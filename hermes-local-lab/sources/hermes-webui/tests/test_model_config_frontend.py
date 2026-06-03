@@ -1,0 +1,47 @@
+"""Static coverage for the Settings model configuration panel."""
+
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def test_model_config_settings_section_exists():
+    assert 'data-settings-section="models"' in INDEX_HTML
+    assert 'id="settingsPaneModels"' in INDEX_HTML
+    assert "模型配置" in INDEX_HTML
+
+
+def test_model_config_has_three_required_surfaces():
+    for marker in (
+        'id="modelConfigProvider"',
+        'id="modelConfigAuxContainer"',
+        'id="imageGenConfigProvider"',
+    ):
+        assert marker in INDEX_HTML
+
+
+def test_model_config_js_calls_expected_endpoints():
+    assert "async function loadModelConfigPanel" in PANELS_JS
+    assert "/api/model-config" in PANELS_JS
+    assert "/api/model-config/main" in PANELS_JS
+    assert "/api/image-gen/config" in PANELS_JS
+    assert "/api/model/auxiliary" in PANELS_JS
+    assert "/api/model/set" in PANELS_JS
+
+
+def test_model_config_secret_inputs_start_empty():
+    assert 'id="modelConfigApiKey"' in INDEX_HTML
+    assert 'id="imageGenConfigApiKey"' in INDEX_HTML
+    assert "modelConfigApiKey')||{}).value||''" in PANELS_JS
+    assert "imageGenConfigApiKey')||{}).value||''" in PANELS_JS
+    assert "key_status" in PANELS_JS
+    assert "payload.api_key=apiKey" in PANELS_JS
+
+
+def test_model_config_styles_are_present():
+    assert ".model-config-status" in STYLE_CSS
+    assert ".model-config-panel" in STYLE_CSS
+    assert ".model-config-aux-row" in STYLE_CSS

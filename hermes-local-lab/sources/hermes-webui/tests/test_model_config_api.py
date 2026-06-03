@@ -1,0 +1,143 @@
+"""Tests for WebUI model configuration parity with Hermes CLI config."""
+
+from __future__ import annotations
+
+import json
+import os
+
+import yaml
+
+import api.providers as providers
+import api.profiles as profiles
+from api import model_config
+
+
+def _use_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        model_config,
+        "get_providers",
+        lambda: {
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "models": [{"id": "deepseek-chat", "label": "deepseek-chat"}],
+                    "configurable": True,
+                    "has_key": False,
+                }
+            ],
+            "active_provider": "deepseek",
+        },
+    )
+    monkeypatch.setattr(
+        model_config,
+        "get_image_gen_config",
+        lambda: {"image_gen": {}, "providers": []},
+    )
+
+
+def _read_config(tmp_path):
+    return yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8")) or {}
+
+
+def test_main_model_config_writes_deepseek_key_without_echo(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": "sk-deepseek-test-key-123456",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["model"]["provider"] == "deepseek"
+    assert cfg["model"]["default"] == "deepseek-chat"
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=sk-deepseek-test-key-123456" in env_text
+    assert "sk-deepseek-test-key-123456" not in json.dumps(result)
+    os.environ.pop("DEEPSEEK_API_KEY", None)
+
+
+def test_custom_main_model_uses_key_env_not_inline_secret(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("HERMES_CUSTOM_MODEL_API_KEY", raising=False)
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "custom",
+            "model": "my-image-aware-model",
+            "base_url": "https://custom.example.com/v1/",
+            "api_key": "custom-secret-key-123456",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["model"]["provider"] == "custom"
+    assert cfg["model"]["default"] == "my-image-aware-model"
+    assert cfg["model"]["base_url"] == "https://custom.example.com/v1"
+    assert cfg["model"]["key_env"] == "HERMES_CUSTOM_MODEL_API_KEY"
+    assert "api_key" not in cfg["model"]
+    assert "HERMES_CUSTOM_MODEL_API_KEY=custom-secret-key-123456" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    assert "custom-secret-key-123456" not in json.dumps(result)
+    os.environ.pop("HERMES_CUSTOM_MODEL_API_KEY", None)
+
+
+def test_oauth_main_provider_rejected_from_webui(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+
+    try:
+        model_config.set_main_model_config(
+            {"provider": "openai-codex", "model": "gpt-5.1-codex"}
+        )
+    except ValueError as exc:
+        assert "OAuth" in str(exc)
+        assert "hermes" in str(exc)
+    else:
+        raise AssertionError("OAuth provider accepted WebUI API-key setup")
+
+
+def test_image_gen_config_writes_provider_model_and_key(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [
+            {
+                "id": "fal",
+                "name": "FAL",
+                "models": [{"id": "fal-ai/flux-2-pro", "label": "Flux 2 Pro"}],
+                "default_model": "fal-ai/flux-2-pro",
+                "key_status": {"configured": False, "env_var": "FAL_KEY"},
+            }
+        ],
+    )
+
+    model_config.set_image_gen_config(
+        {
+            "provider": "fal",
+            "model": "fal-ai/flux-2-pro",
+            "api_key": "fal-test-key-123456",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["image_gen"]["provider"] == "fal"
+    assert cfg["image_gen"]["model"] == "fal-ai/flux-2-pro"
+    assert cfg["image_gen"]["use_gateway"] is False
+    assert "FAL_KEY=fal-test-key-123456" in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
+    os.environ.pop("FAL_KEY", None)
