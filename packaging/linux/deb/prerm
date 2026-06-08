@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pkill -f '/opt/taiji-agent/.*/hermes gateway run' 2>/dev/null || true
+pkill -f '/opt/taiji-agent/.*/hermes-webui/server.py' 2>/dev/null || true
+pkill -f '/opt/taiji-agent/apps/taiji-desktop' 2>/dev/null || true
+
+exit 0

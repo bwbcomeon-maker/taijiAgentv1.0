@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Open the Taiji Agent desktop app from an installed Linux package.
+set -euo pipefail
+
+APP_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
+APP_DIR="$APP_ROOT/apps/taiji-desktop"
+ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/electron"
+
+if [ ! -x "$ELECTRON_BIN" ]; then
+  echo "Electron runtime not found: $ELECTRON_BIN" >&2
+  echo "Rebuild the offline package on Linux x86_64 so node_modules/electron contains the Linux binary." >&2
+  exit 1
+fi
+
+export TAIJI_AGENT_ROOT="$APP_ROOT"
+exec "$ELECTRON_BIN" "$APP_DIR"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "$arch" in
+  amd64|x86_64) exit 0 ;;
+  *)
+    echo "taiji-agent only supports amd64/x86_64 for the current Hygon/UOS package." >&2
+    exit 1
+    ;;
+esac

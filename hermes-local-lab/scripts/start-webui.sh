@@ -3,33 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-AGENT_DIR="$LAB_DIR/sources/hermes-agent"
-WEBUI_DIR="$LAB_DIR/sources/hermes-webui"
-LOG_DIR="$LAB_DIR/logs"
-TMP_DIR="$LAB_DIR/tmp"
+# shellcheck source=runtime-env.sh
+source "$SCRIPT_DIR/runtime-env.sh"
 PID_FILE="$LOG_DIR/hermes-webui.pid"
 LOG_FILE="$LOG_DIR/hermes-webui.log"
-RUNTIME_ENV="$TMP_DIR/runtime.env"
 
-mkdir -p "$LOG_DIR" "$TMP_DIR" "$LAB_DIR/hermes-home" "$LAB_DIR/workspace"
-
-if [ -f "$LAB_DIR/.env" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "$LAB_DIR/.env"
-  set +a
-fi
-
-if [ -f "$RUNTIME_ENV" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "$RUNTIME_ENV"
-  set +a
-fi
-
-HERMES_HOME="${HERMES_HOME:-$LAB_DIR/hermes-home}"
-HERMES_WORKSPACE="${HERMES_WORKSPACE:-$LAB_DIR/workspace}"
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
 WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
@@ -63,7 +41,7 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 if lsof -nP -iTCP:"$HERMES_WEBUI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Port $HERMES_WEBUI_PORT is already in use. Set WEBUI_PORT/HERMES_WEBUI_PORT in $LAB_DIR/.env." >&2
+  echo "Port $HERMES_WEBUI_PORT is already in use. Set WEBUI_PORT/HERMES_WEBUI_PORT in $TAIJI_ENV_FILE." >&2
   lsof -nP -iTCP:"$HERMES_WEBUI_PORT" -sTCP:LISTEN >&2 || true
   exit 1
 fi

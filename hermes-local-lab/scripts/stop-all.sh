@@ -2,8 +2,9 @@
 # Stop Hermes Local Lab processes started by start-agent.sh and start-webui.sh.
 set -euo pipefail
 
-LAB_DIR="/Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab"
-LOG_DIR="$LAB_DIR/logs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=runtime-env.sh
+source "$SCRIPT_DIR/runtime-env.sh"
 
 stop_pid_file() {
   local name="$1"

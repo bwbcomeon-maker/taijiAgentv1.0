@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Installation/runtime verifier for Taiji Agent desktop packages.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=runtime-env.sh
+source "$SCRIPT_DIR/runtime-env.sh"
+
+AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
+AGENT_API_PORT="${AGENT_API_PORT:-18642}"
+WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
+WEBUI_PORT="${WEBUI_PORT:-18787}"
+
+ok_count=0
+warn_count=0
+fail_count=0
+
+ok() { printf '[OK] %s\n' "$*"; ok_count=$((ok_count + 1)); }
+warn() { printf '[WARN] %s\n' "$*"; warn_count=$((warn_count + 1)); }
+fail() { printf '[FAIL] %s\n' "$*"; fail_count=$((fail_count + 1)); }
+
+http_code() {
+  curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null
+}
+
+echo "Taiji Agent native verification"
+echo "Install root: $LAB_DIR"
+echo "Config file : $TAIJI_ENV_FILE"
+echo "Hermes home : $HERMES_HOME"
+echo "Workspace   : $HERMES_WORKSPACE"
+echo "Log dir     : $LOG_DIR"
+echo
+
+arch="$(uname -m 2>/dev/null || true)"
+case "$arch" in
+  x86_64|amd64) ok "CPU architecture supported: $arch" ;;
+  arm64|aarch64) warn "Current machine is $arch; Hygon/UOS target package must be x86_64/amd64" ;;
+  *) fail "Unsupported or unknown CPU architecture: ${arch:-unknown}" ;;
+esac
+
+if [ -d "$AGENT_DIR" ] && [ -f "$AGENT_DIR/pyproject.toml" ]; then
+  ok "Agent source exists: $AGENT_DIR"
+else
+  fail "Agent source missing: $AGENT_DIR"
+fi
+
+if [ -d "$WEBUI_DIR" ] && [ -f "$WEBUI_DIR/server.py" ]; then
+  ok "WebUI source exists: $WEBUI_DIR"
+else
+  fail "WebUI source missing: $WEBUI_DIR"
+fi
+
+for script in start-agent.sh start-webui.sh stop-all.sh runtime-env.sh; do
+  if [ -f "$SCRIPT_DIR/$script" ]; then
+    ok "Runtime script exists: $script"
+  else
+    fail "Runtime script missing: $SCRIPT_DIR/$script"
+  fi
+done
+
+if [ -x "$AGENT_DIR/venv/bin/python" ] && [ -x "$AGENT_DIR/venv/bin/hermes" ]; then
+  ok "Bundled Agent venv is usable"
+else
+  warn "Bundled Agent venv not found; run setup-local.sh in source mode or rebuild Linux package with venv included"
+fi
+
+desktop_app="$LAB_DIR/apps/taiji-desktop"
+if [ ! -f "$desktop_app/package.json" ] && [ -f "$LAB_DIR/../apps/taiji-desktop/package.json" ]; then
+  desktop_app="$(cd "$LAB_DIR/.." && pwd)/apps/taiji-desktop"
+fi
+if [ -f "$desktop_app/package.json" ] && [ -f "$desktop_app/src/main.js" ]; then
+  ok "Electron desktop app files exist: $desktop_app"
+else
+  warn "Electron desktop app files not found under install root: $desktop_app"
+fi
+
+if command -v taiji-agent >/dev/null 2>&1; then
+  ok "Global desktop launcher exists: $(command -v taiji-agent)"
+else
+  warn "Global desktop launcher taiji-agent not found in PATH"
+fi
+
+if command -v taiji >/dev/null 2>&1; then
+  ok "Global CLI launcher exists: $(command -v taiji)"
+else
+  warn "Global CLI launcher taiji not found in PATH"
+fi
+
+if [ -f /usr/share/applications/taiji-agent.desktop ]; then
+  ok "Desktop entry installed: /usr/share/applications/taiji-agent.desktop"
+else
+  warn "Desktop entry not found at /usr/share/applications/taiji-agent.desktop"
+fi
+
+agent_code="$(http_code "http://$AGENT_API_HOST:$AGENT_API_PORT/health")"
+if [ "$agent_code" = "200" ]; then
+  ok "Agent health returned HTTP 200 at $AGENT_API_HOST:$AGENT_API_PORT"
+else
+  warn "Agent health not reachable at $AGENT_API_HOST:$AGENT_API_PORT; start the desktop app and retry for runtime checks"
+fi
+
+webui_code="$(http_code "http://$WEBUI_HOST:$WEBUI_PORT/health")"
+if [ "$webui_code" = "200" ]; then
+  ok "WebUI health returned HTTP 200 at $WEBUI_HOST:$WEBUI_PORT"
+else
+  warn "WebUI health not reachable at $WEBUI_HOST:$WEBUI_PORT; start the desktop app and retry for runtime checks"
+fi
+
+provider_keys=(OPENAI_API_KEY DEEPSEEK_API_KEY SILICONFLOW_API_KEY OPENROUTER_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY KIMI_API_KEY MOONSHOT_API_KEY DASHSCOPE_API_KEY XAI_API_KEY HF_TOKEN)
+configured_key_count=0
+for key in "${provider_keys[@]}"; do
+  if [ -n "${!key:-}" ]; then
+    configured_key_count=$((configured_key_count + 1))
+  fi
+done
+
+if [ "$configured_key_count" -gt 0 ]; then
+  ok "At least one model provider key is configured in the current environment"
+else
+  warn "No model provider key found; service checks do not prove real model conversation"
+fi
+
+echo
+echo "Summary: OK=$ok_count WARN=$warn_count FAIL=$fail_count"
+if [ "$fail_count" -gt 0 ]; then
+  exit 1
+fi
+exit 0
