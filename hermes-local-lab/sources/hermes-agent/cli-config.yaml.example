@@ -789,6 +789,19 @@ platform_toolsets:
 #   filesystem:
 #     command: npx
 #     args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+#   filesystem-demo:
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "./demos/mcp/filesystem-demo"]
+#     allowed_roots: ["./demos/mcp/filesystem-demo"]
+#     timeout: 60
+#     # Security: only grant directories you intend the MCP server to read/write.
+#     # File write, delete, overwrite, and patch-like MCP calls require user confirmation.
+#   playwright-demo:
+#     command: npx
+#     args: ["@playwright/mcp@latest", "--headless"]
+#     timeout: 120
+#     browser_actions_require_confirmation: true
+#     # Security: browser typing/clicking/submission MCP calls require user confirmation.
 #   notion:
 #     url: https://mcp.notion.com/mcp
 #   github:

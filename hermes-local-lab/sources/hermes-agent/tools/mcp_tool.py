@@ -89,7 +89,8 @@ import shutil
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -319,6 +320,74 @@ def _sanitize_error(text: str) -> str:
     accidental credential exposure in tool error responses.
     """
     return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+
+
+def _mcp_tool_call_log_path() -> Path:
+    """Return the per-profile MCP tool-call audit log path."""
+    try:
+        from hermes_constants import get_hermes_home
+        log_dir = get_hermes_home() / "logs"
+    except Exception:
+        log_dir = Path(os.path.expanduser("~/.hermes/logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "mcp-tool-calls.jsonl"
+
+
+def _redact_mcp_log_value(value: Any) -> Any:
+    """Return a bounded, secret-redacted copy suitable for audit logs."""
+    sensitive_keys = ("auth", "token", "key", "secret", "password", "credential")
+    if isinstance(value, dict):
+        redacted: Dict[str, Any] = {}
+        for key, item in list(value.items())[:80]:
+            key_text = str(key)
+            if any(marker in key_text.lower() for marker in sensitive_keys):
+                redacted[key_text] = "[REDACTED]"
+            else:
+                redacted[key_text] = _redact_mcp_log_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_mcp_log_value(item) for item in value[:80]]
+    if isinstance(value, str):
+        text = _sanitize_error(value)
+        if len(text) > 1000:
+            text = text[:1000].rstrip() + "…"
+        return text
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _sanitize_error(str(value))[:1000]
+
+
+def _append_mcp_tool_call_log(
+    *,
+    server_name: str,
+    tool_name: str,
+    arguments: Any,
+    ok: bool,
+    duration_ms: int,
+    error: Optional[str] = None,
+) -> None:
+    """Append one MCP tool-call audit row.
+
+    The log is intentionally JSONL so WebUI can tail recent entries without
+    parsing general agent logs. It records arguments after redaction, never raw
+    tool results.
+    """
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "server": str(server_name),
+        "tool": str(tool_name),
+        "ok": bool(ok),
+        "duration_ms": int(duration_ms),
+        "arguments": _redact_mcp_log_value(arguments if isinstance(arguments, dict) else {}),
+    }
+    if error:
+        row["error"] = _sanitize_error(str(error))[:1000]
+    try:
+        path = _mcp_tool_call_log_path()
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as exc:
+        logger.debug("Failed to append MCP tool-call audit log: %s", exc)
 
 
 def _exc_str(exc: BaseException) -> str:
@@ -2414,6 +2483,78 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
+_MCP_DANGEROUS_TOOL_RE = re.compile(
+    r"(?:^|[_\-.:/])("
+    r"write|delete|remove|overwrite|replace|patch|move|rename|submit|"
+    r"type|fill|input|press|click"
+    r")(?:$|[_\-.:/])",
+    re.IGNORECASE,
+)
+
+
+def _get_mcp_tool_approval_callback():
+    """Return the current interactive approval callback, if one is installed."""
+    try:
+        from tools.terminal_tool import _get_approval_callback
+        return _get_approval_callback()
+    except Exception:
+        return None
+
+
+def _mcp_tool_requires_confirmation(tool_name: str, args: dict) -> bool:
+    """Heuristic for MCP tool calls that need explicit user confirmation."""
+    name = str(tool_name or "")
+    if _MCP_DANGEROUS_TOOL_RE.search(name):
+        return True
+    if isinstance(args, dict):
+        for key, value in args.items():
+            key_l = str(key).lower()
+            if key_l in {"overwrite", "delete", "remove", "submit", "confirm"} and bool(value):
+                return True
+            if key_l in {"operation", "action", "method"} and _MCP_DANGEROUS_TOOL_RE.search(str(value)):
+                return True
+    return False
+
+
+def _mcp_confirmation_error(server_name: str, tool_name: str, args: dict) -> Optional[str]:
+    """Return an error JSON string when a dangerous MCP call is not approved."""
+    if not _mcp_tool_requires_confirmation(tool_name, args):
+        return None
+    callback = _get_mcp_tool_approval_callback()
+    description = (
+        "MCP 工具调用可能修改文件、删除/覆盖内容，或在浏览器中输入/提交表单。"
+        "请确认该操作来自当前用户意图。"
+    )
+    command = json.dumps(
+        {
+            "type": "mcp_tool_call",
+            "server": server_name,
+            "tool": tool_name,
+            "arguments": _redact_mcp_log_value(args),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        from tools.approval import prompt_dangerous_approval
+        choice = prompt_dangerous_approval(
+            command,
+            description,
+            allow_permanent=False,
+            approval_callback=callback,
+        )
+    except Exception as exc:
+        logger.warning("MCP tool approval failed closed: %s", exc)
+        choice = "deny"
+    if choice in {"once", "session", "always"}:
+        return None
+    return json.dumps({
+        "error": (
+            f"MCP tool '{tool_name}' on server '{server_name}' requires user "
+            "confirmation before running and was denied."
+        )
+    }, ensure_ascii=False)
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -2422,6 +2563,33 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """
 
     def _handler(args: dict, **kwargs) -> str:
+        call_started = time.monotonic()
+
+        def _finish(result: str, *, ok: Optional[bool] = None, error: Optional[str] = None) -> str:
+            final_ok = ok
+            final_error = error
+            if final_ok is None:
+                final_ok = True
+                try:
+                    parsed = json.loads(result)
+                    if isinstance(parsed, dict) and parsed.get("error"):
+                        final_ok = False
+                        final_error = str(parsed.get("error") or "")
+                except Exception:
+                    final_ok = True
+            _append_mcp_tool_call_log(
+                server_name=server_name,
+                tool_name=tool_name,
+                arguments=args if isinstance(args, dict) else {},
+                ok=bool(final_ok),
+                duration_ms=int((time.monotonic() - call_started) * 1000),
+                error=final_error,
+            )
+            return result
+
+        if not isinstance(args, dict):
+            args = {}
+
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).
@@ -2437,7 +2605,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             age = time.monotonic() - opened_at
             if age < _CIRCUIT_BREAKER_COOLDOWN_SEC:
                 remaining = max(1, int(_CIRCUIT_BREAKER_COOLDOWN_SEC - age))
-                return json.dumps({
+                return _finish(json.dumps({
                     "error": (
                         f"MCP server '{server_name}' is unreachable after "
                         f"{_server_error_counts[server_name]} consecutive "
@@ -2445,16 +2613,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                         f"Do NOT retry this tool yet — use alternative "
                         f"approaches or ask the user to check the MCP server."
                     )
-                }, ensure_ascii=False)
+                }, ensure_ascii=False), ok=False, error="circuit breaker open")
             # Cooldown elapsed → fall through as a half-open probe.
+
+        confirmation_error = _mcp_confirmation_error(server_name, tool_name, args)
+        if confirmation_error is not None:
+            return _finish(confirmation_error, ok=False, error="confirmation denied")
 
         with _lock:
             server = _servers.get(server_name)
         if not server or not server.session:
             _bump_server_error(server_name)
-            return json.dumps({
+            return _finish(json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
-            }, ensure_ascii=False)
+            }, ensure_ascii=False), ok=False, error="server not connected")
 
         async def _call():
             async with server._rpc_lock:
@@ -2512,17 +2684,21 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         try:
             result = _call_once()
             # Check if the MCP tool itself returned an error
+            call_ok = True
+            call_error = None
             try:
                 parsed = json.loads(result)
                 if "error" in parsed:
+                    call_ok = False
+                    call_error = str(parsed.get("error") or "")
                     _bump_server_error(server_name)
                 else:
                     _reset_server_error(server_name)  # success — reset
             except (json.JSONDecodeError, TypeError):
                 _reset_server_error(server_name)  # non-JSON = success
-            return result
+            return _finish(result, ok=call_ok, error=call_error)
         except InterruptedError:
-            return _interrupted_call_result()
+            return _finish(_interrupted_call_result(), ok=False, error="interrupted")
         except Exception as exc:
             # Auth-specific recovery path: consult the manager, signal
             # reconnect if viable, retry once. Returns None to fall
@@ -2532,7 +2708,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 f"tools/call {tool_name}",
             )
             if recovered is not None:
-                return recovered
+                return _finish(recovered)
 
             # Transport session expiry (#13383): same reconnect flow
             # but skips OAuth recovery because the access token is
@@ -2542,18 +2718,18 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 f"tools/call {tool_name}",
             )
             if recovered is not None:
-                return recovered
+                return _finish(recovered)
 
             _bump_server_error(server_name)
             logger.error(
                 "MCP tool %s/%s call failed: %s",
                 server_name, tool_name, exc,
             )
-            return json.dumps({
+            return _finish(json.dumps({
                 "error": _sanitize_error(
                     f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
                 )
-            }, ensure_ascii=False)
+            }, ensure_ascii=False), ok=False, error=_exc_str(exc))
 
     return _handler
 

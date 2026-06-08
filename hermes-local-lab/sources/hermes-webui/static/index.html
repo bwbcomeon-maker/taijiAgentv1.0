@@ -1510,8 +1510,28 @@
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_servers_title">MCP Servers</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View configured MCP servers.</div>
+              <div id="mcpSecurityNotice" class="mcp-security-notice" data-i18n="mcp_security_notice">Only authorized directories are available to Filesystem MCP. File writes, deletes, overwrites, and browser form submissions require confirmation.</div>
+              <form id="mcpConfigForm" class="mcp-config-form" onsubmit="saveMcpServerConfig(event)">
+                <div class="mcp-config-grid">
+                  <label><span data-i18n="mcp_config_name">Name</span><input id="mcpServerName" type="text" placeholder="filesystem" autocomplete="off"></label>
+                  <label><span data-i18n="mcp_config_preset">Preset</span><select id="mcpPresetSelect" onchange="applyMcpPresetSelection()"><option value="custom">Custom stdio</option></select></label>
+                </div>
+                <label><span data-i18n="mcp_config_command">Command</span><input id="mcpCommand" type="text" placeholder="npx" autocomplete="off"></label>
+                <label><span data-i18n="mcp_config_args">Arguments</span><textarea id="mcpArgs" rows="2" placeholder='["@playwright/mcp@latest","--headless"]'></textarea></label>
+                <label><span data-i18n="mcp_config_allowed_roots">Authorized directories</span><textarea id="mcpAllowedRoots" rows="2" placeholder="./demos/mcp/filesystem-demo"></textarea></label>
+                <div class="mcp-config-actions">
+                  <button type="submit" class="sm-btn" data-i18n="mcp_save_config">Save MCP config</button>
+                  <button type="button" class="sm-btn" onclick="testMcpServer()" data-i18n="mcp_test_connection">Test connection</button>
+                </div>
+                <div id="mcpConfigStatus" class="settings-autosave-status" aria-live="polite"></div>
+              </form>
               <div id="mcpServerList"></div>
-              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here. Use administrator configuration and restart the app for changes to take effect.</div>
+              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes update the local agent configuration. Reload MCP tools or restart the app for a fresh runtime inventory.</div>
+            </div>
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="mcp_call_logs_title">MCP Tool Call Logs</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_call_logs_desc">Recent MCP tool calls with redacted arguments.</div>
+              <div id="mcpCallLogList" class="mcp-call-log-list"></div>
             </div>
             <!-- MCP Tools Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">

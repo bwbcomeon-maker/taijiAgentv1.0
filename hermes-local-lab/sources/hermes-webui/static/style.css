@@ -3990,6 +3990,14 @@ main.main > #mainPlugin{display:none;}
 #mainSettings #btnSignOut:hover{color:var(--accent-text)!important;border-color:var(--accent-bg-strong)!important;}
 
 /* MCP Server Management */
+.mcp-security-notice{margin:0 0 10px;color:var(--text);font-size:11px;line-height:1.45;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.28);border-radius:7px;padding:8px 10px;}
+.mcp-config-form{display:grid;gap:9px;margin:0 0 12px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+.mcp-config-form label{display:grid;gap:5px;color:var(--muted);font-size:11px;font-weight:600;}
+.mcp-config-form input,.mcp-config-form textarea,.mcp-config-form select{width:100%;box-sizing:border-box;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:7px;padding:7px 9px;font-size:12px;outline:none;}
+.mcp-config-form textarea{resize:vertical;min-height:42px;font-family:var(--mono-font,ui-monospace,SFMono-Regular,Menlo,monospace);}
+.mcp-config-form input:focus,.mcp-config-form textarea:focus,.mcp-config-form select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg-soft);}
+.mcp-config-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;}
+.mcp-config-actions{display:flex;gap:8px;flex-wrap:wrap;}
 .mcp-server-row{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;position:relative;font-size:12px;background:var(--surface);}
 .mcp-server-row:hover{background:var(--code-bg);}
 .mcp-server-row-head{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;}
@@ -4027,6 +4035,14 @@ main.main > #mainPlugin{display:none;}
 .mcp-tool-page-btn{border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;cursor:pointer;}
 .mcp-tool-page-btn:hover:not(:disabled){border-color:var(--accent-bg-strong);color:var(--accent-text);}
 .mcp-tool-page-btn:disabled{opacity:.45;cursor:not-allowed;}
+.mcp-call-log-list{max-height:320px;overflow:auto;scrollbar-gutter:stable;}
+.mcp-log-row{display:flex;flex-direction:column;gap:5px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;background:var(--surface);}
+.mcp-log-row.error{border-color:rgba(239,68,68,.28);}
+
+@media (max-width: 720px){
+  .mcp-config-grid{grid-template-columns:1fr;}
+  .mcp-config-actions .sm-btn{flex:1 1 160px;}
+}
 
 /* Picker grids (theme / skin / font-size): make the card chrome use
    tokens so all skins flip correctly. */

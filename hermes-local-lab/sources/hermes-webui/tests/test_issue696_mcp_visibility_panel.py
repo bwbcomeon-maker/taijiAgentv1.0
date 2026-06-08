@@ -13,8 +13,10 @@ def test_settings_system_panel_contains_readonly_mcp_visibility_section():
     assert 'data-i18n="mcp_servers_title"' in html
     assert 'id="mcpServerList"' in html
     assert 'class="mcp-restart-hint"' in html
-    assert 'id="mcpAddFormWrap"' not in html
-    assert 'onclick="showMcpAddForm()"' not in html
+    assert 'id="mcpConfigForm"' in html
+    assert 'id="mcpPresetSelect"' in html
+    assert 'id="mcpAllowedRoots"' in html
+    assert 'id="mcpSecurityNotice"' in html
 
 
 def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
@@ -27,9 +29,12 @@ def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
     assert "toggleMcpServer" in js
     assert "mcp-toggle-btn" in js
     assert "api('/api/mcp/servers')" in js
-    assert "mcp-delete-btn" not in js
-    assert "showMcpAddForm" not in js
-    assert "saveMcpServer" not in js
+    assert "function loadMcpPresets" in js
+    assert "function saveMcpServerConfig" in js
+    assert "function testMcpServer" in js
+    assert "function loadMcpLogs" in js
+    assert "api('/api/mcp/presets')" in js
+    assert "api('/api/mcp/logs')" in js
 
 
 def test_mcp_i18n_includes_visibility_status_labels():
@@ -43,5 +48,9 @@ def test_mcp_i18n_includes_visibility_status_labels():
         "mcp_enabled_yes",
         "mcp_enabled_no",
         "mcp_toggle_followup",
+        "mcp_config_title",
+        "mcp_test_connection",
+        "mcp_call_logs_title",
+        "mcp_security_notice",
     ]:
         assert key in i18n

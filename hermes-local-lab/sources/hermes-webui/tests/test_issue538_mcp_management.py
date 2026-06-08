@@ -6,6 +6,9 @@ from api.routes import (
     _handle_mcp_server_update,
     _handle_mcp_server_delete,
     _handle_mcp_server_toggle,
+    _handle_mcp_server_test,
+    _handle_mcp_presets,
+    _handle_mcp_logs,
     _mask_secrets,
     _parse_mcp_enabled,
     _server_summary,
@@ -197,6 +200,92 @@ class TestMcpSave:
         assert h.send_response.called
         status = h.send_response.call_args[0][0]
         assert status == 400
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_filesystem_preset_expands_to_authorized_directory_config(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {}
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {"preset": "filesystem", "allowed_roots": ["/tmp/hermes-mcp-demo"], "timeout": 30}
+        _handle_mcp_server_update(h, 'filesystem', body)
+        saved = mock_save.call_args[0][1]
+        cfg = saved['mcp_servers']['filesystem']
+        assert cfg['command'] == 'npx'
+        assert cfg['args'] == ['-y', '@modelcontextprotocol/server-filesystem', '/tmp/hermes-mcp-demo']
+        assert cfg['allowed_roots'] == ['/tmp/hermes-mcp-demo']
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_playwright_preset_expands_to_stdio_config(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {}
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {"preset": "playwright", "headless": True, "timeout": 60}
+        _handle_mcp_server_update(h, 'playwright', body)
+        saved = mock_save.call_args[0][1]
+        cfg = saved['mcp_servers']['playwright']
+        assert cfg['command'] == 'npx'
+        assert cfg['args'] == ['@playwright/mcp@latest', '--headless']
+        assert cfg['browser_actions_require_confirmation'] is True
+
+
+class TestMcpPresetsAndProbe:
+    def test_presets_endpoint_lists_filesystem_and_playwright_examples(self):
+        h = _make_handler()
+        _handle_mcp_presets(h)
+        payload = _json_payload(h)
+        names = {preset['id'] for preset in payload['presets']}
+        assert {'filesystem', 'playwright'} <= names
+        fs = next(p for p in payload['presets'] if p['id'] == 'filesystem')
+        assert fs['requires_allowed_roots'] is True
+        assert 'authorized directories' in fs['security_note'].lower()
+
+    @patch('api.routes._probe_mcp_server_tools')
+    @patch('api.routes.get_config')
+    def test_test_endpoint_probes_configured_server_and_returns_tools(self, mock_cfg, mock_probe):
+        mock_cfg.return_value = {'mcp_servers': {'filesystem': {'command': 'npx', 'args': ['-y', '@modelcontextprotocol/server-filesystem', '/tmp/demo']}}}
+        mock_probe.return_value = [('read_file', 'Read a file')]
+        h = _make_handler()
+        h.command = 'POST'
+        _handle_mcp_server_test(h, 'filesystem', {})
+        payload = _json_payload(h)
+        assert payload['ok'] is True
+        assert payload['tool_count'] == 1
+        assert payload['tools'][0]['name'] == 'read_file'
+
+    @patch('api.routes._probe_mcp_server_tools', side_effect=RuntimeError('token=secret failed'))
+    @patch('api.routes.get_config')
+    def test_test_endpoint_redacts_probe_failures(self, mock_cfg, mock_probe):
+        mock_cfg.return_value = {'mcp_servers': {'bad': {'command': 'missing'}}}
+        h = _make_handler()
+        h.command = 'POST'
+        _handle_mcp_server_test(h, 'bad', {})
+        payload = _json_payload(h)
+        assert payload['ok'] is False
+        assert 'secret' not in payload['error']
+
+
+class TestMcpLogs:
+    def test_logs_endpoint_returns_recent_jsonl_entries(self, tmp_path, monkeypatch):
+        log_path = tmp_path / 'mcp-tool-calls.jsonl'
+        log_path.write_text(
+            '{"ts":"2026-06-08T01:00:00Z","server":"filesystem","tool":"read_file","ok":true}\n'
+            '{"bad":\n'
+            '{"ts":"2026-06-08T01:01:00Z","server":"playwright","tool":"browser_navigate","ok":false,"error":"[REDACTED]"}\n',
+            encoding='utf-8',
+        )
+        monkeypatch.setattr('api.routes._mcp_tool_call_log_path', lambda: log_path)
+        h = _make_handler()
+        _handle_mcp_logs(h)
+        payload = _json_payload(h)
+        assert payload['entries'][0]['server'] == 'playwright'
+        assert payload['entries'][1]['server'] == 'filesystem'
+        assert payload['skipped_invalid'] == 1
 
 
 class TestMcpDelete:

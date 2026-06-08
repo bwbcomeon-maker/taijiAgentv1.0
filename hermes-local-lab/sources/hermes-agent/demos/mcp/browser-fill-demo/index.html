@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Browser Fill Demo</title>
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f7f7f4;color:#202124}
+    main{max-width:720px;margin:48px auto;padding:0 20px}
+    form{display:grid;gap:14px;padding:22px;border:1px solid #d8d8d2;background:#fff;border-radius:8px}
+    label{display:grid;gap:6px;font-size:14px;font-weight:650}
+    input,textarea,select,button{font:inherit;border-radius:6px;border:1px solid #c9c9c2;padding:10px}
+    textarea{min-height:100px}
+    button{background:#185abc;color:#fff;border-color:#185abc;font-weight:700;cursor:pointer}
+    output{display:block;margin-top:16px;color:#137333;font-weight:650}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>MCP Browser Fill Demo</h1>
+    <form id="demoForm">
+      <label>姓名 <input name="name" autocomplete="name" required></label>
+      <label>邮箱 <input name="email" type="email" autocomplete="email" required></label>
+      <label>场景
+        <select name="scenario">
+          <option>本地表单填报测试</option>
+          <option>资料收集</option>
+          <option>审批流演示</option>
+        </select>
+      </label>
+      <label>说明 <textarea name="note" required></textarea></label>
+      <button type="submit">提交演示表单</button>
+    </form>
+    <output id="result" aria-live="polite"></output>
+  </main>
+  <script>
+    document.getElementById('demoForm').addEventListener('submit', function(event){
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.currentTarget).entries());
+      document.getElementById('result').textContent = `已提交: ${data.name} / ${data.email} / ${data.scenario}`;
+    });
+  </script>
+</body>
+</html>

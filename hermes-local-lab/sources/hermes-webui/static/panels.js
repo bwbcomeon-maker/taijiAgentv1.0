@@ -8818,6 +8818,106 @@ function toggleMcpServer(name, enabled){
     loadMcpServers();
   }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
 }
+let _mcpPresetsCache=[];
+function loadMcpPresets(){
+  const select=$('mcpPresetSelect');
+  if(!select) return;
+  api('/api/mcp/presets').then(r=>{
+    _mcpPresetsCache=(r&&Array.isArray(r.presets))?r.presets:[];
+    const current=select.value||'custom';
+    select.innerHTML=`<option value="custom">${esc(t('mcp_config_custom'))}</option>`+
+      _mcpPresetsCache.map(p=>`<option value="${esc(p.id)}">${esc(p.label||p.id)}</option>`).join('');
+    select.value=_mcpPresetsCache.some(p=>p.id===current)?current:'custom';
+  }).catch(()=>{});
+}
+function _mcpArgsFromTextarea(value){
+  const raw=(value||'').trim();
+  if(!raw) return [];
+  try{
+    const parsed=JSON.parse(raw);
+    if(Array.isArray(parsed)) return parsed.map(v=>String(v));
+  }catch(e){}
+  return raw.split(/\n/).map(s=>s.trim()).filter(Boolean);
+}
+function _mcpAllowedRootsFromTextarea(value){
+  return (value||'').split(/[\n,]/).map(s=>s.trim()).filter(Boolean);
+}
+function applyMcpPresetSelection(){
+  const preset=($('mcpPresetSelect')||{}).value||'custom';
+  const name=$('mcpServerName');
+  const command=$('mcpCommand');
+  const args=$('mcpArgs');
+  const roots=$('mcpAllowedRoots');
+  if(preset==='filesystem'){
+    if(name&&!name.value) name.value='filesystem';
+    if(command) command.value='npx';
+    if(args) args.value=JSON.stringify(['-y','@modelcontextprotocol/server-filesystem','./demos/mcp/filesystem-demo']);
+    if(roots&&!roots.value) roots.value='./demos/mcp/filesystem-demo';
+  }else if(preset==='playwright'){
+    if(name&&!name.value) name.value='playwright';
+    if(command) command.value='npx';
+    if(args) args.value=JSON.stringify(['@playwright/mcp@latest','--headless']);
+    if(roots) roots.value='';
+  }
+}
+function _setMcpConfigStatus(text,state){
+  const el=$('mcpConfigStatus');
+  if(!el) return;
+  el.className='settings-autosave-status';
+  if(state) el.classList.add('is-'+state);
+  el.textContent=text||'';
+}
+function _mcpConfigPayloadFromUi(){
+  const preset=($('mcpPresetSelect')||{}).value||'custom';
+  const payload={
+    command:(($('mcpCommand')||{}).value||'').trim(),
+    args:_mcpArgsFromTextarea(($('mcpArgs')||{}).value||''),
+    allowed_roots:_mcpAllowedRootsFromTextarea(($('mcpAllowedRoots')||{}).value||''),
+    timeout:120,
+    enabled:true,
+  };
+  if(preset&&preset!=='custom'){
+    payload.preset=preset;
+    if(preset==='playwright') payload.headless=payload.args.indexOf('--headless')!==-1;
+  }
+  return payload;
+}
+async function saveMcpServerConfig(event){
+  if(event&&event.preventDefault) event.preventDefault();
+  const name=(($('mcpServerName')||{}).value||'').trim();
+  if(!name){_setMcpConfigStatus(t('mcp_name_required'),'failed');return;}
+  _setMcpConfigStatus(t('settings_autosave_saving'),'saving');
+  try{
+    const saved=await api('/api/mcp/servers/'+encodeURIComponent(name),{
+      method:'PUT',
+      body:JSON.stringify(_mcpConfigPayloadFromUi()),
+    });
+    if(saved&&saved.ok){
+      _setMcpConfigStatus(t('settings_autosave_saved'),'saved');
+      loadMcpServers();
+    }else{
+      _setMcpConfigStatus(t('mcp_save_failed'),'failed');
+    }
+  }catch(e){
+    _setMcpConfigStatus((e&&e.message)||t('mcp_save_failed'),'failed');
+  }
+}
+async function testMcpServer(name){
+  const serverName=(name||(($('mcpServerName')||{}).value||'')).trim();
+  if(!serverName){_setMcpConfigStatus(t('mcp_name_required'),'failed');return;}
+  _setMcpConfigStatus(t('mcp_testing_connection'),'saving');
+  try{
+    const result=await api('/api/mcp/servers/'+encodeURIComponent(serverName)+'/test',{method:'POST',body:JSON.stringify({})});
+    if(result&&result.ok){
+      _setMcpConfigStatus(t('mcp_test_success',result.tool_count||0),'saved');
+      loadMcpServers();loadMcpTools();
+    }else{
+      _setMcpConfigStatus((result&&result.error)||t('mcp_test_failed'),'failed');
+    }
+  }catch(e){
+    _setMcpConfigStatus((e&&e.message)||t('mcp_test_failed'),'failed');
+  }
+}
 function loadMcpServers(){
   const list=$('mcpServerList');
   if(!list) return;
@@ -8840,9 +8940,10 @@ function loadMcpServers(){
         : (s.transport==='stdio'?`${s.command||''} ${Array.isArray(s.args)?s.args.join(' '):''}`:t('mcp_status_invalid_config'));
       const secretInfo=(s.env||s.headers)?'Administrator parameters configured':'';
       const isEnabled=s.enabled!==false;
-      const encodedName=encodeURIComponent(s.name).replace(/'/g,"\\'");
+      const jsName=JSON.stringify(String(s.name||'')).replace(/</g,'\\u003c');
+      const testBtn=`<button type="button" class="mcp-toggle-btn" onclick="testMcpServer(${jsName})">${esc(t('mcp_test_connection'))}</button>`;
       const toggleBtn=r.toggle_supported
-        ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer('${encodedName}',${!isEnabled})">${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
+        ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer(${jsName},${!isEnabled})">${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
         :`<span>${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</span>`;
       return `<div class="mcp-server-row">
         <div class="mcp-server-row-head">
@@ -8851,7 +8952,7 @@ function loadMcpServers(){
           ${statusBadge}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
-        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${toggleBtn}</div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${testBtn}${toggleBtn}</div>
       </div>`;
     }).join('');
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
@@ -8980,6 +9081,28 @@ function loadMcpTools(){
     filterMcpTools();
   }).catch(()=>{list.innerHTML=`<div class="mcp-tool-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_tools_load_failed'))}</div>`});
 }
+function loadMcpLogs(){
+  const list=$('mcpCallLogList');
+  if(!list) return;
+  list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
+  api('/api/mcp/logs').then(r=>{
+    const entries=(r&&Array.isArray(r.entries))?r.entries:[];
+    if(!entries.length){
+      list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_logs_empty'))}</div>`;
+      return;
+    }
+    list.innerHTML=entries.slice(0,40).map(row=>{
+      const ok=row.ok!==false;
+      const when=row.ts?new Date(row.ts).toLocaleString():'';
+      const args=row.arguments?JSON.stringify(row.arguments):'{}';
+      return `<div class="mcp-log-row ${ok?'ok':'error'}">
+        <div class="mcp-server-row-head"><span class="mcp-tool-name">${esc(row.tool||'unknown')}</span><span class="mcp-tool-server">${esc(row.server||'unknown')}</span><span class="mcp-status-badge ${ok?'mcp-status-active':'mcp-status-invalid_config'}">${esc(ok?t('mcp_log_ok'):t('mcp_log_error'))}</span></div>
+        <div class="mcp-server-detail">${esc(when)}${row.duration_ms!==undefined?' · '+esc(String(row.duration_ms))+'ms':''}${row.error?' · '+esc(row.error):''}</div>
+        <pre class="mcp-tool-schema">${esc(args)}</pre>
+      </div>`;
+    }).join('');
+  }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_logs_failed'))}</div>`});
+}
 function loadGatewayStatus(){
   const card=$('gatewayStatusCard');
   if(!card) return;
@@ -9010,7 +9133,7 @@ function loadGatewayStatus(){
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='system'){loadMcpPresets();loadMcpServers();loadMcpTools();loadMcpLogs();loadGatewayStatus();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

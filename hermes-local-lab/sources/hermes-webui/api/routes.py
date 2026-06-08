@@ -8576,6 +8576,12 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/tools":
         return _handle_mcp_tools_list(handler)
 
+    if parsed.path == "/api/mcp/presets":
+        return _handle_mcp_presets(handler)
+
+    if parsed.path == "/api/mcp/logs":
+        return _handle_mcp_logs(handler)
+
     if parsed.path == "/api/notes/sources":
         return _handle_notes_sources_list(handler)
     if parsed.path == "/api/notes/search":
@@ -9918,6 +9924,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
             return bad(handler, str(e), 409)
+
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.endswith("/test"):
+        name = parsed.path[len("/api/mcp/servers/"):-len("/test")]
+        return _handle_mcp_server_test(handler, name, body)
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
@@ -16966,6 +16976,7 @@ def _mcp_safe_display_text(value, *, limit: int) -> str:
         value = "" if value is None else str(value)
     value = _redact_text(value).strip()
     value = re.sub(r"Authorization:\s*Bearer\s+\S+", "[REDACTED CREDENTIAL]", value, flags=re.I)
+    value = re.sub(r"(?i)\b(api[_-]?key|token|password|secret)\s*=\s*[^\s&,;\"']+", r"\1=[REDACTED]", value)
     if len(value) > limit:
         value = value[: max(0, limit - 1)].rstrip() + "…"
     return value
@@ -17705,6 +17716,178 @@ def _strip_masked_values(submitted, existing):
     return cleaned
 
 
+_MCP_PRESETS = {
+    "filesystem": {
+        "id": "filesystem",
+        "label": "Filesystem MCP",
+        "transport": "stdio",
+        "command": "npx",
+        "args_prefix": ["-y", "@modelcontextprotocol/server-filesystem"],
+        "requires_allowed_roots": True,
+        "security_note": "Only authorized directories are exposed to the MCP server; write, delete, overwrite, and patch operations require confirmation.",
+    },
+    "playwright": {
+        "id": "playwright",
+        "label": "Playwright MCP",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["@playwright/mcp@latest"],
+        "requires_allowed_roots": False,
+        "security_note": "Browser typing, clicking, and form submission actions require confirmation.",
+    },
+}
+
+
+def _handle_mcp_presets(handler):
+    """Return local MCP configuration presets for the WebUI form."""
+    return j(handler, {"presets": list(_MCP_PRESETS.values())})
+
+
+def _mcp_allowed_roots_from_body(body) -> list[str]:
+    raw = body.get("allowed_roots")
+    if raw is None:
+        raw = body.get("allowedRoots")
+    if isinstance(raw, str):
+        roots = [part.strip() for part in re.split(r"[\n,]", raw) if part.strip()]
+    elif isinstance(raw, list):
+        roots = [str(part).strip() for part in raw if str(part).strip()]
+    else:
+        roots = []
+    return roots
+
+
+def _mcp_config_from_preset(body) -> tuple[dict | None, str | None]:
+    preset_id = str(body.get("preset") or "").strip().lower()
+    if not preset_id:
+        return None, None
+    if preset_id not in _MCP_PRESETS:
+        return None, f"unknown MCP preset: {preset_id}"
+    if preset_id == "filesystem":
+        roots = _mcp_allowed_roots_from_body(body)
+        if not roots:
+            return None, "allowed_roots is required for filesystem preset"
+        return {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", *roots],
+            "allowed_roots": roots,
+            "file_operations_require_confirmation": True,
+        }, None
+    if preset_id == "playwright":
+        args = ["@playwright/mcp@latest"]
+        if bool(body.get("headless", True)):
+            args.append("--headless")
+        return {
+            "command": "npx",
+            "args": args,
+            "browser_actions_require_confirmation": True,
+        }, None
+    return None, None
+
+
+def _probe_mcp_server_tools(name: str, config: dict, connect_timeout: float = 30):
+    """Temporarily connect to an MCP server and return tool summaries."""
+    from tools.mcp_tool import (
+        _connect_server,
+        _ensure_mcp_loop,
+        _run_on_mcp_loop,
+        _stop_mcp_loop,
+    )
+
+    _ensure_mcp_loop()
+    found = []
+
+    async def _probe():
+        server = await _connect_server(name, config)
+        try:
+            for tool in getattr(server, "_tools", []) or []:
+                desc = getattr(tool, "description", "") or ""
+                found.append((getattr(tool, "name", "") or "", desc))
+        finally:
+            await server.shutdown()
+
+    try:
+        _run_on_mcp_loop(_probe(), timeout=connect_timeout + 10)
+    finally:
+        _stop_mcp_loop()
+    return found
+
+
+def _handle_mcp_server_test(handler, name, body):
+    """Probe one configured MCP server and return its tool list."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(servers, dict) or name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    server_cfg = servers.get(name)
+    if not isinstance(server_cfg, dict):
+        return bad(handler, f"MCP server '{name}' has invalid config", 400)
+    try:
+        connect_timeout = int(body.get("connect_timeout") or server_cfg.get("connect_timeout") or 30)
+    except Exception:
+        connect_timeout = 30
+    connect_timeout = max(1, min(connect_timeout, 120))
+    try:
+        tools = _probe_mcp_server_tools(name, server_cfg, connect_timeout=connect_timeout)
+        return j(handler, {
+            "ok": True,
+            "name": name,
+            "tool_count": len(tools),
+            "tools": [
+                {
+                    "name": _mcp_safe_display_text(tool_name, limit=120),
+                    "description": _mcp_safe_display_text(desc, limit=240),
+                }
+                for tool_name, desc in tools
+            ],
+        })
+    except Exception as exc:
+        return j(handler, {
+            "ok": False,
+            "name": name,
+            "error": _mcp_safe_display_text(str(exc) or repr(exc), limit=500),
+        }, status=502)
+
+
+def _mcp_tool_call_log_path() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "logs" / "mcp-tool-calls.jsonl"
+    except Exception:
+        return Path(os.path.expanduser("~/.hermes/logs/mcp-tool-calls.jsonl"))
+
+
+def _handle_mcp_logs(handler):
+    """Return recent MCP tool-call audit rows, newest first."""
+    path = _mcp_tool_call_log_path()
+    entries = []
+    skipped = 0
+    if path.exists():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+            for line in reversed(lines):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    skipped += 1
+                    continue
+                if isinstance(row, dict):
+                    row.pop("result", None)
+                    entries.append(row)
+        except Exception as exc:
+            return j(handler, {"entries": [], "error": _mcp_safe_display_text(str(exc), limit=300)}, status=500)
+    return j(handler, {
+        "entries": entries[:100],
+        "skipped_invalid": skipped,
+        "path_configured": bool(path),
+    })
+
+
 def _handle_mcp_server_update(handler, name, body):
     """Add or update an MCP server."""
     from urllib.parse import unquote
@@ -17718,7 +17901,12 @@ def _handle_mcp_server_update(handler, name, body):
     if not isinstance(servers, dict):
         servers = {}
     existing_cfg = servers.get(name, {})
-    if body.get("url"):
+    preset_cfg, preset_error = _mcp_config_from_preset(body)
+    if preset_error:
+        return bad(handler, preset_error)
+    if preset_cfg is not None:
+        server_cfg.update(preset_cfg)
+    elif body.get("url"):
         server_cfg["url"] = body["url"].strip()
         if body.get("headers"):
             server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
@@ -17735,6 +17923,13 @@ def _handle_mcp_server_update(handler, name, body):
             server_cfg["timeout"] = int(body["timeout"])
         except (ValueError, TypeError):
             pass
+    if body.get("connect_timeout") is not None:
+        try:
+            server_cfg["connect_timeout"] = int(body["connect_timeout"])
+        except (ValueError, TypeError):
+            pass
+    if body.get("enabled") is not None:
+        server_cfg["enabled"] = bool(body.get("enabled"))
     servers[name] = server_cfg
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg)
