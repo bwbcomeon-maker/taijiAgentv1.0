@@ -450,6 +450,15 @@ $('btnSend').onclick=()=>{
 $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
+function _micDeniedText(){
+  try{
+    if(document.documentElement&&document.documentElement.dataset.taijiDesktop==='1'){
+      return '麦克风访问被拒绝，请在系统设置中允许太极 Agent 使用麦克风后重试。';
+    }
+  }catch(_){}
+  return t('mic_denied');
+}
+
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -662,7 +671,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         recognition=null;
       }
       const msgs={
-        'not-allowed':t('mic_denied'),
+        'not-allowed':_micDeniedText(),
         'no-speech':t('mic_no_speech'),
         'network':t('mic_network'),
       };
@@ -732,7 +741,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
-      showToast(t('mic_denied'));
+      showToast(_micDeniedText());
     }
   };
 
@@ -875,7 +884,7 @@ window._micPendingSend=window._micPendingSend||false;
       }
       if(event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
         _deactivate();
-        showToast(t('mic_denied'));
+        showToast(_micDeniedText());
         return;
       }
       // Other errors — try to restart

@@ -347,7 +347,7 @@ _WRITEFLOW_TEAMS = {
     "web-article-extractor": {
         "title": "网页文章提取专家",
         "category": "素材提取",
-        "status_label": "适配 taiji Agent 网页工具",
+        "status_label": "适配太极智能体网页能力",
         "description": "从网页链接提取正文、标题、来源和结构化素材，失败时给出可处理原因。",
         "default_mode": "A",
         "default_action": "extract",
@@ -358,7 +358,7 @@ _WRITEFLOW_TEAMS = {
             {"id": "extract-for-writing", "label": "提取成素材", "prompt": "请从我提供的网页文章中提取可用于写作的观点、案例和金句，整理成素材库，不要直接改写成文章。链接："},
         ],
         "members": [
-            {"id": "web-article-extractor", "name": "网页提取专家", "role": "文章提取", "skill": "web-article-extractor", "responsibility": "使用 taiji Agent 网页工具提取正文并保存 Markdown。"},
+            {"id": "web-article-extractor", "name": "网页提取专家", "role": "文章提取", "skill": "web-article-extractor", "responsibility": "使用太极智能体网页能力提取正文并保存 Markdown。"},
             {"id": "research-expert", "name": "素材整理员", "role": "素材整理", "skill": "workflow-producer", "responsibility": "把提取内容整理为可写作素材。"},
         ],
     },

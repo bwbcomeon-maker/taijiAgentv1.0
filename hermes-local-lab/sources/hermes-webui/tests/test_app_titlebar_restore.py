@@ -8,6 +8,7 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 DESKTOP_MAIN_JS = (REPO_ROOT / "apps" / "taiji-desktop" / "src" / "main.js").read_text(encoding="utf-8")
+HEALTH_CHECK_SH = (REPO_ROOT / "hermes-local-lab" / "scripts" / "health-check.sh").read_text(encoding="utf-8")
 
 
 def test_app_titlebar_no_longer_contains_tps_chip():
@@ -71,6 +72,34 @@ def test_taiji_desktop_loads_webui_with_desktop_marker():
     assert 'target.searchParams.set("taiji_desktop", "1");' in DESKTOP_MAIN_JS
     assert "await mainWindow.loadURL(target.toString());" in DESKTOP_MAIN_JS
     assert "dataset.taijiDesktop='1'" in INDEX_HTML
+
+
+def test_taiji_desktop_clears_stale_runtime_before_selecting_ports():
+    cleanup_idx = DESKTOP_MAIN_JS.index("await stopExistingRuntime(labDir, logDir);")
+    port_idx = DESKTOP_MAIN_JS.index("const agentPort = await findFreePort(DEFAULT_AGENT_PORT);")
+
+    assert "async function stopExistingRuntime(labDir, logDir)" in DESKTOP_MAIN_JS
+    assert cleanup_idx < port_idx
+    assert '"stop-all.sh"' in DESKTOP_MAIN_JS
+    assert "TAIJI_AGENT_USE_USER_DIRS: \"1\"" in DESKTOP_MAIN_JS
+
+
+def test_health_check_accepts_desktop_user_state_pid_files():
+    assert 'USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/taiji-agent"' in HEALTH_CHECK_SH
+    assert 'local user_pid_file="$USER_LOG_DIR/$pid_base"' in HEALTH_CHECK_SH
+    assert 'candidates+=("$user_pid_file")' in HEALTH_CHECK_SH
+
+
+def test_taiji_desktop_installs_loopback_media_permission_handlers():
+    assert "installDesktopPermissionHandlers(mainWindow)" in DESKTOP_MAIN_JS
+    assert "setPermissionRequestHandler" in DESKTOP_MAIN_JS
+    assert "setPermissionCheckHandler" in DESKTOP_MAIN_JS
+    assert "function isAllowedDesktopMediaOrigin" in DESKTOP_MAIN_JS
+    assert "127.0.0.1" in DESKTOP_MAIN_JS
+    assert "[::1]" in DESKTOP_MAIN_JS
+    assert '"media"' in DESKTOP_MAIN_JS
+    assert '"microphone"' in DESKTOP_MAIN_JS
+    assert 'askForMediaAccess("microphone")' in DESKTOP_MAIN_JS
 
 
 def test_taiji_desktop_shell_has_safe_drag_region_and_visible_grid_background():

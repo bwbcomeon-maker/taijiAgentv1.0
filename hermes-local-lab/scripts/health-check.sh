@@ -9,6 +9,8 @@ WEBUI_DIR="$LAB_DIR/sources/hermes-webui"
 LOG_DIR="$LAB_DIR/logs"
 TMP_DIR="$LAB_DIR/tmp"
 RUNTIME_ENV="$TMP_DIR/runtime.env"
+USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/taiji-agent"
+USER_LOG_DIR="$USER_STATE_DIR/logs"
 
 if [ -f "$LAB_DIR/.env" ]; then
   set -a
@@ -41,17 +43,34 @@ fail() { printf '[FAIL] %s\n' "$*"; fail_count=$((fail_count + 1)); }
 check_pid() {
   local name="$1"
   local pid_file="$2"
-  if [ ! -f "$pid_file" ]; then
+  local pid_base
+  pid_base="$(basename "$pid_file")"
+  local user_pid_file="$USER_LOG_DIR/$pid_base"
+  local candidates=("$pid_file")
+  if [ "$user_pid_file" != "$pid_file" ]; then
+    candidates+=("$user_pid_file")
+  fi
+
+  local found_file=0
+  local candidate
+  local pid
+  for candidate in "${candidates[@]}"; do
+    if [ ! -f "$candidate" ]; then
+      continue
+    fi
+    found_file=1
+    pid="$(cat "$candidate" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      ok "$name process running: PID $pid ($candidate)"
+      return 0
+    fi
+  done
+
+  if [ "$found_file" -eq 0 ]; then
     warn "$name pid file missing: $pid_file"
     return 1
   fi
-  local pid
-  pid="$(cat "$pid_file" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    ok "$name process running: PID $pid"
-    return 0
-  fi
-  fail "$name process not running; stale or invalid pid file: $pid_file"
+  fail "$name process not running; stale or invalid pid files checked: ${candidates[*]}"
   return 1
 }
 

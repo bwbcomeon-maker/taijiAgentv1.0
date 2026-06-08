@@ -4055,7 +4055,7 @@ function renderWriteflow(data) {
 
 // ── Skills panel ──
 async function loadSkills() {
-  if (_skillsData) { renderSkills(_skillsData); return; }
+  if (_skillsData) { renderSkills(_desktopSafeSkills(_skillsData)); return; }
   const box = $('skillsList');
   try {
     const data = await api('/api/skills');
@@ -4064,7 +4064,7 @@ async function loadSkills() {
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
-    renderSkills(_skillsData);
+    renderSkills(_desktopSafeSkills(_skillsData));
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
 
@@ -4086,6 +4086,7 @@ function _toggleCatCollapse(cat) {
 }
 
 function renderSkills(skills) {
+  skills = _desktopSafeSkills(skills || []);
   const query = ($('skillsSearch').value || '').toLowerCase();
   const filtered = query ? skills.filter(s =>
     (s.name||'').toLowerCase().includes(query) ||
@@ -4139,7 +4140,35 @@ function renderSkills(skills) {
 }
 
 function filterSkills() {
-  if (_skillsData) renderSkills(_skillsData);
+  if (_skillsData) renderSkills(_desktopSafeSkills(_skillsData));
+}
+
+function _isTaijiDesktopSurface(){
+  try{return document.documentElement&&document.documentElement.dataset.taijiDesktop==='1';}
+  catch(_){return false;}
+}
+
+function _desktopSafeSkill(skill){
+  if(!_isTaijiDesktopSurface()) return true;
+  const text=[skill&&skill.name,skill&&skill.description,skill&&skill.category].join(' ').toLowerCase();
+  if(!text.trim()) return false;
+  const forbidden=[
+    'hermes','codex','claude','opencode','computer-use','macos-computer-use',
+    'dogfood','jailbreak','godmode','debugger','debugpy','mcp','github',
+    'devops','mlops','vllm','llama.cpp','huggingface','dspy','subagent'
+  ];
+  if(forbidden.some(marker=>text.includes(marker))) return false;
+  const category=String(skill&&skill.category||'').trim().toUpperCase();
+  if([
+    'AUTONOMOUS-AI-AGENTS','APPLE','DEVOPS','GITHUB','MCP','MLOPS',
+    'RED-TEAMING','SOFTWARE-DEVELOPMENT'
+  ].includes(category)) return false;
+  return true;
+}
+
+function _desktopSafeSkills(skills){
+  if(!_isTaijiDesktopSurface()) return skills || [];
+  return (skills || []).filter(_desktopSafeSkill);
 }
 
 
@@ -5567,8 +5596,8 @@ async function loadProfilesPanel() {
     explainer.innerHTML = `
       <div class="profile-card-header">
         <div style="min-width:0;flex:1">
-          <div class="profile-card-name">Profiles vs workspaces</div>
-          <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+          <div class="profile-card-name">配置文件说明</div>
+          <div class="profile-card-meta">配置文件用于管理智能体工作方式；文件范围由管理员统一配置。</div>
         </div>
       </div>`;
     explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
@@ -8066,7 +8095,7 @@ function _renderModelConfigPanel(data){
  const active=$('modelConfigActive');
  const keyState=$('modelConfigKeyState');
  if(profile) profile.textContent=data.profile||'default';
- if(path) path.textContent=data.config_path||'—';
+ if(path) path.textContent='本机配置';
  if(active) active.textContent=[main.provider,main.model].filter(Boolean).join(' / ')||'—';
  if(keyState) keyState.textContent=_modelConfigKeyLabel(main.key_status);
 

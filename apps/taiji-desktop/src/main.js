@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, shell, dialog, systemPreferences } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
@@ -143,6 +143,82 @@ function appendDesktopLog(logFile, message) {
   fs.appendFileSync(logFile, `${new Date().toISOString()} ${message}\n`);
 }
 
+function isAllowedDesktopMediaOrigin(origin) {
+  try {
+    const url = new URL(String(origin || ""));
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isDesktopMicrophonePermission(permission, details = {}) {
+  if (permission === "microphone") return true;
+  if (permission !== "media") return false;
+  const mediaTypes = Array.isArray(details.mediaTypes) ? details.mediaTypes : [];
+  return mediaTypes.length === 0 || mediaTypes.includes("audio");
+}
+
+async function requestDesktopMicrophoneAccess() {
+  if (process.platform !== "darwin" || !systemPreferences) return true;
+  try {
+    const status = systemPreferences.getMediaAccessStatus
+      ? systemPreferences.getMediaAccessStatus("microphone")
+      : "unknown";
+    if (status === "granted") return true;
+    if (status === "denied" || status === "restricted") return false;
+    if (typeof systemPreferences.askForMediaAccess === "function") {
+      return await systemPreferences.askForMediaAccess("microphone");
+    }
+  } catch (_) {
+    return true;
+  }
+  return true;
+}
+
+function installDesktopPermissionHandlers(win) {
+  if (!win || !win.webContents || !win.webContents.session) return;
+  const ses = win.webContents.session;
+  ses.setPermissionRequestHandler((webContents, permission, callback, details = {}) => {
+    const origin = details.securityOrigin || details.requestingUrl || webContents.getURL();
+    if (!isDesktopMicrophonePermission(permission, details) || !isAllowedDesktopMediaOrigin(origin)) {
+      callback(false);
+      return;
+    }
+    requestDesktopMicrophoneAccess()
+      .then((granted) => callback(!!granted))
+      .catch(() => callback(false));
+  });
+  ses.setPermissionCheckHandler((webContents, permission, requestingOrigin, details = {}) => {
+    const origin = requestingOrigin || details.securityOrigin || webContents.getURL();
+    return isDesktopMicrophonePermission(permission, details) && isAllowedDesktopMediaOrigin(origin);
+  });
+}
+
+async function stopExistingRuntime(labDir, logDir) {
+  const stopScript = path.join(labDir, "scripts", "stop-all.sh");
+  if (!fs.existsSync(stopScript)) return;
+  const desktopLog = path.join(logDir, "taiji-desktop.log");
+  const env = {
+    ...process.env,
+    TAIJI_AGENT_ROOT: labDir,
+    TAIJI_AGENT_USE_USER_DIRS: "1",
+    TAIJI_AGENT_LOG_DIR: logDir
+  };
+  delete env.ELECTRON_RUN_AS_NODE;
+  appendDesktopLog(desktopLog, "stopping stale desktop runtime");
+  const result = spawnSync(stopScript, {
+    cwd: labDir,
+    env,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 12000
+  });
+  if (result.stdout) appendDesktopLog(desktopLog, `[stop-all.sh] ${result.stdout.trimEnd()}`);
+  if (result.stderr) appendDesktopLog(desktopLog, `[stop-all.sh error] ${result.stderr.trimEnd()}`);
+  if (result.error) appendDesktopLog(desktopLog, `[stop-all.sh error] ${result.error.message}`);
+}
+
 function runScript(scriptName, env, logFile) {
   const script = path.join(env.TAIJI_AGENT_ROOT, "scripts", scriptName);
   return new Promise((resolve, reject) => {
@@ -214,6 +290,7 @@ async function startRuntime() {
     "可通过菜单打开运行日志"
   ]);
 
+  await stopExistingRuntime(labDir, logDir);
   const agentPort = await findFreePort(DEFAULT_AGENT_PORT);
   const webuiPort = await findFreePort(DEFAULT_WEBUI_PORT);
   runtimeEnv = createRuntimeEnv(labDir, agentPort, webuiPort, logDir);
@@ -297,6 +374,7 @@ async function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  installDesktopPermissionHandlers(mainWindow);
 
   loadStatus("正在准备太极 Agent", ["初始化桌面窗口", "准备本机运行环境"]);
 

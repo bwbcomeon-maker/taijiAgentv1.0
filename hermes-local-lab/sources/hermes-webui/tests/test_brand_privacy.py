@@ -280,3 +280,54 @@ def test_settings_visible_fallbacks_do_not_expose_internal_config_locations():
     ):
         assert forbidden not in html
         assert forbidden not in panels
+
+
+def test_desktop_visible_model_config_does_not_render_raw_config_path():
+    panels = (WEBUI_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+    assert "path.textContent=data.config_path" not in panels
+    assert "path.textContent='本机配置'" in panels
+
+
+def test_provider_quota_copy_is_productized_for_desktop_surface():
+    providers = (WEBUI_ROOT / "api" / "providers.py").read_text(encoding="utf-8")
+
+    assert "Quota status is not available" not in providers
+    assert "WebUI captures provider response metadata" not in providers
+    assert "暂不支持读取" in providers
+
+
+def test_desktop_skills_filter_internal_brand_markers():
+    panels = (WEBUI_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+    assert "function _desktopSafeSkill" in panels
+    for marker in ("hermes", "codex", "mcp", "github", "jailbreak", "devops", "mlops"):
+        assert marker in panels
+    for category in ("MCP", "GITHUB", "RED-TEAMING", "SOFTWARE-DEVELOPMENT"):
+        assert category in panels
+    assert "renderSkills(_desktopSafeSkills(_skillsData));" in panels
+
+
+def test_shell_empty_state_fallbacks_are_productized_chinese():
+    html = (WEBUI_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert "Select a memory section" not in html
+    assert "Pick a section from the sidebar" not in html
+    assert "选择一个记忆栏目" in html
+    assert "从左侧选择栏目查看或编辑内容" in html
+
+
+def test_model_picker_icon_actions_have_localized_titles():
+    ui = (WEBUI_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+
+    assert 'title="Clear search"' not in ui
+    assert 'title="Use this model"' not in ui
+    assert "model_search_clear_title" in ui
+    assert "model_use_custom_title" in ui
+
+
+def test_writeflow_team_copy_uses_productized_desktop_language():
+    routes = (WEBUI_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+
+    assert "taiji Agent 网页工具" not in routes
+    assert "太极智能体网页能力" in routes

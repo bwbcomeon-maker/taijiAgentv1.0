@@ -1376,7 +1376,6 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
         return _provider_account_usage_status(provider, display_name, refresh=refresh)
 
     if provider != "openrouter":
-        detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
         return {
             "ok": False,
             "provider": provider,
@@ -1384,7 +1383,7 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
             "supported": False,
             "status": "unsupported",
             "quota": None,
-            "message": f"Quota status is not available for {display_name}. {detail}",
+            "message": f"{display_name} 暂不支持读取额度状态。当前模型配置可继续使用，不影响正常对话。",
         }
 
     api_key = _get_provider_api_key("openrouter")

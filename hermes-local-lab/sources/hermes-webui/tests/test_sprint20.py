@@ -85,16 +85,16 @@ def test_mic_status_has_listening_text():
     assert 'Listening' in html
 
 
-def test_mic_button_svg_microphone_shape():
-    """btnMic SVG must include the rect (mic body) and path (mic arc)."""
+def test_mic_button_uses_taiji_icon_system():
+    """btnMic should render through the shared Taiji icon system."""
     html, _ = get_text("/")
     # Find mic button section
     btn_start = html.find('id="btnMic"')
     btn_end = html.find('</button>', btn_start) + len('</button>')
     btn_html = html[btn_start:btn_end]
-    assert '<rect' in btn_html, "mic SVG missing rect (mic body)"
-    assert '<path' in btn_html, "mic SVG missing path (arc)"
-    assert '<line' in btn_html, "mic SVG missing line (stand)"
+    assert 'class="taiji-icon composer-control-icon"' in btn_html
+    assert 'data-icon="mic"' in btn_html
+    assert 'aria-hidden="true"' in btn_html
 
 
 def test_mic_button_inside_composer_left():
@@ -375,7 +375,7 @@ def test_boot_js_prefix_captured_on_start():
     """_prefix must be set from ta.value when the user starts recording."""
     js, _ = get_text("/static/boot.js")
     # _prefix assignment must happen in the btn.onclick else branch (before recognition.start)
-    btn_onclick_idx = js.find("btn.onclick")
+    btn_onclick_idx = js.find("btn.onclick=async()=>")
     btn_onclick_end = js.find("};", btn_onclick_idx)
     onclick_body = js[btn_onclick_idx:btn_onclick_end]
     assert "_prefix=ta.value" in onclick_body or "_prefix = ta.value" in onclick_body

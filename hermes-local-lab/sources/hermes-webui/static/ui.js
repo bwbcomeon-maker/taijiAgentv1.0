@@ -138,6 +138,7 @@ function _closeUiVisibilityHiddenDropdowns(){
 }
 
 function applyUiVisibility(){
+  const workspaceFilesVisible=isUiFeatureVisible('composer','workspace_files');
   document.querySelectorAll('[data-panel]').forEach(el=>{
     const panel=el.dataset&&el.dataset.panel;
     if(panel) _setUiVisibilityHidden(el,!isUiFeatureVisible('nav',panel));
@@ -161,8 +162,8 @@ function applyUiVisibility(){
   }
 
   _setUiVisibilityHidden($('profileChipWrap'),!isUiFeatureVisible('composer','profile'));
-  _setUiVisibilityHidden($('btnWorkspacePanelToggle'),!isUiFeatureVisible('composer','workspace_files'));
-  _setUiVisibilityHidden($('btnWorkspacePanelEdgeToggle'),!isUiFeatureVisible('composer','workspace_files'));
+  _setUiVisibilityHidden($('btnWorkspacePanelToggle'),!workspaceFilesVisible);
+  _setUiVisibilityHidden($('btnWorkspacePanelEdgeToggle'),!workspaceFilesVisible);
   _setUiVisibilityHidden($('composerWorkspaceChip'),!isUiFeatureVisible('composer','workspace_switcher'));
   _setUiVisibilityHidden($('composerModelChip'),!isUiFeatureVisible('composer','model'));
   _setUiVisibilityHidden($('composerReasoningWrap'),!isUiFeatureVisible('composer','reasoning'));
@@ -174,9 +175,16 @@ function applyUiVisibility(){
 
   const workspaceGroup=$('composerWorkspaceGroup');
   if(workspaceGroup){
-    const hideWorkspaceGroup=!isUiFeatureVisible('composer','workspace_files')&&!isUiFeatureVisible('composer','workspace_switcher');
+    const hideWorkspaceGroup=!workspaceFilesVisible&&!isUiFeatureVisible('composer','workspace_switcher');
     _setUiVisibilityHidden(workspaceGroup,hideWorkspaceGroup);
   }
+  const workspacePanel=document.querySelector('.rightpanel');
+  _setUiVisibilityHidden(workspacePanel,!workspaceFilesVisible);
+  document.querySelectorAll('[data-taiji-quick-feature]').forEach(el=>{
+    const feature=el.dataset&&el.dataset.taijiQuickFeature;
+    if(feature) _setUiVisibilityHidden(el,!isUiFeatureVisible('composer',feature));
+  });
+  if(!workspaceFilesVisible&&typeof closeWorkspacePanel==='function') closeWorkspacePanel();
   const mobileConfigBtn=$('composerMobileConfigBtn');
   if(mobileConfigBtn){
     const hasMobileComposerEntry=['workspace_switcher','model','reasoning'].some(key=>isUiFeatureVisible('composer',key));
@@ -2227,7 +2235,7 @@ function renderModelDropdown(){
   _scopeNote.textContent=t('model_scope_advisory')||'Applies to this conversation from your next message.';
   const _searchRow=document.createElement('div');
   _searchRow.className='model-search-row';
-  _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
+  _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="${esc(t('model_search_clear_title'))}">${li('x',10)}</button>`;
   const _si=_searchRow.querySelector('.model-search-input');
   const _sc=_searchRow.querySelector('.model-search-clear');
   // Create custom model section elements
@@ -2236,7 +2244,7 @@ function renderModelDropdown(){
   _custSep.textContent=t('model_custom_label')||'Custom model ID';
   const _custRow=document.createElement('div');
   _custRow.className='model-custom-row';
-  _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
+  _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="${esc(t('model_use_custom_title'))}">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
   const _cb=_custRow.querySelector('.model-custom-btn');
   const _configuredRank=(badge)=>{

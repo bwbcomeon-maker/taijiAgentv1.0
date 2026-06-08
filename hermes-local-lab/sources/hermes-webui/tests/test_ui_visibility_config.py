@@ -292,6 +292,16 @@ def test_visibility_hidden_elements_are_forced_out_of_layout():
     assert "display:none!important;" in STYLE_CSS
 
 
+def test_workspace_feature_visibility_hides_panel_and_home_shortcut():
+    assert 'data-taiji-quick-feature="workspace_files"' in (
+        ROOT / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "document.querySelectorAll('[data-taiji-quick-feature]')" in UI_JS
+    assert "document.querySelector('.rightpanel')" in UI_JS
+    assert "closeWorkspacePanel();" in UI_JS
+    assert "_setUiVisibilityHidden(workspacePanel,!workspaceFilesVisible);" in UI_JS
+
+
 def test_taiji_composer_visibility_hidden_overrides_skin_display_rules():
     final_hidden_selector = (
         ":root[data-skin] .taiji-home-shell #composerWrap [data-ui-visibility-hidden=\"1\"]"
@@ -363,3 +373,10 @@ def test_hidden_composer_controls_noop_their_dropdowns():
     assert "closeToolsetsDropdown();" in UI_JS
     assert "closeWsDropdown();" in PANELS_JS
     assert "closeProfileDropdown();" in PANELS_JS
+
+
+def test_desktop_mic_denied_message_uses_desktop_permission_copy():
+    assert "function _micDeniedText()" in BOOT_JS
+    assert "dataset.taijiDesktop==='1'" in BOOT_JS
+    assert "系统设置" in BOOT_JS
+    assert "showToast(_micDeniedText())" in BOOT_JS
