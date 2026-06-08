@@ -433,10 +433,7 @@ if (!gotSingleInstanceLock) {
   app.on("before-quit", stopRuntime);
 
   app.on("window-all-closed", () => {
-    stopRuntime();
-    if (process.platform !== "darwin") {
-      app.quit();
-    }
+    app.quit();
   });
 
   app.on("activate", () => {
