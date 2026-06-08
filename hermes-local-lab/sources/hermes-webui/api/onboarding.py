@@ -196,9 +196,8 @@ _PROVIDER_CATEGORIES = [
 ]
 
 _UNSUPPORTED_PROVIDER_NOTE = (
-    "Advanced provider flows such as Nous Portal and GitHub Copilot are still "
-    "terminal-first. OpenAI Codex and Anthropic Claude Code can be authenticated in this onboarding flow "
-    "when your Hermes config selects the corresponding provider."
+    "Some advanced provider flows require administrator authentication. "
+    "OpenAI Codex and Anthropic Claude Code can be authenticated here when available."
 )
 
 
@@ -683,7 +682,8 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     provider = _extract_current_provider(cfg)
     model = _extract_current_model(cfg)
     base_url = _extract_current_base_url(cfg)
-    env_values = _load_env_file(_get_active_hermes_home() / ".env")
+    env_path = _get_active_hermes_home() / ".env"
+    env_values = _load_env_file(env_path)
 
     provider_configured = bool(provider and model)
     provider_ready = False
@@ -732,34 +732,32 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     if not _HERMES_FOUND or not imports_ok:
         state = "agent_unavailable"
         note = (
-            "WebUI 当前还不能完整导入 Hermes。请先完成初始化或修复 Agent 安装，"
-            "然后再配置提供商。"
+            "本机应用当前仍在准备中。请先完成初始化或修复安装状态，然后再配置提供商。"
         )
     elif chat_ready:
         state = "ready"
         provider_name = _PROVIDER_DISPLAY.get(
-            provider, provider.title() if provider else "Hermes"
+            provider, provider.title() if provider else "太极 Agent"
         )
-        note = f"Hermes 已完成基础配置，可以通过 {provider_name} 开始对话。"
+        note = f"太极 Agent 已完成基础配置，可以通过 {provider_name} 开始对话。"
     elif provider_configured:
         state = "provider_incomplete"
         if provider == "custom" and not base_url:
             note = (
-                "Hermes 已保存提供商/模型选择，但还需要填写对话所需的 base URL 和 API Key。"
+                "太极 Agent 已保存提供商/模型选择，但还需要填写对话所需的 base URL 和 API Key。"
             )
         elif provider not in _SUPPORTED_PROVIDER_SETUPS:
             # OAuth / unsupported provider: avoid misleading "API key" wording.
             note = (
-                f"提供商 '{provider}' 已配置，但尚未完成认证。请在终端运行 "
-                "'hermes auth' 或 'hermes model' 完成设置，然后重新加载 WebUI。"
+                f"提供商 '{provider}' 已配置，但尚未完成认证。请完成管理员认证后重新加载应用。"
             )
         else:
             note = (
-                "Hermes 已保存提供商/模型选择，但还需要填写对话所需的 API Key。"
+                "太极 Agent 已保存提供商/模型选择，但还需要填写对话所需的 API Key。"
             )
     else:
         state = "needs_provider"
-        note = "Hermes 已安装，但仍需要选择提供商并保存可用凭据。"
+        note = "太极 Agent 已就绪，下一步选择模型提供商并保存凭据。"
 
     return {
         "provider_configured": provider_configured,
@@ -770,7 +768,10 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         "current_provider": provider or None,
         "current_model": model or None,
         "current_base_url": base_url or None,
-        "env_path": str(_get_active_hermes_home() / ".env"),
+        # Keep the raw path for technical diagnostics / compatibility, but the
+        # ordinary onboarding UI must render the public status fields instead.
+        "env_path": str(env_path),
+        "env_exists": env_path.exists(),
     }
 
 
@@ -864,7 +865,8 @@ def get_onboarding_status() -> dict:
     # through the wizard just because their provider doesn't have a detectable API key
     # — the wizard cannot represent their provider and would overwrite their config
     # with whichever wizard-supported provider they accidentally select.
-    config_exists = Path(_get_config_path()).exists()
+    config_path = Path(_get_config_path())
+    config_exists = config_path.exists()
 
     # For providers not in the wizard's quick-setup list (e.g. ollama-cloud, deepseek,
     # xai, kimi-k2.6), the wizard can never help — it only knows how to configure
@@ -910,15 +912,17 @@ def get_onboarding_status() -> dict:
             "default_workspace": settings.get("default_workspace")
             or str(DEFAULT_WORKSPACE),
             "password_enabled": is_auth_enabled(),
-            "bot_name": settings.get("bot_name") or "Hermes",
+            "bot_name": settings.get("bot_name") or "taiji Agent",
         },
         "system": {
             "hermes_found": bool(_HERMES_FOUND),
             "imports_ok": bool(imports_ok),
             "missing_modules": missing,
             "import_errors": errors,
-            "config_path": str(_get_config_path()),
-            "config_exists": Path(_get_config_path()).exists(),
+            # Raw path remains available for explicit diagnostics only. Product
+            # UI renders config_exists/env_exists as status labels instead.
+            "config_path": str(config_path),
+            "config_exists": config_exists,
             **runtime,
         },
         "setup": _build_setup_catalog(cfg),
@@ -971,8 +975,7 @@ def apply_onboarding_setup(body: dict) -> dict:
         return {
             "error": "config_exists",
             "message": (
-                "Hermes 已经配置过（config.yaml 已存在）。"
-                "如需覆盖，请传入 confirm_overwrite=true。"
+                "太极 Agent 已经配置过。如需覆盖，请先在管理员设置中确认。"
             ),
             "requires_confirm": True,
         }

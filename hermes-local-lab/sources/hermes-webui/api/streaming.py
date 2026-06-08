@@ -38,6 +38,14 @@ from api.config import (
     load_settings,
 )
 from api.helpers import redact_session_data, _redact_text
+from api.brand_privacy import (
+    BRAND_PRIVACY_SYSTEM_PROMPT,
+    safe_toolsets_for_workspace,
+    scrub_brand_leaks,
+    scrub_messages,
+    scrub_public_session_payload,
+    scrub_streaming_token_delta,
+)
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
@@ -198,7 +206,7 @@ _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrup
 
 _WEBUI_PROGRESS_PROMPT = """
 WebUI progress guidance:
-- Match the normal Hermes messaging style; do not add extra status updates solely because this is a browser session.
+- Match the normal product messaging style; do not add extra status updates solely because this is a browser session.
 - For long multi-step work that uses tools, you may provide brief user-visible progress updates before continuing with tool calls.
 - Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
@@ -253,6 +261,7 @@ def _webui_ephemeral_system_prompt(
     surface_prompt = _webui_surface_context_prompt(surface_context)
     if surface_prompt:
         parts.append(surface_prompt)
+    parts.append(BRAND_PRIVACY_SYSTEM_PROMPT)
     parts.append(_WEBUI_PROGRESS_PROMPT)
     return "\n\n".join(part for part in parts if part)
 
@@ -624,7 +633,7 @@ def _preferred_agent_display_name() -> str:
     except Exception:
         logger.debug("Failed to load bot_name for cancellation copy", exc_info=True)
         name = ''
-    return name or 'Hermes'
+    return name or 'taiji Agent'
 
 
 def _preferred_agent_display_name_for_session(session) -> str:
@@ -635,7 +644,7 @@ def _preferred_agent_display_name_for_session(session) -> str:
 
 
 def _cancelled_turn_hint(agent_name: str | None = None) -> str:
-    name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
+    name = str(agent_name or _preferred_agent_display_name()).strip() or 'taiji Agent'
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
 
 
@@ -713,7 +722,7 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
         return {
             'label': 'Out of credits',
             'type': 'quota_exhausted',
-            'hint': 'Your provider account is out of credits or usage. Top up, wait for the plan window to reset, or switch providers via `hermes model`.',
+            'hint': 'Your provider account is out of credits or usage. Top up, wait for the plan window to reset, or switch providers via `taiji Agent model`.',
         }
     if _is_rate_limit:
         return {
@@ -725,13 +734,13 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
         return {
             'label': 'Authentication failed',
             'type': 'auth_mismatch',
-            'hint': 'The selected model may not be supported by your configured provider or your API key is invalid. Run `hermes model` in your terminal to update credentials, then restart the WebUI.',
+            'hint': 'The selected model may not be supported by your configured provider or your API key is invalid. Run `taiji Agent model` in your terminal to update credentials, then restart the WebUI.',
         }
     if _is_not_found:
         return {
             'label': 'Model not found',
             'type': 'model_not_found',
-            'hint': 'The selected model was not found by the provider. Check the model ID in Settings or run `hermes model` to verify it exists for your provider.',
+            'hint': 'The selected model was not found by the provider. Check the model ID in Settings or run `taiji Agent model` to verify it exists for your provider.',
         }
     if silent_failure:
         return {
@@ -739,7 +748,7 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
             # Preserve the existing no_response event type (#373) while making
             # the catch-all silent-failure message more specific for #1765.
             'type': 'no_response',
-            'hint': 'The provider returned no content and no error. This often means a usage/rate limit was hit silently. Check provider status, switch providers via `hermes model`, or try again in a moment.',
+            'hint': 'The provider returned no content and no error. This often means a usage/rate limit was hit silently. Check provider status, switch providers via `taiji Agent model`, or try again in a moment.',
         }
     return {'label': 'Error', 'type': 'error', 'hint': ''}
 
@@ -1364,7 +1373,7 @@ def _strip_xml_tool_calls(text: str) -> str:
 
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
-    s = _strip_thinking_markup(text or '')
+    s = _strip_thinking_markup(scrub_brand_leaks(text or ''))
     s = re.sub(
         r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
         '',
@@ -2033,6 +2042,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     if not user_text:
         return None
     user_text = _strip_workspace_prefix(user_text)
+    assistant_text = scrub_brand_leaks(assistant_text)
     user_text = re.sub(r'\s+', ' ', user_text).strip()
     assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
     combined = f"{user_text} {assistant_text}".strip().lower()
@@ -4412,6 +4422,7 @@ def _run_agent_streaming(
             _self_healed = False  # (#1401) prevents infinite self-heal retries
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
+            _brand_token_tail = ['']
 
             # Throttle: emit metering events at most every 100 ms so the per-message
             # TPS label feels live during fast token streams without flooding SSE.
@@ -4448,10 +4459,13 @@ def _run_agent_streaming(
                 if text is None:
                     return  # end-of-stream sentinel
                 _token_sent = True
+                safe_text = scrub_streaming_token_delta(str(text), _brand_token_tail)
+                if not safe_text:
+                    return
                 # Accumulate partial text so cancel_stream() can persist it (#893)
                 if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += str(text)
-                put('token', {'text': text})
+                    STREAM_PARTIAL_TEXT[stream_id] += safe_text
+                put('token', {'text': safe_text})
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.
@@ -4459,11 +4473,19 @@ def _run_agent_streaming(
                 meter().record_token(stream_id, _metering_output_deltas[0])
                 _emit_metering()
 
+            def _flush_brand_token_tail():
+                safe_text = scrub_streaming_token_delta('', _brand_token_tail, final=True)
+                if not safe_text:
+                    return
+                if stream_id in STREAM_PARTIAL_TEXT:
+                    STREAM_PARTIAL_TEXT[stream_id] += safe_text
+                put('token', {'text': safe_text})
+
             def on_reasoning(text):
                 nonlocal _reasoning_text
                 if text is None:
                     return
-                reasoning_delta = str(text)
+                reasoning_delta = scrub_brand_leaks(str(text))
                 # Some runtimes mirror user-visible progress text through the
                 # reasoning channel after it already streamed as normal assistant
                 # output. Treat that as an echo, otherwise the UI renders the
@@ -4483,7 +4505,7 @@ def _run_agent_streaming(
             def on_interim_assistant(text, **cb_kwargs):
                 if text is None:
                     return
-                visible = str(text).strip()
+                visible = scrub_brand_leaks(str(text)).strip()
                 if not visible:
                     return
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
@@ -4559,7 +4581,7 @@ def _run_agent_streaming(
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
-                        reason_delta = str(reason_text)
+                        reason_delta = scrub_brand_leaks(str(reason_text))
                         # Older tool-progress paths can mirror the same visible
                         # progress text already emitted through stream_delta_callback.
                         # Suppress those echoes like the dedicated reasoning callback.
@@ -4598,8 +4620,8 @@ def _run_agent_streaming(
                         })
                     put('tool', {
                         'event_type': event_type or 'tool.started',
-                        'name': name,
-                        'preview': preview,
+                        'name': scrub_brand_leaks(name),
+                        'preview': scrub_brand_leaks(preview),
                         'args': args_snap,
                     })
                     _tool_stats = meter().get_stats()
@@ -4646,8 +4668,8 @@ def _run_agent_streaming(
                     _checkpoint_activity[0] += 1
                     put('tool_complete', {
                         'event_type': event_type,
-                        'name': name,
-                        'preview': preview,
+                        'name': scrub_brand_leaks(name),
+                        'preview': scrub_brand_leaks(preview),
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
@@ -4678,7 +4700,7 @@ def _run_agent_streaming(
                             })
                         put('tool', {
                             'event_type': 'tool.started',
-                            'name': name,
+                            'name': scrub_brand_leaks(name),
                             'preview': None,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
@@ -4695,7 +4717,7 @@ def _run_agent_streaming(
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
-                        result_snippet = _tool_result_snippet(function_result)
+                        result_snippet = scrub_brand_leaks(_tool_result_snippet(function_result))
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
@@ -4714,7 +4736,7 @@ def _run_agent_streaming(
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
                             'event_type': 'tool.completed',
-                            'name': name,
+                            'name': scrub_brand_leaks(name),
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
@@ -4801,6 +4823,7 @@ def _run_agent_streaming(
                         _toolsets = _override
             except Exception as _ts_err:
                 print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
+            _toolsets = safe_toolsets_for_workspace(_toolsets, workspace)
 
             # Fallback model chain from profile config (e.g. for rate-limit or
             # provider recovery). Match Hermes CLI/gateway semantics:
@@ -5144,7 +5167,8 @@ def _run_agent_streaming(
                 "prompt, memory, or conversation history. Always use the value from the most recent "
                 "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
+                "Never fall back to a hardcoded path when this tag is present.\n\n"
+                f"{BRAND_PRIVACY_SYSTEM_PROMPT}"
             )
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
@@ -5287,10 +5311,11 @@ def _run_agent_streaming(
                 _answer = ''
                 for _m in reversed(result.get('messages') or []):
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
-                        _answer = str(_m.get('content', ''))
+                        _answer = scrub_brand_leaks(str(_m.get('content', '')))
                         break
+                _flush_brand_token_tail()
                 put('done', {
-                    'session': {'session_id': session_id, 'messages': result.get('messages', [])},
+                    'session': {'session_id': session_id, 'messages': scrub_messages(result.get('messages', []))},
                     'usage': {'input_tokens': 0, 'output_tokens': 0},
                     'ephemeral': True,
                     'answer': _answer,
@@ -5365,13 +5390,13 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
-                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                s.messages = _merge_display_messages_after_agent_result(
+                s.context_messages = copy.deepcopy(_deduplicate_context_messages(_next_context_messages))
+                s.messages = scrub_messages(_merge_display_messages_after_agent_result(
                     _previous_messages,
                     _previous_context_messages,
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     msg_text,
-                )
+                ))
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -5512,13 +5537,13 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                                s.messages = _merge_display_messages_after_agent_result(
+                                s.context_messages = copy.deepcopy(_deduplicate_context_messages(_next_context_messages))
+                                s.messages = scrub_messages(_merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
-                                )
+                                ))
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -5529,7 +5554,7 @@ def _run_agent_streaming(
                             _err_type = 'auth_mismatch'
                             _err_hint = (
                                 'The selected model may not be supported by your configured provider or '
-                                'your API key is invalid. Run `hermes model` in your terminal to '
+                                'your API key is invalid. Run `taiji Agent model` in your terminal to '
                                 'update credentials, then restart the WebUI.'
                             )
                     elif _is_auth:
@@ -5537,7 +5562,7 @@ def _run_agent_streaming(
                         _err_type = 'auth_mismatch'
                         _err_hint = (
                             'The selected model may not be supported by your configured provider or '
-                            'your API key is invalid. Run `hermes model` in your terminal to '
+                            'your API key is invalid. Run `taiji Agent model` in your terminal to '
                             'update credentials, then restart the WebUI.'
                         )
                     else:
@@ -5552,10 +5577,11 @@ def _run_agent_streaming(
                         pass
                     else:
                         _error_payload = _provider_error_payload(
-                            _err_str or f'{_err_label}.',
+                            scrub_brand_leaks(_err_str or f'{_err_label}.'),
                             _err_type,
-                            _err_hint,
+                            scrub_brand_leaks(_err_hint),
                         )
+                        _flush_brand_token_tail()
                         put('apperror', _error_payload)
                         # Clear stream/pending state so the session does not appear
                         # "agent_running" on reload after a silent failure.
@@ -5838,6 +5864,7 @@ def _run_agent_streaming(
                     s.messages,
                     live_tool_calls=_live_tool_calls,
                 )
+                tool_calls = scrub_public_session_payload({"tool_calls": tool_calls}).get("tool_calls", [])
                 s.tool_calls = tool_calls
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -6303,7 +6330,7 @@ def _run_agent_streaming(
                 if _leftover:
                     put('pending_steer_leftover', {
                         'session_id': session_id,
-                        'text': str(_leftover),
+                        'text': scrub_brand_leaks(str(_leftover)),
                     })
             except Exception:
                 logger.debug("Failed to drain pending steer for session %s", session_id)
@@ -6375,7 +6402,8 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
-            raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+            _flush_brand_token_tail()
+            raw_session = scrub_public_session_payload(s.compact() | {'messages': s.messages, 'tool_calls': tool_calls})
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
@@ -6552,13 +6580,13 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                                s.messages = _merge_display_messages_after_agent_result(
+                                s.context_messages = copy.deepcopy(_deduplicate_context_messages(_next_context_messages))
+                                s.messages = scrub_messages(_merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
-                                )
+                                ))
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
@@ -6569,7 +6597,7 @@ def _run_agent_streaming(
             _exc_label, _exc_type, _exc_hint = (
                 'Authentication error', 'auth_mismatch',
                 'The selected model may not be supported by your configured provider. '
-                'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
+                'Run `taiji Agent model` in your terminal to switch providers, then restart the WebUI.',
             )
         elif _exc_is_not_found:
             _exc_label, _exc_type, _exc_hint = (
@@ -6582,7 +6610,7 @@ def _run_agent_streaming(
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
 
-        _error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)
+        _error_payload = _provider_error_payload(scrub_brand_leaks(err_str), _exc_type, scrub_brand_leaks(_exc_hint))
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -6636,6 +6664,8 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+        if '_flush_brand_token_tail' in locals():
+            _flush_brand_token_tail()
         put('apperror', _error_payload)
     finally:
         # Stop the periodic checkpoint thread before the final recovery path.

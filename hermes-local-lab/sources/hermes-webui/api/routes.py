@@ -347,7 +347,7 @@ _WRITEFLOW_TEAMS = {
     "web-article-extractor": {
         "title": "网页文章提取专家",
         "category": "素材提取",
-        "status_label": "适配 Hermes 网页工具",
+        "status_label": "适配 taiji Agent 网页工具",
         "description": "从网页链接提取正文、标题、来源和结构化素材，失败时给出可处理原因。",
         "default_mode": "A",
         "default_action": "extract",
@@ -358,7 +358,7 @@ _WRITEFLOW_TEAMS = {
             {"id": "extract-for-writing", "label": "提取成素材", "prompt": "请从我提供的网页文章中提取可用于写作的观点、案例和金句，整理成素材库，不要直接改写成文章。链接："},
         ],
         "members": [
-            {"id": "web-article-extractor", "name": "网页提取专家", "role": "文章提取", "skill": "web-article-extractor", "responsibility": "使用 Hermes 网页工具提取正文并保存 Markdown。"},
+            {"id": "web-article-extractor", "name": "网页提取专家", "role": "文章提取", "skill": "web-article-extractor", "responsibility": "使用 taiji Agent 网页工具提取正文并保存 Markdown。"},
             {"id": "research-expert", "name": "素材整理员", "role": "素材整理", "skill": "workflow-producer", "responsibility": "把提取内容整理为可写作素材。"},
         ],
     },
@@ -2205,6 +2205,7 @@ def _writeflow_task_status(
         placeholders=False,
         include_default=False,
     )
+    ready_done_artifacts = [item for item in done_artifacts if item.get("exists", True)]
     waiting_artifacts = _writeflow_task_artifacts(
         artifacts,
         task_def,
@@ -2215,7 +2216,7 @@ def _writeflow_task_status(
     display_artifacts = _writeflow_task_artifacts(artifacts, task_def, placeholders=True)
     requires_artifact = bool(task_def.get("requires_artifact"))
     done_requires_event = bool(task_def.get("done_requires_event"))
-    done_by_artifact = bool(done_artifacts)
+    done_by_artifact = bool(ready_done_artifacts)
     if requires_artifact and done_requires_event:
         done = bool(done_by_event and done_by_artifact)
     elif requires_artifact:
@@ -2244,7 +2245,7 @@ def _writeflow_task_status(
     if status in {"done", "waiting_user"}:
         task_artifacts = [
             str(item.get("path") or "")
-            for item in (done_artifacts if status == "done" else waiting_artifacts)
+            for item in (ready_done_artifacts if status == "done" else waiting_artifacts)
             if item.get("path") and not item.get("placeholder")
         ]
     worker_id = str(task_def.get("worker_id") or "")
@@ -2331,6 +2332,95 @@ def _writeflow_member_rows_for_tasks(team_id: str, tasks: list[dict]) -> list[di
             status = "待命"
         rows.append({**member, "status": status})
     return rows
+
+
+def _writeflow_task_by_id(tasks: list[dict], task_id: str) -> dict:
+    return next((task for task in tasks if str(task.get("id") or "") == task_id), {})
+
+
+def _writeflow_task_paths(*tasks: dict) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for task in tasks:
+        for path in task.get("artifacts") if isinstance(task.get("artifacts"), list) else []:
+            rel = _writeflow_clean_artifact_path(str(path or ""))
+            if rel and rel not in seen:
+                rows.append(rel)
+                seen.add(rel)
+    return rows
+
+
+def _writeflow_display_task_status(*tasks: dict) -> tuple[str, str]:
+    statuses = [str(task.get("status") or "") for task in tasks if task]
+    labels = [str(task.get("status_label") or "") for task in tasks if task]
+    if any(status in {"error", "blocked"} for status in statuses):
+        idx = next((i for i, status in enumerate(statuses) if status in {"error", "blocked"}), 0)
+        return statuses[idx], labels[idx] or _writeflow_status_label(statuses[idx])
+    if tasks and all(task and str(task.get("status") or "") == "done" for task in tasks):
+        return "done", "已完成"
+    if any(status == "running" for status in statuses):
+        idx = next((i for i, status in enumerate(statuses) if status == "running"), 0)
+        return "running", labels[idx] or "执行中"
+    if any(status == "waiting_user" for status in statuses):
+        idx = next((i for i, status in enumerate(statuses) if status == "waiting_user"), 0)
+        return "waiting_user", labels[idx] or "等待确认"
+    return "pending", "待执行"
+
+
+def _writeflow_display_tasks_for_run(run: dict) -> list[dict]:
+    tasks = run.get("tasks") if isinstance(run.get("tasks"), list) else []
+    if str(run.get("team_id") or "") != "content-creator-team":
+        return tasks
+
+    direction = _writeflow_task_by_id(tasks, "direction")
+    draft = _writeflow_task_by_id(tasks, "draft")
+    review = _writeflow_task_by_id(tasks, "review")
+    illustrations = _writeflow_task_by_id(tasks, "illustrations")
+
+    article_status, article_label = _writeflow_display_task_status(direction, draft, review)
+    if str(review.get("status") or "") == "done":
+        article_label = "发布版已完成"
+    elif str(draft.get("status") or "") == "done":
+        article_status = "waiting_user"
+        article_label = "初稿已完成，待打磨发布"
+    elif str(direction.get("status") or "") == "running":
+        article_label = "主编正在定方向"
+
+    image_status = str(illustrations.get("status") or "pending")
+    image_label = str(illustrations.get("status_label") or _writeflow_status_label(image_status))
+
+    return [
+        {
+            "id": "draft",
+            "title": "撰写公众号长文",
+            "worker_id": "writing-executor",
+            "worker_name": "文案创作专家",
+            "status": article_status,
+            "status_label": article_label,
+            "description": "标题方案、正文初稿、审稿润色和发布建议。",
+            "artifacts": _writeflow_task_paths(direction, draft, review),
+        },
+        {
+            "id": "illustrations",
+            "title": "生成封面和文中配图",
+            "worker_id": "article-illustrator",
+            "worker_name": "配图专家",
+            "status": image_status,
+            "status_label": image_label,
+            "description": "封面图、文中配图；图片能力不可用时先产出可复用配图提示词。",
+            "artifacts": _writeflow_task_paths(illustrations),
+        },
+    ]
+
+
+def _writeflow_apply_display_contract(run: dict) -> dict:
+    display_tasks = _writeflow_display_tasks_for_run(run)
+    run["display_tasks"] = display_tasks
+    run["display_progress"] = {
+        "done": sum(1 for task in display_tasks if str(task.get("status") or "") == "done"),
+        "total": len(display_tasks),
+    }
+    return run
 
 
 def _writeflow_apply_state_machine(workspace: Path, run: dict, artifacts: list[dict] | None = None) -> dict:
@@ -2431,7 +2521,7 @@ def _writeflow_apply_state_machine(workspace: Path, run: dict, artifacts: list[d
     run["reference_artifacts"] = reference_artifacts
     run["file_changes"] = _writeflow_project_file_changes(str(run.get("project_slug") or ""), [item for item in matched_artifacts if not item.get("placeholder") and item.get("exists", True)])
     run["next_actions"] = list(next_actions_map.get(next_key) or next_actions_map.get(run_status) or run.get("next_actions") or ["继续", "调整要求", "导出"])
-    return _writeflow_normalize_run(run)
+    return _writeflow_apply_display_contract(_writeflow_normalize_run(run))
 
 
 def _writeflow_enrich_run_from_workspace(workspace: Path, run: dict) -> dict:
@@ -2723,6 +2813,16 @@ def _writeflow_find_run(
     return runs[0] if runs else None
 
 
+def _writeflow_find_session_run(workspace: Path, session_id: str | None, project: str | None = None) -> dict | None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    for run in _writeflow_list_runs(workspace, project):
+        if str(run.get("session_id") or "").strip() == sid:
+            return run
+    return None
+
+
 def _writeflow_active_run_context(workspace: Path, session_id: str | None) -> dict | None:
     sid = str(session_id or "").strip()
     if not sid:
@@ -2905,9 +3005,9 @@ def _writeflow_ensure_session_run(workspace: Path, session_id: str, project: str
     sid = str(session_id or "").strip()
     if not sid:
         return None
-    for run in _writeflow_list_runs(workspace, project):
-        if str(run.get("session_id") or "") == sid:
-            return run
+    existing = _writeflow_find_session_run(workspace, sid, project)
+    if existing:
+        return existing
     meta = _writeflow_run_meta_from_session(sid)
     if not meta:
         return None
@@ -2938,7 +3038,12 @@ def _writeflow_ensure_run(workspace: Path, body: dict, meta: dict | None = None)
     if existing and existing.get("status") not in _WRITEFLOW_RUN_TERMINAL_STATUSES:
         existing_sid = str(existing.get("session_id") or "").strip()
         existing_team_id = str(existing.get("team_id") or "")
-        if requested_run_id or ((not session_id or not existing_sid or existing_sid == session_id) and existing_team_id == team_id):
+        same_team = existing_team_id == team_id
+        if requested_run_id and same_team and (not session_id or not existing_sid or existing_sid == session_id):
+            return existing
+        if same_team and session_id and existing_sid == session_id:
+            return existing
+        if same_team and not session_id and not existing_sid:
             return existing
     if raw_project and not meta.get("name"):
         meta["name"] = raw_project
@@ -2961,6 +3066,7 @@ def _writeflow_artifacts_payload(workspace: Path, run_id: str) -> dict:
         "workspace": str(workspace),
         "run_id": run["run_id"],
         "project_slug": run.get("project_slug") or "",
+        "run": run,
         "artifacts": run.get("artifacts") or [],
         "reference_artifacts": run.get("reference_artifacts") or [],
         "file_changes": run.get("file_changes") or [],
@@ -3943,6 +4049,7 @@ from api.config import (
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
+    get_ui_visibility,
     IMAGE_EXTS,
     MD_EXTS,
     MIME_MAP,
@@ -3981,6 +4088,15 @@ from api.helpers import (
     redact_session_data,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
+)
+from api.brand_privacy import (
+    BRAND_PRIVACY_SYSTEM_PROMPT,
+    brand_safe_reply,
+    is_brand_probe,
+    safe_toolsets_for_workspace,
+    scrub_brand_leaks,
+    scrub_messages,
+    scrub_public_session_payload,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -6133,25 +6249,26 @@ _LOGIN_PAGE_HTML = """<!doctype html>
 <title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-  height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#16213e;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:36px 32px;
-  width:320px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)}
-.logo{width:48px;height:48px;border-radius:12px;background:linear-gradient(145deg,#e8a030,#e94560);
-  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;
-  margin:0 auto 12px;box-shadow:0 2px 12px rgba(233,69,96,.3)}
-h1{font-size:18px;font-weight:600;margin-bottom:4px}
-.sub{font-size:12px;color:#8888aa;margin-bottom:24px}
-input{width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
-  background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;outline:none;margin-bottom:14px;
-  transition:border-color .15s}
-input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.1)}
-button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(124,185,255,.15);
-  border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
+body{background:linear-gradient(135deg,rgba(219,235,252,.90),rgba(244,247,253,.96)),url("static/assets/taiji/background/background-grid.png") center/cover fixed,#F4F7FD;
+  color:#2B4568;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{background:rgba(255,255,255,.86);border:1px solid #D7EAFC;border-radius:22px;padding:36px 32px;
+  width:min(340px,100%);text-align:center;box-shadow:0 18px 50px rgba(33,66,118,.14),inset 0 1px 0 rgba(255,255,255,.7);
+  backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+.logo{width:72px;height:72px;border-radius:20px;background:rgba(255,255,255,.62) url("static/assets/taiji/logo/logo-mark.png") center/64px 64px no-repeat;
+  margin:0 auto 14px;box-shadow:0 8px 24px rgba(18,178,198,.16);border:1px solid rgba(18,178,198,.18);font-size:0;color:transparent}
+h1{font-size:20px;font-weight:700;margin-bottom:4px;color:#203A5C;letter-spacing:0}
+.sub{font-size:12px;color:#7A8CA4;margin-bottom:24px}
+input{width:100%;padding:11px 14px;border-radius:14px;border:1px solid #D7EAFC;
+  background:rgba(255,255,255,.76);color:#2B4568;font-size:14px;outline:none;margin-bottom:14px;
+  transition:border-color .15s,box-shadow .15s}
+input:focus{border-color:#12B2C6;box-shadow:0 0 0 3px rgba(18,178,198,.18)}
+button{width:100%;padding:11px;border-radius:14px;border:none;background:linear-gradient(90deg,#12B2C6 0%,#4FC8D9 50%,#69CFE0 100%);
+  border:1px solid transparent;color:#fff;font-size:14px;font-weight:700;cursor:pointer;
   transition:all .15s}
-button:hover{background:rgba(124,185,255,.25)}
-.passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
-.err{color:#e94560;font-size:12px;margin-top:10px;display:none}
+button:hover{filter:brightness(1.02);box-shadow:0 8px 20px rgba(18,178,198,.22)}
+.passkey-login{margin-top:10px;background:rgba(255,255,255,.62);border-color:#D7EAFC;color:#2B4568;box-shadow:none}
+.err{color:#D93D4A;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
@@ -6402,7 +6519,7 @@ def _build_llm_wiki_status() -> dict:
             "path_configured": path_configured,
             "path_source": path_source,
             "toggle_available": False,
-            "toggle_reason": "Hermes Agent exposes WIKI_PATH/wiki.path for location, but no stable on/off config flag is currently available.",
+            "toggle_reason": "taiji Agent exposes WIKI_PATH/wiki.path for location, but no stable on/off config flag is currently available.",
             "docs_url": _LLM_WIKI_DOCS_URL,
         }
         if not wiki_path.exists():
@@ -7056,12 +7173,13 @@ _SHELL_ERROR_HTML = """<!doctype html>
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-  <title>Hermes is restarting</title>
+  <title>taiji Agent is restarting</title>
 </head>
-<body style=\"margin:0;padding:2rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#111827;color:#e5e7eb;\">
-  <main style=\"max-width:40rem;margin:10vh auto;line-height:1.5;\">
-    <h1 style=\"font-size:1.5rem;margin:0 0 0.75rem;\">Hermes is restarting…</h1>
-    <p style=\"margin:0;color:#cbd5e1;\">The WebUI shell could not load cleanly. Refresh in a moment if this page does not update automatically.</p>
+<body style=\"margin:0;padding:2rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(135deg,rgba(219,235,252,.9),rgba(244,247,253,.96)),url('static/assets/taiji/background/background-grid.png') center/cover fixed,#F4F7FD;color:#2B4568;\">
+  <main style=\"max-width:40rem;margin:10vh auto;line-height:1.5;background:rgba(255,255,255,.86);border:1px solid #D7EAFC;border-radius:22px;padding:2rem;box-shadow:0 18px 50px rgba(33,66,118,.14);\">
+    <img src=\"static/assets/taiji/logo/logo-mark.png\" alt=\"\" width=\"56\" height=\"56\" style=\"display:block;margin:0 0 1rem;border-radius:16px;\">
+    <h1 style=\"font-size:1.5rem;margin:0 0 0.75rem;color:#203A5C;\">taiji Agent is restarting…</h1>
+    <p style=\"margin:0;color:#5A6F8E;\">The WebUI shell could not load cleanly. Refresh in a moment if this page does not update automatically.</p>
   </main>
 </body>
 </html>"""
@@ -7200,7 +7318,7 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/login":
         _settings = load_settings()
-        _bn = _html.escape(_settings.get("bot_name") or "Hermes")
+        _bn = _html.escape(_settings.get("bot_name") or "taiji Agent")
         _lang = _settings.get("language", "en")
         _login_strings = _LOGIN_LOCALE[
             _resolve_login_locale_key(_lang)
@@ -7392,6 +7510,7 @@ def handle_get(handler, parsed) -> bool:
         settings["password_env_var"] = bool(
             os.getenv("HERMES_WEBUI_PASSWORD", "").strip()
         )
+        settings["ui_visibility"] = get_ui_visibility()
         # Inject the running version so the UI badge stays in sync with git tags
         # without any manual release step.
         try:
@@ -8272,18 +8391,19 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
         project = qs.get("project", [""])[0].strip() or None
+        recover = qs.get("recover", [""])[0].strip().lower() in {"1", "true", "yes"}
         try:
             workspace = _writeflow_workspace(session_id)
         except Exception as exc:
             return bad(handler, f"Invalid writeflow workspace: {_sanitize_error(exc)}", 400)
         runs = _writeflow_list_runs(workspace, project)
-        session_run = None
-        if session_id:
-            session_run = next((run for run in runs if str(run.get("session_id") or "") == session_id), None)
-            if not session_run:
-                session_run = _writeflow_ensure_session_run(workspace, session_id, project)
-                if session_run:
-                    runs = _writeflow_list_runs(workspace, project)
+        session_run = _writeflow_find_session_run(workspace, session_id, project)
+        recovered_session_run = False
+        if session_id and not session_run and recover:
+            session_run = _writeflow_ensure_session_run(workspace, session_id, project)
+            if session_run:
+                recovered_session_run = True
+                runs = _writeflow_list_runs(workspace, project)
         return j(
             handler,
             {
@@ -8291,6 +8411,7 @@ def handle_get(handler, parsed) -> bool:
                 "workspace": str(workspace),
                 "runs_dir": str(_writeflow_runs_dir(workspace)),
                 "session_run": session_run,
+                "recovered_session_run": recovered_session_run,
                 "runs": runs,
                 "teams": _writeflow_team_templates(),
             },
@@ -8300,15 +8421,26 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
         run_id = qs.get("run_id", [""])[0].strip()
-        if not run_id:
-            return bad(handler, "run_id required", 400)
+        recover = qs.get("recover", [""])[0].strip().lower() in {"1", "true", "yes"}
+        if not run_id and not session_id:
+            return bad(handler, "run_id or session_id required", 400)
         try:
             workspace = _writeflow_workspace(session_id)
-            run, error = _writeflow_read_run(workspace, run_id)
+            if run_id:
+                run, error = _writeflow_read_run(workspace, run_id)
+            else:
+                run = _writeflow_find_session_run(workspace, session_id)
+                if not run and recover:
+                    run = _writeflow_ensure_session_run(workspace, session_id or "")
+                error = None
         except Exception as exc:
             return bad(handler, f"Invalid writeflow run: {_sanitize_error(exc)}", 400)
         if error:
             return bad(handler, error, 404)
+        if run and session_id:
+            run_sid = str(run.get("session_id") or "").strip()
+            if run_sid and run_sid != session_id:
+                return bad(handler, "writeflow run does not belong to this session", 404)
         return j(handler, {"ok": True, "workspace": str(workspace), "run": run, "teams": _writeflow_team_templates()})
 
     if parsed.path == "/api/writeflow/artifacts":
@@ -8324,6 +8456,9 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, f"Invalid writeflow artifacts request: {_sanitize_error(exc)}", 400)
         if not payload.get("ok"):
             return bad(handler, payload.get("error") or "team_run not found", 404)
+        run_sid = str((payload.get("run") if isinstance(payload.get("run"), dict) else {}).get("session_id") or "")
+        if session_id and run_sid and run_sid != session_id:
+            return bad(handler, "writeflow run does not belong to this session", 404)
         return j(handler, payload)
 
     # ── Memory API (GET) ──
@@ -9795,7 +9930,7 @@ def handle_post(handler, parsed) -> bool:
         )
 
         if "bot_name" in body:
-            body["bot_name"] = (str(body["bot_name"]) or "").strip() or "Hermes"
+            body["bot_name"] = (str(body["bot_name"]) or "").strip() or "taiji Agent"
 
         auth_enabled_before = is_auth_enabled()
         current_cookie = parse_cookie(handler)
@@ -9837,6 +9972,7 @@ def handle_post(handler, parsed) -> bool:
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
+        saved["ui_visibility"] = get_ui_visibility()
 
         auth_enabled_after = is_auth_enabled()
         auth_just_enabled = bool(
@@ -13156,6 +13292,103 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _start_brand_privacy_safe_stream_for_session(
+    s,
+    *,
+    msg: str,
+    workspace: str,
+    model: str,
+    model_provider=None,
+    normalized_model: bool = False,
+    diag=None,
+):
+    """Complete a sensitive provenance probe without starting the agent/tools."""
+    diag.stage("brand_privacy_stream") if diag else None
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        with STREAMS_LOCK:
+            current_active = current_stream_id in STREAMS
+        if current_active:
+            return {
+                "error": "session already has an active stream",
+                "active_stream_id": current_stream_id,
+                "_status": 409,
+            }
+        _clear_stale_stream_state(s)
+
+    stream_id = uuid.uuid4().hex
+    now = time.time()
+    reply = brand_safe_reply(msg)
+    with _get_session_agent_lock(s.session_id):
+        was_hidden_empty_session = _is_hidden_empty_session(s)
+        s.workspace = workspace
+        s.model = model
+        s.model_provider = model_provider
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+        s.pending_started_at = None
+        user_msg = {"role": "user", "content": msg, "timestamp": int(now)}
+        assistant_msg = {"role": "assistant", "content": reply, "timestamp": int(now)}
+        s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
+        s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+            {"role": "user", "content": msg},
+            {"role": "assistant", "content": reply},
+        ]
+        s.messages = scrub_messages(s.messages)
+        s.context_messages = copy.deepcopy(s.context_messages)
+        if s.title in ("Untitled", "New Chat", "") or not s.title:
+            s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
+        s.save()
+    if was_hidden_empty_session:
+        publish_session_list_changed("session_new")
+    else:
+        publish_session_list_changed("session_update")
+
+    stream = create_stream_channel()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = stream
+
+    def _emit_safe_reply():
+        try:
+            stream.put_nowait(("token", {"text": reply}))
+            raw_session = scrub_public_session_payload(s.compact() | {"messages": s.messages, "tool_calls": []})
+            stream.put_nowait((
+                "done",
+                {
+                    "session": redact_session_data(raw_session),
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "brand_privacy": True,
+                },
+            ))
+            stream.put_nowait(("stream_end", {"session_id": s.session_id}))
+            time.sleep(30)
+        finally:
+            with STREAMS_LOCK:
+                if STREAMS.get(stream_id) is stream:
+                    STREAMS.pop(stream_id, None)
+                    STREAM_LAST_EVENT_ID.pop(stream_id, None)
+
+    threading.Thread(
+        target=_emit_safe_reply,
+        name=f"brand-privacy-{s.session_id[:8]}",
+        daemon=True,
+    ).start()
+
+    response = {
+        "stream_id": stream_id,
+        "session_id": s.session_id,
+        "pending_started_at": now,
+        "title": s.title,
+        "brand_privacy": True,
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return response
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -13516,6 +13749,19 @@ def _handle_chat_start(handler, body, diag=None):
             requested_model,
             requested_provider,
         )
+        if is_brand_probe(msg):
+            response = _start_brand_privacy_safe_stream_for_session(
+                s,
+                msg=msg,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                normalized_model=normalized_model,
+                diag=diag,
+            )
+            status = int(response.pop("_status", 200) or 200)
+            diag.stage("response_write") if diag else None
+            return j(handler, response, status=status)
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
             StartRunRequest,
@@ -13585,7 +13831,9 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
-    explicit = requested_workspace not in (None, "")
+    requested_text = str(requested_workspace or "").strip()
+    polluted_placeholder = requested_text in {"内部路径", "internal path", "taiji Agent-local-lab"}
+    explicit = requested_workspace not in (None, "") and not polluted_placeholder
     candidate = requested_workspace if explicit else getattr(s, "workspace", None)
     try:
         return str(resolve_trusted_workspace(candidate))
@@ -13649,6 +13897,31 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
+        if is_brand_probe(msg):
+            reply = brand_safe_reply(msg)
+            now = int(time.time())
+            s.messages = list(getattr(s, "messages", None) or []) + [
+                {"role": "user", "content": msg, "timestamp": now},
+                {"role": "assistant", "content": reply, "timestamp": now},
+            ]
+            s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+                {"role": "user", "content": msg},
+                {"role": "assistant", "content": reply},
+            ]
+            s.messages = scrub_messages(s.messages)
+            s.context_messages = copy.deepcopy(s.context_messages)
+            if s.title == "Untitled" or not s.title:
+                s.title = scrub_brand_leaks(title_from(s.messages, s.title))
+            s.save()
+            return j(
+                handler,
+                {
+                    "answer": reply,
+                    "status": "done",
+                    "session": s.compact() | {"messages": s.messages},
+                    "result": {"brand_privacy": True},
+                },
+            )
     from api.streaming import _ENV_LOCK
 
     with _ENV_LOCK:
@@ -13697,6 +13970,7 @@ def _handle_chat_sync(handler, body):
                     _api_key = _cp_key
                 if not _base_url and _cp_base:
                     _base_url = _cp_base
+            _sync_toolsets = safe_toolsets_for_workspace(_resolve_cli_toolsets(), workspace)
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -13706,7 +13980,7 @@ def _handle_chat_sync(handler, body):
                 # does not inject CLI-specific terminal/output guidance.
                 platform="webui",
                 quiet_mode=True,
-                enabled_toolsets=_resolve_cli_toolsets(),
+                enabled_toolsets=_sync_toolsets,
                 session_id=s.session_id,
             )
             from api.streaming import (
@@ -13736,7 +14010,8 @@ def _handle_chat_sync(handler, body):
                 "notes only for explicit captures, durable preferences, decisions, blockers/open "
                 "issues, runbook-worthy workflows, or other clearly reusable signals; otherwise "
                 "leave external notes and durable memory unchanged. When you do write or update a durable note, briefly tell "
-                "the user what note or section changed so the write is reviewable."
+                "the user what note or section changed so the write is reviewable.\n\n"
+                f"{BRAND_PRIVACY_SYSTEM_PROMPT}"
             )
 
             _previous_messages = list(s.messages or [])
@@ -13773,16 +14048,16 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _next_context_messages,
         )
-        s.context_messages = _next_context_messages
-        s.messages = _merge_display_messages_after_agent_result(
+        s.context_messages = copy.deepcopy(_next_context_messages)
+        s.messages = scrub_messages(_merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
             _restore_display_reasoning_metadata(_previous_messages, _result_messages),
             msg,
-        )
+        ))
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
-            s.title = title_from(s.messages, s.title)
+            s.title = scrub_brand_leaks(title_from(s.messages, s.title))
         s.save()
     # Sync to state.db for /insights (opt-in setting)
     try:
@@ -13809,10 +14084,10 @@ def _handle_chat_sync(handler, body):
     return j(
         handler,
         {
-            "answer": result.get("final_response") or "",
+            "answer": scrub_brand_leaks(result.get("final_response") or ""),
             "status": "done" if result.get("completed", True) else "partial",
-            "session": s.compact() | {"messages": s.messages},
-            "result": {k: v for k, v in result.items() if k != "messages"},
+            "session": scrub_public_session_payload(s.compact() | {"messages": s.messages}),
+            "result": scrub_brand_leaks({k: v for k, v in result.items() if k != "messages"}),
         },
     )
 

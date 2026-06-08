@@ -4861,7 +4861,7 @@ _SETTINGS_DEFAULTS = {
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "language": "zh",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
-        "HERMES_WEBUI_BOT_NAME", "Hermes"
+        "HERMES_WEBUI_BOT_NAME", "taiji Agent"
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
@@ -4974,6 +4974,99 @@ def load_settings() -> dict:
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
     return settings
+
+
+_UI_VISIBILITY_FEATURES = {
+    "nav": (
+        "chat",
+        "tasks",
+        "kanban",
+        "writing",
+        "skills",
+        "memory",
+        "workspaces",
+        "profiles",
+        "todos",
+        "insights",
+        "logs",
+        "settings",
+    ),
+    "settings_sections": (
+        "conversation",
+        "appearance",
+        "preferences",
+        "models",
+        "providers",
+        "plugins",
+        "system",
+    ),
+    "composer": (
+        "profile",
+        "workspace_files",
+        "workspace_switcher",
+        "model",
+        "reasoning",
+        "toolsets",
+        "quota",
+    ),
+}
+
+
+def _normalized_hidden_feature_set(value) -> set[str]:
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = value
+    else:
+        return set()
+    normalized = set()
+    for item in raw_values:
+        text = str(item or "").strip().lower().replace("-", "_")
+        if text:
+            normalized.add(text)
+    return normalized
+
+
+def _feature_visibility_group(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def get_ui_visibility(config_data: dict | None = None) -> dict:
+    """Return the computed product-entry visibility for the active profile.
+
+    The frontend only needs the normalized allow/deny booleans. Keep the raw
+    YAML, config path, and unknown keys out of /api/settings.
+    """
+    cfg_data = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = cfg_data.get("webui", {}) if isinstance(cfg_data, dict) else {}
+    hidden_cfg = (
+        webui_cfg.get("hidden_features", {}) if isinstance(webui_cfg, dict) else {}
+    )
+    if not isinstance(hidden_cfg, dict):
+        hidden_cfg = {}
+    feature_cfg = (
+        webui_cfg.get("feature_visibility", {}) if isinstance(webui_cfg, dict) else {}
+    )
+    if not isinstance(feature_cfg, dict):
+        feature_cfg = {}
+
+    result = {}
+    for group, keys in _UI_VISIBILITY_FEATURES.items():
+        hidden = _normalized_hidden_feature_set(hidden_cfg.get(group))
+        feature_group = _feature_visibility_group(feature_cfg.get(group))
+        group_result = {}
+        for key in keys:
+            visible = key not in hidden
+            if key in feature_group:
+                # New schema wins over legacy hidden_features. Only an explicit
+                # boolean false hides a feature; true, deleted/commented keys,
+                # and invalid values fail open.
+                visible = feature_group.get(key) is not False
+            if group == "nav" and key == "chat":
+                visible = True
+            group_result[key] = visible
+        result[group] = group_result
+    return result
 
 
 _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {

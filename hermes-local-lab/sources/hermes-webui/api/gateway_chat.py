@@ -24,6 +24,13 @@ from api.config import (
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
+from api.brand_privacy import (
+    BRAND_PRIVACY_SYSTEM_PROMPT,
+    scrub_brand_leaks,
+    scrub_messages,
+    scrub_public_session_payload,
+    scrub_streaming_token_delta,
+)
 from api.models import get_session
 from api.run_journal import RunJournalWriter
 
@@ -224,6 +231,13 @@ def _run_gateway_chat_streaming(
     def put_gateway_event(event, data):
         if cancel_event.is_set() and event not in ("cancel", "error", "apperror"):
             return
+        if event == "done" and isinstance(data, dict) and isinstance(data.get("session"), dict):
+            data = {
+                **data,
+                "session": scrub_public_session_payload(data.get("session")),
+            }
+        else:
+            data = scrub_brand_leaks(data)
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -239,6 +253,7 @@ def _run_gateway_chat_streaming(
 
     s = None
     final_text = ""
+    brand_token_tail = [""]
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
@@ -255,7 +270,7 @@ def _run_gateway_chat_streaming(
 
             prefill_context = _load_webui_prefill_context(cfg)
             prefill_messages = [
-                {"role": "system", "content": _WEBUI_PROGRESS_PROMPT},
+                {"role": "system", "content": f"{BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{_WEBUI_PROGRESS_PROMPT}"},
                 *_prefill_messages_with_webui_context(prefill_context, cfg),
             ]
             put_gateway_event("context_status", {
@@ -353,13 +368,23 @@ def _run_gateway_chat_streaming(
                 last_payload = payload
                 delta = _gateway_sse_delta(payload)
                 if delta:
+                    delta = scrub_streaming_token_delta(delta, brand_token_tail)
+                    if not delta:
+                        usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                        continue
                     final_text += delta
                     if stream_id in STREAM_PARTIAL_TEXT:
                         STREAM_PARTIAL_TEXT[stream_id] += delta
                     put_gateway_event("token", {"text": delta})
                 usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+        tail_delta = scrub_streaming_token_delta("", brand_token_tail, final=True)
+        if tail_delta:
+            final_text += tail_delta
+            if stream_id in STREAM_PARTIAL_TEXT:
+                STREAM_PARTIAL_TEXT[stream_id] += tail_delta
+            put_gateway_event("token", {"text": tail_delta})
         usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
-        assistant_text = final_text.strip()
+        assistant_text = scrub_brand_leaks(final_text).strip()
         if not assistant_text:
             put_gateway_event("apperror", {
                 "label": "Gateway returned no response",
@@ -383,7 +408,7 @@ def _run_gateway_chat_streaming(
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            s.context_messages = list(previous_context + [user_msg, assistant_msg])
             display = list(getattr(s, "messages", None) or [])
             # Avoid duplicating the eager-save checkpointed user message.
             if display:
@@ -393,7 +418,7 @@ def _run_gateway_chat_streaming(
                     msg_norm = " ".join(str(msg_text or "").split())
                     if latest_text == msg_norm:
                         display = display[:-1]
-            s.messages = display + [user_msg, assistant_msg]
+            s.messages = scrub_messages(display + [user_msg, assistant_msg])
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None
@@ -402,7 +427,7 @@ def _run_gateway_chat_streaming(
             s.model = model
             s.model_provider = model_provider
             s.save()
-        gateway_session_payload = s.compact() | {"messages": s.messages, "tool_calls": []}
+        gateway_session_payload = scrub_public_session_payload(s.compact() | {"messages": s.messages, "tool_calls": []})
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
@@ -412,15 +437,15 @@ def _run_gateway_chat_streaming(
             err_body = ""
         put_gateway_event(
             "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+            scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))),
         )
     except Exception as exc:
-        safe = _redact_text(str(exc))[:500]
+        safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
         put_gateway_event("apperror", {
             "label": "Gateway request failed",
             "type": "gateway_error",
             "message": safe or "Gateway request failed.",
-            "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
+            "hint": "Check the configured Gateway API server health.",
         })
     finally:
         if s is not None:

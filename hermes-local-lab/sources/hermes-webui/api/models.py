@@ -2716,10 +2716,12 @@ def _active_state_db_path() -> Path:
 
 def _sidebar_title_is_generic_webui(title: str | None) -> bool:
     text = ' '.join(str(title or '').split())
-    if text == 'Hermes WebUI':
+    if text in {'Hermes WebUI', 'taiji Agent WebUI'}:
         return True
-    prefix = 'Hermes WebUI #'
-    return text.startswith(prefix) and text[len(prefix):].isdigit()
+    for prefix in ('Hermes WebUI #', 'taiji Agent WebUI #'):
+        if text.startswith(prefix) and text[len(prefix):].isdigit():
+            return True
+    return False
 
 
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:

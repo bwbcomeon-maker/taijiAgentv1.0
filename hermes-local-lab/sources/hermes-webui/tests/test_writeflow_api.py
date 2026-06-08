@@ -271,8 +271,12 @@ def test_writeflow_start_creates_team_run_and_status_restores_it(monkeypatch, tm
     assert run["team_id"] == "content-creator-team"
     assert run["project_slug"] == "公众号长文"
     assert [task["id"] for task in run["tasks"]] == ["direction", "draft", "illustrations", "review"]
+    assert [task["id"] for task in run["display_tasks"]] == ["draft", "illustrations"]
     assert run["tasks"][0]["title"] == "确定写作方向"
     assert run["tasks"][0]["status"] == "running"
+    assert run["display_tasks"][0]["title"] == "撰写公众号长文"
+    assert run["display_tasks"][0]["status"] == "running"
+    assert run["display_tasks"][0]["status_label"] == "主编正在定方向"
     assert run["artifacts"] == []
     assert run["reference_artifacts"] == []
     assert run["tasks"][2]["status"] == "pending"
@@ -280,6 +284,7 @@ def test_writeflow_start_creates_team_run_and_status_restores_it(monkeypatch, tm
     status = routes._writeflow_public_status(tmp_path)
     assert status["runs"][0]["run_id"] == run_id
     assert status["runs"][0]["progress"] == {"done": 0, "total": 4}
+    assert status["runs"][0]["display_progress"] == {"done": 0, "total": 2}
 
 
 def test_writeflow_start_recovers_existing_active_team_run(monkeypatch, tmp_path):
@@ -334,7 +339,7 @@ def test_writeflow_start_does_not_reuse_run_from_another_session(monkeypatch, tm
     assert len(list((tmp_path / "articles" / ".writeflow" / "runs").glob("*.json"))) == 2
 
 
-def test_writeflow_runs_endpoint_materializes_missing_session_run(monkeypatch, tmp_path):
+def test_writeflow_runs_endpoint_does_not_materialize_missing_session_run_by_default(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -359,6 +364,37 @@ def test_writeflow_runs_endpoint_materializes_missing_session_run(monkeypatch, t
     response = routes.handle_get(object(), urlparse("/api/writeflow/runs?session_id=new-session"))
 
     assert response["payload"]["ok"] is True
+    assert response["payload"]["session_run"] is None
+    assert response["payload"]["recovered_session_run"] is False
+    assert response["payload"]["runs"] == []
+
+
+def test_writeflow_runs_endpoint_can_explicitly_recover_legacy_session_run(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    class Session:
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "请【深度文章研究团】接手这个写作任务。\n\n"
+                    "本轮要做：开始写作\n"
+                    "稿件名称：企业为什么需要本地 AI Agent 工作台\n\n"
+                    "本次需求：\n"
+                    "围绕「企业为什么需要本地 AI Agent 工作台」做一篇深度文章。"
+                ),
+            }
+        ]
+
+    monkeypatch.setattr(routes, "_writeflow_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: Session())
+    monkeypatch.setattr(routes, "_writeflow_image_generation_ready", lambda: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: {"status": status, "payload": payload})
+
+    response = routes.handle_get(object(), urlparse("/api/writeflow/runs?session_id=new-session&recover=1"))
+
+    assert response["payload"]["ok"] is True
+    assert response["payload"]["recovered_session_run"] is True
     session_run = response["payload"]["session_run"]
     assert session_run["session_id"] == "new-session"
     assert session_run["team_id"] == "deep-research-team"
@@ -423,11 +459,76 @@ def test_writeflow_run_endpoints_return_runs_and_artifacts(monkeypatch, tmp_path
 
     runs_response = routes.handle_get(object(), urlparse("/api/writeflow/runs?session_id=sid"))
     run_response = routes.handle_get(object(), urlparse("/api/writeflow/run?session_id=sid&run_id=wr-api"))
+    session_run_response = routes.handle_get(object(), urlparse("/api/writeflow/run?session_id=sid"))
     artifacts_response = routes.handle_get(object(), urlparse("/api/writeflow/artifacts?session_id=sid&run_id=wr-api"))
 
     assert runs_response["payload"]["runs"][0]["run_id"] == "wr-api"
+    assert runs_response["payload"]["session_run"]["run_id"] == "wr-api"
     assert run_response["payload"]["run"]["run_id"] == "wr-api"
+    assert session_run_response["payload"]["run"]["run_id"] == "wr-api"
     assert artifacts_response["payload"]["run_id"] == "wr-api"
+
+
+def test_writeflow_run_endpoint_returns_null_for_plain_session(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_writeflow_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: {"status": status, "payload": payload})
+
+    response = routes.handle_get(object(), urlparse("/api/writeflow/run?session_id=plain-session"))
+
+    assert response["status"] == 200
+    assert response["payload"]["ok"] is True
+    assert response["payload"]["run"] is None
+
+
+def test_writeflow_run_endpoint_does_not_return_another_session_run(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_writeflow_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: {"status": status, "payload": payload})
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, status=400: {"status": status, "error": message})
+
+    run = routes._writeflow_run_from_project(
+        tmp_path,
+        "api-demo",
+        {"name": "API Demo", "status": "running"},
+        session_id="sid-a",
+        run_id="wr-api",
+    )
+    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-api"), run)
+
+    response = routes.handle_get(object(), urlparse("/api/writeflow/run?session_id=sid-b&run_id=wr-api"))
+
+    assert response["status"] == 404
+    assert "does not belong" in response["error"]
+
+
+def test_writeflow_missing_artifact_does_not_complete_task(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_writeflow_image_generation_ready", lambda: True)
+
+    run = routes._writeflow_run_from_project(
+        tmp_path,
+        "missing-artifact",
+        {
+            "name": "Missing Artifact",
+            "status": "running",
+            "artifacts": {"draft_v1": "articles/missing-artifact/draft_v1.md"},
+        },
+        session_id="sid",
+        run_id="wr-missing",
+    )
+    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-missing"), run)
+
+    refreshed = routes._writeflow_list_runs(tmp_path)[0]
+
+    draft_task = next(task for task in refreshed["tasks"] if task["id"] == "draft")
+    visible_draft = next(task for task in refreshed["display_tasks"] if task["id"] == "draft")
+    assert draft_task["status"] != "done"
+    assert visible_draft["status"] != "done"
+    assert refreshed["artifacts"] == []
 
 
 def test_writeflow_sidebar_titles_show_team_and_topic(monkeypatch, tmp_path):

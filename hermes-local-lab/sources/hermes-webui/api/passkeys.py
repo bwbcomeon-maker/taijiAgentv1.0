@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - exercised by source tests instead
 _CREDENTIALS_FILE = STATE_DIR / "passkeys.json"
 _CHALLENGES_FILE = STATE_DIR / ".passkey_challenges.json"
 _CHALLENGE_TTL = 300
-_RP_NAME = "Hermes WebUI"
+_RP_NAME = "taiji Agent WebUI"
 
 
 class PasskeyError(ValueError):
@@ -158,7 +158,7 @@ def registration_options(handler) -> dict[str, Any]:
     return {
         "challenge": challenge,
         "rp": {"name": _RP_NAME, "id": rp_id},
-        "user": {"id": _b64u(hashlib.sha256(rp_id.encode()).digest()[:16]), "name": "Hermes WebUI", "displayName": "Hermes WebUI"},
+        "user": {"id": _b64u(hashlib.sha256(rp_id.encode()).digest()[:16]), "name": "taiji Agent WebUI", "displayName": "taiji Agent WebUI"},
         "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
         "authenticatorSelection": {"residentKey": "preferred", "userVerification": "preferred"},
         "timeout": 60000,
