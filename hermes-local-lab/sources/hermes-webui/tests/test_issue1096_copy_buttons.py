@@ -13,7 +13,7 @@ def _py_src() -> str:
 
 
 class TestClipboardPermissions:
-    """Permissions-Policy must allow clipboard-write for the origin."""
+    """Permissions-Policy must allow clipboard access for the origin."""
 
     def test_permissions_policy_includes_clipboard_write(self):
         """Permissions-Policy header must include clipboard-write=(self)."""
@@ -23,6 +23,14 @@ class TestClipboardPermissions:
         assert m, "Permissions-Policy header value must exist"
         assert "clipboard-write=(self)" in m.group(1), \
             "Permissions-Policy must include clipboard-write=(self)"
+
+    def test_permissions_policy_includes_clipboard_read(self):
+        """Permissions-Policy header must include clipboard-read=(self)."""
+        src = _py_src()
+        m = re.search(r"Permissions-Policy',\s*'(.*?)'", src, re.DOTALL)
+        assert m, "Permissions-Policy header value must exist"
+        assert "clipboard-read=(self)" in m.group(1), \
+            "Permissions-Policy must include clipboard-read=(self)"
 
 
 class TestCopyTextFunction:

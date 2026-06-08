@@ -1518,7 +1518,16 @@
                 </div>
                 <label><span data-i18n="mcp_config_command">Command</span><input id="mcpCommand" type="text" placeholder="npx" autocomplete="off"></label>
                 <label><span data-i18n="mcp_config_args">Arguments</span><textarea id="mcpArgs" rows="2" placeholder='["@playwright/mcp@latest","--headless"]'></textarea></label>
-                <label><span data-i18n="mcp_config_allowed_roots">Authorized directories</span><textarea id="mcpAllowedRoots" rows="2" placeholder="./demos/mcp/filesystem-demo"></textarea></label>
+                <div class="mcp-field">
+                  <label for="mcpAllowedRoots" data-i18n="mcp_config_allowed_roots">Authorized directories</label>
+                  <div class="mcp-path-input-row">
+                    <textarea id="mcpAllowedRoots" rows="2" placeholder="./demos/mcp/filesystem-demo" spellcheck="false"></textarea>
+                    <div class="mcp-path-actions">
+                      <button type="button" class="mcp-path-action-btn" onclick="pasteMcpAllowedRoots()" data-i18n="mcp_paste_path">Paste path</button>
+                      <button type="button" class="mcp-path-action-btn" onclick="chooseMcpAllowedDirectory()" data-i18n="mcp_choose_directory">Choose directory</button>
+                    </div>
+                  </div>
+                </div>
                 <div class="mcp-config-actions">
                   <button type="submit" class="sm-btn" data-i18n="mcp_save_config">Save MCP config</button>
                   <button type="button" class="sm-btn" onclick="testMcpServer()" data-i18n="mcp_test_connection">Test connection</button>

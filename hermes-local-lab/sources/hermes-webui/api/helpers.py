@@ -65,7 +65,7 @@ def _security_headers(handler):
     )
     handler.send_header(
         'Permissions-Policy',
-        'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
+        'camera=(), microphone=(self), geolocation=(), clipboard-write=(self), clipboard-read=(self)'
     )
 
 

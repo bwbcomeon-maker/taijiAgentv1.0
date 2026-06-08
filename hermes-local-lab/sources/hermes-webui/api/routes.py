@@ -11497,7 +11497,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_header("Referrer-Policy", "same-origin")
         handler.send_header(
             "Permissions-Policy",
-            "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
+            "camera=(), microphone=(self), geolocation=(), clipboard-write=(self), clipboard-read=(self)",
         )
     else:
         _security_headers(handler)
@@ -11694,7 +11694,7 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     handler.send_header("Referrer-Policy", "same-origin")
     handler.send_header(
         "Permissions-Policy",
-        "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
+        "camera=(), microphone=(self), geolocation=(), clipboard-write=(self), clipboard-read=(self)",
     )
     handler.end_headers()
     handler.wfile.write(body)
@@ -17816,15 +17816,26 @@ def _handle_mcp_server_test(handler, name, body):
     """Probe one configured MCP server and return its tool list."""
     from urllib.parse import unquote
     name = unquote(name)
+    if not isinstance(body, dict):
+        body = {}
     if not name:
         return bad(handler, "name is required")
     cfg = get_config()
     servers = cfg.get("mcp_servers", {}) if isinstance(cfg, dict) else {}
-    if not isinstance(servers, dict) or name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    server_cfg = servers.get(name)
-    if not isinstance(server_cfg, dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
+    if not isinstance(servers, dict):
+        servers = {}
+    body_has_config = isinstance(body, dict) and any(body.get(key) for key in ("preset", "url", "command"))
+    if body_has_config:
+        existing_cfg = servers.get(name, {}) if isinstance(servers.get(name), dict) else {}
+        server_cfg, config_error = _mcp_server_config_from_body(body, existing_cfg)
+        if config_error:
+            return bad(handler, config_error)
+    else:
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        server_cfg = servers.get(name)
+        if not isinstance(server_cfg, dict):
+            return bad(handler, f"MCP server '{name}' has invalid config", 400)
     try:
         connect_timeout = int(body.get("connect_timeout") or server_cfg.get("connect_timeout") or 30)
     except Exception:
@@ -17888,36 +17899,36 @@ def _handle_mcp_logs(handler):
     })
 
 
-def _handle_mcp_server_update(handler, name, body):
-    """Add or update an MCP server."""
-    from urllib.parse import unquote
-    name = unquote(name)
-    if not name:
-        return bad(handler, "name is required")
-    # Validate: must have url (http) or command (stdio)
-    server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
+def _mcp_server_config_from_body(body, existing_cfg=None) -> tuple[dict | None, str | None]:
+    """Build one MCP server config from a WebUI request body without saving it."""
+    if not isinstance(body, dict):
+        return None, "request body must be an object"
+    if not isinstance(existing_cfg, dict):
+        existing_cfg = {}
+    server_cfg: dict = {}
     preset_cfg, preset_error = _mcp_config_from_preset(body)
     if preset_error:
-        return bad(handler, preset_error)
+        return None, preset_error
     if preset_cfg is not None:
         server_cfg.update(preset_cfg)
     elif body.get("url"):
-        server_cfg["url"] = body["url"].strip()
+        url = str(body.get("url") or "").strip()
+        if not url:
+            return None, "url or command is required"
+        server_cfg["url"] = url
         if body.get("headers"):
             server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
     elif body.get("command"):
-        server_cfg["command"] = body["command"].strip()
+        command = str(body.get("command") or "").strip()
+        if not command:
+            return None, "url or command is required"
+        server_cfg["command"] = command
         if body.get("args"):
             server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
         if body.get("env"):
             server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
     else:
-        return bad(handler, "url or command is required")
+        return None, "url or command is required"
     if body.get("timeout") is not None:
         try:
             server_cfg["timeout"] = int(body["timeout"])
@@ -17930,6 +17941,23 @@ def _handle_mcp_server_update(handler, name, body):
             pass
     if body.get("enabled") is not None:
         server_cfg["enabled"] = bool(body.get("enabled"))
+    return server_cfg, None
+
+
+def _handle_mcp_server_update(handler, name, body):
+    """Add or update an MCP server."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    existing_cfg = servers.get(name, {})
+    server_cfg, config_error = _mcp_server_config_from_body(body, existing_cfg)
+    if config_error:
+        return bad(handler, config_error)
     servers[name] = server_cfg
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg)

@@ -16,6 +16,8 @@ def test_settings_system_panel_contains_readonly_mcp_visibility_section():
     assert 'id="mcpConfigForm"' in html
     assert 'id="mcpPresetSelect"' in html
     assert 'id="mcpAllowedRoots"' in html
+    assert 'onclick="pasteMcpAllowedRoots()"' in html
+    assert 'onclick="chooseMcpAllowedDirectory()"' in html
     assert 'id="mcpSecurityNotice"' in html
 
 
@@ -32,6 +34,10 @@ def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
     assert "function loadMcpPresets" in js
     assert "function saveMcpServerConfig" in js
     assert "function testMcpServer" in js
+    assert "function pasteMcpAllowedRoots" in js
+    assert "function chooseMcpAllowedDirectory" in js
+    assert "const testBody=isSavedRow?{}:_mcpConfigPayloadFromUi();" in js
+    assert "window.taijiDesktop&&window.taijiDesktop.pickDirectory" in js
     assert "function loadMcpLogs" in js
     assert "api('/api/mcp/presets')" in js
     assert "api('/api/mcp/logs')" in js
@@ -50,6 +56,10 @@ def test_mcp_i18n_includes_visibility_status_labels():
         "mcp_toggle_followup",
         "mcp_config_title",
         "mcp_test_connection",
+        "mcp_paste_path",
+        "mcp_choose_directory",
+        "mcp_clipboard_unavailable",
+        "mcp_directory_picker_unavailable",
         "mcp_call_logs_title",
         "mcp_security_notice",
     ]:

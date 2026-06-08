@@ -258,6 +258,23 @@ class TestMcpPresetsAndProbe:
         assert payload['tool_count'] == 1
         assert payload['tools'][0]['name'] == 'read_file'
 
+    @patch('api.routes._probe_mcp_server_tools')
+    @patch('api.routes.get_config')
+    def test_test_endpoint_probes_submitted_form_config_without_saved_server(self, mock_cfg, mock_probe):
+        mock_cfg.return_value = {'mcp_servers': {}}
+        mock_probe.return_value = [('browser_navigate', 'Navigate')]
+        h = _make_handler()
+        h.command = 'POST'
+        _handle_mcp_server_test(h, 'playwright', {"preset": "playwright", "headless": True})
+        payload = _json_payload(h)
+        assert payload['ok'] is True
+        assert payload['tool_count'] == 1
+        mock_probe.assert_called_once()
+        name, config = mock_probe.call_args[0][:2]
+        assert name == 'playwright'
+        assert config['command'] == 'npx'
+        assert config['args'] == ['@playwright/mcp@latest', '--headless']
+
     @patch('api.routes._probe_mcp_server_tools', side_effect=RuntimeError('token=secret failed'))
     @patch('api.routes.get_config')
     def test_test_endpoint_redacts_probe_failures(self, mock_cfg, mock_probe):

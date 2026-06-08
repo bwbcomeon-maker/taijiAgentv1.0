@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, dialog, systemPreferences } = require("electron");
+const { app, BrowserWindow, Menu, shell, dialog, systemPreferences, ipcMain } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
@@ -195,6 +195,26 @@ function installDesktopPermissionHandlers(win) {
   });
 }
 
+function installDesktopIpcHandlers() {
+  ipcMain.handle("taiji:pick-directory", async (event) => {
+    const senderUrl = event.senderFrame && event.senderFrame.url
+      ? event.senderFrame.url
+      : event.sender.getURL();
+    if (!isAllowedDesktopMediaOrigin(senderUrl)) {
+      return { ok: false, error: "unauthorized origin" };
+    }
+    const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    const result = await dialog.showOpenDialog(owner, {
+      title: "选择授权目录",
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || !result.filePaths || !result.filePaths.length) {
+      return { ok: false, canceled: true };
+    }
+    return { ok: true, path: result.filePaths[0] };
+  });
+}
+
 async function stopExistingRuntime(labDir, logDir) {
   const stopScript = path.join(labDir, "scripts", "stop-all.sh");
   if (!fs.existsSync(stopScript)) return;
@@ -365,6 +385,7 @@ async function createWindow() {
       trafficLightPosition: { x: 16, y: 16 }
     } : {}),
     webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -405,6 +426,7 @@ if (!gotSingleInstanceLock) {
 
   app.whenReady().then(() => {
     installMenu();
+    installDesktopIpcHandlers();
     createWindow();
   });
 

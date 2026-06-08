@@ -8842,6 +8842,65 @@ function _mcpArgsFromTextarea(value){
 function _mcpAllowedRootsFromTextarea(value){
   return (value||'').split(/[\n,]/).map(s=>s.trim()).filter(Boolean);
 }
+function _cleanMcpPathText(text){
+  return String(text||'')
+    .split(/[\n,]/)
+    .map(s=>s.trim().replace(/^['"]|['"]$/g,''))
+    .filter(Boolean);
+}
+function _appendMcpAllowedRoots(paths){
+  const roots=$('mcpAllowedRoots');
+  if(!roots) return false;
+  const incoming=Array.isArray(paths)?paths:_cleanMcpPathText(paths);
+  if(!incoming.length) return false;
+  const existing=_cleanMcpPathText(roots.value);
+  const merged=existing.slice();
+  incoming.forEach(p=>{if(merged.indexOf(p)===-1) merged.push(p);});
+  roots.value=merged.join('\n');
+  roots.dispatchEvent(new Event('input',{bubbles:true}));
+  roots.dispatchEvent(new Event('change',{bubbles:true}));
+  roots.focus();
+  return true;
+}
+async function pasteMcpAllowedRoots(){
+  const roots=$('mcpAllowedRoots');
+  if(!roots) return;
+  roots.focus();
+  try{
+    if(!navigator.clipboard||typeof navigator.clipboard.readText!=='function'){
+      throw new Error('clipboard unavailable');
+    }
+    const text=await navigator.clipboard.readText();
+    if(!_appendMcpAllowedRoots(text)){
+      if(typeof showToast==='function') showToast(t('mcp_path_empty_clipboard'));
+      return;
+    }
+    if(typeof showToast==='function') showToast(t('mcp_path_pasted'));
+  }catch(e){
+    if(typeof showToast==='function') showToast(t('mcp_clipboard_unavailable'),5000,'error');
+  }
+}
+async function chooseMcpAllowedDirectory(){
+  const roots=$('mcpAllowedRoots');
+  if(roots) roots.focus();
+  try{
+    const bridge=window.taijiDesktop&&window.taijiDesktop.pickDirectory;
+    if(typeof bridge!=='function'){
+      if(typeof showToast==='function') showToast(t('mcp_directory_picker_unavailable'),5000,'error');
+      return;
+    }
+    const result=await bridge();
+    if(result&&result.canceled) return;
+    if(!result||!result.ok||!result.path){
+      throw new Error((result&&result.error)||'directory picker failed');
+    }
+    if(_appendMcpAllowedRoots([result.path])&&typeof showToast==='function'){
+      showToast(t('mcp_directory_selected'));
+    }
+  }catch(e){
+    if(typeof showToast==='function') showToast(t('mcp_directory_picker_failed'),5000,'error');
+  }
+}
 function applyMcpPresetSelection(){
   const preset=($('mcpPresetSelect')||{}).value||'custom';
   const name=$('mcpServerName');
@@ -8903,11 +8962,13 @@ async function saveMcpServerConfig(event){
   }
 }
 async function testMcpServer(name){
-  const serverName=(name||(($('mcpServerName')||{}).value||'')).trim();
+  const isSavedRow=typeof name==='string'&&name.trim();
+  const serverName=(isSavedRow?name:(($('mcpServerName')||{}).value||'')).trim();
   if(!serverName){_setMcpConfigStatus(t('mcp_name_required'),'failed');return;}
   _setMcpConfigStatus(t('mcp_testing_connection'),'saving');
   try{
-    const result=await api('/api/mcp/servers/'+encodeURIComponent(serverName)+'/test',{method:'POST',body:JSON.stringify({})});
+    const testBody=isSavedRow?{}:_mcpConfigPayloadFromUi();
+    const result=await api('/api/mcp/servers/'+encodeURIComponent(serverName)+'/test',{method:'POST',body:JSON.stringify(testBody)});
     if(result&&result.ok){
       _setMcpConfigStatus(t('mcp_test_success',result.tool_count||0),'saved');
       loadMcpServers();loadMcpTools();
