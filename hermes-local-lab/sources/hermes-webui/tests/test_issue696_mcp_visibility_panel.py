@@ -29,8 +29,12 @@ def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
     assert "mcp-empty-state" in js
     assert "mcp-error-state" in js
     assert "toggleMcpServer" in js
+    assert "function deleteMcpServer" in js
     assert "mcp-toggle-btn" in js
+    assert "mcp-delete-btn" in js
     assert "api('/api/mcp/servers')" in js
+    assert "method:'DELETE'" in js
+    assert "showConfirmDialog" in js
     assert "function loadMcpPresets" in js
     assert "function saveMcpServerConfig" in js
     assert "function testMcpServer" in js
@@ -54,6 +58,10 @@ def test_mcp_i18n_includes_visibility_status_labels():
         "mcp_enabled_yes",
         "mcp_enabled_no",
         "mcp_toggle_followup",
+        "mcp_delete_confirm_title",
+        "mcp_delete_confirm_message",
+        "mcp_deleted",
+        "mcp_delete_failed",
         "mcp_config_title",
         "mcp_test_connection",
         "mcp_paste_path",

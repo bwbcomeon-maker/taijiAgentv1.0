@@ -8818,6 +8818,35 @@ function toggleMcpServer(name, enabled){
     loadMcpServers();
   }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
 }
+async function deleteMcpServer(name){
+  const serverName=String(name||'').trim();
+  if(!serverName) return;
+  const ok=await showConfirmDialog({
+    title:t('mcp_delete_confirm_title'),
+    message:t('mcp_delete_confirm_message',serverName),
+    confirmLabel:t('delete_title'),
+    danger:true,
+    focusCancel:true
+  });
+  if(!ok) return;
+  try{
+    const result=await api('/api/mcp/servers/'+encodeURIComponent(serverName),{method:'DELETE'});
+    if(result&&result.ok){
+      _setMcpConfigStatus(t('mcp_deleted'),'saved');
+      showToast(t('mcp_deleted'));
+      loadMcpServers();
+      loadMcpTools();
+      return;
+    }
+    const message=(result&&result.error)||t('mcp_delete_failed');
+    _setMcpConfigStatus(message,'failed');
+    showToast(message,'error');
+  }catch(e){
+    const message=(e&&e.message)||t('mcp_delete_failed');
+    _setMcpConfigStatus(message,'failed');
+    showToast(message,'error');
+  }
+}
 let _mcpPresetsCache=[];
 function loadMcpPresets(){
   const select=$('mcpPresetSelect');
@@ -9006,6 +9035,7 @@ function loadMcpServers(){
       const toggleBtn=r.toggle_supported
         ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer(${jsName},${!isEnabled})">${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
         :`<span>${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</span>`;
+      const deleteBtn=`<button type="button" class="mcp-toggle-btn mcp-delete-btn" title="${esc(t('mcp_delete_confirm_title'))}" onclick="deleteMcpServer(${jsName})">${esc(t('delete_title'))}</button>`;
       return `<div class="mcp-server-row">
         <div class="mcp-server-row-head">
           <span class="mcp-server-name">${esc(s.name)}</span>
@@ -9013,7 +9043,7 @@ function loadMcpServers(){
           ${statusBadge}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
-        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${testBtn}${toggleBtn}</div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${testBtn}${toggleBtn}${deleteBtn}</div>
       </div>`;
     }).join('');
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
