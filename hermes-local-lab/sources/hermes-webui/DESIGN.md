@@ -1,22 +1,22 @@
 ---
 version: alpha
-name: Hermes Calm Console
-description: "A restrained agent control surface: conversational content first, tool traces as quiet metadata, minimal chrome."
+name: taiji Agent Light Glass Console
+description: "A light glass enterprise agent control surface: local assistant work first, tool traces as quiet metadata, restrained brand chrome."
 colors:
-  primary: "#EAE0D5"
-  secondary: "#C6AC8F"
-  tertiary: "#C6AC8F"
-  neutral: "#0A0908"
-  surface: "#22333B"
-  surfaceSubtle: "#11100E"
-  borderSubtle: "#3B4A50"
-  ink: "#0A0908"
-  success: "#86C08B"
-  warning: "#E0B15D"
-  error: "#F87171"
+  primary: "#15233A"
+  secondary: "#4F6584"
+  tertiary: "#12B2C6"
+  neutral: "#F4F7FD"
+  surface: "#FFFFFF"
+  surfaceSubtle: "rgba(255,255,255,0.74)"
+  borderSubtle: "rgba(33,66,118,0.14)"
+  ink: "#15233A"
+  success: "#16A46C"
+  warning: "#D98A16"
+  error: "#D93D4A"
 typography:
   body-md:
-    fontFamily: "Georgia, Times New Roman, serif"
+    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, Inter, system-ui, sans-serif"
     fontSize: 15px
     fontWeight: 400
     lineHeight: 1.68
@@ -95,17 +95,17 @@ components:
 
 ## Overview
 
-Hermes WebUI should feel like a calm developer console, not a demo page assembled from colorful cards. The primary artifact is the conversation. Tool calls, thinking traces, context compaction records, token usage, and runtime status are useful, but they are transcript metadata and should sit below the visual priority of user and assistant prose.
+taiji Agent WebUI should feel like a light enterprise workbench, not a demo page assembled from colorful cards. The primary artifact is the conversation and the active local workspace. Tool calls, thinking traces, context compaction records, token usage, and runtime status are useful, but they are transcript metadata and should sit below the visual priority of user and assistant prose.
 
-The desired direction is Linear/Vercel precision with a little Claude-style conversational warmth: quiet surfaces, clear spacing, restrained accent use, and progressive disclosure for debugging detail.
+The current default direction is `light + taiji-light-glass`: pale blue page chrome, white/glass panels, cyan-blue accents, deep blue-gray text, and restrained shadows. The brand resource entrypoint is `static/brand.js`; repo-local image assets live under `static/assets/taiji/` and can be replaced there when final transparent PNG/SVG/WebP/ICO source files are available.
 
 ## Colors
 
-- **Primary (#EAE0D5):** main text on dark surfaces. The warm parchment should feel readable and grounded, not like bright white terminal text.
-- **Secondary/Tertiary (#C6AC8F):** metadata and restrained accent. Use sparingly for active state, focus, user bubbles, and quiet emphasis.
-- **Neutral (#0A0908):** app background and ink. This gives the WebUI depth without returning to the previous navy/gold theme.
-- **Surface (#22333B):** panels, sidebar, and stronger interactive surfaces. It should carry the structure while the conversation remains primary.
-- **Light surfaces (#EAE0D5 / #F4EEE7):** light mode uses the palette's parchment as the field and a slightly lifted derived surface for panels.
+- **Primary (#15233A):** main text on light surfaces. It should read as deep blue-gray, not pure black.
+- **Secondary (#4F6584):** metadata and secondary labels.
+- **Tertiary / Accent (#12B2C6):** active states, focus rings, primary actions, links, and user bubbles.
+- **Neutral (#F4F7FD / #DBEBFC):** app background gradient and page field.
+- **Surface (#FFFFFF / rgba(255,255,255,0.74)):** cards, sidebar, composer, popovers, and lifted panels.
 - **Semantic colors:** success/warning/error/info are state colors only, not decorative palette choices.
 
 ## Typography
@@ -115,6 +115,14 @@ Use Claude-like split typography: assistant prose gets an editorial serif stack 
 Scale should stay tight: 11px metadata, 12px labels, 14px body, 16–18px headings. Do not proliferate 10px/10.5px/12.5px one-offs unless there is a real layout constraint.
 
 ## Layout
+
+### Desktop Taiji App Shell
+
+At `1024px` and wider, the default `taiji-light-glass` experience uses a three-column desktop shell: brand navigation, a context secondary panel, and the main workspace. This shell is not a static landing page. `static/taiji-home.js` mounts the existing `main.main`, `#mainChat`, `#composerWrap`, and workspace drawer into the redesigned frame, then keeps visual state synchronized with the legacy business state.
+
+The secondary panel is state-driven. Chat renders recent conversations from `/api/sessions` and `/api/projects`; other navigation entries mount their real legacy side panels (`panelTasks`, `panelKanban`, `panelSkills`, and so on) into the Taiji glass column. Non-chat modules must not show the recent-conversation title, session search, or session grouping controls. New chat, session loading, search, quick prompts, send, model/workspace/reasoning/toolset menus, and all main navigation entries must continue to call the existing WebUI functions. If a module has no data, show a Taiji empty state inside the real panel rather than falling back to hardcoded sample cards.
+
+Narrow screens below `1024px` intentionally keep the legacy responsive layout for now. Do not force the desktop shell into phone/tablet widths until a dedicated responsive redesign exists.
 
 Conversation rhythm:
 

@@ -485,6 +485,7 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    _resetWriteflowDockForSessionChange('new-session-start');
     updateQueueBadge();
     S.toolCalls=[];
     _messagesTruncated=false;
@@ -519,7 +520,7 @@ async function newSession(flash, options={}){
       reqBody.model_provider=newModelState.model_provider||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
-    S.session=data.session;S.messages=data.session.messages||[];
+    S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,inheritWs):data.session;S.messages=data.session.messages||[];
     S.lastUsage={...(data.session.last_usage||{})};
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -558,6 +559,7 @@ async function newSession(flash, options={}){
     updateSendBtn();
     setStatus('');
     setComposerStatus('');
+    _resetWriteflowDockForSessionChange('new-session-ready');
     if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
     if(typeof _syncCtxIndicator==='function'){
       _syncCtxIndicator({
@@ -603,6 +605,9 @@ async function loadSession(sid){
   // refresh paths pass {force:true} when external state.db changes arrive.
   // Legacy invariant kept for static regression tests: if(currentSid===sid) return
   if(currentSid===sid && !forceReload) return;
+  if(currentSid !== sid || forceReload){
+    _resetWriteflowDockForSessionChange('load-session');
+  }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -683,7 +688,7 @@ async function loadSession(sid){
   }
   // Stale response? A newer loadSession() call has already started (#1060).
   if (_loadingSessionId !== sid) return;
-  S.session=data.session;
+  S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session;
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   // Reset scroll-direction tracker on session switch so the new chat's
@@ -913,6 +918,39 @@ async function loadSession(sid){
   }
 }
 
+function _forceChatSessionPanel(){
+  const layoutEl=document.querySelector('.layout');
+  if(layoutEl) layoutEl.classList.remove('writing-center-mode');
+  const mainEl=document.querySelector('main.main');
+  if(mainEl){
+    ['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','todos','insights','logs','plugin'].forEach(panel=>{
+      mainEl.classList.remove('showing-'+panel);
+    });
+  }
+  document.querySelectorAll('.panel-view').forEach(panel=>panel.classList.remove('active'));
+  const chatPanel=$('panelChat');
+  if(chatPanel) chatPanel.classList.add('active');
+  document.querySelectorAll('[data-panel]').forEach(tab=>tab.classList.toggle('active',tab.dataset.panel==='chat'));
+  try{_currentPanel='chat';}catch(_){}
+  if(typeof window!=='undefined'&&window.TaijiHomeController&&typeof window.TaijiHomeController.syncShellState==='function'){
+    try{window.TaijiHomeController.syncShellState();}catch(_){}
+  }
+}
+
+async function openChatSession(sid, options={}){
+  if(!sid) return false;
+  if(!options.skipLoad){
+    await loadSession(sid, options.loadOptions||{});
+  }
+  if(typeof switchPanel==='function'){
+    await switchPanel('chat');
+  }else{
+    _forceChatSessionPanel();
+  }
+  _forceChatSessionPanel();
+  return true;
+}
+
 const _WRITEFLOW_STATUS_REFRESH_MS = 5000;
 let _writeflowStatusRefreshTimer = null;
 let _writeflowStatusRefreshSid = '';
@@ -928,6 +966,17 @@ function _stopWriteflowStatusRefresh(){
     _writeflowStatusRefreshTimer=null;
   }
   _writeflowStatusRefreshSid='';
+}
+
+function _isWriteflowHydrationForActiveSession(sid){
+  return !!(sid&&S.session&&S.session.session_id===sid);
+}
+
+function _resetWriteflowDockForSessionChange(_reason){
+  if(typeof window!=='undefined') window._pendingWriteflowStatusCard=null;
+  _stopWriteflowStatusRefresh();
+  _removeWriteflowStatusCardsFromMessages();
+  if(typeof clearWriteflowStatusDock==='function') clearWriteflowStatusDock();
 }
 
 function _scheduleWriteflowStatusRefresh(sid,run){
@@ -948,33 +997,32 @@ function _scheduleWriteflowStatusRefresh(sid,run){
 }
 
 async function _hydrateWriteflowStatusCardForSession(sid,options={}){
-  if(!sid||!Array.isArray(S.messages)){
+  if(!sid||!Array.isArray(S.messages)||!_isWriteflowHydrationForActiveSession(sid)){
     _stopWriteflowStatusRefresh();
-    if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
+    if(_isWriteflowHydrationForActiveSession(sid)&&typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
   let data;
   try{
-    data=await api(`/api/writeflow/runs?session_id=${encodeURIComponent(sid)}`);
+    data=await api(`/api/writeflow/run?session_id=${encodeURIComponent(sid)}`);
   }catch(_){
+    if(!_isWriteflowHydrationForActiveSession(sid))return false;
     if(!options.silent)_stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
-  const runs=Array.isArray(data&&data.runs)?data.runs:[];
-  const run=(data&&data.session_run&&data.session_run.session_id===sid)
-    ? data.session_run
-    : runs.find(item=>item&&item.session_id===sid);
+  if(!_isWriteflowHydrationForActiveSession(sid))return false;
+  const run=(data&&data.run&&data.run.session_id===sid)?data.run:null;
   if(!run||!run.run_id){
     _removeWriteflowStatusCardsFromMessages();
     _stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
-  if(!S.session||S.session.session_id!==sid)return false;
   const card=typeof _writeflowStatusCardFromRun==='function'
     ? _writeflowStatusCardFromRun(run,data)
     : (typeof _writeflowStatusCardFromCompose==='function'?_writeflowStatusCardFromCompose({run}):null);
+  if(!_isWriteflowHydrationForActiveSession(sid))return false;
   if(!card){
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
@@ -3710,7 +3758,9 @@ function _sessionDisplayTitle(s){
 
 function _sessionTitleIsDefaultWebUI(rawTitle){
   const title=String(rawTitle||'').replace(/\s+/g,' ').trim();
-  return title==='Hermes WebUI'||/^Hermes WebUI #\d+$/.test(title);
+  return title==='太极 Agent'||/^太极 Agent #\d+$/.test(title)
+    || title==='Hermes WebUI'||/^Hermes WebUI #\d+$/.test(title)
+    || title==='taiji Agent WebUI'||/^taiji Agent WebUI #\d+$/.test(title);
 }
 
 function _sessionTitleTags(rawTitle){
@@ -4456,7 +4506,8 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(seg.session_id);
+          if(typeof openChatSession==='function') await openChatSession(seg.session_id);
+          else await loadSession(seg.session_id);
           renderSessionListFromCache();
         };
         lineageList.appendChild(row);
@@ -4483,7 +4534,8 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(child.session_id);
+          if(typeof openChatSession==='function') await openChatSession(child.session_id);
+          else await loadSession(child.session_id);
           renderSessionListFromCache();
         };
         childList.appendChild(row);
@@ -4877,7 +4929,9 @@ function renderSessionListFromCache(){
         }
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          await loadSession(s.session_id);renderSessionListFromCache();
+          if(typeof openChatSession==='function') await openChatSession(s.session_id);
+          else await loadSession(s.session_id);
+          renderSessionListFromCache();
           if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         }finally{
           el.classList.remove('loading');

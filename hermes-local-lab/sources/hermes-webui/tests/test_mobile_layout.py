@@ -301,23 +301,21 @@ def test_composer_controls_switch_to_icon_only_by_container_width():
     compact_700 = _container_query_block(CSS, "composer-footer (max-width: 700px)")
     assert compact_700, "Expected composer mid-width compact rules at @container composer-footer (max-width: 700px)"
     for selector in (
-        ".composer-workspace-label",
-        ".composer-model-label",
-        ".composer-model-chevron",
-        "#composerWorkspaceLabel",
-        "#composerModelLabel",
+        ".composer-profile-wrap",
+        ".composer-reasoning-wrap",
+        ".composer-toolsets-wrap",
         ".composer-workspace-chip",
         ".composer-model-chip",
         ".composer-divider",
     ):
         assert selector in compact_700, f"{selector} should be present in the 700px composer compact block"
     assert "display:none" in compact_700
-    assert "max-width:52px" in compact_700
-    # Ensure this first stage does not prematurely remove profile/reasoning labels.
-    assert ".composer-profile-label" not in compact_700
-    assert ".composer-reasoning-label" not in compact_700
-    assert ".composer-profile-chevron" not in compact_700
-    assert ".composer-reasoning-chevron" not in compact_700
+    assert "max-width:52px" not in compact_700
+    # The first stage must keep primary workspace/model text visible.
+    assert ".composer-workspace-label" not in compact_700
+    assert ".composer-model-label" not in compact_700
+    assert "#composerWorkspaceLabel" not in compact_700
+    assert "#composerModelLabel" not in compact_700
 
     compact_520 = _container_query_block(CSS, "composer-footer (max-width: 520px)")
     assert compact_520, "Expected full composer icon-only rules at @container composer-footer (max-width: 520px)"
@@ -358,20 +356,21 @@ def test_composer_controls_switch_to_icon_only_by_container_width():
 
 
 def test_composer_700px_workspace_switch_does_not_become_blank_chip():
-    """The 700px container state may hide the workspace label, but needs a switch affordance."""
+    """The 700px container state should keep the primary workspace/model labels readable."""
     compact_700 = _container_query_block(CSS, "composer-footer (max-width: 700px)")
     assert compact_700, "Expected composer mid-width compact rules at @container composer-footer (max-width: 700px)"
 
-    workspace_label = _declarations(_rule_body(compact_700, ".composer-workspace-label"))
     workspace_chip = _optional_declarations(compact_700, ".composer-workspace-chip")
-    workspace_chevron = _optional_declarations(compact_700, ".composer-workspace-chevron")
-    mobile_config = _optional_declarations(compact_700, ".composer-mobile-config-btn")
+    model_chip = _optional_declarations(compact_700, ".composer-model-chip")
 
-    assert _display_hidden(workspace_label), \
-        "700px container state should hide the long workspace label before tighter mobile rules"
-    if not _display_hidden(workspace_chip) and not _display_inline_flex(mobile_config):
-        assert not _display_hidden(workspace_chevron), \
-            "700px container state must not leave the visible workspace switch chip without a label or chevron"
+    assert ".composer-workspace-label" not in compact_700, \
+        "700px container state must not hide the primary workspace label"
+    assert ".composer-model-label" not in compact_700, \
+        "700px container state must not hide the primary model label"
+    assert workspace_chip.get("max-width") != "52px", \
+        "700px workspace chip must not collapse into a blank icon chip"
+    assert model_chip.get("max-width") != "52px", \
+        "700px model chip must not collapse into a blank icon chip"
 
 
 def test_composer_compact_switch_is_not_viewport_only():

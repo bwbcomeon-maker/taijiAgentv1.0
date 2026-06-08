@@ -1,5 +1,5 @@
 /**
- * Hermes WebUI Service Worker
+ * taiji Agent Service Worker
  * Minimal PWA service worker — enables "Add to Home Screen".
  * No offline caching of API responses (the UI requires a live backend).
  * Caches only static shell assets so the app shell loads fast on repeat visits.
@@ -20,11 +20,13 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 // either the authenticated app shell or login code, and stale cached responses
 // can make valid password submits fail until the user clears browser cache.
 // Navigations populate './' only after a successful non-redirect network load.
-const VQ = '?v=__WEBUI_VERSION__';
+const VQ = '?v=__WEBUI_VERSION__-taiji-shell-23';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
+  './static/brand.js' + VQ,
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
+  './static/taiji-home.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
@@ -40,6 +42,34 @@ const SHELL_ASSETS = [
   './static/vendor/katex/0.16.22/katex.min.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
+  './static/favicon-192.png',
+  './static/favicon-512.png',
+  './static/apple-touch-icon.png',
+  './static/assets/taiji/logo/logo-mark.png',
+  './static/assets/taiji/logo/logo-mark@2x.png',
+  './static/assets/taiji/background/background-grid.png',
+  './static/assets/taiji/nav/nav-chat.png',
+  './static/assets/taiji/nav/nav-tasks.png',
+  './static/assets/taiji/nav/nav-kanban.png',
+  './static/assets/taiji/nav/nav-writing.png',
+  './static/assets/taiji/nav/nav-skills.png',
+  './static/assets/taiji/nav/nav-memory.png',
+  './static/assets/taiji/nav/nav-workspaces.png',
+  './static/assets/taiji/nav/nav-profiles.png',
+  './static/assets/taiji/nav/nav-todos.png',
+  './static/assets/taiji/nav/nav-insights.png',
+  './static/assets/taiji/nav/nav-logs.png',
+  './static/assets/taiji/nav/nav-settings.png',
+  './static/assets/taiji/nav/nav-dashboard.png',
+  './static/assets/taiji/action/action-attach.png',
+  './static/assets/taiji/action/action-voice.png',
+  './static/assets/taiji/action/action-user.png',
+  './static/assets/taiji/action/action-folder.png',
+  './static/assets/taiji/action/action-model.png',
+  './static/assets/taiji/action/action-mode.png',
+  './static/assets/taiji/action/action-scope.png',
+  './static/assets/taiji/action/action-send.png',
+  './static/assets/taiji/action/action-new.png',
   './manifest.json',
 ];
 
@@ -133,7 +163,7 @@ self.addEventListener('fetch', (event) => {
         return caches.match('./').then((cached) => cached || new Response(
           '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
           '<h2>你已离线</h2>' +
-          '<p>Hermes 需要连接服务器。请检查网络后重试。</p>' +
+          '<p>taiji Agent 需要连接服务器。请检查网络后重试。</p>' +
           '</body></html>',
           { headers: { 'Content-Type': 'text/html' } }
         ));

@@ -1,14 +1,24 @@
 ---
-# Hermes Web UI -- Changelog
+# taiji Agent WebUI -- Changelog
 
 ## [Unreleased]
 
 ### Added
 
+- Added the `taiji-light-glass` WebUI skin with light glass enterprise tokens, centralized brand metadata in `static/brand.js`, and service-worker coverage for the new brand entrypoint.
+- Added repo-local taiji brand assets under `static/assets/taiji/`, wiring the real logo, background, navigation icons, composer actions, workspace panel controls, favicons, login page, and restart shell into the `taiji-light-glass` skin while keeping Lucide/SVG fallback markup for other skins.
+- Added `static/taiji-home.js`, a desktop Taiji App Shell controller that mounts the real WebUI main view and composer into the redesigned three-column homepage, renders recent sessions from live APIs, and wires navigation, quick prompts, new chat, session loading, search, send, and Dock menus to existing business functions.
+- Added dynamic Taiji secondary panels for all desktop navigation entries: Chat keeps live recent conversations, while Tasks, Kanban, Writing, Skills, Memory, Workspaces, Profiles, Todos, Insights, Logs, and Settings now show their real module side panels instead of the conversation list.
+- Added a real `mainTodos` workspace panel so the desktop Taiji navigation can show the current session task list instead of falling back to Chat.
 - Settings now includes a Model Configuration panel for active-profile defaults: main chat provider/model, auxiliary task models, and image-generation provider/model are saved to the active Hermes `config.yaml` and `.env` without echoing secrets back to the browser.
 
 ### Changed
 
+- User-facing app identity now uses `taiji Agent` across title, manifest, shell UI, offline/service-worker copy, settings, onboarding, dialogs, toasts, and main English/Chinese UI strings while retaining internal Hermes protocol/env/cache identifiers.
+- The default WebUI appearance is now `light + taiji-light-glass`; existing theme and skin choices remain available.
+- The 1024px+ desktop UI now uses the Taiji brand sidebar, live recent-conversation panel, electric-grid main workspace, and real glass composer Dock while hiding the old desktop rail/header/sidebar in that shell.
+- The second desktop column is now context-aware. Non-chat modules no longer show recent conversations or session filters; their existing business controls are mounted into the Taiji glass side panel and continue to use the original WebUI functions and APIs.
+- Taiji shell CSS/JS assets now use a dedicated resource suffix so PWA/browser caches pick up the functional shell wiring during local iterative builds.
 - Writing expert-team sessions now start with business-facing editorial-team copy and keep technical workflow details in a short execution memo, avoiding absolute paths and skill jargon in the first screen.
 - Writing expert-team run cards now render as a visual team board with member avatars, active/done/waiting states, phase progress, task status, and artifact chips instead of a text-only status table.
 - Writing expert-team run cards are restored from run state when an existing writing session is opened, so old sessions and refreshed pages still show the visual team board.
@@ -18,6 +28,7 @@
 - Writing expert-team compose prompts no longer expose concrete article/state/run paths or internal tool fields; the backend owns artifact location, progress sync, and downloadable artifact registration.
 - Writing expert-team status docks are now bound to the active session run only, so a newly summoned team cannot fall back to another conversation's latest board.
 - Writing expert-team boards now separate current-run artifacts from historical references, so same-topic old drafts or chat-mentioned paths cannot appear as downloadable results before the current task actually produces them.
+- Writing expert-team summons now stay in the current window: choosing a team creates and selects a new chat task, then shows the live team board above the composer instead of opening a separate task window.
 
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 

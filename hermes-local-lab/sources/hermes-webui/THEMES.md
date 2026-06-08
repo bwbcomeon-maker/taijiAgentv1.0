@@ -1,6 +1,6 @@
-# Hermes Web UI — Themes
+# taiji Agent WebUI — Themes
 
-Hermes Web UI splits **appearance** into two independent pickers:
+taiji Agent WebUI splits **appearance** into two independent pickers:
 
 - **Theme** — the mode: `System`, `Dark`, or `Light`. Drives the background,
   text, surface, and chrome colors.
@@ -19,7 +19,7 @@ toggles Light/Dark/System; the **Skin** grid offers the built-in accent palettes
 Preview is instant — the UI updates as you click.
 
 **Slash command:** Type `/theme <name>` in the composer. The command accepts
-both theme names (`system`, `dark`, `light`) and skin names (`default`, `ares`,
+both theme names (`system`, `dark`, `light`) and skin names (`taiji-light-glass`, `default`, `ares`,
 `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`, `sienna`,
 `catppuccin`, `nous`, `geist-contrast`). It updates the matching axis and leaves the other one
 alone.
@@ -34,9 +34,9 @@ loading, and saved server-side via `POST /api/settings` (under `theme` and
 
 | Theme | Description |
 |-------|-------------|
-| **System** (default) | Follows the OS `prefers-color-scheme` preference and updates live. |
+| **Light** (default) | Bright enterprise surfaces with dark text, high contrast for daylight environments. |
+| **System** | Follows the OS `prefers-color-scheme` preference and updates live. |
 | **Dark** | Deep dark surfaces, low-glare for long sessions. |
-| **Light** | Bright surfaces with dark text, high contrast for daylight environments. |
 
 The theme is applied as a class on `<html>`: `.dark` is present for dark mode,
 absent for light. System mode tracks the OS preference at runtime.
@@ -47,7 +47,8 @@ absent for light. System mode tracks the OS preference at runtime.
 
 | Skin | Description |
 |------|-------------|
-| **Default** | The original Hermes gold accent. Warm and understated. |
+| **taiji Agent** (`taiji-light-glass`, default) | Light glass enterprise skin: pale blue background, cyan-blue accent, white cards, deep blue-gray text, restrained shadows, and repo-local taiji logo/navigation/action image assets. |
+| **Default** | The upstream gold accent. Warm and understated. |
 | **Ares** | Fiery red. High-energy and assertive. |
 | **Mono** | Neutral gray. Distraction-free, for deep focus. |
 | **Slate** | Slate blue-gray. Subtle and grown-up. |
@@ -62,6 +63,19 @@ absent for light. System mode tracks the OS preference at runtime.
 Each skin defines paired light + dark variants so it reads cleanly on either
 theme. The skin is applied as `data-skin="<name>"` on `<html>` (the default
 skin clears the attribute).
+
+The `taiji-light-glass` skin also owns the desktop Taiji App Shell at
+`1024px+`: brand navigation, a context secondary panel, and the real WebUI main
+workspace/composer are styled as one glass workbench. Chat uses the secondary
+panel for live recent sessions; Tasks, Kanban, Writing, Skills, Memory,
+Workspaces, Profiles, Todos, Insights, Logs, and Settings mount their own real
+module side panels there. The shell is controlled by `static/taiji-home.js`;
+keep business state in the existing WebUI modules and use the shell only as
+presentation/synchronization glue.
+
+When changing shell CSS or `static/taiji-home.js`, update the Taiji resource
+suffix in `static/index.html` and the matching service-worker `VQ` suffix in
+`static/sw.js` so existing PWA caches fetch the new shell resources.
 
 ---
 

@@ -151,7 +151,14 @@ function _setOnboardingNotice(msg,kind='info'){
 
 function _getOnboardingWorkspaceChoices(){
   const items=((ONBOARDING.status||{}).workspaces||{}).items||[];
-  return items.length?items:[{name:'Home',path:ONBOARDING.form.workspace||''}];
+  return items.length?items:[{name:t('onboarding_workspace_default'),path:ONBOARDING.form.workspace||''}];
+}
+
+function _getOnboardingWorkspaceDisplayName(ws, idx){
+  const rawName=String((ws&&ws.name)||'').trim();
+  const rawPath=String((ws&&ws.path)||'').trim();
+  if(rawName && rawName!==rawPath && !/[\\/]/.test(rawName)) return rawName;
+  return idx===0?t('onboarding_workspace_default'):`${t('onboarding_workspace_local')} ${idx+1}`;
 }
 
 function _getOnboardingProviderModelChoices(){
@@ -219,7 +226,7 @@ function _renderOnboardingProviderOAuthField(provider){
     <div class="onboarding-oauth-icon">🔑</div>
     <div style="flex:1">
       <strong>改用 Claude Code OAuth</strong>
-      <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code 订阅凭据不同于 Anthropic API 密钥。</strong>仅当你希望 Hermes 使用服务器上已有的 Claude Code 凭据，或在主机上完成 <code>claude setup-token</code> 时启动短轮询流程，才使用此路径。</p>
+      <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code 订阅凭据不同于 Anthropic API 密钥。</strong>仅当你希望 taiji Agent 使用服务器上已有的 Claude Code 凭据，或在主机上完成 <code>claude setup-token</code> 时启动短轮询流程，才使用此路径。</p>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="anthropicOAuthBtn" onclick="startAnthropicOAuth()" type="button">使用 Claude Code 登录</button></div>
       <div id="anthropicOAuthFlow" style="display:none;margin-top:12px"></div>
     </div>
@@ -255,9 +262,9 @@ function _renderOnboardingBody(){
         <div class="onboarding-check ${(settings.password_enabled?'ok':'muted')}"><strong>${t('onboarding_check_password')}</strong><span>${settings.password_enabled?t('onboarding_check_password_enabled'):t('onboarding_check_password_disabled')}</span></div>
       </div>
       <div class="onboarding-copy">
-        <p><strong>${t('onboarding_config_file')}</strong> ${esc(system.config_path||t('onboarding_unknown'))}</p>
-        <p><strong>${t('onboarding_env_file')}</strong> ${esc(system.env_path||t('onboarding_unknown'))}</p>
-        <p>${esc(system.provider_note||'')}</p>
+        <p><strong>${t('onboarding_config_status')}</strong> ${system.config_exists?t('onboarding_config_status_ready'):t('onboarding_config_status_pending')}</p>
+        <p><strong>${t('onboarding_credentials_status')}</strong> ${system.env_exists?t('onboarding_credentials_status_saved'):t('onboarding_credentials_status_pending')}</p>
+        <p><strong>${t('onboarding_provider_status')}</strong> ${esc(system.provider_note||t('onboarding_check_provider_pending'))}</p>
         ${system.current_provider?`<p><strong>${t('onboarding_current_provider')}</strong> ${esc(system.current_provider)}${system.current_model?` — ${esc(system.current_model)}`:''}</p>`:''}
         ${system.current_base_url?`<p><strong>${t('onboarding_base_url_label')}</strong> ${esc(system.current_base_url)}</p>`:''}
         ${system.missing_modules&&system.missing_modules.length?`<p><strong>${t('onboarding_missing_imports')}</strong> ${esc(system.missing_modules.join(', '))}</p>`:''}
@@ -273,7 +280,7 @@ function _renderOnboardingBody(){
     const keyHelp=provider
       ? (provider.id==='anthropic'
         ? 'Anthropic API key path: paste an Anthropic Console API key here. This is separate from a Claude Code subscription; use the Claude Code OAuth card if you want subscription credentials instead.'
-        : `${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`)
+        : `${t('onboarding_api_key_help_prefix')}.`)
       : '';
 
     // OAuth provider path: configured via CLI, no API key input needed.
@@ -342,7 +349,7 @@ function _renderOnboardingBody(){
   }
 
   if(key==='workspace'){
-    const workspaceOptions=_getOnboardingWorkspaceChoices().map(ws=>`<option value="${esc(ws.path)}">${esc(ws.name||ws.path)} — ${esc(ws.path)}</option>`).join('');
+    const workspaceOptions=_getOnboardingWorkspaceChoices().map((ws,idx)=>`<option value="${esc(ws.path)}">${esc(_getOnboardingWorkspaceDisplayName(ws,idx))}</option>`).join('');
     _setOnboardingNotice(t('onboarding_notice_workspace'), 'info');
     body.innerHTML=`
       <label class="onboarding-field">
@@ -456,7 +463,8 @@ async function _saveOnboardingProviderSetup(){
   // providers not in the quick-setup list (e.g. minimax-cn) even though they are
   // fully configured.  Posting in that case would either be a no-op (the server
   // just marks complete for unsupported providers) or could silently overwrite
-  // config.yaml if the user accidentally changed the provider dropdown.
+  // the existing provider configuration if the user accidentally changed the
+  // provider dropdown.
   const currentIsOauth=!!(ONBOARDING.status&&ONBOARDING.status.setup&&ONBOARDING.status.setup.current_is_oauth);
   if(isUnchanged && !apiKey && ((ONBOARDING.status.system||{}).chat_ready || currentIsOauth)) return;
   const body={provider,model};
@@ -625,7 +633,7 @@ async function _pollCodexOAuth(){
     _codexOAuthFlowId=null;
     _setCodexOAuthButton(true);
     if(status==='success'){
-      _renderCodexOAuthTerminal('success','Credentials saved to the Hermes credential pool. Refreshing provider status…');
+      _renderCodexOAuthTerminal('success','Credentials saved to the taiji Agent credential pool. Refreshing provider status…');
       showToast(t('oauth_codex_success'));
       try{await loadOnboardingWizard();}catch(e){}
     }else if(status==='expired'){
@@ -736,7 +744,7 @@ async function _pollAnthropicOAuth(){
     _anthropicOAuthFlowId=null;
     _setAnthropicOAuthButton(true);
     if(status==='success'){
-      _renderAnthropicOAuthTerminal('success','Hermes is now linked to Claude Code credentials. Refreshing provider status…');
+      _renderAnthropicOAuthTerminal('success','taiji Agent is now linked to Claude Code credentials. Refreshing provider status…');
       showToast('Claude Code OAuth 已连接');
       try{await loadOnboardingWizard();}catch(e){}
     }else if(status==='expired'){
@@ -761,7 +769,7 @@ async function startAnthropicOAuth(){
   _anthropicOAuthFlowId=null;
   _setAnthropicOAuthButton(false);
   flowDiv.style.display='block';
-  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>Checking Claude Code credentials…</strong><p>Hermes is checking for existing Claude Code OAuth credentials on this server.</p></div></div>`;
+  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>Checking Claude Code credentials…</strong><p>taiji Agent is checking for existing Claude Code OAuth credentials on this server.</p></div></div>`;
   try{
     const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'anthropic'})});
     if(resp.error) throw new Error(resp.error);
@@ -772,7 +780,7 @@ async function startAnthropicOAuth(){
       _clearAnthropicOAuthPoll();
       _anthropicOAuthFlowId=null;
       _setAnthropicOAuthButton(true);
-      _renderAnthropicOAuthTerminal('success','Hermes is now linked to Claude Code credentials. Refreshing provider status…');
+      _renderAnthropicOAuthTerminal('success','taiji Agent is now linked to Claude Code credentials. Refreshing provider status…');
       showToast('Claude Code OAuth 已连接');
       try{await loadOnboardingWizard();}catch(e){}
       return;
@@ -782,7 +790,7 @@ async function startAnthropicOAuth(){
         <div class="onboarding-oauth-icon">🖥️</div>
         <div style="flex:1">
           <strong>Complete Claude Code login on this host</strong>
-          <p style="margin-top:6px">${esc(action_required||"Run 'claude setup-token' on the server, then return here. Hermes will detect the credential automatically.")}</p>
+          <p style="margin-top:6px">${esc(action_required||"Run 'claude setup-token' on the server, then return here. taiji Agent will detect the credential automatically.")}</p>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
             <code style="display:inline-block;background:rgba(255,255,255,.08);padding:6px 10px;border-radius:8px;user-select:all">claude setup-token</code>
             <button class="sm-btn" type="button" onclick="cancelAnthropicOAuth()">Cancel</button>

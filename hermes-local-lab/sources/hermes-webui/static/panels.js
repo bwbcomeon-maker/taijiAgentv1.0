@@ -149,8 +149,8 @@ function syncAppTitlebar() {
 
 function _beginSettingsPanelSession() {
   _settingsDirty = false;
-  _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
-  _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
+  _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'light';
+  _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'taiji-light-glass';
   _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
   _pendingSettingsTargetPanel = null;
   if (_settingsAppearanceAutosaveTimer) {
@@ -203,6 +203,10 @@ function _resyncChatSidebarAfterPanelSwitch() {
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
+  if(nextPanel!=='chat'&&typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('nav',nextPanel)){
+    if(window.closeAllTaijiFloatingPanels) window.closeAllTaijiFloatingPanels();
+    return false;
+  }
   // ── Desktop sidebar collapse toggle (rail-click only) ──
   // If the click came from a rail icon AND we're on desktop, the rail icon
   // does double duty: clicking the already-active panel collapses the sidebar;
@@ -224,6 +228,7 @@ async function switchPanel(name, opts = {}) {
     }
   }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
+  if (window.closeAllTaijiFloatingPanels) window.closeAllTaijiFloatingPanels();
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel
   // so we don't keep a stale connection open in the background.
@@ -243,7 +248,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','todos','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -438,8 +443,8 @@ function _cronGatewayNoticeHtml(status) {
     ? 'Gateway not configured'
     : 'Gateway not running';
   const body = notConfigured
-    ? 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or `hermes gateway` running outside the WebUI.'
-    : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
+    ? 'In taiji Agent, scheduled jobs require the gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or the gateway command running outside the WebUI.'
+    : 'In taiji Agent, scheduled jobs require the gateway daemon to be running. Start the gateway container or gateway command before relying on offline scheduled runs.';
   const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
   const helpLink = notConfigured
     ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
@@ -2232,7 +2237,7 @@ async function _kanbanPopulateAssigneeSelect(currentValue){
   // it last so the default-selected option is the first profile, not "no one".
   let html = '';
   if (profiles.length) {
-    html += `<optgroup label="${esc(t('kanban_assignee_profiles_label') || 'Hermes profiles')}">`;
+    html += `<optgroup label="${esc(t('kanban_assignee_profiles_label') || 'taiji Agent profiles')}">`;
     html += profiles.map(v => `<option value="${esc(v)}"${v === currentValue ? ' selected' : ''}>${esc(v)}</option>`).join('');
     html += '</optgroup>';
   }
@@ -2652,7 +2657,8 @@ async function loadKanbanTask(taskId){
 
 function loadTodos() {
   const panel = $('todoPanel');
-  if (!panel) return;
+  const mainPanel = $('todoMainPanel');
+  if (!panel && !mainPanel) return;
   const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
   // Parse the most recent todo state from message history
   let todos = [];
@@ -2669,12 +2675,14 @@ function loadTodos() {
     }
   }
   if (!todos.length) {
-    panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    const emptyHtml = `<div class="taiji-todos-empty">${esc(t('todos_no_active'))}</div>`;
+    if (panel) panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    if (mainPanel) mainPanel.innerHTML = emptyHtml;
     return;
   }
   const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
   const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
-  panel.innerHTML = todos.map(t => `
+  const html = todos.map(t => `
     <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
       <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[t.status]||'var(--muted)'}">${statusIcon[t.status]||li('square',14)}</span>
       <div style="flex:1;min-width:0">
@@ -2682,6 +2690,17 @@ function loadTodos() {
         <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(t.id)} · ${esc(t.status)}</div>
       </div>
     </div>`).join('');
+  if (panel) panel.innerHTML = html;
+  if (mainPanel) {
+    mainPanel.innerHTML = todos.map(t => `
+      <div class="taiji-todo-item" data-status="${esc(t.status||'pending')}">
+        <span class="taiji-todo-icon" aria-hidden="true">${statusIcon[t.status]||li('square',14)}</span>
+        <div class="taiji-todo-body">
+          <div class="taiji-todo-title">${esc(t.content)}</div>
+          <div class="taiji-todo-meta">${esc(t.id)} · ${esc(t.status)}</div>
+        </div>
+      </div>`).join('');
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -3270,7 +3289,7 @@ function _renderLlmWikiStatus(d) {
   // becomes config-driven. esc() HTML-escapes but doesn't validate URL scheme.
   const docsUrl = /^https?:\/\//i.test(rawDocsUrl) ? rawDocsUrl : '#';
   const toggleNote = status.toggle_available
-    ? 'Toggle available from configured Hermes Agent setting.'
+    ? 'Toggle available from configured taiji Agent setting.'
     : (status.toggle_reason || 'No stable LLM Wiki on/off config flag was detected, so this panel is read-only.');
   const statusNote = isReady
     ? 'LLM Wiki is configured and page metadata is visible without exposing wiki content.'
@@ -3509,7 +3528,7 @@ async function clearConversation() {
   try {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: S.session.session_id})});
-    S.session = data.session;
+    S.session = typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session;
     S.messages = [];
     S.toolCalls = [];
     syncTopbar();
@@ -3769,8 +3788,8 @@ function openWriteflowTeamModal(teamId) {
     </div>
     <div class="writeflow-modal-section">
       <h4>本次需求</h4>
-      <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清主题、读者、素材、语气或文章链接；召唤后会新建独立写作对话。">${esc(seedPrompt)}</textarea>
-      <p class="writeflow-modal-note">召唤后会新建一个写作对话，运行状态、阶段确认和产物路径都在那里显示。</p>
+      <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清主题、读者、素材、语气或文章链接；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
+      <p class="writeflow-modal-note">召唤后会新建一个聊天任务，运行状态、阶段确认和产物入口会显示在对话框上方。</p>
     </div>`;
   footer.innerHTML = `<button type="button" class="btn primary writeflow-summon-btn" onclick="summonWriteflowTeam()">召唤 ${esc(team.title)}</button>`;
   modal.hidden = false;
@@ -3820,7 +3839,6 @@ async function summonWriteflowTeam() {
     template_id: _writeflowSelectedTemplateId,
     example_prompt: team.examples.find(example => example.id === _writeflowSelectedTemplateId)?.prompt || '',
     new_session: true,
-    open_new_window: true,
     summon_only: false,
   });
 }
@@ -4837,6 +4855,7 @@ function syncWorkspaceDisplays(){
     composerChip.disabled=!hasWorkspace;
     composerChip.title=hasWorkspace?ws:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    composerChip.setAttribute('aria-expanded',composerDropdown&&composerDropdown.classList.contains('open')?'true':'false');
   }
   if(mobileAction){
     mobileAction.title=hasWorkspace?ws:t('no_workspace');
@@ -4870,6 +4889,7 @@ function _positionComposerWsDropdown(){
   // While the mobile config panel is open, anchor to #composerMobileWorkspaceAction instead of only the desktop workspace chip.
   const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
   if(!dd||!anchor||!footer)return;
+  if(window.positionTaijiFloatingPanel&&window.positionTaijiFloatingPanel(dd,anchor,{minWidth:300,maxHeight:420,align:'left'}))return;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -4883,6 +4903,7 @@ function _positionProfileDropdown(){
   const chip=$('profileChip');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer)return;
+  if(window.positionTaijiFloatingPanel&&window.positionTaijiFloatingPanel(dd,chip,{minWidth:260,maxHeight:380,align:'left'}))return;
   const chipRect=chip.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -5000,6 +5021,10 @@ function toggleWsDropdown(){
 }
 
 function toggleComposerWsDropdown(){
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','workspace_switcher')){
+    closeWsDropdown();
+    return;
+  }
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');
@@ -5016,7 +5041,10 @@ function toggleComposerWsDropdown(){
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
       dd.classList.add('open');
       _positionComposerWsDropdown();
-      if(chip) chip.classList.add('active');
+      if(chip){
+        chip.classList.add('active');
+        chip.setAttribute('aria-expanded','true');
+      }
       if(mobileAction) mobileAction.classList.add('active');
     });
   }
@@ -5029,7 +5057,11 @@ function closeWsDropdown(){
   const mobileAction=$('composerMobileWorkspaceAction');
   if(dd)dd.classList.remove('open');
   if(composerDd)composerDd.classList.remove('open');
-  if(composerChip)composerChip.classList.remove('active');
+  if(window.closeTaijiFloatingPanel)window.closeTaijiFloatingPanel(composerDd);
+  if(composerChip){
+    composerChip.classList.remove('active');
+    composerChip.setAttribute('aria-expanded','false');
+  }
   if(mobileAction)mobileAction.classList.remove('active');
 }
 document.addEventListener('click',e=>{
@@ -5414,7 +5446,7 @@ async function promptWorkspacePath(){
     if(!ws)return;
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(r.session,ws):r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -5450,7 +5482,7 @@ async function switchToWorkspace(path,name){
     if(!ws){showToast(t('no_workspace'));return;}
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(r.session,ws):r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -5474,7 +5506,9 @@ async function switchToWorkspace(path,name){
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
-    S.session.workspace=path;
+    if(typeof isValidRuntimeWorkspacePath!=='function'||isValidRuntimeWorkspacePath(path)){
+      S.session.workspace=path;
+    }
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -5512,6 +5546,8 @@ function _refreshProfileSwitchBackground(gen){
   // Stage-394 follow-up to #2636 deep review.
   Promise.resolve(api('/api/settings')).then(function(s){
     if (gen !== _profileSwitchGeneration) return;
+    window._uiVisibility=s&&s.ui_visibility?s.ui_visibility:null;
+    if(typeof applyUiVisibility==='function') applyUiVisibility();
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
     if (typeof _setHiddenTabs === 'function') _setHiddenTabs(hidden);
@@ -5742,6 +5778,10 @@ function renderProfileDropdown(data) {
 }
 
 function toggleProfileDropdown() {
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','profile')){
+    closeProfileDropdown();
+    return;
+  }
   const dd = $('profileDropdown');
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
@@ -5759,6 +5799,7 @@ function toggleProfileDropdown() {
 function closeProfileDropdown() {
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
+  if(window.closeTaijiFloatingPanel)window.closeTaijiFloatingPanel(dd);
   const chip=$('profileChip');
   if(chip) chip.classList.remove('active');
 }
@@ -5874,7 +5915,9 @@ async function switchToProfile(name) {
             model: S.session.model,
             model_provider: S.session.model_provider||null,
           })});
-          S.session.workspace = data.default_workspace;
+          if(typeof isValidRuntimeWorkspacePath!=='function'||isValidRuntimeWorkspacePath(data.default_workspace)){
+            S.session.workspace = data.default_workspace;
+          }
         } catch (_) {}
       }
     }
@@ -6221,6 +6264,10 @@ function _toggleTabVisibilityChip(panel){
 }
 
 function switchSettingsSection(name){
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('nav','settings')){
+    if(typeof switchPanel==='function') switchPanel('chat',{bypassSettingsGuard:true});
+    return false;
+  }
   // If the main content is not showing settings, switch back first
   if (_currentPanel !== 'settings') {
     _currentPanel = 'settings';
@@ -6231,7 +6278,12 @@ function switchSettingsSection(name){
       });
     }
   }
-  const section=(name==='appearance'||name==='preferences'||name==='models'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const requested=(name==='appearance'||name==='preferences'||name==='models'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const section=typeof resolveUiSettingsSection==='function'?resolveUiSettingsSection(requested):requested;
+  if(!section){
+    if(typeof switchPanel==='function') switchPanel('chat',{bypassSettingsGuard:true});
+    return false;
+  }
   _settingsSection=section;
   _currentSettingsSection=section;
   const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',models:'Models',providers:'Providers',plugins:'Plugins',system:'System'};
@@ -6353,8 +6405,8 @@ function _applyTtsEnabled(enabled){
 
 function _appearancePayloadFromUi(){
   return {
-    theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
-    skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
+    theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'light',
+    skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'taiji-light-glass',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
@@ -6382,8 +6434,8 @@ function _setAppearanceAutosaveStatus(state){
 
 function _rememberAppearanceSaved(payload){
   if(!payload) return;
-  _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
-  _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
+  _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'light';
+  _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'taiji-light-glass';
   _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
 }
 
@@ -6562,6 +6614,8 @@ function _retryPreferencesAutosave(){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    window._uiVisibility=settings&&settings.ui_visibility?settings.ui_visibility:null;
+    if(typeof applyUiVisibility==='function') applyUiVisibility();
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
     const webuiBadge = $('settings-webui-version-badge');
@@ -6576,10 +6630,10 @@ async function loadSettingsPanel(){
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
-    const themeVal=settings.theme||'dark';
+    const themeVal=settings.theme||'light';
     if(themeSel) themeSel.value=themeVal;
     if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal);
-    const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();
+    const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'taiji-light-glass').toLowerCase();
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
@@ -6671,7 +6725,7 @@ async function loadSettingsPanel(){
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
       // Use the smart matcher so a saved bare form like "anthropic/claude-opus-4.6"
-      // (what the CLI's `hermes model` command writes) still selects the matching
+      // (what the CLI's `taiji Agent model` command writes) still selects the matching
       // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this, the
       // picker renders blank for any user whose default was persisted without the
       // @-prefix — CLI-first users, legacy installs, etc.
@@ -6882,7 +6936,7 @@ async function loadSettingsPanel(){
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
     if(botNameField){
-      botNameField.value=settings.bot_name||'Hermes';
+      botNameField.value=settings.bot_name||'taiji Agent';
       let botNameTimer=null;
       botNameField.addEventListener('input',()=>{
         if(botNameTimer) clearTimeout(botNameTimer);
@@ -7395,7 +7449,7 @@ function _buildProviderCard(p){
   card.className='provider-card';
   card.dataset.provider=p.id;
   // Use the is_oauth flag from the backend — it reflects _OAUTH_PROVIDERS in providers.py.
-  // key_source can be 'oauth' (hermes auth), 'config_yaml' (token in config.yaml), or 'none'.
+  // key_source can be 'oauth' (taiji Agent auth), 'config_yaml' (token in config.yaml), or 'none'.
   const isOauth=p.is_oauth===true;
   // models_total reflects the complete catalog (e.g. 396 for a large-tier
   // Nous Portal account). The "models" array may be trimmed to a featured
@@ -7435,14 +7489,14 @@ function _buildProviderCard(p){
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
     if(p.key_source==='config_yaml'){
-      hint.textContent=t('providers_oauth_config_yaml_hint')||'Token configured via config.yaml. To update, edit the providers section in your config.yaml or run hermes auth.';
+      hint.textContent=t('providers_oauth_config_yaml_hint')||'Token configured by administrator settings. Use administrator configuration to update it.';
     } else if(p.auth_error){
       hint.textContent=p.auth_error;
       hint.style.color='var(--accent)';
     } else if(p.has_key){
       hint.textContent=t('providers_oauth_hint');
     } else {
-      hint.textContent=t('providers_oauth_not_configured_hint')||'Not authenticated. Run hermes auth in the terminal to configure this provider.';
+      hint.textContent=t('providers_oauth_not_configured_hint')||'Not authenticated. Complete administrator authentication to configure this provider.';
       hint.style.color='var(--muted)';
     }
     body.appendChild(hint);
@@ -7500,8 +7554,8 @@ function _buildProviderCard(p){
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
     hint.textContent=p.is_custom
-      ? '自定义提供商来自 config.yaml / hermes model。请通过 CLI 或配置文件编辑。'
-      : '此提供商在 WebUI 外部管理。';
+      ? '自定义提供商来自管理员配置。请在管理员配置中编辑。'
+      : '此提供商在应用外部管理。';
     body.appendChild(hint);
   }
 
@@ -7798,7 +7852,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
-  window._botName=body.bot_name||'Hermes';
+  window._botName=body.bot_name||'taiji Agent';
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
@@ -7809,7 +7863,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
   _settingsDirty=false;
   _settingsThemeOnOpen=theme;
-  _settingsSkinOnOpen=skin||'default';
+  _settingsSkinOnOpen=skin||'taiji-light-glass';
   _settingsFontSizeOnOpen=fontSize||localStorage.getItem('hermes-font-size')||'default';
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
@@ -7913,12 +7967,12 @@ function _auxSelectStyle(){
 function _modelConfigKeyLabel(status){
  const st=status||{};
  if(st.configured){
-  if(st.source==='oauth') return 'OAuth / CLI 已配置';
-  if(st.env_var) return `${st.env_var} 已配置`;
+  if(st.source==='oauth') return 'OAuth 已配置';
+  if(st.env_var) return '凭据已配置';
   return '已配置';
  }
- if(st.source==='oauth') return '需要 CLI 登录';
- if(st.env_var) return `${st.env_var} 未配置`;
+ if(st.source==='oauth') return '需要完成认证';
+ if(st.env_var) return '凭据未配置';
  return '未配置';
 }
 
@@ -7971,11 +8025,11 @@ function _syncMainModelConfigControls(){
  _setDatalistOptions('modelConfigModelOptions',models);
  if(hint){
   if(isOauth){
-   hint.textContent='此 provider 使用 OAuth/CLI 登录，请在终端运行 hermes model 或 hermes auth。';
+   hint.textContent='此提供商使用 OAuth 认证。请完成管理员认证后回到这里刷新状态。';
   }else if(isCustom){
-   hint.textContent='自定义端点密钥会保存到 .env 的 HERMES_CUSTOM_MODEL_API_KEY，config.yaml 只保存 key_env。';
+   hint.textContent='自定义端点密钥会保存到本机凭据区，管理员配置仅保存引用关系。';
   }else{
-   hint.textContent='留空保留现有密钥；填写后会写入当前 HERMES_HOME/.env。';
+   hint.textContent='留空保留现有密钥；填写后会保存到本机凭据区。';
   }
  }
 }
@@ -8082,6 +8136,28 @@ async function loadModelConfigPanel(force){
   if(typeof showToast==='function') showToast('加载模型配置失败：'+(e.message||e));
  }finally{
   if(status) status.classList.remove('loading');
+ }
+}
+
+async function pasteSecretToInput(inputId){
+ const input=$(inputId);
+ if(!input)return;
+ input.focus();
+ try{
+  if(!navigator.clipboard||typeof navigator.clipboard.readText!=='function'){
+   throw new Error('clipboard unavailable');
+  }
+  const text=await navigator.clipboard.readText();
+  if(!text){
+   if(typeof showToast==='function')showToast('剪贴板为空');
+   return;
+  }
+  input.value=String(text).trim();
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+  input.dispatchEvent(new Event('change',{bubbles:true}));
+  if(typeof showToast==='function')showToast('已粘贴密钥');
+ }catch(e){
+  if(typeof showToast==='function')showToast('无法读取剪贴板，请使用 Cmd+V 或右键粘贴',5000,'error');
  }
 }
 
@@ -8459,8 +8535,8 @@ async function saveSettings(andClose){
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
-  const theme=($('settingsTheme')||{}).value||'dark';
-  const skin=($('settingsSkin')||{}).value||'default';
+  const theme=($('settingsTheme')||{}).value||'light';
+  const skin=($('settingsSkin')||{}).value||'taiji-light-glass';
   const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
   const language=($('settingsLanguage')||{}).value||'zh';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
@@ -8495,7 +8571,7 @@ async function saveSettings(andClose){
   body.busy_input_mode=busyInputMode;
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
-  body.bot_name=botName||'Hermes';
+  body.bot_name=botName||'taiji Agent';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
@@ -8733,9 +8809,7 @@ function loadMcpServers(){
       const detail=s.transport==='http'
         ? (s.url||'')
         : (s.transport==='stdio'?`${s.command||''} ${Array.isArray(s.args)?s.args.join(' '):''}`:t('mcp_status_invalid_config'));
-      const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
-      const headersInfo=s.headers?Object.entries(s.headers).map(([k,v])=>`${k}=${v}`).join(', '):'';
-      const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
+      const secretInfo=(s.env||s.headers)?'Administrator parameters configured':'';
       const isEnabled=s.enabled!==false;
       const encodedName=encodeURIComponent(s.name).replace(/'/g,"\\'");
       const toggleBtn=r.toggle_supported

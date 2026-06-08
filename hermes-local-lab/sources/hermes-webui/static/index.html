@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Hermes</title>
+<title>taiji Agent</title>
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
      correct base when the page is served from /session/<id> routes. See #2226. -->
@@ -15,19 +15,21 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Hermes">
+<meta name="apple-mobile-web-app-title" content="taiji Agent">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
+<script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,'taiji-light-glass':1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},rawSkin=localStorage.getItem('hermes-skin'),t=(localStorage.getItem('hermes-theme')||'light').toLowerCase(),s=(!rawSkin||rawSkin.toLowerCase()==='default'?'taiji-light-glass':rawSkin).toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'light'),skin=skins[s]?s:(m?m[1]:'taiji-light-glass');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.dataset.skin='taiji-light-glass';}})()</script>
+<script>(function(){try{if(new URLSearchParams(location.search||'').get('taiji_desktop')==='1')document.documentElement.dataset.taijiDesktop='1';}catch(e){}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
-<meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" id="hermes-theme-color" content="#0D0D1A">
-<script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
+<meta name="theme-color" content="#F4F7FD" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#F4F7FD" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" id="hermes-theme-color" content="#F4F7FD">
+<script>(function(){try{var t=localStorage.getItem('hermes-theme')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#F4F7FD';if((localStorage.getItem('hermes-skin')||'taiji-light-glass')==='taiji-light-glass')c='#F4F7FD';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
+<script src="static/brand.js?v=__WEBUI_VERSION__"></script>
 <script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
@@ -68,7 +70,7 @@
     };
   }
 })()</script>
-<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__-taiji-shell-23">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -97,7 +99,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
+        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__-taiji-shell-23').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
         });
       });
@@ -117,26 +119,122 @@
   </script>
 </head>
 <body>
+<div class="taiji-home-shell" aria-label="太极智能体首页">
+  <aside class="taiji-brand-sidebar" aria-label="太极智能体主导航">
+    <div class="taiji-brand-head">
+      <img class="taiji-brand-logo" src="static/assets/taiji/logo/logo-mark.png" alt="太极智能体 Logo" width="118" height="118">
+      <div class="taiji-brand-title">太极智能体</div>
+      <div class="taiji-brand-subtitle">企业级本地智能助理</div>
+    </div>
+    <nav class="taiji-brand-nav" aria-label="太极智能体功能导航">
+      <button class="taiji-nav-item is-active" type="button" data-taiji-panel="chat" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="message-square" aria-hidden="true"></span><span>聊天</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="tasks" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="calendar" aria-hidden="true"></span><span>任务</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="kanban" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="layers" aria-hidden="true"></span><span>看板</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="writing" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="pencil" aria-hidden="true"></span><span>专家团</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="skills" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="zap" aria-hidden="true"></span><span>技能</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="memory" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="brain" aria-hidden="true"></span><span>记忆</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="workspaces" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="folder" aria-hidden="true"></span><span>工作区</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="profiles" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="user" aria-hidden="true"></span><span>配置</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="todos" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="list-todo" aria-hidden="true"></span><span>待办</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="insights" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="cpu" aria-hidden="true"></span><span>统计</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="logs" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="terminal" aria-hidden="true"></span><span>日志</span>
+      </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="settings" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="settings" aria-hidden="true"></span><span>设置</span>
+      </button>
+    </nav>
+  </aside>
+
+  <aside class="taiji-secondary-panel" id="taijiSecondaryPanel" aria-label="当前功能子栏" data-secondary-panel="chat">
+    <section class="taiji-chat-secondary" aria-label="最近会话">
+      <div class="taiji-recent-head">
+        <h1>最近会话</h1>
+        <button class="taiji-new-chat" type="button" onclick="taijiHomeNewChat()">
+          <span aria-hidden="true">+</span><span>新建对话</span>
+        </button>
+      </div>
+      <label class="taiji-search-box" aria-label="搜索会话">
+        <span class="taiji-icon taiji-search-icon" data-icon="search" aria-hidden="true"></span>
+        <input id="taijiSessionSearch" type="search" placeholder="搜索会话..." autocomplete="off">
+      </label>
+      <div class="taiji-filter-row" aria-label="会话筛选">
+        <button class="taiji-filter is-active" type="button" data-taiji-session-filter="all">全部</button>
+        <button class="taiji-filter" type="button" data-taiji-session-filter="ungrouped">未分组</button>
+        <button class="taiji-filter-add" type="button" aria-label="新增分组" onclick="taijiHomeCreateProject()">+</button>
+      </div>
+      <div class="taiji-session-groups" id="taijiSessionGroups" aria-live="polite"></div>
+      <button class="taiji-view-all" type="button" onclick="taijiHomeRefreshSessions()">查看全部会话 <span aria-hidden="true">›</span></button>
+    </section>
+    <section class="taiji-panel-secondary-host" id="taijiPanelSecondaryHost" aria-live="polite"></section>
+  </aside>
+
+  <button class="taiji-secondary-toggle" id="taijiSecondaryToggle" type="button" onclick="taijiHomeToggleSecondary()" aria-controls="taijiSecondaryPanel" aria-expanded="true" aria-label="收起会话栏" title="收起会话栏">
+    <span class="taiji-secondary-toggle-icon" aria-hidden="true">‹</span>
+    <span class="taiji-secondary-toggle-label">会话</span>
+  </button>
+
+  <main class="taiji-main-workspace" aria-label="太极智能体主工作区">
+    <div class="taiji-workspace-brand-pill" aria-hidden="true">
+      <img src="static/assets/taiji/logo/logo-mark.png" alt="" width="32" height="32">
+      <span>太极智能体</span>
+    </div>
+    <section class="taiji-hero" aria-label="智能体快捷入口">
+      <img class="taiji-hero-logo" src="static/assets/taiji/logo/logo-mark.png" alt="太极智能体 Logo" width="128" height="128">
+      <h2>有什么可以帮您？</h2>
+      <p>随时提问，运行命令，浏览文件或管理定时任务。</p>
+      <div class="taiji-quick-list">
+        <button class="taiji-quick-card" type="button" onclick="taijiHomeSetPrompt('这个工作区有哪些文件？')">
+          <span class="taiji-icon taiji-quick-icon" data-icon="folder" aria-hidden="true"></span>
+          <span>这个工作区有哪些文件？</span>
+          <span class="taiji-quick-arrow" aria-hidden="true">›</span>
+        </button>
+        <button class="taiji-quick-card" type="button" onclick="taijiHomeSetPrompt('今天有什么安排？')">
+          <span class="taiji-icon taiji-quick-icon" data-icon="calendar" aria-hidden="true"></span>
+          <span>今天有什么安排？</span>
+          <span class="taiji-quick-arrow" aria-hidden="true">›</span>
+        </button>
+        <button class="taiji-quick-card" type="button" onclick="taijiHomeSetPrompt('帮我规划一个小项目。')">
+          <span class="taiji-icon taiji-quick-icon" data-icon="workflow" aria-hidden="true"></span>
+          <span>帮我规划一个小项目。</span>
+          <span class="taiji-quick-arrow" aria-hidden="true">›</span>
+        </button>
+        <button class="taiji-quick-card" type="button" onclick="taijiHomeSetPrompt('帮我运行一条系统命令。')">
+          <span class="taiji-icon taiji-quick-icon" data-icon="terminal" aria-hidden="true"></span>
+          <span>帮我运行一条系统命令。</span>
+          <span class="taiji-quick-arrow" aria-hidden="true">›</span>
+        </button>
+      </div>
+    </section>
+  </main>
+</div>
 <header class="app-titlebar" role="banner">
   <button class="app-titlebar-hamburger has-tooltip has-tooltip--bottom" id="btnHamburger" onclick="toggleMobileSidebar()" type="button" data-tooltip="菜单" aria-label="菜单">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <div class="app-titlebar-inner">
-    <span class="app-titlebar-icon" aria-hidden="true">
-      <svg viewBox="0 0 64 64" width="16" height="16" aria-hidden="true">
-        <defs>
-          <linearGradient id="app-titlebar-gold" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" style="stop-color:#F5C542"/>
-            <stop offset="100%" style="stop-color:#D4961C"/>
-          </linearGradient>
-        </defs>
-        <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#app-titlebar-gold)"/>
-        <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
-        <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
-        <circle cx="32" cy="10" r="4" fill="#F5C542"/>
-      </svg>
-    </span>
-    <span class="app-titlebar-title" id="appTitlebarTitle">Hermes</span>
+    <span class="app-titlebar-icon" aria-hidden="true"><img src="static/assets/taiji/logo/logo-mark.png" alt="" width="22" height="22"></span>
+    <span class="app-titlebar-title" id="appTitlebarTitle">taiji Agent</span>
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
@@ -159,7 +257,7 @@
     <button class="rail-btn nav-tab has-tooltip" data-panel="profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles" aria-label="Agent profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos" aria-label="Todos"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights" aria-label="Insights"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
-    <button class="rail-btn nav-tab dashboard-link has-tooltip" id="dashboardRailBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard" aria-label="Hermes Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
+    <button class="rail-btn nav-tab dashboard-link has-tooltip" id="dashboardRailBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" data-tooltip="taiji Agent Dashboard" data-i18n-title="tab_dashboard" aria-label="taiji Agent Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs" aria-label="Logs"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
     <div class="rail-spacer"></div>
     <button class="rail-btn nav-tab has-tooltip" data-panel="settings" onclick="switchPanel('settings',{fromRailClick:true})" data-tooltip="Settings" data-i18n-title="tab_settings" aria-label="Settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
@@ -177,7 +275,7 @@
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="todos" data-label="Todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="insights" data-label="Insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
-      <button class="nav-tab dashboard-link has-tooltip has-tooltip--bottom" id="dashboardMobileBtn" data-dashboard-link data-label="Dashboard" style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
+      <button class="nav-tab dashboard-link has-tooltip has-tooltip--bottom" id="dashboardMobileBtn" data-dashboard-link data-label="Dashboard" style="display:none" onclick="openHermesDashboard(event)" data-tooltip="taiji Agent Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="logs" data-label="Logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
       <!-- Settings button mirrored here for mobile (rail is desktop-only via @media >=768px). Keep in sync with rail entry. -->
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="settings" onclick="switchPanel('settings',{fromRailClick:true})" data-tooltip="Settings" data-i18n-title="tab_settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
@@ -251,7 +349,7 @@
         </div>
       </div>
       <div class="writeflow-panel writeflow-panel-compact">
-        <p>从专家中心选择团队，召唤后进入独立写作对话。</p>
+        <p>从专家中心选择团队，召唤后进入新的聊天任务。</p>
       </div>
     </div>
     <!-- Skills panel -->
@@ -395,23 +493,7 @@
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
-        <div class="empty-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
-          <defs>
-            <linearGradient id="hermes-gold" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" style="stop-color:#F5C542;stop-opacity:1"/>
-              <stop offset="100%" style="stop-color:#D4961C;stop-opacity:1"/>
-            </linearGradient>
-          </defs>
-          <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#hermes-gold)"/>
-          <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
-          <path d="M30 22 C26 19, 18 19, 14 22 C18 20, 24 20, 28 24" fill="#D4961C" opacity="0.8"/>
-          <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
-          <path d="M34 22 C38 19, 46 19, 50 22 C46 20, 40 20, 36 24" fill="#D4961C" opacity="0.8"/>
-          <path d="M32 48 C22 44, 20 38, 26 34 C20 36, 18 42, 24 46 C18 40, 22 30, 30 28 C24 32, 22 38, 28 42" fill="none" stroke="#F5C542" stroke-width="2.5" stroke-linecap="round"/>
-          <path d="M32 48 C42 44, 44 38, 38 34 C44 36, 46 42, 40 46 C46 40, 42 30, 34 28 C40 32, 42 38, 36 42" fill="none" stroke="#D4961C" stroke-width="2.5" stroke-linecap="round"/>
-          <circle cx="32" cy="10" r="4" fill="#F5C542"/>
-          <circle cx="32" cy="10" r="2" fill="#FFF8E1" opacity="0.7"/>
-        </svg></div>
+        <div class="empty-logo"><img src="static/assets/taiji/logo/logo-mark.png" alt="taiji Agent mark" width="80" height="80"></div>
         <h2 data-i18n="empty_title">What can I help with?</h2>
         <p data-i18n="empty_subtitle">Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
         <div class="suggestion-grid">
@@ -452,16 +534,16 @@
       <div class="offline-copy">
         <strong id="offlineTitle" data-i18n="offline_title">Connection lost</strong>
         <span id="offlineDetails" data-i18n="offline_browser_detail">Your browser reports that this device is offline.</span>
-        <span id="offlineAutorefresh" data-i18n="offline_autorefresh">I will refresh this page automatically when Hermes is reachable again.</span>
+        <span id="offlineAutorefresh" data-i18n="offline_autorefresh">I will refresh this page automatically when taiji Agent is reachable again.</span>
       </div>
       <button class="offline-action" id="offlineCheckNow" type="button" onclick="checkOfflineRecoveryNow()" data-i18n="offline_check_now">Check now</button>
     </div>
     <div class="agent-health-banner" id="agentHealthBanner" role="alert" aria-live="assertive" hidden>
       <div class="agent-health-copy">
-        <strong id="agentHealthTitle">Hermes Agent 无响应</strong>
+        <strong id="agentHealthTitle">taiji Agent 无响应</strong>
         <span id="agentHealthDetails">网关心跳失败。在恢复之前，消息可能无法送达。</span>
       </div>
-      <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="关闭 Hermes Agent 心跳告警">关闭</button>
+      <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="关闭 taiji Agent 心跳告警">关闭</button>
     </div>
     <div class="composer-wrap" id="composerWrap">
       <div class="composer-flyout">
@@ -568,36 +650,23 @@
           Drop files to upload to workspace
         </div>
         <div class="attach-tray" id="attachTray"></div>
-        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> Listening…</div>
+        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span><span class="status-text">Listening…</span></div>
         <div class="voice-mode-bar" id="voiceModeBar" style="display:none">
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
+        <textarea id="msg" rows="1" placeholder="输入消息给 taiji Agent…"></textarea>
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
-            <button type="button" class="icon-btn has-tooltip" id="btnAttach" data-tooltip="附加文件">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            <button type="button" class="icon-btn has-tooltip composer-control composer-icon-control" id="btnAttach" data-tooltip="附加文件">
+              <span class="taiji-icon composer-control-icon" data-icon="paperclip" aria-hidden="true"></span>
             </button>
-            <button class="icon-btn mic-btn has-tooltip" id="btnMic" data-tooltip="Dictate" data-i18n-title="voice_dictate" style="display:none">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="1" width="6" height="12" rx="3"/>
-                <path d="M5 10a7 7 0 0 0 14 0"/>
-                <line x1="12" y1="19" x2="12" y2="23"/>
-                <line x1="8" y1="23" x2="16" y2="23"/>
-              </svg>
+            <button type="button" class="icon-btn mic-btn has-tooltip composer-control composer-icon-control" id="btnMic" data-tooltip="Dictate" data-i18n-title="voice_dictate" title="Dictate" aria-label="语音输入" style="display:none">
+              <span class="taiji-icon composer-control-icon" data-icon="mic" aria-hidden="true"></span>
             </button>
-            <button class="icon-btn voice-mode-btn has-tooltip" id="btnVoiceMode" data-tooltip="Voice mode" data-i18n-title="voice_mode_toggle" style="display:none">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <!-- Lucide audio-lines: signals two-way voice conversation, matches ChatGPT/Gemini convention. -->
-                <path d="M2 10v4"/>
-                <path d="M6 6v12"/>
-                <path d="M10 3v18"/>
-                <path d="M14 8v8"/>
-                <path d="M18 5v14"/>
-                <path d="M22 10v4"/>
-              </svg>
+            <button type="button" class="icon-btn voice-mode-btn has-tooltip composer-control composer-icon-control" id="btnVoiceMode" data-tooltip="Voice mode" data-i18n-title="voice_mode_toggle" title="Voice mode" aria-label="语音模式" style="display:none">
+              <span class="taiji-icon composer-control-icon" data-icon="audio-lines" aria-hidden="true"></span>
             </button>
             <div class="composer-divider" aria-hidden="true"></div>
             <button class="yolo-pill" id="yoloPill" type="button" onclick="cmdYolo()" style="display:none" title="YOLO mode — click to disable" data-i18n-title="yolo_pill_title_active">
@@ -605,31 +674,31 @@
               <span class="yolo-pill-label" data-i18n="yolo_pill_label">YOLO</span>
             </button>
             <div id="profileChipWrap" class="composer-profile-wrap">
-              <button class="composer-profile-chip profile-chip" id="profileChip" type="button" onclick="toggleProfileDropdown()" title="切换配置档">
-                <span class="composer-profile-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
-                <span class="composer-profile-label" id="profileChipLabel">默认</span>
+              <button class="composer-profile-chip profile-chip composer-control" id="profileChip" type="button" onclick="toggleProfileDropdown()" title="切换配置档">
+                <span class="taiji-icon composer-profile-icon composer-control-icon" data-icon="user" aria-hidden="true"></span>
+                <span class="composer-profile-label composer-control-label" id="profileChipLabel">默认</span>
                 <span class="composer-profile-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
             </div>
             <div class="composer-ws-wrap">
               <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group" aria-label="工作区控件">
-                <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="显示工作区面板" aria-pressed="false" aria-label="切换工作区文件面板">
-                  <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                <button class="composer-workspace-files-btn composer-control composer-icon-control has-tooltip" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="工作区文件" data-tooltip="工作区文件" aria-pressed="false" aria-label="打开工作区文件面板">
+                  <span class="taiji-icon composer-workspace-icon composer-control-icon" data-icon="folder" aria-hidden="true"></span>
                 </button>
-                <button class="composer-workspace-chip" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="切换工作区" disabled>
-                  <span class="composer-workspace-label" id="composerWorkspaceLabel"></span>
+                <button class="composer-workspace-chip composer-control" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="切换工作区" aria-label="切换工作区" aria-haspopup="listbox" aria-expanded="false" aria-controls="composerWsDropdown" disabled>
+                  <span class="composer-workspace-label composer-control-label" id="composerWorkspaceLabel">工作区</span>
                   <span class="composer-workspace-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </button>
               </div>
             </div>
-            <button class="icon-btn composer-mobile-config-btn" id="composerMobileConfigBtn" type="button" onclick="toggleMobileComposerConfig()" title="工作区、模型、推理和上下文设置" aria-label="工作区、模型、推理和上下文设置" aria-haspopup="true" aria-expanded="false" aria-controls="composerMobileConfigPanel">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            <button class="icon-btn composer-mobile-config-btn composer-control composer-icon-control" id="composerMobileConfigBtn" type="button" onclick="toggleMobileComposerConfig()" title="工作区、模型、推理和上下文设置" aria-label="工作区、模型、推理和上下文设置" aria-haspopup="true" aria-expanded="false" aria-controls="composerMobileConfigPanel">
+              <span class="taiji-icon composer-control-icon" data-icon="settings" aria-hidden="true"></span>
               <span class="composer-mobile-ctx-badge" id="composerMobileCtxBadge" aria-hidden="true" style="display:none">0</span>
             </button>
             <div class="composer-model-wrap">
-              <button class="composer-model-chip" id="composerModelChip" type="button" onclick="toggleModelDropdown()" title="对话模型">
-                <span class="composer-model-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg></span>
-                <span class="composer-model-label" id="composerModelLabel"></span>
+              <button class="composer-model-chip composer-control" id="composerModelChip" type="button" onclick="toggleModelDropdown()" title="对话模型">
+                <span class="taiji-icon composer-model-icon composer-control-icon" data-icon="cpu" aria-hidden="true"></span>
+                <span class="composer-model-label composer-control-label" id="composerModelLabel">模型</span>
                 <span class="composer-model-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
               <select id="modelSelect" class="composer-model-select" title="对话模型" aria-hidden="true" tabindex="-1">
@@ -659,16 +728,16 @@
               <span class="provider-quota-chip-label" id="providerQuotaChipLabel"></span>
             </button>
             <div class="composer-reasoning-wrap" id="composerReasoningWrap" style="display:none">
-              <button class="composer-reasoning-chip" id="composerReasoningChip" type="button" onclick="toggleReasoningDropdown()" title="推理强度">
-                <span class="composer-reasoning-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
-                <span class="composer-reasoning-label" id="composerReasoningLabel"></span>
+              <button class="composer-reasoning-chip composer-control" id="composerReasoningChip" type="button" onclick="toggleReasoningDropdown()" title="推理强度">
+                <span class="taiji-icon composer-reasoning-icon composer-control-icon" data-icon="zap" aria-hidden="true"></span>
+                <span class="composer-reasoning-label composer-control-label" id="composerReasoningLabel">推理</span>
                 <span class="composer-reasoning-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
             </div>
             <div class="composer-toolsets-wrap" id="composerToolsetsWrap">
-              <button class="composer-toolsets-chip" id="composerToolsetsChip" type="button" onclick="toggleToolsetsDropdown()" title="会话工具集">
-                <span class="composer-toolsets-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
-                <span class="composer-toolsets-label" id="composerToolsetsLabel">全局</span>
+              <button class="composer-toolsets-chip composer-control" id="composerToolsetsChip" type="button" onclick="toggleToolsetsDropdown()" title="会话工具集">
+                <span class="taiji-icon composer-toolsets-icon composer-control-icon" data-icon="globe" aria-hidden="true"></span>
+                <span class="composer-toolsets-label composer-control-label" id="composerToolsetsLabel">全局</span>
                 <span class="composer-toolsets-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
             </div>
@@ -697,21 +766,21 @@
               </div>
             </div>
             <span class="bg-badge" id="bgBadge" style="display:none" title="后台任务运行中">0</span>
-            <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="发送消息" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+            <button class="send-btn has-tooltip has-tooltip--left composer-control composer-icon-control" id="btnSend" data-tooltip="发送消息" disabled>
+              <span class="taiji-icon composer-control-icon" data-icon="arrow-up" aria-hidden="true"></span>
             </button>
           </div>
           <div class="composer-mobile-config-panel" id="composerMobileConfigPanel" aria-label="工作区、模型、推理和上下文设置">
             <button class="composer-mobile-config-action" id="composerMobileWorkspaceAction" type="button" onclick="toggleComposerWsDropdown()" title="切换工作区">
-              <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+              <span class="taiji-icon composer-workspace-icon composer-control-icon" data-icon="folder" aria-hidden="true"></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_workspace">Workspace</span><span class="composer-mobile-config-value" id="composerMobileWorkspaceLabel"></span></span>
             </button>
             <button class="composer-mobile-config-action" id="composerMobileModelAction" type="button" onclick="toggleModelDropdown()" title="对话模型">
-              <span class="composer-model-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg></span>
+              <span class="taiji-icon composer-model-icon composer-control-icon" data-icon="cpu" aria-hidden="true"></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_model">Model</span><span class="composer-mobile-config-value" id="composerMobileModelLabel"></span></span>
             </button>
             <button class="composer-mobile-config-action" id="composerMobileReasoningAction" type="button" onclick="toggleReasoningDropdown()" title="推理强度" style="display:none">
-              <span class="composer-reasoning-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
+              <span class="taiji-icon composer-reasoning-icon composer-control-icon" data-icon="zap" aria-hidden="true"></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_reasoning">Reasoning</span><span class="composer-mobile-config-value" id="composerMobileReasoningLabel"></span></span>
             </button>
             <div class="composer-mobile-config-action composer-mobile-context-action" id="composerMobileContextAction" role="group" aria-label="上下文窗口" style="display:none">
@@ -849,7 +918,7 @@
           <div class="writeflow-center-head">
             <div>
               <strong>选择一个写作专家团</strong>
-              <span>先选团队，再把任务交给独立对话处理。</span>
+              <span>先选团队，再把任务交给新的聊天任务处理。</span>
             </div>
             <div class="writeflow-center-search">
               <svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -894,6 +963,17 @@
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
         <div class="main-view-empty-title" data-i18n="profiles_empty_title">Select a profile</div>
         <div class="main-view-empty-sub" data-i18n="profiles_empty_sub">Pick an agent profile from the sidebar to view and edit its settings, or create a new one.</div>
+      </div>
+    </div>
+    <div id="mainTodos" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title" data-i18n="current_task_list">Current task list</div>
+          <div class="main-view-subtitle">当前会话中的任务进度会在这里同步展示。</div>
+        </div>
+      </div>
+      <div class="main-view-body">
+        <div class="main-view-content taiji-todos-content" id="todoMainPanel"></div>
       </div>
     </div>
     <div id="mainInsights" class="main-view">
@@ -982,7 +1062,7 @@
               <label data-i18n="settings_label_skin">Skin</label>
               <div id="skinPickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:4px">
               </div>
-              <input type="hidden" id="settingsSkin" value="default">
+              <input type="hidden" id="settingsSkin" value="taiji-light-glass">
             </div>
                         <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
@@ -1046,7 +1126,7 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title" data-i18n="settings_section_preferences_title">Preferences</div>
-                <div class="settings-section-meta" data-i18n="settings_section_preferences_meta">Defaults and UI behavior for Hermes Web UI.</div>
+                <div class="settings-section-meta" data-i18n="settings_section_preferences_meta">Defaults and UI behavior for taiji Agent.</div>
               </div>
             </div>
             <div class="settings-field">
@@ -1114,7 +1194,7 @@
                 <input type="checkbox" id="settingsVoiceModeEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_voice_mode">Hands-free voice mode button</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_voice_mode">Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_voice_mode">Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — taiji Agent auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1244,7 +1324,7 @@
                 <input type="checkbox" id="settingsSyncInsights" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_sync_insights">Sync usage to /insights</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sync_insights">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sync_insights">Mirrors WebUI token usage to state.db so <code>taiji Agent /insights</code> includes browser session data. Off by default.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1270,7 +1350,7 @@
             <div class="settings-field">
               <label for="settingsBotName" data-i18n="settings_label_bot_name">Default assistant name</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Used for the default profile only. Other profiles use their own profile names.</div>
-              <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <input type="text" id="settingsBotName" placeholder="taiji Agent" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
             <div id="settingsPreferencesAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
@@ -1279,7 +1359,7 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title">模型配置</div>
-                <div class="settings-section-meta">写入当前 Hermes 配置档，影响 CLI 和新会话；不会热切换正在运行的回复。</div>
+                <div class="settings-section-meta">写入当前 taiji Agent 配置档，影响 CLI 和新会话；不会热切换正在运行的回复。</div>
               </div>
               <button class="btn-tiny" type="button" onclick="loadModelConfigPanel(true)">刷新</button>
             </div>
@@ -1306,7 +1386,10 @@
                 </div>
                 <div id="modelConfigApiKeyRow">
                   <label for="modelConfigApiKey">API 密钥</label>
-                  <input id="modelConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                  <div class="model-config-secret-row">
+                    <input id="modelConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                    <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('modelConfigApiKey')">粘贴</button>
+                  </div>
                   <div class="model-config-hint" id="modelConfigProviderHint">—</div>
                 </div>
                 <button class="sm-btn" id="btnSaveMainModel" type="button" onclick="saveMainModelConfig()">保存主模型配置</button>
@@ -1323,7 +1406,10 @@
                 <datalist id="imageGenConfigModelOptions"></datalist>
                 <div id="imageGenConfigApiKeyRow">
                   <label for="imageGenConfigApiKey">API 密钥</label>
-                  <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                  <div class="model-config-secret-row">
+                    <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                    <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
+                  </div>
                   <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
                 </div>
                 <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存图片生成配置</button>
@@ -1359,14 +1445,14 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title" data-i18n="settings_plugins_title">Plugins</div>
-                <div class="settings-section-meta" data-i18n="settings_plugins_meta">View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.</div>
+                <div class="settings-section-meta" data-i18n="settings_plugins_meta">View installed taiji Agent plugins and the lifecycle hooks they register. This panel is read-only.</div>
               </div>
             </div>
             <div id="pluginsList" style="display:flex;flex-direction:column;margin-top:4px">
               <!-- Populated dynamically by loadPluginsPanel() -->
             </div>
             <div id="pluginsEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="settings_plugins_empty">
-              No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.
+              No taiji Agent plugins are currently visible. Install or enable plugins from administrator configuration to see them here.
             </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
@@ -1386,12 +1472,12 @@
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
               <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">The HERMES_WEBUI_PASSWORD environment variable is currently set and takes precedence. Unset it and restart the server to manage the password from here.</div>
+              <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">A system-level password override is active. Remove the override and restart the app before managing the password here.</div>
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
             <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
-              <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
+              <label data-i18n="settings_label_shutdown">Stop the taiji Agent server</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
               <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
             </div>
@@ -1403,8 +1489,8 @@
               <div id="passkeyList" style="margin-top:8px;font-size:12px;color:var(--muted)">尚未注册通行密钥。</div>
             </div>
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
-              <label for="settingsDashboardMode">官方 Hermes 仪表盘</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">当官方 <code>hermes dashboard</code> 可访问时显示导航栏链接。公网反向代理 URL 仅保存在浏览器端，不会由服务器探测。</div>
+              <label for="settingsDashboardMode">官方 taiji Agent 仪表盘</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">当官方 <code>taiji Agent dashboard</code> 可访问时显示导航栏链接。公网反向代理 URL 仅保存在浏览器端，不会由服务器探测。</div>
               <select id="settingsDashboardMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="auto">自动检测</option>
                 <option value="always">始终显示</option>
@@ -1417,15 +1503,15 @@
             <!-- Gateway Status Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label>Gateway 状态</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Hermes gateway 状态（Telegram、Discord、Slack 等）。</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">taiji Agent gateway 状态（Telegram、Discord、Slack 等）。</div>
               <div id="gatewayStatusCard"><span style="color:var(--muted);font-size:12px">加载中…</span></div>
             </div>
             <!-- MCP Servers Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_servers_title">MCP Servers</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View Model Context Protocol servers configured in config.yaml.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View configured MCP servers.</div>
               <div id="mcpServerList"></div>
-              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here for now. Edit config.yaml and restart Hermes for changes to take effect.</div>
+              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here. Use administrator configuration and restart the app for changes to take effect.</div>
             </div>
             <!-- MCP Tools Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
@@ -1496,8 +1582,8 @@
     <div class="onboarding-shell">
       <div class="onboarding-sidebar">
         <div class="onboarding-badge" data-i18n="onboarding_badge">FIRST RUN</div>
-        <h2 id="onboardingTitle" data-i18n="onboarding_title">Welcome to Hermes Web UI</h2>
-        <p id="onboardingLead" data-i18n="onboarding_lead">A quick guided setup will check your Hermes install, choose a workspace and model, and optionally protect the app with a password.</p>
+        <h2 id="onboardingTitle" data-i18n="onboarding_title">Welcome to taiji Agent</h2>
+        <p id="onboardingLead" data-i18n="onboarding_lead">A quick guided setup will check your taiji Agent install, choose a workspace and model, and optionally protect the app with a password.</p>
         <div class="onboarding-steps" id="onboardingSteps"></div>
       </div>
       <div class="onboarding-main">
@@ -1520,6 +1606,7 @@
     <div id="writeflowTeamModalFooter" class="writeflow-modal-footer"></div>
   </div>
 </div>
+<div class="taiji-floating-layer" id="taijiFloatingLayer" aria-hidden="true"></div>
 <div class="app-dialog-overlay" id="appDialogOverlay" style="display:none" aria-hidden="true">
   <div class="app-dialog" id="appDialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogDesc">
     <div class="app-dialog-header">
@@ -1539,15 +1626,16 @@
 <div class="toast" id="toast"></div>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/ui.js?v=__WEBUI_VERSION__-taiji-shell-23" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/panels.js?v=__WEBUI_VERSION__-taiji-shell-23" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/boot.js?v=__WEBUI_VERSION__-taiji-shell-23" defer></script>
+<script src="static/taiji-home.js?v=__WEBUI_VERSION__-taiji-shell-23" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">
@@ -1616,7 +1704,7 @@
       <select id="kanbanTaskModalAssignee">
         <!-- Options populated by _kanbanPopulateAssigneeSelect() at modal open time. -->
       </select>
-      <div class="kanban-modal-hint" id="kanbanTaskModalAssigneeHint" data-i18n="kanban_assignee_hint">选择一个 Hermes 配置档，让调度器领取并运行此任务。保持为<em>未分配</em>的任务会一直停留在就绪状态。</div>
+      <div class="kanban-modal-hint" id="kanbanTaskModalAssigneeHint" data-i18n="kanban_assignee_hint">选择一个 taiji Agent 配置档，让调度器领取并运行此任务。保持为<em>未分配</em>的任务会一直停留在就绪状态。</div>
     </div>
     <div class="kanban-modal-row">
       <label for="kanbanTaskModalTenant" data-i18n="kanban_tenant">Tenant</label>

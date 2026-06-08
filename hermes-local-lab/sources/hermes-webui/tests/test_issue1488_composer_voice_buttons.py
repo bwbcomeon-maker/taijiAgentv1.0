@@ -88,10 +88,14 @@ class TestComposerVoiceButtonHTML:
             f"btnVoiceMode static tooltip still says 'Voice input': {vm_title!r}"
 
     def test_voice_mode_uses_audio_lines_glyph(self):
-        """btnVoiceMode SVG must use the audio-lines (waveform) shape.
-        We detect the pattern by looking for the 6 vertical-bar paths
-        characteristic of Lucide's audio-lines icon."""
+        """btnVoiceMode must resolve to the audio-lines (waveform) shape.
+
+        The Taiji shell renders self-hosted Lucide icons from static/icons.js
+        via data-icon slots, so this test accepts the current registry-based
+        path instead of requiring inline SVG inside index.html.
+        """
         html = _src("index.html")
+        icons = _src("icons.js")
         # Extract the full button (open tag through </button>)
         m = re.search(
             r'<button[^>]*\bid="btnVoiceMode"[^>]*>(.+?)</button>',
@@ -100,8 +104,12 @@ class TestComposerVoiceButtonHTML:
         )
         assert m, "btnVoiceMode element must be parseable"
         body = m.group(1)
+        assert 'data-icon="audio-lines"' in body
+
+        audio_start = icons.index("'audio-lines':")
+        audio_path = icons[audio_start : icons.index(",", audio_start)]
         # Lucide audio-lines path data — six <path d="M{x} {y}v{h}"/> entries.
-        bars = re.findall(r'<path d="M\d+\s+\d+v\d+"', body)
+        bars = re.findall(r'<path d="M\d+\s+\d+v\d+"', audio_path)
         assert len(bars) >= 5, (
             f"btnVoiceMode SVG must use audio-lines (>=5 vertical-bar paths); "
             f"found {len(bars)}. Visual confusion bug returns if reverted to "

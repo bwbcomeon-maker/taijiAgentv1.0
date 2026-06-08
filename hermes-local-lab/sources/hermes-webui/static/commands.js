@@ -240,9 +240,9 @@ function cliOnlyCommandResponse(cmdName, meta){
   const detail=desc?`\n\n${desc}`:'';
   let extra='';
   if(name==='browser'){
-    extra='\n\nBrowser tools in WebUI must be configured server-side with the agent/browser environment. Once configured, ask the model to use browser tools directly; `/browser` itself only works in `hermes chat`.';
+    extra='\n\nBrowser tools in WebUI must be configured server-side with the agent/browser environment. Once configured, ask the model to use browser tools directly; `/browser` itself only works in the taiji Agent CLI chat.';
   }
-  return `\`/${name}\` is a Hermes CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
+  return `\`/${name}\` is a taiji Agent CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
 }
 
 async function executeAgentPluginCommand(text,_meta){
@@ -475,7 +475,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
     if(data.session.session_id&&data.session.session_id!==currentSid){
       await loadSession(data.session.session_id);
     }else{
-      S.session=data.session;
+      S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session;
       S.messages=data.session.messages||[];
       S.toolCalls=data.session.tool_calls||[];
       clearLiveToolCards();
@@ -577,7 +577,7 @@ async function _runManualCompression(focusTopic){
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('会话已不可用');
       }
-      S.session=live.session;
+      S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(live.session,S.session&&S.session.workspace):live.session;
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
       if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
@@ -830,7 +830,7 @@ async function sendWriteflowAction(payload){
     if(!ta)throw new Error('输入框不可用');
     ta.value=data.message;
     if(typeof autoResize==='function')autoResize();
-    if(!wantsNewWindow&&typeof switchPanel==='function')switchPanel('chat');
+    if(!wantsNewWindow&&typeof switchPanel==='function')await switchPanel('chat');
     _queueWriteflowStatusCard(data);
     if(body.summon_only){
       closeWriteflowWindow();
@@ -894,11 +894,12 @@ const WRITEFLOW_STATUS_TEAM_IMAGES={
 function _writeflowStatusCardFromCompose(data){
   const run=data&&data.run;
   if(!run||!run.run_id)return null;
-  const tasks=Array.isArray(run.tasks)?run.tasks:[];
+  const internalTasks=Array.isArray(run.tasks)?run.tasks:[];
+  const tasks=Array.isArray(run.display_tasks)&&run.display_tasks.length?run.display_tasks:internalTasks;
   const members=Array.isArray(run.members)?run.members:[];
   const artifacts=Array.isArray(run.artifacts)?run.artifacts:[];
   const fileChanges=Array.isArray(run.file_changes)?run.file_changes:[];
-  const progress=run.progress||{};
+  const progress=run.display_progress||run.progress||{};
   const teamTitle=(data.display_team&&data.display_team.title)||run.team_title||run.team_id||data.team_id||'内容创作专家团';
   const teamCategory=(data.display_team&&data.display_team.category)||run.team_category||'写作团队';
   const teamImage=(data.display_team&&data.display_team.image)||WRITEFLOW_STATUS_TEAM_IMAGES[run.team_id]||'';
@@ -939,7 +940,7 @@ function _writeflowStatusCardFromCompose(data){
   ];
 	  return {
 	    type:'writeflow',
-	    title:'专家团队运行',
+	    title:'专家团运行',
 	    subtitle:run.title||run.project_slug||data.project_name||'写作任务',
 	    sessionId:run.run_id,
 	    runId:run.run_id,
@@ -1014,7 +1015,7 @@ async function cmdGoal(args){
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
-      workspace:S.session.workspace,
+      workspace:(typeof chatRequestWorkspace==='function'?chatRequestWorkspace():S.session.workspace),
       model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
       model_provider:S.session.model_provider||null,
       profile:S.activeProfile||S.session.profile||'default',

@@ -550,7 +550,7 @@ async function send(){
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:(typeof chatRequestWorkspace==='function'?chatRequestWorkspace():S.session.workspace),
       model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
@@ -1366,7 +1366,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeLastTickMs=now;
 
     // OpenWebUI fades the actual arriving tokens, so long/fast responses naturally
-    // appear to accelerate. Hermes has a playout buffer, so track incoming word
+    // appear to accelerate. taiji Agent has a playout buffer, so track incoming word
     // velocity and play out faster than it instead of using a metronomic cadence.
     // LLM telemetry is usually tokens/sec, but the UI reveals words. A fixed word
     // cadence can look stuck even when token throughput is high, so combine:
@@ -1919,7 +1919,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=(typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(d.session,S.session&&S.session.workspace):d.session);S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -2341,7 +2341,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
           if(data&&data.session&&S.session&&S.session.session_id===activeSid){
-            S.session=data.session;
+            S.session=(typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session);
             const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             clearLiveToolCards();if(!assistantText)removeThinking();
@@ -2352,7 +2352,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
-            const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
+            const cancelAgentName=(assistantDisplayName()+'').trim()||'taiji Agent';
             S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
@@ -2437,7 +2437,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
-        S.session=session;
+        S.session=(typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(session,S.session&&S.session.workspace):session);
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -2534,7 +2534,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 }
 
 function transcript(){
-  const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
+  const lines=[`# taiji Agent session ${S.session?.session_id||''}`,``,
     `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
   for(const m of S.messages){
     if(!m||m.role==='tool')continue;

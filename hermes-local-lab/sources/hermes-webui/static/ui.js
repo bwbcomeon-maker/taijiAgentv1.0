@@ -1,8 +1,60 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 
+function productDisplayName(name){
+  const value=String(name||'').trim();
+  return /^(hermes|hermes agent|hermes webui)$/i.test(value)?'taiji Agent':(value||'taiji Agent');
+}
+
 function assistantDisplayName(){
-  if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
-  return window._botName||'Hermes';
+  if(S.activeProfile&&S.activeProfile!=='default'){
+    const profileName=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+    return productDisplayName(profileName);
+  }
+  const name=window._botName||'taiji Agent';
+  return productDisplayName(name);
+}
+
+function isValidRuntimeWorkspacePath(value){
+  const text=String(value||'').trim();
+  if(!text)return false;
+  if(text==='内部路径'||/^internal path$/i.test(text))return false;
+  if(/taiji Agent-(?:local-lab|home|agent|webui|state|cli)/i.test(text))return false;
+  return text.startsWith('/')||text.startsWith('~/')||/^[A-Za-z]:[\\/]/.test(text);
+}
+
+function lastValidRuntimeWorkspace(){
+  const current=S.session&&S.session.workspace;
+  if(isValidRuntimeWorkspacePath(current))return current;
+  if(isValidRuntimeWorkspacePath(S._profileDefaultWorkspace))return S._profileDefaultWorkspace;
+  try{
+    const saved=localStorage.getItem('hermes-webui-last-workspace')||'';
+    if(isValidRuntimeWorkspacePath(saved))return saved;
+  }catch(_){}
+  return '';
+}
+
+function sanitizeSessionRuntimeFields(session, fallbackWorkspace){
+  if(!session||typeof session!=='object')return session;
+  const next={...session};
+  const fallback=isValidRuntimeWorkspacePath(fallbackWorkspace)?fallbackWorkspace:lastValidRuntimeWorkspace();
+  if(!isValidRuntimeWorkspacePath(next.workspace)){
+    if(fallback)next.workspace=fallback;
+    else delete next.workspace;
+  }else{
+    try{localStorage.setItem('hermes-webui-last-workspace',next.workspace);}catch(_){}
+  }
+  return next;
+}
+
+function chatRequestWorkspace(){
+  const ws=S.session&&S.session.workspace;
+  return isValidRuntimeWorkspacePath(ws)?ws:undefined;
+}
+
+if(typeof window!=='undefined'){
+  window.isValidRuntimeWorkspacePath=isValidRuntimeWorkspacePath;
+  window.sanitizeSessionRuntimeFields=sanitizeSessionRuntimeFields;
+  window.chatRequestWorkspace=chatRequestWorkspace;
 }
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
@@ -16,6 +68,259 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+const TAIJI_FLOATING_LAYER_ID='taijiFloatingLayer';
+const _taijiFloatingPanels=new Set();
+let _taijiFloatingListenersReady=false;
+
+const UI_VISIBILITY_DEFAULTS={
+  nav:['chat','tasks','kanban','writing','skills','memory','workspaces','profiles','todos','insights','logs','settings'],
+  settings_sections:['conversation','appearance','preferences','models','providers','plugins','system'],
+  composer:['profile','workspace_files','workspace_switcher','model','reasoning','toolsets','quota']
+};
+
+function isUiFeatureVisible(group,key){
+  const g=String(group||'').trim();
+  const k=String(key||'').trim();
+  if(!g||!k) return true;
+  if(g==='nav'&&k==='chat') return true;
+  const vis=window._uiVisibility&&typeof window._uiVisibility==='object'?window._uiVisibility:null;
+  const groupVis=vis&&vis[g]&&typeof vis[g]==='object'?vis[g]:null;
+  if(!groupVis||!Object.prototype.hasOwnProperty.call(groupVis,k)) return true;
+  return groupVis[k]!==false;
+}
+
+function _setUiVisibilityHidden(el,hidden){
+  if(!el) return;
+  if(hidden){
+    if(el.dataset.uiVisibilityHidden!=='1'){
+      el.dataset.uiVisibilityPreviousHidden=el.hidden?'1':'0';
+      el.dataset.uiVisibilityPreviousTabindex=el.hasAttribute('tabindex')?String(el.getAttribute('tabindex')||''):'__none__';
+      el.dataset.uiVisibilityPreviousAriaHidden=el.hasAttribute('aria-hidden')?String(el.getAttribute('aria-hidden')||''):'__none__';
+    }
+    el.dataset.uiVisibilityHidden='1';
+    el.classList.add('ui-visibility-hidden');
+    el.classList.remove('active','is-active');
+    el.hidden=true;
+    el.setAttribute('aria-hidden','true');
+    el.setAttribute('tabindex','-1');
+    if(typeof el.blur==='function'&&document.activeElement===el) el.blur();
+  }else if(el.dataset.uiVisibilityHidden==='1'){
+    const wasHidden=el.dataset.uiVisibilityPreviousHidden==='1';
+    const previousTabindex=el.dataset.uiVisibilityPreviousTabindex;
+    const previousAriaHidden=el.dataset.uiVisibilityPreviousAriaHidden;
+    delete el.dataset.uiVisibilityHidden;
+    delete el.dataset.uiVisibilityPreviousHidden;
+    delete el.dataset.uiVisibilityPreviousTabindex;
+    delete el.dataset.uiVisibilityPreviousAriaHidden;
+    el.classList.remove('ui-visibility-hidden');
+    el.hidden=wasHidden;
+    if(previousTabindex==='__none__') el.removeAttribute('tabindex');
+    else if(typeof previousTabindex==='string') el.setAttribute('tabindex',previousTabindex);
+    if(previousAriaHidden==='__none__') el.removeAttribute('aria-hidden');
+    else if(typeof previousAriaHidden==='string') el.setAttribute('aria-hidden',previousAriaHidden);
+  }
+}
+
+function resolveUiSettingsSection(name){
+  const requested=String(name||'conversation').trim();
+  const known=UI_VISIBILITY_DEFAULTS.settings_sections;
+  const normalized=known.includes(requested)?requested:'conversation';
+  if(isUiFeatureVisible('settings_sections',normalized)) return normalized;
+  return known.find(section=>isUiFeatureVisible('settings_sections',section))||null;
+}
+
+function _closeUiVisibilityHiddenDropdowns(){
+  if(!isUiFeatureVisible('composer','profile')&&typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(!isUiFeatureVisible('composer','workspace_switcher')&&typeof closeWsDropdown==='function') closeWsDropdown();
+  if(!isUiFeatureVisible('composer','model')&&typeof closeModelDropdown==='function') closeModelDropdown();
+  if(!isUiFeatureVisible('composer','reasoning')&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  if(!isUiFeatureVisible('composer','toolsets')&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+}
+
+function applyUiVisibility(){
+  document.querySelectorAll('[data-panel]').forEach(el=>{
+    const panel=el.dataset&&el.dataset.panel;
+    if(panel) _setUiVisibilityHidden(el,!isUiFeatureVisible('nav',panel));
+  });
+  document.querySelectorAll('[data-taiji-panel]').forEach(el=>{
+    const panel=el.dataset&&el.dataset.taijiPanel;
+    if(panel) _setUiVisibilityHidden(el,!isUiFeatureVisible('nav',panel));
+  });
+  document.querySelectorAll('#settingsMenu [data-settings-section]').forEach(el=>{
+    const section=el.dataset&&el.dataset.settingsSection;
+    if(section) _setUiVisibilityHidden(el,!isUiFeatureVisible('settings_sections',section));
+  });
+  const settingsDd=$('settingsSectionDropdown');
+  if(settingsDd&&settingsDd.options){
+    Array.from(settingsDd.options).forEach(opt=>{
+      const section=opt.value;
+      const hidden=!isUiFeatureVisible('settings_sections',section);
+      opt.hidden=hidden;
+      opt.disabled=hidden;
+    });
+  }
+
+  _setUiVisibilityHidden($('profileChipWrap'),!isUiFeatureVisible('composer','profile'));
+  _setUiVisibilityHidden($('btnWorkspacePanelToggle'),!isUiFeatureVisible('composer','workspace_files'));
+  _setUiVisibilityHidden($('btnWorkspacePanelEdgeToggle'),!isUiFeatureVisible('composer','workspace_files'));
+  _setUiVisibilityHidden($('composerWorkspaceChip'),!isUiFeatureVisible('composer','workspace_switcher'));
+  _setUiVisibilityHidden($('composerModelChip'),!isUiFeatureVisible('composer','model'));
+  _setUiVisibilityHidden($('composerReasoningWrap'),!isUiFeatureVisible('composer','reasoning'));
+  _setUiVisibilityHidden($('composerToolsetsWrap'),!isUiFeatureVisible('composer','toolsets'));
+  _setUiVisibilityHidden($('providerQuotaChip'),!isUiFeatureVisible('composer','quota'));
+  _setUiVisibilityHidden($('composerMobileWorkspaceAction'),!isUiFeatureVisible('composer','workspace_switcher'));
+  _setUiVisibilityHidden($('composerMobileModelAction'),!isUiFeatureVisible('composer','model'));
+  _setUiVisibilityHidden($('composerMobileReasoningAction'),!isUiFeatureVisible('composer','reasoning'));
+
+  const workspaceGroup=$('composerWorkspaceGroup');
+  if(workspaceGroup){
+    const hideWorkspaceGroup=!isUiFeatureVisible('composer','workspace_files')&&!isUiFeatureVisible('composer','workspace_switcher');
+    _setUiVisibilityHidden(workspaceGroup,hideWorkspaceGroup);
+  }
+  const mobileConfigBtn=$('composerMobileConfigBtn');
+  if(mobileConfigBtn){
+    const hasMobileComposerEntry=['workspace_switcher','model','reasoning'].some(key=>isUiFeatureVisible('composer',key));
+    _setUiVisibilityHidden(mobileConfigBtn,!hasMobileComposerEntry);
+    if(!hasMobileComposerEntry&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+  }
+
+  _closeUiVisibilityHiddenDropdowns();
+  if(typeof _currentPanel!=='undefined'&&_currentPanel&&_currentPanel!=='chat'&&!isUiFeatureVisible('nav',_currentPanel)){
+    setTimeout(()=>{ if(typeof switchPanel==='function') switchPanel('chat',{bypassSettingsGuard:true}); },0);
+  }
+  if(typeof _currentSettingsSection!=='undefined'&&_currentSettingsSection&&!isUiFeatureVisible('settings_sections',_currentSettingsSection)){
+    const next=resolveUiSettingsSection(_currentSettingsSection);
+    setTimeout(()=>{ if(next&&typeof switchSettingsSection==='function') switchSettingsSection(next); },0);
+  }
+}
+
+if(typeof window!=='undefined'){
+  window.isUiFeatureVisible=isUiFeatureVisible;
+  window.resolveUiSettingsSection=resolveUiSettingsSection;
+  window.applyUiVisibility=applyUiVisibility;
+}
+
+function _taijiFloatingEnabled(){
+  return typeof window!=='undefined'
+    && window.matchMedia
+    && window.matchMedia('(min-width:1024px)').matches
+    && !!document.querySelector('.taiji-home-shell');
+}
+
+function _taijiFloatingLayer(){
+  let layer=$(TAIJI_FLOATING_LAYER_ID);
+  if(!layer){
+    layer=document.createElement('div');
+    layer.id=TAIJI_FLOATING_LAYER_ID;
+    layer.className='taiji-floating-layer';
+    layer.setAttribute('aria-hidden','true');
+    document.body.appendChild(layer);
+  }
+  if(!_taijiFloatingListenersReady){
+    _taijiFloatingListenersReady=true;
+    window.addEventListener('scroll',_refreshTaijiFloatingPanels,true);
+    window.addEventListener('resize',_refreshTaijiFloatingPanels);
+  }
+  return layer;
+}
+
+function _syncTaijiFloatingLayerState(){
+  const layer=$(TAIJI_FLOATING_LAYER_ID);
+  if(!layer)return;
+  const hasOpen=[..._taijiFloatingPanels].some(panel=>panel&&panel.classList&&panel.classList.contains('open'));
+  layer.classList.toggle('has-open',hasOpen);
+  layer.setAttribute('aria-hidden',hasOpen?'false':'true');
+}
+
+function positionTaijiFloatingPanel(panel,anchor,opts){
+  if(!_taijiFloatingEnabled()||!panel||!anchor)return false;
+  const rect=anchor.getBoundingClientRect();
+  if(rect.width<=0||rect.height<=0)return false;
+  const options=opts||{};
+  const layer=_taijiFloatingLayer();
+  if(panel.parentElement!==layer)layer.appendChild(panel);
+  panel.classList.add('taiji-floating-popover');
+  panel.dataset.taijiFloating='1';
+  panel._taijiFloatingAnchor=anchor;
+  panel._taijiFloatingOptions=options;
+  _taijiFloatingPanels.add(panel);
+
+  const margin=Number.isFinite(options.margin)?options.margin:12;
+  const gap=Number.isFinite(options.gap)?options.gap:8;
+  const viewportW=Math.max(document.documentElement.clientWidth||0,window.innerWidth||0);
+  const viewportH=Math.max(document.documentElement.clientHeight||0,window.innerHeight||0);
+  const availableAbove=Math.max(0,rect.top-margin-gap);
+  const availableBelow=Math.max(0,viewportH-rect.bottom-margin-gap);
+  const preferBottom=options.placement==='bottom'||(availableAbove<180&&availableBelow>availableAbove);
+  const available=preferBottom?availableBelow:availableAbove;
+  const maxHeight=Math.max(150,Math.min(options.maxHeight||420,available||viewportH-(margin*2)));
+
+  panel.style.position='fixed';
+  panel.style.right='auto';
+  panel.style.bottom='auto';
+  panel.style.zIndex=String(options.zIndex||1040);
+  panel.style.maxWidth=`calc(100vw - ${margin*2}px)`;
+  panel.style.maxHeight=`${Math.floor(maxHeight)}px`;
+  panel.style.overflowY='auto';
+  panel.style.visibility='hidden';
+  if(options.minWidth){
+    panel.style.minWidth=`${Math.min(options.minWidth,viewportW-(margin*2))}px`;
+  }
+  if(options.width){
+    panel.style.width=`${Math.min(options.width,viewportW-(margin*2))}px`;
+  }else{
+    panel.style.width='';
+  }
+
+  const panelRect=panel.getBoundingClientRect();
+  const width=Math.min(panelRect.width||options.minWidth||rect.width,viewportW-(margin*2));
+  const height=Math.min(panelRect.height||maxHeight,maxHeight);
+  let left=options.align==='right'?rect.right-width:rect.left;
+  if(options.align==='center')left=rect.left+(rect.width-width)/2;
+  left=Math.max(margin,Math.min(left,viewportW-margin-width));
+  let top=preferBottom?rect.bottom+gap:rect.top-height-gap;
+  top=Math.max(margin,Math.min(top,viewportH-margin-height));
+  panel.style.left=`${Math.round(left)}px`;
+  panel.style.top=`${Math.round(top)}px`;
+  panel.style.visibility='';
+  panel.style.transformOrigin=preferBottom?'top left':'bottom left';
+  _syncTaijiFloatingLayerState();
+  return true;
+}
+
+function closeTaijiFloatingPanel(panel){
+  if(!panel)return;
+  panel.classList.remove('taiji-floating-popover');
+  panel.style.visibility='';
+  _syncTaijiFloatingLayerState();
+}
+
+function closeAllTaijiFloatingPanels(){
+  if(typeof closeProfileDropdown==='function')closeProfileDropdown();
+  if(typeof closeWsDropdown==='function')closeWsDropdown();
+  if(typeof closeModelDropdown==='function')closeModelDropdown();
+  if(typeof closeReasoningDropdown==='function')closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function')closeToolsetsDropdown();
+}
+
+function _refreshTaijiFloatingPanels(){
+  _taijiFloatingPanels.forEach(panel=>{
+    if(!panel||!panel.classList||!panel.classList.contains('open'))return;
+    const anchor=panel._taijiFloatingAnchor;
+    if(!anchor||!document.documentElement.contains(anchor)){
+      panel.classList.remove('open');
+      closeTaijiFloatingPanel(panel);
+      return;
+    }
+    positionTaijiFloatingPanel(panel,anchor,panel._taijiFloatingOptions||{});
+  });
+}
+
+if(typeof window!=='undefined'){
+  window.positionTaijiFloatingPanel=positionTaijiFloatingPanel;
+  window.closeTaijiFloatingPanel=closeTaijiFloatingPanel;
+  window.closeAllTaijiFloatingPanels=closeAllTaijiFloatingPanels;
+}
 const OFFLINE_RECHECK_MS=2500;
 let _offlineVisible=false;
 let _offlineReason='browser';
@@ -257,12 +562,13 @@ const STATUS_CARD_WRITEFLOW_PHASES=['确定方向','生成初稿','打磨发布'
 function _writeflowStatusCardFromRun(run,data){
   if(!run||!run.run_id)return null;
   data=data||{};
-  const tasks=Array.isArray(run.tasks)?run.tasks:[];
+  const internalTasks=Array.isArray(run.tasks)?run.tasks:[];
+  const tasks=Array.isArray(run.display_tasks)&&run.display_tasks.length?run.display_tasks:internalTasks;
   const members=Array.isArray(run.members)?run.members:[];
   const artifacts=Array.isArray(run.artifacts)?run.artifacts:[];
   const referenceArtifacts=Array.isArray(run.reference_artifacts)?run.reference_artifacts:[];
   const fileChanges=Array.isArray(run.file_changes)?run.file_changes:[];
-  const progress=run.progress||{};
+  const progress=run.display_progress||run.progress||{};
   const teamTitle=(data.display_team&&data.display_team.title)||run.team_title||run.team_id||data.team_id||'内容创作专家团';
   const teamCategory=(data.display_team&&data.display_team.category)||run.team_category||'写作团队';
   const teamImage=(data.display_team&&data.display_team.image)||STATUS_CARD_WRITEFLOW_TEAM_IMAGES[run.team_id]||'';
@@ -318,7 +624,7 @@ function _writeflowStatusCardFromRun(run,data){
   ];
   return {
     type:'writeflow',
-    title:'专家团队运行',
+    title:'专家团运行',
     subtitle:run.title||run.project_slug||data.project_name||'写作任务',
     sessionId:run.run_id,
     runId:run.run_id,
@@ -356,7 +662,7 @@ function _statusCardAvatarHtml(src,label,cls){
 }
 
 function _statusCardWriteflowStorageKey(card){
-  return `writeflow-status-dock:${card.runId||card.sessionId||card.subtitle||'default'}:expanded`;
+  return `writeflow-status-dock:${card.runId||card.sessionId||card.subtitle||'default'}:compact-v2-expanded`;
 }
 
 function _statusCardWriteflowExpanded(card){
@@ -370,10 +676,12 @@ function toggleWriteflowStatusCard(btn){
   const shouldExpand=card.classList.contains('is-collapsed');
   card.classList.toggle('is-expanded',shouldExpand);
   card.classList.toggle('is-collapsed',!shouldExpand);
-  btn.setAttribute('aria-expanded',shouldExpand?'true':'false');
-  btn.setAttribute('title',shouldExpand?'收起看板':'展开看板');
-  const label=btn.querySelector&&btn.querySelector('.status-card-writeflow-toggle-label');
-  if(label)label.textContent=shouldExpand?'收起':'展开';
+  card.querySelectorAll('.status-card-writeflow-toggle').forEach(toggle=>{
+    toggle.setAttribute('aria-expanded',shouldExpand?'true':'false');
+    toggle.setAttribute('title',shouldExpand?'收起看板':'展开看板');
+    const label=toggle.querySelector&&toggle.querySelector('.status-card-writeflow-toggle-label');
+    if(label)label.textContent=shouldExpand?'收起':'展开';
+  });
   const key=card.getAttribute('data-writeflow-card-key');
   if(key){
     try{localStorage.setItem(key,shouldExpand?'1':'0');}catch(_){}
@@ -428,18 +736,38 @@ function _statusCardWriteflowHtml(card,copyBtn){
   const expanded=_statusCardWriteflowExpanded(card);
   const toggleIcon=(typeof li==='function')?li('chevron-down',13):'⌄';
   const toggleBtn=`<button class="status-card-writeflow-toggle" type="button" aria-expanded="${expanded?'true':'false'}" data-writeflow-toggle="1" title="${expanded?'收起看板':'展开看板'}" onclick="toggleWriteflowStatusCard(this);event.stopPropagation()"><span class="status-card-writeflow-toggle-label">${expanded?'收起':'展开'}</span><span class="status-card-writeflow-toggle-icon">${toggleIcon}</span></button>`;
+  const currentMember=members.find(member=>_statusCardStateClass(member.status)==='running')
+    ||members.find(member=>{
+      const cls=_statusCardStateClass(member.status);
+      return cls==='issue'||cls==='waiting';
+    })
+    ||members[0]
+    ||null;
+  const currentMemberImage=currentMember
+    ? (currentMember.image||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[currentMember.id]||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[currentMember.skill]||'')
+    : teamImage;
+  const currentMemberName=currentMember?(currentMember.name||currentMember.id||'成员'):(team.title||card.title||'专家团队');
+  const currentMemberRole=currentMember?(currentMember.role||currentMember.skill||''):(team.category||card.subtitle||'');
+  const currentStateClass=currentMember?_statusCardStateClass(currentMember.status):stateClass;
+  const currentStateLabel=currentMember?(currentMember.status||card.statusLabel||card.status||'执行中'):(card.statusLabel||card.status||'执行中');
+  const miniProgress=`${done}/${total||tasks.length||2}`;
+  const miniHtml=`<div class="status-card-writeflow-mini" aria-label="专家团当前运行状态">
+    ${_statusCardAvatarHtml(currentMemberImage,currentMemberName,'status-card-writeflow-mini-avatar')}
+    <span class="status-card-writeflow-mini-main">
+      <strong>${esc(currentMemberName)}</strong>
+      <small>${esc(currentMemberRole||team.title||card.subtitle||'专家团运行')}</small>
+    </span>
+    <span class="status-card-writeflow-mini-pill ${esc(currentStateClass)}"><i></i>${esc(currentStateLabel)}</span>
+    <span class="status-card-writeflow-mini-meta"><b>${esc(phase)}</b><small>阶段</small></span>
+    <span class="status-card-writeflow-mini-meta"><b>${esc(miniProgress)}</b><small>任务</small></span>
+    <span class="status-card-writeflow-mini-actions">${toggleBtn}</span>
+  </div>`;
   const metricHtml=[
     {label:'成员',value:String(members.length||0)},
     {label:'当前',value:activeLabel},
     {label:'完成',value:`${memberDone}/${members.length||0}`},
     {label:'产物',value:String(readyArtifacts.length||0)},
   ].map(item=>`<span class="status-card-writeflow-metric"><b>${esc(item.value)}</b><small>${esc(item.label)}</small></span>`).join('');
-  const compactHtml=[
-    {label:'状态',value:card.statusLabel||card.status||'执行中',cls:`status-card-writeflow-compact-badge ${stateClass}`},
-    {label:'阶段',value:phase},
-    {label:'当前',value:activeLabel},
-    {label:'任务',value:`${done}/${total||tasks.length||2}`},
-  ].map(item=>`<span class="${esc(item.cls||'')}"><b>${esc(item.value)}</b><small>${esc(item.label)}</small></span>`).join('');
   const phaseHtml=STATUS_CARD_WRITEFLOW_PHASES.map((label,idx)=>{
     const cls=idx<phaseIdx?'done':(idx===phaseIdx?'active':'todo');
     return `<span class="status-card-writeflow-phase ${cls}"><i>${idx+1}</i><b>${esc(label)}</b></span>`;
@@ -489,6 +817,7 @@ function _statusCardWriteflowHtml(card,copyBtn){
   const artifactHtml=artifacts.length?artifacts.slice(0,6).map(item=>artifactItemHtml(item,false)).join(''):'<span class="status-card-writeflow-empty">等待本轮产物生成</span>';
   const referenceArtifactHtml=referenceArtifacts.length?referenceArtifacts.slice(0,6).map(item=>artifactItemHtml(item,true)).join(''):'';
   return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}">
+    ${miniHtml}
     <div class="status-card-head status-card-writeflow-head">
       <div class="status-card-title-wrap">
         <div class="status-card-writeflow-team">
@@ -502,7 +831,6 @@ function _statusCardWriteflowHtml(card,copyBtn){
       <div class="status-card-actions">${copyBtn}${toggleBtn}</div>
     </div>
     <div class="status-card-writeflow-body">
-      <div class="status-card-writeflow-compact">${compactHtml}</div>
       <div class="status-card-writeflow-overview">
         <span class="status-card-writeflow-badge ${esc(stateClass)}">${esc(card.statusLabel||card.status||'执行中')}</span>
         ${metricHtml}
@@ -570,13 +898,13 @@ function renderWriteflowStatusDock(card){
   }
   const activeSid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
   const sourceSid=card.sourceSessionId||card.source_session_id||'';
-  if(sourceSid&&activeSid&&sourceSid!==activeSid){
+  if(!sourceSid||!activeSid||sourceSid!==activeSid){
     return clearWriteflowStatusDock();
   }
   dock.innerHTML=_statusCardHtml(card);
   dock.hidden=false;
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
-  dock.dataset.writeflowSourceSessionId=sourceSid||activeSid||'';
+  dock.dataset.writeflowSourceSessionId=sourceSid;
   return true;
 }
 
@@ -965,9 +1293,11 @@ document.addEventListener('click', e => {
   if(sessionLink){
     const href=sessionLink.getAttribute('href')||'';
     const m=href.match(/(?:^|\/)session\/([^?#]+)/i);
-    if(m&&typeof loadSession==='function'){
+    if(m&&(typeof openChatSession==='function'||typeof loadSession==='function')){
       e.preventDefault();
-      try{loadSession(decodeURIComponent(m[1]));}catch(_){loadSession(m[1]);}
+      const sid=(()=>{try{return decodeURIComponent(m[1]);}catch(_){return m[1];}})();
+      if(typeof openChatSession==='function') openChatSession(sid);
+      else loadSession(sid);
     }
     return;
   }
@@ -1142,7 +1472,7 @@ function renderProviderQuotaIndicator(status){
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
   // Default is off (window._showQuotaChip defaults to false in boot.js) so users
   // never see the chip unless they opt in.
-  if(window._showQuotaChip!==true){
+  if(window._showQuotaChip!==true||(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','quota'))){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
@@ -1162,7 +1492,7 @@ function renderProviderQuotaIndicator(status){
 async function refreshProviderQuotaIndicator(){
   // Short-circuit before the fetch when the chip is disabled — no point asking
   // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
+  if(window._showQuotaChip!==true||(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','quota'))){
     const chip=$('providerQuotaChip');
     if(chip){chip.hidden=true;chip.removeAttribute('title');}
     return;
@@ -1725,7 +2055,7 @@ async function _fetchLiveModels(provider, sel){
 
 /**
  * Check if the given model ID belongs to a different provider than the one
- * currently configured in Hermes. Returns a warning string if mismatched,
+ * currently configured in taiji Agent. Returns a warning string if mismatched,
  * or null if the selection looks compatible.
  *
  * Provider detection is intentionally loose — we compare the model's slash
@@ -1747,7 +2077,7 @@ function _checkProviderMismatch(modelId){
   const norm=p=>aliases[p]||p;
   if(norm(modelProvider)!==norm(ap)){
     return (window.t?window.t('provider_mismatch_warning',modelId,ap):
-      `"${modelId}" may not work with your configured provider (${ap}). Send anyway or run \`hermes model\` to switch.`);
+      `"${modelId}" may not work with your configured provider (${ap}). Send anyway or run \`taiji Agent model\` to switch.`);
   }
   return null;
 }
@@ -1837,6 +2167,7 @@ function _positionModelDropdown(){
   const panel=$('composerMobileConfigPanel');
   const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:(chip&&chip.offsetParent?chip:mobileAction);
   if(!anchor) return;
+  if(window.positionTaijiFloatingPanel&&window.positionTaijiFloatingPanel(dd,anchor,{minWidth:280,maxHeight:420,align:'left'}))return;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -2096,6 +2427,10 @@ async function selectModelFromDropdown(value){
 }
 
 async function toggleModelDropdown(){
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','model')){
+    closeModelDropdown();
+    return;
+  }
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const sel=$('modelSelect');
@@ -2124,6 +2459,7 @@ function closeModelDropdown(){
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
   if(dd) dd.classList.remove('open');
+  if(window.closeTaijiFloatingPanel)window.closeTaijiFloatingPanel(dd);
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
 }
@@ -2205,6 +2541,15 @@ function _applyReasoningChip(eff){
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','reasoning')){
+    wrap.hidden=true;
+    if(mobileAction) mobileAction.hidden=true;
+    closeReasoningDropdown();
+    return;
+  }else{
+    if(wrap.dataset.uiVisibilityHidden!=='1') wrap.hidden=false;
+    if(mobileAction&&mobileAction.dataset.uiVisibilityHidden!=='1') mobileAction.hidden=false;
+  }
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
     ?null
     :_currentReasoningEffortsSupported;
@@ -2250,6 +2595,10 @@ function _highlightReasoningOption(effort){
 }
 
 function toggleReasoningDropdown(){
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','reasoning')){
+    closeReasoningDropdown();
+    return;
+  }
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
   if(!dd||!chip) return;
@@ -2275,6 +2624,7 @@ function _positionReasoningDropdown(){
   if(!dd||!chip||!footer) return;
   const panel=$('composerMobileConfigPanel');
   const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  if(window.positionTaijiFloatingPanel&&window.positionTaijiFloatingPanel(dd,anchor,{minWidth:150,maxHeight:320,align:'left'}))return;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -2288,6 +2638,7 @@ function closeReasoningDropdown(){
   const chip=$('composerReasoningChip');
   const mobileAction=$('composerMobileReasoningAction');
   if(dd) dd.classList.remove('open');
+  if(window.closeTaijiFloatingPanel)window.closeTaijiFloatingPanel(dd);
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
 }
@@ -2322,6 +2673,13 @@ function _applyToolsetsChip(toolsets) {
   const label = $('composerToolsetsLabel');
   const chip = $('composerToolsetsChip');
   if (!wrap || !label) return;
+  if (typeof isUiFeatureVisible === 'function' && !isUiFeatureVisible('composer', 'toolsets')) {
+    wrap.hidden = true;
+    closeToolsetsDropdown();
+    return;
+  } else if (wrap.dataset.uiVisibilityHidden !== '1') {
+    wrap.hidden = false;
+  }
   // Visibility is controlled entirely by responsive CSS — the chip shows only
   // at wide composer-footer widths (>= 1100px container query). At narrower
   // widths the layout is too cramped (model + reasoning + profile + workspace
@@ -2386,6 +2744,7 @@ function _positionToolsetsDropdown() {
   // 1100px container threshold while dropdown was open), don't try to anchor
   // to a zero-rect element — close the dropdown instead. (#1431)
   if (chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  if(window.positionTaijiFloatingPanel&&window.positionTaijiFloatingPanel(dd,chip,{minWidth:300,maxHeight:360,align:'right'}))return;
   const chipRect = chip.getBoundingClientRect();
   const footerRect = footer.getBoundingClientRect();
   let left = chipRect.left - footerRect.left;
@@ -2395,6 +2754,10 @@ function _positionToolsetsDropdown() {
 }
 
 function toggleToolsetsDropdown() {
+  if (typeof isUiFeatureVisible === 'function' && !isUiFeatureVisible('composer', 'toolsets')) {
+    closeToolsetsDropdown();
+    return;
+  }
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
   if (!dd || !chip) return;
@@ -2421,6 +2784,7 @@ function closeToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
   if (dd) dd.classList.remove('open');
+  if(window.closeTaijiFloatingPanel)window.closeTaijiFloatingPanel(dd);
   if (chip) chip.classList.remove('active');
 }
 
@@ -2508,6 +2872,11 @@ function closeMobileComposerConfig(){
 function toggleMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
+  const btn=$('composerMobileConfigBtn');
+  if(btn&&btn.hidden){
+    closeMobileComposerConfig();
+    return;
+  }
   const open=panel.classList.contains('open');
   if(open){
     closeMobileComposerConfig();
@@ -5177,7 +5546,7 @@ document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
 
-// ── Hermes agent/gateway heartbeat alert (#716) ──
+// ── taiji Agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
 const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
 let _agentHealthTimer=null;
@@ -5202,7 +5571,7 @@ function _showAgentHealthAlert(payload){
   const title=$('agentHealthTitle');
   const details=$('agentHealthDetails');
   if(!banner) return;
-  if(title) title.textContent='Hermes Agent 无响应';
+  if(title) title.textContent='taiji Agent 无响应';
   const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
   if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
   banner.hidden=false;
@@ -5261,7 +5630,7 @@ async function refreshSession() {
   if (!S.session) return;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
-    S.session = data.session;
+    S.session = typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session;
     S.messages = data.session.messages || [];
     const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
@@ -5748,7 +6117,11 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
+  if(document.querySelector('.taiji-home-shell')){
+    document.title=assistantDisplayName();
+  }else{
+    document.title=sessionTitle+' \u2014 '+assistantDisplayName();
+  }
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
@@ -5914,10 +6287,11 @@ function _formatTurnTps(value){
 function isTpsDisplayEnabled(){
   return window._showTps===true;
 }
-function _assistantRoleHtml(tsTitle='', tpsText=''){
+function _assistantRoleHtml(tsTitle='', tpsText='', tsTime=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
+  const time=tsTime?`<span class="msg-role-time">${esc(tsTime)}</span>`:'';
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant"><img src="static/assets/taiji/logo/logo-mark.png" alt="" width="28" height="28"><span>${esc(_bn.charAt(0).toUpperCase())}</span></div><span class="msg-role-name">${esc(_bn)}</span>${time}${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
@@ -5937,12 +6311,12 @@ function _setAssistantTurnTps(turn, tpsText=''){
 function _setLiveAssistantTps(value){
   _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
 }
-function _createAssistantTurn(tsTitle='', tpsText=''){
+function _createAssistantTurn(tsTitle='', tpsText='', tsTime=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
   row.dataset.role='assistant';
   if(S.session) row.dataset.sessionId=S.session.session_id;
-  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
+  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText, tsTime)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
 function _assistantTurnBlocks(turn){
@@ -7100,7 +7474,7 @@ function renderMessages(options){
     }
 
     if(!currentAssistantTurn){
-      currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+      currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'', tsTime);
       inner.appendChild(currentAssistantTurn);
     }
     const seg=document.createElement('div');
@@ -9387,7 +9761,7 @@ async function promptNewFile(){
     if(!ws) return;
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(r.session,ws):r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -9409,7 +9783,7 @@ async function promptNewFolder(){
     if(!ws) return;
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(r.session,ws):r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -9421,7 +9795,8 @@ async function promptNewFolder(){
     showToast(t('folder_created')+name.trim());
     await loadDir(S.currentDir);
     // Offer to add the new folder as a space (#782)
-    const absPath=S.session.workspace?((S.currentDir==='.'?S.session.workspace:S.session.workspace+'/'+S.currentDir)+'/'+name.trim()):null;
+    const sessionWorkspace=(typeof chatRequestWorkspace==='function'?chatRequestWorkspace():(S.session&&S.session.workspace));
+    const absPath=sessionWorkspace?((S.currentDir==='.'?sessionWorkspace:sessionWorkspace+'/'+S.currentDir)+'/'+name.trim()):null;
     if(absPath){
       const addAsSpace=await showConfirmDialog({
         title:t('folder_add_as_space_title'),

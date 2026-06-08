@@ -199,17 +199,28 @@ function syncWorkspacePanelUI(){
   const isOpen=isCompact?mobileOpen:desktopOpen;
   const canBrowse=!!S.session||_hasWorkspacePreviewVisible()||!!(S._profileDefaultWorkspace);
   const hasPreview=_hasWorkspacePreviewVisible();
+  const workspaceFilesVisible=typeof isUiFeatureVisible!=='function'||isUiFeatureVisible('composer','workspace_files');
   if(toggleBtn){
+    if(!workspaceFilesVisible){
+      toggleBtn.hidden=true;
+    }else if(toggleBtn.dataset.uiVisibilityHidden!=='1'){
+      toggleBtn.hidden=false;
+    }
     toggleBtn.classList.toggle('active',isOpen);
     toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
     _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
-    toggleBtn.disabled=!canBrowse;
+    toggleBtn.disabled=!workspaceFilesVisible||!canBrowse;
   }
   if(edgeToggleBtn){
+    if(!workspaceFilesVisible){
+      edgeToggleBtn.hidden=true;
+    }else if(edgeToggleBtn.dataset.uiVisibilityHidden!=='1'){
+      edgeToggleBtn.hidden=false;
+    }
     edgeToggleBtn.classList.toggle('active',isOpen);
     edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false');
     _setButtonTooltip(edgeToggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
-    edgeToggleBtn.disabled=!canBrowse;
+    edgeToggleBtn.disabled=!workspaceFilesVisible||!canBrowse;
   }
   if(collapseBtn){
     _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');
@@ -392,6 +403,10 @@ function closeMobileWorkspacePanelFromChat(e){
   closeWorkspacePanel();
 }
 function toggleWorkspacePanel(force){
+  if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('composer','workspace_files')){
+    closeWorkspacePanel();
+    return;
+  }
   const {panel}= _workspacePanelEls();
   if(!panel)return;
   const currentlyOpen=_workspacePanelMode!=='closed';
@@ -439,7 +454,38 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
-  if(!SpeechRecognition&&!_canRecordAudio) return; // Browser unsupported — mic button stays hidden
+  const btn=$('btnMic');
+  const status=$('micStatus');
+  const ta=$('msg');
+  const statusText=status?status.querySelector('.status-text'):null;
+
+  function _micUnavailableText(){
+    const text=t('mic_unavailable');
+    return text&&text!=='mic_unavailable'?text:t('mic_network');
+  }
+
+  function _showMicUnavailable(){
+    if(status){
+      status.style.display='';
+      if(statusText) statusText.textContent=_micUnavailableText()||'Microphone unavailable';
+      setTimeout(()=>{
+        if(!window._micActive) status.style.display='none';
+      },2200);
+    }
+    showToast(_micUnavailableText());
+  }
+
+  if(!SpeechRecognition&&!_canRecordAudio){
+    if(btn){
+      btn.style.display='';
+      btn.disabled=true;
+      btn.classList.add('is-unavailable');
+      btn.setAttribute('aria-disabled','true');
+      btn.setAttribute('data-tooltip',_micUnavailableText());
+      btn.onclick=()=>_showMicUnavailable();
+    }
+    return;
+  }
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
@@ -452,11 +498,9 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   // raw-audio toggle changes mid-recording (#3169 Codex review).
   let _activeCaptureMode = null;
 
-  const btn=$('btnMic');
-  const status=$('micStatus');
-  const ta=$('msg');
-  const statusText=status?status.querySelector('.status-text'):null;
   btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
+  btn.disabled=false;
+  btn.removeAttribute('aria-disabled');
 
   let recognition=(!_forceMediaRecorder&&SpeechRecognition)?new SpeechRecognition():null;
   let mediaRecorder=null;
@@ -735,11 +779,21 @@ window._micPendingSend=window._micPendingSend||false;
     try{ return localStorage.getItem('hermes-voice-mode-button')==='true'; }
     catch(_){ return false; }
   }
+  function _taijiVoiceModePrimarySurfaceEnabled(){
+    const root=document.documentElement;
+    return !(root&&root.dataset&&root.dataset.taijiDesktop==='1');
+  }
   let _voiceModeActive=false;
 
   function _applyVoiceModePref(){
     const enabled = _voiceModePrefEnabled();
-    modeBtn.style.display = enabled ? '' : 'none';
+    const showPrimary=enabled && _taijiVoiceModePrimarySurfaceEnabled();
+    modeBtn.hidden=!showPrimary;
+    if(showPrimary){
+      modeBtn.style.removeProperty('display');
+    }else{
+      modeBtn.style.setProperty('display','none','important');
+    }
     if(!enabled && _voiceModeActive) _deactivate();
   }
   _applyVoiceModePref();
@@ -1067,6 +1121,7 @@ $('btnNewChat').onclick=async()=>{
      && !S.busy
      && !S.session.active_stream_id
      && !S.session.pending_user_message){
+    if(typeof _resetWriteflowDockForSessionChange==='function') _resetWriteflowDockForSessionChange('new-chat-empty-focus');
     $('msg').focus();closeMobileSidebar();return;
   }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
@@ -1075,13 +1130,13 @@ $('btnDownload').onclick=()=>{
   if(!S.session)return;
   const blob=new Blob([transcript()],{type:'text/markdown'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+  a.download=`taiji-agent-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
 };
 $('btnExportJSON').onclick=()=>{
   if(!S.session)return;
   const url=`/api/session/export?session_id=${encodeURIComponent(S.session.session_id)}`;
   const a=document.createElement('a');a.href=url;
-  a.download=`hermes-${S.session.session_id}.json`;a.click();
+  a.download=`taiji-agent-${S.session.session_id}.json`;a.click();
 };
 $('btnImportJSON').onclick=()=>$('importFileInput').click();
 $('importFileInput').onchange=async(e)=>{
@@ -1167,7 +1222,7 @@ $('modelSelect').onchange=async()=>{
   }
   const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
     session_id:S.session.session_id,
-    workspace:S.session.workspace,
+    workspace:(typeof chatRequestWorkspace==='function'?chatRequestWorkspace():S.session.workspace),
     model:modelState.model,
     model_provider:modelState.model_provider||null,
   })});
@@ -1178,7 +1233,7 @@ $('modelSelect').onchange=async()=>{
     }
   }
   _applySessionContextMetadataUpdate(data);
-  // Warn if selected model belongs to a different provider than what Hermes is configured for
+  // Warn if selected model belongs to a different provider than what taiji Agent is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
     if(warn&&typeof showToast==='function') showToast(warn,4000);
@@ -1322,6 +1377,7 @@ document.addEventListener('keydown',async e=>{
        && !S.busy
        && !S.session.active_stream_id
        && !S.session.pending_user_message){
+      if(typeof _resetWriteflowDockForSessionChange==='function') _resetWriteflowDockForSessionChange('new-chat-shortcut-empty-focus');
       $('msg').focus();return;
     }
     // Cmd/Ctrl+K should always create a new conversation, even while the current
@@ -1447,11 +1503,12 @@ window.addEventListener('resize',()=>{
 
 // ── Appearance helpers (theme = light/dark/system, skin = accent color) ──────
 const _THEMES=[
-  {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
+  {name:'Light', value:'light', colors:['#F4F7FD','#DBEBFC','#12B2C6']},
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
-  {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
+  {name:'System', value:'system', colors:['#F4F7FD','#0D0D1A','#12B2C6']},
 ];
 const _SKINS=[
+  {name:'taiji Agent', value:'taiji-light-glass', colors:['#DBEBFC','#12B2C6','#69CFE0']},
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
   {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
@@ -1482,8 +1539,8 @@ function _normalizeAppearance(theme,skin){
   const rawTheme=typeof theme==='string'?theme.trim().toLowerCase():'';
   const rawSkin=typeof skin==='string'?skin.trim().toLowerCase():'';
   const legacy=_LEGACY_THEME_MAP[rawTheme];
-  const nextTheme=legacy?legacy.theme:(_VALID_THEMES.has(rawTheme)?rawTheme:'dark');
-  const nextSkin=_VALID_SKINS.has(rawSkin)?rawSkin:(legacy?legacy.skin:'default');
+  const nextTheme=legacy?legacy.theme:(_VALID_THEMES.has(rawTheme)?rawTheme:'light');
+  const nextSkin=_VALID_SKINS.has(rawSkin)?rawSkin:(legacy?legacy.skin:'taiji-light-glass');
   return {theme:nextTheme,skin:nextSkin};
 }
 
@@ -1656,7 +1713,7 @@ function applyBotName(){
   const topbarTitle=$('topbarTitle');
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
-  if(msg) msg.placeholder='Message '+name+'\u2026';
+  if(msg) msg.placeholder='输入消息给 '+name+'\u2026';
 }
 
 (async()=>{
@@ -1665,6 +1722,8 @@ function applyBotName(){
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    window._uiVisibility=s.ui_visibility||null;
+    if(typeof applyUiVisibility==='function') applyUiVisibility();
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
@@ -1693,7 +1752,7 @@ function applyBotName(){
     };
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._botName=s.bot_name||'Hermes';
+    window._botName=s.bot_name||'taiji Agent';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
       window._defaultModel=s.default_model;
@@ -1783,7 +1842,7 @@ function applyBotName(){
     window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
-    window._botName='Hermes';
+    window._botName='taiji Agent';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
@@ -1907,6 +1966,7 @@ function applyBotName(){
         return;
       }
       await loadSession(saved);
+      if(urlSession&&typeof openChatSession==='function') await openChatSession(saved,{skipLoad:true});
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
@@ -2024,8 +2084,8 @@ window.addEventListener('pageshow', async (event) => {
 
 async function shutdownServer() {
   const ok = await showConfirmDialog({
-    title: (typeof t === 'function' ? t('settings_shutdown_confirm_title') : 'Stop Hermes WebUI'),
-    message: (typeof t === 'function' ? t('settings_shutdown_confirm_message') : 'Stop the Hermes WebUI server?'),
+    title: (typeof t === 'function' ? t('settings_shutdown_confirm_title') : 'Stop taiji Agent'),
+    message: (typeof t === 'function' ? t('settings_shutdown_confirm_message') : 'Stop the taiji Agent server?'),
     confirmLabel: (typeof t === 'function' ? t('settings_shutdown_confirm_btn') : 'Stop'),
     danger: true,
   });

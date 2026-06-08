@@ -215,6 +215,30 @@ class TestIndexHtmlIntegration:
         assert "sw.js?v=__WEBUI_VERSION__" in src
         assert "static/ui.js?v=__WEBUI_VERSION__" in src
 
+    def test_taiji_shell_assets_share_cache_bust_suffix(self):
+        src = INDEX.read_text(encoding="utf-8")
+        sw = SW.read_text(encoding="utf-8")
+        expected = "__WEBUI_VERSION__-taiji-shell-23"
+        for asset in (
+            "static/style.css",
+            "static/ui.js",
+            "static/panels.js",
+            "static/boot.js",
+            "static/taiji-home.js",
+            "sw.js",
+        ):
+            assert f"{asset}?v={expected}" in src
+        assert f"const VQ = '?v={expected}';" in sw
+
+        shell_versions = set(
+            re.findall(
+                r"(?:static/(?:style\.css|ui\.js|panels\.js|boot\.js|taiji-home\.js)|sw\.js)"
+                r"\?v=__WEBUI_VERSION__-taiji-shell-(\d+)",
+                src,
+            )
+        )
+        assert shell_versions == {"23"}
+
     def test_index_versions_stylesheet(self):
         """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
         carry the same `?v=__WEBUI_VERSION__` cache-bust query as the JS files.
@@ -481,10 +505,10 @@ class TestSessionManifestRoute:
         data = json.loads(bytes(handler.body).decode("utf-8"))
         assert isinstance(data, dict)
 
-    def test_session_manifest_json_has_hermes_name(self):
+    def test_session_manifest_json_has_taiji_name(self):
         handler = self._get("/session/manifest.json")
         data = json.loads(bytes(handler.body).decode("utf-8"))
-        assert data.get("name") == "Hermes"
+        assert data.get("name") == "taiji Agent"
 
     def test_session_manifest_json_has_512_icon(self):
         handler = self._get("/session/manifest.json")
@@ -516,7 +540,7 @@ class TestSessionManifestRoute:
     def test_session_manifest_webmanifest_is_parseable_json(self):
         handler = self._get("/session/manifest.webmanifest")
         data = json.loads(bytes(handler.body).decode("utf-8"))
-        assert data.get("name") == "Hermes"
+        assert data.get("name") == "taiji Agent"
 
     def test_session_manifest_webmanifest_is_not_html(self):
         handler = self._get("/session/manifest.webmanifest")
@@ -546,10 +570,10 @@ class TestRootManifestRoute:
             f"expected application/manifest+json, got {ct!r}"
         )
 
-    def test_root_manifest_json_has_hermes_name_and_512_icon(self):
+    def test_root_manifest_json_has_taiji_name_and_512_icon(self):
         handler = self._get("/manifest.json")
         data = json.loads(bytes(handler.body).decode("utf-8"))
-        assert data.get("name") == "Hermes"
+        assert data.get("name") == "taiji Agent"
         icons = data.get("icons", [])
         sizes = [icon.get("sizes", "") for icon in icons]
         assert any("512" in s for s in sizes)

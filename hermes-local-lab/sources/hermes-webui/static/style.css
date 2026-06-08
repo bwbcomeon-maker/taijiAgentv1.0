@@ -1,5 +1,5 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  /* ── Light mode (default) — warm gold-tinted palette from Hermes brand ── */
+  /* ── Light mode (default) ── */
   :root {
     --bg:#FEFCF7;--sidebar:#FAF7F0;--border:#E0D8C8;--border2:rgba(0,0,0,0.15);
     --text:#1A1610;--muted:#5C5344;--accent:#B8860B;--blue:#0288A8;--gold:#8B6508;--code-bg:#F5F0E5;
@@ -95,6 +95,516 @@
     --surface-subtle:rgba(255,255,255,.025);--surface-subtle-hover:rgba(255,255,255,.045);
     --border-subtle:rgba(255,255,255,.075);--border-muted:rgba(255,255,255,.12);
   }
+  /* ── Skin: taiji Agent Light Glass ──
+     Full palette rewrite for a crisp, light glassmorphism enterprise UI. */
+  :root[data-skin="taiji-light-glass"],
+  :root.dark[data-skin="taiji-light-glass"]{
+    --color-bg-from:#DBEBFC;
+    --color-bg-to:#F4F7FD;
+    --color-bg-atmosphere:#D4E4F5;
+    --color-accent-500:#12B2C6;
+    --color-accent-400:#4FC8D9;
+    --color-accent-300:#69CFE0;
+    --color-surface-glass:rgba(255,255,255,.78);
+    --color-surface-glass-strong:rgba(255,255,255,.82);
+    --color-surface-card:rgba(255,255,255,.88);
+    --color-border-glass:#EFF6FE;
+    --color-border-soft:#EAF2FB;
+    --color-border-highlight:#D7EAFC;
+    --color-text-primary:#2B4568;
+    --color-text-body:#5A6F8E;
+    --color-text-secondary:#7A8CA4;
+    --color-text-placeholder:#8E9CAF;
+    --color-text-nav:#345172;
+    --bg:#F4F7FD;
+    --sidebar:rgba(255,255,255,.78);
+    --surface:rgba(255,255,255,.88);
+    --main-bg:rgba(244,247,253,.58);
+    --topbar-bg:rgba(255,255,255,.82);
+    --border:#EFF6FE;
+    --border2:rgba(215,234,252,.92);
+    --text:#2B4568;
+    --muted:#7A8CA4;
+    --strong:#203A5C;
+    --em:#5A6F8E;
+    --accent:#12B2C6;
+    --accent-hover:#0D9CAF;
+    --accent-text:#0B879A;
+    --accent-bg:rgba(18,178,198,.10);
+    --accent-bg-strong:rgba(18,178,198,.18);
+    --blue:#12B2C6;
+    --gold:#12B2C6;
+    --code-bg:rgba(240,243,248,.90);
+    --input-bg:rgba(255,255,255,.70);
+    --hover-bg:rgba(18,178,198,.08);
+    --focus-ring:rgba(18,178,198,.28);
+    --focus-glow:rgba(18,178,198,.10);
+    --code-inline-bg:rgba(43,69,104,.08);
+    --code-text:#245D7A;
+    --pre-text:#2B4568;
+    --surface-subtle:rgba(255,255,255,.56);
+    --surface-subtle-hover:rgba(255,255,255,.76);
+    --border-subtle:rgba(215,234,252,.78);
+    --border-muted:rgba(215,234,252,.95);
+    --radius-sm:8px;
+    --radius-md:12px;
+    --radius-card:18px;
+    --radius-lg:22px;
+    --font-ui:"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    --taiji-shadow-panel:0 10px 30px rgba(33,66,118,.08),0 2px 8px rgba(33,66,118,.04),inset 0 1px 0 rgba(255,255,255,.65);
+    --taiji-shadow-card:0 6px 18px rgba(33,66,118,.06),0 1px 4px rgba(33,66,118,.04);
+    --taiji-shadow-active:0 8px 20px rgba(18,178,198,.22),0 2px 8px rgba(18,178,198,.12),inset 0 1px 0 rgba(255,255,255,.35);
+    --user-bubble-bg:linear-gradient(90deg,#12B2C6 0%,#4FC8D9 48%,#69CFE0 100%);
+    --user-bubble-border:rgba(18,178,198,.28);
+    --user-bubble-text:#FFFFFF;
+    --user-bubble-placeholder:#8E9CAF;
+    --taiji-logo-mark:url("assets/taiji/logo/logo-mark.png");
+    --taiji-bg-image:url("assets/taiji/background/background-grid.png");
+    --taiji-nav-chat:url("assets/taiji/nav/nav-chat.png");
+    --taiji-nav-tasks:url("assets/taiji/nav/nav-tasks.png");
+    --taiji-nav-kanban:url("assets/taiji/nav/nav-kanban.png");
+    --taiji-nav-writing:url("assets/taiji/nav/nav-writing.png");
+    --taiji-nav-skills:url("assets/taiji/nav/nav-skills.png");
+    --taiji-nav-memory:url("assets/taiji/nav/nav-memory.png");
+    --taiji-nav-workspaces:url("assets/taiji/nav/nav-workspaces.png");
+    --taiji-nav-profiles:url("assets/taiji/nav/nav-profiles.png");
+    --taiji-nav-todos:url("assets/taiji/nav/nav-todos.png");
+    --taiji-nav-insights:url("assets/taiji/nav/nav-insights.png");
+    --taiji-nav-logs:url("assets/taiji/nav/nav-logs.png");
+    --taiji-nav-settings:url("assets/taiji/nav/nav-settings.png");
+    --taiji-nav-dashboard:url("assets/taiji/nav/nav-dashboard.png");
+    --taiji-action-attach:url("assets/taiji/action/action-attach.png");
+    --taiji-action-voice:url("assets/taiji/action/action-voice.png");
+    --taiji-action-user:url("assets/taiji/action/action-user.png");
+    --taiji-action-folder:url("assets/taiji/action/action-folder.png");
+    --taiji-action-model:url("assets/taiji/action/action-model.png");
+    --taiji-action-mode:url("assets/taiji/action/action-mode.png");
+    --taiji-action-scope:url("assets/taiji/action/action-scope.png");
+    --taiji-action-send:url("assets/taiji/action/action-send.png");
+    --taiji-user-avatar:url("assets/taiji/avatar/avatar-user.png");
+  }
+  :root.dark[data-skin="taiji-light-glass"]{color-scheme:light;}
+  :root[data-skin="taiji-light-glass"],
+  :root[data-skin="taiji-light-glass"] body{font-family:var(--font-ui);}
+  body{
+    background:
+      linear-gradient(135deg,rgba(219,235,252,.90) 0%,rgba(244,247,253,.95) 100%),
+      var(--taiji-bg-image),
+      linear-gradient(135deg,var(--color-bg-from) 0%,var(--color-bg-to) 100%);
+    background-size:cover,cover,auto;
+    background-position:center,center,center;
+    background-attachment:fixed,fixed,scroll;
+    color:var(--text);
+  }
+  :root[data-skin="taiji-light-glass"]{background:#DBEBFC;overflow-x:hidden;}
+  :root[data-skin="taiji-light-glass"] .app-titlebar,
+  :root[data-skin="taiji-light-glass"] .rail,
+  :root[data-skin="taiji-light-glass"] .sidebar,
+  :root[data-skin="taiji-light-glass"] .rightpanel,
+  :root[data-skin="taiji-light-glass"] .composer-wrap{
+    background:var(--color-surface-glass);
+    border-color:var(--color-border-glass);
+    box-shadow:var(--taiji-shadow-panel);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  :root[data-skin="taiji-light-glass"] .main,
+  :root[data-skin="taiji-light-glass"] .main-view{
+    background:transparent;
+  }
+  :root[data-skin="taiji-light-glass"] .app-titlebar-title,
+  :root[data-skin="taiji-light-glass"] .panel-head,
+  :root[data-skin="taiji-light-glass"] .main-view-title,
+  :root[data-skin="taiji-light-glass"] .settings-section-title{
+    color:var(--color-text-primary);
+    font-weight:700;
+    letter-spacing:0;
+  }
+  :root[data-skin="taiji-light-glass"] .app-titlebar-icon{
+    width:22px;height:22px;border-radius:8px;
+    display:inline-flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,.72);
+    box-shadow:0 0 0 1px rgba(18,178,198,.18),0 4px 12px rgba(18,178,198,.18);
+    overflow:hidden;
+  }
+  :root[data-skin="taiji-light-glass"] .app-titlebar-icon img{width:100%;height:100%;object-fit:contain;display:block;}
+  :root[data-skin="taiji-light-glass"] .empty-logo{
+    width:88px;height:88px;border-radius:24px;
+    display:flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,.58);
+    border:1px solid var(--color-border-highlight);
+    box-shadow:var(--taiji-shadow-card);
+    margin:0 auto 18px;
+  }
+  :root[data-skin="taiji-light-glass"] .empty-logo img{width:76px;height:76px;object-fit:contain;display:block;}
+  :root[data-skin="taiji-light-glass"] .rail-btn,
+  :root[data-skin="taiji-light-glass"] .nav-tab,
+  :root[data-skin="taiji-light-glass"] .panel-head-btn,
+  :root[data-skin="taiji-light-glass"] .icon-btn,
+  :root[data-skin="taiji-light-glass"] .sm-btn,
+  :root[data-skin="taiji-light-glass"] .btn,
+  :root[data-skin="taiji-light-glass"] .composer-mobile-config-action{
+    border-radius:12px;
+    color:var(--color-text-nav);
+  }
+  :root[data-skin="taiji-light-glass"] .rail-btn:hover,
+  :root[data-skin="taiji-light-glass"] .nav-tab:hover,
+  :root[data-skin="taiji-light-glass"] .panel-head-btn:hover,
+  :root[data-skin="taiji-light-glass"] .icon-btn:hover,
+  :root[data-skin="taiji-light-glass"] .sm-btn:hover,
+  :root[data-skin="taiji-light-glass"] .btn:hover{
+    background:rgba(255,255,255,.72);
+    color:var(--color-text-primary);
+    border-color:var(--color-border-highlight);
+  }
+  :root[data-skin="taiji-light-glass"] .rail-btn.active,
+  :root[data-skin="taiji-light-glass"] .nav-tab.active,
+  :root[data-skin="taiji-light-glass"] .project-chip.active,
+  :root[data-skin="taiji-light-glass"] .profile-opt.active,
+  :root[data-skin="taiji-light-glass"] .theme-pick-btn.active,
+  :root[data-skin="taiji-light-glass"] .skin-pick-btn.active,
+  :root[data-skin="taiji-light-glass"] .font-size-pick-btn.active{
+    background:linear-gradient(90deg,#12B2C6 0%,#4FC8D9 48%,#69CFE0 100%)!important;
+    color:#fff!important;
+    border-color:transparent!important;
+    box-shadow:var(--taiji-shadow-active)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .rail-btn.active::before,
+  :root[data-skin="taiji-light-glass"] .nav-tab.active::before{background:#12B2C6;}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab,
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab{
+    position:relative;
+  }
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel] > svg,
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel] > svg,
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-dashboard-link] > svg,
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-dashboard-link] > svg{
+    width:23px;height:23px;
+    opacity:1;
+    color:transparent;
+    stroke:transparent;
+    fill:transparent;
+    background-color:var(--color-text-nav);
+    -webkit-mask-image:var(--taiji-nav-icon);
+    -webkit-mask-position:center;
+    -webkit-mask-size:contain;
+    -webkit-mask-repeat:no-repeat;
+    mask-image:var(--taiji-nav-icon);
+    mask-position:center;
+    mask-size:contain;
+    mask-repeat:no-repeat;
+    pointer-events:none;
+    flex:0 0 23px;
+  }
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab.active > svg,
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab.active > svg{
+    background-color:#fff;
+    filter:drop-shadow(0 2px 4px rgba(13,156,175,.16));
+  }
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="chat"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="chat"]{--taiji-nav-icon:var(--taiji-nav-chat);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="tasks"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="tasks"]{--taiji-nav-icon:var(--taiji-nav-tasks);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="kanban"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="kanban"]{--taiji-nav-icon:var(--taiji-nav-kanban);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="writing"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="writing"]{--taiji-nav-icon:var(--taiji-nav-writing);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="skills"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="skills"]{--taiji-nav-icon:var(--taiji-nav-skills);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="memory"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="memory"]{--taiji-nav-icon:var(--taiji-nav-memory);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="workspaces"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="workspaces"]{--taiji-nav-icon:var(--taiji-nav-workspaces);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="profiles"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="profiles"]{--taiji-nav-icon:var(--taiji-nav-profiles);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="todos"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="todos"]{--taiji-nav-icon:var(--taiji-nav-todos);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="insights"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="insights"]{--taiji-nav-icon:var(--taiji-nav-insights);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="logs"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="logs"]{--taiji-nav-icon:var(--taiji-nav-logs);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-panel="settings"],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-panel="settings"]{--taiji-nav-icon:var(--taiji-nav-settings);}
+  :root[data-skin="taiji-light-glass"] .rail .nav-tab[data-dashboard-link],
+  :root[data-skin="taiji-light-glass"] .sidebar-nav .nav-tab[data-dashboard-link]{--taiji-nav-icon:var(--taiji-nav-dashboard);}
+  :root[data-skin="taiji-light-glass"] .session-item,
+  :root[data-skin="taiji-light-glass"] .cron-item,
+  :root[data-skin="taiji-light-glass"] .kanban-task-card,
+  :root[data-skin="taiji-light-glass"] .insights-card,
+  :root[data-skin="taiji-light-glass"] .settings-card,
+  :root[data-skin="taiji-light-glass"] .workspace-card,
+  :root[data-skin="taiji-light-glass"] .suggestion,
+  :root[data-skin="taiji-light-glass"] .tool-card,
+  :root[data-skin="taiji-light-glass"] .model-config-panel,
+  :root[data-skin="taiji-light-glass"] .plugin-card{
+    background:var(--color-surface-card);
+    border-color:var(--color-border-soft);
+    border-radius:18px;
+    box-shadow:var(--taiji-shadow-card);
+  }
+  :root[data-skin="taiji-light-glass"] .session-item.active{
+    background:rgba(255,255,255,.92)!important;
+    border:1px solid rgba(18,178,198,.24);
+    box-shadow:var(--taiji-shadow-card),inset 3px 0 0 #12B2C6;
+    color:var(--color-text-primary)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .session-item.active .session-title,
+  :root[data-skin="taiji-light-glass"] .session-item.active .session-meta,
+  :root[data-skin="taiji-light-glass"] .session-item.active *{color:inherit;}
+  :root[data-skin="taiji-light-glass"] input,
+  :root[data-skin="taiji-light-glass"] textarea,
+  :root[data-skin="taiji-light-glass"] select,
+  :root[data-skin="taiji-light-glass"] .sidebar-search input,
+  :root[data-skin="taiji-light-glass"] .app-dialog-input{
+    background:rgba(255,255,255,.76)!important;
+    border-color:var(--color-border-highlight)!important;
+    border-radius:14px!important;
+    color:var(--color-text-primary)!important;
+  }
+  :root[data-skin="taiji-light-glass"] input::placeholder,
+  :root[data-skin="taiji-light-glass"] textarea::placeholder{color:var(--color-text-placeholder)!important;}
+  :root[data-skin="taiji-light-glass"] input:focus,
+  :root[data-skin="taiji-light-glass"] textarea:focus,
+  :root[data-skin="taiji-light-glass"] select:focus,
+  :root[data-skin="taiji-light-glass"] .composer-box:focus-within{
+    border-color:#12B2C6!important;
+    box-shadow:0 0 0 3px rgba(18,178,198,.18)!important;
+    outline:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .composer-box{
+    max-width:clamp(820px,64vw,1180px);
+    background:var(--color-surface-glass-strong)!important;
+    border:1px solid var(--color-border-highlight)!important;
+    border-radius:22px!important;
+    box-shadow:var(--taiji-shadow-panel);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  :root[data-skin="taiji-light-glass"] button.send-btn:not(:disabled),
+  :root[data-skin="taiji-light-glass"] .btn.primary,
+  :root[data-skin="taiji-light-glass"] .new-chat-btn,
+  :root[data-skin="taiji-light-glass"] .app-dialog-btn.confirm,
+  :root[data-skin="taiji-light-glass"] .clarify-submit{
+    background:linear-gradient(90deg,#12B2C6 0%,#4FC8D9 48%,#69CFE0 100%)!important;
+    border-color:transparent!important;
+    color:#fff!important;
+    box-shadow:var(--taiji-shadow-active)!important;
+    font-weight:700;
+  }
+  :root[data-skin="taiji-light-glass"] button.send-btn:disabled{
+    background:rgba(142,156,175,.18)!important;
+    color:var(--color-text-secondary)!important;
+    border-color:var(--color-border-soft)!important;
+  }
+  :root[data-skin="taiji-light-glass"] #btnAttach,
+  :root[data-skin="taiji-light-glass"] #btnMic,
+  :root[data-skin="taiji-light-glass"] #btnVoiceMode,
+  :root[data-skin="taiji-light-glass"] #btnSend,
+  :root[data-skin="taiji-light-glass"] .composer-mobile-config-btn,
+  :root[data-skin="taiji-light-glass"] #btnNewFile,
+  :root[data-skin="taiji-light-glass"] #btnNewFolder,
+  :root[data-skin="taiji-light-glass"] #btnUploadWorkspace,
+  :root[data-skin="taiji-light-glass"] #btnWorkspacePrefs{
+    position:relative;
+  }
+  :root[data-skin="taiji-light-glass"] #btnAttach > svg,
+  :root[data-skin="taiji-light-glass"] #btnMic > svg,
+  :root[data-skin="taiji-light-glass"] #btnVoiceMode > svg,
+  :root[data-skin="taiji-light-glass"] #btnSend > svg,
+  :root[data-skin="taiji-light-glass"] .composer-mobile-config-btn > svg,
+  :root[data-skin="taiji-light-glass"] #btnNewFile > svg,
+  :root[data-skin="taiji-light-glass"] #btnNewFolder > svg,
+  :root[data-skin="taiji-light-glass"] #btnUploadWorkspace > svg,
+  :root[data-skin="taiji-light-glass"] #btnWorkspacePrefs > svg,
+  :root[data-skin="taiji-light-glass"] .composer-profile-icon > svg,
+  :root[data-skin="taiji-light-glass"] .composer-workspace-icon > svg,
+  :root[data-skin="taiji-light-glass"] .composer-model-icon > svg,
+  :root[data-skin="taiji-light-glass"] .composer-reasoning-icon > svg,
+  :root[data-skin="taiji-light-glass"] .composer-toolsets-icon > svg{
+    opacity:1;
+  }
+  :root[data-skin="taiji-light-glass"] #btnAttach::after,
+  :root[data-skin="taiji-light-glass"] #btnMic::after,
+  :root[data-skin="taiji-light-glass"] #btnVoiceMode::after,
+  :root[data-skin="taiji-light-glass"] #btnSend::after,
+  :root[data-skin="taiji-light-glass"] .composer-mobile-config-btn::after,
+  :root[data-skin="taiji-light-glass"] #btnNewFile::after,
+  :root[data-skin="taiji-light-glass"] #btnNewFolder::after,
+  :root[data-skin="taiji-light-glass"] #btnUploadWorkspace::after,
+  :root[data-skin="taiji-light-glass"] #btnWorkspacePrefs::after,
+  :root[data-skin="taiji-light-glass"] .composer-profile-icon::after,
+  :root[data-skin="taiji-light-glass"] .composer-workspace-icon::after,
+  :root[data-skin="taiji-light-glass"] .composer-model-icon::after,
+  :root[data-skin="taiji-light-glass"] .composer-reasoning-icon::after,
+  :root[data-skin="taiji-light-glass"] .composer-toolsets-icon::after{
+    content:none;
+    display:none;
+  }
+  :root[data-skin="taiji-light-glass"] .composer-profile-icon,
+  :root[data-skin="taiji-light-glass"] .composer-workspace-icon,
+  :root[data-skin="taiji-light-glass"] .composer-model-icon,
+  :root[data-skin="taiji-light-glass"] .composer-reasoning-icon,
+  :root[data-skin="taiji-light-glass"] .composer-toolsets-icon{
+    position:relative;
+    width:18px;height:18px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    flex:0 0 18px;
+  }
+  :root[data-skin="taiji-light-glass"] .suggestion[data-msg="What files are in this workspace?"]{position:relative;}
+  :root[data-skin="taiji-light-glass"] .suggestion[data-msg="What files are in this workspace?"] > svg{display:none;}
+  :root[data-skin="taiji-light-glass"] .suggestion[data-msg="What files are in this workspace?"]::before{
+    content:"";
+    width:16px;height:16px;
+    background:var(--taiji-action-folder) center/contain no-repeat;
+    flex:0 0 16px;
+  }
+  :root[data-skin="taiji-light-glass"] .msg-row[data-role="user"] .msg-body{
+    background:linear-gradient(90deg,#12B2C6 0%,#4FC8D9 48%,#69CFE0 100%);
+    color:#fff;
+    border:1px solid rgba(255,255,255,.58);
+    border-radius:18px;
+    box-shadow:var(--taiji-shadow-active);
+  }
+  :root[data-skin="taiji-light-glass"] .msg-row[data-role="assistant"] .msg-body{color:var(--color-text-body);}
+  :root[data-skin="taiji-light-glass"] .app-dialog,
+  :root[data-skin="taiji-light-glass"] .kanban-modal,
+  :root[data-skin="taiji-light-glass"] .workspace-prefs-menu,
+  :root[data-skin="taiji-light-glass"] .file-ctx-menu,
+  :root[data-skin="taiji-light-glass"] .dropdown-menu{
+    background:rgba(255,255,255,.92)!important;
+    border-color:var(--color-border-highlight)!important;
+    border-radius:18px!important;
+    box-shadow:0 18px 50px rgba(33,66,118,.16)!important;
+    color:var(--color-text-primary)!important;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  :root[data-skin="taiji-light-glass"] .rightpanel.mobile-open{box-shadow:-12px 0 38px rgba(33,66,118,.16)!important;}
+  :root[data-skin="taiji-light-glass"] .onboarding-overlay{
+    background:
+      linear-gradient(135deg,rgba(219,235,252,.82),rgba(244,247,253,.92)),
+      var(--taiji-bg-image) center/cover fixed,
+      #F4F7FD!important;
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-card{
+    background:rgba(255,255,255,.86)!important;
+    border-color:var(--color-border-highlight)!important;
+    box-shadow:0 24px 80px rgba(33,66,118,.16),inset 0 1px 0 rgba(255,255,255,.72)!important;
+    backdrop-filter:blur(22px);
+    -webkit-backdrop-filter:blur(22px);
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-sidebar{
+    position:relative;
+    background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,.48))!important;
+    border-right-color:var(--color-border-highlight)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-sidebar::before{
+    content:"";
+    width:58px;height:58px;
+    display:block;
+    margin:0 0 14px;
+    border-radius:18px;
+    background:rgba(255,255,255,.62) var(--taiji-logo-mark) center/52px 52px no-repeat;
+    border:1px solid rgba(18,178,198,.18);
+    box-shadow:0 8px 24px rgba(18,178,198,.15);
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-sidebar h2{
+    color:var(--color-text-primary);
+    letter-spacing:0;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-sidebar p,
+  :root[data-skin="taiji-light-glass"] .onboarding-copy,
+  :root[data-skin="taiji-light-glass"] .onboarding-step-desc,
+  :root[data-skin="taiji-light-glass"] .onboarding-check span,
+  :root[data-skin="taiji-light-glass"] .onboarding-oauth-card p{
+    color:var(--color-text-body)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-badge{
+    background:rgba(18,178,198,.10);
+    color:#0B879A;
+    border:1px solid rgba(18,178,198,.18);
+    letter-spacing:.08em;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-step,
+  :root[data-skin="taiji-light-glass"] .onboarding-check,
+  :root[data-skin="taiji-light-glass"] .onboarding-summary div,
+  :root[data-skin="taiji-light-glass"] .onboarding-oauth-card{
+    background:rgba(255,255,255,.62)!important;
+    border-color:var(--color-border-soft)!important;
+    box-shadow:var(--taiji-shadow-card);
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-step.active,
+  :root[data-skin="taiji-light-glass"] .onboarding-step.done,
+  :root[data-skin="taiji-light-glass"] .onboarding-check.ok,
+  :root[data-skin="taiji-light-glass"] .onboarding-check.warn,
+  :root[data-skin="taiji-light-glass"] .onboarding-oauth-ready,
+  :root[data-skin="taiji-light-glass"] .onboarding-oauth-pending{
+    background:rgba(18,178,198,.08)!important;
+    border-color:rgba(18,178,198,.22)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-step-title,
+  :root[data-skin="taiji-light-glass"] .onboarding-check strong,
+  :root[data-skin="taiji-light-glass"] .onboarding-field span,
+  :root[data-skin="taiji-light-glass"] .onboarding-summary span,
+  :root[data-skin="taiji-light-glass"] .onboarding-oauth-card strong{
+    color:var(--color-text-primary)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-step-index{
+    background:rgba(255,255,255,.72);
+    color:var(--color-text-primary);
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-step.active .onboarding-step-index,
+  :root[data-skin="taiji-light-glass"] .onboarding-step.done .onboarding-step-index{
+    background:#12B2C6;
+    color:#fff;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-status{
+    background:rgba(255,255,255,.68)!important;
+    border-color:var(--color-border-highlight)!important;
+    color:var(--color-text-body)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-status.success,
+  :root[data-skin="taiji-light-glass"] .onboarding-status.warn{
+    background:rgba(18,178,198,.08)!important;
+    border-color:rgba(18,178,198,.22)!important;
+    color:#0B879A!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-field input,
+  :root[data-skin="taiji-light-glass"] .onboarding-field select,
+  :root[data-skin="taiji-light-glass"] .onboarding-probe-banner{
+    background:rgba(255,255,255,.78)!important;
+    border-color:var(--color-border-highlight)!important;
+    color:var(--color-text-primary)!important;
+    border-radius:14px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-probe-banner.onboarding-probe-ok{
+    border-color:rgba(22,164,108,.36)!important;
+    color:#0F7A52!important;
+    background:rgba(22,164,108,.10)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-probe-banner.onboarding-probe-error{
+    border-color:rgba(217,61,74,.36)!important;
+    color:#B12D3A!important;
+    background:rgba(217,61,74,.10)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .onboarding-probe-btn,
+  :root[data-skin="taiji-light-glass"] .onboarding-actions .sm-btn{
+    background:rgba(255,255,255,.72)!important;
+    border-color:var(--color-border-highlight)!important;
+    color:var(--color-text-primary)!important;
+    box-shadow:var(--taiji-shadow-card);
+  }
+  :root[data-skin="taiji-light-glass"] #onboardingNextBtn{
+    background:linear-gradient(90deg,#12B2C6 0%,#4FC8D9 48%,#69CFE0 100%)!important;
+    border-color:transparent!important;
+    color:#fff!important;
+    box-shadow:var(--taiji-shadow-active)!important;
+  }
+  :root[data-skin="taiji-light-glass"] ::selection{background:rgba(18,178,198,.24);color:var(--color-text-primary);}
   /* ── Skin: Default (gold — matches base) ── */
   /* No overrides needed — :root and .dark already use gold accent */
   /* ── Skin: Ares (red) ── */
@@ -1186,6 +1696,12 @@
   .composer-wrap.terminal-dock-visible .composer-flyout{z-index:4;}
   /* ── Approval card ── */
   .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;}
+  .approval-card:not(.visible),
+  .clarify-card:not(.visible),
+  .queue-card:not(.visible){display:none!important;visibility:hidden!important;pointer-events:none!important;}
+  .approval-card.visible,
+  .clarify-card.visible,
+  .queue-card.visible{display:block!important;visibility:visible!important;}
   .approval-card.visible{pointer-events:auto;z-index:3;}
   .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid var(--accent-bg-strong);border-radius:14px;padding:16px 18px 40px;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;}
   .approval-card.visible .approval-inner{transform:translateY(0);opacity:1;}
@@ -2063,19 +2579,14 @@
   }
 
   @container composer-footer (max-width: 700px){
-    /* Stage 1: remove long workspace/model text first to avoid clipping.
-       The left sidebar + panel layout can consume width before right panel opens, so this
-       must be container-driven and independent of panel state. */
-    .composer-workspace-label,
-    #composerWorkspaceLabel,
-    .composer-model-label,
-    .composer-model-chevron,
-    #composerModelLabel{display:none;}
-
+    /* Stage 1: hide optional controls first; keep workspace/model readable. */
+    .composer-profile-wrap,
+    .composer-reasoning-wrap,
+    .composer-toolsets-wrap{display:none!important;}
     .composer-workspace-chip,
-    .composer-model-chip{max-width:52px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
-    .composer-workspace-group{min-height:44px;}
-    .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
+    .composer-model-chip{min-height:42px;padding:6px 10px;justify-content:center;font-size:12px;}
+    .composer-workspace-group{min-height:42px;max-width:220px;}
+    .composer-workspace-files-btn{min-width:42px;padding:6px 8px;}
     .composer-divider{display:none;}
   }
 
@@ -3336,7 +3847,7 @@ main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-writing):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-writing):not(.showing-workspaces):not(.showing-profiles):not(.showing-todos):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -4038,33 +4549,39 @@ main.main > #mainPlugin{display:none;}
 .status-card-label{color:var(--muted);font-weight:550;background:rgba(0,0,0,.015);}
 .status-card-value{color:var(--text);word-break:break-word;font-family:var(--font-mono);}
 .status-card-writeflow{max-width:min(var(--msg-max),860px);background:var(--surface-subtle);}
-.writeflow-status-dock{width:100%;max-width:clamp(780px,60vw,1100px);margin:0 auto 8px;position:relative;z-index:3;}
+.writeflow-status-dock{width:100%;max-width:clamp(560px,48vw,760px);margin:0 auto 6px;position:relative;z-index:3;}
 .writeflow-status-dock[hidden]{display:none!important;}
-.writeflow-status-dock .status-card-writeflow{width:100%;max-width:none;margin:0;border-color:var(--border-subtle);box-shadow:0 12px 30px rgba(0,0,0,.12);}
-.writeflow-status-dock .status-card-writeflow.is-expanded{max-height:min(46vh,520px);overflow:auto;overscroll-behavior:contain;}
-.writeflow-status-dock .status-card-writeflow.is-collapsed .status-card-writeflow-body{padding:8px 10px 10px;}
-.writeflow-status-dock .status-card-writeflow.is-collapsed .status-card-writeflow-compact span{min-height:34px;}
+.writeflow-status-dock .status-card-writeflow{width:100%;max-width:none;margin:0;border-color:var(--border-subtle);box-shadow:0 8px 20px rgba(0,0,0,.10);}
+.writeflow-status-dock .status-card-writeflow.is-expanded{max-height:min(38vh,420px);overflow:auto;overscroll-behavior:contain;}
+.writeflow-status-dock .status-card-writeflow.is-collapsed{max-height:72px;overflow:hidden;box-shadow:0 6px 16px rgba(0,0,0,.08);}
 .status-card-writeflow-head{align-items:center;}
 .status-card-writeflow-team{display:flex;align-items:center;gap:10px;min-width:0;}
 .status-card-writeflow-team-avatar{width:42px;height:42px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;overflow:hidden;border:1px solid var(--border-subtle);background:var(--surface);}
-.status-card-writeflow-team-avatar img,.status-card-writeflow-avatar img,.status-card-task-avatar img{width:100%;height:100%;object-fit:cover;display:block;}
+.status-card-writeflow-team-avatar img,.status-card-writeflow-avatar img,.status-card-task-avatar img,.status-card-writeflow-mini-avatar img{width:100%;height:100%;object-fit:cover;display:block;}
 .status-card-avatar-fallback{display:inline-flex;align-items:center;justify-content:center;width:100%;height:100%;font-weight:700;color:var(--text);background:var(--surface-subtle-hover);}
-.status-card-writeflow-team-avatar img+.status-card-avatar-fallback,.status-card-writeflow-avatar img+.status-card-avatar-fallback,.status-card-task-avatar img+.status-card-avatar-fallback{display:none;}
+.status-card-writeflow-team-avatar img+.status-card-avatar-fallback,.status-card-writeflow-avatar img+.status-card-avatar-fallback,.status-card-task-avatar img+.status-card-avatar-fallback,.status-card-writeflow-mini-avatar img+.status-card-avatar-fallback{display:none;}
 .status-card-writeflow-toggle{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px;padding:5px 10px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--surface);color:var(--text);font-size:12px;font-weight:650;cursor:pointer;white-space:nowrap;}
 .status-card-writeflow-toggle:hover{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
 .status-card-writeflow-toggle-icon{display:inline-flex;transition:transform .16s ease;}
 .status-card-writeflow.is-expanded .status-card-writeflow-toggle-icon{transform:rotate(180deg);}
+.status-card-writeflow-mini{display:none;grid-template-columns:38px minmax(0,1fr) auto auto auto auto;gap:8px;align-items:center;min-height:52px;padding:6px 8px;}
+.status-card-writeflow.is-collapsed .status-card-writeflow-mini{display:grid;}
+.status-card-writeflow.is-collapsed .status-card-writeflow-head,.status-card-writeflow.is-collapsed .status-card-writeflow-body{display:none;}
+.status-card-writeflow-mini-avatar{width:38px;height:38px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;overflow:hidden;border:1px solid var(--border-subtle);background:var(--surface-subtle-hover);}
+.status-card-writeflow-mini-main{min-width:0;display:flex;flex-direction:column;gap:2px;}
+.status-card-writeflow-mini-main strong{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:13px;line-height:1.2;font-weight:750;}
+.status-card-writeflow-mini-main small{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:10px;line-height:1.2;}
+.status-card-writeflow-mini-pill{display:inline-flex;align-items:center;gap:5px;min-height:26px;padding:4px 8px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:700;white-space:nowrap;}
+.status-card-writeflow-mini-pill i{width:6px;height:6px;border-radius:999px;background:currentColor;}
+.status-card-writeflow-mini-pill.running{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+.status-card-writeflow-mini-pill.done{color:var(--success);border-color:color-mix(in srgb,var(--success) 35%,var(--border-subtle));background:color-mix(in srgb,var(--success) 8%,transparent);}
+.status-card-writeflow-mini-pill.waiting{color:var(--warning);border-color:color-mix(in srgb,var(--warning) 35%,var(--border-subtle));background:color-mix(in srgb,var(--warning) 8%,transparent);}
+.status-card-writeflow-mini-pill.issue{color:var(--error);border-color:color-mix(in srgb,var(--error) 35%,var(--border-subtle));background:color-mix(in srgb,var(--error) 8%,transparent);}
+.status-card-writeflow-mini-meta{min-width:46px;display:flex;flex-direction:column;align-items:flex-start;gap:1px;color:var(--muted);}
+.status-card-writeflow-mini-meta b{max-width:86px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;line-height:1.1;font-weight:750;}
+.status-card-writeflow-mini-meta small{font-size:9px;line-height:1.1;}
+.status-card-writeflow-mini-actions{display:inline-flex;align-items:center;justify-content:flex-end;}
 .status-card-writeflow-body{display:flex;flex-direction:column;gap:10px;padding:12px 14px 14px;}
-.status-card-writeflow-compact{display:none;grid-template-columns:1.05fr 1fr 1.25fr .7fr;gap:7px;align-items:stretch;}
-.status-card-writeflow.is-collapsed .status-card-writeflow-compact{display:grid;}
-.status-card-writeflow.is-collapsed .status-card-writeflow-overview,.status-card-writeflow.is-collapsed .status-card-writeflow-progress,.status-card-writeflow.is-collapsed .status-card-writeflow-phases{display:none;}
-.status-card-writeflow-compact span{min-width:0;min-height:38px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface);padding:6px 8px;display:flex;flex-direction:column;justify-content:center;}
-.status-card-writeflow-compact b{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;line-height:1.2;font-weight:700;}
-.status-card-writeflow-compact small{margin-top:3px;color:var(--muted);font-size:10px;line-height:1.2;}
-.status-card-writeflow-compact-badge.running{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
-.status-card-writeflow-compact-badge.done{color:var(--success);border-color:color-mix(in srgb,var(--success) 35%,var(--border-subtle));background:color-mix(in srgb,var(--success) 8%,transparent);}
-.status-card-writeflow-compact-badge.waiting{color:var(--warning);border-color:color-mix(in srgb,var(--warning) 35%,var(--border-subtle));background:color-mix(in srgb,var(--warning) 8%,transparent);}
-.status-card-writeflow-compact-badge.issue{color:var(--error);border-color:color-mix(in srgb,var(--error) 35%,var(--border-subtle));background:color-mix(in srgb,var(--error) 8%,transparent);}
 .status-card-writeflow-overview{display:grid;grid-template-columns:1.1fr repeat(4,minmax(0,1fr));gap:7px;align-items:stretch;}
 .status-card-writeflow-badge,.status-card-writeflow-metric{min-width:0;min-height:46px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface);padding:7px 9px;display:flex;flex-direction:column;justify-content:center;}
 .status-card-writeflow-badge{font-size:12px;font-weight:700;color:var(--muted);}
@@ -4124,7 +4641,7 @@ main.main > #mainPlugin{display:none;}
 .status-card-writeflow-artifact-actions button:hover{border-color:var(--accent-bg-strong);color:var(--accent-text);background:var(--accent-bg);}
 .status-card-writeflow-empty{display:flex;align-items:center;min-height:34px;color:var(--muted);font-size:11px;border:1px dashed var(--border-subtle);border-radius:8px;padding:7px;background:var(--surface);}
 @media (max-width:700px){.status-card{margin-left:0;}.status-card-head{flex-direction:column;}.status-card-actions{width:100%;justify-content:space-between;}.status-card-session-copy{max-width:100%;}.status-card-grid{grid-template-columns:1fr;}.status-card-label{padding-bottom:2px;border-top:1px solid var(--border-subtle);}.status-card-value{padding-top:2px;border-top:0;}}
-@media (max-width:700px){.writeflow-status-dock{max-width:100%;margin-bottom:7px;}.status-card-writeflow-head{align-items:stretch;}.status-card-writeflow-compact{grid-template-columns:repeat(2,minmax(0,1fr));}.status-card-writeflow-overview{grid-template-columns:repeat(2,minmax(0,1fr));}.status-card-writeflow-badge{grid-column:1 / -1;}.status-card-writeflow-phases{grid-template-columns:1fr;}.status-card-writeflow-members,.status-card-writeflow-tasks,.status-card-writeflow-artifacts{grid-template-columns:1fr;}.status-card-writeflow-artifact.ready{grid-template-columns:32px minmax(0,1fr);}.status-card-writeflow-artifact-actions{grid-column:2;}}
+@media (max-width:700px){.writeflow-status-dock{max-width:100%;margin-bottom:5px;}.writeflow-status-dock .status-card-writeflow.is-collapsed{max-height:72px;}.status-card-writeflow-head{align-items:stretch;}.status-card-writeflow-mini{grid-template-columns:34px minmax(0,1fr) auto auto;grid-template-rows:auto auto;gap:4px 7px;min-height:58px;padding:6px 7px;}.status-card-writeflow-mini-avatar{width:34px;height:34px;grid-row:1 / span 2;}.status-card-writeflow-mini-main{grid-row:1 / span 2;}.status-card-writeflow-mini-pill{min-height:24px;padding:3px 7px;font-size:10px;}.status-card-writeflow-mini-meta{min-width:42px;}.status-card-writeflow-mini-meta b{max-width:58px;font-size:11px;}.status-card-writeflow-mini-actions{grid-column:4;}.status-card-writeflow-overview{grid-template-columns:repeat(2,minmax(0,1fr));}.status-card-writeflow-badge{grid-column:1 / -1;}.status-card-writeflow-phases{grid-template-columns:1fr;}.status-card-writeflow-members,.status-card-writeflow-tasks,.status-card-writeflow-artifacts{grid-template-columns:1fr;}.status-card-writeflow-artifact.ready{grid-template-columns:32px minmax(0,1fr);}.status-card-writeflow-artifact-actions{grid-column:2;}}
 @media (max-width:700px){.writeflow-status-dock .status-card-writeflow-head{flex-direction:row;align-items:center;}.writeflow-status-dock .status-card-actions{width:auto;justify-content:flex-end;}.writeflow-status-dock .status-card-writeflow-team>span{min-width:0;}.writeflow-status-dock .status-card-title,.writeflow-status-dock .status-card-subtitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
 .assistant-segment-anchor { display: none; }
 
@@ -5165,4 +5682,3686 @@ main.main.showing-logs > #mainLogs{display:flex;}
 /* Cap composer width on very wide displays so the chip-cluster gap stays bounded */
 @media (min-width:1600px) {
   .composer-box{max-width:1600px;margin:0 auto;}
+}
+
+/* Taiji desktop home shell: rebuilds the landing workspace instead of skinning
+   the legacy chat layout. The legacy DOM remains mounted for API/event
+   compatibility and is hidden on desktop. */
+.taiji-home-shell{
+  display:none;
+}
+
+@media (min-width:901px){
+  body{
+    overflow:hidden;
+    margin:0;
+    color:#09264d;
+    background:#eaf7ff;
+    font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  .app-titlebar,
+  .layout,
+  .mobile-overlay,
+  .workspace-panel-edge-toggle{
+    display:none!important;
+  }
+  .taiji-home-shell{
+    --taiji-panel-bg:rgba(255,255,255,.78);
+    --taiji-panel-border:rgba(255,255,255,.9);
+    --taiji-text:#082a53;
+    --taiji-muted:#385274;
+    --taiji-cyan:#04afc3;
+    --taiji-cyan-2:#56d1dc;
+    --taiji-soft-line:rgba(28,87,137,.11);
+    --taiji-user-avatar:url("assets/taiji/avatar/avatar-user.png");
+    --taiji-brand-w:clamp(210px,13.45vw,276px);
+    --taiji-recent-w:clamp(300px,20.5vw,420px);
+    --taiji-gap:clamp(8px,.72vw,14px);
+    --taiji-shell-pad:clamp(8px,.72vw,14px);
+    box-sizing:border-box;
+    position:relative;
+    display:grid;
+    grid-template-columns:var(--taiji-brand-w) var(--taiji-recent-w) minmax(0,1fr);
+    gap:var(--taiji-gap);
+    width:100vw;
+    height:100vh;
+    padding:var(--taiji-shell-pad);
+    background:
+      radial-gradient(circle at 24% 5%,rgba(60,177,221,.26),transparent 33%),
+      linear-gradient(135deg,#ecf8ff 0%,#f8fcff 42%,#dff1ff 100%);
+  }
+  .taiji-home-shell *,
+  .taiji-home-shell *::before,
+  .taiji-home-shell *::after{
+    box-sizing:border-box;
+  }
+  .taiji-home-shell button,
+  .taiji-home-shell input,
+  .taiji-home-shell textarea{
+    font:inherit;
+  }
+  .taiji-home-shell button{
+    border:0;
+    cursor:pointer;
+  }
+  .taiji-brand-sidebar,
+  .taiji-secondary-panel{
+    min-height:0;
+    border:1px solid var(--taiji-panel-border);
+    border-radius:17px;
+    background:
+      linear-gradient(180deg,rgba(255,255,255,.9),rgba(244,251,255,.72));
+    box-shadow:
+      0 12px 26px rgba(51,103,148,.11),
+      inset 0 1px 0 rgba(255,255,255,.75);
+    backdrop-filter:blur(22px);
+    -webkit-backdrop-filter:blur(22px);
+  }
+  .taiji-brand-sidebar{
+    display:flex;
+    flex-direction:column;
+    padding:clamp(16px,1.08vw,22px) clamp(16px,1.08vw,22px) clamp(14px,.9vw,18px);
+  }
+  .taiji-brand-head{
+    text-align:center;
+    flex:0 0 auto;
+  }
+  .taiji-brand-logo{
+    width:clamp(64px,4.3vw,88px);
+    height:clamp(64px,4.3vw,88px);
+    object-fit:contain;
+    display:block;
+    margin:0 auto clamp(6px,.55vw,11px);
+    filter:drop-shadow(0 10px 15px rgba(11,113,189,.18));
+  }
+  .taiji-brand-title{
+    font-size:clamp(22px,1.42vw,29px);
+    line-height:1.1;
+    font-weight:800;
+    letter-spacing:0;
+    color:#06284f;
+  }
+  .taiji-brand-subtitle{
+    margin-top:6px;
+    color:#1c4169;
+    font-size:clamp(12px,.82vw,16px);
+    line-height:1.25;
+    font-weight:600;
+  }
+  .taiji-brand-nav{
+    display:flex;
+    flex-direction:column;
+    gap:clamp(2px,.24vw,5px);
+    margin-top:clamp(14px,.9vw,18px);
+    overflow:hidden auto;
+    padding-right:2px;
+  }
+  .taiji-brand-nav::-webkit-scrollbar,
+  .taiji-session-groups::-webkit-scrollbar,
+  .taiji-panel-secondary-host .panel-view::-webkit-scrollbar{
+    width:0;
+    height:0;
+  }
+  .taiji-nav-item{
+    display:flex;
+    align-items:center;
+    gap:clamp(12px,.82vw,16px);
+    min-height:clamp(40px,2.38vw,46px);
+    padding:0 clamp(12px,.9vw,18px);
+    border-radius:10px;
+    color:#082a53;
+    background:transparent;
+    font-size:clamp(14px,.92vw,16px);
+    line-height:1;
+    font-weight:650;
+    text-align:left;
+    transition:background .18s ease,box-shadow .18s ease,color .18s ease,transform .18s ease;
+  }
+  .taiji-icon{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    color:currentColor;
+    line-height:1;
+    flex:0 0 auto;
+  }
+  .taiji-icon svg{
+    display:block!important;
+    width:100%;
+    height:100%;
+    stroke:currentColor;
+    stroke-width:2.15;
+    opacity:1!important;
+  }
+  .taiji-nav-icon{
+    width:30px;
+    height:30px;
+    border-radius:9px;
+    color:#1794bb;
+    background:rgba(224,247,252,.62);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.72);
+  }
+  .taiji-nav-icon svg{
+    width:22px!important;
+    height:22px!important;
+  }
+  .taiji-nav-item:hover{
+    background:rgba(8,175,195,.1);
+  }
+  .taiji-nav-item.is-active{
+    color:#063d61;
+    background:rgba(222,246,251,.86);
+    box-shadow:inset 2px 0 0 rgba(10,174,195,.48),0 8px 16px rgba(0,165,188,.08);
+  }
+  .taiji-nav-item.is-active .taiji-nav-icon{
+    color:#078cac;
+    background:rgba(255,255,255,.78);
+  }
+  .taiji-secondary-panel{
+    display:flex;
+    flex-direction:column;
+    padding:clamp(22px,1.45vw,30px) clamp(18px,1.3vw,26px) clamp(14px,1vw,20px);
+  }
+  .taiji-chat-secondary{
+    display:flex;
+    flex:1 1 auto;
+    flex-direction:column;
+    min-height:0;
+  }
+  .taiji-panel-secondary-host{
+    display:none;
+    flex:1 1 auto;
+    min-height:0;
+  }
+  .taiji-secondary-panel:not([data-secondary-panel="chat"]) .taiji-chat-secondary{
+    display:none!important;
+  }
+  .taiji-secondary-panel:not([data-secondary-panel="chat"]) .taiji-panel-secondary-host{
+    display:flex;
+  }
+  .taiji-secondary-panel[data-secondary-panel="chat"] .taiji-panel-secondary-host{
+    display:none!important;
+  }
+  .taiji-secondary-toggle{
+    position:absolute;
+    top:50%;
+    left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + var(--taiji-gap) + var(--taiji-recent-w) + (var(--taiji-gap) / 2));
+    z-index:12;
+    display:grid;
+    place-items:center;
+    width:28px;
+    min-height:58px;
+    padding:6px 0;
+    transform:translate(-50%,-50%);
+    border:1px solid rgba(193,216,234,.72)!important;
+    border-radius:999px!important;
+    color:#0b315a;
+    background:rgba(255,255,255,.82)!important;
+    box-shadow:
+      0 10px 22px rgba(47,95,135,.14),
+      inset 0 1px 0 rgba(255,255,255,.88)!important;
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+    transition:left .22s ease,background .18s ease,box-shadow .18s ease,transform .18s ease;
+  }
+  .taiji-secondary-toggle:hover{
+    background:rgba(255,255,255,.94)!important;
+    box-shadow:
+      0 12px 26px rgba(47,95,135,.18),
+      inset 0 1px 0 rgba(255,255,255,.94)!important;
+  }
+  .taiji-secondary-toggle:focus-visible{
+    outline:2px solid rgba(4,175,195,.42);
+    outline-offset:3px;
+  }
+  .taiji-secondary-toggle-icon{
+    display:block;
+    font-size:22px;
+    line-height:1;
+    font-weight:700;
+    transform:translateY(-1px);
+  }
+  .taiji-secondary-toggle-label{
+    display:none;
+  }
+  .taiji-home-shell[data-secondary-collapsed="1"]{
+    grid-template-columns:var(--taiji-brand-w) minmax(0,1fr);
+  }
+  .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-panel{
+    display:none!important;
+  }
+  .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{
+    left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2));
+    min-height:64px;
+    gap:2px;
+    padding:7px 0;
+  }
+  .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle-label{
+    display:block;
+    writing-mode:vertical-rl;
+    text-orientation:mixed;
+    font-size:11px;
+    line-height:1;
+    font-weight:800;
+    letter-spacing:.08em;
+  }
+  .taiji-panel-secondary-host .panel-view{
+    display:flex!important;
+    flex:1 1 auto;
+    flex-direction:column;
+    min-height:0;
+    width:100%;
+    padding:0;
+    color:#082a53;
+    background:transparent!important;
+  }
+  .taiji-panel-secondary-host .panel-view:not(.taiji-secondary-active-view){
+    display:none!important;
+  }
+  .taiji-panel-secondary-host .panel-head{
+    flex:0 0 auto;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:18px;
+    min-height:auto;
+    padding:0 0 clamp(22px,1.6vw,32px);
+    border:0;
+    color:var(--taiji-text);
+    background:transparent;
+  }
+  .taiji-panel-secondary-host .panel-head > span{
+    color:var(--taiji-text);
+    font-size:clamp(21px,1.38vw,28px);
+    line-height:1.15;
+    font-weight:800;
+    letter-spacing:0;
+  }
+  .taiji-panel-secondary-host .panel-head-actions{
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  .taiji-panel-secondary-host .panel-head-btn,
+  .taiji-panel-secondary-host .btn,
+  .taiji-panel-secondary-host .logs-copy{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-height:40px;
+    border:1px solid rgba(175,204,226,.72);
+    border-radius:12px;
+    color:#092d55;
+    background:rgba(255,255,255,.78);
+    box-shadow:0 8px 18px rgba(29,80,126,.12),inset 0 1px 0 rgba(255,255,255,.9);
+    font-weight:700;
+  }
+  .taiji-panel-secondary-host .panel-head-btn{
+    width:clamp(40px,2.58vw,52px);
+    height:clamp(40px,2.58vw,52px);
+    padding:0;
+  }
+  .taiji-panel-secondary-host .panel-head-btn svg,
+  .taiji-panel-secondary-host .side-menu-item svg{
+    width:20px;
+    height:20px;
+    color:#0c5b8a;
+  }
+  .taiji-panel-secondary-host .sidebar-search,
+  .taiji-panel-secondary-host .session-search-field{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    min-height:46px;
+    margin:0 0 14px;
+    padding:0 14px;
+    border:1px solid rgba(194,213,228,.54);
+    border-radius:14px;
+    background:rgba(249,252,255,.62);
+    box-shadow:inset 0 1px 8px rgba(22,67,112,.035);
+  }
+  .taiji-panel-secondary-host .sidebar-search-icon{
+    flex:0 0 auto;
+    width:18px;
+    height:18px;
+    color:#2c5c87;
+  }
+  .taiji-panel-secondary-host input,
+  .taiji-panel-secondary-host select,
+  .taiji-panel-secondary-host textarea{
+    min-width:0;
+    border:1px solid rgba(194,213,228,.64);
+    border-radius:12px;
+    color:#173659;
+    background:rgba(255,255,255,.66);
+    outline:0;
+  }
+  .taiji-panel-secondary-host .sidebar-search input,
+  .taiji-panel-secondary-host .session-search-field input{
+    width:100%;
+    border:0;
+    background:transparent;
+  }
+  .taiji-panel-secondary-host input::placeholder{
+    color:#7d8da3;
+  }
+  .taiji-panel-secondary-host select{
+    width:100%;
+    min-height:42px;
+    padding:0 12px;
+  }
+  .taiji-panel-secondary-host .cron-list,
+  .taiji-panel-secondary-host .kanban-list,
+  .taiji-panel-secondary-host .skills-list,
+  .taiji-panel-secondary-host #memoryPanel,
+  .taiji-panel-secondary-host #todoPanel,
+  .taiji-panel-secondary-host #workspacesPanel,
+  .taiji-panel-secondary-host #profilesPanel,
+  .taiji-panel-secondary-host #settingsMenu{
+    flex:1 1 auto;
+    min-height:0;
+    overflow:auto;
+    padding:0 2px 8px!important;
+  }
+  .taiji-panel-secondary-host .kanban-filter-stack,
+  .taiji-panel-secondary-host .logs-control-panel{
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+    margin-bottom:16px;
+    padding:0;
+    background:transparent;
+  }
+  .taiji-panel-secondary-host .kanban-check,
+  .taiji-panel-secondary-host .logs-check-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    min-height:40px;
+    padding:0 12px;
+    border:1px solid rgba(194,213,228,.5);
+    border-radius:12px;
+    background:rgba(255,255,255,.58);
+    color:#25466b;
+    font-weight:650;
+  }
+  .taiji-panel-secondary-host .kanban-check input,
+  .taiji-panel-secondary-host .logs-check-row input{
+    min-width:auto;
+  }
+  .taiji-panel-secondary-host .side-menu{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+  }
+  .taiji-panel-secondary-host .side-menu-item{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    width:100%;
+    min-height:48px;
+    padding:0 14px;
+    border:1px solid rgba(194,213,228,.45);
+    border-radius:13px;
+    color:#17385f;
+    background:rgba(255,255,255,.54);
+    text-align:left;
+    font-weight:650;
+  }
+  .taiji-panel-secondary-host .side-menu-item.active,
+  .taiji-panel-secondary-host .side-menu-item:hover{
+    color:#fff;
+    background:linear-gradient(135deg,#08b0c5 0%,#35c9d6 100%);
+    box-shadow:0 10px 20px rgba(0,164,190,.22);
+  }
+  .taiji-panel-secondary-host .side-menu-item.active svg,
+  .taiji-panel-secondary-host .side-menu-item:hover svg{
+    color:#fff;
+  }
+  .taiji-panel-secondary-host .panel-head-sub,
+  .taiji-panel-secondary-host .writeflow-panel{
+    margin:0 0 14px;
+    padding:12px 14px!important;
+    border:1px solid rgba(194,213,228,.5);
+    border-radius:13px;
+    color:#385274;
+    background:rgba(255,255,255,.56);
+    font-size:14px;
+    line-height:1.5;
+  }
+  .taiji-panel-secondary-host .detail-alert,
+  .taiji-secondary-empty{
+    padding:14px;
+    border:1px solid rgba(194,213,228,.55);
+    border-radius:14px;
+    color:#385274;
+    background:rgba(255,255,255,.58);
+  }
+  .taiji-secondary-empty h2{
+    margin:0 0 8px;
+    color:var(--taiji-text);
+    font-size:24px;
+  }
+  .taiji-secondary-empty p{
+    margin:0;
+  }
+  .taiji-recent-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:18px;
+  }
+  .taiji-recent-head h1{
+    margin:0;
+    color:var(--taiji-text);
+    font-size:clamp(21px,1.38vw,28px);
+    line-height:1.15;
+    font-weight:800;
+    letter-spacing:0;
+  }
+  .taiji-new-chat{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:10px;
+    height:clamp(34px,2.25vw,46px);
+    min-width:clamp(102px,6.2vw,128px);
+    padding:0 14px;
+    border:1px solid rgba(175,204,226,.72);
+    border-radius:11px;
+    color:#092d55;
+    background:rgba(255,255,255,.78);
+    box-shadow:0 6px 14px rgba(29,80,126,.08),inset 0 1px 0 rgba(255,255,255,.9);
+    font-size:clamp(13px,.84vw,16px);
+    font-weight:700;
+  }
+  .taiji-new-chat span:first-child{
+    color:#00a9bd;
+    font-size:1.55em;
+    line-height:.8;
+    font-weight:500;
+  }
+  .taiji-search-box{
+    display:flex;
+    align-items:center;
+    gap:13px;
+    height:clamp(36px,2.55vw,50px);
+    margin-top:clamp(20px,1.35vw,28px);
+    padding:0 clamp(12px,.9vw,18px);
+    border:1px solid rgba(194,213,228,.54);
+    border-radius:13px;
+    background:rgba(249,252,255,.62);
+    box-shadow:inset 0 1px 8px rgba(22,67,112,.035);
+  }
+  .taiji-search-box img{
+    width:clamp(16px,1.08vw,22px);
+    height:clamp(16px,1.08vw,22px);
+    opacity:.82;
+  }
+  .taiji-search-box input{
+    min-width:0;
+    width:100%;
+    border:0;
+    outline:0;
+    color:#173659;
+    background:transparent;
+    font-size:clamp(13px,.88vw,17px);
+  }
+  .taiji-search-box input::placeholder{
+    color:#7d8da3;
+  }
+  .taiji-filter-row{
+    display:grid;
+    grid-template-columns:auto auto 1fr auto;
+    align-items:center;
+    gap:8px;
+    margin-top:clamp(16px,1.12vw,23px);
+  }
+  .taiji-filter,
+  .taiji-filter-add{
+    height:clamp(34px,2.18vw,44px);
+    border-radius:10px;
+    color:#25466b;
+    background:rgba(255,255,255,.72);
+    border:1px solid rgba(184,207,225,.62);
+    box-shadow:0 6px 13px rgba(33,83,131,.08);
+    font-weight:650;
+  }
+  .taiji-filter{
+    padding:0 clamp(12px,.8vw,17px);
+    font-size:clamp(13px,.84vw,16px);
+  }
+  .taiji-filter.is-active{
+    color:#fff;
+    background:linear-gradient(135deg,#08b0c5 0%,#27c2d1 100%);
+    border-color:rgba(8,176,197,.55);
+    box-shadow:0 8px 16px rgba(0,164,190,.2);
+  }
+  .taiji-filter-add{
+    grid-column:4;
+    width:clamp(34px,2.18vw,44px);
+    font-size:clamp(20px,1.22vw,25px);
+    line-height:1;
+    color:#24456a;
+  }
+  .taiji-session-groups{
+    flex:1 1 auto;
+    min-height:0;
+    overflow:auto;
+    margin-top:clamp(22px,1.5vw,30px);
+    padding:0 2px 8px;
+  }
+  .taiji-session-group+ .taiji-session-group{
+    margin-top:clamp(22px,1.58vw,32px);
+  }
+  .taiji-session-group header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:0 6px 10px;
+    color:#0e315c;
+    font-size:clamp(14px,.92vw,18px);
+    font-weight:800;
+  }
+  .taiji-session-group header span:last-child{
+    color:#0e315c;
+    font-size:20px;
+    transform:translateY(-2px);
+  }
+  .taiji-session-card{
+    overflow:hidden;
+    border:1px solid rgba(184,207,225,.55);
+    border-radius:13px;
+    background:rgba(255,255,255,.5);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.8);
+  }
+  .taiji-session-card button{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:14px;
+    width:100%;
+    min-height:clamp(42px,2.75vw,56px);
+    padding:0 clamp(11px,.78vw,16px);
+    color:#18395f;
+    background:transparent;
+    border-bottom:1px solid var(--taiji-soft-line);
+    text-align:left;
+    font-size:clamp(13px,.88vw,16px);
+    font-weight:620;
+  }
+  .taiji-session-card button:last-child{
+    border-bottom:0;
+  }
+  .taiji-session-card span{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .taiji-session-card .taiji-session-title{
+    flex:1 1 auto;
+    min-width:0;
+  }
+  .taiji-session-card time{
+    flex:0 0 auto;
+    color:#3e5675;
+    font-size:.95em;
+  }
+  .taiji-view-all{
+    flex:0 0 auto;
+    width:100%;
+    height:clamp(42px,2.7vw,54px);
+    margin-top:clamp(11px,.85vw,17px);
+    border:1px solid rgba(221,231,239,.72);
+    border-radius:11px;
+    color:#03a8bd;
+    background:rgba(255,255,255,.86);
+    box-shadow:0 6px 14px rgba(32,76,120,.08);
+    font-size:clamp(13px,.86vw,16px);
+    font-weight:800;
+  }
+  .taiji-view-all span{
+    font-size:1.5em;
+    margin-left:8px;
+    vertical-align:-1px;
+  }
+
+  .taiji-main-workspace{
+    position:relative;
+    min-width:0;
+    min-height:0;
+    overflow:hidden;
+    border:1px solid rgba(255,255,255,.32);
+    border-radius:18px;
+    background-image:
+      linear-gradient(90deg,rgba(248,253,255,.72) 0%,rgba(247,252,255,.52) 44%,rgba(231,246,255,.16) 100%),
+      url("assets/taiji/background/background-grid.png");
+    background-size:cover;
+    background-position:center;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 8px 20px rgba(47,95,135,.07);
+  }
+  .taiji-main-workspace::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    background:
+      radial-gradient(circle at 49% 69%,rgba(54,219,232,.18),transparent 31%),
+      radial-gradient(circle at 42% 48%,rgba(255,255,255,.36),transparent 34%),
+      linear-gradient(180deg,rgba(244,251,255,.48) 0%,rgba(241,250,255,.1) 54%,rgba(226,245,255,.22) 100%);
+  }
+  .taiji-hero{
+    position:relative;
+    z-index:5;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    width:min(560px,56%);
+    margin:clamp(54px,3.8vw,78px) auto 0;
+    text-align:center;
+  }
+  .taiji-hero-logo{
+    width:clamp(54px,3.5vw,72px);
+    height:clamp(54px,3.5vw,72px);
+    object-fit:contain;
+    filter:drop-shadow(0 10px 16px rgba(25,119,201,.2));
+  }
+  .taiji-hero h2{
+    margin:clamp(10px,.72vw,15px) 0 0;
+    color:#06284f;
+    font-size:clamp(28px,2vw,40px);
+    line-height:1.15;
+    font-weight:850;
+    letter-spacing:0;
+  }
+  .taiji-hero p{
+    margin:clamp(8px,.62vw,13px) 0 0;
+    color:#244365;
+    font-size:clamp(13px,.9vw,18px);
+    line-height:1.55;
+    font-weight:650;
+  }
+  .taiji-quick-list{
+    display:flex;
+    flex-direction:column;
+    gap:clamp(10px,.72vw,14px);
+    width:min(520px,100%);
+    margin-top:clamp(20px,1.42vw,28px);
+  }
+  .taiji-quick-card{
+    display:grid;
+    grid-template-columns:38px minmax(0,1fr) auto;
+    align-items:center;
+    gap:clamp(12px,.9vw,18px);
+    min-height:clamp(48px,3.18vw,64px);
+    padding:0 clamp(16px,1.14vw,24px);
+    border:1px solid rgba(190,211,229,.72);
+    border-radius:12px;
+    color:#082a53;
+    background:rgba(255,255,255,.84);
+    box-shadow:0 8px 18px rgba(47,96,139,.1),inset 0 1px 0 rgba(255,255,255,.78);
+    text-align:left;
+    font-size:clamp(13px,.9vw,18px);
+    line-height:1.2;
+    font-weight:800;
+    backdrop-filter:blur(12px);
+    -webkit-backdrop-filter:blur(12px);
+  }
+  .taiji-quick-card:hover{
+    transform:translateY(-1px);
+    box-shadow:0 14px 28px rgba(39,107,154,.18),inset 0 1px 0 rgba(255,255,255,.88);
+  }
+  .taiji-quick-icon{
+    width:38px;
+    height:38px;
+    justify-self:center;
+    border:1px solid rgba(160,218,236,.55);
+    border-radius:10px;
+    color:#0b99b8;
+    background:linear-gradient(180deg,rgba(245,253,255,.96),rgba(225,249,253,.72));
+    box-shadow:0 5px 12px rgba(46,117,169,.1),inset 0 1px 0 rgba(255,255,255,.82);
+  }
+  .taiji-quick-icon svg{
+    width:25px!important;
+    height:25px!important;
+  }
+  .taiji-quick-arrow{
+    color:#092a51;
+    font-size:clamp(21px,1.42vw,29px);
+    font-weight:300;
+    line-height:1;
+  }
+  .taiji-input-dock{
+    position:absolute;
+    z-index:2;
+    left:clamp(25px,1.8vw,36px);
+    right:clamp(19px,1.45vw,30px);
+    bottom:clamp(18px,1.3vw,26px);
+    min-height:clamp(108px,7.2vw,132px);
+    padding:clamp(13px,.95vw,18px) clamp(14px,1vw,20px) clamp(10px,.72vw,14px);
+    border:1px solid rgba(204,223,238,.76);
+    border-radius:13px;
+    background:rgba(255,255,255,.86);
+    box-shadow:0 10px 24px rgba(47,95,135,.12),inset 0 1px 0 rgba(255,255,255,.86);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  .taiji-input-dock textarea{
+    display:block;
+    width:100%;
+    min-height:clamp(34px,2.35vw,46px);
+    max-height:58px;
+    resize:none;
+    border:0;
+    outline:0;
+    color:#18395f;
+    background:transparent;
+    font-size:clamp(13px,.9vw,18px);
+    line-height:1.45;
+    font-weight:500;
+  }
+  .taiji-input-dock textarea::placeholder{
+    color:#4b5e78;
+  }
+  .taiji-dock-toolbar{
+    display:flex;
+    align-items:center;
+    gap:clamp(8px,.58vw,12px);
+    margin-top:clamp(9px,.64vw,13px);
+  }
+  .taiji-dock-actions,
+  .taiji-dock-selectors{
+    display:flex;
+    align-items:center;
+    gap:clamp(6px,.48vw,10px);
+    min-width:0;
+  }
+  .taiji-dock-actions button{
+    display:grid;
+    place-items:center;
+    width:clamp(32px,2.2vw,44px);
+    height:clamp(32px,2.2vw,44px);
+    border-radius:10px;
+    color:#15375f;
+    background:transparent;
+  }
+  .taiji-dock-actions img{
+    width:clamp(17px,1.18vw,24px);
+    height:clamp(17px,1.18vw,24px);
+  }
+  .taiji-dock-selectors{
+    flex:1 1 auto;
+    overflow:hidden;
+  }
+  .taiji-dock-selectors button{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:7px;
+    height:clamp(34px,2.35vw,46px);
+    min-width:0;
+    padding:0 clamp(10px,.72vw,15px);
+    border:1px solid rgba(196,216,232,.68);
+    border-radius:10px;
+    color:#17375d;
+    background:rgba(249,252,255,.72);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9);
+    font-size:clamp(11px,.78vw,14px);
+    font-weight:650;
+    white-space:nowrap;
+  }
+  .taiji-dock-selectors img{
+    width:clamp(14px,1vw,19px);
+    height:clamp(14px,1vw,19px);
+  }
+  .taiji-dock-selectors button:nth-child(3){
+    min-width:clamp(140px,9.4vw,190px);
+  }
+  .taiji-send{
+    flex:0 0 auto;
+    display:grid;
+    place-items:center;
+    width:clamp(40px,2.65vw,52px);
+    height:clamp(40px,2.65vw,52px);
+    border-radius:10px;
+    color:#fff;
+    background:linear-gradient(180deg,#10c5d6,#03aabf);
+    box-shadow:0 8px 18px rgba(3,170,191,.24);
+    font-size:clamp(23px,1.55vw,31px);
+    line-height:1;
+    font-weight:300;
+  }
+}
+
+@media (min-width:901px) and (max-height:860px){
+  .taiji-home-shell{
+    --taiji-brand-w:204px;
+    --taiji-recent-w:304px;
+    --taiji-gap:8px;
+    --taiji-shell-pad:8px;
+    padding:var(--taiji-shell-pad);
+  }
+  .taiji-brand-sidebar{
+    padding-top:14px;
+    padding-bottom:12px;
+  }
+  .taiji-brand-logo{
+    width:60px;
+    height:60px;
+    margin-bottom:4px;
+  }
+  .taiji-brand-title{
+    font-size:22px;
+  }
+  .taiji-brand-subtitle{
+    font-size:12px;
+    margin-top:5px;
+  }
+  .taiji-brand-nav{
+    gap:2px;
+    margin-top:12px;
+  }
+  .taiji-nav-item{
+    min-height:40px;
+    font-size:14px;
+    border-radius:9px;
+  }
+  .taiji-secondary-panel{
+    padding-top:18px;
+    padding-bottom:12px;
+  }
+  .taiji-session-group+ .taiji-session-group{
+    margin-top:16px;
+  }
+  .taiji-session-card button{
+    min-height:40px;
+  }
+  .taiji-hero{
+    margin-top:44px;
+  }
+  .taiji-hero-logo{
+    width:48px;
+    height:48px;
+  }
+  .taiji-hero h2{
+    font-size:28px;
+    margin-top:8px;
+  }
+  .taiji-quick-list{
+    gap:9px;
+    margin-top:16px;
+  }
+  .taiji-quick-card{
+    min-height:46px;
+  }
+  .taiji-input-dock{
+    min-height:102px;
+  }
+  .taiji-dock-selectors button:nth-child(n+4){
+    display:none;
+  }
+}
+
+@media (max-width:900px){
+  .taiji-home-shell{
+    display:none!important;
+  }
+}
+
+@media (min-width:901px){
+  .taiji-main-workspace > main.main.taiji-real-main{
+    position:absolute;
+    inset:0;
+    z-index:2;
+    display:flex;
+    min-width:0;
+    min-height:0;
+    color:#082a53;
+    background:transparent!important;
+  }
+  .taiji-main-workspace > main.main.taiji-real-main .main-view{
+    min-width:0;
+    min-height:0;
+    width:100%;
+    height:100%;
+    color:#082a53;
+    background:transparent!important;
+  }
+  .taiji-main-workspace > main.main.taiji-real-main .chat,
+  .taiji-main-workspace > main.main.taiji-real-main .empty-state,
+  .taiji-main-workspace > main.main.taiji-real-main .panel-view,
+  .taiji-main-workspace > main.main.taiji-real-main .settings-section{
+    background:transparent!important;
+  }
+  .taiji-home-shell:not(.taiji-welcome) .taiji-hero{
+    display:none;
+  }
+  .taiji-home-shell.taiji-welcome .taiji-hero{
+    display:flex;
+  }
+  .taiji-home-shell.taiji-welcome main.main.taiji-real-main #mainChat .messages-shell{
+    display:none;
+  }
+  .taiji-home-shell.taiji-welcome main.main.taiji-real-main #mainChat{
+    display:flex!important;
+  }
+  .taiji-home-shell main.main.taiji-real-main > .main-view:not(#mainChat){
+    display:none!important;
+  }
+  .taiji-home-shell main.main.taiji-real-main.showing-skills > #mainSkills,
+  .taiji-home-shell main.main.taiji-real-main.showing-memory > #mainMemory,
+  .taiji-home-shell main.main.taiji-real-main.showing-tasks > #mainTasks,
+  .taiji-home-shell main.main.taiji-real-main.showing-kanban > #mainKanban,
+  .taiji-home-shell main.main.taiji-real-main.showing-writing > #mainWriting,
+  .taiji-home-shell main.main.taiji-real-main.showing-workspaces > #mainWorkspaces,
+  .taiji-home-shell main.main.taiji-real-main.showing-profiles > #mainProfiles,
+  .taiji-home-shell main.main.taiji-real-main.showing-todos > #mainTodos,
+  .taiji-home-shell main.main.taiji-real-main.showing-insights > #mainInsights,
+  .taiji-home-shell main.main.taiji-real-main.showing-logs > #mainLogs,
+  .taiji-home-shell main.main.taiji-real-main.showing-plugin > #mainPlugin,
+  .taiji-home-shell main.main.taiji-real-main.showing-settings > #mainSettings{
+    display:flex!important;
+  }
+  .taiji-home-shell main.main.taiji-real-main.showing-skills > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-memory > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-tasks > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-kanban > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-writing > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-workspaces > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-profiles > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-todos > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-insights > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-logs > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-plugin > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-settings > #mainChat{
+    display:none!important;
+  }
+  .taiji-home-shell main.main.taiji-real-main #mainChat{
+    position:relative;
+    overflow:hidden;
+  }
+  .taiji-home-shell main.main.taiji-real-main #mainChat .empty-state{
+    display:none!important;
+  }
+  .taiji-home-shell main.main.taiji-real-main #mainChat .messages-shell{
+    position:absolute;
+    inset:0 0 clamp(150px,9.6vw,190px) 0;
+    z-index:2;
+    padding:clamp(66px,4.7vw,92px) clamp(36px,2.6vw,54px) 18px;
+    background:linear-gradient(180deg,rgba(248,253,255,.6),rgba(248,253,255,.08));
+  }
+  .taiji-home-shell main.main.taiji-real-main #messages{
+    height:100%;
+    padding:0;
+    color:#082a53;
+    background:transparent;
+  }
+  .taiji-home-shell main.main.taiji-real-main #msgInner,
+  .taiji-home-shell main.main.taiji-real-main .live-compression-cards,
+  .taiji-home-shell main.main.taiji-real-main #liveToolCards{
+    max-width:min(980px,calc(100% - 40px));
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row{
+    color:#082a53;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-body{
+    border:1px solid rgba(190,211,229,.62);
+    border-radius:18px;
+    background:rgba(255,255,255,.82);
+    box-shadow:0 12px 28px rgba(47,96,139,.1),inset 0 1px 0 rgba(255,255,255,.8);
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    color:#fff;
+    background:linear-gradient(135deg,#0aaec4,#52cfda);
+    border-color:rgba(8,176,197,.34);
+    box-shadow:0 12px 24px rgba(0,164,190,.22);
+  }
+  .taiji-home-shell #composerWrap{
+    position:absolute;
+    z-index:6;
+    left:clamp(25px,1.8vw,36px);
+    right:clamp(19px,1.45vw,30px);
+    bottom:clamp(18px,1.3vw,26px);
+    min-height:clamp(136px,8.8vw,170px);
+    padding:0;
+    border:1px solid rgba(204,223,238,.76);
+    border-radius:22px;
+    background:rgba(255,255,255,.9)!important;
+    box-shadow:0 16px 38px rgba(47,95,135,.17),inset 0 1px 0 rgba(255,255,255,.86)!important;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  .taiji-home-shell #composerWrap::before{
+    display:none;
+  }
+  .taiji-home-shell #composerWrap .composer-box{
+    width:100%;
+    max-width:none;
+    min-height:100%;
+    margin:0;
+    padding:clamp(18px,1.32vw,26px) clamp(18px,1.32vw,26px) clamp(13px,.95vw,20px);
+    border:0;
+    border-radius:22px;
+    color:#18395f;
+    background:transparent!important;
+    box-shadow:none!important;
+  }
+  .taiji-home-shell #composerWrap textarea#msg{
+    min-height:clamp(42px,2.8vw,58px);
+    max-height:70px;
+    padding:0;
+    color:#18395f;
+    background:transparent;
+    border:0;
+    font-size:clamp(17px,1.1vw,22px);
+    line-height:1.45;
+    font-weight:500;
+  }
+  .taiji-home-shell #composerWrap textarea#msg::placeholder{
+    color:#4b5e78!important;
+  }
+  .taiji-home-shell #composerWrap .composer-footer{
+    display:flex;
+    align-items:center;
+    gap:clamp(10px,.72vw,15px);
+    min-height:clamp(48px,3.1vw,60px);
+    margin-top:clamp(10px,.72vw,14px);
+  }
+  .taiji-home-shell #composerWrap .composer-left,
+  .taiji-home-shell #composerWrap .composer-right{
+    display:flex;
+    align-items:center;
+    gap:clamp(8px,.65vw,13px);
+    min-width:0;
+  }
+  .taiji-home-shell #composerWrap .composer-left{
+    flex:1 1 auto;
+    overflow-x:auto;
+    overflow-y:visible;
+    scrollbar-width:none;
+  }
+  .taiji-home-shell #composerWrap .composer-toolsets-wrap{
+    display:none!important;
+  }
+  .taiji-home-shell #composerWrap .composer-right{
+    flex:0 0 auto;
+  }
+  .taiji-home-shell #composerWrap .icon-btn,
+  .taiji-home-shell #composerWrap .composer-mobile-config-btn{
+    display:grid;
+    place-items:center;
+    width:clamp(38px,2.7vw,52px);
+    height:clamp(38px,2.7vw,52px);
+    min-width:clamp(38px,2.7vw,52px);
+    border:0;
+    border-radius:12px;
+    color:#15375f;
+    background:transparent;
+    box-shadow:none;
+  }
+  .taiji-home-shell #composerWrap .composer-profile-chip,
+  .taiji-home-shell #composerWrap .composer-workspace-group,
+  .taiji-home-shell #composerWrap .composer-workspace-chip,
+  .taiji-home-shell #composerWrap .composer-model-chip,
+  .taiji-home-shell #composerWrap .composer-reasoning-chip,
+  .taiji-home-shell #composerWrap .composer-toolsets-chip,
+  .taiji-home-shell #composerWrap .provider-quota-chip{
+    height:clamp(42px,2.82vw,56px);
+    min-width:0;
+    padding:0 clamp(13px,.95vw,19px);
+    border:1px solid rgba(196,216,232,.68);
+    border-radius:12px;
+    color:#17375d;
+    background:rgba(249,252,255,.76)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9)!important;
+    font-size:clamp(13px,.88vw,17px);
+    font-weight:650;
+    white-space:nowrap;
+  }
+  .taiji-home-shell #composerWrap .composer-model-chip{
+    min-width:clamp(176px,11.8vw,238px);
+  }
+  .taiji-home-shell #composerWrap #btnSend{
+    display:grid;
+    place-items:center;
+    width:clamp(48px,3.05vw,60px);
+    height:clamp(48px,3.05vw,60px);
+    min-width:clamp(48px,3.05vw,60px);
+    border:0;
+    border-radius:13px;
+    color:#fff;
+    background:linear-gradient(180deg,#10c5d6,#03aabf)!important;
+    box-shadow:0 12px 22px rgba(3,170,191,.32)!important;
+  }
+  .taiji-home-shell #composerWrap #btnSend:disabled{
+    opacity:.48;
+    color:#6c879d;
+    background:rgba(224,239,247,.85)!important;
+    box-shadow:none!important;
+  }
+  .taiji-home-shell #writeflowStatusDock{
+    display:block!important;
+    width:min(760px,calc(100% - 64px));
+    max-width:min(760px,calc(100% - 64px));
+    margin:0 auto clamp(4px,.5vw,8px);
+  }
+  .taiji-home-shell #writeflowStatusDock:has(.status-card-writeflow.is-expanded){
+    width:min(920px,calc(100% - 48px));
+    max-width:min(920px,calc(100% - 48px));
+  }
+  .taiji-home-shell #writeflowStatusDock[hidden]{
+    display:none!important;
+  }
+  .taiji-home-shell #writeflowStatusDock .status-card-writeflow{
+    border-color:rgba(152,190,219,.72);
+    background:rgba(255,255,255,.88);
+    box-shadow:0 8px 18px rgba(36,86,132,.12);
+  }
+  .taiji-home-shell #writeflowStatusDock .status-card-writeflow.is-expanded{
+    box-shadow:0 14px 32px rgba(36,86,132,.16);
+  }
+  .taiji-home-shell #composerWrap .composer-divider,
+  .taiji-home-shell #composerWrap .composer-mobile-config-btn{
+    display:none;
+  }
+  .taiji-home-shell #composerWrap .model-dropdown,
+  .taiji-home-shell #composerWrap .ws-dropdown,
+  .taiji-home-shell #composerWrap .profile-dropdown,
+  .taiji-home-shell #composerWrap .composer-toolsets-dropdown,
+  .taiji-home-shell #composerWrap .composer-reasoning-dropdown{
+    border:1px solid rgba(196,216,232,.78);
+    border-radius:16px;
+    background:rgba(255,255,255,.96);
+    box-shadow:0 20px 44px rgba(36,86,132,.22);
+    color:#0c3159;
+  }
+  .taiji-home-shell .taiji-session-empty{
+    display:grid;
+    place-items:center;
+    min-height:160px;
+    border:1px dashed rgba(130,172,205,.55);
+    border-radius:16px;
+    color:#55708f;
+    background:rgba(255,255,255,.45);
+    font-weight:650;
+  }
+  .taiji-home-shell .taiji-session-row{
+    position:relative;
+  }
+  .taiji-home-shell .taiji-session-row.is-active{
+    color:#fff;
+    background:linear-gradient(135deg,#08b0c5,#55d1dc);
+  }
+  .taiji-home-shell .taiji-session-row.is-active time,
+  .taiji-home-shell .taiji-session-row.is-active .taiji-session-live{
+    color:#fff;
+  }
+  .taiji-home-shell .taiji-session-live{
+    position:absolute;
+    right:14px;
+    bottom:6px;
+    color:#069caf;
+    font-size:11px;
+    font-weight:800;
+  }
+  .taiji-home-shell main.main.taiji-real-main > .main-view:not(#mainChat){
+    padding:clamp(70px,5vw,92px) clamp(30px,2.2vw,44px) clamp(30px,2.2vw,44px);
+    overflow:hidden;
+    flex-direction:column;
+  }
+  .taiji-home-shell main.main.taiji-real-main > .main-view:not(#mainChat) .main-view-header{
+    flex:0 0 auto;
+    min-height:64px;
+    padding:0 0 18px;
+    border:0;
+    color:#082a53;
+    background:transparent;
+  }
+  .taiji-home-shell main.main.taiji-real-main > .main-view:not(#mainChat) .main-view-title{
+    color:#06284f;
+    font-size:clamp(24px,1.55vw,32px);
+    font-weight:850;
+  }
+  .taiji-home-shell main.main.taiji-real-main > .main-view:not(#mainChat) .main-view-body{
+    flex:1 1 auto;
+    min-height:0;
+    overflow:auto;
+    overscroll-behavior:contain;
+    padding:clamp(18px,1.25vw,26px);
+    border:1px solid rgba(204,223,238,.74);
+    border-radius:22px;
+    color:#15375f;
+    background:rgba(255,255,255,.74);
+    box-shadow:0 18px 38px rgba(47,95,135,.13),inset 0 1px 0 rgba(255,255,255,.86);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  .taiji-home-shell main.main.taiji-real-main .main-view-content{
+    max-width:1280px;
+  }
+  .taiji-floating-layer{
+    position:fixed;
+    inset:0;
+    z-index:1040;
+    pointer-events:none;
+  }
+  .taiji-floating-layer .taiji-floating-popover{
+    pointer-events:auto;
+    box-sizing:border-box;
+    overscroll-behavior:contain;
+  }
+  .taiji-floating-layer .model-dropdown.open,
+  .taiji-floating-layer .ws-dropdown.open,
+  .taiji-floating-layer .profile-dropdown.open,
+  .taiji-floating-layer .composer-toolsets-dropdown.open,
+  .taiji-floating-layer .composer-reasoning-dropdown.open{
+    display:block;
+    border:1px solid rgba(196,216,232,.78);
+    border-radius:16px;
+    background:rgba(255,255,255,.97);
+    box-shadow:0 20px 44px rgba(36,86,132,.22);
+    color:#0c3159;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  .taiji-home-shell main.main.taiji-real-main > #mainSettings{
+    overflow:hidden;
+  }
+  .taiji-home-shell main.main.taiji-real-main > #mainSettings .settings-main{
+    flex:1 1 auto;
+    width:100%;
+    max-width:min(1160px,100%);
+    min-height:0;
+    max-height:100%;
+    margin:0 auto;
+    padding:clamp(18px,1.25vw,26px);
+    overflow:auto;
+    overscroll-behavior:contain;
+    border:1px solid rgba(204,223,238,.74);
+    border-radius:22px;
+    color:#15375f;
+    background:rgba(255,255,255,.74);
+    box-shadow:0 18px 38px rgba(47,95,135,.13),inset 0 1px 0 rgba(255,255,255,.86);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  .taiji-home-shell main.main.taiji-real-main > #mainSettings .settings-pane{
+    min-width:0;
+  }
+  .taiji-home-shell main.main.taiji-real-main > #mainSettings .settings-section-head{
+    position:sticky;
+    top:0;
+    z-index:2;
+    background:linear-gradient(180deg,rgba(255,255,255,.96),rgba(255,255,255,.78));
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+  }
+  .taiji-home-shell main.main.taiji-real-main .settings-card,
+  .taiji-home-shell main.main.taiji-real-main .workspace-card,
+  .taiji-home-shell main.main.taiji-real-main .insights-card,
+  .taiji-home-shell main.main.taiji-real-main .kanban-task-card,
+  .taiji-home-shell main.main.taiji-real-main .cron-item,
+  .taiji-home-shell main.main.taiji-real-main .plugin-card,
+  .taiji-home-shell main.main.taiji-real-main .memory-card,
+  .taiji-home-shell main.main.taiji-real-main .skill-card,
+  .taiji-home-shell main.main.taiji-real-main .tool-card{
+    border-color:rgba(190,211,229,.72)!important;
+    border-radius:16px!important;
+    color:#15375f!important;
+    background:rgba(255,255,255,.78)!important;
+    box-shadow:0 12px 26px rgba(47,96,139,.1),inset 0 1px 0 rgba(255,255,255,.8)!important;
+  }
+  .taiji-home-shell main.main.taiji-real-main input,
+  .taiji-home-shell main.main.taiji-real-main textarea,
+  .taiji-home-shell main.main.taiji-real-main select{
+    border-color:rgba(184,207,225,.8)!important;
+    border-radius:12px!important;
+    color:#173659!important;
+    background:rgba(249,252,255,.78)!important;
+  }
+  .taiji-home-shell .model-config-secret-row{
+    display:flex;
+    align-items:stretch;
+    gap:8px;
+    min-width:0;
+  }
+  .taiji-home-shell .model-config-secret-row input{
+    flex:1 1 auto;
+    min-width:0;
+  }
+  .taiji-home-shell .model-config-paste-btn{
+    flex:0 0 auto;
+    min-width:54px;
+    padding:0 12px;
+    border:1px solid rgba(184,207,225,.8);
+    border-radius:12px;
+    color:#067d91;
+    background:rgba(232,250,253,.82);
+    font-size:12px;
+    font-weight:750;
+    cursor:pointer;
+  }
+  .taiji-home-shell .model-config-paste-btn:hover,
+  .taiji-home-shell .model-config-paste-btn:focus-visible{
+    border-color:rgba(8,176,197,.62);
+    background:rgba(210,246,251,.95);
+    outline:0;
+  }
+  .taiji-main-workspace > .rightpanel.taiji-workspace-drawer{
+    position:absolute;
+    top:76px;
+    right:28px;
+    bottom:clamp(174px,10.8vw,210px);
+    z-index:7;
+    width:min(360px,34%);
+    border:1px solid rgba(204,223,238,.76);
+    border-radius:20px;
+    background:rgba(255,255,255,.86);
+    box-shadow:0 18px 42px rgba(47,95,135,.18);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+  }
+  .taiji-home-shell .taiji-todos-content{
+    display:grid;
+    gap:12px;
+  }
+  .taiji-home-shell .taiji-todos-empty{
+    display:grid;
+    place-items:center;
+    min-height:220px;
+    border:1px dashed rgba(130,172,205,.55);
+    border-radius:16px;
+    color:#55708f;
+    background:rgba(255,255,255,.46);
+    font-weight:650;
+  }
+  .taiji-home-shell .taiji-todo-item{
+    display:flex;
+    align-items:flex-start;
+    gap:12px;
+    padding:14px 16px;
+    border:1px solid rgba(190,211,229,.72);
+    border-radius:16px;
+    color:#15375f;
+    background:rgba(255,255,255,.8);
+    box-shadow:0 12px 26px rgba(47,96,139,.1),inset 0 1px 0 rgba(255,255,255,.82);
+  }
+  .taiji-home-shell .taiji-todo-icon{
+    display:grid;
+    place-items:center;
+    width:28px;
+    height:28px;
+    border-radius:10px;
+    color:#079caf;
+    background:rgba(18,188,208,.12);
+    flex:0 0 auto;
+  }
+  .taiji-home-shell .taiji-todo-item[data-status="completed"]{
+    opacity:.72;
+  }
+  .taiji-home-shell .taiji-todo-item[data-status="completed"] .taiji-todo-title{
+    text-decoration:line-through;
+  }
+  .taiji-home-shell .taiji-todo-title{
+    color:#082a53;
+    font-size:15px;
+    font-weight:750;
+    line-height:1.45;
+  }
+  .taiji-home-shell .taiji-todo-meta{
+    margin-top:4px;
+    color:#66829c;
+    font-size:12px;
+    font-weight:650;
+  }
+  .taiji-workspace-brand-pill{
+    position:absolute;
+    top:clamp(26px,2vw,42px);
+    left:50%;
+    z-index:8;
+    display:none;
+    align-items:center;
+    gap:8px;
+    min-height:38px;
+    padding:4px 16px 4px 7px;
+    border:1px solid rgba(198,218,234,.62);
+    border-radius:999px;
+    color:#0a315b;
+    background:rgba(255,255,255,.58);
+    box-shadow:0 8px 20px rgba(47,95,135,.1),inset 0 1px 0 rgba(255,255,255,.86);
+    transform:translateX(-50%);
+    backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px);
+    pointer-events:none;
+  }
+  .taiji-workspace-brand-pill img{
+    width:30px;
+    height:30px;
+    object-fit:contain;
+    filter:drop-shadow(0 5px 8px rgba(23,113,189,.2));
+  }
+  .taiji-workspace-brand-pill span{
+    font-size:15px;
+    line-height:1;
+    font-weight:850;
+  }
+  .taiji-home-shell.taiji-chat-has-messages .taiji-workspace-brand-pill{
+    display:flex;
+  }
+  .taiji-home-shell:not(.taiji-chat-active) .taiji-workspace-brand-pill,
+  .taiji-home-shell.taiji-welcome .taiji-workspace-brand-pill{
+    display:none;
+  }
+
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    display:flex!important;
+    inset:0 0 clamp(170px,10.8vw,210px) 0;
+    padding:clamp(82px,5.55vw,108px) clamp(35px,2.6vw,54px) 18px;
+    background:
+      radial-gradient(circle at 50% 44%,rgba(255,255,255,.18),transparent 34%),
+      linear-gradient(180deg,rgba(247,252,255,.18),rgba(247,252,255,.04));
+  }
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #messages{
+    width:100%;
+    height:100%;
+    overflow:auto;
+    scrollbar-width:none;
+  }
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #messages::-webkit-scrollbar{
+    width:0;
+    height:0;
+  }
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner,
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main .live-compression-cards,
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #liveToolCards{
+    width:min(1080px,calc(100% - 18px));
+    max-width:min(1080px,calc(100% - 18px))!important;
+    margin:0 auto;
+  }
+  .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner{
+    display:flex;
+    flex-direction:column;
+    align-items:stretch;
+    gap:clamp(15px,1vw,22px);
+    min-height:100%;
+    padding:6px 0 22px;
+  }
+  .taiji-home-shell main.main.taiji-real-main .assistant-turn{
+    align-self:flex-start;
+    display:grid!important;
+    grid-template-columns:44px minmax(0,1fr);
+    column-gap:12px;
+    width:min(680px,68%);
+    max-width:min(680px,68%);
+    padding:0;
+    color:#102f58;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-role.assistant{
+    grid-column:1 / -1;
+    display:grid;
+    grid-template-columns:44px auto auto minmax(0,1fr);
+    align-items:center;
+    gap:8px;
+    min-height:42px;
+    margin:0 0 4px;
+    color:#385274;
+    opacity:1;
+    font-size:14px;
+    font-weight:750;
+  }
+  .taiji-home-shell main.main.taiji-real-main .role-icon.assistant{
+    display:grid;
+    place-items:center;
+    width:42px;
+    height:42px;
+    border:1px solid rgba(202,222,237,.76);
+    border-radius:999px;
+    background:rgba(255,255,255,.86);
+    box-shadow:0 8px 18px rgba(47,95,135,.12),inset 0 1px 0 rgba(255,255,255,.88);
+    overflow:hidden;
+  }
+  .taiji-home-shell main.main.taiji-real-main .role-icon.assistant img{
+    display:block;
+    width:34px;
+    height:34px;
+    object-fit:contain;
+  }
+  .taiji-home-shell main.main.taiji-real-main .role-icon.assistant span{
+    display:none;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-role-name{
+    color:#244365;
+    font-size:15px;
+    font-weight:820;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-role-time{
+    color:#6f86a3;
+    font-size:13px;
+    font-weight:650;
+    font-variant-numeric:tabular-nums;
+  }
+  .taiji-home-shell main.main.taiji-real-main .assistant-turn-blocks{
+    grid-column:2;
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    min-width:0;
+  }
+  .taiji-home-shell main.main.taiji-real-main .assistant-segment{
+    min-width:0;
+  }
+  .taiji-home-shell main.main.taiji-real-main .assistant-segment .msg-body,
+  .taiji-home-shell main.main.taiji-real-main .assistant-turn .msg-body{
+    width:fit-content;
+    max-width:min(620px,100%);
+    margin:0;
+    padding:13px 17px;
+    border:1px solid rgba(199,216,230,.7);
+    border-radius:11px;
+    color:#102f58;
+    background:rgba(255,255,255,.88);
+    box-shadow:0 8px 20px rgba(47,95,135,.13),inset 0 1px 0 rgba(255,255,255,.86);
+    line-height:1.65;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+  }
+
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]{
+    align-self:stretch!important;
+    display:grid!important;
+    grid-template-columns:minmax(0,clamp(260px,36vw,540px)) 44px;
+    grid-template-rows:auto auto;
+    align-items:end;
+    justify-content:end;
+    column-gap:12px;
+    row-gap:4px;
+    width:100%;
+    max-width:none!important;
+    padding:0;
+    margin:0;
+    color:#102f58;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{
+    content:"";
+    grid-column:2;
+    grid-row:2;
+    display:block;
+    width:42px;
+    height:42px;
+    border:1px solid rgba(200,219,234,.78);
+    border-radius:999px;
+    background:
+      var(--taiji-user-avatar) center/44px 44px no-repeat,
+      transparent;
+    box-shadow:0 8px 18px rgba(47,95,135,.1);
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    grid-column:1;
+    grid-row:2;
+    justify-self:end;
+    width:fit-content;
+    max-width:clamp(260px,36vw,540px);
+    min-width:0;
+    margin:0;
+    padding:13px 18px;
+    border:1px solid rgba(8,176,197,.42);
+    border-radius:13px;
+    color:#fff;
+    background:linear-gradient(135deg,#05a8c4 0%,#13bed0 52%,#46d0d9 100%);
+    box-shadow:0 12px 24px rgba(0,164,190,.22),inset 0 1px 0 rgba(255,255,255,.25);
+    font-size:16px;
+    line-height:1.55;
+    font-weight:730;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-foot{
+    grid-column:1;
+    grid-row:1;
+    justify-self:end;
+    display:flex;
+    align-items:center;
+    justify-content:flex-end;
+    gap:8px;
+    min-height:16px;
+    margin:0 3px 0 0;
+    padding:0;
+    color:#6f86a3;
+    opacity:1;
+    font-size:13px;
+    font-weight:650;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-foot .msg-time{
+    order:0;
+    opacity:1;
+    color:#6f86a3;
+    font-size:13px;
+    font-variant-numeric:tabular-nums;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-foot .msg-actions{
+    order:1;
+    opacity:0;
+    transition:opacity .15s ease;
+  }
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]:hover .msg-foot .msg-actions,
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]:focus-within .msg-foot .msg-actions{
+    opacity:.92;
+  }
+  .taiji-home-shell main.main.taiji-real-main .assistant-turn .msg-foot,
+  .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="assistant"] .msg-foot{
+    padding-left:0;
+    max-width:min(620px,100%);
+  }
+
+  .taiji-home-shell #composerWrap{
+    left:clamp(18px,1.35vw,28px);
+    right:clamp(18px,1.35vw,28px);
+    bottom:clamp(14px,1vw,20px);
+    min-height:clamp(104px,7vw,128px);
+    border-color:rgba(190,215,231,.72)!important;
+    border-radius:13px;
+    background:rgba(255,255,255,.88)!important;
+    box-shadow:0 9px 22px rgba(47,95,135,.11),inset 0 1px 0 rgba(255,255,255,.88)!important;
+  }
+  .taiji-home-shell #composerWrap:focus-within,
+  .taiji-home-shell #composerWrap .composer-box:focus-within{
+    border-color:rgba(190,215,231,.78)!important;
+    box-shadow:0 9px 22px rgba(47,95,135,.11),inset 0 1px 0 rgba(255,255,255,.88)!important;
+    outline:0!important;
+  }
+  .taiji-home-shell #composerWrap .composer-box{
+    min-height:100%;
+    padding:clamp(12px,.86vw,16px) clamp(14px,1vw,18px) clamp(9px,.66vw,13px);
+  }
+  .taiji-home-shell #composerWrap textarea#msg{
+    min-height:clamp(32px,2.2vw,44px);
+    max-height:52px;
+    padding:0 2px 7px;
+    border:0!important;
+    border-bottom:1px solid rgba(190,211,229,.5)!important;
+    border-radius:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    outline:0!important;
+    font-size:clamp(13px,.9vw,18px)!important;
+  }
+  .taiji-home-shell #composerWrap textarea#msg:focus{
+    border-color:rgba(190,211,229,.5)!important;
+    box-shadow:none!important;
+    outline:0!important;
+  }
+  .taiji-home-shell #composerWrap .composer-footer{
+    min-height:clamp(36px,2.45vw,48px);
+    margin-top:8px;
+    padding:0!important;
+    gap:9px;
+  }
+  .taiji-home-shell #composerWrap .composer-left{
+    gap:8px;
+    overflow-x:auto;
+    overflow-y:visible;
+    scrollbar-width:none;
+  }
+  .taiji-home-shell #composerWrap .composer-right{
+    width:clamp(40px,2.65vw,52px);
+    min-width:clamp(40px,2.65vw,52px);
+    height:clamp(40px,2.65vw,52px);
+  }
+  .taiji-home-shell #composerWrap #btnAttach,
+  .taiji-home-shell #composerWrap #btnMic,
+  .taiji-home-shell #composerWrap #btnVoiceMode{
+    display:grid;
+    place-items:center;
+    width:clamp(32px,2.2vw,44px)!important;
+    height:clamp(32px,2.2vw,44px)!important;
+    min-width:clamp(32px,2.2vw,44px)!important;
+    border:1px solid rgba(196,216,232,.62)!important;
+    border-radius:10px!important;
+    color:#15375f!important;
+    background:rgba(255,255,255,.62)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.86)!important;
+    opacity:1!important;
+  }
+  .taiji-home-shell #composerWrap #btnAttach:hover,
+  .taiji-home-shell #composerWrap #btnMic:hover,
+  .taiji-home-shell #composerWrap #btnVoiceMode:hover{
+    border-color:rgba(8,176,197,.48)!important;
+    background:rgba(232,250,253,.82)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control-icon svg{
+    width:22px!important;
+    height:22px!important;
+    opacity:1!important;
+  }
+  .taiji-home-shell #composerWrap .composer-profile-chip,
+  .taiji-home-shell #composerWrap .composer-workspace-group,
+  .taiji-home-shell #composerWrap .composer-workspace-chip,
+  .taiji-home-shell #composerWrap .composer-model-chip,
+  .taiji-home-shell #composerWrap .composer-reasoning-chip,
+  .taiji-home-shell #composerWrap .composer-toolsets-chip,
+  .taiji-home-shell #composerWrap .provider-quota-chip{
+    height:clamp(34px,2.35vw,46px)!important;
+    border-radius:10px!important;
+    background:rgba(249,252,255,.74)!important;
+    font-size:clamp(11px,.78vw,14px)!important;
+  }
+  .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn{
+    display:grid!important;
+    place-items:center!important;
+    width:clamp(40px,2.65vw,52px)!important;
+    height:clamp(40px,2.65vw,52px)!important;
+    min-width:clamp(40px,2.65vw,52px)!important;
+    border:0!important;
+    border-radius:10px!important;
+    color:#fff!important;
+    background:linear-gradient(180deg,#11c6d6 0%,#05acc2 100%)!important;
+    box-shadow:0 8px 18px rgba(3,170,191,.24)!important;
+    opacity:1!important;
+    transform:none!important;
+  }
+  .taiji-home-shell #composerWrap #btnSend:disabled,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend:disabled,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn:disabled{
+    color:#fff!important;
+    background:linear-gradient(180deg,rgba(17,198,214,.62),rgba(5,172,194,.52))!important;
+    box-shadow:0 7px 14px rgba(3,170,191,.11)!important;
+    cursor:not-allowed!important;
+  }
+  .taiji-home-shell #composerWrap #btnSend:not(:disabled):hover{
+    filter:brightness(1.04);
+    box-shadow:0 10px 20px rgba(3,170,191,.3)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    grid-column:1!important;
+    grid-row:2!important;
+    justify-self:end!important;
+    width:fit-content!important;
+    max-width:clamp(260px,36vw,540px)!important;
+    min-width:0!important;
+    margin:0!important;
+    padding:13px 18px!important;
+    border:1px solid rgba(8,176,197,.42)!important;
+    border-radius:13px!important;
+    color:#fff!important;
+    background:linear-gradient(135deg,#05a8c4 0%,#13bed0 52%,#46d0d9 100%)!important;
+    box-shadow:0 12px 24px rgba(0,164,190,.22),inset 0 1px 0 rgba(255,255,255,.25)!important;
+    font-size:16px!important;
+    line-height:1.55!important;
+    font-weight:730!important;
+    overflow-wrap:anywhere!important;
+    word-break:break-word!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-segment,
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="assistant"] .msg-body{
+    border:1px solid rgba(200,219,234,.78)!important;
+    border-radius:12px!important;
+    color:#123157!important;
+    background:rgba(255,255,255,.9)!important;
+    box-shadow:0 10px 22px rgba(41,90,132,.12),inset 0 1px 0 rgba(255,255,255,.94)!important;
+    overflow-wrap:anywhere!important;
+    word-break:break-word!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-turn-blocks{
+    display:flex!important;
+    flex-direction:column!important;
+    align-items:flex-start!important;
+    gap:14px!important;
+    max-width:min(640px,100%)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-segment{
+    display:flex!important;
+    flex-direction:column!important;
+    align-items:flex-start!important;
+    width:fit-content!important;
+    max-width:min(620px,100%)!important;
+    min-width:0!important;
+    padding:0!important;
+    border:0!important;
+    border-radius:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-segment > .msg-body{
+    width:fit-content!important;
+    max-width:min(620px,100%)!important;
+    min-width:0!important;
+    padding:13px 18px!important;
+    border:1px solid rgba(200,219,234,.78)!important;
+    border-radius:12px!important;
+    color:#123157!important;
+    background:rgba(255,255,255,.9)!important;
+    box-shadow:0 10px 22px rgba(41,90,132,.12),inset 0 1px 0 rgba(255,255,255,.94)!important;
+    overflow-wrap:anywhere!important;
+    word-break:break-word!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-segment > .msg-foot{
+    display:none!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn{
+    display:grid!important;
+    place-items:center!important;
+    width:clamp(40px,2.65vw,52px)!important;
+    height:clamp(40px,2.65vw,52px)!important;
+    min-width:clamp(40px,2.65vw,52px)!important;
+    border:0!important;
+    border-radius:10px!important;
+    color:#fff!important;
+    background:linear-gradient(180deg,#11c6d6 0%,#05acc2 100%)!important;
+    box-shadow:0 8px 18px rgba(3,170,191,.24)!important;
+    opacity:1!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend:disabled,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn:disabled{
+    color:#fff!important;
+    background:linear-gradient(180deg,rgba(17,198,214,.62),rgba(5,172,194,.52))!important;
+    box-shadow:0 7px 14px rgba(3,170,191,.11)!important;
+    cursor:not-allowed!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item{
+    border-radius:10px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-new-chat,
+  :root[data-skin] .taiji-home-shell .taiji-filter,
+  :root[data-skin] .taiji-home-shell .taiji-filter-add,
+  :root[data-skin] .taiji-home-shell .taiji-view-all{
+    border-radius:10px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card button{
+    border-radius:0!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-quick-card{
+    border-radius:12px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnAttach,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnMic,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnVoiceMode,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-profile-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-model-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-reasoning-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-toolsets-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .provider-quota-chip{
+    border-radius:10px!important;
+  }
+  /* Taiji desktop refinement: user avatar, lighter session typography,
+     consistent chat bubbles, and a real send arrow instead of the PNG upload glyph. */
+  :root[data-skin] .taiji-home-shell .taiji-session-card{
+    border-color:rgba(188,211,229,.46)!important;
+    border-radius:12px!important;
+    background:rgba(255,255,255,.44)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.72)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card button,
+  :root[data-skin] .taiji-home-shell .taiji-session-row{
+    min-height:40px!important;
+    padding:0 12px!important;
+    color:#18395f!important;
+    font-size:14px!important;
+    font-weight:520!important;
+    letter-spacing:0!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card span{
+    font-weight:520!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card time{
+    color:#4b617d!important;
+    font-size:13px!important;
+    font-weight:500!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-row.is-active{
+    color:#fff!important;
+    background:linear-gradient(135deg,#08b0c5 0%,#54d0db 100%)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.28)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-row.is-active span{
+    color:#fff!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-row.is-active time{
+    color:rgba(255,255,255,.92)!important;
+    font-weight:560!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn{
+    width:min(660px,66%)!important;
+    max-width:min(660px,66%)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-segment > .msg-body{
+    border-radius:14px!important;
+    font-size:15px!important;
+    font-weight:500!important;
+    line-height:1.68!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]{
+    grid-template-columns:minmax(0,clamp(240px,34vw,520px)) 44px!important;
+    column-gap:10px!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{
+    width:42px!important;
+    height:42px!important;
+    border:0!important;
+    background:
+      var(--taiji-user-avatar) center/54px 54px no-repeat,
+      transparent!important;
+    box-shadow:0 8px 16px rgba(42,92,137,.12)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    max-width:clamp(240px,34vw,520px)!important;
+    padding:12px 17px!important;
+    border-radius:14px!important;
+    font-size:15px!important;
+    line-height:1.55!important;
+    font-weight:620!important;
+    box-shadow:0 10px 20px rgba(0,164,190,.2),inset 0 1px 0 rgba(255,255,255,.25)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-foot,
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-foot .msg-time{
+    color:#778ba6!important;
+    font-size:12px!important;
+    font-weight:560!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap{
+    overflow:hidden!important;
+    border-radius:16px!important;
+    border-color:rgba(185,213,232,.68)!important;
+    background:rgba(255,255,255,.9)!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-box{
+    border-radius:16px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap textarea#msg{
+    font-weight:520!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend::after,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend::after,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn::after,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn::after{
+    display:none!important;
+    content:none!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend > svg,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend > svg,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn > svg,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn > svg{
+    display:block!important;
+    width:20px!important;
+    height:20px!important;
+    opacity:1!important;
+    color:#fff!important;
+    stroke:currentColor!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn{
+    border-radius:12px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend:disabled,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn:disabled{
+    background:linear-gradient(180deg,rgba(17,198,214,.58),rgba(5,172,194,.48))!important;
+    opacity:.78!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend:disabled > svg,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn:disabled > svg{
+    opacity:.72!important;
+  }
+  /* Taiji desktop polish v2: cohesive app shell, lighter density, aligned composer/dock. */
+  :root[data-skin] .taiji-home-shell{
+    --taiji-polish-panel:rgba(255,255,255,.72);
+    --taiji-polish-panel-strong:rgba(255,255,255,.84);
+    --taiji-polish-line:rgba(185,209,228,.48);
+    --taiji-polish-line-soft:rgba(207,224,237,.38);
+    --taiji-polish-text:#18375d;
+    --taiji-polish-muted:#6d8199;
+    --taiji-polish-accent:#0aaec3;
+    --taiji-polish-accent-soft:rgba(10,174,195,.11);
+    --taiji-polish-shadow:0 6px 18px rgba(37,82,126,.07),inset 0 1px 0 rgba(255,255,255,.74);
+    --taiji-polish-shadow-soft:0 3px 10px rgba(37,82,126,.045),inset 0 1px 0 rgba(255,255,255,.68);
+    gap:10px!important;
+    padding:10px!important;
+    color:var(--taiji-polish-text);
+    background:
+      linear-gradient(135deg,rgba(224,240,252,.92) 0%,rgba(247,251,255,.96) 54%,rgba(229,245,253,.88) 100%)!important;
+    font-weight:400;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell{
+    --taiji-desktop-titlebar-h:38px;
+    padding:calc(var(--taiji-desktop-titlebar-h) + 8px) 10px 10px!important;
+    background:
+      linear-gradient(180deg,rgba(232,246,255,.96) 0%,rgba(239,249,255,.9) 42px,rgba(224,241,253,.86) 100%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell::after{
+    content:"";
+    position:fixed;
+    z-index:80;
+    top:0;
+    left:0;
+    right:0;
+    height:var(--taiji-desktop-titlebar-h);
+    pointer-events:auto;
+    -webkit-app-region:drag;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell button,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell input,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell textarea,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell select,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell a,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell [role="button"]{
+    -webkit-app-region:no-drag;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-brand-sidebar,
+  :root[data-skin] .taiji-home-shell .taiji-secondary-panel,
+  :root[data-skin] .taiji-home-shell .taiji-main-workspace{
+    border:1px solid var(--taiji-polish-line)!important;
+    border-radius:14px!important;
+    background:var(--taiji-polish-panel)!important;
+    box-shadow:var(--taiji-polish-shadow-soft)!important;
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+  }
+  :root[data-skin] .taiji-home-shell .taiji-main-workspace{
+    background-image:
+      linear-gradient(90deg,rgba(250,253,255,.82) 0%,rgba(246,251,255,.48) 50%,rgba(233,246,253,.12) 100%),
+      url("assets/taiji/background/background-grid.png")!important;
+    background-size:cover!important;
+    background-position:center right!important;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.34),0 5px 16px rgba(37,82,126,.055)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-main-workspace::before{
+    background:
+      linear-gradient(180deg,rgba(255,255,255,.1),rgba(241,249,254,.04)),
+      radial-gradient(circle at 72% 58%,rgba(10,174,195,.04),transparent 34%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell .taiji-main-workspace{
+    background-image:
+      linear-gradient(90deg,rgba(250,253,255,.78) 0%,rgba(246,251,255,.34) 48%,rgba(233,246,253,.03) 100%),
+      url("assets/taiji/background/background-grid.png")!important;
+    background-position:center right!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell .taiji-main-workspace::before{
+    background:
+      linear-gradient(180deg,rgba(255,255,255,.06),rgba(241,249,254,.02)),
+      radial-gradient(circle at 72% 62%,rgba(10,174,195,.035),transparent 30%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell .taiji-workspace-brand-pill{
+    top:16px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-brand-logo{
+    width:62px!important;
+    height:62px!important;
+    margin-bottom:8px!important;
+    filter:drop-shadow(0 7px 12px rgba(42,112,178,.14))!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-brand-title,
+  :root[data-skin] .taiji-home-shell .taiji-recent-head h1{
+    color:#092d54!important;
+    font-weight:720!important;
+    letter-spacing:0!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-brand-subtitle{
+    color:var(--taiji-polish-muted)!important;
+    font-weight:520!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item{
+    min-height:40px!important;
+    padding:0 14px!important;
+    border:1px solid transparent!important;
+    border-radius:10px!important;
+    color:#24476b!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    font-size:14px!important;
+    font-weight:560!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item img{
+    width:22px!important;
+    height:22px!important;
+    flex:0 0 22px!important;
+    opacity:.94;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item:hover{
+    border-color:var(--taiji-polish-line-soft)!important;
+    background:rgba(255,255,255,.5)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item.is-active{
+    color:#063d61!important;
+    border-color:rgba(10,174,195,.2)!important;
+    background:var(--taiji-polish-accent-soft)!important;
+    box-shadow:inset 2px 0 0 rgba(10,174,195,.48)!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item.is-active img{
+    filter:none!important;
+    opacity:.95!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-quick-card{
+    grid-template-columns:34px minmax(0,1fr) auto!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-quick-card img{
+    width:30px!important;
+    height:30px!important;
+    object-fit:contain!important;
+    justify-self:center!important;
+    filter:drop-shadow(0 2px 4px rgba(42,112,178,.1))!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-new-chat,
+  :root[data-skin] .taiji-home-shell .taiji-filter,
+  :root[data-skin] .taiji-home-shell .taiji-filter-add,
+  :root[data-skin] .taiji-home-shell .taiji-view-all,
+  :root[data-skin] .taiji-home-shell .taiji-search-box{
+    border-color:var(--taiji-polish-line-soft)!important;
+    border-radius:10px!important;
+    background:rgba(255,255,255,.62)!important;
+    box-shadow:var(--taiji-polish-shadow-soft)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-filter.is-active{
+    color:#063d61!important;
+    border-color:rgba(10,174,195,.24)!important;
+    background:var(--taiji-polish-accent-soft)!important;
+    box-shadow:none!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-groups{
+    margin-top:18px!important;
+    padding:0 0 8px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-group+ .taiji-session-group{
+    margin-top:18px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-group header{
+    padding:0 2px 8px!important;
+    color:#17395f!important;
+    font-size:14px!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card{
+    border:0!important;
+    border-radius:10px!important;
+    background:rgba(255,255,255,.28)!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card button,
+  :root[data-skin] .taiji-home-shell .taiji-session-row{
+    min-height:38px!important;
+    padding:0 10px!important;
+    border-bottom:1px solid var(--taiji-polish-line-soft)!important;
+    color:#1b3e63!important;
+    background:transparent!important;
+    font-size:13px!important;
+    font-weight:460!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card button:last-child,
+  :root[data-skin] .taiji-home-shell .taiji-session-row:last-child{
+    border-bottom:0!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card span{
+    font-weight:460!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card .taiji-session-title{
+    flex:1 1 auto!important;
+    min-width:0!important;
+    max-width:100%!important;
+    overflow:hidden!important;
+    text-overflow:ellipsis!important;
+    white-space:nowrap!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-card time{
+    flex:0 0 auto!important;
+    color:#6f8299!important;
+    font-size:12px!important;
+    font-weight:450!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-row.is-active{
+    color:#073a5e!important;
+    border-color:rgba(10,174,195,.18)!important;
+    background:rgba(10,174,195,.12)!important;
+    box-shadow:inset 3px 0 0 rgba(10,174,195,.7)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-row.is-active span{
+    color:#073a5e!important;
+    font-weight:620!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-session-row.is-active time{
+    color:#52708c!important;
+    font-weight:500!important;
+  }
+  :root[data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    inset:0 0 clamp(158px,9.8vw,190px) 0!important;
+    padding:clamp(70px,4.8vw,92px) clamp(24px,1.8vw,36px) 16px!important;
+    background:linear-gradient(180deg,rgba(250,253,255,.16),rgba(240,249,254,.06))!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    inset:0 0 clamp(164px,10vw,194px) 0!important;
+    padding:clamp(66px,4.5vw,88px) clamp(20px,1.6vw,32px) 16px!important;
+    background:linear-gradient(90deg,rgba(250,253,255,.08),rgba(250,253,255,.02) 56%,rgba(250,253,255,0))!important;
+  }
+  :root[data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner,
+  :root[data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main .live-compression-cards,
+  :root[data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #liveToolCards{
+    width:min(920px,calc(100% - 12px))!important;
+    max-width:min(920px,calc(100% - 12px))!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main .live-compression-cards,
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #liveToolCards{
+    margin-left:clamp(18px,4vw,76px)!important;
+    margin-right:auto!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn{
+    width:min(720px,80%)!important;
+    max-width:min(720px,80%)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-role.assistant{
+    min-height:34px!important;
+    margin-bottom:2px!important;
+    color:#536d88!important;
+    font-size:13px!important;
+    font-weight:560!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .role-icon.assistant{
+    width:34px!important;
+    height:34px!important;
+    box-shadow:0 4px 10px rgba(47,95,135,.08),inset 0 1px 0 rgba(255,255,255,.82)!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .role-icon.assistant img{
+    width:28px!important;
+    height:28px!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-role-name{
+    color:#355678!important;
+    font-size:13px!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]{
+    grid-template-columns:minmax(0,clamp(240px,32vw,500px)) 38px!important;
+    column-gap:9px!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{
+    width:36px!important;
+    height:36px!important;
+    background:var(--taiji-user-avatar) center/46px 46px no-repeat,transparent!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    max-width:clamp(240px,32vw,500px)!important;
+    padding:11px 15px!important;
+    border-color:rgba(10,174,195,.32)!important;
+    border-radius:12px!important;
+    background:linear-gradient(135deg,#0ba9bd 0%,#32c3cf 100%)!important;
+    box-shadow:0 8px 16px rgba(0,164,190,.16),inset 0 1px 0 rgba(255,255,255,.22)!important;
+    font-size:14px!important;
+    font-weight:560!important;
+    line-height:1.55!important;
+  }
+  :root[data-skin] .taiji-home-shell main.main.taiji-real-main .assistant-turn .assistant-segment > .msg-body{
+    max-width:min(700px,100%)!important;
+    padding:12px 16px!important;
+    border-color:rgba(196,216,231,.55)!important;
+    border-radius:12px!important;
+    background:rgba(255,255,255,.82)!important;
+    box-shadow:0 6px 14px rgba(41,90,132,.075),inset 0 1px 0 rgba(255,255,255,.82)!important;
+    color:#16365b!important;
+    font-size:14px!important;
+    font-weight:440!important;
+    line-height:1.68!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap{
+    left:24px!important;
+    right:24px!important;
+    bottom:14px!important;
+    min-height:116px!important;
+    border-color:var(--taiji-polish-line)!important;
+    border-radius:14px!important;
+    background:rgba(255,255,255,.82)!important;
+    box-shadow:0 5px 16px rgba(37,82,126,.07),inset 0 1px 0 rgba(255,255,255,.8)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell #composerWrap{
+    left:20px!important;
+    right:20px!important;
+    bottom:16px!important;
+    min-height:116px!important;
+    border-color:rgba(179,210,232,.7)!important;
+    border-radius:15px!important;
+    background:rgba(251,254,255,.9)!important;
+    box-shadow:0 8px 22px rgba(31,80,124,.11),inset 0 1px 0 rgba(255,255,255,.9)!important;
+    overflow:hidden!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-box{
+    padding:12px 14px 10px!important;
+    border-radius:14px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap textarea#msg{
+    min-height:34px!important;
+    max-height:50px!important;
+    color:#1a3d62!important;
+    font-size:14px!important;
+    font-weight:430!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-footer{
+    min-height:38px!important;
+    gap:8px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnAttach,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnMic,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnVoiceMode,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-profile-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-model-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-reasoning-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-toolsets-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .provider-quota-chip{
+    height:40px!important;
+    border-color:var(--taiji-polish-line-soft)!important;
+    border-radius:10px!important;
+    background:rgba(250,253,255,.64)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.72)!important;
+    font-size:12px!important;
+    font-weight:560!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnAttach,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnMic,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnVoiceMode{
+    width:40px!important;
+    min-width:40px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-control-icon svg{
+    width:22px!important;
+    height:22px!important;
+    opacity:1!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-profile-icon,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-icon,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-model-icon,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-reasoning-icon,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-toolsets-icon{
+    width:22px!important;
+    height:22px!important;
+    flex:0 0 22px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn{
+    width:44px!important;
+    height:44px!important;
+    min-width:44px!important;
+    border-radius:11px!important;
+    background:linear-gradient(180deg,#2cc7d2 0%,#0baec3 100%)!important;
+    box-shadow:0 7px 15px rgba(3,170,191,.2)!important;
+  }
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock{
+    width:100%!important;
+    max-width:none!important;
+    margin:0 0 8px!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell #writeflowStatusDock{
+    position:relative;
+    z-index:2;
+    margin:0 0 10px!important;
+    padding:0!important;
+  }
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock:has(.status-card-writeflow.is-expanded){
+    width:100%!important;
+    max-width:none!important;
+  }
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow{
+    border-color:var(--taiji-polish-line)!important;
+    border-radius:12px!important;
+    background:rgba(255,255,255,.76)!important;
+    box-shadow:0 4px 12px rgba(37,82,126,.06),inset 0 1px 0 rgba(255,255,255,.76)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow{
+    border-color:rgba(185,216,235,.76)!important;
+    border-radius:12px!important;
+    background:rgba(255,255,255,.72)!important;
+    box-shadow:none!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow.is-collapsed{
+    max-height:56px!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow.is-expanded{
+    max-height:min(38vh,420px)!important;
+    overflow:auto!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnAttach .composer-control-icon svg,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnMic .composer-control-icon svg,
+  :root[data-skin] .taiji-home-shell #composerWrap #btnVoiceMode .composer-control-icon svg{
+    width:22px!important;
+    min-width:22px!important;
+    max-width:22px!important;
+    inline-size:22px!important;
+    height:22px!important;
+    min-height:22px!important;
+    max-height:22px!important;
+    block-size:22px!important;
+    background-size:22px 22px!important;
+  }
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini{
+    min-height:48px!important;
+    padding:5px 8px!important;
+  }
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-main strong{
+    font-size:13px!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-main small,
+  :root[data-skin] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-meta small{
+    color:var(--taiji-polish-muted)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item{
+    min-height:44px!important;
+    gap:12px!important;
+    padding:0 14px!important;
+    border:1px solid transparent!important;
+    border-radius:10px!important;
+    color:#10375f!important;
+    font-size:15px!important;
+    font-weight:650!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-icon{
+    width:30px!important;
+    height:30px!important;
+    color:#1696b7!important;
+    background:rgba(224,247,252,.68)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-icon svg{
+    width:22px!important;
+    height:22px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-nav-item.is-active .taiji-nav-icon{
+    color:#078cac!important;
+    background:rgba(255,255,255,.8)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.84),0 4px 10px rgba(20,136,175,.08)!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-quick-card{
+    grid-template-columns:38px minmax(0,1fr) auto!important;
+    gap:14px!important;
+    font-size:16px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-quick-icon{
+    width:38px!important;
+    height:38px!important;
+  }
+  :root[data-skin] .taiji-home-shell .taiji-quick-icon svg{
+    width:25px!important;
+    height:25px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap{
+    overflow:visible!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin] .taiji-home-shell #composerWrap{
+    overflow:visible!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-footer{
+    gap:10px!important;
+    min-height:44px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-left{
+    flex:1 1 auto;
+    min-width:0;
+    gap:8px!important;
+    overflow-x:auto!important;
+    overflow-y:visible!important;
+    scrollbar-width:none;
+    -webkit-overflow-scrolling:touch;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-left::-webkit-scrollbar{
+    display:none;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-left > *{
+    flex-shrink:0;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-toolsets-wrap{display:none!important;}
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-control{
+    box-sizing:border-box;
+    align-items:center;
+    justify-content:center;
+    gap:8px;
+    height:42px!important;
+    min-height:42px!important;
+    border:1px solid var(--taiji-polish-line-soft)!important;
+    border-radius:11px!important;
+    color:#123b62!important;
+    background:rgba(250,253,255,.72)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.78)!important;
+    font-size:14px!important;
+    font-weight:620!important;
+    line-height:1!important;
+    white-space:nowrap;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-icon-control{
+    width:42px!important;
+    min-width:42px!important;
+    padding:0!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-control-icon{
+    display:inline-flex!important;
+    align-items:center;
+    justify-content:center;
+    width:22px!important;
+    height:22px!important;
+    flex:0 0 22px!important;
+    color:#1096b8!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-control-icon::after{
+    content:none!important;
+    display:none!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-control-icon svg{
+    display:block!important;
+    width:22px!important;
+    height:22px!important;
+    opacity:1!important;
+    stroke:currentColor!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-control-label{
+    display:inline-block;
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-group{
+    display:inline-flex!important;
+    align-items:center!important;
+    height:42px!important;
+    min-height:42px!important;
+    max-width:230px!important;
+    border:1px solid var(--taiji-polish-line-soft)!important;
+    border-radius:11px!important;
+    background:rgba(250,253,255,.72)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.78)!important;
+    overflow:hidden!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-files-btn{
+    width:42px!important;
+    min-width:42px!important;
+    height:42px!important;
+    padding:0!important;
+    border:0!important;
+    border-right:1px solid var(--taiji-polish-line-soft)!important;
+    border-radius:10px 0 0 10px!important;
+    background:transparent!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-chip{
+    flex:1 1 auto!important;
+    width:auto!important;
+    min-width:86px!important;
+    max-width:188px!important;
+    padding:0 10px!important;
+    border:0!important;
+    border-radius:0 10px 10px 0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-model-chip{
+    min-width:150px!important;
+    max-width:220px!important;
+    padding:0 12px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-toolsets-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-reasoning-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-profile-chip,
+  :root[data-skin] .taiji-home-shell #composerWrap .provider-quota-chip{
+    max-width:170px!important;
+    padding:0 12px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn{
+    display:grid!important;
+    width:44px!important;
+    min-width:44px!important;
+    height:44px!important;
+    border-radius:12px!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap #btnSend .composer-control-icon,
+  :root[data-skin] .taiji-home-shell #composerWrap button.send-btn .composer-control-icon{
+    color:#fff!important;
+  }
+  :root[data-skin] .taiji-home-shell #composerWrap .composer-mobile-config-btn{
+    display:none!important;
+  }
+  @container composer-footer (min-width: 1080px){
+    .taiji-home-shell #composerWrap .composer-toolsets-wrap{display:block!important;}
+  }
+  @container composer-footer (max-width: 760px){
+    .taiji-home-shell #composerWrap .composer-profile-wrap,
+    .taiji-home-shell #composerWrap .composer-reasoning-wrap,
+    .taiji-home-shell #composerWrap .composer-toolsets-wrap,
+    .taiji-home-shell #composerWrap .provider-quota-chip{display:none!important;}
+    .taiji-home-shell #composerWrap .composer-model-chip{min-width:136px!important;max-width:184px!important;}
+    .taiji-home-shell #composerWrap .composer-workspace-group{max-width:188px!important;}
+  }
+  @container composer-footer (max-width: 520px){
+    .taiji-home-shell #composerWrap .composer-control-label,
+    .taiji-home-shell #composerWrap .composer-workspace-chevron,
+    .taiji-home-shell #composerWrap .composer-model-chevron,
+    .taiji-home-shell #composerWrap .composer-profile-chevron,
+    .taiji-home-shell #composerWrap .composer-reasoning-chevron{display:none!important;}
+    .taiji-home-shell #composerWrap .composer-model-wrap,
+    .taiji-home-shell #composerWrap .composer-ws-wrap{display:none!important;}
+    .taiji-home-shell #composerWrap .composer-mobile-config-btn{display:inline-flex!important;}
+  }
+  html[data-workspace-panel="closed"] .taiji-main-workspace > .rightpanel.taiji-workspace-drawer{
+    opacity:0;
+    pointer-events:none;
+    transform:translateX(18px);
+  }
+}
+
+.ui-visibility-hidden,
+[data-ui-visibility-hidden="1"],
+.taiji-home-shell [data-ui-visibility-hidden="1"],
+.taiji-home-shell .taiji-nav-item[data-ui-visibility-hidden="1"],
+.nav-tab[data-ui-visibility-hidden="1"],
+.side-menu-item[data-ui-visibility-hidden="1"]{
+  display:none!important;
+}
+
+:root[data-skin="taiji-light-glass"]{
+  --taiji-ui-bg:#eef6fc;
+  --taiji-ui-panel:rgba(255,255,255,.74);
+  --taiji-ui-panel-solid:rgba(255,255,255,.92);
+  --taiji-ui-reading:rgba(255,255,255,.86);
+  --taiji-ui-line:rgba(170,198,221,.58);
+  --taiji-ui-line-strong:rgba(106,177,205,.54);
+  --taiji-ui-text:#152b49;
+  --taiji-ui-heading:#0a2f58;
+  --taiji-ui-muted:#60738e;
+  --taiji-ui-muted-soft:#7d8ea4;
+  --taiji-ui-accent:#0899b4;
+  --taiji-ui-accent-strong:#048aa8;
+  --taiji-ui-accent-soft:rgba(12,166,194,.11);
+  --taiji-ui-success:#0f9f77;
+  --taiji-ui-shadow:0 16px 42px rgba(44,88,128,.10);
+  --taiji-ui-shadow-soft:0 8px 24px rgba(44,88,128,.075);
+  --taiji-ui-radius-panel:14px;
+  --taiji-ui-radius-control:12px;
+}
+
+@media (min-width:901px){
+  :root[data-skin="taiji-light-glass"] body{
+    background:
+      linear-gradient(180deg,rgba(246,251,255,.96),rgba(232,243,251,.96)),
+      var(--taiji-ui-bg)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell{
+    gap:16px!important;
+    padding:clamp(18px,1.4vw,26px)!important;
+    color:var(--taiji-ui-text);
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-sidebar,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-secondary-panel,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-main-workspace{
+    border:1px solid var(--taiji-ui-line)!important;
+    border-radius:var(--taiji-ui-radius-panel)!important;
+    background:var(--taiji-ui-panel)!important;
+    box-shadow:var(--taiji-ui-shadow-soft)!important;
+    backdrop-filter:blur(18px) saturate(1.08)!important;
+    -webkit-backdrop-filter:blur(18px) saturate(1.08)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-sidebar{
+    width:clamp(250px,15.4vw,288px)!important;
+    padding:32px 24px 24px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-secondary-panel{
+    width:clamp(330px,22vw,390px)!important;
+    padding:30px 24px 24px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-main-workspace{
+    background-image:
+      linear-gradient(90deg,rgba(250,253,255,.98) 0%,rgba(248,252,255,.84) 46%,rgba(239,248,254,.42) 100%),
+      url("assets/taiji/background/background-grid.png")!important;
+    background-size:cover!important;
+    background-position:center right!important;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.36),var(--taiji-ui-shadow-soft)!important;
+    overflow:hidden!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-main-workspace::before{
+    background:
+      linear-gradient(180deg,rgba(255,255,255,.18),rgba(244,250,254,.08)),
+      radial-gradient(circle at 76% 58%,rgba(8,153,180,.035),transparent 32%)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-logo{
+    width:64px!important;
+    height:64px!important;
+    margin-bottom:12px!important;
+    filter:drop-shadow(0 9px 16px rgba(33,103,172,.14))!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-title{
+    color:var(--taiji-ui-heading)!important;
+    font-size:26px!important;
+    font-weight:760!important;
+    line-height:1.14!important;
+    letter-spacing:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-subtitle{
+    margin-top:6px!important;
+    color:var(--taiji-ui-muted)!important;
+    font-size:14px!important;
+    font-weight:560!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-nav{
+    gap:7px!important;
+    margin-top:28px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-item{
+    position:relative;
+    min-height:44px!important;
+    padding:0 14px 0 12px!important;
+    gap:12px!important;
+    border:1px solid transparent!important;
+    border-radius:10px!important;
+    color:#1b385c!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    font-size:15px!important;
+    font-weight:600!important;
+    line-height:1!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-item::before{
+    content:"";
+    position:absolute;
+    left:0;
+    top:9px;
+    bottom:9px;
+    width:2px;
+    border-radius:999px;
+    background:transparent;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-icon{
+    display:grid!important;
+    place-items:center!important;
+    width:32px!important;
+    height:32px!important;
+    flex:0 0 32px!important;
+    border-radius:9px!important;
+    color:var(--taiji-ui-accent-strong)!important;
+    background:transparent!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-icon svg{
+    width:22px!important;
+    height:22px!important;
+    stroke-width:2.05!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-item:hover{
+    border-color:rgba(181,207,226,.52)!important;
+    background:rgba(255,255,255,.52)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-item.is-active{
+    color:var(--taiji-ui-heading)!important;
+    border-color:rgba(8,153,180,.22)!important;
+    background:linear-gradient(90deg,rgba(213,244,250,.78),rgba(235,249,252,.58))!important;
+    box-shadow:none!important;
+    font-weight:680!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-item.is-active::before{
+    background:var(--taiji-ui-accent)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-nav-item.is-active .taiji-nav-icon{
+    color:var(--taiji-ui-accent-strong)!important;
+    background:rgba(255,255,255,.74)!important;
+  }
+
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-recent-head{
+    margin-bottom:24px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-recent-head h1{
+    color:var(--taiji-ui-heading)!important;
+    font-size:26px!important;
+    font-weight:760!important;
+    letter-spacing:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-new-chat,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-filter,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-filter-add,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-view-all{
+    border:1px solid rgba(184,208,226,.48)!important;
+    border-radius:10px!important;
+    color:var(--taiji-ui-heading)!important;
+    background:rgba(255,255,255,.64)!important;
+    box-shadow:none!important;
+    font-weight:640!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-new-chat span:first-child{
+    color:var(--taiji-ui-accent)!important;
+    font-size:20px!important;
+    line-height:1!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-search-box{
+    min-height:48px!important;
+    border:1px solid rgba(184,208,226,.58)!important;
+    border-radius:11px!important;
+    background:rgba(255,255,255,.64)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.82)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-search-icon{
+    display:grid!important;
+    place-items:center;
+    width:22px;
+    height:22px;
+    color:#6b8bad;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-search-icon svg{
+    width:18px!important;
+    height:18px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-filter.is-active{
+    border-color:transparent!important;
+    color:var(--taiji-ui-heading)!important;
+    background:rgba(214,244,250,.82)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-groups{
+    gap:24px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-group header{
+    margin:0 0 10px!important;
+    color:var(--taiji-ui-heading)!important;
+    font-size:18px!important;
+    font-weight:720!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-card{
+    border:0!important;
+    border-radius:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-card button,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row{
+    display:grid!important;
+    grid-template-columns:minmax(0,1fr) auto!important;
+    align-items:center!important;
+    column-gap:10px!important;
+    min-height:46px!important;
+    padding:0 10px 0 12px!important;
+    border:1px solid transparent!important;
+    border-bottom-color:rgba(185,206,223,.38)!important;
+    border-radius:8px!important;
+    color:var(--taiji-ui-text)!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    font-size:14px!important;
+    font-weight:600!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-card .taiji-session-title{
+    min-width:0!important;
+    overflow:hidden!important;
+    text-overflow:ellipsis!important;
+    white-space:nowrap!important;
+    font-weight:640!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-meta{
+    display:flex!important;
+    flex-direction:column!important;
+    align-items:flex-end!important;
+    justify-content:center!important;
+    gap:3px!important;
+    min-width:42px!important;
+    line-height:1!important;
+    white-space:nowrap!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-card time{
+    color:var(--taiji-ui-muted)!important;
+    font-size:13px!important;
+    font-weight:520!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-live{
+    position:static!important;
+    transform:none!important;
+    display:inline-flex!important;
+    align-items:center!important;
+    justify-content:center!important;
+    min-height:14px!important;
+    padding:2px 5px!important;
+    border:1px solid rgba(8,153,180,.22)!important;
+    border-radius:999px!important;
+    color:var(--taiji-ui-accent-strong)!important;
+    background:rgba(255,255,255,.58)!important;
+    font-size:10px!important;
+    font-weight:700!important;
+    line-height:1!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row:hover{
+    border-color:rgba(183,208,226,.5)!important;
+    background:rgba(255,255,255,.48)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row.is-active{
+    min-height:54px!important;
+    border-color:rgba(8,153,180,.26)!important;
+    border-left-color:var(--taiji-ui-accent)!important;
+    border-left-width:3px!important;
+    background:rgba(214,244,250,.58)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row.is-active span,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row.is-active time{
+    color:var(--taiji-ui-heading)!important;
+  }
+
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-main-workspace .taiji-real-main{
+    max-width:min(760px,calc(100% - 56px))!important;
+    margin:32px auto clamp(178px,11vw,214px)!important;
+    border:1px solid var(--taiji-ui-line)!important;
+    border-radius:12px!important;
+    background:var(--taiji-ui-reading)!important;
+    box-shadow:0 14px 36px rgba(44,88,128,.08),inset 0 1px 0 rgba(255,255,255,.78)!important;
+    backdrop-filter:blur(12px)!important;
+    -webkit-backdrop-filter:blur(12px)!important;
+    overflow:hidden!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace .taiji-real-main{
+    display:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    inset:0!important;
+    padding:28px 32px 30px!important;
+    background:transparent!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #messages{
+    border-radius:10px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main .live-compression-cards,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #liveToolCards{
+    width:100%!important;
+    max-width:100%!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-turn{
+    width:100%!important;
+    max-width:100%!important;
+    grid-template-columns:0 minmax(0,1fr)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-role.assistant{
+    display:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-turn-blocks{
+    grid-column:2!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-segment .msg-body,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-turn .msg-body{
+    width:100%!important;
+    max-width:100%!important;
+    padding:0!important;
+    border:0!important;
+    border-radius:0!important;
+    color:var(--taiji-ui-text)!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    font-size:18px!important;
+    font-weight:500!important;
+    line-height:1.82!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-body h1,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-body h2,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-body h3{
+    color:var(--taiji-ui-heading)!important;
+    font-weight:720!important;
+    letter-spacing:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-body p,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-body li{
+    color:var(--taiji-ui-text)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]{
+    padding:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{
+    display:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    max-width:min(520px,80%)!important;
+    border:1px solid rgba(8,153,180,.22)!important;
+    border-radius:12px!important;
+    background:linear-gradient(135deg,#079ab4,#0fb3c6)!important;
+    box-shadow:0 10px 24px rgba(8,153,180,.16)!important;
+    font-size:15px!important;
+    font-weight:620!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-hero{
+    width:min(640px,calc(100% - 64px))!important;
+    padding-top:clamp(108px,9vh,148px)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-hero-logo{
+    width:58px!important;
+    height:58px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-hero h2{
+    color:var(--taiji-ui-heading)!important;
+    font-size:34px!important;
+    font-weight:760!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-hero p{
+    color:#294a6c!important;
+    font-size:15px!important;
+    font-weight:580!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-quick-card{
+    grid-template-columns:40px minmax(0,1fr) 18px!important;
+    min-height:58px!important;
+    padding:8px 14px 8px 10px!important;
+    border:1px solid rgba(184,208,226,.56)!important;
+    border-radius:12px!important;
+    color:var(--taiji-ui-text)!important;
+    background:rgba(255,255,255,.82)!important;
+    box-shadow:0 10px 28px rgba(44,88,128,.08)!important;
+    font-size:16px!important;
+    font-weight:610!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-quick-icon{
+    width:36px!important;
+    height:36px!important;
+    border-radius:10px!important;
+    color:var(--taiji-ui-accent-strong)!important;
+    background:rgba(224,246,250,.72)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-quick-icon svg{
+    width:24px!important;
+    height:24px!important;
+  }
+
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock{
+    left:clamp(28px,2.1vw,40px)!important;
+    right:clamp(28px,2.1vw,40px)!important;
+    bottom:clamp(132px,8.5vw,158px)!important;
+    z-index:14!important;
+    padding:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow{
+    border:1px solid var(--taiji-ui-line)!important;
+    border-radius:13px!important;
+    background:var(--taiji-ui-panel-solid)!important;
+    box-shadow:var(--taiji-ui-shadow-soft)!important;
+    color:var(--taiji-ui-text)!important;
+    overflow:hidden!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini{
+    display:grid!important;
+    grid-template-columns:auto minmax(0,1fr) auto auto auto auto;
+    align-items:center!important;
+    gap:14px!important;
+    min-height:64px!important;
+    padding:8px 14px!important;
+    color:var(--taiji-ui-text)!important;
+    background:transparent!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-avatar{
+    width:42px!important;
+    height:42px!important;
+    border-radius:10px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-main strong{
+    color:var(--taiji-ui-heading)!important;
+    font-size:15px!important;
+    font-weight:720!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-main small,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-meta small{
+    color:var(--taiji-ui-muted)!important;
+    font-size:12px!important;
+    font-weight:520!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-pill{
+    min-height:32px!important;
+    padding:0 12px!important;
+    border:1px solid rgba(8,153,180,.22)!important;
+    border-radius:999px!important;
+    color:var(--taiji-ui-accent-strong)!important;
+    background:rgba(214,244,250,.72)!important;
+    font-size:13px!important;
+    font-weight:680!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-meta{
+    min-width:68px!important;
+    padding:0 10px!important;
+    border-left:1px solid rgba(184,208,226,.48)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-mini-meta b{
+    color:var(--taiji-ui-heading)!important;
+    font-size:14px!important;
+    font-weight:720!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-toggle{
+    height:34px!important;
+    padding:0 12px!important;
+    border:1px solid rgba(184,208,226,.5)!important;
+    border-radius:10px!important;
+    color:var(--taiji-ui-heading)!important;
+    background:rgba(255,255,255,.72)!important;
+    box-shadow:none!important;
+    font-size:13px!important;
+    font-weight:650!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow.is-expanded{
+    max-height:min(58vh,560px)!important;
+    overflow:auto!important;
+    background:var(--taiji-ui-panel-solid)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow.is-expanded .status-card-writeflow-mini{
+    border-bottom:1px solid var(--taiji-ui-line)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow-body{
+    background:rgba(248,252,255,.72)!important;
+  }
+
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap{
+    left:clamp(28px,2.1vw,40px)!important;
+    right:clamp(28px,2.1vw,40px)!important;
+    bottom:clamp(22px,1.55vw,30px)!important;
+    min-height:118px!important;
+    overflow:visible!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-box{
+    padding:18px 18px 14px!important;
+    border:1px solid var(--taiji-ui-line-strong)!important;
+    border-radius:15px!important;
+    background:rgba(255,255,255,.88)!important;
+    box-shadow:0 18px 42px rgba(44,88,128,.14),inset 0 1px 0 rgba(255,255,255,.82)!important;
+    backdrop-filter:blur(18px) saturate(1.08)!important;
+    -webkit-backdrop-filter:blur(18px) saturate(1.08)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap textarea#msg{
+    min-height:34px!important;
+    padding:0 4px 12px!important;
+    border:0!important;
+    border-bottom:1px solid rgba(184,208,226,.62)!important;
+    border-radius:0!important;
+    color:var(--taiji-ui-text)!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    font-size:17px!important;
+    font-weight:500!important;
+    line-height:1.6!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap textarea#msg::placeholder{
+    color:#7b8da4!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-footer{
+    container-type:inline-size;
+    container-name:composer-footer;
+    display:flex!important;
+    align-items:center!important;
+    gap:12px!important;
+    min-height:44px!important;
+    padding-top:12px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-right{
+    display:flex!important;
+    align-items:center!important;
+    min-width:0!important;
+    gap:10px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left{
+    flex:1 1 auto!important;
+    overflow-x:auto!important;
+    overflow-y:visible!important;
+    scrollbar-width:none;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left::-webkit-scrollbar{
+    display:none;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left > *{
+    flex-shrink:0;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-divider{
+    display:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control{
+    box-sizing:border-box;
+    display:inline-flex!important;
+    align-items:center!important;
+    justify-content:center!important;
+    gap:9px!important;
+    height:44px!important;
+    min-height:44px!important;
+    border:1px solid rgba(184,208,226,.62)!important;
+    border-radius:12px!important;
+    color:var(--taiji-ui-heading)!important;
+    background:rgba(249,253,255,.72)!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.78)!important;
+    font-size:14px!important;
+    font-weight:650!important;
+    line-height:1!important;
+    white-space:nowrap!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control:hover,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control:focus-visible{
+    border-color:rgba(8,153,180,.36)!important;
+    background:rgba(255,255,255,.9)!important;
+    outline:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control:disabled{
+    opacity:.72!important;
+    cursor:not-allowed!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control:empty{
+    display:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-icon-control{
+    width:44px!important;
+    min-width:44px!important;
+    padding:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control-icon{
+    display:inline-flex!important;
+    align-items:center!important;
+    justify-content:center!important;
+    width:22px!important;
+    height:22px!important;
+    flex:0 0 22px!important;
+    color:var(--taiji-ui-accent-strong)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control-icon svg{
+    width:22px!important;
+    height:22px!important;
+    stroke-width:2.1!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{
+    display:inline-flex!important;
+    align-items:center!important;
+    gap:8px!important;
+    height:44px!important;
+    max-width:268px!important;
+    border:0!important;
+    border-radius:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    overflow:visible!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-files-btn{
+    width:44px!important;
+    min-width:44px!important;
+    height:44px!important;
+    border:1px solid rgba(184,208,226,.62)!important;
+    border-radius:12px!important;
+    background:rgba(249,253,255,.72)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-chip{
+    min-width:92px!important;
+    max-width:192px!important;
+    padding:0 12px!important;
+    border:1px solid rgba(184,208,226,.62)!important;
+    border-radius:12px!important;
+    background:rgba(249,253,255,.72)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-chip.active,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-chip[aria-expanded="true"]{
+    border-color:rgba(8,153,180,.42)!important;
+    background:rgba(232,249,252,.92)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group:has(.composer-workspace-chip[data-ui-visibility-hidden="1"]){
+    width:auto!important;
+    max-width:none!important;
+    border:0!important;
+    background:transparent!important;
+    overflow:visible!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group:has(.composer-workspace-chip[data-ui-visibility-hidden="1"]) .composer-workspace-files-btn{
+    border:1px solid rgba(184,208,226,.62)!important;
+    border-radius:12px!important;
+    background:rgba(249,253,255,.72)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group:has(.composer-workspace-files-btn[data-ui-visibility-hidden="1"]) .composer-workspace-chip{
+    border-radius:12px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chip{
+    min-width:186px!important;
+    max-width:260px!important;
+    padding:0 14px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-toolsets-chip,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-reasoning-chip,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-profile-chip,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .provider-quota-chip{
+    max-width:180px!important;
+    padding:0 14px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn{
+    width:46px!important;
+    min-width:46px!important;
+    height:46px!important;
+    border:1px solid rgba(8,153,180,.18)!important;
+    border-radius:13px!important;
+    background:linear-gradient(135deg,#58d4df,#0998b4)!important;
+    box-shadow:0 10px 24px rgba(8,153,180,.18)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend:disabled,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn:disabled{
+    border-color:rgba(184,208,226,.5)!important;
+    background:linear-gradient(135deg,rgba(166,226,235,.86),rgba(122,206,219,.86))!important;
+    box-shadow:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend .composer-control-icon,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn .composer-control-icon{
+    color:#fff!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-toolsets-wrap{
+    display:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-mobile-config-btn{
+    display:none!important;
+  }
+  @container composer-footer (min-width: 1040px){
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-toolsets-wrap{
+      display:block!important;
+    }
+  }
+  @container composer-footer (max-width: 760px){
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-profile-wrap,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-reasoning-wrap,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-toolsets-wrap,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .provider-quota-chip{
+      display:none!important;
+    }
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chip{
+      min-width:154px!important;
+      max-width:198px!important;
+    }
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{
+      max-width:198px!important;
+    }
+  }
+  @container composer-footer (max-width: 520px){
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control-label,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-chevron,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chevron,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-profile-chevron,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-reasoning-chevron{
+      display:none!important;
+    }
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-wrap,
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-ws-wrap{
+      display:none!important;
+    }
+    :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-mobile-config-btn{
+      display:inline-flex!important;
+    }
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{
+    gap:8px!important;
+    border:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    overflow:visible!important;
+  }
+}
+
+@media (min-width:901px){
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell{
+    --taiji-brand-w:clamp(236px,14vw,288px);
+    --taiji-recent-w:clamp(320px,21vw,390px);
+    --taiji-gap:16px;
+    --taiji-shell-pad:10px;
+    grid-template-columns:var(--taiji-brand-w) var(--taiji-recent-w) minmax(0,1fr)!important;
+    gap:var(--taiji-gap)!important;
+    padding:var(--taiji-shell-pad)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-sidebar,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-secondary-panel{
+    width:auto!important;
+    min-width:0!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-main-workspace .taiji-real-main{
+    inset:0!important;
+    width:auto!important;
+    max-width:none!important;
+    margin:0!important;
+    border:0!important;
+    border-radius:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
+    overflow:visible!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    position:absolute!important;
+    top:32px!important;
+    left:50%!important;
+    right:auto!important;
+    bottom:clamp(246px,22vh,310px)!important;
+    width:min(760px,calc(100% - 56px))!important;
+    max-width:min(760px,calc(100% - 56px))!important;
+    min-height:220px!important;
+    padding:28px 32px 30px!important;
+    border:1px solid var(--taiji-ui-line)!important;
+    border-radius:12px!important;
+    background:var(--taiji-ui-reading)!important;
+    box-shadow:0 14px 36px rgba(44,88,128,.08),inset 0 1px 0 rgba(255,255,255,.78)!important;
+    transform:translateX(-50%)!important;
+    backdrop-filter:blur(12px)!important;
+    -webkit-backdrop-filter:blur(12px)!important;
+    overflow:hidden!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock{
+    left:50%!important;
+    right:auto!important;
+    bottom:clamp(152px,15vh,190px)!important;
+    width:min(760px,calc(100% - 56px))!important;
+    max-width:min(760px,calc(100% - 56px))!important;
+    transform:translateX(-50%)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap{
+    left:50%!important;
+    right:auto!important;
+    bottom:clamp(24px,2.4vh,32px)!important;
+    width:min(760px,calc(100% - 56px))!important;
+    max-width:min(760px,calc(100% - 56px))!important;
+    min-height:0!important;
+    transform:translateX(-50%)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-box{
+    width:100%!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    inset:auto!important;
+    top:32px!important;
+    left:50%!important;
+    right:auto!important;
+    bottom:clamp(310px,34vh,380px)!important;
+    width:min(760px,calc(100% - 56px))!important;
+    max-width:min(760px,calc(100% - 56px))!important;
+    padding:28px 32px 30px!important;
+    background:var(--taiji-ui-reading)!important;
+    transform:translateX(-50%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main .live-compression-cards,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #liveToolCards{
+    width:100%!important;
+    max-width:100%!important;
+    margin-left:0!important;
+    margin-right:0!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap{
+    inset:auto!important;
+    left:50%!important;
+    right:auto!important;
+    top:auto!important;
+    bottom:clamp(22px,2.4vh,30px)!important;
+    width:min(760px,calc(100% - 56px))!important;
+    max-width:min(760px,calc(100% - 56px))!important;
+    min-height:0!important;
+    transform:translateX(-50%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock{
+    position:absolute!important;
+    left:0!important;
+    right:0!important;
+    top:auto!important;
+    bottom:calc(100% + 12px)!important;
+    width:100%!important;
+    max-width:100%!important;
+    padding:0!important;
+    transform:none!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock .status-card-writeflow{
+    width:100%!important;
+  }
+}
+
+@media (min-width:901px){
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace > main.main.taiji-real-main{
+    display:flex!important;
+    inset:0!important;
+    width:auto!important;
+    max-width:none!important;
+    margin:0!important;
+    border:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    overflow:visible!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome #mainChat{
+    display:flex!important;
+    background:transparent!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome main.main.taiji-real-main #mainChat .messages-shell{
+    display:none!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome #composerWrap{
+    display:block!important;
+    visibility:visible!important;
+    pointer-events:auto!important;
+  }
+
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    inset:auto!important;
+    top:32px!important;
+    left:50%!important;
+    right:auto!important;
+    bottom:clamp(168px,18vh,228px)!important;
+    width:min(860px,calc(100% - 72px))!important;
+    max-width:min(860px,calc(100% - 72px))!important;
+    min-height:220px!important;
+    padding:20px 18px 22px!important;
+    border:0!important;
+    border-radius:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    transform:translateX(-50%)!important;
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
+    overflow:visible!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow) main.main.taiji-real-main #mainChat .messages-shell{
+    bottom:clamp(238px,26vh,318px)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #messages{
+    padding:0!important;
+    background:transparent!important;
+    overflow:auto!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #msgInner{
+    width:100%!important;
+    max-width:100%!important;
+    margin:0!important;
+    padding:8px 2px 24px!important;
+    gap:18px!important;
+  }
+
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-turn{
+    display:grid!important;
+    grid-template-columns:40px minmax(0,1fr)!important;
+    column-gap:12px!important;
+    width:min(700px,78%)!important;
+    max-width:min(700px,78%)!important;
+    align-self:flex-start!important;
+    padding:0!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-role.assistant{
+    grid-column:1 / -1!important;
+    display:grid!important;
+    grid-template-columns:40px auto auto minmax(0,1fr)!important;
+    align-items:center!important;
+    gap:8px!important;
+    min-height:40px!important;
+    margin:0 0 4px!important;
+    color:#385274!important;
+    opacity:1!important;
+    font-size:13px!important;
+    font-weight:720!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .role-icon.assistant{
+    display:grid!important;
+    place-items:center!important;
+    width:40px!important;
+    height:40px!important;
+    border:1px solid rgba(202,222,237,.78)!important;
+    border-radius:999px!important;
+    background:rgba(255,255,255,.88)!important;
+    box-shadow:0 8px 18px rgba(47,95,135,.12),inset 0 1px 0 rgba(255,255,255,.88)!important;
+    overflow:hidden!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .role-icon.assistant img{
+    display:block!important;
+    width:32px!important;
+    height:32px!important;
+    object-fit:contain!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .role-icon.assistant span{
+    display:none!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-turn-blocks{
+    grid-column:2!important;
+    gap:8px!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-segment .msg-body,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-turn .msg-body{
+    width:fit-content!important;
+    max-width:min(620px,100%)!important;
+    margin:0!important;
+    padding:13px 17px!important;
+    border:1px solid rgba(199,216,230,.7)!important;
+    border-radius:11px!important;
+    color:#102f58!important;
+    background:rgba(255,255,255,.9)!important;
+    box-shadow:0 8px 20px rgba(47,95,135,.12),inset 0 1px 0 rgba(255,255,255,.86)!important;
+    font-size:16px!important;
+    font-weight:500!important;
+    line-height:1.68!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]{
+    display:grid!important;
+    grid-template-columns:minmax(0,clamp(260px,36vw,540px)) 40px!important;
+    column-gap:12px!important;
+    align-self:stretch!important;
+    justify-content:end!important;
+    width:100%!important;
+    max-width:none!important;
+    padding:0!important;
+    margin:0!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{
+    content:""!important;
+    grid-column:2!important;
+    grid-row:2!important;
+    display:block!important;
+    width:40px!important;
+    height:40px!important;
+    align-self:start!important;
+    border:0!important;
+    border-radius:999px!important;
+    background:
+      var(--taiji-user-avatar) center/42px 42px no-repeat,
+      transparent!important;
+    box-shadow:0 8px 18px rgba(47,95,135,.1)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    grid-column:1!important;
+    grid-row:2!important;
+    justify-self:end!important;
+    max-width:clamp(260px,36vw,540px)!important;
+    border-radius:13px!important;
+  }
+
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"]{
+    grid-template-columns:var(--taiji-brand-w) minmax(0,1fr)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-panel{
+    display:none!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{
+    left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important;
+  }
 }
