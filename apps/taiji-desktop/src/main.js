@@ -18,9 +18,26 @@ let runtimeEnv = null;
 let stopped = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
+function desktopBootLog(message) {
+  try {
+    appendDesktopLog(path.join(userStateDir(), "logs", "taiji-desktop.log"), `[desktop] ${message}`);
+  } catch (_) {
+    // Logging must never block app startup.
+  }
+}
+
+desktopBootLog(`boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"}`);
+
 function resolveLabDir() {
   if (process.env.TAIJI_AGENT_ROOT) {
     return path.resolve(process.env.TAIJI_AGENT_ROOT);
+  }
+
+  if (process.resourcesPath) {
+    const bundledLab = path.resolve(process.resourcesPath, "..", "..", "..");
+    if (fs.existsSync(path.join(bundledLab, "scripts", "start-agent.sh"))) {
+      return bundledLab;
+    }
   }
 
   const repoRoot = path.resolve(__dirname, "..", "..", "..");
@@ -295,6 +312,7 @@ function stopRuntime() {
 }
 
 async function startRuntime() {
+  desktopBootLog("startRuntime");
   const labDir = resolveLabDir();
   const logDir = path.join(userStateDir(), "logs");
   const desktopLog = path.join(logDir, "taiji-desktop.log");
@@ -369,6 +387,7 @@ function installMenu() {
 }
 
 async function createWindow() {
+  desktopBootLog("createWindow");
   const labDir = resolveLabDir();
   const iconPath = path.join(labDir, "sources", "hermes-webui", "static", "favicon-512.png");
   mainWindow = new BrowserWindow({
@@ -425,6 +444,7 @@ if (!gotSingleInstanceLock) {
   app.on("second-instance", focusMainWindow);
 
   app.whenReady().then(() => {
+    desktopBootLog("app.whenReady");
     installMenu();
     installDesktopIpcHandlers();
     createWindow();

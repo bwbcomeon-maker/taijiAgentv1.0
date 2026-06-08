@@ -6,6 +6,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 REPO_DIR="/Users/bwb/Documents/工作/taiji-agentv1.0"
 APP_DIR="$REPO_DIR/apps/taiji-desktop"
 LAB_DIR="$REPO_DIR/hermes-local-lab"
+ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG_DIR="$HOME/.local/state/taiji-agent/logs"
 LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
 
@@ -41,5 +42,34 @@ if [ ! -d node_modules/electron ]; then
   fi
 fi
 
+if [ ! -x "$ELECTRON_BIN" ]; then
+  show_error "Electron 启动文件不存在。请先安装桌面端依赖。"
+  exit 1
+fi
+
+echo "Electron: $ELECTRON_BIN"
+RUNNER="$LOG_DIR/taiji-desktop-electron-runner.sh"
+cat >"$RUNNER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$PATH"
+export HOME="$HOME"
+export USER="${USER:-$(id -un)}"
+export LOGNAME="${LOGNAME:-$(id -un)}"
+export SHELL="${SHELL:-/bin/zsh}"
+export TMPDIR="${TMPDIR:-/tmp}"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
 export TAIJI_AGENT_ROOT="$LAB_DIR"
-exec "$APP_DIR/node_modules/.bin/electron" "$APP_DIR"
+cd "$APP_DIR"
+exec "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1
+EOF
+chmod +x "$RUNNER"
+
+/usr/bin/osascript - "$RUNNER" <<'OSA'
+on run argv
+  do shell script quoted form of (item 1 of argv) & " >/dev/null 2>&1 &"
+end run
+OSA
+echo "Electron launch delegated via osascript runner: $RUNNER"
+exit 0
