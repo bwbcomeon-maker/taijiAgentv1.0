@@ -22,6 +22,7 @@ from hermes_cli.config import (
     sanitize_env_file,
     _sanitize_env_lines,
 )
+from hermes_cli.default_soul import DEFAULT_SOUL_MD, LEGACY_DEFAULT_SOUL_MD
 
 
 class TestGetHermesHome:
@@ -51,7 +52,22 @@ class TestEnsureHermesHome:
             ensure_hermes_home()
             soul_path = tmp_path / "SOUL.md"
             assert soul_path.exists()
-            assert soul_path.read_text(encoding="utf-8").strip() != ""
+            content = soul_path.read_text(encoding="utf-8")
+            assert content == DEFAULT_SOUL_MD
+            assert "taiji Agent" in content
+            assert "Hermes" not in content
+            assert "Nous Research" not in content
+
+    def test_migrates_legacy_default_soul_md(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            soul_path = tmp_path / "SOUL.md"
+            soul_path.write_text(LEGACY_DEFAULT_SOUL_MD, encoding="utf-8")
+            ensure_hermes_home()
+            content = soul_path.read_text(encoding="utf-8")
+            assert content == DEFAULT_SOUL_MD
+            assert "taiji Agent" in content
+            assert "Hermes" not in content
+            assert "Nous Research" not in content
 
     def test_does_not_overwrite_existing_soul_md(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
@@ -59,6 +75,14 @@ class TestEnsureHermesHome:
             soul_path.write_text("custom soul", encoding="utf-8")
             ensure_hermes_home()
             assert soul_path.read_text(encoding="utf-8") == "custom soul"
+
+    def test_does_not_migrate_modified_legacy_soul_md(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            soul_path = tmp_path / "SOUL.md"
+            content = f"{LEGACY_DEFAULT_SOUL_MD}\n"
+            soul_path.write_text(content, encoding="utf-8")
+            ensure_hermes_home()
+            assert soul_path.read_text(encoding="utf-8") == content
 
 
 class TestLoadConfigDefaults:
@@ -892,4 +916,3 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
-

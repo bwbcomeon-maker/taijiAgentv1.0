@@ -331,3 +331,15 @@ def test_writeflow_team_copy_uses_productized_desktop_language():
 
     assert "taiji Agent 网页工具" not in routes
     assert "太极智能体网页能力" in routes
+
+
+def test_default_soul_template_is_productized_chinese():
+    default_soul_src = (REPO_ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "hermes_cli" / "default_soul.py").read_text(encoding="utf-8")
+    namespace = {}
+    exec(default_soul_src, namespace)
+    default_soul = namespace["DEFAULT_SOUL_MD"]
+
+    assert "taiji Agent" in default_soul
+    assert "Hermes Agent" not in default_soul
+    assert "Nous Research" not in default_soul
+    assert "中文" in default_soul or "本地智能助理" in default_soul

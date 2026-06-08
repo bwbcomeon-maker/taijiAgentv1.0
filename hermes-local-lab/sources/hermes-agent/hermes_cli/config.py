@@ -225,7 +225,7 @@ _EXTRA_ENV_KEYS = frozenset({
 import yaml
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.default_soul import DEFAULT_SOUL_MD
+from hermes_cli.default_soul import DEFAULT_SOUL_MD, LEGACY_DEFAULT_SOUL_MD
 
 
 # =============================================================================
@@ -572,6 +572,14 @@ def _ensure_default_soul_md(home: Path) -> None:
     """Seed a default SOUL.md into HERMES_HOME if the user doesn't have one yet."""
     soul_path = home / "SOUL.md"
     if soul_path.exists():
+        try:
+            existing = soul_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if existing != LEGACY_DEFAULT_SOUL_MD:
+            return
+        soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
+        _secure_file(soul_path)
         return
     soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
     _secure_file(soul_path)
