@@ -9365,3 +9365,18 @@ main.main.showing-logs > #mainLogs{display:flex;}
     left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important;
   }
 }
+
+/* When config hides workspace controls, use the freed compact-footer space for reasoning. */
+:root[data-skin] .taiji-home-shell #composerWrap .composer-left:has(#composerWorkspaceGroup[data-ui-visibility-hidden="1"]) .composer-reasoning-wrap:not([data-ui-visibility-hidden="1"]):not([data-reasoning-unsupported="1"]){
+  display:block!important;
+}
+
+/* UI visibility config must win over late Taiji skin display overrides. */
+:root[data-skin] .taiji-home-shell #composerWrap [data-ui-visibility-hidden="1"],
+:root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-group[data-ui-visibility-hidden="1"],
+:root[data-skin] .taiji-home-shell #composerWrap .composer-ws-wrap[data-ui-visibility-hidden="1"],
+:root[data-skin] .taiji-home-shell #composerWrap .composer-model-wrap[data-ui-visibility-hidden="1"],
+:root[data-skin] .taiji-home-shell #composerWrap .composer-mobile-config-btn[data-ui-visibility-hidden="1"],
+:root[data-skin] .taiji-home-shell #composerWrap [hidden][data-ui-visibility-hidden="1"]{
+  display:none!important;
+}

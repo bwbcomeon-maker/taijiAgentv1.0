@@ -292,6 +292,48 @@ def test_visibility_hidden_elements_are_forced_out_of_layout():
     assert "display:none!important;" in STYLE_CSS
 
 
+def test_taiji_composer_visibility_hidden_overrides_skin_display_rules():
+    final_hidden_selector = (
+        ":root[data-skin] .taiji-home-shell #composerWrap [data-ui-visibility-hidden=\"1\"]"
+    )
+    final_hidden_idx = STYLE_CSS.rfind(final_hidden_selector)
+
+    assert final_hidden_idx > -1
+    for skin_selector in (
+        ":root[data-skin] .taiji-home-shell #composerWrap .composer-workspace-group{",
+        ":root[data-skin] .taiji-home-shell #composerWrap .composer-mobile-config-btn{",
+        ":root[data-skin=\"taiji-light-glass\"] .taiji-home-shell #composerWrap .composer-workspace-group{",
+        ":root[data-skin=\"taiji-light-glass\"] .taiji-home-shell #composerWrap .composer-mobile-config-btn{",
+    ):
+        assert final_hidden_idx > STYLE_CSS.rfind(skin_selector)
+
+    final_hidden_block = STYLE_CSS[final_hidden_idx : STYLE_CSS.index("}", final_hidden_idx)]
+    for selector in (
+        ".composer-workspace-group[data-ui-visibility-hidden=\"1\"]",
+        ".composer-ws-wrap[data-ui-visibility-hidden=\"1\"]",
+        ".composer-model-wrap[data-ui-visibility-hidden=\"1\"]",
+        ".composer-mobile-config-btn[data-ui-visibility-hidden=\"1\"]",
+    ):
+        assert selector in final_hidden_block
+
+
+def test_taiji_compact_composer_shows_reasoning_when_workspace_group_is_hidden():
+    responsive_hide_idx = STYLE_CSS.rfind(
+        ".taiji-home-shell #composerWrap .composer-reasoning-wrap,"
+    )
+    workspace_hidden_reasoning_idx = STYLE_CSS.rfind(
+        ".composer-left:has(#composerWorkspaceGroup[data-ui-visibility-hidden=\"1\"]) "
+        ".composer-reasoning-wrap:not([data-ui-visibility-hidden=\"1\"])"
+    )
+
+    assert responsive_hide_idx > -1
+    assert workspace_hidden_reasoning_idx > responsive_hide_idx
+    block = STYLE_CSS[
+        workspace_hidden_reasoning_idx : STYLE_CSS.index("}", workspace_hidden_reasoning_idx)
+    ]
+    assert "display:block!important;" in block
+
+
 def test_hidden_panels_and_settings_sections_are_guarded():
     assert "!isUiFeatureVisible('nav',nextPanel)" in PANELS_JS
     assert "!isUiFeatureVisible('nav','settings')" in PANELS_JS

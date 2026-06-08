@@ -2557,10 +2557,12 @@ function _applyReasoningChip(eff){
     ?supportedEfforts.length>0
     :true;
   if(!supports){
+    wrap.dataset.reasoningUnsupported='1';
     wrap.style.display='none';
     if(mobileAction) mobileAction.style.display='none';
     return;
   }
+  delete wrap.dataset.reasoningUnsupported;
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
