@@ -4,6 +4,12 @@ set -euo pipefail
 chmod +x /opt/taiji-agent/scripts/*.sh /opt/taiji-agent/scripts/taiji-native-verify 2>/dev/null || true
 chmod +x /usr/bin/taiji-agent /usr/bin/taiji 2>/dev/null || true
 
+chrome_sandbox="/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox"
+if [ -f "$chrome_sandbox" ]; then
+  chown root:root "$chrome_sandbox" 2>/dev/null || true
+  chmod 4755 "$chrome_sandbox" 2>/dev/null || true
+fi
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi

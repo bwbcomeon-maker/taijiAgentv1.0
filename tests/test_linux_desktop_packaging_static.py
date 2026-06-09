@@ -50,6 +50,28 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("not found", verify)
         self.assertIn("desktop smoke test", verify)
 
+    def test_build_script_distinguishes_public_pem_from_private_keys(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn("scan_private_key_material", build)
+        self.assertIn("BEGIN .*PRIVATE KEY", build)
+        self.assertIn("-name '*.key'", build)
+        self.assertIn("-name '.env'", build)
+        self.assertNotIn("-name '*.pem' -o -name 'id_rsa'", build)
+
+    def test_postinst_repairs_electron_chrome_sandbox_permissions(self):
+        postinst = read_text("packaging/linux/deb/postinst")
+
+        self.assertIn("chrome-sandbox", postinst)
+        self.assertIn("chown root:root", postinst)
+        self.assertIn("chmod 4755", postinst)
+
+    def test_desktop_entry_uses_single_main_category(self):
+        desktop = read_text("packaging/linux/taiji-agent.desktop")
+
+        self.assertIn("Categories=Utility;", desktop)
+        self.assertNotIn("Categories=Utility;Development;", desktop)
+
     def test_setup_local_can_recover_from_stale_uv_lockfile_on_kylin_build_host(self):
         setup = read_text("hermes-local-lab/scripts/setup-local.sh")
 

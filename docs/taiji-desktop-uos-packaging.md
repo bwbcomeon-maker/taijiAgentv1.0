@@ -63,10 +63,12 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 
 - 在 macOS 或非 x86_64/amd64 主机上构建最终包。
 - Electron runtime 不是 Linux x86_64 ELF，或 `ldd` 显示缺少共享库。
-- 包内出现 `.env`、私钥、macOS metadata、`__pycache__`、`*.pyc`。
+- 包内出现 `.env`、私钥、macOS metadata、`__pycache__`、`*.pyc`。公共 CA 证书类 PEM 可进入 Python venv，但 PEM/证书文件内容中出现 `BEGIN ... PRIVATE KEY` 会拒绝发布。
 - DEB 产物字符串中出现 `LIBARCHIVE`、`com.apple`、`PaxHeaders`、`SCHILY.xattr` 等历史失败标记。
 
 `hermes-local-lab/scripts/setup-local.sh` 默认先执行 `uv sync --extra all --locked`。如果目标机构建工作区的 `uv.lock` 与当前 `pyproject.toml` 再次漂移，会打印警告并在该构建工作区内重试不带 `--locked` 的同步；需要强制锁文件校验时设置 `TAIJI_UV_LOCK_MODE=strict`。
+
+目标终端交付脚本在每次构建前清理 `生成的安装包/` 旧输出，构建成功后写入 `.build-success`。安装脚本必须看到该成功标记并校验当前 DEB 的 SHA256，才会执行 `sudo apt install`，避免构建失败后误装历史残留包。
 
 产物位于：
 

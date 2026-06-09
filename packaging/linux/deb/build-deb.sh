@@ -81,6 +81,27 @@ archive_old_packages() {
     -exec mv {} "$ARCHIVE_DIR"/ \;
 }
 
+scan_private_key_material() {
+  if find "$INSTALL_ROOT" \( -name '.env' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) | grep -q .; then
+    echo "Package tree contains local secrets or private-key shaped files; refusing release." >&2
+    find "$INSTALL_ROOT" \( -name '.env' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) >&2
+    exit 1
+  fi
+
+  private_key_paths=""
+  while IFS= read -r -d '' candidate; do
+    if grep -Eq 'BEGIN .*PRIVATE KEY' "$candidate" 2>/dev/null; then
+      private_key_paths="${private_key_paths}${candidate}"$'\n'
+    fi
+  done < <(find "$INSTALL_ROOT" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) -print0)
+
+  if [ -n "$private_key_paths" ]; then
+    echo "Package tree contains private key material; refusing release." >&2
+    printf '%s' "$private_key_paths" >&2
+    exit 1
+  fi
+}
+
 scan_package_tree() {
   if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' -o -name '*.pyc' \) | grep -q .; then
     echo "Package tree contains macOS/Python cache metadata; clean before release." >&2
@@ -88,11 +109,7 @@ scan_package_tree() {
     exit 1
   fi
 
-  if find "$INSTALL_ROOT" \( -name '.env' -o -name '*.pem' -o -name 'id_rsa' -o -name 'id_ed25519' \) | grep -q .; then
-    echo "Package tree contains local secrets or private-key shaped files; refusing release." >&2
-    find "$INSTALL_ROOT" \( -name '.env' -o -name '*.pem' -o -name 'id_rsa' -o -name 'id_ed25519' \) >&2
-    exit 1
-  fi
+  scan_private_key_material
 }
 
 scan_deb_release_artifact() {

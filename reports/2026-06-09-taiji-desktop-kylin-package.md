@@ -12,8 +12,11 @@
 - 构建脚本新增 Linux Electron runtime 校验：确认 Electron 是 Linux x86_64 ELF，并通过 `ldd` 检查缺失共享库。
 - DEB `Depends` 扩展为覆盖 Electron 在 Kylin V10 SP1 上常见的 GTK、X11、DBus、CUPS、NSS、GBM、ALSA 等运行库。
 - 构建脚本新增 desktop entry 校验、旧包归档、包树 secret/cache 扫描和 DEB 产物 macOS metadata 字符串扫描。
+- 包树 secret 扫描区分公共 PEM 证书和私钥内容；`certifi/cacert.pem` 这类公共 CA 证书允许进入 venv，`BEGIN ... PRIVATE KEY` 仍拒绝发布。
+- 安装脚本会修复 Electron `chrome-sandbox` root/setuid 权限，降低国产桌面 Electron 启动失败风险。
 - 安装态 `/opt/taiji-agent/bin/taiji-native-verify` 会检查 Electron runtime、desktop entry、图标、共享库缺失，并支持 `TAIJI_VERIFY_DESKTOP_SMOKE=1` 图形会话 smoke test。
 - 目标终端交付脚本会自动准备 `uv` 和现代 Node/npm；`setup-local.sh` 默认先使用锁文件同步，锁文件漂移时在构建工作区重试不带 `--locked` 的同步，避免目标机构建中途无 DEB 产物。
+- 交付脚本在构建前清理旧 DEB 输出，构建成功后写入 `.build-success`；安装脚本只安装带有当前成功标记且 SHA256 匹配的 DEB。
 - 安装包仍不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
 
 ## 状态边界

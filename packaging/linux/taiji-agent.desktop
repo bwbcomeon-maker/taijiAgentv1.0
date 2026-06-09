@@ -5,5 +5,5 @@ Comment=本地智能体工作台
 Exec=/usr/bin/taiji-agent
 Icon=taiji-agent
 Terminal=false
-Categories=Utility;Development;
+Categories=Utility;
 StartupNotify=true
