@@ -1395,9 +1395,9 @@ function _renderAttachmentHtml(fname, url){
   if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
   if(_HTML_EXTS.test(fname)){
     const inlineUrl=url+(String(url).includes('?')?'&':'?')+'inline=1';
-    return `<a class="msg-file-badge msg-file-badge--html" href="${esc(inlineUrl)}" target="_blank" rel="noopener">${li('file-code',12)} ${esc(fname)}</a>`;
+    return `<a class="msg-file-badge msg-file-badge--html" href="${esc(inlineUrl)}" target="_blank" rel="noopener" title="${esc(fname)}">${li('file-code',12)} <span class="msg-file-name">${esc(fname)}</span></a>`;
   }
-  return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+  return `<div class="msg-file-badge" title="${esc(fname)}">${li('paperclip',12)} <span class="msg-file-name">${esc(fname)}</span></div>`;
 }
 document.addEventListener('click', e => {
   const btn=e.target&&e.target.closest?e.target.closest('.media-speed-btn'):null;
@@ -7477,7 +7477,8 @@ function renderMessages(options){
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
       row.dataset.rawText=String(displayContent).trim();
-      row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const userBodyHtml=filesHtml?`${filesHtml}${bodyHtml}`:bodyHtml;
+      row.innerHTML=`<div class="msg-body">${userBodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
       continue;

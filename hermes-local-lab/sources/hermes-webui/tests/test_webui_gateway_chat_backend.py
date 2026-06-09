@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import urllib.error
 
+import api.config as config
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
@@ -346,6 +347,7 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
         return FakeResponse()
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(config, "get_config", lambda: {"agent": {"image_input_mode": "native"}})
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
@@ -372,3 +374,66 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_gateway_chat_worker_injects_document_attachment_context(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    attachment_root = tmp_path / "attachments"
+    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir.mkdir(parents=True)
+    doc = uploaded_dir / "例子-工具手册.txt"
+    doc.write_text("附件正文：这是一份AI公文写作工具手册，包含标题、正文、落款规范。", encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"summary"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-gateway-doc-test"
+    s.active_stream_id = stream_id
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "这份文件主要讲什么？",
+        "test-model",
+        str(workspace),
+        stream_id,
+        [{"name": doc.name, "path": str(doc), "mime": "text/plain", "is_image": False}],
+    )
+
+    content = captured["body"]["messages"][-1]["content"]
+    assert isinstance(content, str)
+    assert "[Uploaded file context]" in content
+    assert "例子-工具手册.txt" in content
+    assert "AI公文写作工具手册" in content
+    assert "这份文件主要讲什么？" in content
+    assert str(uploaded_dir) not in content
+    assert str(doc) not in content

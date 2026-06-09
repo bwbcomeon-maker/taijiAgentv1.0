@@ -86,6 +86,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("autoHideMenuBar", main_js)
         self.assertIn("taiji-agent-diagnose", main_js)
 
+    def test_desktop_menu_preserves_standard_edit_roles_for_paste(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+
+        self.assertIn('label: "编辑"', main_js)
+        for role in ("undo", "redo", "cut", "copy", "paste", "pasteAndMatchStyle", "selectAll"):
+            self.assertIn(f'role: "{role}"', main_js)
+        self.assertLess(main_js.index('process.platform === "linux"'), main_js.index('label: "编辑"'))
+        self.assertLess(main_js.index('label: "编辑"'), main_js.index("Menu.buildFromTemplate(template)"))
+
     def test_desktop_exposes_guarded_clipboard_read_for_webui_secret_paste(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
         preload_js = read_text("apps/taiji-desktop/src/preload.js")

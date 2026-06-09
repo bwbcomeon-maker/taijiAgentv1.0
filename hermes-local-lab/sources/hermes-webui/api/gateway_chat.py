@@ -293,15 +293,43 @@ def _run_gateway_chat_streaming(
             # Scope Gateway long-term continuity to this WebUI conversation
             # without exposing the browser's auth cookie or CSRF material.
             headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-        message_content: Any = str(msg_text or "")
+        message_text = str(msg_text or "")
+        message_content: Any = message_text
         if attachments:
             try:
+                from api.attachment_context import build_attachment_context
                 from api.streaming import _build_native_multimodal_message
 
-                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                text_attachments = [
+                    att for att in attachments
+                    if isinstance(att, dict)
+                    and not bool(att.get("is_image"))
+                    and not str(att.get("mime") or "").strip().lower().startswith("image/")
+                ]
+                if text_attachments:
+                    attachment_context = build_attachment_context(
+                        text_attachments,
+                        workspace=str(workspace),
+                        cfg=cfg,
+                        image_mode="native",
+                    )
+                    if attachment_context.text_context:
+                        message_text = f"{attachment_context.text_context}\n\n{message_text}".strip()
+                message_content = _build_native_multimodal_message(
+                    "",
+                    message_text,
+                    attachments,
+                    str(workspace),
+                    cfg=cfg,
+                )
             except Exception:
-                logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
-                message_content = str(msg_text or "")
+                logger.warning("Failed to build gateway attachment context", exc_info=True)
+                message_content = (
+                    "[Uploaded file context]\n"
+                    "Attachment processing failed before the gateway model call. "
+                    "Tell the user the uploaded attachment could not be analyzed this turn.\n\n"
+                    f"{message_text}"
+                ).strip()
         body = {
             "model": model or "default",
             "stream": True,
