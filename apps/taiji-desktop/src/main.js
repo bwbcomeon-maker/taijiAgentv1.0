@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, dialog, systemPreferences, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, shell, dialog, systemPreferences, ipcMain, clipboard } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
@@ -229,6 +229,16 @@ function installDesktopIpcHandlers() {
       return { ok: false, canceled: true };
     }
     return { ok: true, path: result.filePaths[0] };
+  });
+
+  ipcMain.handle("taiji:read-clipboard-text", async (event) => {
+    const senderUrl = event.senderFrame && event.senderFrame.url
+      ? event.senderFrame.url
+      : event.sender.getURL();
+    if (!isAllowedDesktopMediaOrigin(senderUrl)) {
+      return { ok: false, error: "unauthorized origin" };
+    }
+    return { ok: true, text: clipboard.readText() || "" };
   });
 }
 

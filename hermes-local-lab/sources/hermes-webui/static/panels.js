@@ -8168,15 +8168,25 @@ async function loadModelConfigPanel(force){
  }
 }
 
+async function _readSecretClipboardText(){
+ if(window.taijiDesktop&&typeof window.taijiDesktop.readClipboardText==='function'){
+  const result=await window.taijiDesktop.readClipboardText();
+  if(typeof result==='string') return result;
+  if(result&&result.ok) return result.text||'';
+  throw new Error((result&&result.error)||'desktop clipboard unavailable');
+ }
+ if(navigator.clipboard&&typeof navigator.clipboard.readText==='function'){
+  return await navigator.clipboard.readText();
+ }
+ throw new Error('clipboard unavailable');
+}
+
 async function pasteSecretToInput(inputId){
  const input=$(inputId);
  if(!input)return;
  input.focus();
  try{
-  if(!navigator.clipboard||typeof navigator.clipboard.readText!=='function'){
-   throw new Error('clipboard unavailable');
-  }
-  const text=await navigator.clipboard.readText();
+  const text=await _readSecretClipboardText();
   if(!text){
    if(typeof showToast==='function')showToast('剪贴板为空');
    return;

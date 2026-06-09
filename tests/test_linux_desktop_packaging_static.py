@@ -86,6 +86,17 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("autoHideMenuBar", main_js)
         self.assertIn("taiji-agent-diagnose", main_js)
 
+    def test_desktop_exposes_guarded_clipboard_read_for_webui_secret_paste(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+        preload_js = read_text("apps/taiji-desktop/src/preload.js")
+
+        self.assertIn("clipboard", main_js)
+        self.assertIn('ipcMain.handle("taiji:read-clipboard-text"', main_js)
+        self.assertIn("isAllowedDesktopMediaOrigin(senderUrl)", main_js)
+        self.assertIn("clipboard.readText", main_js)
+        self.assertIn("readClipboardText", preload_js)
+        self.assertIn('ipcRenderer.invoke("taiji:read-clipboard-text")', preload_js)
+
     def test_build_script_distinguishes_public_pem_from_private_keys(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
 

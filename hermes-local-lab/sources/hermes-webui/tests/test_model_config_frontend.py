@@ -41,6 +41,13 @@ def test_model_config_secret_inputs_start_empty():
     assert "payload.api_key=apiKey" in PANELS_JS
 
 
+def test_secret_paste_uses_desktop_clipboard_bridge_when_available():
+    assert "readSecretClipboardText" in PANELS_JS
+    assert "window.taijiDesktop" in PANELS_JS
+    assert "readClipboardText" in PANELS_JS
+    assert "navigator.clipboard.readText" in PANELS_JS
+
+
 def test_model_config_styles_are_present():
     assert ".model-config-status" in STYLE_CSS
     assert ".model-config-panel" in STYLE_CSS
