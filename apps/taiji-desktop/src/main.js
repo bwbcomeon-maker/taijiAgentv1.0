@@ -259,6 +259,18 @@ async function stopExistingRuntime(labDir, logDir) {
 function runScript(scriptName, env, logFile) {
   const script = path.join(env.TAIJI_AGENT_ROOT, "scripts", scriptName);
   return new Promise((resolve, reject) => {
+    const outputTail = [];
+    const rememberOutput = (prefix, chunk) => {
+      const text = chunk.toString().trimEnd();
+      if (!text) return;
+      appendDesktopLog(logFile, `${prefix} ${text}`);
+      for (const line of text.split(/\r?\n/)) {
+        if (line.trim()) outputTail.push(`${prefix} ${line}`);
+      }
+      if (outputTail.length > 24) {
+        outputTail.splice(0, outputTail.length - 24);
+      }
+    };
     appendDesktopLog(logFile, `starting ${scriptName}`);
     const child = spawn(script, {
       cwd: env.TAIJI_AGENT_ROOT,
@@ -266,14 +278,15 @@ function runScript(scriptName, env, logFile) {
       stdio: ["ignore", "pipe", "pipe"]
     });
 
-    child.stdout.on("data", (chunk) => appendDesktopLog(logFile, `[${scriptName}] ${chunk.toString().trimEnd()}`));
-    child.stderr.on("data", (chunk) => appendDesktopLog(logFile, `[${scriptName} error] ${chunk.toString().trimEnd()}`));
+    child.stdout.on("data", (chunk) => rememberOutput(`[${scriptName}]`, chunk));
+    child.stderr.on("data", (chunk) => rememberOutput(`[${scriptName} error]`, chunk));
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`${scriptName} exited with code ${code}`));
+        const detail = outputTail.length ? `\n\n最近输出：\n${outputTail.join("\n")}` : "";
+        reject(new Error(`${scriptName} exited with code ${code}${detail}`));
       }
     });
   });

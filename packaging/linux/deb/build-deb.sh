@@ -141,8 +141,13 @@ for cmd in dpkg-deb rsync npm sha256sum file ldd strings; do
   require_cmd "$cmd"
 done
 
-if [ ! -x "$LAB_DIR/sources/hermes-agent/venv/bin/hermes" ]; then
+HERMES_PYTHON="$LAB_DIR/sources/hermes-agent/venv/bin/python"
+if [ ! -x "$HERMES_PYTHON" ]; then
   echo "Missing Linux Agent venv. Run hermes-local-lab/scripts/setup-local.sh on this Linux build host first." >&2
+  exit 1
+fi
+if ! "$HERMES_PYTHON" -m hermes_cli.main --help >/dev/null 2>&1; then
+  echo "Linux Agent venv module entrypoint failed. Re-run hermes-local-lab/scripts/setup-local.sh on this Linux build host." >&2
   exit 1
 fi
 

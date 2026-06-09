@@ -49,6 +49,29 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("ldd", verify)
         self.assertIn("not found", verify)
         self.assertIn("desktop smoke test", verify)
+        self.assertIn("-m hermes_cli.main --help", verify)
+        self.assertIn("Hermes CLI module entrypoint works", verify)
+
+    def test_desktop_runtime_does_not_depend_on_venv_console_script_shebang(self):
+        start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
+        cli = read_text("packaging/linux/bin/taiji")
+        health_check = read_text("hermes-local-lab/scripts/health-check.sh")
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn("-m hermes_cli.main gateway run --accept-hooks", start_agent)
+        self.assertNotIn('venv/bin/hermes" gateway run', start_agent)
+        self.assertIn("-m hermes_cli.main", cli)
+        self.assertNotIn("venv/bin/hermes", cli)
+        self.assertIn("-m hermes_cli.main --help", health_check)
+        self.assertIn("-m hermes_cli.main --version", health_check)
+        self.assertIn("-m hermes_cli.main --help", build)
+
+    def test_desktop_startup_errors_include_recent_script_output(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+
+        self.assertIn("outputTail", main_js)
+        self.assertIn("最近输出", main_js)
+        self.assertIn("[${scriptName} error]", main_js)
 
     def test_build_script_distinguishes_public_pem_from_private_keys(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

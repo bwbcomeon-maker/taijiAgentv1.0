@@ -21,12 +21,14 @@
 - 针对目标机反复出现的 `tar: opt/taiji-agent/runtime/hermes-home: file changed as we read it`，根因收敛为旧 WebUI/Gateway 持续写运行目录导致备份不可稳定完成。安装脚本不再备份旧 `/opt/taiji-agent`，而是删除旧系统安装、旧配置、旧服务和旧入口后再安装新版。
 - 安装脚本会检查 `8787`、`18642`、`18787` 端口；只清理命令行明确指向 `/opt/taiji-agent` 的旧进程，遇到非太极 Agent 进程占用会停止安装并打印诊断。
 - 旧版模型 Key、微信 token 和历史会话不再保留；普通用户家目录下的新版用户态目录不在旧系统安装清理范围内。
+- 安装成功后双击启动失败的根因已收敛为 `venv/bin/hermes` 控制台脚本使用目标机构建工作区绝对 shebang；当交付目录路径包含空格时，Linux shebang 解析会把解释器路径截断。桌面启动脚本、`taiji` CLI、健康检查和 DEB 构建门禁已改为使用 `venv/bin/python -m hermes_cli.main`，不再依赖控制台脚本 shebang。
+- Electron 启动失败弹窗会带最近脚本输出，安装态 `taiji-native-verify` 会提前验证 `python -m hermes_cli.main --help`，降低双击后才暴露启动链问题的风险。
 - 安装包仍不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
 
 ## 状态边界
 
 - 已实时验证：当前 macOS 源码态脚本静态检查和健康检查可在本机执行。
-- 未实时验证：Linux amd64 构建、DEB 安装、目标机双击启动、窗口关闭后进程清理、真实模型对话。
+- 未实时验证：新版源码包在 Linux amd64 目标机重新构建、DEB 重装、目标机双击启动、窗口关闭后进程清理、真实模型对话。
 - 历史线索：旧 `hermes-bwb` 的 `1kylin9` WebUI 包可复用失败经验，但不能替代本 Electron 完整包验收。
 
 ## 目标机构建/验收门槛

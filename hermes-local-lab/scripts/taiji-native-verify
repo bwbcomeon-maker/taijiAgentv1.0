@@ -71,10 +71,15 @@ for script in start-agent.sh start-webui.sh stop-all.sh runtime-env.sh; do
   fi
 done
 
-if [ -x "$AGENT_DIR/venv/bin/python" ] && [ -x "$AGENT_DIR/venv/bin/hermes" ]; then
-  ok "Bundled Agent venv is usable"
+if [ -x "$AGENT_DIR/venv/bin/python" ]; then
+  ok "Bundled Agent Python runtime exists"
+  if "$AGENT_DIR/venv/bin/python" -m hermes_cli.main --help >/dev/null 2>&1; then
+    ok "Hermes CLI module entrypoint works"
+  else
+    runtime_issue "Hermes CLI module entrypoint failed"
+  fi
 else
-  warn "Bundled Agent venv not found; run setup-local.sh in source mode or rebuild Linux package with venv included"
+  runtime_issue "Bundled Agent Python runtime not found; run setup-local.sh in source mode or rebuild Linux package with venv included"
 fi
 
 desktop_app="$LAB_DIR/apps/taiji-desktop"

@@ -15,9 +15,15 @@ API_SERVER_PORT="${API_SERVER_PORT:-$AGENT_API_PORT}"
 API_SERVER_CORS_ORIGINS="${API_SERVER_CORS_ORIGINS:-http://127.0.0.1:18787,http://localhost:18787}"
 API_SERVER_MODEL_NAME="${API_SERVER_MODEL_NAME:-hermes-agent}"
 TERMINAL_CWD="${TERMINAL_CWD:-$HERMES_WORKSPACE}"
+HERMES_PYTHON="${HERMES_PYTHON:-$AGENT_DIR/venv/bin/python}"
+
+if [ ! -x "$HERMES_PYTHON" ]; then
+  echo "Hermes Agent Python runtime not found: $HERMES_PYTHON" >&2
+  exit 1
+fi
 
 if [ -z "${API_SERVER_KEY:-}" ] || [ "$API_SERVER_KEY" = "replace-with-a-random-local-dev-token" ]; then
-  API_SERVER_KEY="$(openssl rand -hex 32 2>/dev/null || "$AGENT_DIR/venv/bin/python" -c 'import secrets; print(secrets.token_hex(32))')"
+  API_SERVER_KEY="$(openssl rand -hex 32 2>/dev/null || "$HERMES_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
   umask 077
   printf 'API_SERVER_KEY=%s\n' "$API_SERVER_KEY" > "$RUNTIME_ENV"
 fi
@@ -52,7 +58,7 @@ export TERMINAL_CWD
 unset PYTHONPATH PYTHONHOME
 
 cd "$AGENT_DIR"
-pid="$("$AGENT_DIR/venv/bin/python" -c 'import os, subprocess, sys
+pid="$("$HERMES_PYTHON" -c 'import os, subprocess, sys
 log = open(sys.argv[1], "ab", buffering=0)
 proc = subprocess.Popen(
     sys.argv[3:],
@@ -63,7 +69,7 @@ proc = subprocess.Popen(
     env=os.environ.copy(),
 )
 print(proc.pid)
-' "$LOG_FILE" "$AGENT_DIR" "$AGENT_DIR/venv/bin/hermes" gateway run --accept-hooks)"
+' "$LOG_FILE" "$AGENT_DIR" "$HERMES_PYTHON" -m hermes_cli.main gateway run --accept-hooks)"
 printf '%s\n' "$pid" > "$PID_FILE"
 
 health_url="http://$API_SERVER_HOST:$API_SERVER_PORT/health"

@@ -4,13 +4,13 @@
 set -euo pipefail
 
 APP_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
-HERMES_BIN="$APP_ROOT/sources/hermes-agent/venv/bin/hermes"
+HERMES_PYTHON="$APP_ROOT/sources/hermes-agent/venv/bin/python"
 
-if [ ! -x "$HERMES_BIN" ]; then
-  echo "Taiji Agent CLI runtime not found: $HERMES_BIN" >&2
+if [ ! -x "$HERMES_PYTHON" ]; then
+  echo "Taiji Agent CLI runtime not found: $HERMES_PYTHON" >&2
   exit 1
 fi
 
 export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 export HERMES_WORKSPACE="${HERMES_WORKSPACE:-$PWD}"
-exec "$HERMES_BIN" "$@"
+exec "$HERMES_PYTHON" -m hermes_cli.main "$@"

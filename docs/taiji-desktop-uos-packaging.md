@@ -70,6 +70,8 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 
 目标终端交付脚本在每次构建前清理 `生成的安装包/` 旧输出，构建成功后写入 `.build-success`。安装脚本必须看到该成功标记并校验当前 DEB 的 SHA256，才会执行 `sudo apt install`，避免构建失败后误装历史残留包。
 
+桌面启动链不直接执行 `sources/hermes-agent/venv/bin/hermes` 控制台脚本。目标机交付目录可能包含空格或中文路径，venv 控制台脚本的绝对 shebang 在 Linux 上会被空格截断；因此 `start-agent.sh`、`/usr/bin/taiji`、`health-check.sh` 和 DEB 构建门禁统一使用 `sources/hermes-agent/venv/bin/python -m hermes_cli.main`。安装态 `taiji-native-verify` 也会提前验证这个模块入口，避免安装成功但双击后 Agent 启动失败。
+
 如果目标机已经安装过旧 hermes-bwb 浏览器 WebUI 版 `taiji-agent`，新版交付不按两个产品并存处理。`02_目标终端_安装并验证.sh` 会停止并禁用旧 `taiji-agent-webui.service` / `taiji-agent-gateway.service`，清理命令行明确指向 `/opt/taiji-agent` 的旧进程，解除 `taiji-agent` hold 状态，并通过 `apt-get purge`、`dpkg --remove --force-remove-reinstreq`、`dpkg --purge --force-all` 收口旧包状态。只有旧包状态清理干净后，脚本才会删除白名单内旧路径并安装 Electron 完整版；如果旧包状态仍残留，脚本直接失败，不安装新版。旧 `/opt/taiji-agent`、旧系统配置、旧 systemd unit、旧命令入口和旧桌面入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不在清理范围内。
 
 产物位于：
@@ -97,5 +99,5 @@ taiji --help
 ## 状态边界
 
 - 已实时验证：当前 macOS 源码态健康检查曾通过；本文件只描述实现和构建流程。
-- 未实时验证：Kylin V10 SP1 x86_64 实机安装、双击启动、真实模型对话、卸载重装。
+- 未实时验证：新版源码包在 Kylin V10 SP1 x86_64 实机重新构建、安装、双击启动、真实模型对话、卸载重装。
 - 历史线索：此前一键启动脚本和 `18642/18787` 端口经验只作为设计依据，不能替代目标机验收。

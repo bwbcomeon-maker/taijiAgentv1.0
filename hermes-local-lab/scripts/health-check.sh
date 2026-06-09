@@ -91,13 +91,15 @@ else
   fail "Hermes Agent source missing: $AGENT_DIR"
 fi
 
-if "$AGENT_DIR/venv/bin/hermes" --help >/dev/null 2>&1; then
+HERMES_PYTHON="${HERMES_PYTHON:-$AGENT_DIR/venv/bin/python}"
+
+if "$HERMES_PYTHON" -m hermes_cli.main --help >/dev/null 2>&1; then
   ok "Hermes Agent help command works"
 else
   fail "Hermes Agent help command failed"
 fi
 
-agent_version="$("$AGENT_DIR/venv/bin/hermes" --version 2>/dev/null | head -1 || true)"
+agent_version="$("$HERMES_PYTHON" -m hermes_cli.main --version 2>/dev/null | head -1 || true)"
 if [ -n "$agent_version" ]; then
   ok "Hermes Agent version command works: $agent_version"
 else
