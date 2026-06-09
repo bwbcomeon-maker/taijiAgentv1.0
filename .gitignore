@@ -35,7 +35,19 @@ hermes-local-lab/sources/hermes-agent/articles/
 # Build outputs
 **/build/
 **/dist/
-/taijiagent 打包交付/
+/taijiagent 打包交付/*
+!/taijiagent 打包交付/
+!/taijiagent 打包交付/01_目标终端_构建安装包.sh
+!/taijiagent 打包交付/02_目标终端_安装并验证.sh
+!/taijiagent 打包交付/操作说明.md
+!/taijiagent 打包交付/版本信息.txt
+/taijiagent 打包交付/*.tar.gz
+/taijiagent 打包交付/SHA256SUMS.txt
+/taijiagent 打包交付/.构建工具/
+/taijiagent 打包交付/构建工作区/
+/taijiagent 打包交付/生成的安装包/
+/taijiagent 打包交付/构建日志/
+/taijiagent 打包交付/旧版备份/
 
 # Local editor/tool state
 .idea/

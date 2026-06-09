@@ -17,6 +17,9 @@
 - 安装态 `/opt/taiji-agent/bin/taiji-native-verify` 会检查 Electron runtime、desktop entry、图标、共享库缺失，并支持 `TAIJI_VERIFY_DESKTOP_SMOKE=1` 图形会话 smoke test。
 - 目标终端交付脚本会自动准备 `uv` 和现代 Node/npm；`setup-local.sh` 默认先使用锁文件同步，锁文件漂移时在构建工作区重试不带 `--locked` 的同步，避免目标机构建中途无 DEB 产物。
 - 交付脚本在构建前清理旧 DEB 输出，构建成功后写入 `.build-success`；安装脚本只安装带有当前成功标记且 SHA256 匹配的 DEB。
+- 安装脚本新增旧 hermes-bwb WebUI 版自动备份替换流程：先备份旧 `/opt/taiji-agent`、系统配置和旧服务文件，再停止旧 WebUI/Gateway systemd 服务、清理旧包状态和白名单内旧路径，最后安装 Electron 完整版。
+- 安装脚本会检查 `8787`、`18642`、`18787` 端口；只清理命令行明确指向 `/opt/taiji-agent` 的旧进程，遇到非太极 Agent 进程占用会停止安装并打印诊断。
+- 旧版备份保存在交付目录 `旧版备份/`，可能包含模型 Key、微信 token 或历史会话，只用于目标机本地排障，不进入新版 DEB。
 - 安装包仍不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
 
 ## 状态边界
@@ -29,7 +32,7 @@
 
 ```bash
 sha256sum -c taiji-agent_*.deb.sha256
-sudo apt install -y ./taiji-agent_*_amd64.deb
+bash ./02_目标终端_安装并验证.sh
 /opt/taiji-agent/bin/taiji-native-verify
 TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify
 taiji --help

@@ -92,6 +92,20 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Node.js 10 / npm 6", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
 
+    def test_delivery_install_script_replaces_legacy_webui_package_safely(self):
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+
+        self.assertIn("BACKUP_DIR", install)
+        self.assertIn("taiji-agent-legacy-", install)
+        self.assertIn("taiji-agent-webui.service", install)
+        self.assertIn("taiji-agent-gateway.service", install)
+        self.assertIn("systemctl disable", install)
+        self.assertIn("apt-get purge -y taiji-agent", install)
+        self.assertIn("dpkg --purge --force-all taiji-agent", install)
+        self.assertIn("LEGACY_PROCESS_PATTERNS", install)
+        self.assertIn("check_port_conflict", install)
+        self.assertIn("--reinstall --allow-downgrades --allow-change-held-packages", install)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,10 @@
+太极 Agent 麒麟终端打包交付
+
+源码包：taiji-agentv1.0-kylin-build-src-ea45a02.tar.gz
+源码 commit：ea45a021a97a8146aa1dad4d990fc609bb86fd63
+目标系统：Kylin V10 SP1 / Debian-like / x86_64 amd64 / glibc 2.31
+交付形态：目标终端本地构建 amd64 DEB，然后本机安装验证
+安装脚本：已支持同版本重装、apt 降级覆盖和 hold 包覆盖，不需要手动卸载旧 taiji-agent。
+旧版处理：安装前自动备份并替换旧 hermes-bwb WebUI 版 taiji-agent，不保留两个 Agent 并存运行。
+
+注意：本交付文件夹不包含模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
