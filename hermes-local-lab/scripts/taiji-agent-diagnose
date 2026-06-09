@@ -127,6 +127,42 @@ for group in ("nav", "settings_sections", "composer"):
 PY
 }
 
+attachment_capabilities() {
+  local py
+  py="$(python_bin)"
+  if [ -z "$py" ]; then
+    printf 'python unavailable; skipped attachment capability summary\n'
+    return 0
+  fi
+  HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HERMES_HOME/webui}" \
+  "$py" - "$WEBUI_DIR" "$HERMES_WORKSPACE" <<'PY' 2>&1 | redact_stream
+from pathlib import Path
+import json
+import os
+import sys
+
+webui_dir = Path(sys.argv[1])
+workspace = sys.argv[2]
+sys.path.insert(0, str(webui_dir))
+try:
+    from api.attachment_context import diagnostic_summary, has_configured_vision
+    from api.upload import _attachment_root
+    try:
+        from api.config import get_config
+        cfg = get_config()
+    except Exception:
+        cfg = {}
+    summary = diagnostic_summary()
+    summary["attachment_root"] = str(_attachment_root())
+    summary["attachment_root_exists"] = _attachment_root().exists()
+    summary["workspace"] = workspace
+    summary["vision_configured"] = has_configured_vision(cfg)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+except Exception as exc:
+    print(f"attachment_capabilities_failed={exc}")
+PY
+}
+
 log_tail() {
   local file="$1"
   if [ -f "$file" ]; then
@@ -185,6 +221,9 @@ fi
 
 section "Config Summary"
 config_summary
+
+section "Attachment Capabilities"
+attachment_capabilities
 
 section "HTTP Probes"
 if have curl; then

@@ -7,19 +7,19 @@ MESSAGES_JS = ROOT / "static" / "messages.js"
 UPLOAD_PY = ROOT / "api" / "upload.py"
 
 
-def test_image_uploads_use_server_path_in_attached_files_context():
-    """The agent text context must include real uploaded paths for images.
+def test_uploads_keep_structured_attachment_payload_without_path_text():
+    """The browser must not expose absolute attachment paths in user text.
 
-    /api/upload returns an absolute attachment path. The browser also sends the
-    structured attachment payload to /api/chat/start, but text/tool-mode agents
-    still rely on the literal ``[Attached files: ...]`` suffix. Images must not
-    be downgraded to bare filenames there, otherwise tools like vision_analyze
-    cannot open the uploaded file immediately.
+    /api/upload returns an absolute attachment path. The browser sends that
+    path only inside the structured attachments payload; backend attachment
+    context ingestion handles model-only file access.
     """
     src = MESSAGES_JS.read_text(encoding="utf-8")
 
-    assert "uploadedPaths=uploaded.map(u=>u&&u.is_image?" not in src
-    assert "uploadedPaths=uploaded.map(u=>u&&u.path?u.path" in src
+    assert "uploadedPaths=uploaded.map" not in src
+    assert "I've uploaded" not in src
+    assert "[Attached files:" not in src
+    assert "attachments:uploaded.length?uploaded:undefined" in src
 
 
 def test_attached_files_context_is_hidden_from_user_message_display():

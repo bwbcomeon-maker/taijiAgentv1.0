@@ -455,10 +455,8 @@ async function send(){
   setComposerStatus('');
 
   const uploadedNames=uploaded.map(u=>u.name||u);
-  const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
   let msgText=text;
-  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
-  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(uploaded.length&&!msgText)msgText=`Uploaded files: ${uploadedNames.join(', ')}`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();

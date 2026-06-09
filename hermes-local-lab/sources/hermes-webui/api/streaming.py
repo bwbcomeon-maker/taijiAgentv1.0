@@ -4,6 +4,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
 import base64
 import contextlib
+import asyncio
 import json
 import logging
 import mimetypes
@@ -47,6 +48,10 @@ from api.brand_privacy import (
     scrub_streaming_token_delta,
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.attachment_context import (
+    build_attachment_context,
+    has_configured_vision,
+)
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
@@ -1201,7 +1206,7 @@ def _is_valid_image(path: Path, mime: str) -> bool:
     return False
 
 
-def _resolve_image_input_mode(cfg: dict) -> str:
+def _resolve_image_input_mode(cfg: dict, *, provider: str | None = None, model: str | None = None) -> str:
     """Return ``"native"`` or ``"text"`` based on config, mirroring
     ``agent/image_routing.py:decide_image_input_mode``.
 
@@ -1220,6 +1225,23 @@ def _resolve_image_input_mode(cfg: dict) -> str:
     if mode == "text":
         return "text"
 
+    try:
+        from agent.image_routing import decide_image_input_mode
+
+        model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+        resolved_provider = provider or str(model_cfg.get("provider") or "").strip()
+        resolved_model = model or str(
+            model_cfg.get("default")
+            or model_cfg.get("model")
+            or model_cfg.get("name")
+            or ""
+        ).strip()
+        decided = decide_image_input_mode(resolved_provider, resolved_model, cfg)
+        if decided in ("native", "text"):
+            return decided
+    except Exception as exc:
+        logger.debug("WebUI image routing capability lookup failed: %s", exc)
+
     # auto: if auxiliary.vision is explicitly configured → text mode
     # (user opted into a dedicated vision backend)
     aux = cfg.get("auxiliary") or {}
@@ -1236,13 +1258,73 @@ def _resolve_image_input_mode(cfg: dict) -> str:
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None):
+def _enrich_webui_images_with_vision(agent, user_text: str, image_items: list[dict[str, str]]) -> str:
+    """Pre-analyze uploaded images for text-mode image routing.
+
+    This mirrors the agent-side vision enrichment but keeps local filesystem
+    paths out of the injected prompt so desktop replies do not echo them.
+    """
+    if not image_items:
+        return user_text
+
+    async def _run() -> str:
+        from tools.vision_tools import vision_analyze_tool
+        from agent.memory_manager import sanitize_context
+
+        prompt = (
+            "Describe everything visible in this image in thorough detail. "
+            "Include any text, code, data, objects, people, layout, colors, "
+            "and any other notable visual information."
+        )
+        parts = []
+        for item in image_items:
+            name = str(item.get("name") or "image").strip() or "image"
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            try:
+                result_json = await vision_analyze_tool(image_url=path, user_prompt=prompt)
+                result = json.loads(result_json)
+                if result.get("success"):
+                    analysis = sanitize_context(str(result.get("analysis") or "").strip())
+                    if analysis:
+                        parts.append(f"[Uploaded image: {name}]\n{analysis}")
+                        continue
+                parts.append(f"[Uploaded image: {name}] 图片已上传，但本轮视觉分析没有返回可用内容。请如实告知用户。")
+            except Exception as exc:
+                logger.warning("WebUI image attachment vision analysis failed for %s: %s", name, exc)
+                parts.append(f"[Uploaded image: {name}] 图片已上传，但本轮视觉分析失败。请如实告知用户当前无法分析这张图片。")
+        if not parts:
+            return user_text
+        prefix = "[Uploaded image context]\n" + "\n\n".join(parts)
+        return f"{prefix}\n\n{user_text}" if user_text else prefix
+
+    try:
+        return asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+
+def _build_native_multimodal_message(
+    workspace_ctx: str,
+    msg_text: str,
+    attachments,
+    workspace: str,
+    *,
+    cfg: dict = None,
+    provider: str | None = None,
+    model: str | None = None,
+):
     """Build native multimodal content parts for current-turn image uploads.
 
-    WebUI uploads files into the active workspace. For image files, pass the
-    bytes to Hermes as OpenAI-style image_url data URLs so vision-capable main
-    models can consume them in the same request. Non-image files intentionally
-    stay as text path attachments so the agent can inspect them with file tools.
+    For image files, pass the bytes to Hermes as OpenAI-style image_url data
+    URLs so vision-capable main models can consume them in the same request.
+    Non-image attachment text is injected before this helper by
+    ``api.attachment_context``.
 
     When *cfg* is provided, respects ``agent.image_input_mode`` — if the resolved
     mode is ``"text"``, returns a plain string (attachments are not embedded) so
@@ -1252,7 +1334,7 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         return workspace_ctx + msg_text
 
     # ── Check image_input_mode before embedding anything ──
-    if cfg is not None and _resolve_image_input_mode(cfg) == "text":
+    if cfg is not None and _resolve_image_input_mode(cfg, provider=provider, model=model) == "text":
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
@@ -5274,7 +5356,42 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            if attachments:
+                try:
+                    _image_mode = _resolve_image_input_mode(_cfg, provider=model_provider, model=model)
+                    _vision_available = has_configured_vision(_cfg)
+                    _attachment_context = build_attachment_context(
+                        attachments,
+                        workspace=workspace,
+                        cfg=_cfg,
+                        image_mode=_image_mode,
+                        vision_available=_vision_available,
+                    )
+                    if _image_mode == "text" and _vision_available and _attachment_context.image_items:
+                        _agent_msg_text = _enrich_webui_images_with_vision(
+                            agent,
+                            _agent_msg_text,
+                            _attachment_context.image_items,
+                        )
+                    if _attachment_context.text_context:
+                        _agent_msg_text = f"{_attachment_context.text_context}\n\n{_agent_msg_text}".strip()
+                except Exception as exc:
+                    logger.warning("Failed to build uploaded attachment context: %s", exc, exc_info=True)
+                    _agent_msg_text = (
+                        "[Uploaded file context]\n"
+                        "Attachment processing failed before the model call. "
+                        "Tell the user the uploaded attachment could not be analyzed this turn.\n\n"
+                        f"{_agent_msg_text}"
+                    ).strip()
+            user_message = _build_native_multimodal_message(
+                workspace_ctx,
+                _agent_msg_text,
+                attachments,
+                workspace,
+                cfg=_cfg,
+                provider=model_provider,
+                model=model,
+            )
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
