@@ -1,0 +1,7 @@
+name: doubao
+version: 1.0.0
+description: "Doubao Seedream image generation backend via Volcengine Ark (Seedream 5.0 Lite)."
+author: NousResearch
+kind: backend
+requires_env:
+  - ARK_API_KEY

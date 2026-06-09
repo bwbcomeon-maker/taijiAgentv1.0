@@ -6,6 +6,7 @@
 ### Added
 
 - Added the `taiji-light-glass` WebUI skin with light glass enterprise tokens, centralized brand metadata in `static/brand.js`, and service-worker coverage for the new brand entrypoint.
+- Added Doubao Seedream 5.0 Lite as a built-in image-generation provider, configurable from Settings with `ARK_API_KEY` and routed through the existing `image_generate` tool.
 - Added repo-local taiji brand assets under `static/assets/taiji/`, wiring the real logo, background, navigation icons, composer actions, workspace panel controls, favicons, login page, and restart shell into the `taiji-light-glass` skin while keeping Lucide/SVG fallback markup for other skins.
 - Added `static/taiji-home.js`, a desktop Taiji App Shell controller that mounts the real WebUI main view and composer into the redesigned three-column homepage, renders recent sessions from live APIs, and wires navigation, quick prompts, new chat, session loading, search, send, and Dock menus to existing business functions.
 - Added dynamic Taiji secondary panels for all desktop navigation entries: Chat keeps live recent conversations, while Tasks, Kanban, Writing, Skills, Memory, Workspaces, Profiles, Todos, Insights, Logs, and Settings now show their real module side panels instead of the conversation list.

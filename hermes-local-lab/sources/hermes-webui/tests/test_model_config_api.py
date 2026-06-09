@@ -141,3 +141,60 @@ def test_image_gen_config_writes_provider_model_and_key(monkeypatch, tmp_path):
         encoding="utf-8"
     )
     os.environ.pop("FAL_KEY", None)
+
+
+def test_image_gen_config_writes_doubao_ark_key_without_echo(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [
+            {
+                "id": "doubao",
+                "name": "Doubao Seedream",
+                "models": [
+                    {
+                        "id": "doubao-seedream-5-0-260128",
+                        "label": "Doubao Seedream 5.0 Lite",
+                    }
+                ],
+                "default_model": "doubao-seedream-5-0-260128",
+                "key_status": {"configured": False, "env_var": "ARK_API_KEY"},
+            }
+        ],
+    )
+
+    result = model_config.set_image_gen_config(
+        {
+            "provider": "doubao",
+            "model": "doubao-seedream-5-0-260128",
+            "api_key": "ark-test-key-123456",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["image_gen"]["provider"] == "doubao"
+    assert cfg["image_gen"]["model"] == "doubao-seedream-5-0-260128"
+    assert cfg["image_gen"]["use_gateway"] is False
+    assert "ARK_API_KEY=ark-test-key-123456" in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
+    assert "ark-test-key-123456" not in json.dumps(result)
+    os.environ.pop("ARK_API_KEY", None)
+
+
+def test_image_gen_provider_rows_include_doubao(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+
+    rows = model_config._image_gen_provider_rows("doubao")
+    doubao = next(row for row in rows if row["id"] == "doubao")
+
+    assert doubao["name"] == "Doubao Seedream"
+    assert doubao["active"] is True
+    assert doubao["key_status"]["env_var"] == "ARK_API_KEY"
+    assert doubao["key_status"]["configured"] is False
+    model_ids = {item["id"] for item in doubao["models"]}
+    assert "doubao-seedream-5-0-260128" in model_ids
+    assert "doubao-seedream-5-0-lite-260128" in model_ids

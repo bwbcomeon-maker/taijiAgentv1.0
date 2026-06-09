@@ -38,12 +38,14 @@ logger = logging.getLogger(__name__)
 
 _CUSTOM_MODEL_KEY_ENV = "HERMES_CUSTOM_MODEL_API_KEY"
 _IMAGE_GEN_KEY_ENV: dict[str, str] = {
+    "doubao": "ARK_API_KEY",
     "fal": "FAL_KEY",
     "openai": "OPENAI_API_KEY",
     "xai": "XAI_API_KEY",
     "krea": "KREA_API_KEY",
 }
 _BUILTIN_IMAGE_GEN_MODULES: tuple[str, ...] = (
+    "plugins.image_gen.doubao",
     "plugins.image_gen.fal",
     "plugins.image_gen.openai",
     "plugins.image_gen.openai-codex",
@@ -112,7 +114,7 @@ def _ensure_image_gen_plugins_registered() -> None:
     from agent import image_gen_registry
 
     registered = {provider.name for provider in image_gen_registry.list_providers()}
-    if {"fal", "openai", "openai-codex", "xai", "krea"}.issubset(registered):
+    if {"doubao", "fal", "openai", "openai-codex", "xai", "krea"}.issubset(registered):
         return
     ctx = _ImageGenRegisterContext()
     for module_name in _BUILTIN_IMAGE_GEN_MODULES:
