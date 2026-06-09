@@ -13,7 +13,8 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 RUNTIME_ENV_SH = (LAB_ROOT / "scripts" / "runtime-env.sh").read_text(encoding="utf-8")
-PACKAGED_CONFIG = (LAB_ROOT / "hermes-home" / "config.yaml").read_text(encoding="utf-8")
+PACKAGED_CONFIG_PATH = LAB_ROOT / "config" / "taiji-default-config.yaml"
+PACKAGED_CONFIG = PACKAGED_CONFIG_PATH.read_text(encoding="utf-8")
 
 
 def test_backend_ui_visibility_defaults_fail_open():
@@ -178,19 +179,20 @@ def test_packaged_config_lists_all_features_with_chinese_explanations():
 
 
 def test_runtime_env_syncs_packaged_feature_visibility_on_startup():
-    assert "sync-feature-visibility.py" in RUNTIME_ENV_SH
-    assert 'TAIJI_AGENT_SYNC_FEATURE_VISIBILITY:-1' in RUNTIME_ENV_SH
-    assert "$LAB_DIR/hermes-home/config.yaml" in RUNTIME_ENV_SH
+    assert "sync-packaged-config.py" in RUNTIME_ENV_SH
+    assert "TAIJI_AGENT_SYNC_PACKAGED_CONFIG" in RUNTIME_ENV_SH
+    assert "$LAB_DIR/config/taiji-default-config.yaml" in RUNTIME_ENV_SH
     assert "$HERMES_HOME/config.yaml" in RUNTIME_ENV_SH
 
 
-def test_sync_feature_visibility_script_preserves_user_model_config(tmp_path):
+def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):
     template = tmp_path / "template.yaml"
     target = tmp_path / "user" / "config.yaml"
     template.write_text(
         yaml.safe_dump(
             {
                 "model": {"default": "packaged-model"},
+                "image_gen": {"provider": "openai-codex", "model": "gpt-image-2-medium"},
                 "webui": {
                     "feature_visibility": {
                         "nav": {"tasks": False},
@@ -219,7 +221,7 @@ def test_sync_feature_visibility_script_preserves_user_model_config(tmp_path):
     )
 
     subprocess.run(
-        ["python3", str(LAB_ROOT / "scripts" / "sync-feature-visibility.py"), str(template), str(target)],
+        ["python3", str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
         check=True,
     )
     merged = yaml.safe_load(target.read_text(encoding="utf-8"))
@@ -227,23 +229,55 @@ def test_sync_feature_visibility_script_preserves_user_model_config(tmp_path):
     assert merged["model"]["default"] == "user-model"
     assert merged["model"]["api_key"] == "keep-me"
     assert merged["providers"]["deepseek"]["api_key"] == "also-keep"
+    assert merged["image_gen"]["provider"] == "openai-codex"
+    assert merged["image_gen"]["model"] == "gpt-image-2-medium"
     assert merged["webui"]["feature_visibility"]["nav"]["tasks"] is False
     assert merged["webui"]["feature_visibility"]["settings_sections"]["models"] is False
     assert merged["webui"]["feature_visibility"]["composer"]["model"] is False
 
 
-def test_sync_feature_visibility_script_copies_template_for_missing_target(tmp_path):
-    template = LAB_ROOT / "hermes-home" / "config.yaml"
+def test_sync_packaged_config_copies_template_for_missing_target(tmp_path):
+    template = PACKAGED_CONFIG_PATH
     target = tmp_path / "fresh" / "config.yaml"
 
     subprocess.run(
-        ["python3", str(LAB_ROOT / "scripts" / "sync-feature-visibility.py"), str(template), str(target)],
+        ["python3", str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
         check=True,
     )
 
     copied = target.read_text(encoding="utf-8")
     assert "左侧主导航" in copied
     assert "feature_visibility" in copied
+    assert "deepseek-v4-pro" in copied
+
+
+def test_sync_packaged_config_fills_empty_model_without_overwriting_user_values(tmp_path):
+    template = PACKAGED_CONFIG_PATH
+    target = tmp_path / "existing" / "config.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": "", "default": "user-model", "api_key": "keep-me"},
+                "image_gen": {"provider": "fal"},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["python3", str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+        check=True,
+    )
+    merged = yaml.safe_load(target.read_text(encoding="utf-8"))
+
+    assert merged["model"]["provider"] == "deepseek"
+    assert merged["model"]["default"] == "user-model"
+    assert merged["model"]["api_key"] == "keep-me"
+    assert merged["image_gen"]["provider"] == "fal"
+    assert merged["image_gen"]["model"] == "gpt-image-2-medium"
 
 
 def test_boot_reads_ui_visibility_and_applies_it():

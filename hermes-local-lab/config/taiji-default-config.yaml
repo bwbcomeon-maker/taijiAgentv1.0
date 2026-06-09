@@ -1,0 +1,47 @@
+# 太极 Agent 桌面版默认非密配置。
+# 本文件可以进入安装包；不要在这里写入任何敏感凭据。
+
+model:
+  provider: deepseek
+  default: deepseek-v4-pro
+  base_url: https://api.deepseek.com/v1
+
+image_gen:
+  provider: openai-codex
+  use_gateway: false
+  model: gpt-image-2-medium
+
+webui:
+  # 左侧主导航。true=显示，false=隐藏。
+  feature_visibility:
+    nav:
+      chat: true
+      tasks: true
+      kanban: false
+      writing: true
+      skills: false
+      memory: true
+      workspaces: false
+      profiles: true
+      todos: false
+      insights: false
+      logs: false
+      settings: true
+    # 设置页二级菜单。true=显示，false=隐藏。
+    settings_sections:
+      conversation: true
+      appearance: false
+      preferences: false
+      models: true
+      providers: true
+      plugins: false
+      system: true
+    # 底部输入区控制条。true=显示，false=隐藏。
+    composer:
+      profile: false
+      workspace_files: false
+      workspace_switcher: false
+      model: true
+      reasoning: true
+      toolsets: false
+      quota: false

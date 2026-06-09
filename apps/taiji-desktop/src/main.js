@@ -338,7 +338,7 @@ async function startRuntime() {
   loadStatus("正在启动太极 Agent", [
     "正在准备本机运行环境",
     "正在检查服务状态",
-    "可通过菜单打开运行日志"
+    "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
 
   await stopExistingRuntime(labDir, logDir);
@@ -349,7 +349,7 @@ async function startRuntime() {
   loadStatus("正在启动太极 Agent", [
     "正在启动本地对话服务",
     "正在准备工作台界面",
-    "可通过菜单打开运行日志"
+    "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
   await runScript("start-agent.sh", runtimeEnv, desktopLog);
   await waitForHttp(`http://127.0.0.1:${agentPort}/health`, 30000);
@@ -357,7 +357,7 @@ async function startRuntime() {
   loadStatus("正在启动太极 Agent", [
     "本地对话服务已就绪",
     "正在打开工作台界面",
-    "可通过菜单打开运行日志"
+    "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
   await runScript("start-webui.sh", runtimeEnv, desktopLog);
   await waitForHttp(`http://127.0.0.1:${webuiPort}/health`, 30000);
@@ -372,6 +372,11 @@ async function startRuntime() {
 }
 
 function installMenu() {
+  if (process.platform === "linux" && process.env.TAIJI_DESKTOP_SHOW_MENU !== "1") {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+
   const template = [
     {
       label: APP_NAME,
@@ -412,6 +417,7 @@ async function createWindow() {
     title: APP_NAME,
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
     backgroundColor: DESKTOP_CHROME_BACKGROUND,
+    autoHideMenuBar: process.platform === "linux",
     ...(process.platform === "darwin" ? {
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 16, y: 16 }
@@ -440,7 +446,7 @@ async function createWindow() {
     const message = error && error.stack ? error.stack : String(error);
     loadStatus("启动失败", [
       "本地服务未能启动",
-      "请通过菜单打开运行日志查看技术诊断信息"
+      "请运行 taiji-agent-diagnose 导出技术诊断信息"
     ], message);
     if (SMOKE_TEST) {
       console.error(message);

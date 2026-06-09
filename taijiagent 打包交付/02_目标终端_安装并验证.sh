@@ -263,8 +263,7 @@ check_port_conflict() {
     done
     if [ -n "$offenders" ]; then
       printf '%s' "$offenders" >&2
-      warn "${phase}：端口 $port 被非预期进程占用。为避免误杀其他软件，已停止安装。"
-      return 1
+      warn "${phase}：端口 $port 被非预期进程占用。新版桌面端会自动选择空闲端口，安装继续；请在诊断报告中保留该信息。"
     fi
   done
   return 0
@@ -361,6 +360,7 @@ main() {
   printf '\n[OK] 安装验证命令已执行完毕。\n'
   printf '请从开始菜单搜索并打开：太极 Agent\n'
   printf '打开后先确认首屏，再配置模型并发送一句测试消息。\n'
+  printf '如果页面或功能异常，请执行：bash ./03_目标终端_导出诊断报告.sh\n'
   printf '\n日志：%s\n' "$LOG_FILE"
 }
 

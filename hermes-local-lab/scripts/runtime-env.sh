@@ -35,14 +35,14 @@ fi
 
 mkdir -p "$LOG_DIR" "$TMP_DIR" "$HERMES_HOME" "$HERMES_WORKSPACE"
 
-if [ "${TAIJI_AGENT_SYNC_FEATURE_VISIBILITY:-1}" = "1" ]; then
-  _taiji_packaged_config="$LAB_DIR/hermes-home/config.yaml"
+if [ "${TAIJI_AGENT_SYNC_PACKAGED_CONFIG:-${TAIJI_AGENT_SYNC_FEATURE_VISIBILITY:-1}}" = "1" ]; then
+  _taiji_packaged_config="$LAB_DIR/config/taiji-default-config.yaml"
   _taiji_target_config="$HERMES_HOME/config.yaml"
   if [ -f "$_taiji_packaged_config" ]; then
     if [ -x "$AGENT_DIR/venv/bin/python" ]; then
-      "$AGENT_DIR/venv/bin/python" "$LAB_DIR/scripts/sync-feature-visibility.py" "$_taiji_packaged_config" "$_taiji_target_config" || true
+      "$AGENT_DIR/venv/bin/python" "$LAB_DIR/scripts/sync-packaged-config.py" "$_taiji_packaged_config" "$_taiji_target_config" || true
     elif command -v python3 >/dev/null 2>&1; then
-      python3 "$LAB_DIR/scripts/sync-feature-visibility.py" "$_taiji_packaged_config" "$_taiji_target_config" || true
+      python3 "$LAB_DIR/scripts/sync-packaged-config.py" "$_taiji_packaged_config" "$_taiji_target_config" || true
     fi
   fi
   unset _taiji_packaged_config _taiji_target_config

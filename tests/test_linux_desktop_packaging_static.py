@@ -17,6 +17,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('ldd "$ELECTRON_BIN"', build)
         self.assertIn("desktop-file-validate", build)
         self.assertIn("scan_deb_release_artifact", build)
+        self.assertIn("validate_packaged_config_template", build)
+        self.assertIn("config/taiji-default-config.yaml", build)
         for forbidden in ("LIBARCHIVE", "com.apple", "PaxHeaders", "SCHILY.xattr"):
             self.assertIn(forbidden, build)
 
@@ -51,6 +53,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("desktop smoke test", verify)
         self.assertIn("-m hermes_cli.main --help", verify)
         self.assertIn("Hermes CLI module entrypoint works", verify)
+        self.assertIn("verify_packaged_config", verify)
+        self.assertIn("/api/model-config", verify)
+        self.assertIn("/api/settings", verify)
 
     def test_desktop_runtime_does_not_depend_on_venv_console_script_shebang(self):
         start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
@@ -72,6 +77,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("outputTail", main_js)
         self.assertIn("最近输出", main_js)
         self.assertIn("[${scriptName} error]", main_js)
+
+    def test_linux_desktop_hides_application_menu_bar(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+
+        self.assertIn('process.platform === "linux"', main_js)
+        self.assertIn("Menu.setApplicationMenu(null)", main_js)
+        self.assertIn("autoHideMenuBar", main_js)
+        self.assertIn("taiji-agent-diagnose", main_js)
 
     def test_build_script_distinguishes_public_pem_from_private_keys(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
@@ -129,6 +142,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("LEGACY_PROCESS_PATTERNS", install)
         self.assertIn("check_port_conflict", install)
         self.assertIn("--reinstall --allow-downgrades --allow-change-held-packages", install)
+        self.assertIn("新版桌面端会自动选择空闲端口", install)
+        self.assertIn("03_目标终端_导出诊断报告.sh", install)
 
     def test_delivery_install_script_removes_legacy_runtime_without_backup(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
@@ -163,6 +178,19 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             install.index("pid_uses_taiji_install_root()", install.index("remove_legacy_files()"))
         ]
         self.assertIn("remove_legacy_path /opt/taiji-agent", remove_files)
+
+    def test_diagnose_entrypoints_are_packaged_and_delivery_script_exists(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        launcher = read_text("packaging/linux/bin/taiji-agent-diagnose")
+        diagnose = read_text("hermes-local-lab/scripts/taiji-agent-diagnose")
+        delivery = read_text("taijiagent 打包交付/03_目标终端_导出诊断报告.sh")
+
+        self.assertIn("taiji-agent-diagnose", build)
+        self.assertIn("scripts/taiji-agent-diagnose", launcher)
+        self.assertIn("TAIJI_AGENT_USE_USER_DIRS", launcher)
+        self.assertIn("redact_stream", diagnose)
+        self.assertIn("/api/model-config", diagnose)
+        self.assertIn("诊断报告", delivery)
 
 
 if __name__ == "__main__":

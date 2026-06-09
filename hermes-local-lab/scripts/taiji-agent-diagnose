@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Emit a redacted runtime diagnostic report for installed Taiji Agent packages.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
+# shellcheck source=runtime-env.sh
+source "$SCRIPT_DIR/runtime-env.sh"
+
+AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
+AGENT_API_PORT="${AGENT_API_PORT:-18642}"
+WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
+WEBUI_PORT="${WEBUI_PORT:-18787}"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+section() {
+  printf '\n==== %s ====\n' "$*"
+}
+
+redact_stream() {
+  sed -E \
+    -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASS|AUTH)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}"'"'"']+/\1[REDACTED]/gI' \
+    -e 's/(Bearer )[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/gI'
+}
+
+run() {
+  printf '$ %s\n' "$*"
+  "$@" 2>&1 | redact_stream || printf '[command failed: %s]\n' "$*" | redact_stream
+}
+
+python_bin() {
+  if [ -x "$AGENT_DIR/venv/bin/python" ]; then
+    printf '%s\n' "$AGENT_DIR/venv/bin/python"
+  elif have python3; then
+    command -v python3
+  else
+    printf '\n'
+  fi
+}
+
+http_json_summary() {
+  local url="$1" kind="$2" py
+  py="$(python_bin)"
+  if [ -z "$py" ]; then
+    printf 'python unavailable; skipped %s\n' "$url"
+    return 0
+  fi
+  "$py" - "$url" "$kind" <<'PY' 2>&1 | redact_stream
+import json
+import sys
+import urllib.error
+import urllib.request
+
+url, kind = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        status = response.status
+        body = response.read(1024 * 1024)
+    print(f"{url} HTTP {status}")
+    data = json.loads(body.decode("utf-8"))
+except Exception as exc:
+    print(f"{url} failed: {exc}")
+    raise SystemExit(0)
+
+if kind == "settings":
+    visibility = data.get("ui_visibility") if isinstance(data, dict) else {}
+    for group in ("nav", "settings_sections", "composer"):
+        values = visibility.get(group, {}) if isinstance(visibility, dict) else {}
+        hidden = sorted(k for k, v in values.items() if v is False)
+        print(f"{group}.hidden={','.join(hidden) if hidden else '-'}")
+elif kind == "model":
+    main = data.get("main", {}) if isinstance(data, dict) else {}
+    providers = data.get("providers", []) if isinstance(data, dict) else []
+    image = data.get("image_gen", {}) if isinstance(data, dict) else {}
+    print(f"ok={data.get('ok')}")
+    print(f"profile={data.get('profile')}")
+    print(f"config_path={data.get('config_path')}")
+    print(f"main.provider={main.get('provider') or '-'}")
+    print(f"main.model={main.get('model') or '-'}")
+    print(f"main.base_url={main.get('base_url') or '-'}")
+    print(f"providers.count={len(providers) if isinstance(providers, list) else 0}")
+    print(f"image.provider={image.get('provider') or '-'}")
+    print(f"image.model={image.get('model') or '-'}")
+else:
+    print(json.dumps(data, ensure_ascii=False, indent=2)[:4000])
+PY
+}
+
+config_summary() {
+  local py config_path
+  py="$(python_bin)"
+  config_path="$HERMES_HOME/config.yaml"
+  if [ -z "$py" ]; then
+    printf 'python unavailable; skipped config summary\n'
+    return 0
+  fi
+  "$py" - "$config_path" <<'PY' 2>&1 | redact_stream
+from pathlib import Path
+import sys
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"yaml unavailable: {exc}")
+    raise SystemExit(0)
+
+path = Path(sys.argv[1])
+print(f"config_path={path}")
+print(f"exists={path.exists()}")
+if not path.exists():
+    raise SystemExit(0)
+data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+model = data.get("model") if isinstance(data, dict) else {}
+image = data.get("image_gen") if isinstance(data, dict) else {}
+webui = data.get("webui") if isinstance(data, dict) else {}
+visibility = webui.get("feature_visibility") if isinstance(webui, dict) else {}
+print(f"model.provider={(model or {}).get('provider') or '-'}")
+print(f"model.default={(model or {}).get('default') or '-'}")
+print(f"model.base_url={(model or {}).get('base_url') or '-'}")
+print(f"image.provider={(image or {}).get('provider') or '-'}")
+print(f"image.model={(image or {}).get('model') or '-'}")
+for group in ("nav", "settings_sections", "composer"):
+    values = visibility.get(group, {}) if isinstance(visibility, dict) else {}
+    hidden = sorted(k for k, v in values.items() if v is False)
+    print(f"{group}.hidden={','.join(hidden) if hidden else '-'}")
+PY
+}
+
+log_tail() {
+  local file="$1"
+  if [ -f "$file" ]; then
+    printf '\n--- %s ---\n' "$file"
+    tail -120 "$file" 2>&1 | redact_stream
+  else
+    printf '\n--- %s missing ---\n' "$file"
+  fi
+}
+
+section "Taiji Agent Diagnose"
+printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+printf 'user=%s\n' "$(id -un 2>/dev/null || true)"
+printf 'install_root=%s\n' "$LAB_DIR"
+printf 'hermes_home=%s\n' "$HERMES_HOME"
+printf 'workspace=%s\n' "$HERMES_WORKSPACE"
+printf 'log_dir=%s\n' "$LOG_DIR"
+
+section "System"
+run uname -a
+if [ -f /etc/os-release ]; then
+  run cat /etc/os-release
+fi
+if have dpkg-query; then
+  run dpkg-query -W -f='${Package} ${Version} ${Architecture} ${db:Status-Abbrev}\n' taiji-agent
+fi
+if have apt-mark; then
+  run apt-mark showhold
+fi
+
+section "Launchers And Desktop Entry"
+run command -v taiji-agent
+run command -v taiji
+run command -v taiji-agent-diagnose
+if [ -f /usr/share/applications/taiji-agent.desktop ]; then
+  run grep -E '^(Name|Exec|Icon|Terminal|Categories)=' /usr/share/applications/taiji-agent.desktop
+fi
+run ls -ld /opt/taiji-agent /usr/bin/taiji-agent /usr/bin/taiji
+
+section "Processes And Ports"
+if have pgrep; then
+  run pgrep -af '/opt/taiji-agent|taiji-agent|hermes-webui|hermes_cli.main'
+fi
+if have lsof; then
+  for port in 8787 18642 18787 "$AGENT_API_PORT" "$WEBUI_PORT"; do
+    run lsof -nP -iTCP:"$port" -sTCP:LISTEN
+  done
+fi
+
+section "Legacy Services"
+if have systemctl; then
+  for svc in taiji-agent-webui.service taiji-agent-gateway.service; do
+    run systemctl status "$svc" --no-pager
+  done
+fi
+
+section "Config Summary"
+config_summary
+
+section "HTTP Probes"
+if have curl; then
+  run curl -fsS "http://$AGENT_API_HOST:$AGENT_API_PORT/health"
+  run curl -fsS "http://$WEBUI_HOST:$WEBUI_PORT/health"
+  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/settings" settings
+  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/model-config" model
+fi
+
+section "Recent Logs"
+log_tail "$LOG_DIR/taiji-desktop.log"
+log_tail "$LOG_DIR/hermes-agent.log"
+log_tail "$LOG_DIR/hermes-webui.log"
+log_tail /var/log/taiji-agent-postinst-verify.log
+
+section "End"
+printf 'diagnose_complete=1\n'

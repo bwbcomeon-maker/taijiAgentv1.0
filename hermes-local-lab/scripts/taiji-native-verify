@@ -36,6 +36,98 @@ http_code() {
   curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null
 }
 
+python_bin() {
+  if [ -x "$AGENT_DIR/venv/bin/python" ]; then
+    printf '%s\n' "$AGENT_DIR/venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    command -v python3
+  else
+    printf '\n'
+  fi
+}
+
+verify_packaged_config() {
+  local py template target
+  py="$(python_bin)"
+  template="$LAB_DIR/config/taiji-default-config.yaml"
+  target="$HERMES_HOME/config.yaml"
+  [ -n "$py" ] || return 1
+  "$py" - "$template" "$target" <<'PY'
+from pathlib import Path
+import sys
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"yaml import failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+template_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+if not template_path.exists():
+    print(f"missing packaged config template: {template_path}", file=sys.stderr)
+    raise SystemExit(1)
+if not target_path.exists():
+    print(f"missing active user config: {target_path}", file=sys.stderr)
+    raise SystemExit(1)
+
+template = yaml.safe_load(template_path.read_text(encoding="utf-8")) or {}
+target = yaml.safe_load(target_path.read_text(encoding="utf-8")) or {}
+template_visibility = ((template.get("webui") or {}).get("feature_visibility") or {})
+target_visibility = ((target.get("webui") or {}).get("feature_visibility") or {})
+if template_visibility != target_visibility:
+    print("active config feature_visibility does not match packaged template", file=sys.stderr)
+    raise SystemExit(1)
+model = target.get("model") if isinstance(target.get("model"), dict) else {}
+provider = str(model.get("provider") or "").strip()
+model_id = str(model.get("default") or model.get("model") or "").strip()
+if not provider or not model_id:
+    print("active config main model provider/model is empty", file=sys.stderr)
+    raise SystemExit(1)
+image = target.get("image_gen") if isinstance(target.get("image_gen"), dict) else {}
+print(f"active config model={provider}/{model_id}")
+print(f"active config image_gen={image.get('provider') or '-'}/{image.get('model') or '-'}")
+PY
+}
+
+verify_webui_api_payloads() {
+  local py base_url
+  py="$(python_bin)"
+  base_url="http://$WEBUI_HOST:$WEBUI_PORT"
+  [ -n "$py" ] || return 1
+  "$py" - "$base_url" <<'PY'
+import json
+import sys
+import urllib.request
+
+base_url = sys.argv[1].rstrip("/")
+
+def fetch(path):
+    with urllib.request.urlopen(base_url + path, timeout=5) as response:
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"{path} HTTP {response.status}")
+        return json.loads(response.read().decode("utf-8"))
+
+settings = fetch("/api/settings")
+visibility = settings.get("ui_visibility") or {}
+composer = visibility.get("composer") or {}
+nav = visibility.get("nav") or {}
+if composer.get("workspace_files") is not False:
+    raise SystemExit("composer.workspace_files is not hidden in /api/settings")
+if nav.get("kanban") is not False or nav.get("skills") is not False:
+    raise SystemExit("expected packaged nav visibility is not reflected in /api/settings")
+
+model_config = fetch("/api/model-config")
+main = model_config.get("main") or {}
+providers = model_config.get("providers") or []
+if not main.get("provider") or not main.get("model"):
+    raise SystemExit("main provider/model is empty in /api/model-config")
+if not isinstance(providers, list) or not providers:
+    raise SystemExit("providers list is empty in /api/model-config")
+print(f"api model={main.get('provider')}/{main.get('model')} providers={len(providers)}")
+PY
+}
+
 echo "Taiji Agent native verification"
 echo "Install root: $LAB_DIR"
 echo "Config file : $TAIJI_ENV_FILE"
@@ -152,6 +244,12 @@ else
   runtime_issue "Desktop icon not found at /usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 fi
 
+if verify_packaged_config; then
+  ok "Packaged non-secret config is active in the user runtime"
+else
+  runtime_issue "Packaged non-secret config is missing or not synchronized"
+fi
+
 if [ "${TAIJI_VERIFY_DESKTOP_SMOKE:-0}" = "1" ]; then
   if command -v taiji-agent >/dev/null 2>&1; then
     if command -v timeout >/dev/null 2>&1; then
@@ -180,6 +278,11 @@ fi
 webui_code="$(http_code "http://$WEBUI_HOST:$WEBUI_PORT/health")"
 if [ "$webui_code" = "200" ]; then
   ok "WebUI health returned HTTP 200 at $WEBUI_HOST:$WEBUI_PORT"
+  if verify_webui_api_payloads; then
+    ok "WebUI settings and model-config APIs returned packaged desktop defaults"
+  else
+    runtime_issue "WebUI settings/model-config API check failed"
+  fi
 else
   warn "WebUI health not reachable at $WEBUI_HOST:$WEBUI_PORT; start the desktop app and retry for runtime checks"
 fi

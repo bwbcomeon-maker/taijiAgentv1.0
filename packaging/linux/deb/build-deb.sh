@@ -12,6 +12,7 @@ LAB_DIR="$REPO_ROOT/hermes-local-lab"
 APP_DIR="$REPO_ROOT/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/electron"
 DESKTOP_FILE="$REPO_ROOT/packaging/linux/taiji-agent.desktop"
+DEFAULT_CONFIG="$LAB_DIR/config/taiji-default-config.yaml"
 VERSION="${TAIJI_AGENT_VERSION:-0.1.0}"
 ARCH="amd64"
 BUILD_ROOT="$REPO_ROOT/runtime/package-build/deb"
@@ -102,6 +103,55 @@ scan_private_key_material() {
   fi
 }
 
+validate_packaged_config_template() {
+  if [ ! -f "$DEFAULT_CONFIG" ]; then
+    fail "Missing packaged default config template: $DEFAULT_CONFIG"
+  fi
+  "$HERMES_PYTHON" - "$DEFAULT_CONFIG" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+path = Path(sys.argv[1])
+data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+sensitive_keys = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "private_key",
+    "wechat",
+    "weixin",
+    "corpsecret",
+)
+
+def scan(value, prefix=""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key).strip().lower()
+            if any(marker in key_text for marker in sensitive_keys):
+                raise SystemExit(f"sensitive key in packaged default config: {prefix}{key}")
+            scan(child, f"{prefix}{key}.")
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            scan(child, f"{prefix}{idx}.")
+    elif isinstance(value, str) and "BEGIN " in value and "PRIVATE KEY" in value:
+        raise SystemExit(f"private key shaped value in packaged default config: {prefix.rstrip('.')}")
+
+scan(data)
+required = [
+    ("model", "provider"),
+    ("model", "default"),
+    ("webui", "feature_visibility"),
+]
+for parent, key in required:
+    if not isinstance(data.get(parent), dict) or key not in data[parent]:
+        raise SystemExit(f"missing {parent}.{key} in packaged default config")
+PY
+}
+
 scan_package_tree() {
   if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' -o -name '*.pyc' \) | grep -q .; then
     echo "Package tree contains macOS/Python cache metadata; clean before release." >&2
@@ -153,6 +203,7 @@ fi
 
 verify_linux_electron_runtime
 validate_desktop_entry "$DESKTOP_FILE"
+validate_packaged_config_template
 
 rm -rf "$BUILD_ROOT"
 mkdir -p \
@@ -187,12 +238,14 @@ rsync -a \
 
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
+install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT/usr/bin/taiji-agent-diagnose"
 install -m 0644 "$DESKTOP_FILE" "$PKG_ROOT/usr/share/applications/taiji-agent.desktop"
 install -m 0644 "$LAB_DIR/sources/hermes-webui/static/favicon-512.png" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 cat > "$INSTALL_ROOT/bin/taiji-native-verify" <<'VERIFY'
 #!/usr/bin/env bash
 set -euo pipefail
 export TAIJI_AGENT_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
+export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
 exec "$TAIJI_AGENT_ROOT/scripts/taiji-native-verify" "$@"
 VERIFY
 chmod 0755 "$INSTALL_ROOT/bin/taiji-native-verify"

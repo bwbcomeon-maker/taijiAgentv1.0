@@ -13,6 +13,9 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 - 最终安装包必须在 Linux x86_64/amd64 构建，不能在 macOS 上产最终 DEB。
 - 目标终端交付优先使用根目录的 `taijiagent 打包交付/01_目标终端_构建安装包.sh`；脚本会准备 `uv` 和现代 Node/npm，避免 Kylin V10 源内旧 npm 无法处理 Electron lockfile。
 - 目标终端构建成功后会写入 `.build-success`，安装脚本只安装带有本次成功标记且 SHA256 匹配的 DEB，避免误装旧包。
+- 安装包内置非密默认产品配置，用于同步菜单显隐、默认模型展示和首页控件；不内置或覆盖模型密钥。
+- Linux Electron 桌面端默认隐藏应用菜单栏，保留麒麟原生标题栏。
+- 安装后可运行 `taiji-agent-diagnose` 或交付目录的 `03_目标终端_导出诊断报告.sh` 导出脱敏诊断报告。
 - 手动构建前必须在 Linux 构建机完成 `hermes-local-lab/scripts/setup-local.sh` 和 `apps/taiji-desktop/npm ci`，确保包内包含 Linux Python venv 和 Linux Electron runtime。
 - 默认只给主 `.deb` 生成 `.sha256`；旧版本包应移动到 `旧版本归档/`，避免误装。
 - 安装包不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。

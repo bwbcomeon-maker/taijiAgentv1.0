@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-chmod +x /opt/taiji-agent/scripts/*.sh /opt/taiji-agent/scripts/taiji-native-verify 2>/dev/null || true
+chmod +x /opt/taiji-agent/scripts/*.sh \
+  /opt/taiji-agent/scripts/taiji-native-verify \
+  /opt/taiji-agent/scripts/taiji-agent-diagnose \
+  /opt/taiji-agent/scripts/sync-packaged-config.py 2>/dev/null || true
 chmod +x /usr/bin/taiji-agent /usr/bin/taiji 2>/dev/null || true
 
 chrome_sandbox="/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox"
@@ -19,7 +22,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 if [ -x /opt/taiji-agent/bin/taiji-native-verify ]; then
-  /opt/taiji-agent/bin/taiji-native-verify >/var/log/taiji-agent-postinst-verify.log 2>&1 || true
+  TAIJI_AGENT_USE_USER_DIRS=0 /opt/taiji-agent/bin/taiji-native-verify >/var/log/taiji-agent-postinst-verify.log 2>&1 || true
 fi
 
 exit 0

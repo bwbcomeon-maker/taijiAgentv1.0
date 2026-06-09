@@ -307,15 +307,15 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertLess(log.index("sudo kill 9999"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
         self.assertIn("sudo apt-get install -y --reinstall", log)
 
-    def test_non_taiji_port_conflict_stops_before_destructive_actions(self):
+    def test_non_taiji_port_conflict_is_reported_without_blocking_install(self):
         result = self.run_install_package(lsof_mode="non_taiji")
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
-        self.assertNotIn("sudo systemctl stop", log)
-        self.assertNotIn("apt-get purge -y taiji-agent", log)
-        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertNotIn("sudo apt-get install -y --reinstall", log)
+        self.assertNotIn("sudo kill 43210", log)
+        self.assertIn("apt-get purge -y taiji-agent", log)
+        self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
+        self.assertIn("sudo apt-get install -y --reinstall", log)
 
 
 if __name__ == "__main__":

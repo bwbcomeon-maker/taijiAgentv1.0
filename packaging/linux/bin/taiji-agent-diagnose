@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Print a redacted Taiji Agent runtime diagnostic report.
+set -euo pipefail
+
+APP_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
+DIAGNOSE="$APP_ROOT/scripts/taiji-agent-diagnose"
+
+if [ ! -x "$DIAGNOSE" ]; then
+  echo "Taiji Agent diagnose script not found: $DIAGNOSE" >&2
+  exit 1
+fi
+
+export TAIJI_AGENT_ROOT="$APP_ROOT"
+export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
+exec "$DIAGNOSE" "$@"

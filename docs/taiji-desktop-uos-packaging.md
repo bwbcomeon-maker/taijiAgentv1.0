@@ -9,7 +9,7 @@
   - 数据：`~/.local/share/taiji-agent/hermes-home`
   - 工作区：`~/.local/share/taiji-agent/workspace`
   - 日志：`~/.local/state/taiji-agent/logs`
-- 诊断命令：安装后为 `/opt/taiji-agent/bin/taiji-native-verify`，源码态为 `hermes-local-lab/scripts/taiji-native-verify`。
+- 诊断命令：安装后为 `/opt/taiji-agent/bin/taiji-native-verify`、`/usr/bin/taiji-agent-diagnose`，源码态为 `hermes-local-lab/scripts/taiji-native-verify` 和 `hermes-local-lab/scripts/taiji-agent-diagnose`。
 
 ## 目标机事实采集
 
@@ -64,6 +64,7 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 - 在 macOS 或非 x86_64/amd64 主机上构建最终包。
 - Electron runtime 不是 Linux x86_64 ELF，或 `ldd` 显示缺少共享库。
 - 包内出现 `.env`、私钥、macOS metadata、`__pycache__`、`*.pyc`。公共 CA 证书类 PEM 可进入 Python venv，但 PEM/证书文件内容中出现 `BEGIN ... PRIVATE KEY` 会拒绝发布。
+- 默认非密产品配置模板缺失、字段不完整，或 YAML 实际字段里出现敏感凭据形态。
 - DEB 产物字符串中出现 `LIBARCHIVE`、`com.apple`、`PaxHeaders`、`SCHILY.xattr` 等历史失败标记。
 
 `hermes-local-lab/scripts/setup-local.sh` 默认先执行 `uv sync --extra all --locked`。如果目标机构建工作区的 `uv.lock` 与当前 `pyproject.toml` 再次漂移，会打印警告并在该构建工作区内重试不带 `--locked` 的同步；需要强制锁文件校验时设置 `TAIJI_UV_LOCK_MODE=strict`。
@@ -72,7 +73,9 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 
 桌面启动链不直接执行 `sources/hermes-agent/venv/bin/hermes` 控制台脚本。目标机交付目录可能包含空格或中文路径，venv 控制台脚本的绝对 shebang 在 Linux 上会被空格截断；因此 `start-agent.sh`、`/usr/bin/taiji`、`health-check.sh` 和 DEB 构建门禁统一使用 `sources/hermes-agent/venv/bin/python -m hermes_cli.main`。安装态 `taiji-native-verify` 也会提前验证这个模块入口，避免安装成功但双击后 Agent 启动失败。
 
-如果目标机已经安装过旧 hermes-bwb 浏览器 WebUI 版 `taiji-agent`，新版交付不按两个产品并存处理。`02_目标终端_安装并验证.sh` 会停止并禁用旧 `taiji-agent-webui.service` / `taiji-agent-gateway.service`，清理命令行明确指向 `/opt/taiji-agent` 的旧进程，解除 `taiji-agent` hold 状态，并通过 `apt-get purge`、`dpkg --remove --force-remove-reinstreq`、`dpkg --purge --force-all` 收口旧包状态。只有旧包状态清理干净后，脚本才会删除白名单内旧路径并安装 Electron 完整版；如果旧包状态仍残留，脚本直接失败，不安装新版。旧 `/opt/taiji-agent`、旧系统配置、旧 systemd unit、旧命令入口和旧桌面入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不在清理范围内。
+如果目标机已经安装过旧 hermes-bwb 浏览器 WebUI 版 `taiji-agent`，新版交付不按两个产品并存处理。`02_目标终端_安装并验证.sh` 会停止并禁用旧 `taiji-agent-webui.service` / `taiji-agent-gateway.service`，清理命令行明确指向 `/opt/taiji-agent` 的旧进程，解除 `taiji-agent` hold 状态，并通过 `apt-get purge`、`dpkg --remove --force-remove-reinstreq`、`dpkg --purge --force-all` 收口旧包状态。只有旧包状态清理干净后，脚本才会删除白名单内旧路径并安装 Electron 完整版；如果旧包状态仍残留，脚本直接失败，不安装新版。旧 `/opt/taiji-agent`、旧系统配置、旧 systemd unit、旧命令入口和旧桌面入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不在清理范围内。默认端口被非太极进程占用时只记录诊断，不阻断安装，因为桌面端会自动选择空闲本地端口。
+
+安装包内置 `hermes-local-lab/config/taiji-default-config.yaml` 作为非密产品配置模板。启动时同步菜单显隐、默认模型和图片模型展示；已有用户配置时只补空值，不覆盖用户已配置的密钥。Linux 桌面端默认隐藏 Electron 应用菜单栏，保留麒麟原生标题栏。
 
 产物位于：
 
@@ -89,12 +92,15 @@ bash ./02_目标终端_安装并验证.sh
 /opt/taiji-agent/bin/taiji-native-verify
 TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify
 /usr/bin/taiji-agent
+taiji-agent-diagnose
 taiji --help
 ```
 
 安装后从开始菜单双击“太极 Agent”。Electron 会以当前桌面用户启动本地 Agent API 和 WebUI，运行目录位于 `~/.config/taiji-agent`、`~/.local/share/taiji-agent`、`~/.local/state/taiji-agent`；关闭窗口会停止本次会话对应的本地进程。
 
 安装包不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。未配置模型 key 时，只能证明桌面壳、Agent API、WebUI 和本地端口链路可用，不能证明真实模型对话已完成。真实对话必须在目标机首启配置模型后再验收。
+
+如果目标机页面、菜单、模型下拉或对话异常，优先运行交付目录中的 `bash ./03_目标终端_导出诊断报告.sh`，保留生成的脱敏诊断报告。
 
 ## 状态边界
 
