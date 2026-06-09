@@ -35,6 +35,7 @@ hermes-local-lab/sources/hermes-agent/articles/
 # Build outputs
 **/build/
 **/dist/
+/taijiagent 打包交付/
 
 # Local editor/tool state
 .idea/
