@@ -106,6 +106,31 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("check_port_conflict", install)
         self.assertIn("--reinstall --allow-downgrades --allow-change-held-packages", install)
 
+    def test_delivery_install_script_freezes_legacy_runtime_before_backup(self):
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+
+        for required in (
+            "record_active_legacy_services",
+            "freeze_legacy_runtime",
+            "restore_active_legacy_services",
+            "cleanup_stale_backup_temps",
+            "tar -tzf",
+        ):
+            self.assertIn(required, install)
+
+        prepare = install[
+            install.index("prepare_legacy_replacement()"):
+            install.index("install_package()", install.index("prepare_legacy_replacement()"))
+        ]
+        self.assertLess(prepare.index("record_active_legacy_services"), prepare.index("freeze_legacy_runtime"))
+        self.assertLess(prepare.index("freeze_legacy_runtime"), prepare.index("backup_legacy_installation"))
+        self.assertLess(prepare.index("backup_legacy_installation"), prepare.index("disable_legacy_services"))
+        self.assertLess(prepare.index("disable_legacy_services"), prepare.index("purge_legacy_package_state"))
+        self.assertLess(prepare.index("purge_legacy_package_state"), prepare.index("remove_legacy_files"))
+        self.assertIn("if ! freeze_legacy_runtime", prepare)
+        self.assertIn("restore_active_legacy_services", prepare)
+        self.assertIn("旧版备份失败", prepare)
+
 
 if __name__ == "__main__":
     unittest.main()

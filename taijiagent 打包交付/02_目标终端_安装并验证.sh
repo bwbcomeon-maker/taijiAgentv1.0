@@ -8,6 +8,7 @@ BACKUP_DIR="$SCRIPT_DIR/旧版备份"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DEB_PATH=""
 CHECKSUM_PATH=""
+ACTIVE_LEGACY_SERVICES=()
 
 LEGACY_SERVICES=(
   "taiji-agent-webui.service"
@@ -175,14 +176,31 @@ remove_taiji_launcher_if_owned() {
   remove_legacy_path "$path"
 }
 
+record_active_legacy_services() {
+  ACTIVE_LEGACY_SERVICES=()
+  local svc
+  for svc in "${LEGACY_SERVICES[@]}"; do
+    if systemctl is-active "$svc" >/dev/null 2>&1; then
+      ACTIVE_LEGACY_SERVICES+=("$svc")
+    fi
+  done
+}
+
+cleanup_stale_backup_temps() {
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+  sudo rm -f "$BACKUP_DIR"/*.tmp "$BACKUP_DIR"/taiji-agent-legacy-*.tar.gz.tmp 2>/dev/null || true
+}
+
 backup_legacy_installation() {
-  local backup_path tmp_backup path rel
+  local backup_path tmp_backup path rel attempt
   local -a backup_items=()
   backup_path="$BACKUP_DIR/taiji-agent-legacy-$(date +%Y%m%d_%H%M%S).tar.gz"
   tmp_backup="$backup_path.tmp"
 
   mkdir -p "$BACKUP_DIR"
   chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+  cleanup_stale_backup_temps
 
   for path in "${LEGACY_BACKUP_PATHS[@]}" /usr/bin/taiji /usr/bin/taiji-agent /usr/share/applications/taiji-agent.desktop; do
     if path_exists "$path"; then
@@ -197,20 +215,66 @@ backup_legacy_installation() {
   fi
 
   info "备份旧版运行数据和系统入口。备份包可能包含模型 Key 或微信 token，请勿外发。"
-  sudo rm -f "$tmp_backup"
-  sudo tar -C / -czf "$tmp_backup" "${backup_items[@]}"
+  for attempt in 1 2; do
+    sudo rm -f "$tmp_backup"
+    if sudo tar -C / -czf "$tmp_backup" "${backup_items[@]}"; then
+      break
+    fi
+    sudo rm -f "$tmp_backup"
+    if [ "$attempt" -ge 2 ]; then
+      warn "旧版备份失败：旧运行数据仍在变化或文件不可读，已停止替换安装。"
+      return 1
+    fi
+    warn "旧版备份第 ${attempt} 次失败，将再次停止旧进程后重试。"
+    stop_legacy_processes
+    sleep 1
+  done
+
+  if [ ! -s "$tmp_backup" ]; then
+    warn "旧版备份失败：备份文件为空。"
+    sudo rm -f "$tmp_backup"
+    return 1
+  fi
+
   sudo chmod 600 "$tmp_backup"
   sudo chown "$(id -u):$(id -g)" "$tmp_backup"
   mv "$tmp_backup" "$backup_path"
   chmod 600 "$backup_path"
+  if ! tar -tzf "$backup_path" >/dev/null; then
+    warn "旧版备份失败：备份包无法通过 tar -tzf 校验。"
+    rm -f "$backup_path"
+    return 1
+  fi
   ok "旧版备份完成：$backup_path"
 }
 
-stop_legacy_services() {
-  info "停止并禁用旧版后台服务"
+stop_legacy_services_for_backup() {
+  info "停止旧版后台服务以冻结运行数据"
   local svc
   for svc in "${LEGACY_SERVICES[@]}"; do
     sudo systemctl stop "$svc" >/dev/null 2>&1 || true
+  done
+}
+
+freeze_legacy_runtime() {
+  stop_legacy_services_for_backup
+  stop_legacy_processes
+  check_port_conflict "安装前冻结后"
+}
+
+restore_active_legacy_services() {
+  [ "${#ACTIVE_LEGACY_SERVICES[@]}" -gt 0 ] || return 0
+  warn "旧版备份失败，尝试恢复原本正在运行的旧服务。"
+  local svc
+  for svc in "${ACTIVE_LEGACY_SERVICES[@]}"; do
+    sudo systemctl start "$svc" >/dev/null 2>&1 || warn "恢复旧服务失败：$svc"
+  done
+}
+
+disable_legacy_services() {
+  info "禁用旧版后台服务"
+  local svc
+  for svc in "${LEGACY_SERVICES[@]}"; do
     sudo systemctl disable "$svc" >/dev/null 2>&1 || true
     sudo systemctl reset-failed "$svc" >/dev/null 2>&1 || true
   done
@@ -290,11 +354,11 @@ check_port_conflict() {
     offenders=""
     for pid in $pids; do
       if pid_uses_taiji_install_root "$pid"; then
-        if [ "$phase" = "安装前清理后" ] || [ "$phase" = "安装后" ]; then
+        if [ "$phase" = "安装前" ]; then
+          warn "${phase}：端口 $port 被旧版太极 Agent 进程占用，稍后会自动清理。"
+        else
           cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
           offenders="${offenders}pid=$pid $cmdline"$'\n'
-        else
-          warn "${phase}：端口 $port 被旧版太极 Agent 进程占用，稍后会自动清理。"
         fi
       else
         cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
@@ -303,9 +367,11 @@ check_port_conflict() {
     done
     if [ -n "$offenders" ]; then
       printf '%s' "$offenders" >&2
-      fail "${phase}：端口 $port 被非预期进程占用。为避免误杀其他软件，已停止安装。"
+      warn "${phase}：端口 $port 被非预期进程占用。为避免误杀其他软件，已停止安装。"
+      return 1
     fi
   done
+  return 0
 }
 
 verify_legacy_services_inactive() {
@@ -321,19 +387,26 @@ verify_legacy_services_inactive() {
 }
 
 prepare_legacy_replacement() {
-  check_port_conflict "安装前"
+  check_port_conflict "安装前" || fail "安装前端口检查未通过，未执行旧版替换。"
   if ! legacy_installation_detected; then
     ok "未检测到旧版 taiji-agent WebUI 安装残留"
     return 0
   fi
 
-  warn "检测到旧版 taiji-agent WebUI/后台服务安装，将先备份再自动替换。"
-  backup_legacy_installation
-  stop_legacy_services
-  stop_legacy_processes
+  warn "检测到旧版 taiji-agent WebUI/后台服务安装，将先停止旧运行态、备份成功后再自动替换。"
+  record_active_legacy_services
+  if ! freeze_legacy_runtime; then
+    restore_active_legacy_services
+    fail "旧版运行态无法冻结，已保留旧安装，未执行卸载或新版安装。请保留日志后重新运行本脚本。"
+  fi
+  if ! backup_legacy_installation; then
+    restore_active_legacy_services
+    fail "旧版备份失败，已保留旧安装，未执行卸载或新版安装。请保留日志后重新运行本脚本。"
+  fi
+  disable_legacy_services
   purge_legacy_package_state
   remove_legacy_files
-  check_port_conflict "安装前清理后"
+  check_port_conflict "安装前清理后" || fail "安装前清理后端口检查未通过，已停止安装。"
   verify_legacy_services_inactive
   ok "旧版 taiji-agent 已备份并清理完成"
 }
@@ -357,7 +430,7 @@ install_package() {
 
   info "安装太极 Agent。这里可能需要输入 sudo 密码。"
   sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
-  check_port_conflict "安装后"
+  check_port_conflict "安装后" || fail "安装后端口检查未通过。"
   verify_legacy_services_inactive
 }
 
