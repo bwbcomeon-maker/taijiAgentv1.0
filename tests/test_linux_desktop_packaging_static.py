@@ -97,6 +97,18 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("readClipboardText", preload_js)
         self.assertIn('ipcRenderer.invoke("taiji:read-clipboard-text")', preload_js)
 
+    def test_desktop_defers_webui_gateway_key_to_start_webui_script(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+        start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
+
+        self.assertIn("env.API_SERVER_KEY = crypto.randomBytes", main_js)
+        self.assertIn("env.HERMES_WEBUI_GATEWAY_BASE_URL", main_js)
+        self.assertNotIn("env.HERMES_WEBUI_GATEWAY_API_KEY", main_js)
+        self.assertIn(
+            'HERMES_WEBUI_GATEWAY_API_KEY="${HERMES_WEBUI_GATEWAY_API_KEY:-$API_SERVER_KEY}"',
+            start_webui,
+        )
+
     def test_build_script_distinguishes_public_pem_from_private_keys(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
 

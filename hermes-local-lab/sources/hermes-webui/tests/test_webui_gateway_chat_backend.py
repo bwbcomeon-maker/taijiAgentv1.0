@@ -285,8 +285,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
+    expected_system_prompt = f"{gateway_chat.BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{streaming._WEBUI_PROGRESS_PROMPT}"
     assert [m["content"] for m in payload["messages"]] == [
-        streaming._WEBUI_PROGRESS_PROMPT,
+        expected_system_prompt,
         "prefill",
         "webui session context",
         "Say hello",

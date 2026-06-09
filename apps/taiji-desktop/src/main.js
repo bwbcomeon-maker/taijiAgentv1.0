@@ -317,7 +317,6 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.HERMES_WEBUI_HOST = "127.0.0.1";
   env.HERMES_WEBUI_PORT = String(webuiPort);
   env.API_SERVER_KEY = crypto.randomBytes(32).toString("hex");
-  env.HERMES_WEBUI_GATEWAY_API_KEY = env.API_SERVER_KEY;
   env.HERMES_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
   return env;
 }
