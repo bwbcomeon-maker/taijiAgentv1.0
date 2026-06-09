@@ -11,7 +11,8 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 注意：
 
 - 最终安装包必须在 Linux x86_64/amd64 构建，不能在 macOS 上产最终 DEB。
-- 构建前必须在 Linux 构建机完成 `hermes-local-lab/scripts/setup-local.sh` 和 `apps/taiji-desktop/npm ci`，确保包内包含 Linux Python venv 和 Linux Electron runtime。
+- 目标终端交付优先使用根目录的 `taijiagent 打包交付/01_目标终端_构建安装包.sh`；脚本会准备 `uv` 和现代 Node/npm，避免 Kylin V10 源内旧 npm 无法处理 Electron lockfile。
+- 手动构建前必须在 Linux 构建机完成 `hermes-local-lab/scripts/setup-local.sh` 和 `apps/taiji-desktop/npm ci`，确保包内包含 Linux Python venv 和 Linux Electron runtime。
 - 默认只给主 `.deb` 生成 `.sha256`；旧版本包应移动到 `旧版本归档/`，避免误装。
 - 安装包不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
 - 只有在目标机完成 `sudo apt install`、`/opt/taiji-agent/bin/taiji-native-verify`、双击图标启动、关闭窗口清理进程、首启配置模型后的真实对话验证后，才能标记为“目标机已验证”。

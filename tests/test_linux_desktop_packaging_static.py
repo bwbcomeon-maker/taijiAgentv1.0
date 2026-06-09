@@ -50,6 +50,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("not found", verify)
         self.assertIn("desktop smoke test", verify)
 
+    def test_setup_local_can_recover_from_stale_uv_lockfile_on_kylin_build_host(self):
+        setup = read_text("hermes-local-lab/scripts/setup-local.sh")
+
+        self.assertIn("TAIJI_UV_LOCK_MODE", setup)
+        self.assertIn("strict", setup)
+        self.assertIn("auto", setup)
+        self.assertIn("uv sync --extra all --locked", setup)
+        self.assertIn("uv sync --extra all", setup)
+        self.assertIn("retrying without --locked", setup)
+
     def test_operator_doc_records_confirmed_kylin_target_and_offline_boundary(self):
         doc = read_text("docs/taiji-desktop-uos-packaging.md")
 
@@ -57,6 +67,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("glibc 2.31", doc)
         self.assertIn("离线优先", doc)
         self.assertIn("不内置模型", doc)
+        self.assertIn("Node.js 10 / npm 6", doc)
+        self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
 
 
 if __name__ == "__main__":

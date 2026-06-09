@@ -12,9 +12,34 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
+sync_agent_dependencies() {
+  local lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
+
+  case "$lock_mode" in
+    strict)
+      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all --locked
+      ;;
+    auto)
+      if UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all --locked; then
+        return 0
+      fi
+      echo "Warning: uv.lock sync failed; retrying without --locked in this build workspace." >&2
+      echo "Warning: rerun with TAIJI_UV_LOCK_MODE=strict to require a current hash-verified lockfile." >&2
+      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all
+      ;;
+    unlocked)
+      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all
+      ;;
+    *)
+      echo "Unsupported TAIJI_UV_LOCK_MODE: $lock_mode (expected strict, auto, or unlocked)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 cd "$AGENT_DIR"
 uv venv venv --python 3.11
-UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all --locked
+sync_agent_dependencies
 
 uv pip install --python "$AGENT_DIR/venv/bin/python" \
   -r "$WEBUI_DIR/requirements.txt"

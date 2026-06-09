@@ -13,6 +13,7 @@
 - DEB `Depends` 扩展为覆盖 Electron 在 Kylin V10 SP1 上常见的 GTK、X11、DBus、CUPS、NSS、GBM、ALSA 等运行库。
 - 构建脚本新增 desktop entry 校验、旧包归档、包树 secret/cache 扫描和 DEB 产物 macOS metadata 字符串扫描。
 - 安装态 `/opt/taiji-agent/bin/taiji-native-verify` 会检查 Electron runtime、desktop entry、图标、共享库缺失，并支持 `TAIJI_VERIFY_DESKTOP_SMOKE=1` 图形会话 smoke test。
+- 目标终端交付脚本会自动准备 `uv` 和现代 Node/npm；`setup-local.sh` 默认先使用锁文件同步，锁文件漂移时在构建工作区重试不带 `--locked` 的同步，避免目标机构建中途无 DEB 产物。
 - 安装包仍不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
 
 ## 状态边界

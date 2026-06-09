@@ -43,6 +43,10 @@ python3 --version 2>/dev/null || true
 
 最终 DEB 必须在 Linux x86_64/amd64 构建，不允许在 macOS 上产最终包。构建策略为离线优先：包内预置 Linux Electron runtime、Agent Python venv、WebUI/Agent 源码和运行脚本。
 
+面向目标终端的一键交付优先使用根目录下的 `taijiagent 打包交付/01_目标终端_构建安装包.sh`。该脚本会自动校验源码包、准备 `uv`，并在系统 Node/npm 过旧时使用交付目录内的隔离 Node.js Linux x64 构建工具，避免 Kylin V10 源里的 Node.js 10 / npm 6 无法处理 lockfile v3。
+
+手动构建时执行：
+
 ```bash
 cd /path/to/taiji-agentv1.0
 cd hermes-local-lab
@@ -61,6 +65,8 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 - Electron runtime 不是 Linux x86_64 ELF，或 `ldd` 显示缺少共享库。
 - 包内出现 `.env`、私钥、macOS metadata、`__pycache__`、`*.pyc`。
 - DEB 产物字符串中出现 `LIBARCHIVE`、`com.apple`、`PaxHeaders`、`SCHILY.xattr` 等历史失败标记。
+
+`hermes-local-lab/scripts/setup-local.sh` 默认先执行 `uv sync --extra all --locked`。如果目标机构建工作区的 `uv.lock` 与当前 `pyproject.toml` 再次漂移，会打印警告并在该构建工作区内重试不带 `--locked` 的同步；需要强制锁文件校验时设置 `TAIJI_UV_LOCK_MODE=strict`。
 
 产物位于：
 
