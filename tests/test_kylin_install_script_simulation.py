@@ -80,30 +80,6 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
               rm)
                 /bin/rm "$@"
                 ;;
-              tar)
-                count_file="$FAKE_STATE/tar_count"
-                count=0
-                [ -f "$count_file" ] && count="$(cat "$count_file")"
-                count=$((count + 1))
-                printf '%s' "$count" > "$count_file"
-                if [ "$count" -le "${FAKE_TAR_FAILS:-0}" ]; then
-                  printf 'tar: opt/taiji-agent/runtime/hermes-home: file changed as we read it\n' >&2
-                  exit 1
-                fi
-                out=""
-                prev=""
-                for arg in "$@"; do
-                  if [ "$prev" = "-czf" ]; then
-                    out="$arg"
-                    break
-                  fi
-                  prev="$arg"
-                done
-                [ -n "$out" ] || exit 2
-                mkdir -p "$FAKE_STATE/tar-src"
-                printf 'legacy backup\n' > "$FAKE_STATE/tar-src/manifest.txt"
-                /usr/bin/tar -C "$FAKE_STATE/tar-src" -czf "$out" manifest.txt
-                ;;
               chmod)
                 /bin/chmod "$@"
                 ;;
@@ -121,16 +97,25 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 esac
                 ;;
               kill)
+                touch "$FAKE_STATE/killed_${1#-}"
                 :
                 ;;
               apt-get)
                 case "${1:-}" in
-                  purge) touch "$FAKE_STATE/purged" ;;
+                  purge)
+                    if [ "${FAKE_APT_PURGE_FAIL:-0}" = "1" ]; then
+                      exit 1
+                    fi
+                    touch "$FAKE_STATE/purged"
+                    ;;
                   install) touch "$FAKE_STATE/installed" ;;
                 esac
                 ;;
               dpkg)
-                touch "$FAKE_STATE/dpkg_purged"
+                if [ "${FAKE_DPKG_PERSIST:-0}" = "1" ]; then
+                  exit 1
+                fi
+                touch "$FAKE_STATE/purged"
                 ;;
               *)
                 "$cmd" "$@"
@@ -183,6 +168,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             self.fake_bin / "pgrep",
             r'''
             #!/usr/bin/env bash
+            if [ "${FAKE_PGREP_MODE:-none}" = "legacy" ]; then
+              printf '9999\n'
+              exit 0
+            fi
             exit 1
             ''',
         )
@@ -192,11 +181,6 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             #!/usr/bin/env bash
             if [ "${FAKE_LSOF_MODE:-none}" = "non_taiji" ]; then
               printf '43210\n'
-              exit 0
-            fi
-            if [ "${FAKE_LSOF_MODE:-none}" = "taiji_after_freeze" ] && \
-              [ -f "$FAKE_STATE/stopped_taiji-agent-webui.service" ]; then
-              printf '54321\n'
               exit 0
             fi
             exit 1
@@ -210,7 +194,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
               printf '/usr/bin/other-app --port 8787\n'
               exit 0
             fi
-            if [ "$*" = "-p 54321 -o args=" ]; then
+            if [ "$*" = "-p 9999 -o args=" ]; then
               printf '/opt/taiji-agent/src/hermes-webui/server.py\n'
               exit 0
             fi
@@ -218,7 +202,14 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             ''',
         )
 
-    def run_install_package(self, *, tar_failures: int = 0, lsof_mode: str = "none") -> subprocess.CompletedProcess:
+    def run_install_package(
+        self,
+        *,
+        apt_purge_fails: bool = False,
+        dpkg_persists: bool = False,
+        lsof_mode: str = "none",
+        pgrep_mode: str = "none",
+    ) -> subprocess.CompletedProcess:
         harness = self.tmp_path / "run.sh"
         harness.write_text(
             textwrap.dedent(
@@ -228,8 +219,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export PATH="{self.fake_bin}:$PATH"
                 export FAKE_STATE="{self.fake_state}"
                 export FAKE_LOG="{self.fake_log}"
-                export FAKE_TAR_FAILS="{tar_failures}"
+                export FAKE_APT_PURGE_FAIL="{1 if apt_purge_fails else 0}"
+                export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
                 export FAKE_LSOF_MODE="{lsof_mode}"
+                export FAKE_PGREP_MODE="{pgrep_mode}"
                 source "{self.import_script}"
                 path_exists() {{
                   case "$1" in
@@ -272,42 +265,47 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def fake_log_text(self) -> str:
         return self.fake_log.read_text(encoding="utf-8") if self.fake_log.exists() else ""
 
-    def test_tar_file_changed_once_retries_backup_before_installing(self):
-        result = self.run_install_package(tar_failures=1)
+    def test_clean_reinstall_removes_legacy_without_backup_before_installing(self):
+        result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
-        self.assertEqual(log.count("sudo tar -C / -czf"), 2, log)
-        self.assertLess(log.index("sudo systemctl stop taiji-agent-webui.service"), log.index("sudo tar -C / -czf"))
-        self.assertLess(log.index("sudo tar -C / -czf"), log.index("sudo systemctl disable taiji-agent-webui.service"))
+        self.assertNotIn("sudo tar -C / -czf", log)
+        self.assertLess(log.index("sudo systemctl stop taiji-agent-webui.service"), log.index("sudo apt-mark unhold taiji-agent"))
+        self.assertLess(log.index("sudo apt-mark unhold taiji-agent"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
+        self.assertLess(log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"), log.index("sudo rm -rf -- /opt/taiji-agent"))
+        self.assertLess(log.index("sudo rm -rf -- /opt/taiji-agent"), log.index("sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages"))
         self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
         self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertIn("sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages", log)
 
-    def test_repeated_backup_failure_preserves_legacy_installation(self):
-        result = self.run_install_package(tar_failures=2)
+    def test_dpkg_purge_fallback_allows_install_when_apt_purge_fails(self):
+        result = self.run_install_package(apt_purge_fails=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        log = self.fake_log_text()
+        self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
+        self.assertIn("sudo dpkg --remove --force-remove-reinstreq taiji-agent", log)
+        self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
+        self.assertIn("sudo apt-get install -y --reinstall", log)
+
+    def test_persistent_dpkg_state_stops_before_file_removal_and_install(self):
+        result = self.run_install_package(apt_purge_fails=True, dpkg_persists=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
-        self.assertEqual(log.count("sudo tar -C / -czf"), 2, log)
-        self.assertIn("sudo systemctl start taiji-agent-webui.service", log)
-        self.assertIn("sudo systemctl start taiji-agent-gateway.service", log)
-        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
         self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertNotIn("sudo apt-get install -y --reinstall", log)
 
-    def test_freeze_failure_restores_active_services_without_cleanup(self):
-        result = self.run_install_package(lsof_mode="taiji_after_freeze")
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_legacy_opt_process_is_killed_before_package_purge(self):
+        result = self.run_install_package(pgrep_mode="legacy")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
-        self.assertIn("sudo systemctl stop taiji-agent-webui.service", log)
-        self.assertIn("sudo systemctl start taiji-agent-webui.service", log)
-        self.assertIn("sudo systemctl start taiji-agent-gateway.service", log)
-        self.assertNotIn("sudo tar -C / -czf", log)
-        self.assertNotIn("apt-get purge -y taiji-agent", log)
-        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertNotIn("sudo apt-get install -y --reinstall", log)
+        self.assertIn("sudo kill 9999", log)
+        self.assertLess(log.index("sudo kill 9999"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
+        self.assertIn("sudo apt-get install -y --reinstall", log)
 
     def test_non_taiji_port_conflict_stops_before_destructive_actions(self):
         result = self.run_install_package(lsof_mode="non_taiji")
@@ -315,7 +313,6 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
 
         log = self.fake_log_text()
         self.assertNotIn("sudo systemctl stop", log)
-        self.assertNotIn("sudo tar -C / -czf", log)
         self.assertNotIn("apt-get purge -y taiji-agent", log)
         self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertNotIn("sudo apt-get install -y --reinstall", log)

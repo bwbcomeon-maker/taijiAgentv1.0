@@ -17,10 +17,10 @@
 - 安装态 `/opt/taiji-agent/bin/taiji-native-verify` 会检查 Electron runtime、desktop entry、图标、共享库缺失，并支持 `TAIJI_VERIFY_DESKTOP_SMOKE=1` 图形会话 smoke test。
 - 目标终端交付脚本会自动准备 `uv` 和现代 Node/npm；`setup-local.sh` 默认先使用锁文件同步，锁文件漂移时在构建工作区重试不带 `--locked` 的同步，避免目标机构建中途无 DEB 产物。
 - 交付脚本在构建前清理旧 DEB 输出，构建成功后写入 `.build-success`；安装脚本只安装带有当前成功标记且 SHA256 匹配的 DEB。
-- 安装脚本新增旧 hermes-bwb WebUI 版自动备份替换流程：先停止旧 WebUI/Gateway systemd 服务和 `/opt/taiji-agent` 相关旧进程，冻结旧运行态后再备份旧 `/opt/taiji-agent`、系统配置和旧服务文件；备份成功并通过 `tar -tzf` 校验后，才清理旧包状态和白名单内旧路径，最后安装 Electron 完整版。
-- 针对目标机出现的 `tar: opt/taiji-agent/runtime/hermes-home: file changed as we read it`，根因收敛为旧 WebUI/Gateway 仍在写运行目录导致备份读写冲突。安装脚本现在会清理上次失败遗留的 `.tmp` 备份、备份失败自动重试一次；若仍失败，会保留旧安装，不执行 purge、删除或新版安装，并尽量恢复原本正在运行的旧服务。
+- 安装脚本按用户最终选择改为旧 hermes-bwb WebUI 版彻底清除后安装新版：停止并禁用旧 WebUI/Gateway systemd 服务，清理 `/opt/taiji-agent` 相关旧进程，解除 hold，执行 `apt-get purge` 并用 `dpkg --remove` / `dpkg --purge` 收口旧包状态。
+- 针对目标机反复出现的 `tar: opt/taiji-agent/runtime/hermes-home: file changed as we read it`，根因收敛为旧 WebUI/Gateway 持续写运行目录导致备份不可稳定完成。安装脚本不再备份旧 `/opt/taiji-agent`，而是删除旧系统安装、旧配置、旧服务和旧入口后再安装新版。
 - 安装脚本会检查 `8787`、`18642`、`18787` 端口；只清理命令行明确指向 `/opt/taiji-agent` 的旧进程，遇到非太极 Agent 进程占用会停止安装并打印诊断。
-- 旧版备份保存在交付目录 `旧版备份/`，可能包含模型 Key、微信 token 或历史会话，只用于目标机本地排障，不进入新版 DEB。
+- 旧版模型 Key、微信 token 和历史会话不再保留；普通用户家目录下的新版用户态目录不在旧系统安装清理范围内。
 - 安装包仍不内置模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
 
 ## 状态边界

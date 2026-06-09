@@ -95,41 +95,51 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_delivery_install_script_replaces_legacy_webui_package_safely(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
-        self.assertIn("BACKUP_DIR", install)
-        self.assertIn("taiji-agent-legacy-", install)
         self.assertIn("taiji-agent-webui.service", install)
         self.assertIn("taiji-agent-gateway.service", install)
+        self.assertIn("clean_reinstall_legacy_package", install)
         self.assertIn("systemctl disable", install)
+        self.assertIn("apt-mark unhold taiji-agent", install)
         self.assertIn("apt-get purge -y taiji-agent", install)
+        self.assertIn("dpkg --remove --force-remove-reinstreq taiji-agent", install)
         self.assertIn("dpkg --purge --force-all taiji-agent", install)
         self.assertIn("LEGACY_PROCESS_PATTERNS", install)
         self.assertIn("check_port_conflict", install)
         self.assertIn("--reinstall --allow-downgrades --allow-change-held-packages", install)
 
-    def test_delivery_install_script_freezes_legacy_runtime_before_backup(self):
+    def test_delivery_install_script_removes_legacy_runtime_without_backup(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
-        for required in (
-            "record_active_legacy_services",
-            "freeze_legacy_runtime",
+        for forbidden in (
+            "BACKUP_DIR",
+            "backup_legacy_installation",
             "restore_active_legacy_services",
             "cleanup_stale_backup_temps",
-            "tar -tzf",
+            "tar -C / -czf",
+            "旧版备份",
         ):
-            self.assertIn(required, install)
+            self.assertNotIn(forbidden, install)
 
         prepare = install[
             install.index("prepare_legacy_replacement()"):
             install.index("install_package()", install.index("prepare_legacy_replacement()"))
         ]
-        self.assertLess(prepare.index("record_active_legacy_services"), prepare.index("freeze_legacy_runtime"))
-        self.assertLess(prepare.index("freeze_legacy_runtime"), prepare.index("backup_legacy_installation"))
-        self.assertLess(prepare.index("backup_legacy_installation"), prepare.index("disable_legacy_services"))
-        self.assertLess(prepare.index("disable_legacy_services"), prepare.index("purge_legacy_package_state"))
-        self.assertLess(prepare.index("purge_legacy_package_state"), prepare.index("remove_legacy_files"))
-        self.assertIn("if ! freeze_legacy_runtime", prepare)
-        self.assertIn("restore_active_legacy_services", prepare)
-        self.assertIn("旧版备份失败", prepare)
+        self.assertLess(prepare.index("check_port_conflict \"安装前\""), prepare.index("clean_reinstall_legacy_package"))
+        self.assertLess(prepare.index("clean_reinstall_legacy_package"), prepare.index("check_port_conflict \"安装前清理后\""))
+
+        clean = install[
+            install.index("clean_reinstall_legacy_package()"):
+            install.index("install_package()", install.index("clean_reinstall_legacy_package()"))
+        ]
+        self.assertLess(clean.index("stop_and_disable_legacy_services"), clean.index("stop_legacy_processes"))
+        self.assertLess(clean.index("stop_legacy_processes"), clean.index("purge_legacy_package_state"))
+        self.assertLess(clean.index("purge_legacy_package_state"), clean.index("remove_legacy_files"))
+        self.assertLess(clean.index("remove_legacy_files"), clean.index("systemctl daemon-reload"))
+        remove_files = install[
+            install.index("remove_legacy_files()"):
+            install.index("pid_uses_taiji_install_root()", install.index("remove_legacy_files()"))
+        ]
+        self.assertIn("remove_legacy_path /opt/taiji-agent", remove_files)
 
 
 if __name__ == "__main__":

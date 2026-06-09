@@ -70,7 +70,7 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 
 目标终端交付脚本在每次构建前清理 `生成的安装包/` 旧输出，构建成功后写入 `.build-success`。安装脚本必须看到该成功标记并校验当前 DEB 的 SHA256，才会执行 `sudo apt install`，避免构建失败后误装历史残留包。
 
-如果目标机已经安装过旧 hermes-bwb 浏览器 WebUI 版 `taiji-agent`，新版交付不按两个产品并存处理。`02_目标终端_安装并验证.sh` 会先记录旧 `taiji-agent-webui.service` / `taiji-agent-gateway.service` 的 active 状态，停止旧服务和命令行明确指向 `/opt/taiji-agent` 的旧进程，确认旧运行态不再写入后，再把旧 `/opt/taiji-agent`、系统配置和旧 systemd unit 备份到交付目录的 `旧版备份/`。只有备份包存在、非空并通过 `tar -tzf` 校验后，脚本才会禁用旧服务、清理旧包状态和白名单内旧路径，然后安装 Electron 完整版。备份失败时会保留旧安装，不执行 purge、删除或新版安装，并尽量恢复原本处于 active 的旧服务。备份包可能包含模型 Key、微信 token 或历史会话，只保留在目标机本地排障使用，不进入新版 DEB。
+如果目标机已经安装过旧 hermes-bwb 浏览器 WebUI 版 `taiji-agent`，新版交付不按两个产品并存处理。`02_目标终端_安装并验证.sh` 会停止并禁用旧 `taiji-agent-webui.service` / `taiji-agent-gateway.service`，清理命令行明确指向 `/opt/taiji-agent` 的旧进程，解除 `taiji-agent` hold 状态，并通过 `apt-get purge`、`dpkg --remove --force-remove-reinstreq`、`dpkg --purge --force-all` 收口旧包状态。只有旧包状态清理干净后，脚本才会删除白名单内旧路径并安装 Electron 完整版；如果旧包状态仍残留，脚本直接失败，不安装新版。旧 `/opt/taiji-agent`、旧系统配置、旧 systemd unit、旧命令入口和旧桌面入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不在清理范围内。
 
 产物位于：
 
