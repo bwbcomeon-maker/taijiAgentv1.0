@@ -19,6 +19,19 @@ ok() { printf '[OK] %s\n' "$*"; ok_count=$((ok_count + 1)); }
 warn() { printf '[WARN] %s\n' "$*"; warn_count=$((warn_count + 1)); }
 fail() { printf '[FAIL] %s\n' "$*"; fail_count=$((fail_count + 1)); }
 
+packaged_install=0
+if [ "$LAB_DIR" = "/opt/taiji-agent" ]; then
+  packaged_install=1
+fi
+
+runtime_issue() {
+  if [ "$packaged_install" -eq 1 ]; then
+    fail "$*"
+  else
+    warn "$*"
+  fi
+}
+
 http_code() {
   curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null
 }
@@ -71,7 +84,36 @@ fi
 if [ -f "$desktop_app/package.json" ] && [ -f "$desktop_app/src/main.js" ]; then
   ok "Electron desktop app files exist: $desktop_app"
 else
-  warn "Electron desktop app files not found under install root: $desktop_app"
+  runtime_issue "Electron desktop app files not found under install root: $desktop_app"
+fi
+
+electron_bin="$desktop_app/node_modules/electron/dist/electron"
+if [ -x "$electron_bin" ]; then
+  ok "Electron runtime exists: $electron_bin"
+  if command -v file >/dev/null 2>&1; then
+    electron_file="$(file "$electron_bin" 2>/dev/null || true)"
+    case "$electron_file" in
+      *ELF*64-bit*x86-64*|*ELF*64-bit*X86-64*|*ELF*64-bit*80386*)
+        ok "Electron runtime is Linux x86_64 ELF"
+        ;;
+      *)
+        runtime_issue "Electron runtime is not Linux x86_64 ELF: ${electron_file:-unknown file type}"
+        ;;
+    esac
+  fi
+  if command -v ldd >/dev/null 2>&1; then
+    ldd_output="$(ldd "$electron_bin" 2>&1 || true)"
+    if printf '%s\n' "$ldd_output" | grep -q 'not found'; then
+      printf '%s\n' "$ldd_output" >&2
+      runtime_issue "Electron runtime has missing shared libraries marked as not found"
+    else
+      ok "Electron runtime ldd check found no missing shared libraries"
+    fi
+  else
+    warn "ldd not found; Electron shared library check skipped"
+  fi
+else
+  runtime_issue "Electron runtime missing or not executable: $electron_bin"
 fi
 
 if command -v taiji-agent >/dev/null 2>&1; then
@@ -88,8 +130,39 @@ fi
 
 if [ -f /usr/share/applications/taiji-agent.desktop ]; then
   ok "Desktop entry installed: /usr/share/applications/taiji-agent.desktop"
+  if grep -qx 'Exec=/usr/bin/taiji-agent' /usr/share/applications/taiji-agent.desktop \
+    && grep -qx 'Icon=taiji-agent' /usr/share/applications/taiji-agent.desktop \
+    && grep -qx 'Terminal=false' /usr/share/applications/taiji-agent.desktop; then
+    ok "Desktop entry points to the packaged launcher and icon"
+  else
+    runtime_issue "Desktop entry is missing expected Exec/Icon/Terminal settings"
+  fi
 else
-  warn "Desktop entry not found at /usr/share/applications/taiji-agent.desktop"
+  runtime_issue "Desktop entry not found at /usr/share/applications/taiji-agent.desktop"
+fi
+
+if [ -f /usr/share/icons/hicolor/512x512/apps/taiji-agent.png ]; then
+  ok "Desktop icon installed: /usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
+else
+  runtime_issue "Desktop icon not found at /usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
+fi
+
+if [ "${TAIJI_VERIFY_DESKTOP_SMOKE:-0}" = "1" ]; then
+  if command -v taiji-agent >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+      if TAIJI_DESKTOP_SMOKE_TEST=1 timeout 60 taiji-agent >/dev/null 2>&1; then
+        ok "Electron desktop smoke test passed"
+      else
+        runtime_issue "Electron desktop smoke test failed"
+      fi
+    else
+      warn "timeout not found; Electron desktop smoke test skipped"
+    fi
+  else
+    runtime_issue "Electron desktop smoke test skipped because taiji-agent is not in PATH"
+  fi
+else
+  warn "Electron desktop smoke test skipped; set TAIJI_VERIFY_DESKTOP_SMOKE=1 inside a graphical session to run it"
 fi
 
 agent_code="$(http_code "http://$AGENT_API_HOST:$AGENT_API_PORT/health")"
