@@ -102,6 +102,31 @@ def test_writeflow_expert_center_interactions_are_chat_first():
     assert "summon_only: false" in fn_body
 
 
+def test_writeflow_team_modal_uses_guided_studio_layout_without_new_actions():
+    fn_start = PANELS_JS.index("function openWriteflowTeamModal")
+    fn_body = PANELS_JS[fn_start : PANELS_JS.index("function closeWriteflowTeamModal", fn_start)]
+
+    for expected in (
+        "writeflow-modal-shell",
+        "writeflow-modal-overview",
+        "writeflow-modal-content",
+        "writeflow-modal-guides",
+        "writeflow-modal-template-list",
+        "writeflow-modal-prompt-card",
+        "writeflow-modal-footer-main",
+    ):
+        assert expected in fn_body
+        assert expected in STYLE_CSS
+
+    assert "<h4>能力介绍</h4>" in fn_body
+    assert "<h4>团队成员</h4>" in fn_body
+    assert "<h4>试试这样问我</h4>" in fn_body
+    assert "writeflowTeamPrompt" in fn_body
+    assert "summonWriteflowTeam()" in fn_body
+    assert "save" not in fn_body.lower()
+    assert "copy" not in fn_body.lower()
+
+
 def test_writeflow_team_run_ui_is_kept_out_of_writing_catalog():
     assert 'id="writeflowRuns"' not in INDEX_HTML
     assert 'id="writeflowProjects"' not in INDEX_HTML

@@ -3763,35 +3763,49 @@ function openWriteflowTeamModal(teamId) {
       <strong>${esc(example.prompt)}</strong>
     </button>`).join('');
   body.innerHTML = `
-    <div class="writeflow-modal-head">
-      ${_writeflowAvatarHtml(team.image, team.title, 'writeflow-modal-avatar')}
-      <div>
-        <h3 id="writeflowTeamModalTitle">${esc(team.title)}</h3>
-        <p>${esc(team.category)} · ${esc(team.statusLabel)}</p>
+    <div class="writeflow-modal-shell">
+      <div class="writeflow-modal-head">
+        ${_writeflowAvatarHtml(team.image, team.title, 'writeflow-modal-avatar')}
+        <div>
+          <h3 id="writeflowTeamModalTitle">${esc(team.title)}</h3>
+          <p><i></i>${esc(team.category)} · ${esc(team.statusLabel)}</p>
+        </div>
       </div>
-    </div>
-    <div class="writeflow-modal-section">
-      <h4>能力介绍</h4>
-      <p>${esc(team.description)}</p>
-    </div>
-    <div class="writeflow-modal-section">
-      <h4>擅长领域</h4>
-      <div class="writeflow-team-tags modal-tags">${tags}</div>
-    </div>
-    <div class="writeflow-modal-section">
-      <h4>团队成员</h4>
-      <div class="writeflow-modal-members">${members}</div>
-    </div>
-    <div class="writeflow-modal-section">
-      <h4>试试这样问我</h4>
-      <div class="writeflow-examples">${examples}</div>
-    </div>
-    <div class="writeflow-modal-section">
-      <h4>本次需求</h4>
-      <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清主题、读者、素材、语气或文章链接；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
-      <p class="writeflow-modal-note">召唤后会新建一个聊天任务，运行状态、阶段确认和产物入口会显示在对话框上方。</p>
+
+      <div class="writeflow-modal-content">
+        <div class="writeflow-modal-overview">
+          <div class="writeflow-modal-section">
+            <h4>能力介绍</h4>
+            <p>${esc(team.description)}</p>
+          </div>
+          <div class="writeflow-modal-section">
+            <h4>擅长领域</h4>
+            <div class="writeflow-team-tags modal-tags">${tags}</div>
+          </div>
+          <div class="writeflow-modal-section">
+            <h4>团队成员</h4>
+            <div class="writeflow-modal-members">${members}</div>
+          </div>
+        </div>
+
+        <div class="writeflow-modal-guides">
+          <div class="writeflow-modal-section">
+            <h4>试试这样问我</h4>
+            <div class="writeflow-examples writeflow-modal-template-list">${examples}</div>
+          </div>
+          <div class="writeflow-modal-section writeflow-modal-prompt-card">
+            <h4>本次需求</h4>
+            <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清主题、读者、素材、语气或文章链接；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
+            <p class="writeflow-modal-note">召唤后会新建一个聊天任务，运行状态、阶段确认和产物入口会显示在对话框上方。</p>
+          </div>
+        </div>
+      </div>
     </div>`;
-  footer.innerHTML = `<button type="button" class="btn primary writeflow-summon-btn" onclick="summonWriteflowTeam()">召唤 ${esc(team.title)}</button>`;
+  footer.innerHTML = `
+    <div class="writeflow-modal-footer-main">
+      <span>进入新的聊天任务后，可继续确认阶段、查看运行状态和产物入口。</span>
+      <button type="button" class="btn primary writeflow-summon-btn" onclick="summonWriteflowTeam()">召唤 ${esc(team.title)}</button>
+    </div>`;
   modal.hidden = false;
   modal.onclick = event => {
     if (event.target === modal) closeWriteflowTeamModal();
