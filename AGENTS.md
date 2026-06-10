@@ -26,3 +26,4 @@
 - 每次改打包链路后至少运行：`python3 -m unittest tests.test_linux_desktop_packaging_static tests.test_kylin_install_script_simulation`、相关 shell 脚本 `bash -n`、桌面主进程 `node --check apps/taiji-desktop/src/main.js`、新增/改动 Python 的 `python3 -m py_compile`，以及针对启动面文件的 Hermes token 静态扫描。
 - 不得在 macOS 或非目标架构上声称最终 DEB 已验证。macOS 只能做源码修改、静态检查和部分本机 smoke；最终 DEB 必须在 Linux x86_64/amd64 的 Kylin/UOS/openKylin 类环境构建并安装验证。
 - 验收结论必须分清：源码仓库 grep 仍可能看到 Hermes；重新构建并安装后的用户安装目录、普通启动入口、进程命令、环境变量、日志和诊断输出才是去 Hermes 化的验收对象。旧安装包不会自动变化，必须重新打包并重新安装。
+- 若一次打包经过多轮目标机调试，调试成功并完成验证后，必须把新增经验同步回本项目 `AGENTS.md`。同步内容至少包括：实际问题根因、有效修复方式、必须保留的 release gate、目标机验收命令、仍需人工确认的风险；不要把未验证猜测写成长期规则。
