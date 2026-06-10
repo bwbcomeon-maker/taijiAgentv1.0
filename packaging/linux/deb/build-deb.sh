@@ -9,6 +9,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LAB_DIR="$REPO_ROOT/hermes-local-lab"
+SOURCE_AGENT_DIR="$LAB_DIR/sources/hermes-agent"
+SOURCE_WEB_DIR="$LAB_DIR/sources/hermes-webui"
 APP_DIR="$REPO_ROOT/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/electron"
 DESKTOP_FILE="$REPO_ROOT/packaging/linux/taiji-agent.desktop"
@@ -18,6 +20,8 @@ ARCH="amd64"
 BUILD_ROOT="$REPO_ROOT/runtime/package-build/deb"
 PKG_ROOT="$BUILD_ROOT/root"
 INSTALL_ROOT="$PKG_ROOT/opt/taiji-agent"
+AGENT_RUNTIME="$INSTALL_ROOT/runtime/agent"
+WEB_RUNTIME="$INSTALL_ROOT/runtime/web"
 OUT_DIR="$REPO_ROOT/packages/麒麟操作系统安装包"
 OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"
 ARCHIVE_DIR="$OUT_DIR/旧版本归档"
@@ -107,7 +111,7 @@ validate_packaged_config_template() {
   if [ ! -f "$DEFAULT_CONFIG" ]; then
     fail "Missing packaged default config template: $DEFAULT_CONFIG"
   fi
-  "$HERMES_PYTHON" - "$DEFAULT_CONFIG" <<'PY'
+  "$SOURCE_AGENT_PYTHON" - "$DEFAULT_CONFIG" <<'PY'
 import sys
 from pathlib import Path
 
@@ -152,14 +156,178 @@ for parent, key in required:
 PY
 }
 
+compile_sourceless_python() {
+  local target="$1"
+  local python_bin="$2"
+  find "$target" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+  "$python_bin" -m compileall -q -b "$target"
+  find "$target" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+  find "$target" -type f -name '*.py' ! -path '*/venv/*' -delete
+}
+
+remove_editable_install_metadata() {
+  local site_packages
+  while IFS= read -r -d '' site_packages; do
+    find "$site_packages" -maxdepth 1 \( \
+      -name '__editable__*' -o \
+      -name '*editable*' -o \
+      -iname '*hermes*' \
+    \) -exec rm -rf {} +
+  done < <(find "$AGENT_RUNTIME/venv" -type d -name site-packages -print0)
+
+  find "$AGENT_RUNTIME/venv/bin" -maxdepth 1 -iname '*hermes*' -exec rm -f {} + 2>/dev/null || true
+}
+
+rename_internal_agent_modules() {
+  if [ -d "$AGENT_RUNTIME/hermes_cli" ]; then
+    mv "$AGENT_RUNTIME/hermes_cli" "$AGENT_RUNTIME/taiji_cli"
+  fi
+
+  local source target
+  for source in "$AGENT_RUNTIME"/hermes_*.py; do
+    [ -e "$source" ] || continue
+    target="$AGENT_RUNTIME/taiji_${source##*/hermes_}"
+    mv "$source" "$target"
+  done
+
+  if [ -f "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" ]; then
+    mv "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" \
+      "$AGENT_RUNTIME/agent/transports/taiji_tools_mcp_server.py"
+  fi
+
+  rm -rf \
+    "$AGENT_RUNTIME/hermes" \
+    "$AGENT_RUNTIME/hermes-agent" \
+    "$AGENT_RUNTIME/hermes_agent.egg-info" \
+    "$AGENT_RUNTIME/.hermes" \
+    "$AGENT_RUNTIME/setup-hermes.sh" \
+    "$AGENT_RUNTIME/HERMES.md" \
+    "$AGENT_RUNTIME/hermes-already-has-routines.md"
+}
+
+rewrite_product_text_tokens() {
+  local target="$1"
+  find "$target" -type f ! -path '*/venv/*' \( \
+    -name '*.py' -o \
+    -name '*.js' -o \
+    -name '*.css' -o \
+    -name '*.html' -o \
+    -name '*.json' -o \
+    -name '*.yaml' -o \
+    -name '*.yml' -o \
+    -name '*.toml' -o \
+    -name '*.txt' -o \
+    -name '*.md' \
+  \) -print0 | xargs -0 -r perl -pi -e 's/HERMES_/TAIJI_/g; s/HERMES/TAIJI/g; s/Hermes/Taiji/g; s/hermes/taiji/g'
+}
+
+stage_python_runtime() {
+  mkdir -p "$AGENT_RUNTIME" "$WEB_RUNTIME"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.github' \
+    --exclude '.DS_Store' \
+    --exclude '._*' \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '.env' \
+    --exclude '.pytest_cache' \
+    --exclude '.playwright-mcp' \
+    --exclude 'docs' \
+    --exclude 'tests' \
+    --exclude 'website' \
+    --exclude 'articles' \
+    --exclude 'demos' \
+    --exclude 'docker' \
+    --exclude 'nix' \
+    --exclude 'packaging' \
+    --exclude 'plugins' \
+    --exclude 'skills' \
+    --exclude 'optional-skills' \
+    --exclude 'optional-mcps' \
+    --exclude 'locales' \
+    --exclude 'ui-tui' \
+    --exclude 'web' \
+    --exclude 'venv' \
+    "$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/
+
+  rename_internal_agent_modules
+  rewrite_product_text_tokens "$AGENT_RUNTIME"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.DS_Store' \
+    --exclude '._*' \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    "$SOURCE_AGENT_DIR/venv"/ "$AGENT_RUNTIME/venv"/
+  remove_editable_install_metadata
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.DS_Store' \
+    --exclude '._*' \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '.env' \
+    --exclude '.pytest_cache' \
+    --exclude '.github' \
+    --exclude 'docs' \
+    --exclude 'reports' \
+    --exclude 'scripts' \
+    --exclude 'docker*' \
+    --exclude '*compose*' \
+    --exclude 'start.ps1' \
+    --exclude 'pyproject.toml' \
+    --exclude 'eslint*' \
+    --exclude 'package*.json' \
+    --exclude 'tests' \
+    --exclude 'node_modules' \
+    --exclude 'Dockerfile' \
+    --exclude '*.md' \
+    "$SOURCE_WEB_DIR"/ "$WEB_RUNTIME"/
+
+  rewrite_product_text_tokens "$WEB_RUNTIME"
+
+  compile_sourceless_python "$AGENT_RUNTIME" "$SOURCE_AGENT_PYTHON"
+  compile_sourceless_python "$WEB_RUNTIME" "$SOURCE_AGENT_PYTHON"
+}
+
+scan_product_privacy() {
+  local name_hits text_hits
+  name_hits="$(find "$INSTALL_ROOT" -iname '*hermes*' ! -path "$INSTALL_ROOT/licenses/*" -print)"
+  if [ -n "$name_hits" ]; then
+    echo "Package tree contains legacy product names in visible paths; refusing release." >&2
+    printf '%s\n' "$name_hits" >&2
+    exit 1
+  fi
+
+  text_hits="$(grep -R -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' "$INSTALL_ROOT" \
+    --exclude-dir licenses \
+    --exclude '*.pyc' \
+    --exclude '*.so' \
+    --exclude '*.png' \
+    --exclude '*.jpg' \
+    --exclude '*.jpeg' \
+    --exclude '*.gif' \
+    2>/dev/null || true)"
+  if [ -n "$text_hits" ]; then
+    echo "Package tree contains legacy product names in text files; refusing release." >&2
+    printf '%s\n' "$text_hits" >&2
+    exit 1
+  fi
+}
+
 scan_package_tree() {
-  if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' -o -name '*.pyc' \) | grep -q .; then
+  if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) | grep -q .; then
     echo "Package tree contains macOS/Python cache metadata; clean before release." >&2
-    find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' -o -name '*.pyc' \) >&2
+    find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) >&2
     exit 1
   fi
 
   scan_private_key_material
+  scan_product_privacy
 }
 
 scan_deb_release_artifact() {
@@ -187,16 +355,16 @@ case "$(uname -m)" in
     ;;
 esac
 
-for cmd in dpkg-deb rsync npm sha256sum file ldd strings; do
+for cmd in dpkg-deb rsync npm sha256sum file ldd strings perl; do
   require_cmd "$cmd"
 done
 
-HERMES_PYTHON="$LAB_DIR/sources/hermes-agent/venv/bin/python"
-if [ ! -x "$HERMES_PYTHON" ]; then
+SOURCE_AGENT_PYTHON="$SOURCE_AGENT_DIR/venv/bin/python"
+if [ ! -x "$SOURCE_AGENT_PYTHON" ]; then
   echo "Missing Linux Agent venv. Run hermes-local-lab/scripts/setup-local.sh on this Linux build host first." >&2
   exit 1
 fi
-if ! "$HERMES_PYTHON" -m hermes_cli.main --help >/dev/null 2>&1; then
+if ! (cd "$SOURCE_AGENT_DIR" && "$SOURCE_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1); then
   echo "Linux Agent venv module entrypoint failed. Re-run hermes-local-lab/scripts/setup-local.sh on this Linux build host." >&2
   exit 1
 fi
@@ -209,6 +377,12 @@ rm -rf "$BUILD_ROOT"
 mkdir -p \
   "$INSTALL_ROOT" \
   "$INSTALL_ROOT/bin" \
+  "$INSTALL_ROOT/config" \
+  "$INSTALL_ROOT/licenses" \
+  "$INSTALL_ROOT/resources/icons" \
+  "$INSTALL_ROOT/scripts" \
+  "$AGENT_RUNTIME" \
+  "$WEB_RUNTIME" \
   "$PKG_ROOT/DEBIAN" \
   "$PKG_ROOT/usr/bin" \
   "$PKG_ROOT/usr/share/applications" \
@@ -216,18 +390,24 @@ mkdir -p \
   "$OUT_DIR"
 archive_old_packages
 
-rsync -a \
-  --exclude '.git' \
-  --exclude '.DS_Store' \
-  --exclude '__pycache__' \
-  --exclude '*.pyc' \
-  --exclude '.env' \
-  --exclude 'hermes-home' \
-  --exclude 'logs' \
-  --exclude 'tmp' \
-  --exclude 'workspace' \
-  --exclude 'reports' \
-  "$LAB_DIR"/ "$INSTALL_ROOT"/
+stage_python_runtime
+
+rsync -a "$LAB_DIR/config"/ "$INSTALL_ROOT/config"/
+install -m 0755 "$LAB_DIR/scripts/runtime-env.sh" "$INSTALL_ROOT/scripts/runtime-env.sh"
+install -m 0755 "$LAB_DIR/scripts/start-agent.sh" "$INSTALL_ROOT/scripts/start-agent.sh"
+install -m 0755 "$LAB_DIR/scripts/start-webui.sh" "$INSTALL_ROOT/scripts/start-webui.sh"
+install -m 0755 "$LAB_DIR/scripts/stop-all.sh" "$INSTALL_ROOT/scripts/stop-all.sh"
+install -m 0755 "$LAB_DIR/scripts/health-check.sh" "$INSTALL_ROOT/scripts/health-check.sh"
+install -m 0755 "$LAB_DIR/scripts/taiji-native-verify" "$INSTALL_ROOT/scripts/taiji-native-verify"
+install -m 0755 "$LAB_DIR/scripts/taiji-agent-diagnose" "$INSTALL_ROOT/scripts/taiji-agent-diagnose"
+install -m 0644 "$LAB_DIR/scripts/sync-packaged-config.py" "$INSTALL_ROOT/scripts/sync-packaged-config.py"
+
+if [ -f "$SOURCE_AGENT_DIR/LICENSE" ]; then
+  install -m 0644 "$SOURCE_AGENT_DIR/LICENSE" "$INSTALL_ROOT/licenses/agent-runtime.LICENSE"
+fi
+if [ -f "$SOURCE_WEB_DIR/LICENSE" ]; then
+  install -m 0644 "$SOURCE_WEB_DIR/LICENSE" "$INSTALL_ROOT/licenses/web-runtime.LICENSE"
+fi
 
 mkdir -p "$INSTALL_ROOT/apps"
 rsync -a \
@@ -240,7 +420,8 @@ install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT/usr/bin/taiji-agent-diagnose"
 install -m 0644 "$DESKTOP_FILE" "$PKG_ROOT/usr/share/applications/taiji-agent.desktop"
-install -m 0644 "$LAB_DIR/sources/hermes-webui/static/favicon-512.png" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
+install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
+install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$INSTALL_ROOT/resources/icons/taiji-agent.png"
 cat > "$INSTALL_ROOT/bin/taiji-native-verify" <<'VERIFY'
 #!/usr/bin/env bash
 set -euo pipefail

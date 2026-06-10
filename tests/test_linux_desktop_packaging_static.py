@@ -51,8 +51,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("ldd", verify)
         self.assertIn("not found", verify)
         self.assertIn("desktop smoke test", verify)
-        self.assertIn("-m hermes_cli.main --help", verify)
-        self.assertIn("Hermes CLI module entrypoint works", verify)
+        self.assertIn("-m taiji_runtime.main --help", verify)
+        self.assertIn("Taiji runtime module entrypoint works", verify)
         self.assertIn("verify_packaged_config", verify)
         self.assertIn("/api/model-config", verify)
         self.assertIn("/api/settings", verify)
@@ -63,13 +63,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         health_check = read_text("hermes-local-lab/scripts/health-check.sh")
         build = read_text("packaging/linux/deb/build-deb.sh")
 
-        self.assertIn("-m hermes_cli.main gateway run --accept-hooks", start_agent)
+        self.assertIn("-m taiji_runtime.main gateway run --accept-hooks", start_agent)
         self.assertNotIn('venv/bin/hermes" gateway run', start_agent)
-        self.assertIn("-m hermes_cli.main", cli)
+        self.assertIn("-m taiji_runtime.main", cli)
         self.assertNotIn("venv/bin/hermes", cli)
-        self.assertIn("-m hermes_cli.main --help", health_check)
-        self.assertIn("-m hermes_cli.main --version", health_check)
-        self.assertIn("-m hermes_cli.main --help", build)
+        self.assertIn("-m taiji_runtime.main --help", health_check)
+        self.assertIn("-m taiji_runtime.main --version", health_check)
+        self.assertIn("-m taiji_runtime.main --help", build)
 
     def test_health_check_reads_user_dir_runtime_env_for_desktop_launches(self):
         health_check = read_text("hermes-local-lab/scripts/health-check.sh")
@@ -134,12 +134,43 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
 
         self.assertIn("env.API_SERVER_KEY = crypto.randomBytes", main_js)
-        self.assertIn("env.HERMES_WEBUI_GATEWAY_BASE_URL", main_js)
-        self.assertNotIn("env.HERMES_WEBUI_GATEWAY_API_KEY", main_js)
+        self.assertIn("env.TAIJI_WEBUI_GATEWAY_BASE_URL", main_js)
+        self.assertNotIn("env.TAIJI_WEBUI_GATEWAY_API_KEY", main_js)
         self.assertIn(
-            'HERMES_WEBUI_GATEWAY_API_KEY="${HERMES_WEBUI_GATEWAY_API_KEY:-$API_SERVER_KEY}"',
+            'TAIJI_WEBUI_GATEWAY_API_KEY="${TAIJI_WEBUI_GATEWAY_API_KEY:-$API_SERVER_KEY}"',
             start_webui,
         )
+
+    def test_packaged_runtime_uses_product_layout_and_sourceless_python(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn('AGENT_RUNTIME="$INSTALL_ROOT/runtime/agent"', build)
+        self.assertIn('WEB_RUNTIME="$INSTALL_ROOT/runtime/web"', build)
+        self.assertIn("stage_python_runtime", build)
+        self.assertIn("compile_sourceless_python", build)
+        self.assertIn("scan_product_privacy", build)
+        self.assertNotIn('"$LAB_DIR"/ "$INSTALL_ROOT"/', build)
+
+    def test_packaged_launch_surface_has_no_hermes_visible_tokens(self):
+        paths = [
+            "hermes-local-lab/scripts/runtime-env.sh",
+            "hermes-local-lab/scripts/start-agent.sh",
+            "hermes-local-lab/scripts/start-webui.sh",
+            "hermes-local-lab/scripts/stop-all.sh",
+            "hermes-local-lab/scripts/taiji-native-verify",
+            "hermes-local-lab/scripts/taiji-agent-diagnose",
+            "packaging/linux/bin/taiji",
+            "packaging/linux/bin/taiji-agent",
+            "packaging/linux/bin/taiji-agent-diagnose",
+            "packaging/linux/deb/prerm",
+            "apps/taiji-desktop/src/main.js",
+        ]
+        forbidden = ("hermes", "HERMES_", "hermes_cli", "hermes-agent", "hermes-webui", "hermes-home")
+        for path in paths:
+            text = read_text(path)
+            lowered = text.lower()
+            for token in forbidden:
+                self.assertNotIn(token.lower(), lowered, f"{token} leaked in {path}")
 
     def test_build_script_distinguishes_public_pem_from_private_keys(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

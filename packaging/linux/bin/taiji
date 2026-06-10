@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Ordinary-user Taiji Agent CLI launcher. It intentionally uses each user's
-# own ~/.hermes state and does not read the desktop app's temporary API key.
+# Ordinary-user Taiji Agent CLI launcher. It uses each user's product runtime
+# state and does not read the desktop app's temporary API key.
 set -euo pipefail
 
 APP_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
-HERMES_PYTHON="$APP_ROOT/sources/hermes-agent/venv/bin/python"
+TAIJI_PYTHON="$APP_ROOT/runtime/agent/venv/bin/python"
 RUNTIME_ENV="$APP_ROOT/scripts/runtime-env.sh"
 
-if [ ! -x "$HERMES_PYTHON" ]; then
-  echo "Taiji Agent CLI runtime not found: $HERMES_PYTHON" >&2
+if [ ! -x "$TAIJI_PYTHON" ]; then
+  echo "Taiji Agent CLI runtime not found: $TAIJI_PYTHON" >&2
   exit 1
 fi
 
@@ -18,8 +18,8 @@ if [ -f "$RUNTIME_ENV" ]; then
   # shellcheck source=/dev/null
   source "$RUNTIME_ENV"
 else
-  export HERMES_HOME="${HERMES_HOME:-$HOME/.local/share/taiji-agent/hermes-home}"
-  export HERMES_WORKSPACE="${HERMES_WORKSPACE:-$HOME/.local/share/taiji-agent/workspace}"
+  export TAIJI_RUNTIME_HOME="${TAIJI_RUNTIME_HOME:-$HOME/.local/share/taiji-agent/runtime-home}"
+  export TAIJI_WORKSPACE="${TAIJI_WORKSPACE:-$HOME/.local/share/taiji-agent/workspace}"
 fi
 
-exec "$HERMES_PYTHON" -m hermes_cli.main "$@"
+exec "$TAIJI_PYTHON" -m taiji_runtime.main "$@"

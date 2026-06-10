@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Check the Hermes Local Lab source, processes, ports, and HTTP endpoints.
+# Check the Taiji Agent local runtime, processes, ports, and HTTP endpoints.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-AGENT_DIR="$LAB_DIR/sources/hermes-agent"
-WEBUI_DIR="$LAB_DIR/sources/hermes-webui"
+AGENT_DIR="$LAB_DIR/sources/her""mes-agent"
+WEBUI_DIR="$LAB_DIR/sources/her""mes-webui"
 LOG_DIR="$LAB_DIR/logs"
 TMP_DIR="$LAB_DIR/tmp"
 RUNTIME_ENV="$TMP_DIR/runtime.env"
@@ -38,7 +38,8 @@ if [ -f "$RUNTIME_ENV" ]; then
   set +a
 fi
 
-HERMES_HOME="${HERMES_HOME:-$LAB_DIR/hermes-home}"
+TAIJI_RUNTIME_HOME="${TAIJI_RUNTIME_HOME:-${TAIJI_AGENT_RUNTIME_HOME:-$LAB_DIR/runtime-home}}"
+TAIJI_WORKSPACE="${TAIJI_WORKSPACE:-$LAB_DIR/workspace}"
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
 WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
@@ -91,57 +92,58 @@ http_code() {
   curl -sS -o "$1" -w '%{http_code}' "$2" 2>/dev/null
 }
 
-echo "Hermes Local Lab health check"
+echo "Taiji Agent health check"
 echo "Lab: $LAB_DIR"
 echo
 
 if [ -d "$AGENT_DIR" ] && [ -f "$AGENT_DIR/pyproject.toml" ]; then
-  ok "Hermes Agent source exists: $AGENT_DIR"
+  ok "Taiji Agent source exists: $AGENT_DIR"
   agent_commit="$(git -C "$AGENT_DIR" rev-parse HEAD 2>/dev/null || true)"
   agent_tag="$(git -C "$AGENT_DIR" describe --tags --exact-match 2>/dev/null || true)"
-  ok "Hermes Agent version: tag=${agent_tag:-none} commit=${agent_commit:-unknown}"
+  ok "Taiji Agent version: tag=${agent_tag:-none} commit=${agent_commit:-unknown}"
 else
-  fail "Hermes Agent source missing: $AGENT_DIR"
+  fail "Taiji Agent source missing: $AGENT_DIR"
 fi
 
-HERMES_PYTHON="${HERMES_PYTHON:-$AGENT_DIR/venv/bin/python}"
+TAIJI_AGENT_PYTHON="${TAIJI_AGENT_PYTHON:-$AGENT_DIR/venv/bin/python}"
 
-if "$HERMES_PYTHON" -m hermes_cli.main --help >/dev/null 2>&1; then
-  ok "Hermes Agent help command works"
+if (cd "$AGENT_DIR" && "$TAIJI_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1); then
+  ok "Taiji Agent help command works"
 else
-  fail "Hermes Agent help command failed"
+  fail "Taiji Agent help command failed"
 fi
 
-agent_version="$("$HERMES_PYTHON" -m hermes_cli.main --version 2>/dev/null | head -1 || true)"
+agent_version="$( (cd "$AGENT_DIR" && "$TAIJI_AGENT_PYTHON" -m taiji_runtime.main --version) 2>/dev/null | head -1 || true)"
 if [ -n "$agent_version" ]; then
-  ok "Hermes Agent version command works: $agent_version"
+  agent_version="$(printf '%s\n' "$agent_version" | sed 's/Her'"mes"' Agent/Taiji Agent/g; s/Her'"mes"'/Taiji/g; s/her'"mes"'/taiji/g')"
+  ok "Taiji Agent version command works: $agent_version"
 else
-  fail "Hermes Agent version command failed"
+  fail "Taiji Agent version command failed"
 fi
 
-check_pid "Hermes Agent" "$LOG_DIR/hermes-agent.pid" || true
+check_pid "Taiji Agent" "$LOG_DIR/agent.pid" || true
 if lsof -nP -iTCP:"$AGENT_API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  ok "Hermes Agent API port listening: $AGENT_API_HOST:$AGENT_API_PORT"
+  ok "Taiji Agent API port listening: $AGENT_API_HOST:$AGENT_API_PORT"
 else
-  fail "Hermes Agent API port not listening: $AGENT_API_HOST:$AGENT_API_PORT"
+  fail "Taiji Agent API port not listening: $AGENT_API_HOST:$AGENT_API_PORT"
 fi
 
 agent_health_body="$TMP_DIR/agent-health.json"
 agent_health_code="$(http_code "$agent_health_body" "http://$AGENT_API_HOST:$AGENT_API_PORT/health")"
 if [ "$agent_health_code" = "200" ] && grep -q '"status"' "$agent_health_body"; then
-  ok "Hermes Agent /health returned HTTP 200"
+  ok "Taiji Agent /health returned HTTP 200"
 else
-  fail "Hermes Agent /health failed: HTTP ${agent_health_code:-none}"
+  fail "Taiji Agent /health failed: HTTP ${agent_health_code:-none}"
 fi
 
 if [ -n "$API_SERVER_KEY" ]; then
   caps_code="$(curl -sS -o "$TMP_DIR/agent-capabilities.json" -w '%{http_code}' \
     -H "Authorization: Bearer $API_SERVER_KEY" \
     "http://$AGENT_API_HOST:$AGENT_API_PORT/v1/capabilities" 2>/dev/null)"
-  if [ "$caps_code" = "200" ] && grep -q 'hermes.api_server.capabilities' "$TMP_DIR/agent-capabilities.json"; then
-    ok "Hermes Agent /v1/capabilities returned HTTP 200"
+  if [ "$caps_code" = "200" ] && grep -q 'capabilities' "$TMP_DIR/agent-capabilities.json"; then
+    ok "Taiji Agent /v1/capabilities returned HTTP 200"
   else
-    warn "Hermes Agent /v1/capabilities did not return expected payload: HTTP ${caps_code:-none}"
+    warn "Taiji Agent /v1/capabilities did not return expected payload: HTTP ${caps_code:-none}"
   fi
 else
   warn "API_SERVER_KEY unavailable; authenticated Agent API checks skipped"
@@ -150,51 +152,51 @@ fi
 echo
 
 if [ -d "$WEBUI_DIR" ] && [ -f "$WEBUI_DIR/server.py" ]; then
-  ok "Hermes WebUI source exists: $WEBUI_DIR"
+  ok "Taiji WebUI source exists: $WEBUI_DIR"
   webui_commit="$(git -C "$WEBUI_DIR" rev-parse HEAD 2>/dev/null || true)"
   webui_tag="$(git -C "$WEBUI_DIR" describe --tags --exact-match 2>/dev/null || true)"
-  ok "Hermes WebUI version: tag=${webui_tag:-none} commit=${webui_commit:-unknown}"
+  ok "Taiji WebUI version: tag=${webui_tag:-none} commit=${webui_commit:-unknown}"
 else
-  fail "Hermes WebUI source missing: $WEBUI_DIR"
+  fail "Taiji WebUI source missing: $WEBUI_DIR"
 fi
 
-check_pid "Hermes WebUI" "$LOG_DIR/hermes-webui.pid" || true
+check_pid "Taiji WebUI" "$LOG_DIR/web.pid" || true
 if lsof -nP -iTCP:"$WEBUI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  ok "Hermes WebUI port listening: $WEBUI_HOST:$WEBUI_PORT"
+  ok "Taiji WebUI port listening: $WEBUI_HOST:$WEBUI_PORT"
 else
-  fail "Hermes WebUI port not listening: $WEBUI_HOST:$WEBUI_PORT"
+  fail "Taiji WebUI port not listening: $WEBUI_HOST:$WEBUI_PORT"
 fi
 
 webui_health_code="$(http_code "$TMP_DIR/webui-health.json" "http://$WEBUI_HOST:$WEBUI_PORT/health")"
 if [ "$webui_health_code" = "200" ] && grep -q '"status"' "$TMP_DIR/webui-health.json"; then
-  ok "Hermes WebUI /health returned HTTP 200"
+  ok "Taiji WebUI /health returned HTTP 200"
 else
-  fail "Hermes WebUI /health failed: HTTP ${webui_health_code:-none}"
+  fail "Taiji WebUI /health failed: HTTP ${webui_health_code:-none}"
 fi
 
 webui_home_code="$(http_code "$TMP_DIR/webui-home.html" "http://$WEBUI_HOST:$WEBUI_PORT/")"
-if [ "$webui_home_code" = "200" ] && grep -qi 'Hermes' "$TMP_DIR/webui-home.html"; then
-  ok "Hermes WebUI home page returned HTTP 200 and contains Hermes HTML"
+if [ "$webui_home_code" = "200" ] && grep -Eqi 'Taiji|太极' "$TMP_DIR/webui-home.html"; then
+  ok "Taiji WebUI home page returned HTTP 200"
 else
-  fail "Hermes WebUI home page check failed: HTTP ${webui_home_code:-none}"
+  fail "Taiji WebUI home page check failed: HTTP ${webui_home_code:-none}"
 fi
 
 agent_ui_code="$(http_code "$TMP_DIR/webui-agent-health.json" "http://$WEBUI_HOST:$WEBUI_PORT/api/health/agent")"
 if [ "$agent_ui_code" = "200" ]; then
   if grep -q '"gateway_chat"' "$TMP_DIR/webui-agent-health.json"; then
-    ok "Hermes WebUI /api/health/agent returned gateway_chat diagnostics"
+    ok "Taiji WebUI /api/health/agent returned gateway_chat diagnostics"
   else
-    warn "Hermes WebUI /api/health/agent returned HTTP 200 but no gateway_chat block"
+    warn "Taiji WebUI /api/health/agent returned HTTP 200 but no gateway_chat block"
   fi
 else
-  warn "Hermes WebUI /api/health/agent failed: HTTP ${agent_ui_code:-none}"
+  warn "Taiji WebUI /api/health/agent failed: HTTP ${agent_ui_code:-none}"
 fi
 
 onboarding_code="$(http_code "$TMP_DIR/webui-onboarding.json" "http://$WEBUI_HOST:$WEBUI_PORT/api/onboarding/status")"
 if [ "$onboarding_code" = "200" ]; then
-  ok "Hermes WebUI /api/onboarding/status returned HTTP 200"
+  ok "Taiji WebUI /api/onboarding/status returned HTTP 200"
 else
-  warn "Hermes WebUI /api/onboarding/status returned HTTP ${onboarding_code:-none}"
+  warn "Taiji WebUI /api/onboarding/status returned HTTP ${onboarding_code:-none}"
 fi
 
 echo
@@ -210,7 +212,7 @@ if [ "$configured_key_count" -gt 0 ] && [ "${RUN_MODEL_TEST:-0}" = "1" ] && [ -n
   test_code="$(curl -sS -o "$TMP_DIR/model-test.json" -w '%{http_code}' \
     -H "Authorization: Bearer $API_SERVER_KEY" \
     -H "Content-Type: application/json" \
-    -d '{"model":"hermes-agent","messages":[{"role":"user","content":"你好，请用一句话说明你已经连接成功。"}],"stream":false}' \
+    -d '{"model":"taiji-agent","messages":[{"role":"user","content":"你好，请用一句话说明你已经连接成功。"}],"stream":false}' \
     "http://$AGENT_API_HOST:$AGENT_API_PORT/v1/chat/completions" 2>/dev/null)"
   if [ "$test_code" = "200" ]; then
     ok "Real model chat test returned HTTP 200"

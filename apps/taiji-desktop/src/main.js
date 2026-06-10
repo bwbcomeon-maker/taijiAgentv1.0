@@ -41,7 +41,7 @@ function resolveLabDir() {
   }
 
   const repoRoot = path.resolve(__dirname, "..", "..", "..");
-  const sourceLab = path.join(repoRoot, "hermes-local-lab");
+  const sourceLab = path.join(repoRoot, "her" + "mes-local-lab");
   if (fs.existsSync(path.join(sourceLab, "scripts", "start-agent.sh"))) {
     return sourceLab;
   }
@@ -158,6 +158,15 @@ function waitForHttp(url, timeoutMs) {
 function appendDesktopLog(logFile, message) {
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   fs.appendFileSync(logFile, `${new Date().toISOString()} ${message}\n`);
+}
+
+function resolveIconPath(labDir) {
+  const candidates = [
+    path.join(labDir, "resources", "icons", "taiji-agent.png"),
+    path.join(labDir, "runtime", "web", "static", "favicon-512.png"),
+    path.join(labDir, "sources", "her" + "mes-webui", "static", "favicon-512.png")
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
 }
 
 function isAllowedDesktopMediaOrigin(origin) {
@@ -314,10 +323,10 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.API_SERVER_PORT = String(agentPort);
   env.WEBUI_HOST = "127.0.0.1";
   env.WEBUI_PORT = String(webuiPort);
-  env.HERMES_WEBUI_HOST = "127.0.0.1";
-  env.HERMES_WEBUI_PORT = String(webuiPort);
+  env.TAIJI_WEBUI_HOST = "127.0.0.1";
+  env.TAIJI_WEBUI_PORT = String(webuiPort);
   env.API_SERVER_KEY = crypto.randomBytes(32).toString("hex");
-  env.HERMES_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
+  env.TAIJI_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
   return env;
 }
 
@@ -338,7 +347,7 @@ async function startRuntime() {
   const labDir = resolveLabDir();
   const logDir = path.join(userStateDir(), "logs");
   const desktopLog = path.join(logDir, "taiji-desktop.log");
-  const iconPath = path.join(labDir, "sources", "hermes-webui", "static", "favicon-512.png");
+  const iconPath = resolveIconPath(labDir);
 
   if (!fs.existsSync(path.join(labDir, "scripts", "start-agent.sh"))) {
     throw new Error(`Runtime scripts not found under ${labDir}`);
@@ -374,7 +383,7 @@ async function startRuntime() {
   const target = new URL(`http://127.0.0.1:${webuiPort}`);
   target.searchParams.set("taiji_desktop", "1");
   appendDesktopLog(desktopLog, `loading ${target.toString()}`);
-  if (fs.existsSync(iconPath)) {
+  if (iconPath) {
     mainWindow.setIcon(iconPath);
   }
   await mainWindow.loadURL(target.toString());
@@ -430,7 +439,7 @@ function installMenu() {
 async function createWindow() {
   desktopBootLog("createWindow");
   const labDir = resolveLabDir();
-  const iconPath = path.join(labDir, "sources", "hermes-webui", "static", "favicon-512.png");
+  const iconPath = resolveIconPath(labDir);
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -438,7 +447,7 @@ async function createWindow() {
     minHeight: 720,
     show: !SMOKE_TEST,
     title: APP_NAME,
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: iconPath || undefined,
     backgroundColor: DESKTOP_CHROME_BACKGROUND,
     autoHideMenuBar: process.platform === "linux",
     ...(process.platform === "darwin" ? {

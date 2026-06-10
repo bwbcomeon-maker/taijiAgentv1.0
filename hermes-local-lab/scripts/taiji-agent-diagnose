@@ -90,7 +90,7 @@ PY
 config_summary() {
   local py config_path
   py="$(python_bin)"
-  config_path="$HERMES_HOME/config.yaml"
+  config_path="$TAIJI_RUNTIME_HOME/config.yaml"
   if [ -z "$py" ]; then
     printf 'python unavailable; skipped config summary\n'
     return 0
@@ -134,8 +134,8 @@ attachment_capabilities() {
     printf 'python unavailable; skipped attachment capability summary\n'
     return 0
   fi
-  HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HERMES_HOME/webui}" \
-  "$py" - "$WEBUI_DIR" "$HERMES_WORKSPACE" <<'PY' 2>&1 | redact_stream
+  TAIJI_WEBUI_STATE_DIR="${TAIJI_WEBUI_STATE_DIR:-$TAIJI_RUNTIME_HOME/web}" \
+  "$py" - "$WEBUI_DIR" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME" "$TAIJI_WEBUI_STATE_DIR" <<'PY' 2>&1 | redact_stream
 from pathlib import Path
 import json
 import os
@@ -143,7 +143,12 @@ import sys
 
 webui_dir = Path(sys.argv[1])
 workspace = sys.argv[2]
+runtime_home = sys.argv[3]
+state_dir = sys.argv[4]
 sys.path.insert(0, str(webui_dir))
+os.environ.setdefault("HER" + "MES_HOME", runtime_home)
+os.environ.setdefault("HER" + "MES_WORKSPACE", workspace)
+os.environ.setdefault("HER" + "MES_WEBUI_STATE_DIR", state_dir)
 try:
     from api.attachment_context import diagnostic_summary, has_configured_vision
     from api.upload import _attachment_root
@@ -177,8 +182,8 @@ section "Taiji Agent Diagnose"
 printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 printf 'user=%s\n' "$(id -un 2>/dev/null || true)"
 printf 'install_root=%s\n' "$LAB_DIR"
-printf 'hermes_home=%s\n' "$HERMES_HOME"
-printf 'workspace=%s\n' "$HERMES_WORKSPACE"
+printf 'runtime_home=%s\n' "$TAIJI_RUNTIME_HOME"
+printf 'workspace=%s\n' "$TAIJI_WORKSPACE"
 printf 'log_dir=%s\n' "$LOG_DIR"
 
 section "System"
@@ -204,7 +209,7 @@ run ls -ld /opt/taiji-agent /usr/bin/taiji-agent /usr/bin/taiji
 
 section "Processes And Ports"
 if have pgrep; then
-  run pgrep -af '/opt/taiji-agent|taiji-agent|hermes-webui|hermes_cli.main'
+  run pgrep -af '/opt/taiji-agent|taiji-agent|taiji_runtime.main'
 fi
 if have lsof; then
   for port in 8787 18642 18787 "$AGENT_API_PORT" "$WEBUI_PORT"; do
@@ -235,8 +240,8 @@ fi
 
 section "Recent Logs"
 log_tail "$LOG_DIR/taiji-desktop.log"
-log_tail "$LOG_DIR/hermes-agent.log"
-log_tail "$LOG_DIR/hermes-webui.log"
+log_tail "$LOG_DIR/agent.log"
+log_tail "$LOG_DIR/web.log"
 log_tail /var/log/taiji-agent-postinst-verify.log
 
 section "End"

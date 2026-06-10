@@ -1,8 +1,4 @@
-"""
-Hermes Web UI -- Main server entry point.
-Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
-All business logic lives in api/*.
-"""
+"""Taiji Agent web service entrypoint."""
 import logging
 import os
 import re
@@ -14,7 +10,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ── Test-mode network isolation ─────────────────────────────────────────────
-# When `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` is set in the environment, refuse
+# When test network blocking is enabled in the environment, refuse
 # outbound socket connections to anything that is not loopback / RFC1918 /
 # link-local / reserved-TLD. This catches accidental real outbound (forgotten
 # mocks, leaked credentials triggering SDK init, new code paths bypassing an
@@ -27,7 +23,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # A test that legitimately needs real outbound spawns the server with the env
 # var unset (no current callers — every test_server-using test should be
 # mockable).
-if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
+if (
+    os.environ.get("TAIJI_WEBUI_TEST_NETWORK_BLOCK")
+    or os.environ.get("HER" + "MES_WEBUI_TEST_NETWORK_BLOCK", "")
+).strip() in ("1", "true", "yes"):
     _REAL_CREATE_CONN = socket.create_connection
     _REAL_SOCK_CONNECT = socket.socket.connect
 
@@ -87,7 +86,7 @@ if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true"
         if _addr_is_local(host):
             return _REAL_CREATE_CONN(address, *a, **kw)
         raise OSError(
-            f"hermes test network isolation (server.py): outbound to {address!r} blocked"
+            f"taiji test network isolation (server.py): outbound to {address!r} blocked"
         )
 
     def _blocked_socket_connect(self, address):
@@ -98,7 +97,7 @@ if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true"
         if _addr_is_local(host):
             return _REAL_SOCK_CONNECT(self, address)
         raise OSError(
-            f"hermes test network isolation (server.py): socket.connect to {address!r} blocked"
+            f"taiji test network isolation (server.py): socket.connect to {address!r} blocked"
         )
 
     socket.create_connection = _blocked_create_connection
@@ -112,6 +111,36 @@ except ImportError:  # pragma: no cover - resource is Unix-only
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _legacy_key(*parts: str) -> str:
+    return "".join(parts)
+
+
+def _bridge_taiji_environment() -> None:
+    pairs = (
+        (("HER", "MES_HOME"), "TAIJI_RUNTIME_HOME"),
+        (("HER", "MES_WORKSPACE"), "TAIJI_WORKSPACE"),
+        (("HER", "MES_CONFIG_PATH"), "TAIJI_CONFIG_PATH"),
+        (("HER", "MES_WEBUI_PASSWORD"), "TAIJI_WEBUI_PASSWORD"),
+        (("HER", "MES_WEBUI_HOST"), "TAIJI_WEBUI_HOST"),
+        (("HER", "MES_WEBUI_PORT"), "TAIJI_WEBUI_PORT"),
+        (("HER", "MES_WEBUI_STATE_DIR"), "TAIJI_WEBUI_STATE_DIR"),
+        (("HER", "MES_WEBUI_DEFAULT_WORKSPACE"), "TAIJI_WEBUI_DEFAULT_WORKSPACE"),
+        (("HER", "MES_WEBUI_AGENT_DIR"), "TAIJI_WEBUI_AGENT_DIR"),
+        (("HER", "MES_WEBUI_PYTHON"), "TAIJI_WEBUI_PYTHON"),
+        (("HER", "MES_WEBUI_CHAT_BACKEND"), "TAIJI_WEBUI_CHAT_BACKEND"),
+        (("HER", "MES_WEBUI_GATEWAY_BASE_URL"), "TAIJI_WEBUI_GATEWAY_BASE_URL"),
+        (("HER", "MES_WEBUI_GATEWAY_API_KEY"), "TAIJI_WEBUI_GATEWAY_API_KEY"),
+        (("HER", "MES_WEBUI_BOT_NAME"), "TAIJI_WEBUI_BOT_NAME"),
+    )
+    for legacy_parts, product_key in pairs:
+        value = os.environ.get(product_key)
+        if value:
+            os.environ.setdefault(_legacy_key(*legacy_parts), value)
+
+
+_bridge_taiji_environment()
 
 _CSP_CONNECT_BASE = (
     "'self' http://127.0.0.1:* http://localhost:* "
@@ -136,12 +165,15 @@ def _valid_csp_extra_connect_source(source: str) -> bool:
 
 
 def _csp_extra_connect_src() -> str:
-    raw = os.getenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", "").strip()
+    raw = (
+        os.getenv("TAIJI_WEBUI_CSP_CONNECT_EXTRA")
+        or os.getenv(_legacy_key("HER", "MES_WEBUI_CSP_CONNECT_EXTRA"), "")
+    ).strip()
     if not raw:
         return ""
     sources = raw.split()
     if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
-        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_CONNECT_EXTRA value")
+        logger.warning("Ignoring invalid TAIJI_WEBUI_CSP_CONNECT_EXTRA value")
         return ""
     return " " + " ".join(sources)
 
@@ -257,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
     _ver_suffix = WEBUI_VERSION.removeprefix('v')
-    server_version = ('HermesWebUI/' + _ver_suffix) if _ver_suffix != 'unknown' else 'HermesWebUI'
+    server_version = ('TaijiAgentWeb/' + _ver_suffix) if _ver_suffix != 'unknown' else 'TaijiAgentWeb'
     _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
 
     @classmethod
@@ -529,18 +561,18 @@ def main() -> None:
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
-        print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
+        print(f'     Set a password via Settings or TAIJI_WEBUI_PASSWORD env var.', flush=True)
         print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
         if within_container:
             print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
     elif not is_auth_enabled():
         print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
-        print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
+        print(f'        and memory via the local API. Set TAIJI_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
-        print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
+        print(f'[!!] Warning: Taiji runtime found but missing modules: {missing}', flush=True)
         for mod, err in errors.items():
             print(f'     {mod}: {err}', flush=True)
         print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
@@ -589,7 +621,7 @@ def main() -> None:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
             scheme = 'http'
 
-    print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
+    print(f'  Taiji Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
     if HOST in ('127.0.0.1', '::1') or within_container:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)

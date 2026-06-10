@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop Hermes Local Lab processes started by start-agent.sh and start-webui.sh.
+# Stop Taiji Agent processes started by start-agent.sh and start-webui.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,5 +35,5 @@ stop_pid_file() {
   rm -f "$pid_file"
 }
 
-stop_pid_file "Hermes WebUI" "$LOG_DIR/hermes-webui.pid"
-stop_pid_file "Hermes Agent" "$LOG_DIR/hermes-agent.pid"
+stop_pid_file "Taiji web service" "$LOG_DIR/web.pid"
+stop_pid_file "Taiji Agent" "$LOG_DIR/agent.pid"
