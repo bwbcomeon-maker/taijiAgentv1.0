@@ -7,6 +7,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/runtime-env.sh"
 PID_FILE="$LOG_DIR/hermes-webui.pid"
 LOG_FILE="$LOG_DIR/hermes-webui.log"
+START_TIMEOUT_SECONDS="${TAIJI_WEBUI_START_TIMEOUT:-60}"
+START_POLL_INTERVAL="${TAIJI_WEBUI_START_POLL_INTERVAL:-0.5}"
+
+case "$START_TIMEOUT_SECONDS" in
+  ""|*[!0-9]*) START_TIMEOUT_SECONDS=60 ;;
+esac
+if [ "$START_TIMEOUT_SECONDS" -lt 1 ]; then
+  START_TIMEOUT_SECONDS=60
+fi
+
+log_start_line=0
+if [ -f "$LOG_FILE" ]; then
+  log_start_line="$(wc -l < "$LOG_FILE" | tr -d ' ')"
+fi
+
+tail_recent_log() {
+  if [ ! -f "$LOG_FILE" ]; then
+    return 0
+  fi
+  local start_line
+  local total_lines
+  start_line=$((log_start_line + 1))
+  total_lines="$(wc -l < "$LOG_FILE" | tr -d ' ')"
+  if [ "$total_lines" -ge "$start_line" ]; then
+    sed -n "${start_line},\$p" "$LOG_FILE" | tail -100
+  else
+    tail -100 "$LOG_FILE"
+  fi
+}
 
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
@@ -61,6 +90,7 @@ export TERMINAL_CWD
 unset PYTHONPATH PYTHONHOME
 
 cd "$AGENT_DIR"
+printf '\n[%s] Taiji WebUI startup requested\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
 pid="$("$HERMES_WEBUI_PYTHON" -c 'import os, subprocess, sys
 log = open(sys.argv[1], "ab", buffering=0)
 proc = subprocess.Popen(
@@ -76,7 +106,8 @@ print(proc.pid)
 printf '%s\n' "$pid" > "$PID_FILE"
 
 health_url="http://$HERMES_WEBUI_HOST:$HERMES_WEBUI_PORT/health"
-for _ in $(seq 1 50); do
+deadline=$(( $(date +%s) + START_TIMEOUT_SECONDS ))
+while [ "$(date +%s)" -le "$deadline" ]; do
   if curl -fsS "$health_url" >/dev/null 2>&1; then
     echo "Hermes WebUI ready at http://$HERMES_WEBUI_HOST:$HERMES_WEBUI_PORT"
     echo "PID: $pid"
@@ -85,15 +116,15 @@ for _ in $(seq 1 50); do
   fi
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "Hermes WebUI exited before becoming healthy. Log: $LOG_FILE" >&2
-    tail -80 "$LOG_FILE" >&2 || true
+    tail_recent_log >&2 || true
     rm -f "$PID_FILE"
     exit 1
   fi
-  sleep 0.4
+  sleep "$START_POLL_INTERVAL"
 done
 
-echo "Hermes WebUI did not become healthy at $health_url. Log: $LOG_FILE" >&2
-tail -100 "$LOG_FILE" >&2 || true
+echo "Hermes WebUI did not become healthy at $health_url within ${START_TIMEOUT_SECONDS}s. Log: $LOG_FILE" >&2
+tail_recent_log >&2 || true
 kill "$pid" 2>/dev/null || true
 rm -f "$PID_FILE"
 exit 1

@@ -11,11 +11,24 @@ TMP_DIR="$LAB_DIR/tmp"
 RUNTIME_ENV="$TMP_DIR/runtime.env"
 USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/taiji-agent"
 USER_LOG_DIR="$USER_STATE_DIR/logs"
+USER_TMP_DIR="$USER_STATE_DIR/tmp"
 
-if [ -f "$LAB_DIR/.env" ]; then
+if [ "${TAIJI_AGENT_USE_USER_DIRS:-0}" = "1" ]; then
+  LOG_DIR="${TAIJI_AGENT_LOG_DIR:-$USER_LOG_DIR}"
+  TMP_DIR="${TAIJI_AGENT_TMP_DIR:-$USER_TMP_DIR}"
+  RUNTIME_ENV="${TAIJI_AGENT_RUNTIME_ENV:-$TMP_DIR/runtime.env}"
+  TAIJI_CONFIG_DIR="${TAIJI_AGENT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/taiji-agent}"
+  TAIJI_ENV_FILE="${TAIJI_AGENT_ENV_FILE:-$TAIJI_CONFIG_DIR/.env}"
+else
+  TAIJI_ENV_FILE="${TAIJI_AGENT_ENV_FILE:-$LAB_DIR/.env}"
+fi
+
+mkdir -p "$TMP_DIR"
+
+if [ -f "$TAIJI_ENV_FILE" ]; then
   set -a
   # shellcheck source=/dev/null
-  source "$LAB_DIR/.env"
+  source "$TAIJI_ENV_FILE"
   set +a
 fi
 if [ -f "$RUNTIME_ENV" ]; then

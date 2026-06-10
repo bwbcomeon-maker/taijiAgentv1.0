@@ -71,12 +71,35 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("-m hermes_cli.main --version", health_check)
         self.assertIn("-m hermes_cli.main --help", build)
 
+    def test_health_check_reads_user_dir_runtime_env_for_desktop_launches(self):
+        health_check = read_text("hermes-local-lab/scripts/health-check.sh")
+
+        self.assertIn('TAIJI_AGENT_USE_USER_DIRS:-0', health_check)
+        self.assertIn('TAIJI_AGENT_RUNTIME_ENV:-$TMP_DIR/runtime.env', health_check)
+        self.assertIn('TAIJI_AGENT_ENV_FILE:-$TAIJI_CONFIG_DIR/.env', health_check)
+
     def test_desktop_startup_errors_include_recent_script_output(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
 
         self.assertIn("outputTail", main_js)
         self.assertIn("最近输出", main_js)
         self.assertIn("[${scriptName} error]", main_js)
+
+    def test_runtime_start_scripts_use_configurable_timeouts_and_recent_log_tail(self):
+        start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
+        start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
+
+        self.assertIn('START_TIMEOUT_SECONDS="${TAIJI_AGENT_START_TIMEOUT:-90}"', start_agent)
+        self.assertIn("Taiji Agent API startup requested", start_agent)
+        self.assertIn("tail_recent_log", start_agent)
+        self.assertIn("within ${START_TIMEOUT_SECONDS}s", start_agent)
+        self.assertNotIn("for _ in $(seq 1 50)", start_agent)
+
+        self.assertIn('START_TIMEOUT_SECONDS="${TAIJI_WEBUI_START_TIMEOUT:-60}"', start_webui)
+        self.assertIn("Taiji WebUI startup requested", start_webui)
+        self.assertIn("tail_recent_log", start_webui)
+        self.assertIn("within ${START_TIMEOUT_SECONDS}s", start_webui)
+        self.assertNotIn("for _ in $(seq 1 50)", start_webui)
 
     def test_linux_desktop_hides_application_menu_bar(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
