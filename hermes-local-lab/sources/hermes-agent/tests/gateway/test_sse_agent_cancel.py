@@ -278,3 +278,57 @@ class TestSSEAgentCancelOnDisconnect:
             assert agent_task.cancelled() or agent_task.done()
 
         asyncio.run(run())
+
+    def test_agent_task_exception_streams_sanitized_error_finish_reason(self):
+        """Agent failures must reach the WebUI as an error, not as empty success."""
+        adapter = _make_adapter()
+
+        stream_q = queue.Queue()
+        stream_q.put(None)
+
+        async def fake_agent():
+            raise RuntimeError(
+                "Provider 'deepseek' is set in config.yaml but no API key was found. "
+                "Set the DEEPSEEK_API_KEY environment variable, or switch to a different "
+                "provider with `hermes model`."
+            )
+
+        async def run():
+            from aiohttp import web
+
+            agent_task = asyncio.ensure_future(fake_agent())
+
+            writes: list[str] = []
+            mock_response = AsyncMock(spec=web.StreamResponse)
+
+            async def write_side_effect(data):
+                writes.append(data.decode("utf-8") if isinstance(data, bytes) else str(data))
+
+            mock_response.write = AsyncMock(side_effect=write_side_effect)
+            mock_response.prepare = AsyncMock()
+
+            with patch("gateway.platforms.api_server.web.StreamResponse", return_value=mock_response):
+                await adapter._write_sse_chat_completion(
+                    _make_request(), "cmpl-error", "deepseek-chat", 1234567890,
+                    stream_q, agent_task,
+                )
+
+            serialized = "".join(writes)
+            chunks = []
+            for block in serialized.split("\n\n"):
+                if not block.startswith("data: ") or block == "data: [DONE]":
+                    continue
+                chunks.append(json.loads(block[len("data: "):]))
+            error_chunks = [
+                chunk for chunk in chunks
+                if (chunk.get("choices") or [{}])[0].get("finish_reason") == "error"
+            ]
+            assert error_chunks
+            err = error_chunks[-1].get("error") or {}
+            assert err["code"] == "model_configuration_error"
+            assert "模型服务未配置或不可用" in err["message"]
+            assert "DEEPSEEK_API_KEY" not in serialized
+            assert "hermes" not in serialized.lower()
+            assert "Hermes" not in serialized
+
+        asyncio.run(run())

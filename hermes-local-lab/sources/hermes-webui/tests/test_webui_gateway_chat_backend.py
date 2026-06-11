@@ -14,6 +14,7 @@ from api.config import STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
+    _gateway_sse_error_event,
     _gateway_sse_delta,
     _gateway_stream_usage,
     _gateway_tool_progress_event,
@@ -21,6 +22,13 @@ from api.gateway_chat import (
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
 )
+
+
+def _assert_no_public_hermes(value):
+    serialized = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+    assert "hermes" not in serialized.lower()
+    assert "HERMES_" not in serialized
+    assert "API_SERVER_KEY" not in serialized
 
 
 def test_gateway_chat_backend_is_default_off_for_truthy_values():
@@ -149,12 +157,11 @@ def test_gateway_http_401_reports_gateway_auth_not_provider_key():
         api_key_configured=False,
     )
 
-    assert event["label"] == "Gateway authentication failed"
+    assert event["label"] == "本地对话服务认证失败"
     assert event["type"] == "gateway_auth_error"
     assert "HTTP 401" in event["message"]
-    assert "HERMES_WEBUI_GATEWAY_API_KEY" in event["hint"]
-    assert "API_SERVER_KEY" in event["hint"]
     assert "Invalid API key" not in event["hint"]
+    _assert_no_public_hermes(event)
 
 
 def test_gateway_http_401_with_key_suggests_key_mismatch():
@@ -169,7 +176,26 @@ def test_gateway_http_401_with_key_suggests_key_mismatch():
     event = _gateway_http_error_event(exc, "", api_key_configured=True)
 
     assert event["type"] == "gateway_auth_error"
-    assert event["hint"] == "Check that HERMES_WEBUI_GATEWAY_API_KEY matches the Hermes Gateway API_SERVER_KEY."
+    assert event["hint"] == "请重启太极智能体，或导出诊断报告后交给管理员排查。"
+    _assert_no_public_hermes(event)
+
+
+def test_gateway_sse_error_event_sanitizes_model_configuration_errors():
+    event = _gateway_sse_error_event({
+        "error": {
+            "message": (
+                "Provider 'deepseek' is set in config.yaml but no API key was found. "
+                "Set the DEEPSEEK_API_KEY environment variable, or switch to a different "
+                "provider with `hermes model`."
+            ),
+            "code": "model_configuration_error",
+        }
+    })
+
+    assert event is not None
+    assert event["type"] == "model_configuration_error"
+    assert "模型服务未配置或不可用" in event["message"]
+    _assert_no_public_hermes(event)
 
 
 def test_frontend_renders_gateway_auth_error_with_specific_label():
@@ -182,8 +208,8 @@ def test_frontend_renders_gateway_auth_error_with_specific_label():
     assert "d.type==='gateway_auth_error'" in block
     assert "isGatewayAuthError" in block
     assert "gateway_auth_label" in block
-    assert "Gateway authentication failed" in block
-    assert "isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch" in block, (
+    assert "本地对话服务认证失败" in block
+    assert "isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'本地对话服务认证失败'):isAuthMismatch" in block, (
         "Gateway API key failures should use their own label before generic provider mismatch handling."
     )
 
@@ -315,6 +341,65 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "is_error": False,
         "tid": "call-1",
     }) in events
+
+
+def test_gateway_chat_worker_maps_sse_error_to_taiji_message(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            payload = {
+                "error": {
+                    "message": (
+                        "Provider 'deepseek' is set in config.yaml but no API key was found. "
+                        "Set the DEEPSEEK_API_KEY environment variable, or switch to a different provider "
+                        "with `hermes model`."
+                    ),
+                    "code": "model_configuration_error",
+                }
+            }
+            yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"error"}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    stream_id = "stream-gateway-error-test"
+    s.active_stream_id = stream_id
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "你好",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    app_errors = [data for event, data in events if event == "apperror"]
+    assert app_errors
+    assert app_errors[-1]["type"] == "model_configuration_error"
+    assert "模型服务未配置或不可用" in app_errors[-1]["message"]
+    _assert_no_public_hermes(app_errors[-1])
 
 
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):

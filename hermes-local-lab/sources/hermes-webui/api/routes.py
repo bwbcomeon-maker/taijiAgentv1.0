@@ -4596,12 +4596,22 @@ def _check_csrf(handler) -> bool:
     if not origin_allowed:
         return _set_csrf_failure_reason(handler, "origin_mismatch")
 
-    from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
+    from api.auth import (
+        CSRF_HEADER_NAME,
+        LEGACY_CSRF_HEADER_NAME,
+        is_auth_enabled,
+        parse_cookie,
+        verify_csrf_token,
+    )
 
     if not is_auth_enabled():
         return True
     cookie_val = parse_cookie(handler)
-    submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
+    submitted = (
+        handler.headers.get(CSRF_HEADER_NAME)
+        or handler.headers.get(LEGACY_CSRF_HEADER_NAME)
+        or handler.headers.get("X-CSRF-Token")
+    )
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
     return _set_csrf_failure_reason(handler, "token_mismatch")

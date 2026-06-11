@@ -68,6 +68,22 @@ def test_authenticated_same_origin_browser_post_requires_session_csrf_token(monk
         auth._sessions.pop("c" * 64, None)
 
 
+def test_authenticated_same_origin_browser_post_accepts_legacy_csrf_header(monkeypatch):
+    cookie = _signed_cookie("h" * 64)
+    token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    try:
+        headers = {
+            "Origin": "http://127.0.0.1:8787",
+            "Host": "127.0.0.1:8787",
+            "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+            auth.LEGACY_CSRF_HEADER_NAME: token,
+        }
+        assert routes._check_csrf(_FakeHandler(headers))
+    finally:
+        auth._sessions.pop("h" * 64, None)
+
+
 def test_authenticated_allowed_public_origin_accepts_valid_csrf_token(monkeypatch):
     cookie = _signed_cookie("f" * 64)
     token = auth.csrf_token_for_session(cookie)
@@ -136,7 +152,8 @@ def test_index_shell_includes_csrf_fetch_and_sendbeacon_injection():
     src = (routes._INDEX_HTML_PATH).read_text(encoding="utf-8")
 
     assert "csrfToken:__CSRF_TOKEN_JSON__" in src
-    assert "X-Hermes-CSRF-Token" in src
+    assert "X-Taiji-CSRF-Token" in src
+    assert "X-Hermes-CSRF-Token" not in src
     assert "window.fetch=function" in src
     assert "navigator.sendBeacon=function" in src
     assert "auth\\/login|csp-report" in src

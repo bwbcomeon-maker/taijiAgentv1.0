@@ -543,6 +543,33 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
     }
 
 
+def _classify_agent_stream_error(raw_message: str) -> str:
+    lowered = str(raw_message or "").lower()
+    if "api key" in lowered and (
+        "no api key" in lowered
+        or "not found" in lowered
+        or "missing" in lowered
+        or "was found" in lowered
+    ):
+        return "model_configuration_error"
+    if "provider" in lowered and "config" in lowered:
+        return "model_configuration_error"
+    return "agent_error"
+
+
+def _public_agent_stream_error(raw_message: str) -> Dict[str, str]:
+    code = _classify_agent_stream_error(raw_message)
+    if code == "model_configuration_error":
+        message = "模型服务未配置或不可用。请在配置页补充模型 API Key，或切换到可用模型。"
+    else:
+        message = "本地对话服务暂时不可用。请稍后重试，或导出诊断报告。"
+    return {
+        "message": message,
+        "type": "server_error",
+        "code": code,
+    }
+
+
 if AIOHTTP_AVAILABLE:
     @web.middleware
     async def body_limit_middleware(request, handler):
@@ -1035,7 +1062,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "hermes-agent"})
+        return web.json_response({"status": "ok", "platform": "taiji-agent"})
 
     async def _handle_license_status(self, request: "web.Request") -> "web.Response":
         """GET /v1/license/status — return redacted license state."""
@@ -1056,7 +1083,7 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime = read_runtime_status() or {}
         return web.json_response({
             "status": "ok",
-            "platform": "hermes-agent",
+            "platform": "taiji-agent",
             "gateway_state": runtime.get("gateway_state"),
             "platforms": runtime.get("platforms", {}),
             "active_agents": runtime.get("active_agents", 0),
@@ -1079,7 +1106,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "id": self._model_name,
                     "object": "model",
                     "created": int(time.time()),
-                    "owned_by": "hermes",
+                    "owned_by": "taiji",
                     "permission": [],
                     "root": self._model_name,
                     "parent": None,
@@ -1099,8 +1126,8 @@ class APIServerAdapter(BasePlatformAdapter):
             return auth_err
 
         return web.json_response({
-            "object": "hermes.api_server.capabilities",
-            "platform": "hermes-agent",
+            "object": "taiji.api_server.capabilities",
+            "platform": "taiji-agent",
             "model": self._model_name,
             "auth": {
                 "type": "bearer",
@@ -1111,7 +1138,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "tool_execution": "server",
                 "split_runtime": False,
                 "description": (
-                    "The API server creates a server-side Hermes AIAgent; "
+                    "The API server creates a server-side Taiji agent runtime; "
                     "tools execute on the API-server host unless a future "
                     "explicit split-runtime mode is enabled."
                 ),
@@ -2114,23 +2141,31 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            error_payload = None
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
             except Exception as exc:
-                logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
+                error_payload = _public_agent_stream_error(str(exc))
+                logger.warning(
+                    "Agent task %s failed, usage data lost: %s",
+                    completion_id,
+                    error_payload["message"],
+                )
 
             # Finish chunk
             finish_chunk = {
                 "id": completion_id, "object": "chat.completion.chunk",
                 "created": created, "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "error" if error_payload else "stop"}],
                 "usage": {
                     "prompt_tokens": usage.get("input_tokens", 0),
                     "completion_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
                 },
             }
+            if error_payload:
+                finish_chunk["error"] = error_payload
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):

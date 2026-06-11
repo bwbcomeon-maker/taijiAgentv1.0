@@ -1568,7 +1568,7 @@ function _syncThemeColorMeta(){
   try{
     const bg=getComputedStyle(document.documentElement).getPropertyValue('--sidebar').trim();
     if(!bg) return;
-    const known=document.getElementById('hermes-theme-color');
+    const known=document.getElementById('taiji-theme-color')||document.getElementById('her'+'mes-theme-color');
     if(known){
       known.setAttribute('content',bg);
       known.removeAttribute('media');

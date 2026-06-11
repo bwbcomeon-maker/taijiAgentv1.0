@@ -99,24 +99,62 @@ def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None 
 
 
 def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api_key_configured: bool) -> dict:
-    safe = _redact_text(err_body or str(exc))[:500]
+    safe = scrub_brand_leaks(_redact_text(err_body or str(exc))[:500])
     if exc.code == 401:
         return {
-            "label": "Gateway authentication failed",
+            "label": "本地对话服务认证失败",
             "type": "gateway_auth_error",
-            "message": "Gateway rejected the WebUI API key (HTTP 401).",
-            "hint": (
-                "Set HERMES_WEBUI_GATEWAY_API_KEY to the same value as the Hermes Gateway "
-                "API_SERVER_KEY, or disable HERMES_WEBUI_CHAT_BACKEND=gateway."
-                if not api_key_configured
-                else "Check that HERMES_WEBUI_GATEWAY_API_KEY matches the Hermes Gateway API_SERVER_KEY."
-            ),
+            "message": "本地对话服务认证失败（HTTP 401）。",
+            "hint": "请重启太极智能体，或导出诊断报告后交给管理员排查。",
         }
     return {
-        "label": "Gateway request failed",
+        "label": "太极本地对话服务请求失败",
         "type": "gateway_http_error",
-        "message": f"Gateway returned HTTP {exc.code}.",
-        "hint": safe or "Check the configured Gateway API server.",
+        "message": f"本地对话服务返回 HTTP {exc.code}。",
+        "hint": safe or "请检查太极智能体是否已启动，或导出诊断报告。",
+    }
+
+
+def _gateway_sse_finish_reason(payload: dict) -> str:
+    try:
+        choices = payload.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] or {}
+        return str(choice.get("finish_reason") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _gateway_sse_error_event(payload: dict) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    raw_error = payload.get("error")
+    finish_reason = _gateway_sse_finish_reason(payload)
+    if not isinstance(raw_error, dict) and finish_reason != "error":
+        return None
+    code = ""
+    message = ""
+    if isinstance(raw_error, dict):
+        code = str(raw_error.get("code") or raw_error.get("type") or "").strip().lower()
+        message = str(raw_error.get("message") or "").strip()
+    lowered = message.lower()
+    if (
+        code == "model_configuration_error"
+        or ("api key" in lowered and ("no api key" in lowered or "not found" in lowered or "missing" in lowered))
+        or ("provider" in lowered and "config" in lowered)
+    ):
+        return {
+            "label": "模型服务配置不可用",
+            "type": "model_configuration_error",
+            "message": "模型服务未配置或不可用。请在配置页补充模型 API Key，或切换到可用模型。",
+            "hint": "请检查太极智能体的模型配置、网络或账号余额状态。",
+        }
+    return {
+        "label": "太极本地对话服务不可用",
+        "type": "gateway_error",
+        "message": "本地对话服务暂时不可用。",
+        "hint": "请稍后重试，或导出诊断报告后交给管理员排查。",
     }
 
 
@@ -345,6 +383,7 @@ def _run_gateway_chat_streaming(
         )
         update_active_run(stream_id, phase="gateway-request")
         last_payload = {}
+        gateway_error_event = None
         sse_event = "message"
         with urllib.request.urlopen(req, timeout=600) as resp:
             for raw_line in resp:
@@ -394,6 +433,13 @@ def _run_gateway_chat_streaming(
                     sse_event = "message"
                     continue
                 last_payload = payload
+                error_event = _gateway_sse_error_event(payload)
+                if error_event:
+                    if gateway_error_event is None or error_event.get("type") == "model_configuration_error":
+                        gateway_error_event = error_event
+                    update_active_run(stream_id, phase="gateway-error")
+                    usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                    continue
                 delta = _gateway_sse_delta(payload)
                 if delta:
                     delta = scrub_streaming_token_delta(delta, brand_token_tail)
@@ -412,13 +458,16 @@ def _run_gateway_chat_streaming(
                 STREAM_PARTIAL_TEXT[stream_id] += tail_delta
             put_gateway_event("token", {"text": tail_delta})
         usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+        if gateway_error_event:
+            put_gateway_event("apperror", gateway_error_event)
+            return
         assistant_text = scrub_brand_leaks(final_text).strip()
         if not assistant_text:
             put_gateway_event("apperror", {
-                "label": "Gateway returned no response",
+                "label": "太极本地对话服务未返回内容",
                 "type": "gateway_empty_response",
-                "message": "Gateway returned no assistant message for this turn.",
-                "hint": "Check that Hermes Gateway API server is running and reachable.",
+                "message": "本地对话服务没有返回有效回复。",
+                "hint": "请检查模型配置、网络或账号余额状态，必要时导出诊断报告。",
             })
             return
         with _get_session_agent_lock(session_id):
@@ -470,10 +519,10 @@ def _run_gateway_chat_streaming(
     except Exception as exc:
         safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
         put_gateway_event("apperror", {
-            "label": "Gateway request failed",
+            "label": "太极本地对话服务请求失败",
             "type": "gateway_error",
-            "message": safe or "Gateway request failed.",
-            "hint": "Check the configured Gateway API server health.",
+            "message": safe or "本地对话服务请求失败。",
+            "hint": "请检查太极智能体是否已启动，或导出诊断报告。",
         })
     finally:
         if s is not None:

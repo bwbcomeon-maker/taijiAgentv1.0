@@ -17,22 +17,23 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="taiji Agent">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,'taiji-light-glass':1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},rawSkin=localStorage.getItem('hermes-skin'),t=(localStorage.getItem('hermes-theme')||'light').toLowerCase(),s=(!rawSkin||rawSkin.toLowerCase()==='default'?'taiji-light-glass':rawSkin).toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'light'),skin=skins[s]?s:(m?m[1]:'taiji-light-glass');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.dataset.skin='taiji-light-glass';}})()</script>
+<script>(function(){try{var lp='her'+'mes';window.__taijiStoreGet=function(k,d){var pk='taiji-'+k,lk=lp+'-'+k,v=localStorage.getItem(pk);return v!==null?v:(localStorage.getItem(lk)||d||'');};window.__taijiStoreSet=function(k,v){localStorage.setItem('taiji-'+k,v);};window.__taijiStoreRemove=function(k){localStorage.removeItem('taiji-'+k);localStorage.removeItem(lp+'-'+k);};}catch(e){}})()</script>
+<script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''},ss=window.__taijiStoreSet||function(){},themes={light:1,dark:1,system:1},skins={default:1,'taiji-light-glass':1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},rawSkin=sg('skin',''),t=(sg('theme','light')||'light').toLowerCase(),s=(!rawSkin||rawSkin.toLowerCase()==='default'?'taiji-light-glass':rawSkin).toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'light'),skin=skins[s]?s:(m?m[1]:'taiji-light-glass');ss('theme',theme);ss('skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.dataset.skin='taiji-light-glass';}})()</script>
 <script>(function(){try{if(new URLSearchParams(location.search||'').get('taiji_desktop')==='1')document.documentElement.dataset.taijiDesktop='1';}catch(e){}})()</script>
-<script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
+<script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''},fs=sg('font-size','');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#F4F7FD" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#F4F7FD" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" id="hermes-theme-color" content="#F4F7FD">
-<script>(function(){try{var t=localStorage.getItem('hermes-theme')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#F4F7FD';if((localStorage.getItem('hermes-skin')||'taiji-light-glass')==='taiji-light-glass')c='#F4F7FD';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
-<script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
-<script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
+<meta name="theme-color" id="taiji-theme-color" content="#F4F7FD">
+<script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''},t=sg('theme','light')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#F4F7FD';if((sg('skin','taiji-light-glass')||'taiji-light-glass')==='taiji-light-glass')c='#F4F7FD';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
+<script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''};document.documentElement.dataset.workspacePanel=sg('webui-workspace-panel','')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
+<script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''};if(sg('webui-sidebar-collapsed','')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script src="static/brand.js?v=__WEBUI_VERSION__"></script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>window.__TAIJI_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
 <script>(function(){
-  var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
+  var cfg=window.__TAIJI_CONFIG__||{},token=cfg.csrfToken||'';
   if(!token||!window.fetch)return;
   var originalFetch=window.fetch.bind(window);
   function sameOriginUnsafe(input,init){
@@ -49,7 +50,7 @@
     if(sameOriginUnsafe(input,init)){
       var opts=init?Object.assign({},init):{};
       var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
-      if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
+      if(!headers.has('X-Taiji-CSRF-Token'))headers.set('X-Taiji-CSRF-Token',token);
       opts.headers=headers;
       return originalFetch(input,opts);
     }
@@ -60,7 +61,7 @@
     navigator.sendBeacon=function(url,data){
       try{
         if(sameOriginUnsafe(url,{method:'POST'})){
-          var headers={'X-Hermes-CSRF-Token':token};
+          var headers={'X-Taiji-CSRF-Token':token};
           if(data&&data.type)headers['Content-Type']=data.type;
           originalFetch(url,{method:'POST',credentials:'include',headers:headers,body:data,keepalive:true});
           return true;
@@ -111,7 +112,8 @@
     // RTL users don't see an LTR flash on initial load.
     (function(){
       try{
-        if(localStorage.getItem('hermes-rtl')==='true'){
+        var sg=window.__taijiStoreGet||function(k,d){return d||''};
+        if(sg('rtl','')==='true'){
           document.documentElement.classList.add('chat-content-rtl');
         }
       }catch(_){}
@@ -284,7 +286,7 @@
          before any paint. Mirrors the theme/skin/font-size inline scripts in <head>.
          The boot.js _restoreTabVisibility IIFE is a secondary fallback that also
          handles the active-tab switch. -->
-    <script>(function(){try{var h=localStorage.getItem('hermes-webui-hidden-tabs');if(!h)return;var p=JSON.parse(h);if(!Array.isArray(p))return;var a=new Set(['chat','settings']);p.forEach(function(id){if(a.has(id))return;document.querySelectorAll('[data-panel="'+id+'"]').forEach(function(el){el.classList.add('nav-tab-hidden');});});try{var ac=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');if(ac&&ac.classList.contains('nav-tab-hidden')){ac.classList.remove('active');var c=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]')||document.querySelector('.sidebar-nav .nav-tab[data-panel="chat"]');if(c)c.classList.add('active');}}catch(_){}}catch(e){}})();</script>
+    <script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''},h=sg('webui-hidden-tabs','');if(!h)return;var p=JSON.parse(h);if(!Array.isArray(p))return;var a=new Set(['chat','settings']);p.forEach(function(id){if(a.has(id))return;document.querySelectorAll('[data-panel="'+id+'"]').forEach(function(el){el.classList.add('nav-tab-hidden');});});try{var ac=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');if(ac&&ac.classList.contains('nav-tab-hidden')){ac.classList.remove('active');var c=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]')||document.querySelector('.sidebar-nav .nav-tab[data-panel="chat"]');if(c)c.classList.add('active');}}catch(_){}}catch(e){}})();</script>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
       <div class="panel-head">

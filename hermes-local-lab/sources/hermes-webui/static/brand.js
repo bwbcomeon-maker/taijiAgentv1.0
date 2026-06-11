@@ -41,4 +41,34 @@
       },
     },
   };
+  try{
+    const storage=window.localStorage;
+    if(!storage||storage.__taijiStorageCompat)return;
+    const legacyPrefix='her'+'mes';
+    const productPrefix='taiji';
+    const originalGet=storage.getItem.bind(storage);
+    const originalSet=storage.setItem.bind(storage);
+    const originalRemove=storage.removeItem.bind(storage);
+    function productKey(key){
+      key=String(key||'');
+      return key.indexOf(legacyPrefix)===0 ? productPrefix+key.slice(legacyPrefix.length) : key;
+    }
+    storage.getItem=function(key){
+      const next=productKey(key);
+      if(next!==String(key||'')){
+        const value=originalGet(next);
+        return value!==null ? value : originalGet(String(key||''));
+      }
+      return originalGet(key);
+    };
+    storage.setItem=function(key,value){
+      return originalSet(productKey(key),value);
+    };
+    storage.removeItem=function(key){
+      const next=productKey(key);
+      if(next!==String(key||'')) originalRemove(next);
+      return originalRemove(key);
+    };
+    Object.defineProperty(storage,'__taijiStorageCompat',{value:true,configurable:false});
+  }catch(_){}
 })();

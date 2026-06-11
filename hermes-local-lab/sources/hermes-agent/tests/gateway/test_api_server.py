@@ -496,7 +496,7 @@ class TestHealthEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["status"] == "ok"
-            assert data["platform"] == "hermes-agent"
+            assert data["platform"] == "taiji-agent"
 
     @pytest.mark.asyncio
     async def test_v1_health_alias_returns_ok(self, adapter):
@@ -507,7 +507,7 @@ class TestHealthEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["status"] == "ok"
-            assert data["platform"] == "hermes-agent"
+            assert data["platform"] == "taiji-agent"
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +532,7 @@ class TestHealthDetailedEndpoint:
                 assert resp.status == 200
                 data = await resp.json()
                 assert data["status"] == "ok"
-                assert data["platform"] == "hermes-agent"
+                assert data["platform"] == "taiji-agent"
                 assert data["gateway_state"] == "running"
                 assert data["platforms"] == {"telegram": {"state": "connected"}}
                 assert data["active_agents"] == 2
@@ -578,7 +578,7 @@ class TestModelsEndpoint:
             assert data["object"] == "list"
             assert len(data["data"]) == 1
             assert data["data"][0]["id"] == "hermes-agent"
-            assert data["data"][0]["owned_by"] == "hermes"
+            assert data["data"][0]["owned_by"] == "taiji"
 
     @pytest.mark.asyncio
     async def test_models_returns_profile_name(self):
@@ -645,8 +645,8 @@ class TestCapabilitiesEndpoint:
             resp = await cli.get("/v1/capabilities")
             assert resp.status == 200
             data = await resp.json()
-            assert data["object"] == "hermes.api_server.capabilities"
-            assert data["platform"] == "hermes-agent"
+            assert data["object"] == "taiji.api_server.capabilities"
+            assert data["platform"] == "taiji-agent"
             assert data["model"] == "hermes-agent"
             assert data["auth"]["type"] == "bearer"
             assert data["auth"]["required"] is False

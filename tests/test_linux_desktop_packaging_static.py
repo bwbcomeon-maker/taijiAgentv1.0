@@ -197,6 +197,46 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             for token in forbidden:
                 self.assertNotIn(token.lower(), lowered, f"{token} leaked in {path}")
 
+    def test_stop_all_cleans_legacy_pid_files_without_visible_legacy_tokens(self):
+        stop_all = read_text("hermes-local-lab/scripts/stop-all.sh")
+        lowered = stop_all.lower()
+
+        self.assertIn("legacy_pid_files", stop_all)
+        self.assertIn("pid_uses_managed_runtime", stop_all)
+        self.assertIn("process_command", stop_all)
+        self.assertIn("not managed by this Taiji runtime", stop_all)
+        self.assertIn("lsof", stop_all)
+        for forbidden in ("hermes-agent.pid", "hermes-webui.pid", "hermes_cli.main"):
+            self.assertNotIn(forbidden, lowered)
+
+    def test_api_server_public_health_and_capability_payloads_use_product_brand(self):
+        api_server = read_text("hermes-local-lab/sources/hermes-agent/gateway/platforms/api_server.py")
+
+        self.assertIn('"platform": "taiji-agent"', api_server)
+        self.assertIn('"owned_by": "taiji"', api_server)
+        self.assertIn('"object": "taiji.api_server.capabilities"', api_server)
+        self.assertNotIn('"platform": "hermes-agent"', api_server)
+        self.assertNotIn('"owned_by": "hermes"', api_server)
+        self.assertNotIn('"object": "hermes.api_server.capabilities"', api_server)
+
+    def test_webui_gateway_error_surface_uses_product_copy(self):
+        gateway_chat = read_text("hermes-local-lab/sources/hermes-webui/api/gateway_chat.py")
+        http_error = gateway_chat[
+            gateway_chat.index("def _gateway_http_error_event"):
+            gateway_chat.index("def _gateway_sse_delta")
+        ]
+        empty_response = gateway_chat[
+            gateway_chat.index("if not assistant_text:"):
+            gateway_chat.index("with _get_session_agent_lock", gateway_chat.index("if not assistant_text:"))
+        ]
+
+        for text in (http_error, empty_response):
+            lowered = text.lower()
+            self.assertIn("太极", text)
+            self.assertNotIn("hermes", lowered)
+            self.assertNotIn("gateway returned no assistant message", lowered)
+            self.assertNotIn("hermes_webui_gateway_api_key", lowered)
+
     def test_build_script_distinguishes_public_pem_from_private_keys(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
 
