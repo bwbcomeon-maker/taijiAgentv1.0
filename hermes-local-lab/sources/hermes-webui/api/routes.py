@@ -4186,7 +4186,7 @@ def _handle_license_import(handler, body):
             tmp.chmod(0o600)
         except OSError:
             pass
-        status = license_mod.load_license_status(path=tmp)
+        status = license_mod.load_license_status(path=tmp, check_state=False)
         if status.status != "valid":
             tmp.unlink(missing_ok=True)
             return j(handler, status.to_public_dict(), status=400)

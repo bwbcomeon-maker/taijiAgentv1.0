@@ -149,11 +149,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         for text in (runtime_env, start_agent, start_webui, main_js):
             self.assertIn("TAIJI_LICENSE_FILE", text)
+            self.assertIn("TAIJI_LICENSE_STATE_FILE", text)
             self.assertIn("TAIJI_LICENSE_REQUIRED", text)
             self.assertNotIn("HERMES_LICENSE", text)
             self.assertNotIn("HERMES_LICENSE_FILE", text)
 
         self.assertIn('$TAIJI_CONFIG_DIR/license.jwt', runtime_env)
+        self.assertIn('$TAIJI_STATE_DIR/license-state.json', runtime_env)
         self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_agent)
         self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_webui)
 
