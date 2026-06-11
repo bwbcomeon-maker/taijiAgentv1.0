@@ -58,6 +58,7 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+import taiji_license
 
 logger = logging.getLogger(__name__)
 
@@ -1020,9 +1021,28 @@ class APIServerAdapter(BasePlatformAdapter):
     # HTTP Handlers
     # ------------------------------------------------------------------
 
+    def _license_guard_response(self) -> Optional["web.Response"]:
+        blocked = taiji_license.require_valid_license()
+        if blocked is None:
+            return None
+        return web.json_response(
+            _openai_error(
+                blocked.message or taiji_license.MESSAGE_INVALID,
+                code=blocked.code or "license_invalid",
+            ),
+            status=403,
+        )
+
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
+
+    async def _handle_license_status(self, request: "web.Request") -> "web.Response":
+        """GET /v1/license/status — return redacted license state."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        return web.json_response(taiji_license.load_license_status().to_public_dict())
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — rich status for cross-container dashboard probing.
@@ -1043,6 +1063,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "exit_reason": runtime.get("exit_reason"),
             "updated_at": runtime.get("updated_at"),
             "pid": os.getpid(),
+            "license": taiji_license.load_license_status().to_public_dict(),
         })
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
@@ -1488,6 +1509,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        license_err = self._license_guard_response()
+        if license_err:
+            return license_err
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
@@ -1532,6 +1556,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        license_err = self._license_guard_response()
+        if license_err:
+            return license_err
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
@@ -1671,6 +1698,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        license_err = self._license_guard_response()
+        if license_err:
+            return license_err
 
         # Parse request body
         try:
@@ -2740,6 +2770,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        license_err = self._license_guard_response()
+        if license_err:
+            return license_err
 
         # Long-term memory scope header (see chat_completions for details).
         gateway_session_key, key_err = self._parse_session_key_header(request)
@@ -3087,6 +3120,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        license_err = self._license_guard_response()
+        if license_err:
+            return license_err
         cron_err = self._check_jobs_available()
         if cron_err:
             return cron_err
@@ -3516,6 +3552,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        license_err = self._license_guard_response()
+        if license_err:
+            return license_err
 
         # Long-term memory scope header (see chat_completions for details).
         gateway_session_key, key_err = self._parse_session_key_header(request)
@@ -4052,6 +4091,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/health", self._handle_health)
+            self._app.router.add_get("/v1/license/status", self._handle_license_status)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)

@@ -40,6 +40,7 @@ fi
 
 TAIJI_RUNTIME_HOME="${TAIJI_RUNTIME_HOME:-${TAIJI_AGENT_RUNTIME_HOME:-$LAB_DIR/runtime-home}}"
 TAIJI_WORKSPACE="${TAIJI_WORKSPACE:-$LAB_DIR/workspace}"
+TAIJI_LICENSE_FILE="${TAIJI_LICENSE_FILE:-${TAIJI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/taiji-agent}/license.jwt}"
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
 WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
@@ -120,6 +121,38 @@ if [ -n "$agent_version" ]; then
 else
   fail "Taiji Agent version command failed"
 fi
+
+license_status="$("$TAIJI_AGENT_PYTHON" - "$AGENT_DIR" <<'PY' 2>/dev/null || true
+import sys
+
+agent_dir = sys.argv[1]
+if agent_dir:
+    sys.path.insert(0, agent_dir)
+try:
+    import taiji_license
+    data = taiji_license.load_license_status().to_public_dict()
+    print("|".join(str(data.get(key) or "-") for key in ("status", "code", "expires_at", "remaining_days")))
+except Exception as exc:
+    print(f"invalid|license_status_unavailable|-|-")
+PY
+)"
+case "$license_status" in
+  valid\|*)
+    ok "Taiji license valid: expires=$(printf '%s' "$license_status" | cut -d'|' -f3) remaining_days=$(printf '%s' "$license_status" | cut -d'|' -f4)"
+    ;;
+  missing\|*)
+    warn "Taiji license missing; Agent execution will be blocked when license is required"
+    ;;
+  expired\|*)
+    warn "Taiji license expired; Agent execution is blocked until license is updated"
+    ;;
+  invalid\|*)
+    warn "Taiji license invalid; Agent execution is blocked when license is required"
+    ;;
+  *)
+    warn "Taiji license status unavailable"
+    ;;
+esac
 
 check_pid "Taiji Agent" "$LOG_DIR/agent.pid" || true
 if lsof -nP -iTCP:"$AGENT_API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then

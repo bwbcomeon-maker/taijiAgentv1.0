@@ -93,6 +93,12 @@ scan_private_key_material() {
     exit 1
   fi
 
+  if find "$INSTALL_ROOT" \( -name 'license.jwt' -o -name '*.jwt' \) | grep -q .; then
+    echo "Package tree contains customer license files; refusing release." >&2
+    find "$INSTALL_ROOT" \( -name 'license.jwt' -o -name '*.jwt' \) >&2
+    exit 1
+  fi
+
   private_key_paths=""
   while IFS= read -r -d '' candidate; do
     if grep -Eq 'BEGIN .*PRIVATE KEY' "$candidate" 2>/dev/null; then
@@ -232,6 +238,8 @@ stage_python_runtime() {
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     --exclude '.env' \
+    --exclude 'license.jwt' \
+    --exclude '*.jwt' \
     --exclude '.pytest_cache' \
     --exclude '.playwright-mcp' \
     --exclude 'docs' \
@@ -271,6 +279,8 @@ stage_python_runtime() {
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     --exclude '.env' \
+    --exclude 'license.jwt' \
+    --exclude '*.jwt' \
     --exclude '.pytest_cache' \
     --exclude '.github' \
     --exclude 'docs' \
@@ -358,6 +368,10 @@ esac
 for cmd in dpkg-deb rsync npm sha256sum file ldd strings perl; do
   require_cmd "$cmd"
 done
+
+if [ -n "${TAIJI_LICENSE_PRIVATE_KEY:-}" ] || [ -n "${TAIJI_LICENSE_PRIVATE_KEY_FILE:-}" ]; then
+  warn "license signing private-key environment variables are ignored by package builds"
+fi
 
 SOURCE_AGENT_PYTHON="$SOURCE_AGENT_DIR/venv/bin/python"
 if [ ! -x "$SOURCE_AGENT_PYTHON" ]; then

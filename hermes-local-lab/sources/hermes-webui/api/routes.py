@@ -4117,6 +4117,91 @@ def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
     ) or True
 
 
+def _taiji_license_module():
+    agent_dir = str(os.environ.get("TAIJI_WEBUI_AGENT_DIR") or os.environ.get("TAIJI_AGENT_AGENT_DIR") or "").strip()
+    candidates = []
+    if agent_dir:
+        candidates.append(Path(agent_dir).expanduser())
+    candidates.append(Path(__file__).resolve().parents[2] / "hermes-agent")
+    for candidate in candidates:
+        if candidate.exists():
+            text = str(candidate)
+            if text not in sys.path:
+                sys.path.insert(0, text)
+            break
+    import taiji_license
+
+    return taiji_license
+
+
+def _taiji_license_error_status(message: str, code: str = "license_invalid") -> dict:
+    required = str(os.environ.get("TAIJI_LICENSE_REQUIRED", "")).strip().lower() in {"1", "true", "yes", "on"}
+    return {
+        "status": "invalid",
+        "required": required,
+        "code": code,
+        "message": message,
+        "features": [],
+    }
+
+
+def _taiji_license_status() -> dict:
+    try:
+        return _taiji_license_module().load_license_status().to_public_dict()
+    except Exception:
+        logger.exception("failed to load license status")
+        return _taiji_license_error_status("授权校验不可用，请联系服务方更新安装。", "license_status_unavailable")
+
+
+def _taiji_license_blocked_status() -> dict | None:
+    try:
+        blocked = _taiji_license_module().require_valid_license()
+        return blocked.to_public_dict() if blocked is not None else None
+    except Exception:
+        logger.exception("failed to check license before chat start")
+        if str(os.environ.get("TAIJI_LICENSE_REQUIRED", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            return _taiji_license_error_status("授权校验不可用，请联系服务方更新安装。", "license_status_unavailable")
+        return None
+
+
+def _handle_license_status(handler):
+    return j(handler, _taiji_license_status())
+
+
+def _handle_license_import(handler, body):
+    raw = body.get("license") if isinstance(body, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return bad(handler, "license is required", status=400)
+    token = raw.strip()
+    if len(token.encode("utf-8")) > 64 * 1024:
+        return bad(handler, "license file is too large", status=413)
+
+    try:
+        license_mod = _taiji_license_module()
+        target = license_mod.default_license_path()
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(token + "\n", encoding="utf-8")
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass
+        status = license_mod.load_license_status(path=tmp)
+        if status.status != "valid":
+            tmp.unlink(missing_ok=True)
+            return j(handler, status.to_public_dict(), status=400)
+        os.replace(tmp, target)
+        try:
+            target.chmod(0o600)
+            target.parent.chmod(0o700)
+        except OSError:
+            pass
+        return j(handler, license_mod.load_license_status().to_public_dict())
+    except Exception as exc:
+        logger.exception("failed to import license")
+        return bad(handler, f"license import failed: {_sanitize_error(exc)}", status=500)
+
+
 def _clear_stale_stream_state(session) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
@@ -7451,6 +7536,9 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_model_config())
 
+    if parsed.path == "/api/license/status":
+        return _handle_license_status(handler)
+
     if parsed.path == "/api/image-gen/config":
         from api.model_config import get_image_gen_config
 
@@ -8987,6 +9075,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
             return bad(handler, str(exc), status=500)
+
+    if parsed.path == "/api/license/import":
+        return _handle_license_import(handler, body)
 
     if parsed.path == "/api/image-gen/config":
         from api.model_config import set_image_gen_config
@@ -13399,6 +13490,92 @@ def _start_brand_privacy_safe_stream_for_session(
     return response
 
 
+def _record_license_blocked_turn_for_session(
+    s,
+    *,
+    msg: str,
+    attachments=None,
+    workspace: str,
+    model: str,
+    model_provider=None,
+    normalized_model: bool = False,
+    license_status: dict | None = None,
+    diag=None,
+):
+    """Persist a local authorization reply without starting an agent stream."""
+    diag.stage("license_blocked_turn") if diag else None
+    attachments = attachments or []
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        with STREAMS_LOCK:
+            current_active = current_stream_id in STREAMS
+        if current_active:
+            return {
+                "error": "session already has an active stream",
+                "active_stream_id": current_stream_id,
+                "_status": 409,
+            }
+        _clear_stale_stream_state(s)
+
+    now = time.time()
+    reply = (
+        (license_status or {}).get("message")
+        or "授权不可用，请联系服务方更新授权。"
+    )
+    with _get_session_agent_lock(s.session_id):
+        was_hidden_empty_session = _is_hidden_empty_session(s)
+        s.workspace = workspace
+        s.model = model
+        s.model_provider = model_provider
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+        s.pending_started_at = None
+        user_msg = {"role": "user", "content": msg, "timestamp": int(now)}
+        if attachments:
+            user_msg["attachments"] = list(attachments)
+        assistant_msg = {
+            "role": "assistant",
+            "content": reply,
+            "timestamp": int(now),
+            "license_blocked": True,
+        }
+        s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
+        s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+            {"role": "user", "content": msg},
+            {"role": "assistant", "content": reply},
+        ]
+        s.messages = scrub_messages(s.messages)
+        s.context_messages = copy.deepcopy(s.context_messages)
+        if s.title in ("Untitled", "New Chat", "") or not s.title:
+            s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
+        s.save()
+    if was_hidden_empty_session:
+        publish_session_list_changed("session_new")
+    else:
+        publish_session_list_changed("session_update")
+
+    raw_session = scrub_public_session_payload(
+        s.compact() | {
+            "messages": s.messages,
+            "tool_calls": getattr(s, "tool_calls", []) or [],
+        }
+    )
+    response = {
+        "license_blocked": True,
+        "message": reply,
+        "license": license_status or {},
+        "session_id": s.session_id,
+        "session": redact_session_data(raw_session),
+        "title": s.title,
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return response
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -13759,6 +13936,22 @@ def _handle_chat_start(handler, body, diag=None):
             requested_model,
             requested_provider,
         )
+        license_status = _taiji_license_blocked_status()
+        if license_status is not None:
+            response = _record_license_blocked_turn_for_session(
+                s,
+                msg=msg,
+                attachments=attachments,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                normalized_model=normalized_model,
+                license_status=license_status,
+                diag=diag,
+            )
+            status = int(response.pop("_status", 200) or 200)
+            diag.stage("response_write") if diag else None
+            return j(handler, response, status=status)
         if is_brand_probe(msg):
             response = _start_brand_privacy_safe_stream_for_session(
                 s,

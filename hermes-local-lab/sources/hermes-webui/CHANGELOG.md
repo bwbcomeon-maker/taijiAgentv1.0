@@ -12,6 +12,7 @@
 - Added dynamic Taiji secondary panels for all desktop navigation entries: Chat keeps live recent conversations, while Tasks, Kanban, Writing, Skills, Memory, Workspaces, Profiles, Todos, Insights, Logs, and Settings now show their real module side panels instead of the conversation list.
 - Added a real `mainTodos` workspace panel so the desktop Taiji navigation can show the current session task list instead of falling back to Chat.
 - Settings now includes a Model Configuration panel for active-profile defaults: main chat provider/model, auxiliary task models, and image-generation provider/model are saved to the active Hermes `config.yaml` and `.env` without echoing secrets back to the browser.
+- Settings now includes a Taiji trial license panel with redacted status, expiry, remaining days, and local license import. When a required license is missing, expired, or invalid, chat start records an assistant authorization notice without launching an Agent stream.
 
 ### Changed
 

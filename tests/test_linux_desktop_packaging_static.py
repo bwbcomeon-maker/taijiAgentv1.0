@@ -141,6 +141,31 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             start_webui,
         )
 
+    def test_runtime_start_scripts_enable_product_license_gate(self):
+        runtime_env = read_text("hermes-local-lab/scripts/runtime-env.sh")
+        start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
+        start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+
+        for text in (runtime_env, start_agent, start_webui, main_js):
+            self.assertIn("TAIJI_LICENSE_FILE", text)
+            self.assertIn("TAIJI_LICENSE_REQUIRED", text)
+            self.assertNotIn("HERMES_LICENSE", text)
+            self.assertNotIn("HERMES_LICENSE_FILE", text)
+
+        self.assertIn('$TAIJI_CONFIG_DIR/license.jwt', runtime_env)
+        self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_agent)
+        self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_webui)
+
+    def test_packaging_never_embeds_customer_license_or_private_key_inputs(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn("scan_private_key_material", build)
+        self.assertIn("license.jwt", build)
+        self.assertIn("TAIJI_LICENSE_PRIVATE_KEY", build)
+        self.assertNotIn("cp \"$ROOT_DIR/license.jwt\"", build)
+        self.assertNotIn("BEGIN RSA PRIVATE KEY", build)
+
     def test_packaged_runtime_uses_product_layout_and_sourceless_python(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
 

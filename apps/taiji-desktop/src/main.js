@@ -327,6 +327,9 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_WEBUI_PORT = String(webuiPort);
   env.API_SERVER_KEY = crypto.randomBytes(32).toString("hex");
   env.TAIJI_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  env.TAIJI_LICENSE_FILE = process.env.TAIJI_LICENSE_FILE || path.join(configHome, "taiji-agent", "license.jwt");
+  env.TAIJI_LICENSE_REQUIRED = process.env.TAIJI_LICENSE_REQUIRED || "1";
   return env;
 }
 

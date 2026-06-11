@@ -6,6 +6,7 @@
 - Runtime 脚本：`hermes-local-lab/scripts/runtime-env.sh` 统一处理开发态和安装态路径。
 - 安装态用户目录：
   - 配置：`~/.config/taiji-agent/.env`
+  - 试用授权：`~/.config/taiji-agent/license.jwt`
   - 数据：`~/.local/share/taiji-agent/hermes-home`
   - 工作区：`~/.local/share/taiji-agent/workspace`
   - 日志：`~/.local/state/taiji-agent/logs`
@@ -64,6 +65,7 @@ TAIJI_AGENT_VERSION=0.1.0 ./packaging/linux/deb/build-deb.sh
 - 在 macOS 或非 x86_64/amd64 主机上构建最终包。
 - Electron runtime 不是 Linux x86_64 ELF，或 `ldd` 显示缺少共享库。
 - 包内出现 `.env`、私钥、macOS metadata、`__pycache__`、`*.pyc`。公共 CA 证书类 PEM 可进入 Python venv，但 PEM/证书文件内容中出现 `BEGIN ... PRIVATE KEY` 会拒绝发布。
+- 包内出现客户 `license.jwt` 或其他 `*.jwt` 授权文件。试用授权必须通过交付目录预置或设置页导入，不进入 DEB。
 - 默认非密产品配置模板缺失、字段不完整，或 YAML 实际字段里出现敏感凭据形态。
 - DEB 产物字符串中出现 `LIBARCHIVE`、`com.apple`、`PaxHeaders`、`SCHILY.xattr` 等历史失败标记。
 
@@ -95,6 +97,8 @@ TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify
 taiji-agent-diagnose
 taiji --help
 ```
+
+如果要预置试用授权，把我方签发的 `license.jwt` 放在 `02_目标终端_安装并验证.sh` 同目录，或执行时设置 `TAIJI_LICENSE_SOURCE=/path/to/license.jwt`。安装脚本会复制到 `~/.config/taiji-agent/license.jwt` 并设置为 `0600`；没有授权文件时安装不失败，但首次执行 Agent 对话会提示授权缺失。
 
 安装后从开始菜单双击“太极 Agent”。Electron 会以当前桌面用户启动本地 Agent API 和 WebUI，运行目录位于 `~/.config/taiji-agent`、`~/.local/share/taiji-agent`、`~/.local/state/taiji-agent`；关闭窗口会停止本次会话对应的本地进程。
 

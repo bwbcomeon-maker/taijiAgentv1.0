@@ -25,6 +25,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.fake_bin.mkdir()
         self.fake_state = self.tmp_path / "state"
         self.fake_state.mkdir()
+        self.fake_home = self.tmp_path / "home"
+        self.fake_home.mkdir()
         self.fake_log = self.tmp_path / "fake.log"
         self.import_script = self.tmp_path / "install_import.sh"
         self._write_import_script()
@@ -219,6 +221,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export PATH="{self.fake_bin}:$PATH"
                 export FAKE_STATE="{self.fake_state}"
                 export FAKE_LOG="{self.fake_log}"
+                export HOME="{self.fake_home}"
                 export FAKE_APT_PURGE_FAIL="{1 if apt_purge_fails else 0}"
                 export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
                 export FAKE_LSOF_MODE="{lsof_mode}"
@@ -316,6 +319,17 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn("apt-get purge -y taiji-agent", log)
         self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertIn("sudo apt-get install -y --reinstall", log)
+
+    def test_adjacent_license_is_installed_to_user_config_with_owner_only_mode(self):
+        (self.tmp_path / "license.jwt").write_text("signed-license-token\n", encoding="utf-8")
+
+        result = self.run_install_package()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        target = self.fake_home / ".config" / "taiji-agent" / "license.jwt"
+        self.assertEqual(target.read_text(encoding="utf-8"), "signed-license-token\n")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertIn("license.jwt", self.fake_log_text() + result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

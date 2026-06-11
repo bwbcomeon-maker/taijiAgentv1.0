@@ -75,4 +75,7 @@ if [ -f "$RUNTIME_ENV" ]; then
   set +a
 fi
 
+TAIJI_LICENSE_FILE="${TAIJI_LICENSE_FILE:-$TAIJI_CONFIG_DIR/license.jwt}"
+# TAIJI_LICENSE_REQUIRED is set by product launchers so shared env resolution stays reusable.
+
 mkdir -p "$LOG_DIR" "$TMP_DIR" "$TAIJI_RUNTIME_HOME" "$TAIJI_WORKSPACE"

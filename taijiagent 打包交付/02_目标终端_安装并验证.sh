@@ -304,6 +304,28 @@ prepare_legacy_replacement() {
   ok "旧版 taiji-agent 已彻底清理完成"
 }
 
+install_trial_license() {
+  local source="${TAIJI_LICENSE_SOURCE:-}"
+  if [ -n "$source" ] && [ ! -f "$source" ]; then
+    fail "指定的授权文件不存在：$source"
+  fi
+  if [ -z "$source" ] && [ -f "$SCRIPT_DIR/license.jwt" ]; then
+    source="$SCRIPT_DIR/license.jwt"
+  fi
+  if [ -z "$source" ]; then
+    warn "未发现预置授权文件 license.jwt；应用可安装，但试用授权状态会显示为缺失。"
+    return 0
+  fi
+
+  local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  local target_dir="$config_home/taiji-agent"
+  local target="$target_dir/license.jwt"
+  mkdir -p "$target_dir"
+  chmod 0700 "$target_dir" || true
+  install -m 0600 "$source" "$target"
+  ok "已安装试用授权：license.jwt"
+}
+
 install_package() {
   validate_build_marker
 
@@ -323,6 +345,7 @@ install_package() {
 
   info "安装太极 Agent。这里可能需要输入 sudo 密码。"
   sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
+  install_trial_license
   check_port_conflict "安装后" || fail "安装后端口检查未通过。"
   verify_legacy_services_inactive
 }

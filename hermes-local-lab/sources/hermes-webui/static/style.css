@@ -4120,6 +4120,8 @@ main.main > #mainPlugin{display:none;}
 .model-config-status b{font-size:11px;line-height:1.2;color:var(--muted);font-weight:650;}
 .model-config-status em{margin-top:4px;font-style:normal;font-size:12px;line-height:1.25;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .model-config-status.loading{opacity:.72;}
+.taiji-license-panel[data-license-status="valid"]{border-color:color-mix(in srgb,var(--success) 38%,var(--border));}
+.taiji-license-panel[data-license-status="expired"],.taiji-license-panel[data-license-status="missing"],.taiji-license-panel[data-license-status="invalid"]{border-color:color-mix(in srgb,var(--error) 34%,var(--border));}
 .model-config-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:12px;}
 .model-config-panel{border:1px solid var(--border);border-radius:8px;background:var(--input-bg);padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0;}
 .model-config-panel-wide{margin-top:12px;}

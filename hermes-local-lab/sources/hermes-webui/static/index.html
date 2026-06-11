@@ -1363,6 +1363,23 @@
               </div>
               <button class="btn-tiny" type="button" onclick="loadModelConfigPanel(true)">刷新</button>
             </div>
+            <section class="model-config-panel model-config-panel-wide taiji-license-panel" id="taijiLicensePanel">
+              <div class="model-config-panel-head">
+                <strong>授权</strong>
+                <span id="taijiLicenseSummary">正在读取授权状态</span>
+              </div>
+              <div class="model-config-status taiji-license-status" aria-live="polite">
+                <span><b>状态</b><em id="taijiLicenseStatus">—</em></span>
+                <span><b>客户</b><em id="taijiLicenseCustomer">—</em></span>
+                <span><b>到期</b><em id="taijiLicenseExpires">—</em></span>
+                <span><b>剩余</b><em id="taijiLicenseRemaining">—</em></span>
+              </div>
+              <div class="model-config-actions">
+                <input id="taijiLicenseFile" type="file" accept=".jwt,.txt,application/jwt,text/plain" hidden>
+                <button class="sm-btn" type="button" id="btnImportTaijiLicense">导入授权文件</button>
+                <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权状态</button>
+              </div>
+            </section>
             <div class="model-config-status" id="modelConfigStatus" aria-live="polite">
               <span><b>配置档</b><em id="modelConfigProfile">—</em></span>
               <span><b>配置文件</b><em id="modelConfigPath">—</em></span>

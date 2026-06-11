@@ -554,6 +554,34 @@ async function send(){
       attachments:uploaded.length?uploaded:undefined
     })});
 
+    if(startData.license_blocked){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      stopApprovalPolling();
+      stopClarifyPolling();
+      removeThinking();
+      S.activeStreamId=null;
+      if(S.session&&S.session.session_id===activeSid){
+        S.session.active_stream_id=null;
+        S.session.pending_user_message=null;
+        if(startData.title) S.session.title=startData.title;
+        if(startData.session){
+          S.session=Object.assign({},S.session,startData.session);
+        }
+      }
+      if(startData.session&&Array.isArray(startData.session.messages)){
+        S.messages=startData.session.messages;
+      }else{
+        S.messages.push({role:'assistant',content:startData.message||'授权不可用，请联系服务方更新授权。',license_blocked:true,_ts:Date.now()/1000});
+      }
+      renderMessages();
+      setBusy(false);
+      setComposerStatus('');
+      if(typeof updateSendBtn==='function') updateSendBtn();
+      if(typeof renderSessionList==='function') void renderSessionList();
+      return;
+    }
+
     if(startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(startData.effective_model && S.session){

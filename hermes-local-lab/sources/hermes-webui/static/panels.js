@@ -8161,8 +8161,99 @@ function _renderModelConfigPanel(data){
  _syncImageGenConfigControls();
 }
 
+let _taijiLicenseData=null;
+
+function _taijiLicenseStatusLabel(status){
+ const s=String(status&&status.status||'').toLowerCase();
+ if(s==='valid') return '有效';
+ if(s==='expired') return '已到期';
+ if(s==='missing') return '未安装';
+ if(s==='invalid') return '无效';
+ return '未知';
+}
+
+function _formatTaijiLicenseDate(value){
+ if(!value) return '—';
+ const dt=new Date(value);
+ if(Number.isNaN(dt.getTime())) return String(value);
+ return dt.toLocaleString();
+}
+
+function _renderTaijiLicenseStatus(data){
+ _taijiLicenseData=data||{};
+ const statusEl=$('taijiLicenseStatus');
+ const customerEl=$('taijiLicenseCustomer');
+ const expiresEl=$('taijiLicenseExpires');
+ const remainingEl=$('taijiLicenseRemaining');
+ const summaryEl=$('taijiLicenseSummary');
+ const panel=$('taijiLicensePanel');
+ const label=_taijiLicenseStatusLabel(_taijiLicenseData);
+ if(statusEl) statusEl.textContent=label;
+ if(customerEl) customerEl.textContent=_taijiLicenseData.customer||'—';
+ if(expiresEl) expiresEl.textContent=_formatTaijiLicenseDate(_taijiLicenseData.expires_at);
+ if(remainingEl){
+  remainingEl.textContent=typeof _taijiLicenseData.remaining_days==='number'
+   ? (_taijiLicenseData.remaining_days+' 天')
+   : '—';
+ }
+ if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(_taijiLicenseData.status==='valid'?'授权可用':'授权状态不可用');
+ if(panel){
+  panel.dataset.licenseStatus=_taijiLicenseData.status||'unknown';
+ }
+}
+
+async function loadTaijiLicenseStatus(force){
+ if(_taijiLicenseData&&!force){
+  _renderTaijiLicenseStatus(_taijiLicenseData);
+  return _taijiLicenseData;
+ }
+ try{
+  const data=await api('/api/license/status');
+  _renderTaijiLicenseStatus(data);
+  return data;
+ }catch(e){
+  const data={status:'invalid',message:'授权状态读取失败'};
+  _renderTaijiLicenseStatus(data);
+  if(typeof showToast==='function') showToast('授权状态读取失败：'+(e.message||e),5000,'error');
+  return data;
+ }
+}
+
+function _bindTaijiLicenseControls(){
+ const fileInput=$('taijiLicenseFile');
+ const importBtn=$('btnImportTaijiLicense');
+ const refreshBtn=$('btnRefreshTaijiLicense');
+ if(importBtn&&!importBtn.dataset.bound){
+  importBtn.dataset.bound='1';
+  importBtn.addEventListener('click',()=>{ if(fileInput) fileInput.click(); });
+ }
+ if(refreshBtn&&!refreshBtn.dataset.bound){
+  refreshBtn.dataset.bound='1';
+  refreshBtn.addEventListener('click',()=>loadTaijiLicenseStatus(true));
+ }
+ if(fileInput&&!fileInput.dataset.bound){
+  fileInput.dataset.bound='1';
+  fileInput.addEventListener('change',async()=>{
+   const file=fileInput.files&&fileInput.files[0];
+   fileInput.value='';
+   if(!file) return;
+   try{
+    const text=await file.text();
+    const data=await api('/api/license/import',{method:'POST',body:JSON.stringify({license:text})});
+    _renderTaijiLicenseStatus(data);
+    if(typeof showToast==='function') showToast('授权文件已导入');
+   }catch(e){
+    await loadTaijiLicenseStatus(true);
+    if(typeof showToast==='function') showToast('授权文件导入失败：'+(e.message||e),5000,'error');
+   }
+  });
+ }
+}
+
 async function loadModelConfigPanel(force){
  const status=$('modelConfigStatus');
+ _bindTaijiLicenseControls();
+ loadTaijiLicenseStatus(force).catch(()=>{});
  if(status&&!_modelConfigData) status.classList.add('loading');
  if(_modelConfigData&&!force){
   _renderModelConfigPanel(_modelConfigData);

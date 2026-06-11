@@ -127,6 +127,43 @@ for group in ("nav", "settings_sections", "composer"):
 PY
 }
 
+license_summary() {
+  local py
+  py="$(python_bin)"
+  if [ -z "$py" ]; then
+    printf 'python unavailable; skipped license summary\n'
+    return 0
+  fi
+  "$py" - "$AGENT_DIR" <<'PY' 2>&1 | redact_stream
+import json
+import sys
+
+agent_dir = sys.argv[1]
+if agent_dir:
+    sys.path.insert(0, agent_dir)
+
+try:
+    import taiji_license
+    data = taiji_license.load_license_status().to_public_dict()
+except Exception as exc:
+    data = {
+        "status": "invalid",
+        "code": "license_status_unavailable",
+        "message": f"license status unavailable: {exc}",
+    }
+
+safe = {
+    "status": data.get("status"),
+    "code": data.get("code"),
+    "customer": data.get("customer"),
+    "expires_at": data.get("expires_at"),
+    "remaining_days": data.get("remaining_days"),
+    "message": data.get("message"),
+}
+print(json.dumps({k: v for k, v in safe.items() if v is not None}, ensure_ascii=False, indent=2))
+PY
+}
+
 attachment_capabilities() {
   local py
   py="$(python_bin)"
@@ -226,6 +263,9 @@ fi
 
 section "Config Summary"
 config_summary
+
+section "License Summary"
+license_summary
 
 section "Attachment Capabilities"
 attachment_capabilities
