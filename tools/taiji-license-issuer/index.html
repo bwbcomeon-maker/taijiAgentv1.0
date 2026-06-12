@@ -49,6 +49,15 @@
         </label>
 
         <label class="field span-2">
+          <span>机器码文件</span>
+          <div class="path-row machine-row">
+            <input id="machineRequestPath" name="machineRequestPath" autocomplete="off" readonly required placeholder="请选择 taiji-machine-request.json">
+            <button id="chooseMachineRequest" type="button" class="secondary">文件</button>
+            <button id="chooseMachineRequestDir" type="button" class="secondary">目录</button>
+          </div>
+        </label>
+
+        <label class="field span-2">
           <span>导出路径</span>
           <div class="path-row">
             <input id="outputPath" name="outputPath" autocomplete="off" required>

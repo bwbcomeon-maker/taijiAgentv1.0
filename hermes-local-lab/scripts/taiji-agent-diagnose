@@ -158,6 +158,12 @@ safe = {
     "customer": data.get("customer"),
     "expires_at": data.get("expires_at"),
     "remaining_days": data.get("remaining_days"),
+    "machine_binding_required": data.get("machine_binding_required"),
+    "machine_bound": data.get("machine_bound"),
+    "machine_matched": data.get("machine_matched"),
+    "machine_code_short": data.get("machine_code_short"),
+    "bound_machine_code_short": data.get("bound_machine_code_short"),
+    "machine_label": data.get("machine_label"),
     "message": data.get("message"),
 }
 print(json.dumps({k: v for k, v in safe.items() if v is not None}, ensure_ascii=False, indent=2))

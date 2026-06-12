@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -15,6 +17,8 @@ import jwt
 
 PRODUCT = "taiji-agent"
 PRIVATE_KEY_ENV = "TAIJI_LICENSE_PRIVATE_KEY_FILE"
+MACHINE_BINDING_TYPE = "machine_fingerprint_v1"
+MACHINE_CODE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _parse_date(value: str | None, *, default: datetime) -> datetime:
@@ -40,6 +44,28 @@ def _features(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _machine_binding_from_args(args: argparse.Namespace) -> tuple[str, str]:
+    machine_code = args.machine_code.strip().lower()
+    machine_label = args.machine_label.strip()
+    if args.machine_request:
+        request_path = Path(args.machine_request).expanduser()
+        try:
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Invalid machine request file: {request_path}") from exc
+        if not isinstance(request, dict):
+            raise SystemExit("Invalid machine request file: expected JSON object")
+        if request.get("product") not in (None, PRODUCT):
+            raise SystemExit("Machine request product does not match taiji-agent")
+        if request.get("binding_type") != MACHINE_BINDING_TYPE:
+            raise SystemExit("Machine request binding_type is invalid")
+        machine_code = str(request.get("machine_code") or "").strip().lower()
+        machine_label = machine_label or str(request.get("machine_label") or request.get("hostname") or "").strip()
+    if not MACHINE_CODE_RE.fullmatch(machine_code):
+        raise SystemExit("A valid --machine-request or --machine-code is required")
+    return machine_code, machine_label
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Issue a signed Taiji Agent trial license.")
     parser.add_argument("--customer", required=True, help="Customer display name.")
@@ -49,10 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--not-before", default="", help="ISO start time. Defaults to now.")
     parser.add_argument("--features", default="chat,writing", help="Comma-separated feature list.")
     parser.add_argument("--max-version", default="", help="Optional maximum supported app version.")
+    parser.add_argument("--machine-request", default="", help="taiji-machine-request.json exported from the target terminal.")
+    parser.add_argument("--machine-code", default="", help="Direct machine_code value, sha256:<64 hex>.")
+    parser.add_argument("--machine-label", default="", help="Optional terminal label stored in the license.")
     args = parser.parse_args(argv)
 
     if args.days <= 0:
         raise SystemExit("--days must be greater than 0")
+    machine_code, machine_label = _machine_binding_from_args(args)
 
     private_key_file = os.environ.get(PRIVATE_KEY_ENV, "").strip()
     if not private_key_file:
@@ -75,7 +105,11 @@ def main(argv: list[str] | None = None) -> int:
         "exp": int(exp.timestamp()),
         "expires_at": _iso(exp),
         "features": _features(args.features),
+        "binding_type": MACHINE_BINDING_TYPE,
+        "machine_code": machine_code,
     }
+    if machine_label:
+        payload["machine_label"] = machine_label
     if args.max_version.strip():
         payload["max_version"] = args.max_version.strip()
 

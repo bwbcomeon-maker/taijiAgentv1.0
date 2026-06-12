@@ -4168,6 +4168,21 @@ def _handle_license_status(handler):
     return j(handler, _taiji_license_status())
 
 
+def _handle_license_machine_request(handler, parsed):
+    query = parse_qs(parsed.query)
+    customer = (query.get("customer") or [""])[0]
+    machine_label = (query.get("machine_label") or [""])[0]
+    try:
+        payload = _taiji_license_module().build_machine_request(
+            customer=customer,
+            machine_label=machine_label,
+        )
+        return j(handler, payload)
+    except Exception as exc:
+        logger.exception("failed to build license machine request")
+        return bad(handler, f"machine request failed: {_sanitize_error(exc)}", status=500)
+
+
 def _handle_license_import(handler, body):
     raw = body.get("license") if isinstance(body, dict) else None
     if not isinstance(raw, str) or not raw.strip():
@@ -7548,6 +7563,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/license/status":
         return _handle_license_status(handler)
+
+    if parsed.path == "/api/license/machine-request":
+        return _handle_license_machine_request(handler, parsed)
 
     if parsed.path == "/api/image-gen/config":
         from api.model_config import get_image_gen_config

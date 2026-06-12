@@ -14,8 +14,11 @@ def test_license_settings_panel_and_import_controls_are_present():
 
     assert "taijiLicensePanel" in html
     assert "taijiLicenseFile" in html
+    assert "taijiLicenseMachine" in html
+    assert "btnExportTaijiMachineRequest" in html
     assert "/api/license/status" in panels_js
     assert "/api/license/import" in panels_js
+    assert "/api/license/machine-request" in panels_js
 
 
 def test_chat_start_handles_license_blocked_without_stream():
@@ -30,3 +33,5 @@ def test_backend_exposes_license_status_and_import_routes():
 
     assert 'path == "/api/license/status"' in routes_py
     assert 'path == "/api/license/import"' in routes_py
+    assert 'path == "/api/license/machine-request"' in routes_py
+    assert "build_machine_request" in routes_py

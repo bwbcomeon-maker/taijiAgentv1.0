@@ -8185,6 +8185,7 @@ function _renderTaijiLicenseStatus(data){
  const customerEl=$('taijiLicenseCustomer');
  const expiresEl=$('taijiLicenseExpires');
  const remainingEl=$('taijiLicenseRemaining');
+ const machineEl=$('taijiLicenseMachine');
  const summaryEl=$('taijiLicenseSummary');
  const panel=$('taijiLicensePanel');
  const label=_taijiLicenseStatusLabel(_taijiLicenseData);
@@ -8195,6 +8196,16 @@ function _renderTaijiLicenseStatus(data){
   remainingEl.textContent=typeof _taijiLicenseData.remaining_days==='number'
    ? (_taijiLicenseData.remaining_days+' 天')
    : '—';
+ }
+ if(machineEl){
+  const shortCode=_taijiLicenseData.machine_code_short||'—';
+  if(_taijiLicenseData.machine_bound&&_taijiLicenseData.machine_matched===false){
+   machineEl.textContent='不匹配 · '+shortCode;
+  }else if(_taijiLicenseData.machine_bound&&_taijiLicenseData.machine_matched===true){
+   machineEl.textContent='匹配 · '+shortCode;
+  }else{
+   machineEl.textContent=shortCode;
+  }
  }
  if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(_taijiLicenseData.status==='valid'?'授权可用':'授权状态不可用');
  if(panel){
@@ -8219,10 +8230,23 @@ async function loadTaijiLicenseStatus(force){
  }
 }
 
+function _downloadJsonFile(filename,data){
+ const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json;charset=utf-8'});
+ const url=URL.createObjectURL(blob);
+ const link=document.createElement('a');
+ link.href=url;
+ link.download=filename;
+ document.body.appendChild(link);
+ link.click();
+ link.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
 function _bindTaijiLicenseControls(){
  const fileInput=$('taijiLicenseFile');
  const importBtn=$('btnImportTaijiLicense');
  const refreshBtn=$('btnRefreshTaijiLicense');
+ const machineBtn=$('btnExportTaijiMachineRequest');
  if(importBtn&&!importBtn.dataset.bound){
   importBtn.dataset.bound='1';
   importBtn.addEventListener('click',()=>{ if(fileInput) fileInput.click(); });
@@ -8230,6 +8254,18 @@ function _bindTaijiLicenseControls(){
  if(refreshBtn&&!refreshBtn.dataset.bound){
   refreshBtn.dataset.bound='1';
   refreshBtn.addEventListener('click',()=>loadTaijiLicenseStatus(true));
+ }
+ if(machineBtn&&!machineBtn.dataset.bound){
+  machineBtn.dataset.bound='1';
+  machineBtn.addEventListener('click',async()=>{
+   try{
+    const data=await api('/api/license/machine-request');
+    _downloadJsonFile('taiji-machine-request.json',data);
+    if(typeof showToast==='function') showToast('本机机器码文件已生成');
+   }catch(e){
+    if(typeof showToast==='function') showToast('本机机器码导出失败：'+(e.message||e),5000,'error');
+   }
+  });
  }
  if(fileInput&&!fileInput.dataset.bound){
   fileInput.dataset.bound='1';

@@ -7,9 +7,14 @@ const publicKeyPath = document.getElementById("publicKeyPath");
 const resultBox = document.getElementById("resultBox");
 const outputPath = document.getElementById("outputPath");
 const chooseOutput = document.getElementById("chooseOutput");
+const machineRequestPath = document.getElementById("machineRequestPath");
+const chooseMachineRequest = document.getElementById("chooseMachineRequest");
+const chooseMachineRequestDir = document.getElementById("chooseMachineRequestDir");
 const initializeKey = document.getElementById("initializeKey");
 const resetBtn = document.getElementById("resetBtn");
 const summary = document.getElementById("summary");
+let machineRequests = [];
+let statusCache = {};
 
 function value(id) {
   return document.getElementById(id).value.trim();
@@ -44,6 +49,7 @@ function updateSummary() {
     ["起始", Number.isNaN(nbf.getTime()) ? "时间格式无效" : isoUtc(nbf)],
     ["到期", exp ? isoUtc(exp) : "-"],
     ["功能", value("features") || "-"],
+    ["机器", machineRequests.length ? `${machineRequests.length} 台 · ${machineRequests[0].machineCodeShort || "-"}` : "-"],
   ];
   summary.replaceChildren();
   for (const [label, text] of rows) {
@@ -66,11 +72,13 @@ function readForm() {
     notBefore: value("notBefore"),
     maxVersion: value("maxVersion"),
     outputPath: value("outputPath"),
+    machineRequests,
   };
 }
 
 async function loadStatus() {
   const status = await window.taijiLicenseIssuer.getStatus();
+  statusCache = status || {};
   if (!outputPath.value) {
     outputPath.value = status.suggestedOutputPath || "";
   }
@@ -116,12 +124,47 @@ chooseOutput.addEventListener("click", async () => {
   }
 });
 
+function applyMachineSelection(selected) {
+  if (!selected || selected.canceled) return;
+  if (selected.ok === false) {
+    machineRequests = [];
+    machineRequestPath.value = selected.filePath || selected.dirPath || "";
+    setResult(selected.error || "机器码文件读取失败", "danger");
+    updateSummary();
+    return;
+  }
+  machineRequests = selected.requests || [];
+  machineRequestPath.value = selected.filePath || selected.dirPath || "";
+  if (machineRequests.length > 1 && (!outputPath.value || outputPath.value.endsWith("license.jwt"))) {
+    outputPath.value = statusCache.suggestedBatchOutputPath || outputPath.value.replace(/license\.jwt$/, "taiji-licenses.zip");
+  }
+  setResult(
+    machineRequests.length > 1
+      ? `已导入 ${machineRequests.length} 台机器码，批量导出将生成 zip。`
+      : `已导入机器码：${machineRequests[0] ? machineRequests[0].machineCodeShort : "-"}`,
+    "muted",
+  );
+  updateSummary();
+}
+
+chooseMachineRequest.addEventListener("click", async () => {
+  const selected = await window.taijiLicenseIssuer.chooseMachineRequest();
+  applyMachineSelection(selected);
+});
+
+chooseMachineRequestDir.addEventListener("click", async () => {
+  const selected = await window.taijiLicenseIssuer.chooseMachineRequestDir();
+  applyMachineSelection(selected);
+});
+
 initializeKey.addEventListener("click", () => {
   initializeSigningKey().catch((err) => setResult(err.message || String(err), "danger"));
 });
 
 resetBtn.addEventListener("click", () => {
   form.reset();
+  machineRequests = [];
+  machineRequestPath.value = "";
   document.getElementById("days").value = "30";
   document.getElementById("features").value = "chat,writing";
   loadStatus().catch((err) => setResult(err.message || String(err), "danger"));
@@ -147,13 +190,19 @@ form.addEventListener("submit", async (event) => {
     setResult(response.error || "生成失败", "danger");
     return;
   }
+  const exportLine = response.batch
+    ? `已导出批量包：${response.outputPath}`
+    : `已导出：${response.outputPath}`;
+  const expiryLine = response.payload
+    ? `到期时间：${response.payload.expires_at}`
+    : `授权数量：${response.files.length}`;
   setResult(
     [
-      `已导出：${response.outputPath}`,
-      `到期时间：${response.payload.expires_at}`,
+      exportLine,
+      expiryLine,
       `公钥：${response.publicKeyPath}`,
       `签发记录：${response.recordPath}`,
-      `摘要：${response.tokenHash}`,
+      response.tokenHash ? `摘要：${response.tokenHash}` : `文件：${response.files.map((item) => item.name).join(", ")}`,
     ].join("\n"),
     "ok",
   );

@@ -9,6 +9,28 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 import taiji_license
 
 
+TEST_MACHINE_CODE = "sha256:" + "a" * 64
+OTHER_MACHINE_CODE = "sha256:" + "b" * 64
+TEST_MACHINE_FINGERPRINT = {
+    "binding_type": "machine_fingerprint_v1",
+    "machine_code": TEST_MACHINE_CODE,
+    "machine_code_short": "aaaaaaaaaaaa",
+    "hostname": "test-host",
+    "generated_at": "2026-06-12T00:00:00Z",
+    "collection_version": 1,
+    "signals": [{"name": "machine_id", "available": True}],
+}
+UNAVAILABLE_MACHINE_FINGERPRINT = {
+    "binding_type": "machine_fingerprint_v1",
+    "machine_code": None,
+    "machine_code_short": None,
+    "hostname": "test-host",
+    "generated_at": "2026-06-12T00:00:00Z",
+    "collection_version": 1,
+    "signals": [{"name": "machine_id", "available": False}],
+}
+
+
 @pytest.fixture()
 def signing_keys():
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -31,6 +53,9 @@ def _write_token(path, private_pem, **overrides):
         "customer": "测试客户",
         "product": "taiji-agent",
         "aud": "taiji-agent",
+        "binding_type": "machine_fingerprint_v1",
+        "machine_code": TEST_MACHINE_CODE,
+        "machine_label": "测试终端",
         "iat": now - 60,
         "nbf": now - 60,
         "exp": now + 86400,
@@ -51,6 +76,7 @@ def test_valid_license_returns_public_status(tmp_path, signing_keys):
         path=path,
         public_key=public_pem,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert status.status == "valid"
@@ -61,8 +87,14 @@ def test_valid_license_returns_public_status(tmp_path, signing_keys):
     public = status.to_public_dict()
     assert public["status"] == "valid"
     assert public["customer"] == "测试客户"
+    assert public["machine_bound"] is True
+    assert public["machine_matched"] is True
+    assert public["machine_code_short"] == "aaaaaaaaaaaa"
+    assert public["bound_machine_code_short"] == "aaaaaaaaaaaa"
+    assert public["machine_label"] == "测试终端"
     assert "token" not in public
     assert "path" not in public
+    assert TEST_MACHINE_CODE not in json.dumps(public)
 
 
 def test_missing_required_license_has_stable_code(tmp_path, signing_keys):
@@ -148,6 +180,7 @@ def test_require_valid_license_writes_success_state_once(tmp_path, signing_keys)
         now=1_000_000,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert blocked is None
@@ -171,6 +204,7 @@ def test_success_state_write_is_throttled(tmp_path, signing_keys):
         now=1_000_000,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
     taiji_license.require_valid_license(
         path=path,
@@ -178,6 +212,7 @@ def test_success_state_write_is_throttled(tmp_path, signing_keys):
         now=1_000_030,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
     throttled = json.loads(state_path.read_text(encoding="utf-8"))
     assert throttled["last_successful_validation_at"] == 1_000_000
@@ -188,6 +223,7 @@ def test_success_state_write_is_throttled(tmp_path, signing_keys):
         now=1_000_061,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
     updated = json.loads(state_path.read_text(encoding="utf-8"))
     assert updated["last_successful_validation_at"] == 1_000_061
@@ -215,6 +251,7 @@ def test_clock_rollback_blocks_without_rewriting_state(tmp_path, signing_keys):
         now=999_000,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert blocked is not None
@@ -246,6 +283,7 @@ def test_clock_rollback_recovers_after_time_is_corrected(tmp_path, signing_keys)
         now=999_000,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
     assert blocked is not None
 
@@ -255,6 +293,7 @@ def test_clock_rollback_recovers_after_time_is_corrected(tmp_path, signing_keys)
         now=1_000_120,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert recovered is None
@@ -285,6 +324,7 @@ def test_future_expired_license_does_not_pollute_success_state(tmp_path, signing
         now=now + 10 * 86400,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert blocked is not None
@@ -305,6 +345,7 @@ def test_invalid_license_does_not_create_success_state(tmp_path, signing_keys):
         now=1_000_000,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert status.status == "invalid"
@@ -324,6 +365,7 @@ def test_corrupted_success_state_is_invalid(tmp_path, signing_keys):
         now=1_000_000,
         state_path=state_path,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert status.status == "invalid"
@@ -345,6 +387,7 @@ def test_import_style_validation_can_skip_local_success_state(tmp_path, signing_
         state_path=state_path,
         check_state=False,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert status.status == "valid"
@@ -371,6 +414,7 @@ def test_source_checkout_uses_internal_issuer_public_key_for_gui_license(tmp_pat
             "TAIJI_LICENSE_REQUIRED": "1",
             "TAIJI_AGENT_ROOT": str(lab_root),
         },
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
 
     assert status.status == "valid"
@@ -399,3 +443,96 @@ def test_installed_runtime_does_not_trust_sibling_issuer_public_key_without_sour
 
     assert status.status == "invalid"
     assert status.code == "license_invalid_signature"
+
+
+def test_unbound_license_is_rejected_when_machine_binding_is_required(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    path = tmp_path / "unbound.jwt"
+    _write_token(path, private_pem, binding_type=None, machine_code=None, machine_label=None)
+
+    status = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
+    )
+
+    assert status.status == "invalid"
+    assert status.code == "license_machine_binding_required"
+    assert "本机" in status.message
+
+
+def test_machine_bound_license_rejects_other_machine_code(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    path = tmp_path / "other-machine.jwt"
+    _write_token(path, private_pem, machine_code=OTHER_MACHINE_CODE)
+
+    status = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
+    )
+
+    assert status.status == "invalid"
+    assert status.code == "license_machine_mismatch"
+    assert status.message == "授权文件与本机不匹配，请联系服务方重新签发。"
+    public = status.to_public_dict()
+    assert public["machine_bound"] is True
+    assert public["machine_matched"] is False
+    assert public["machine_code_short"] == "aaaaaaaaaaaa"
+    assert public["bound_machine_code_short"] == "bbbbbbbbbbbb"
+
+
+def test_machine_bound_license_requires_local_fingerprint(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    path = tmp_path / "license.jwt"
+    _write_token(path, private_pem)
+
+    status = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=UNAVAILABLE_MACHINE_FINGERPRINT,
+    )
+
+    assert status.status == "invalid"
+    assert status.code == "license_machine_fingerprint_unavailable"
+    assert "机器码" in status.message
+
+
+def test_unbound_license_can_be_read_when_machine_binding_is_explicitly_disabled(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    path = tmp_path / "legacy.jwt"
+    _write_token(path, private_pem, binding_type=None, machine_code=None, machine_label=None)
+
+    status = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1", "TAIJI_LICENSE_MACHINE_BINDING_REQUIRED": "0"},
+        check_state=False,
+    )
+
+    assert status.status == "valid"
+    assert status.machine_binding_required is False
+    assert status.machine_bound is False
+
+
+def test_machine_request_is_redacted_and_contains_short_fingerprint():
+    request = taiji_license.build_machine_request(
+        customer="测试客户",
+        machine_label="一号终端",
+        machine_fingerprint=TEST_MACHINE_FINGERPRINT,
+        now=1781179200,
+    )
+
+    assert request["request_type"] == "taiji_machine_license_request"
+    assert request["product"] == "taiji-agent"
+    assert request["customer"] == "测试客户"
+    assert request["machine_label"] == "一号终端"
+    assert request["binding_type"] == "machine_fingerprint_v1"
+    assert request["machine_code"] == TEST_MACHINE_CODE
+    assert request["machine_code_short"] == "aaaaaaaaaaaa"
+    raw = json.dumps(request, ensure_ascii=False)
+    assert "PRIVATE KEY" not in raw
+    assert "00:11" not in raw

@@ -152,6 +152,10 @@ input:focus {
   gap: 10px;
 }
 
+.path-row.machine-row {
+  grid-template-columns: minmax(0, 1fr) 86px 86px;
+}
+
 .actions {
   display: flex;
   align-items: center;

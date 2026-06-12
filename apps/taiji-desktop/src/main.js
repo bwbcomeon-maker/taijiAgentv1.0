@@ -333,6 +333,7 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_STATE_DIR = stateDir;
   env.TAIJI_LICENSE_STATE_FILE = process.env.TAIJI_LICENSE_STATE_FILE || path.join(stateDir, "license-state.json");
   env.TAIJI_LICENSE_REQUIRED = process.env.TAIJI_LICENSE_REQUIRED || "1";
+  env.TAIJI_LICENSE_MACHINE_BINDING_REQUIRED = process.env.TAIJI_LICENSE_MACHINE_BINDING_REQUIRED || "1";
   return env;
 }
 

@@ -151,11 +151,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertIn("TAIJI_LICENSE_FILE", text)
             self.assertIn("TAIJI_LICENSE_STATE_FILE", text)
             self.assertIn("TAIJI_LICENSE_REQUIRED", text)
+            self.assertIn("TAIJI_LICENSE_MACHINE_BINDING_REQUIRED", text)
             self.assertNotIn("HERMES_LICENSE", text)
             self.assertNotIn("HERMES_LICENSE_FILE", text)
 
         self.assertIn('$TAIJI_CONFIG_DIR/license.jwt', runtime_env)
         self.assertIn('$TAIJI_STATE_DIR/license-state.json', runtime_env)
+        self.assertIn('TAIJI_LICENSE_MACHINE_BINDING_REQUIRED="${TAIJI_LICENSE_MACHINE_BINDING_REQUIRED:-1}"', runtime_env)
         self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_agent)
         self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_webui)
 
@@ -171,6 +173,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertNotIn("taiji-license-issuer", build)
         self.assertIn("tools/taiji-license-issuer/private/signing-private.pem", gitignore)
         self.assertIn("tools/taiji-license-issuer/*.jwt", gitignore)
+        self.assertIn("tools/taiji-license-issuer/*.zip", gitignore)
+        self.assertIn("tools/taiji-license-issuer/taiji-machine-request*.json", gitignore)
 
     def test_packaged_runtime_uses_product_layout_and_sourceless_python(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

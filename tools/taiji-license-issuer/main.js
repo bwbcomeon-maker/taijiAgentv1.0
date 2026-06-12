@@ -16,6 +16,10 @@ function defaultOutputPath() {
   return path.join(app.getPath("desktop") || os.homedir(), "license.jwt");
 }
 
+function defaultBatchOutputPath() {
+  return path.join(app.getPath("desktop") || os.homedir(), "taiji-licenses.zip");
+}
+
 function privateKeyStatus() {
   const privateKeyPath = core.resolvePrivateKeyPath();
   return {
@@ -25,6 +29,7 @@ function privateKeyStatus() {
     privateKeyFromEnv: Boolean(process.env[core.PRIVATE_KEY_ENV]),
     recordPath: core.defaultRecordPath(),
     suggestedOutputPath: defaultOutputPath(),
+    suggestedBatchOutputPath: defaultBatchOutputPath(),
   };
 }
 
@@ -90,13 +95,47 @@ ipcMain.handle("issuer:choose-output", async () => {
   return { canceled: false, filePath: result.filePath };
 });
 
+ipcMain.handle("issuer:choose-machine-request", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择本机机器码文件",
+    properties: ["openFile"],
+    filters: [{ name: "Taiji machine request", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) {
+    return { canceled: true };
+  }
+  try {
+    const request = core.readMachineRequestFile(result.filePaths[0]);
+    return { canceled: false, filePath: result.filePaths[0], requests: [request] };
+  } catch (err) {
+    return { canceled: false, ok: false, error: safeError(err), filePath: result.filePaths[0], requests: [] };
+  }
+});
+
+ipcMain.handle("issuer:choose-machine-request-dir", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择机器码文件目录",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) {
+    return { canceled: true };
+  }
+  try {
+    const requests = core.readMachineRequestDirectory(result.filePaths[0]);
+    return { canceled: false, dirPath: result.filePaths[0], requests };
+  } catch (err) {
+    return { canceled: false, ok: false, error: safeError(err), dirPath: result.filePaths[0], requests: [] };
+  }
+});
+
 ipcMain.handle("issuer:generate", async (_event, form) => {
   try {
     const privateKeyPath = core.resolvePrivateKeyPath();
     if (!fs.existsSync(privateKeyPath)) {
       return { ok: false, code: "private_key_missing", error: `发证私钥未安装：${privateKeyPath}` };
     }
-    const result = core.issueAndWriteLicense({
+    const machineRequests = Array.isArray(form.machineRequests) ? form.machineRequests : [];
+    const common = {
       customer: form.customer,
       days: Number(form.days),
       features: form.features,
@@ -105,14 +144,19 @@ ipcMain.handle("issuer:generate", async (_event, form) => {
       maxVersion: form.maxVersion,
       outputPath: form.outputPath,
       privateKeyPath,
-    });
+    };
+    const result = machineRequests.length > 1
+      ? core.issueBatchZip({ ...common, machineRequests })
+      : core.issueAndWriteLicense({ ...common, machineRequest: machineRequests[0] });
     return {
       ok: true,
+      batch: machineRequests.length > 1,
       outputPath: result.outputPath,
       publicKeyPath: core.resolvePublicKeyPath({ privateKeyPath }),
       recordPath: result.recordPath,
-      payload: result.payload,
-      tokenHash: result.tokenHash,
+      payload: result.payload || null,
+      tokenHash: result.tokenHash || null,
+      files: result.files || [],
     };
   } catch (err) {
     return { ok: false, error: safeError(err) };

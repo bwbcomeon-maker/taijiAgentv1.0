@@ -14,6 +14,8 @@ CORE_JS = ROOT / "tools" / "taiji-license-issuer" / "issuer-core.js"
 APP_BUNDLE = ROOT / "tools" / "taiji-license-issuer" / "启动太极License签发工具.app"
 AGENT_PYTHON = ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "venv" / "bin" / "python"
 AGENT_DIR = ROOT / "hermes-local-lab" / "sources" / "hermes-agent"
+TEST_MACHINE_CODE = "sha256:" + "c" * 64
+OTHER_MACHINE_CODE = "sha256:" + "d" * 64
 
 
 def _node(script: str, *, env: dict | None = None) -> dict:
@@ -45,6 +47,14 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const publicPath = {json.dumps(str(tmp / "public.pem"))};
                 const outputPath = {json.dumps(str(tmp / "license.jwt"))};
                 const recordPath = {json.dumps(str(tmp / "issued_licenses.jsonl"))};
+                const machineRequest = {{
+                  request_type: 'taiji_machine_license_request',
+                  product: 'taiji-agent',
+                  binding_type: 'machine_fingerprint_v1',
+                  machine_code: {json.dumps(TEST_MACHINE_CODE)},
+                  machine_code_short: 'cccccccccccc',
+                  machine_label: '一号终端'
+                }};
                 fs.writeFileSync(privatePath, privatePem);
                 fs.writeFileSync(publicPath, publicPem);
                 const result = core.issueAndWriteLicense({{
@@ -57,6 +67,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                   outputPath,
                   privateKeyPath: privatePath,
                   recordPath,
+                  machineRequest,
                   now: new Date('2026-06-11T08:00:00Z')
                 }});
                 const record = fs.readFileSync(recordPath, 'utf8').trim();
@@ -80,12 +91,18 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             self.assertEqual(payload["not_before"], "2026-06-11T00:00:00Z")
             self.assertEqual(payload["expires_at"], "2026-07-11T00:00:00Z")
             self.assertEqual(payload["max_version"], "1.2.3")
+            self.assertEqual(payload["binding_type"], "machine_fingerprint_v1")
+            self.assertEqual(payload["machine_code"], TEST_MACHINE_CODE)
+            self.assertEqual(payload["machine_label"], "一号终端")
 
             record = json.loads(data["record"])
             self.assertEqual(record["license_id"], "lic-gui-test")
             self.assertEqual(record["customer"], "测试客户")
+            self.assertEqual(record["machine_code_short"], "cccccccccccc")
+            self.assertEqual(record["machine_label"], "一号终端")
             self.assertEqual(record["jwt_hash"][:7], "sha256:")
             self.assertNotIn(data["token"], data["record"])
+            self.assertNotIn(TEST_MACHINE_CODE, data["record"])
             self.assertNotIn("PRIVATE KEY", data["record"])
 
             verify_script = textwrap.dedent(
@@ -101,6 +118,11 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     public_key=public_key,
                     now=1781179200,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
+                    machine_fingerprint={{
+                        'binding_type': 'machine_fingerprint_v1',
+                        'machine_code': {json.dumps(TEST_MACHINE_CODE)},
+                        'machine_code_short': 'cccccccccccc',
+                    }},
                     check_state=False,
                 )
                 print(status.status)
@@ -125,6 +147,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
               () => core.issueLicense({{ customer: '客户', days: 0, features: 'chat', privateKeyPem: 'x' }}),
               () => core.issueLicense({{ customer: '客户', days: 30, features: ' , ', privateKeyPem: 'x' }}),
               () => core.issueLicense({{ customer: '客户', days: 30, features: 'chat' }}),
+              () => core.issueLicense({{ customer: '客户', days: 30, features: 'chat', privateKeyPem: 'x' }}),
             ];
             const messages = cases.map((fn) => {{
               try {{
@@ -143,6 +166,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
         self.assertIn("有效天数必须大于 0", data["messages"][1])
         self.assertIn("功能包不能为空", data["messages"][2])
         self.assertIn("发证私钥未安装", data["messages"][3])
+        self.assertIn("请先导入机器码文件", data["messages"][4])
 
     def test_default_private_key_path_can_be_overridden_by_env(self):
         with tempfile.TemporaryDirectory() as td:
@@ -158,6 +182,92 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             data = _node(script)
             self.assertEqual(data["path"], str(override))
 
+    def test_cli_issuer_requires_machine_binding_and_generates_valid_license(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            key_script = textwrap.dedent(
+                f"""
+                const crypto = require('crypto');
+                const fs = require('fs');
+                const keys = crypto.generateKeyPairSync('rsa', {{ modulusLength: 2048 }});
+                fs.writeFileSync({json.dumps(str(tmp / "private.pem"))}, keys.privateKey.export({{ type: 'pkcs8', format: 'pem' }}));
+                fs.writeFileSync({json.dumps(str(tmp / "public.pem"))}, keys.publicKey.export({{ type: 'spki', format: 'pem' }}));
+                console.log(JSON.stringify({{ ok: true }}));
+                """
+            )
+            _node(key_script)
+            machine_request = tmp / "taiji-machine-request.json"
+            machine_request.write_text(
+                json.dumps(
+                    {
+                        "request_type": "taiji_machine_license_request",
+                        "product": "taiji-agent",
+                        "binding_type": "machine_fingerprint_v1",
+                        "machine_code": TEST_MACHINE_CODE,
+                        "machine_code_short": "cccccccccccc",
+                        "machine_label": "CLI 终端",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            output_path = tmp / "license.jwt"
+            subprocess.run(
+                [
+                    str(AGENT_PYTHON),
+                    str(ROOT / "hermes-local-lab" / "scripts" / "taiji_license_tool.py"),
+                    "--customer",
+                    "CLI 客户",
+                    "--days",
+                    "30",
+                    "--machine-request",
+                    str(machine_request),
+                    "--not-before",
+                    "2026-06-12T00:00:00Z",
+                    "--output",
+                    str(output_path),
+                ],
+                cwd=ROOT,
+                env={**os.environ, "TAIJI_LICENSE_PRIVATE_KEY_FILE": str(tmp / "private.pem")},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+
+            verify_script = textwrap.dedent(
+                f"""
+                import pathlib
+                import sys
+                sys.path.insert(0, {json.dumps(str(AGENT_DIR))})
+                import taiji_license
+                status = taiji_license.load_license_status(
+                    path=pathlib.Path({json.dumps(str(output_path))}),
+                    public_key=pathlib.Path({json.dumps(str(tmp / "public.pem"))}).read_text(encoding='utf-8'),
+                    now=1781222400,
+                    environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
+                    machine_fingerprint={{
+                        'binding_type': 'machine_fingerprint_v1',
+                        'machine_code': {json.dumps(TEST_MACHINE_CODE)},
+                        'machine_code_short': 'cccccccccccc',
+                    }},
+                    check_state=False,
+                )
+                print(status.status)
+                print(status.machine_label)
+                """
+            )
+            verifier = subprocess.run(
+                [str(AGENT_PYTHON), "-c", verify_script],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            lines = verifier.stdout.strip().splitlines()
+            self.assertEqual(lines, ["valid", "CLI 终端"])
+
     def test_initializer_creates_signing_key_pair_and_license_can_be_verified(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -167,6 +277,14 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const result = core.initializeSigningKeyPair({{
                   privateKeyPath: {json.dumps(str(tmp / "private" / "signing-private.pem"))}
                 }});
+                const machineRequest = {{
+                  request_type: 'taiji_machine_license_request',
+                  product: 'taiji-agent',
+                  binding_type: 'machine_fingerprint_v1',
+                  machine_code: {json.dumps(TEST_MACHINE_CODE)},
+                  machine_code_short: 'cccccccccccc',
+                  machine_label: '桌面终端'
+                }};
                 const issued = core.issueAndWriteLicense({{
                   customer: '国家电网',
                   days: 30,
@@ -174,6 +292,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                   outputPath: {json.dumps(str(tmp / "license.jwt"))},
                   privateKeyPath: result.privateKeyPath,
                   recordPath: {json.dumps(str(tmp / "issued_licenses.jsonl"))},
+                  machineRequest,
                   now: new Date('2026-06-12T00:00:00Z')
                 }});
                 console.log(JSON.stringify({{
@@ -205,6 +324,11 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     public_key={json.dumps(data["publicKeyPem"])},
                     now=1781222400,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
+                    machine_fingerprint={{
+                        'binding_type': 'machine_fingerprint_v1',
+                        'machine_code': {json.dumps(TEST_MACHINE_CODE)},
+                        'machine_code_short': 'cccccccccccc',
+                    }},
                     check_state=False,
                 )
                 print(status.status)
@@ -232,6 +356,73 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
         self.assertIn('issuer:initialize-key', main_js)
         self.assertIn("initializeKey.addEventListener", renderer_js)
         self.assertIn("缺少签发私钥", renderer_js)
+        self.assertIn("chooseMachineRequest", preload_js)
+        self.assertIn("chooseMachineRequestDir", preload_js)
+        self.assertIn("issuer:choose-machine-request", main_js)
+        self.assertIn("issuer:choose-machine-request-dir", main_js)
+        self.assertIn("machineRequestPath", index_html)
+
+    def test_issuer_batch_generates_zip_per_machine_and_safe_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            script = textwrap.dedent(
+                f"""
+                const crypto = require('crypto');
+                const fs = require('fs');
+                const core = require({json.dumps(str(CORE_JS))});
+                const keys = crypto.generateKeyPairSync('rsa', {{ modulusLength: 2048 }});
+                const privatePem = keys.privateKey.export({{ type: 'pkcs8', format: 'pem' }});
+                const privatePath = {json.dumps(str(tmp / "private.pem"))};
+                const zipPath = {json.dumps(str(tmp / "licenses.zip"))};
+                const recordPath = {json.dumps(str(tmp / "issued_licenses.jsonl"))};
+                fs.writeFileSync(privatePath, privatePem);
+                const result = core.issueBatchZip({{
+                  customer: '批量客户',
+                  days: 15,
+                  features: 'chat,writing',
+                  outputPath: zipPath,
+                  privateKeyPath: privatePath,
+                  recordPath,
+                  now: new Date('2026-06-12T00:00:00Z'),
+                  machineRequests: [
+                    {{
+                      request_type: 'taiji_machine_license_request',
+                      product: 'taiji-agent',
+                      binding_type: 'machine_fingerprint_v1',
+                      machine_code: {json.dumps(TEST_MACHINE_CODE)},
+                      machine_code_short: 'cccccccccccc',
+                      machine_label: '一号终端'
+                    }},
+                    {{
+                      request_type: 'taiji_machine_license_request',
+                      product: 'taiji-agent',
+                      binding_type: 'machine_fingerprint_v1',
+                      machine_code: {json.dumps(OTHER_MACHINE_CODE)},
+                      machine_code_short: 'dddddddddddd',
+                      machine_label: '二号终端'
+                    }}
+                  ]
+                }});
+                console.log(JSON.stringify({{
+                  outputPath: result.outputPath,
+                  files: result.files,
+                  records: fs.readFileSync(recordPath, 'utf8').trim().split('\\n')
+                }}));
+                """
+            )
+            data = _node(script)
+
+            self.assertEqual(len(data["files"]), 2)
+            self.assertTrue(Path(data["outputPath"]).is_file())
+            self.assertEqual(len(data["records"]), 2)
+            self.assertNotIn(TEST_MACHINE_CODE, "\n".join(data["records"]))
+            self.assertNotIn(OTHER_MACHINE_CODE, "\n".join(data["records"]))
+            with __import__("zipfile").ZipFile(data["outputPath"]) as archive:
+                names = sorted(archive.namelist())
+                self.assertEqual(len(names), 2)
+                self.assertTrue(all(name.endswith(".jwt") for name in names))
+                tokens = [archive.read(name).decode("utf-8").strip() for name in names]
+                self.assertTrue(all(token.count(".") == 2 for token in tokens))
 
     def test_macos_app_bundle_double_click_launcher_is_structurally_valid(self):
         info_path = APP_BUNDLE / "Contents" / "Info.plist"

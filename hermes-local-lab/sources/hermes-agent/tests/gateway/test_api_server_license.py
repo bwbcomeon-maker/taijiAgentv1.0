@@ -115,3 +115,34 @@ async def test_clock_rollback_code_is_preserved_before_agent_run(monkeypatch):
     assert body["error"]["code"] == "license_clock_rollback"
     assert "系统时间异常" in body["error"]["message"]
     create_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_machine_mismatch_code_is_preserved_before_agent_run(monkeypatch):
+    monkeypatch.setenv("TAIJI_LICENSE_REQUIRED", "1")
+    adapter = _make_adapter()
+    app = _create_license_app(adapter)
+    blocked = taiji_license.LicenseStatus(
+        status="invalid",
+        required=True,
+        code="license_machine_mismatch",
+        message="授权文件与本机不匹配，请联系服务方重新签发。",
+        machine_binding_required=True,
+        machine_bound=True,
+        machine_matched=False,
+        machine_code_short="aaaaaaaaaaaa",
+        bound_machine_code_short="bbbbbbbbbbbb",
+    )
+
+    async with TestClient(TestServer(app)) as cli:
+        with patch(
+            "gateway.platforms.api_server.taiji_license.require_valid_license",
+            return_value=blocked,
+        ), patch.object(adapter, "_create_agent") as create_agent:
+            resp = await cli.post("/v1/responses", json={"input": "hello"})
+            body = await resp.json()
+
+    assert resp.status == 403
+    assert body["error"]["code"] == "license_machine_mismatch"
+    assert "不匹配" in body["error"]["message"]
+    create_agent.assert_not_called()

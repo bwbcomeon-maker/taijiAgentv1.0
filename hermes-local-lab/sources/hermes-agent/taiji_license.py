@@ -6,7 +6,10 @@ import hashlib
 import json
 import math
 import os
+import re
+import socket
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +29,15 @@ LICENSE_FILE_ENV = "TAIJI_LICENSE_FILE"
 LICENSE_STATE_FILE_ENV = "TAIJI_LICENSE_STATE_FILE"
 LICENSE_PUBLIC_KEY_ENV = "TAIJI_LICENSE_PUBLIC_KEY"
 LICENSE_PUBLIC_KEY_FILE_ENV = "TAIJI_LICENSE_PUBLIC_KEY_FILE"
+LICENSE_MACHINE_BINDING_REQUIRED_ENV = "TAIJI_LICENSE_MACHINE_BINDING_REQUIRED"
 VERSION_ENV = "TAIJI_AGENT_VERSION"
 LICENSE_STATE_SCHEMA_VERSION = 1
 LICENSE_CLOCK_ROLLBACK_TOLERANCE_SECONDS = 300
 LICENSE_STATE_WRITE_THROTTLE_SECONDS = 60
+MACHINE_BINDING_TYPE = "machine_fingerprint_v1"
+MACHINE_FINGERPRINT_SCHEMA_VERSION = 1
+MACHINE_REQUEST_SCHEMA_VERSION = 1
+MACHINE_REQUEST_TYPE = "taiji_machine_license_request"
 
 DEFAULT_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuDxQwbVMj7rey/sh63tG
@@ -48,6 +56,11 @@ MESSAGE_INVALID = "授权文件无效，请联系服务方更新授权。"
 MESSAGE_NOT_YET_VALID = "授权尚未生效，请联系服务方确认授权时间。"
 MESSAGE_VERSION_EXCEEDED = "当前版本不在授权范围内，请联系服务方更新授权。"
 MESSAGE_CLOCK_ROLLBACK = "检测到系统时间异常，请校准本机时间后重试。"
+MESSAGE_MACHINE_MISMATCH = "授权文件与本机不匹配，请联系服务方重新签发。"
+MESSAGE_MACHINE_BINDING_REQUIRED = "授权文件缺少本机绑定信息，请联系服务方重新签发。"
+MESSAGE_MACHINE_FINGERPRINT_UNAVAILABLE = "无法获取本机机器码，请联系服务方处理。"
+
+_MACHINE_FINGERPRINT_CACHE: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,12 @@ class LicenseStatus:
     remaining_days: Optional[int] = None
     features: list[str] = field(default_factory=list)
     max_version: Optional[str] = None
+    machine_binding_required: Optional[bool] = None
+    machine_bound: Optional[bool] = None
+    machine_matched: Optional[bool] = None
+    machine_code_short: Optional[str] = None
+    bound_machine_code_short: Optional[str] = None
+    machine_label: Optional[str] = None
 
     def to_public_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -81,13 +100,39 @@ class LicenseStatus:
             "remaining_days": self.remaining_days,
             "features": list(self.features),
             "max_version": self.max_version,
+            "machine_binding_required": self.machine_binding_required,
+            "machine_bound": self.machine_bound,
+            "machine_matched": self.machine_matched,
+            "machine_code_short": self.machine_code_short,
+            "bound_machine_code_short": self.bound_machine_code_short,
+            "machine_label": self.machine_label,
         }
         return {key: value for key, value in payload.items() if value is not None}
 
 
+def _env_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_falsey(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"0", "false", "no", "off"}
+
+
 def license_required(environ: Optional[Mapping[str, str]] = None) -> bool:
     env = environ if environ is not None else os.environ
-    return str(env.get(LICENSE_REQUIRED_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+    return _env_truthy(env.get(LICENSE_REQUIRED_ENV, ""))
+
+
+def license_machine_binding_required(
+    environ: Optional[Mapping[str, str]] = None,
+    *,
+    required: Optional[bool] = None,
+) -> bool:
+    env = environ if environ is not None else os.environ
+    configured = env.get(LICENSE_MACHINE_BINDING_REQUIRED_ENV)
+    if configured is not None and str(configured).strip():
+        return not _env_falsey(configured)
+    return bool(license_required(env) if required is None else required)
 
 
 def default_license_path(environ: Optional[Mapping[str, str]] = None) -> Path:
@@ -111,6 +156,248 @@ def default_license_state_path(environ: Optional[Mapping[str, str]] = None) -> P
     state_home = str(env.get("XDG_STATE_HOME", "")).strip()
     base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
     return base / PRODUCT / DEFAULT_LICENSE_STATE_FILENAME
+
+
+def _clean_machine_signal(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    invalid = {
+        "none",
+        "null",
+        "unknown",
+        "not specified",
+        "to be filled by o.e.m.",
+        "to be filled by oem",
+        "default string",
+        "system serial number",
+    }
+    if text in invalid:
+        return None
+    compact = re.sub(r"[^0-9a-f]", "", text)
+    if compact and set(compact) == {"0"}:
+        return None
+    return text
+
+
+def _read_machine_file(path: Path) -> Optional[str]:
+    try:
+        return _clean_machine_signal(path.read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return None
+
+
+def _normalize_mac(value: Any) -> Optional[str]:
+    text = re.sub(r"[^0-9a-f]", "", str(value or "").strip().lower())
+    if len(text) != 12:
+        return None
+    if set(text) in ({"0"}, {"f"}):
+        return None
+    # Multicast/random locally administered bits are still useful as a weak
+    # fallback, but virtual interfaces are filtered by interface name/device.
+    return ":".join(text[index : index + 2] for index in range(0, 12, 2))
+
+
+def _is_virtual_interface_name(name: str) -> bool:
+    lowered = name.strip().lower()
+    if lowered in {"lo", "sit0"}:
+        return True
+    return lowered.startswith(
+        (
+            "docker",
+            "br-",
+            "veth",
+            "virbr",
+            "vmnet",
+            "vboxnet",
+            "zt",
+            "tun",
+            "tap",
+            "tailscale",
+            "utun",
+            "llw",
+            "awdl",
+            "bridge",
+        )
+    )
+
+
+def _collect_linux_physical_macs() -> list[str]:
+    root = Path("/sys/class/net")
+    if not root.exists():
+        return []
+    macs: list[str] = []
+    for iface in sorted(root.iterdir(), key=lambda item: item.name):
+        if _is_virtual_interface_name(iface.name):
+            continue
+        # On Linux, physical NICs normally have a backing device symlink.
+        if not (iface / "device").exists():
+            continue
+        mac = _normalize_mac(_read_machine_file(iface / "address"))
+        if mac:
+            macs.append(mac)
+    return sorted(set(macs))
+
+
+def _collect_uuid_node_mac() -> list[str]:
+    try:
+        node = uuid.getnode()
+    except Exception:
+        return []
+    if not isinstance(node, int) or node <= 0:
+        return []
+    mac = _normalize_mac(f"{node:012x}")
+    return [mac] if mac else []
+
+
+def _machine_code_short(machine_code: Any) -> Optional[str]:
+    text = _optional_str(machine_code)
+    if not text:
+        return None
+    if text.startswith("sha256:"):
+        return text.split(":", 1)[1][:12]
+    return text[:12]
+
+
+def _valid_machine_code(machine_code: Any) -> bool:
+    text = _optional_str(machine_code)
+    return bool(text and re.fullmatch(r"sha256:[0-9a-f]{64}", text))
+
+
+def _collect_machine_components() -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+    components: list[tuple[str, str]] = []
+    signals: list[dict[str, Any]] = []
+
+    def add_file_signal(name: str, path: Path) -> None:
+        value = _read_machine_file(path)
+        signals.append({"name": name, "available": bool(value)})
+        if value:
+            components.append((name, value))
+
+    add_file_signal("dmi_product_uuid", Path("/sys/class/dmi/id/product_uuid"))
+    add_file_signal("dmi_board_serial", Path("/sys/class/dmi/id/board_serial"))
+
+    machine_id = _read_machine_file(Path("/etc/machine-id")) or _read_machine_file(Path("/var/lib/dbus/machine-id"))
+    signals.append({"name": "machine_id", "available": bool(machine_id)})
+    if machine_id:
+        components.append(("machine_id", machine_id))
+
+    macs = _collect_linux_physical_macs()
+    if not macs and os.name != "posix":
+        macs = _collect_uuid_node_mac()
+    if not macs and not Path("/sys/class/net").exists():
+        macs = _collect_uuid_node_mac()
+    signals.append({"name": "physical_mac", "available": bool(macs), "count": len(macs)})
+    components.extend(("physical_mac", mac) for mac in macs)
+    return sorted(components), signals
+
+
+def _fingerprint_from_components(
+    *,
+    components: list[tuple[str, str]],
+    signals: list[dict[str, Any]],
+    now_ts: float,
+) -> dict[str, Any]:
+    hostname = socket.gethostname() or ""
+    machine_code: Optional[str] = None
+    if components:
+        material = json.dumps(
+            {
+                "product": PRODUCT,
+                "binding_type": MACHINE_BINDING_TYPE,
+                "components": components,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        machine_code = "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return {
+        "binding_type": MACHINE_BINDING_TYPE,
+        "collection_version": MACHINE_FINGERPRINT_SCHEMA_VERSION,
+        "generated_at": _iso_timestamp(now_ts),
+        "hostname": hostname,
+        "machine_code": machine_code,
+        "machine_code_short": _machine_code_short(machine_code),
+        "signals": signals,
+    }
+
+
+def _coerce_machine_fingerprint(machine_fingerprint: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    if machine_fingerprint is None:
+        return get_machine_fingerprint()
+    machine_code = _optional_str(machine_fingerprint.get("machine_code"))
+    if machine_code and not _valid_machine_code(machine_code):
+        machine_code = None
+    return {
+        "binding_type": _optional_str(machine_fingerprint.get("binding_type")) or MACHINE_BINDING_TYPE,
+        "collection_version": machine_fingerprint.get("collection_version") or MACHINE_FINGERPRINT_SCHEMA_VERSION,
+        "generated_at": _optional_str(machine_fingerprint.get("generated_at")),
+        "hostname": _optional_str(machine_fingerprint.get("hostname")),
+        "machine_code": machine_code,
+        "machine_code_short": _optional_str(machine_fingerprint.get("machine_code_short"))
+        or _machine_code_short(machine_code),
+        "signals": machine_fingerprint.get("signals") if isinstance(machine_fingerprint.get("signals"), list) else [],
+    }
+
+
+def get_machine_fingerprint(
+    *,
+    now: Optional[float] = None,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    global _MACHINE_FINGERPRINT_CACHE
+    if use_cache and now is None and _MACHINE_FINGERPRINT_CACHE is not None:
+        return dict(_MACHINE_FINGERPRINT_CACHE)
+    now_ts = time.time() if now is None else float(now)
+    components, signals = _collect_machine_components()
+    fingerprint = _fingerprint_from_components(components=components, signals=signals, now_ts=now_ts)
+    if use_cache and now is None:
+        _MACHINE_FINGERPRINT_CACHE = dict(fingerprint)
+    return fingerprint
+
+
+def build_machine_request(
+    *,
+    customer: str = "",
+    machine_label: str = "",
+    machine_fingerprint: Optional[Mapping[str, Any]] = None,
+    now: Optional[float] = None,
+) -> dict[str, Any]:
+    now_ts = time.time() if now is None else float(now)
+    fingerprint = _coerce_machine_fingerprint(machine_fingerprint) if machine_fingerprint is not None else get_machine_fingerprint(now=now_ts, use_cache=False)
+    machine_code = _optional_str(fingerprint.get("machine_code"))
+    if not _valid_machine_code(machine_code):
+        raise RuntimeError(MESSAGE_MACHINE_FINGERPRINT_UNAVAILABLE)
+    signals = fingerprint.get("signals") if isinstance(fingerprint.get("signals"), list) else []
+    safe_signals: list[dict[str, Any]] = []
+    for item in signals:
+        if not isinstance(item, Mapping):
+            continue
+        safe: dict[str, Any] = {
+            "name": _optional_str(item.get("name")) or "unknown",
+            "available": bool(item.get("available")),
+        }
+        count = item.get("count")
+        if isinstance(count, int):
+            safe["count"] = count
+        safe_signals.append(safe)
+    return {
+        "schema_version": MACHINE_REQUEST_SCHEMA_VERSION,
+        "request_type": MACHINE_REQUEST_TYPE,
+        "product": PRODUCT,
+        "binding_type": MACHINE_BINDING_TYPE,
+        "collection_version": MACHINE_FINGERPRINT_SCHEMA_VERSION,
+        "generated_at": _iso_timestamp(now_ts),
+        "customer": str(customer or "").strip(),
+        "machine_label": str(machine_label or "").strip(),
+        "hostname": _optional_str(fingerprint.get("hostname")) or "",
+        "machine_code": machine_code,
+        "machine_code_short": _machine_code_short(machine_code),
+        "signals": safe_signals,
+    }
 
 
 def _public_key_from_env(environ: Optional[Mapping[str, str]] = None) -> str:
@@ -152,6 +439,9 @@ def _status(
     message: str = "",
     payload: Optional[Mapping[str, Any]] = None,
     now_ts: Optional[float] = None,
+    machine_binding_required: Optional[bool] = None,
+    machine_fingerprint: Optional[Mapping[str, Any]] = None,
+    machine_matched: Optional[bool] = None,
 ) -> LicenseStatus:
     payload = payload or {}
     exp_ts = _claim_timestamp(payload, "exp", "expires_at")
@@ -160,6 +450,16 @@ def _status(
     remaining_days = None
     if exp_ts is not None and now_ts is not None:
         remaining_days = max(0, int(math.ceil((exp_ts - now_ts) / 86400)))
+    local_machine_code = None
+    local_machine_code_short = None
+    if machine_fingerprint:
+        local_machine_code = _optional_str(machine_fingerprint.get("machine_code"))
+        local_machine_code_short = _optional_str(machine_fingerprint.get("machine_code_short")) or _machine_code_short(local_machine_code)
+    bound_machine_code = _optional_str(payload.get("machine_code"))
+    bound_machine_code_short = _machine_code_short(bound_machine_code)
+    machine_bound = bool(bound_machine_code)
+    if machine_binding_required is None and (machine_bound or machine_fingerprint):
+        machine_binding_required = False
     return LicenseStatus(
         status=status,
         required=required,
@@ -174,6 +474,12 @@ def _status(
         remaining_days=remaining_days,
         features=_features(payload.get("features")),
         max_version=_optional_str(payload.get("max_version")),
+        machine_binding_required=machine_binding_required,
+        machine_bound=machine_bound if machine_binding_required is not None or machine_bound else None,
+        machine_matched=machine_matched,
+        machine_code_short=local_machine_code_short,
+        bound_machine_code_short=bound_machine_code_short,
+        machine_label=_optional_str(payload.get("machine_label")),
     )
 
 
@@ -330,6 +636,78 @@ def _check_license_clock(
     return None
 
 
+def _check_machine_binding(
+    *,
+    required: bool,
+    payload: Mapping[str, Any],
+    now_ts: float,
+    machine_binding_required: bool,
+    machine_fingerprint: Mapping[str, Any],
+) -> Optional[LicenseStatus]:
+    binding_type = _optional_str(payload.get("binding_type"))
+    bound_machine_code = _optional_str(payload.get("machine_code"))
+    has_binding_claim = bool(binding_type or bound_machine_code)
+    has_complete_binding = binding_type == MACHINE_BINDING_TYPE and _valid_machine_code(bound_machine_code)
+
+    if machine_binding_required and not has_complete_binding:
+        return _status(
+            "invalid",
+            required=required,
+            code="license_machine_binding_required",
+            message=MESSAGE_MACHINE_BINDING_REQUIRED,
+            payload=payload,
+            now_ts=now_ts,
+            machine_binding_required=machine_binding_required,
+            machine_fingerprint=machine_fingerprint,
+            machine_matched=False if has_binding_claim else None,
+        )
+
+    if not has_binding_claim:
+        return None
+
+    if not has_complete_binding:
+        return _status(
+            "invalid",
+            required=required,
+            code="license_machine_binding_required",
+            message=MESSAGE_MACHINE_BINDING_REQUIRED,
+            payload=payload,
+            now_ts=now_ts,
+            machine_binding_required=machine_binding_required,
+            machine_fingerprint=machine_fingerprint,
+            machine_matched=False,
+        )
+
+    local_machine_code = _optional_str(machine_fingerprint.get("machine_code"))
+    if not _valid_machine_code(local_machine_code):
+        return _status(
+            "invalid",
+            required=required,
+            code="license_machine_fingerprint_unavailable",
+            message=MESSAGE_MACHINE_FINGERPRINT_UNAVAILABLE,
+            payload=payload,
+            now_ts=now_ts,
+            machine_binding_required=machine_binding_required,
+            machine_fingerprint=machine_fingerprint,
+            machine_matched=False,
+        )
+
+    if local_machine_code != bound_machine_code:
+        return _status(
+            "invalid",
+            required=required,
+            code="license_machine_mismatch",
+            message=MESSAGE_MACHINE_MISMATCH,
+            payload=payload,
+            now_ts=now_ts,
+            machine_binding_required=machine_binding_required,
+            machine_fingerprint=machine_fingerprint,
+            machine_matched=False,
+        )
+
+    return None
+
+
 def _write_license_state(
     *,
     path: Path,
@@ -390,27 +768,58 @@ def load_license_status(
     now: Optional[float] = None,
     environ: Optional[Mapping[str, str]] = None,
     check_state: bool = True,
+    machine_fingerprint: Optional[Mapping[str, Any]] = None,
 ) -> LicenseStatus:
     env = environ if environ is not None else os.environ
     required = license_required(env)
+    machine_required = license_machine_binding_required(env, required=required)
+    local_machine_fingerprint = _coerce_machine_fingerprint(machine_fingerprint) if machine_fingerprint is not None else get_machine_fingerprint()
     license_path = Path(path).expanduser() if path is not None else default_license_path(env)
     license_state_path = Path(state_path).expanduser() if state_path is not None else default_license_state_path(env)
     now_ts = time.time() if now is None else float(now)
 
     if not license_path.exists():
-        return _status("missing", required=required, code="license_missing", message=MESSAGE_MISSING)
+        return _status(
+            "missing",
+            required=required,
+            code="license_missing",
+            message=MESSAGE_MISSING,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
 
     try:
         token = license_path.read_text(encoding="utf-8").strip()
     except OSError:
-        return _status("invalid", required=required, code="license_unreadable", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_unreadable",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
     if not token:
-        return _status("invalid", required=required, code="license_empty", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_empty",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
 
     try:
         key = public_key if public_key is not None else _public_key_from_env(env)
     except OSError:
-        return _status("invalid", required=required, code="license_public_key_missing", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_public_key_missing",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
 
     try:
         payload = jwt.decode(
@@ -421,16 +830,51 @@ def load_license_status(
             options={"verify_exp": False, "verify_nbf": False},
         )
     except jwt.InvalidAudienceError:
-        return _status("invalid", required=required, code="license_invalid_audience", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_invalid_audience",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
     except jwt.InvalidSignatureError:
-        return _status("invalid", required=required, code="license_invalid_signature", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_invalid_signature",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
     except jwt.InvalidTokenError:
-        return _status("invalid", required=required, code="license_invalid", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_invalid",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
     except Exception:
-        return _status("invalid", required=required, code="license_invalid", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_invalid",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
 
     if not isinstance(payload, dict):
-        return _status("invalid", required=required, code="license_invalid", message=MESSAGE_INVALID)
+        return _status(
+            "invalid",
+            required=required,
+            code="license_invalid",
+            message=MESSAGE_INVALID,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
+        )
 
     if payload.get("product") != PRODUCT:
         return _status(
@@ -440,6 +884,8 @@ def load_license_status(
             message=MESSAGE_INVALID,
             payload=payload,
             now_ts=now_ts,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
         )
 
     nbf_ts = _claim_timestamp(payload, "nbf", "not_before")
@@ -451,6 +897,8 @@ def load_license_status(
             message=MESSAGE_NOT_YET_VALID,
             payload=payload,
             now_ts=now_ts,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
         )
 
     exp_ts = _claim_timestamp(payload, "exp", "expires_at")
@@ -462,6 +910,8 @@ def load_license_status(
             message=MESSAGE_INVALID,
             payload=payload,
             now_ts=now_ts,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
         )
     if now_ts >= exp_ts:
         return _status(
@@ -471,6 +921,8 @@ def load_license_status(
             message=MESSAGE_EXPIRED,
             payload=payload,
             now_ts=now_ts,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
         )
 
     max_version = _optional_str(payload.get("max_version"))
@@ -483,7 +935,19 @@ def load_license_status(
             message=MESSAGE_VERSION_EXCEEDED,
             payload=payload,
             now_ts=now_ts,
+            machine_binding_required=machine_required,
+            machine_fingerprint=local_machine_fingerprint,
         )
+
+    machine_status = _check_machine_binding(
+        required=required,
+        payload=payload,
+        now_ts=now_ts,
+        machine_binding_required=machine_required,
+        machine_fingerprint=local_machine_fingerprint,
+    )
+    if machine_status is not None:
+        return machine_status
 
     if check_state:
         clock_status = _check_license_clock(
@@ -495,7 +959,16 @@ def load_license_status(
         if clock_status is not None:
             return clock_status
 
-    return _status("valid", required=required, payload=payload, now_ts=now_ts)
+    machine_matched = True if _optional_str(payload.get("machine_code")) else None
+    return _status(
+        "valid",
+        required=required,
+        payload=payload,
+        now_ts=now_ts,
+        machine_binding_required=machine_required,
+        machine_fingerprint=local_machine_fingerprint,
+        machine_matched=machine_matched,
+    )
 
 
 def require_valid_license(
@@ -505,9 +978,17 @@ def require_valid_license(
     public_key: Optional[str] = None,
     now: Optional[float] = None,
     environ: Optional[Mapping[str, str]] = None,
+    machine_fingerprint: Optional[Mapping[str, Any]] = None,
 ) -> Optional[LicenseStatus]:
     env = environ if environ is not None else os.environ
-    status = load_license_status(path=path, state_path=state_path, public_key=public_key, now=now, environ=env)
+    status = load_license_status(
+        path=path,
+        state_path=state_path,
+        public_key=public_key,
+        now=now,
+        environ=env,
+        machine_fingerprint=machine_fingerprint,
+    )
     if not status.required:
         return None
     if status.status == "valid":
@@ -536,6 +1017,12 @@ def require_valid_license(
                 remaining_days=status.remaining_days,
                 features=list(status.features),
                 max_version=status.max_version,
+                machine_binding_required=status.machine_binding_required,
+                machine_bound=status.machine_bound,
+                machine_matched=status.machine_matched,
+                machine_code_short=status.machine_code_short,
+                bound_machine_code_short=status.bound_machine_code_short,
+                machine_label=status.machine_label,
             )
         return None
     return status
