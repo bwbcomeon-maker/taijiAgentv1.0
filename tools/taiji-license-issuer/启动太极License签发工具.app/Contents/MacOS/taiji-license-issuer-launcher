@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TOOL_DIR="$(cd "$BUNDLE_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$TOOL_DIR/../.." && pwd)"
+ELECTRON_BIN="$REPO_ROOT/apps/taiji-desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+LOG_DIR="$HOME/.local/state/taiji-license-issuer/logs"
+LOG_FILE="$LOG_DIR/launcher.log"
+
+mkdir -p "$LOG_DIR"
+exec >>"$LOG_FILE" 2>&1
+
+show_error() {
+  local message="$1"
+  local escaped
+  escaped="$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  /usr/bin/osascript -e "display dialog \"$escaped\" with title \"太极 License 签发工具启动失败\" buttons {\"好\"} default button \"好\"" >/dev/null 2>&1 || true
+}
+
+echo "========================================"
+echo "太极 License 签发工具启动器"
+echo "========================================"
+echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "Tool: $TOOL_DIR"
+echo
+
+if [ ! -x "$ELECTRON_BIN" ]; then
+  show_error "未找到 Electron 运行时。请先在 apps/taiji-desktop 目录安装依赖。"
+  exit 1
+fi
+
+if [ ! -f "$TOOL_DIR/package.json" ]; then
+  show_error "未找到 License 签发工具目录。请确认快捷入口仍在工具目录内。"
+  exit 1
+fi
+
+RUNNER="$LOG_DIR/taiji-license-issuer-runner.sh"
+cat >"$RUNNER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$PATH"
+export HOME="$HOME"
+export USER="${USER:-$(id -un)}"
+export LOGNAME="${LOGNAME:-$(id -un)}"
+export SHELL="${SHELL:-/bin/zsh}"
+export TMPDIR="${TMPDIR:-/tmp}"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export TAIJI_LICENSE_ISSUER_SMOKE="${TAIJI_LICENSE_ISSUER_SMOKE:-}"
+export TAIJI_LICENSE_PRIVATE_KEY_FILE="${TAIJI_LICENSE_PRIVATE_KEY_FILE:-}"
+cd "$TOOL_DIR"
+exec "$ELECTRON_BIN" "$TOOL_DIR" >>"$LOG_FILE" 2>&1
+EOF
+chmod +x "$RUNNER"
+
+/usr/bin/osascript - "$RUNNER" <<'OSA'
+on run argv
+  do shell script quoted form of (item 1 of argv) & " >/dev/null 2>&1 &"
+end run
+OSA
+echo "Electron launch delegated via osascript runner: $RUNNER"
+exit 0

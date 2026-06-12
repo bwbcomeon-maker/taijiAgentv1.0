@@ -1,5 +1,7 @@
 import json
 import os
+import plistlib
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -9,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_JS = ROOT / "tools" / "taiji-license-issuer" / "issuer-core.js"
+APP_BUNDLE = ROOT / "tools" / "taiji-license-issuer" / "启动太极License签发工具.app"
 AGENT_PYTHON = ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "venv" / "bin" / "python"
 AGENT_DIR = ROOT / "hermes-local-lab" / "sources" / "hermes-agent"
 
@@ -154,6 +157,27 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             )
             data = _node(script)
             self.assertEqual(data["path"], str(override))
+
+    def test_macos_app_bundle_double_click_launcher_is_structurally_valid(self):
+        info_path = APP_BUNDLE / "Contents" / "Info.plist"
+        launcher_path = APP_BUNDLE / "Contents" / "MacOS" / "taiji-license-issuer-launcher"
+
+        self.assertTrue(info_path.is_file())
+        self.assertTrue(launcher_path.is_file())
+        self.assertTrue(launcher_path.stat().st_mode & stat.S_IXUSR)
+
+        info = plistlib.loads(info_path.read_bytes())
+        self.assertEqual(info["CFBundlePackageType"], "APPL")
+        self.assertEqual(info["CFBundleExecutable"], "taiji-license-issuer-launcher")
+        self.assertEqual(info["CFBundleIdentifier"], "local.taiji.license.issuer.launcher")
+        self.assertIn("License", info["CFBundleDisplayName"])
+
+        launcher = launcher_path.read_text(encoding="utf-8")
+        self.assertIn("Electron.app/Contents/MacOS/Electron", launcher)
+        self.assertIn('"$ELECTRON_BIN" "$TOOL_DIR"', launcher)
+        self.assertIn("/usr/bin/osascript", launcher)
+        self.assertIn("taiji-license-issuer", launcher)
+        self.assertNotIn("/Users/bwb/", launcher)
 
 
 if __name__ == "__main__":
