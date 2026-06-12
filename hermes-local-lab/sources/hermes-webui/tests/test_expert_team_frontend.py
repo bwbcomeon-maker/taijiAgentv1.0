@@ -77,6 +77,32 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert ".status-card-expert-question-input" in STYLE_CSS
 
 
+def test_expert_team_question_inputs_survive_status_refresh_rerender():
+    assert "function _captureExpertTeamQuestionInputState" in UI_JS
+    assert "function _restoreExpertTeamQuestionInputState" in UI_JS
+    assert "function _expertTeamWorkspaceRenderKey" in UI_JS
+    assert "document.activeElement" in UI_JS
+    assert "selectionStart" in UI_JS
+    assert "selectionEnd" in UI_JS
+    assert "focus({preventScroll:true})" in UI_JS
+    assert ".classList.contains('answered')" in UI_JS
+
+    panel_start = UI_JS.index("function renderExpertTeamWorkspacePanel")
+    panel_body = UI_JS[panel_start : UI_JS.index("function clearExpertTeamWorkspacePanel", panel_start)]
+    assert "const renderKey=_expertTeamWorkspaceRenderKey(card);" in panel_body
+    assert "panel.dataset.expertTeamRenderKey===renderKey" in panel_body
+    assert "const inputState=_captureExpertTeamQuestionInputState(panel);" in panel_body
+    assert "panel.innerHTML=_expertTeamWorkspacePanelHtml(card);" in panel_body
+    assert "_restoreExpertTeamQuestionInputState(panel,inputState);" in panel_body
+
+    dock_start = UI_JS.index("function renderWriteflowStatusDock")
+    dock_body = UI_JS[dock_start : UI_JS.index("function clearWriteflowStatusDock", dock_start)]
+    assert "const isExpertTeam=_isExpertTeamStatusCard(card);" in dock_body
+    assert "const dockInputState=isExpertTeam?_captureExpertTeamQuestionInputState(dock):null;" in dock_body
+    assert "_restoreExpertTeamQuestionInputState(dock,dockInputState);" in dock_body
+    assert "delete dock.dataset.expertTeamRenderKey" in UI_JS
+
+
 def test_expert_team_hydrates_before_writeflow_fallback():
     assert "async function _hydrateExpertTeamStatusCardForSession" in SESSIONS_JS
     assert "/api/expert-teams/run?session_id=" in SESSIONS_JS

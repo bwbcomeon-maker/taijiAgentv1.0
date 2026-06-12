@@ -793,6 +793,111 @@ function _expertTeamQuestionHtml(question,runId){
   </span>`;
 }
 
+function _expertTeamQuestionInputKey(questionEl,inputEl){
+  const qid=questionEl&&questionEl.dataset?questionEl.dataset.expertTeamQuestionId:'';
+  const runId=(questionEl&&questionEl.dataset&&questionEl.dataset.expertTeamRunId)
+    ||(inputEl&&inputEl.dataset&&inputEl.dataset.expertTeamRunId)
+    ||'';
+  return `${runId}::${qid}`;
+}
+
+function _captureExpertTeamQuestionInputState(root){
+  const state={activeKey:'',inputs:{}};
+  if(!root||!root.querySelectorAll||typeof document==='undefined')return state;
+  const active=document.activeElement;
+  root.querySelectorAll('.status-card-expert-question').forEach(questionEl=>{
+    const inputEl=questionEl&&questionEl.querySelector?questionEl.querySelector('[data-expert-team-answer-input]'):null;
+    if(!inputEl)return;
+    const key=_expertTeamQuestionInputKey(questionEl,inputEl);
+    if(!key||key==='::')return;
+    const isActive=active===inputEl;
+    const selectionStart=typeof inputEl.selectionStart==='number'?inputEl.selectionStart:null;
+    const selectionEnd=typeof inputEl.selectionEnd==='number'?inputEl.selectionEnd:null;
+    state.inputs[key]={
+      value:String(inputEl.value||''),
+      selectionStart,
+      selectionEnd,
+      active:isActive,
+    };
+    if(isActive)state.activeKey=key;
+  });
+  return state;
+}
+
+function _restoreExpertTeamQuestionInputState(root,state){
+  if(!root||!root.querySelectorAll||!state||!state.inputs)return false;
+  let focusTarget=null;
+  let focusState=null;
+  let restored=false;
+  root.querySelectorAll('.status-card-expert-question').forEach(questionEl=>{
+    if(questionEl&&questionEl.classList&&questionEl.classList.contains('answered'))return;
+    const inputEl=questionEl&&questionEl.querySelector?questionEl.querySelector('[data-expert-team-answer-input]'):null;
+    if(!inputEl)return;
+    const key=_expertTeamQuestionInputKey(questionEl,inputEl);
+    const saved=state.inputs[key];
+    if(!saved)return;
+    inputEl.value=String(saved.value||'');
+    restored=true;
+    if(saved.active||state.activeKey===key){
+      focusTarget=inputEl;
+      focusState=saved;
+    }
+  });
+  if(focusTarget&&typeof focusTarget.focus==='function'){
+    focusTarget.focus({preventScroll:true});
+    const start=focusState&&typeof focusState.selectionStart==='number'?focusState.selectionStart:null;
+    const end=focusState&&typeof focusState.selectionEnd==='number'?focusState.selectionEnd:start;
+    if(start!==null&&typeof focusTarget.setSelectionRange==='function'){
+      try{focusTarget.setSelectionRange(start,end);}catch(_){}
+    }
+  }
+  return restored;
+}
+
+function _expertTeamWorkspaceRenderKey(card){
+  card=card||{};
+  const compactItem=item=>({
+    id:item&&item.id||'',
+    name:item&&item.name||'',
+    role:item&&item.role||'',
+    workerId:item&&item.worker_id||'',
+    workerName:item&&item.worker_name||'',
+    title:item&&item.title||'',
+    label:item&&item.label||'',
+    status:item&&(item.status_label||item.status)||'',
+    answer:item&&item.answer||'',
+    path:item&&item.path||'',
+    exists:item&&item.exists!==false,
+    placeholder:!!(item&&item.placeholder),
+  });
+  const compact={
+    runId:card.runId||card.sessionId||'',
+    sourceSessionId:card.sourceSessionId||card.source_session_id||'',
+    title:card.title||'',
+    subtitle:card.subtitle||'',
+    team:card.team||{},
+    status:card.status||'',
+    statusLabel:card.statusLabel||'',
+    phase:card.phase||'',
+    phases:Array.isArray(card.phases)?card.phases:[],
+    progress:card.progress||{},
+    questions:(Array.isArray(card.questions)?card.questions:[]).map(question=>({
+      id:question&&question.id||'',
+      title:question&&question.title||'',
+      type:question&&question.type||'',
+      status:question&&question.status||'',
+      answer:question&&question.answer||'',
+      required:question&&question.required!==false,
+      options:Array.isArray(question&&question.options)?question.options:[],
+    })),
+    members:(Array.isArray(card.members)?card.members:[]).map(compactItem),
+    tasks:(Array.isArray(card.tasks)?card.tasks:[]).map(compactItem),
+    artifacts:(Array.isArray(card.artifacts)?card.artifacts:[]).map(compactItem),
+    referenceArtifacts:(Array.isArray(card.referenceArtifacts)?card.referenceArtifacts:[]).map(compactItem),
+  };
+  try{return JSON.stringify(compact);}catch(_){return `${compact.runId}:${compact.status}:${compact.phase}`;}
+}
+
 function _expertTeamDockMiniHtml(card){
   const summary=_expertTeamDockSummary(card||{});
   const actionIcon=(typeof li==='function')?li('arrow-right',13):'›';
@@ -916,10 +1021,18 @@ function renderExpertTeamWorkspacePanel(card){
     panel.setAttribute('aria-live','polite');
     workspace.appendChild(panel);
   }
+  const renderKey=_expertTeamWorkspaceRenderKey(card);
   panel.hidden=false;
   panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
   panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||card.source_session_id||'';
+  if(panel.dataset.expertTeamRenderKey===renderKey&&panel.querySelector('.expert-team-panel-inner')){
+    _setExpertTeamWorkspaceActive(true);
+    return true;
+  }
+  const inputState=_captureExpertTeamQuestionInputState(panel);
   panel.innerHTML=_expertTeamWorkspacePanelHtml(card);
+  panel.dataset.expertTeamRenderKey=renderKey;
+  _restoreExpertTeamQuestionInputState(panel,inputState);
   _setExpertTeamWorkspaceActive(true);
   return true;
 }
@@ -1242,11 +1355,23 @@ function renderWriteflowStatusDock(card){
   if(!sourceSid||!activeSid||sourceSid!==activeSid){
     return clearWriteflowStatusDock();
   }
-  dock.innerHTML=_statusCardHtml(card);
+  const isExpertTeam=_isExpertTeamStatusCard(card);
+  const renderKey=isExpertTeam?_expertTeamWorkspaceRenderKey(card):'';
+  const dockInputState=isExpertTeam?_captureExpertTeamQuestionInputState(dock):null;
+  const canReuseExpertDock=isExpertTeam&&dock.dataset.expertTeamRenderKey===renderKey&&dock.querySelector('.status-card-writeflow');
+  if(!canReuseExpertDock){
+    dock.innerHTML=_statusCardHtml(card);
+    if(isExpertTeam){
+      dock.dataset.expertTeamRenderKey=renderKey;
+      _restoreExpertTeamQuestionInputState(dock,dockInputState);
+    }else{
+      delete dock.dataset.expertTeamRenderKey;
+    }
+  }
   dock.hidden=false;
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
-  if(_isExpertTeamStatusCard(card))renderExpertTeamWorkspacePanel(card);
+  if(isExpertTeam)renderExpertTeamWorkspacePanel(card);
   else clearExpertTeamWorkspacePanel();
   return true;
 }
@@ -1261,6 +1386,7 @@ function clearWriteflowStatusDock(){
   dock.hidden=true;
   delete dock.dataset.writeflowRunId;
   delete dock.dataset.writeflowSourceSessionId;
+  delete dock.dataset.expertTeamRenderKey;
   clearExpertTeamWorkspacePanel();
   return true;
 }
