@@ -18,6 +18,9 @@ import jwt
 PRODUCT = "taiji-agent"
 DEFAULT_LICENSE_FILENAME = "license.jwt"
 DEFAULT_LICENSE_STATE_FILENAME = "license-state.json"
+INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE = Path(
+    "tools/taiji-license-issuer/private/signing-public.pem"
+)
 LICENSE_REQUIRED_ENV = "TAIJI_LICENSE_REQUIRED"
 LICENSE_FILE_ENV = "TAIJI_LICENSE_FILE"
 LICENSE_STATE_FILE_ENV = "TAIJI_LICENSE_STATE_FILE"
@@ -118,7 +121,27 @@ def _public_key_from_env(environ: Optional[Mapping[str, str]] = None) -> str:
     public_key_path = str(env.get(LICENSE_PUBLIC_KEY_FILE_ENV, "")).strip()
     if public_key_path:
         return Path(public_key_path).expanduser().read_text(encoding="utf-8").strip()
+    checkout_key = _source_checkout_internal_issuer_public_key(env)
+    if checkout_key:
+        return checkout_key
     return DEFAULT_PUBLIC_KEY_PEM
+
+
+def _source_checkout_internal_issuer_public_key(env: Mapping[str, str]) -> Optional[str]:
+    agent_root = str(env.get("TAIJI_AGENT_ROOT", "")).strip()
+    if not agent_root:
+        return None
+    root = Path(agent_root).expanduser()
+    repo_root = root.parent if root.name == "hermes-local-lab" else root
+    if not (repo_root / ".git").exists():
+        return None
+    public_key_path = repo_root / INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
+    try:
+        if public_key_path.is_file():
+            return public_key_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return None
 
 
 def _status(

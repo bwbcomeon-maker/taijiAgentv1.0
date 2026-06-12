@@ -348,3 +348,54 @@ def test_import_style_validation_can_skip_local_success_state(tmp_path, signing_
     )
 
     assert status.status == "valid"
+
+
+def test_source_checkout_uses_internal_issuer_public_key_for_gui_license(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    repo_root = tmp_path / "taiji-agentv1.0"
+    lab_root = repo_root / "hermes-local-lab"
+    public_key_path = repo_root / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem"
+    (repo_root / ".git").mkdir(parents=True)
+    lab_root.mkdir(parents=True)
+    public_key_path.parent.mkdir(parents=True)
+    public_key_path.write_text(public_pem, encoding="utf-8")
+
+    path = tmp_path / "license.jwt"
+    _write_token(path, private_pem)
+
+    status = taiji_license.load_license_status(
+        path=path,
+        now=time.time(),
+        check_state=False,
+        environ={
+            "TAIJI_LICENSE_REQUIRED": "1",
+            "TAIJI_AGENT_ROOT": str(lab_root),
+        },
+    )
+
+    assert status.status == "valid"
+
+
+def test_installed_runtime_does_not_trust_sibling_issuer_public_key_without_source_checkout(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    install_root = tmp_path / "opt" / "taiji-agent"
+    public_key_path = tmp_path / "opt" / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem"
+    install_root.mkdir(parents=True)
+    public_key_path.parent.mkdir(parents=True)
+    public_key_path.write_text(public_pem, encoding="utf-8")
+
+    path = tmp_path / "license.jwt"
+    _write_token(path, private_pem)
+
+    status = taiji_license.load_license_status(
+        path=path,
+        now=time.time(),
+        check_state=False,
+        environ={
+            "TAIJI_LICENSE_REQUIRED": "1",
+            "TAIJI_AGENT_ROOT": str(install_root),
+        },
+    )
+
+    assert status.status == "invalid"
+    assert status.code == "license_invalid_signature"
