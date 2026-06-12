@@ -19,6 +19,7 @@ PRODUCT = "taiji-agent"
 PRIVATE_KEY_ENV = "TAIJI_LICENSE_PRIVATE_KEY_FILE"
 MACHINE_BINDING_TYPE = "machine_fingerprint_v1"
 MACHINE_CODE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file"
 
 
 def _parse_date(value: str | None, *, default: datetime) -> datetime:
@@ -105,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "exp": int(exp.timestamp()),
         "expires_at": _iso(exp),
         "features": _features(args.features),
+        "activation_mode": ACTIVATION_MODE_OFFLINE_MACHINE_FILE,
         "binding_type": MACHINE_BINDING_TYPE,
         "machine_code": machine_code,
     }

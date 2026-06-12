@@ -8,6 +8,8 @@ import math
 import os
 import re
 import socket
+import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +40,9 @@ MACHINE_BINDING_TYPE = "machine_fingerprint_v1"
 MACHINE_FINGERPRINT_SCHEMA_VERSION = 1
 MACHINE_REQUEST_SCHEMA_VERSION = 1
 MACHINE_REQUEST_TYPE = "taiji_machine_license_request"
+ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file"
+ACTIVATION_MODE_ONLINE_CODE = "online_code"
+ACTIVATION_MODE_QR_PROXY = "qr_proxy"
 
 DEFAULT_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuDxQwbVMj7rey/sh63tG
@@ -59,6 +64,7 @@ MESSAGE_CLOCK_ROLLBACK = "检测到系统时间异常，请校准本机时间后
 MESSAGE_MACHINE_MISMATCH = "授权文件与本机不匹配，请联系服务方重新签发。"
 MESSAGE_MACHINE_BINDING_REQUIRED = "授权文件缺少本机绑定信息，请联系服务方重新签发。"
 MESSAGE_MACHINE_FINGERPRINT_UNAVAILABLE = "无法获取本机机器码，请联系服务方处理。"
+MESSAGE_ONLINE_ACTIVATION_UNAVAILABLE = "联网激活将在后续版本支持。当前请使用离线授权文件。"
 
 _MACHINE_FINGERPRINT_CACHE: Optional[dict[str, Any]] = None
 
@@ -84,6 +90,9 @@ class LicenseStatus:
     machine_code_short: Optional[str] = None
     bound_machine_code_short: Optional[str] = None
     machine_label: Optional[str] = None
+    activation_mode: Optional[str] = None
+    activation_id: Optional[str] = None
+    entitlement_id: Optional[str] = None
 
     def to_public_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -106,6 +115,9 @@ class LicenseStatus:
             "machine_code_short": self.machine_code_short,
             "bound_machine_code_short": self.bound_machine_code_short,
             "machine_label": self.machine_label,
+            "activation_mode": self.activation_mode,
+            "activation_id": self.activation_id,
+            "entitlement_id": self.entitlement_id,
         }
         return {key: value for key, value in payload.items() if value is not None}
 
@@ -252,6 +264,25 @@ def _collect_uuid_node_mac() -> list[str]:
     return [mac] if mac else []
 
 
+def _collect_macos_platform_uuid() -> Optional[str]:
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', result.stdout or "")
+    if not match:
+        return None
+    return _clean_machine_signal(match.group(1))
+
+
 def _machine_code_short(machine_code: Any) -> Optional[str]:
     text = _optional_str(machine_code)
     if not text:
@@ -284,10 +315,15 @@ def _collect_machine_components() -> tuple[list[tuple[str, str]], list[dict[str,
     if machine_id:
         components.append(("machine_id", machine_id))
 
+    macos_platform_uuid = _collect_macos_platform_uuid()
+    signals.append({"name": "macos_platform_uuid", "available": bool(macos_platform_uuid)})
+    if macos_platform_uuid:
+        components.append(("macos_platform_uuid", macos_platform_uuid))
+
     macs = _collect_linux_physical_macs()
-    if not macs and os.name != "posix":
+    if not macs and not components and os.name != "posix":
         macs = _collect_uuid_node_mac()
-    if not macs and not Path("/sys/class/net").exists():
+    if not macs and not components and not Path("/sys/class/net").exists():
         macs = _collect_uuid_node_mac()
     signals.append({"name": "physical_mac", "available": bool(macs), "count": len(macs)})
     components.extend(("physical_mac", mac) for mac in macs)
@@ -480,6 +516,9 @@ def _status(
         machine_code_short=local_machine_code_short,
         bound_machine_code_short=bound_machine_code_short,
         machine_label=_optional_str(payload.get("machine_label")),
+        activation_mode=_optional_str(payload.get("activation_mode")),
+        activation_id=_optional_str(payload.get("activation_id")),
+        entitlement_id=_optional_str(payload.get("entitlement_id")),
     )
 
 
@@ -1023,6 +1062,9 @@ def require_valid_license(
                 machine_code_short=status.machine_code_short,
                 bound_machine_code_short=status.bound_machine_code_short,
                 machine_label=status.machine_label,
+                activation_mode=status.activation_mode,
+                activation_id=status.activation_id,
+                entitlement_id=status.entitlement_id,
             )
         return None
     return status

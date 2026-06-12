@@ -94,12 +94,14 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             self.assertEqual(payload["binding_type"], "machine_fingerprint_v1")
             self.assertEqual(payload["machine_code"], TEST_MACHINE_CODE)
             self.assertEqual(payload["machine_label"], "一号终端")
+            self.assertEqual(payload["activation_mode"], "offline_machine_file")
 
             record = json.loads(data["record"])
             self.assertEqual(record["license_id"], "lic-gui-test")
             self.assertEqual(record["customer"], "测试客户")
             self.assertEqual(record["machine_code_short"], "cccccccccccc")
             self.assertEqual(record["machine_label"], "一号终端")
+            self.assertEqual(record["activation_mode"], "offline_machine_file")
             self.assertEqual(record["jwt_hash"][:7], "sha256:")
             self.assertNotIn(data["token"], data["record"])
             self.assertNotIn(TEST_MACHINE_CODE, data["record"])
@@ -126,6 +128,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     check_state=False,
                 )
                 print(status.status)
+                print(status.activation_mode)
                 """
             )
             verifier = subprocess.run(
@@ -136,7 +139,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=True,
             )
-            self.assertEqual(verifier.stdout.strip(), "valid")
+            self.assertEqual(verifier.stdout.strip().splitlines(), ["valid", "offline_machine_file"])
 
     def test_issuer_rejects_invalid_required_inputs(self):
         script = textwrap.dedent(

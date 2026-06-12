@@ -1,4 +1,5 @@
 import json
+import types
 import time
 
 import jwt
@@ -56,6 +57,9 @@ def _write_token(path, private_pem, **overrides):
         "binding_type": "machine_fingerprint_v1",
         "machine_code": TEST_MACHINE_CODE,
         "machine_label": "测试终端",
+        "activation_mode": "offline_machine_file",
+        "activation_id": "act-test",
+        "entitlement_id": "ent-test",
         "iat": now - 60,
         "nbf": now - 60,
         "exp": now + 86400,
@@ -92,6 +96,9 @@ def test_valid_license_returns_public_status(tmp_path, signing_keys):
     assert public["machine_code_short"] == "aaaaaaaaaaaa"
     assert public["bound_machine_code_short"] == "aaaaaaaaaaaa"
     assert public["machine_label"] == "测试终端"
+    assert public["activation_mode"] == "offline_machine_file"
+    assert public["activation_id"] == "act-test"
+    assert public["entitlement_id"] == "ent-test"
     assert "token" not in public
     assert "path" not in public
     assert TEST_MACHINE_CODE not in json.dumps(public)
@@ -109,6 +116,44 @@ def test_missing_required_license_has_stable_code(tmp_path, signing_keys):
     assert status.status == "missing"
     assert status.code == "license_missing"
     assert "授权" in status.message
+
+
+def test_macos_machine_fingerprint_uses_stable_platform_uuid(monkeypatch):
+    original_exists = taiji_license.Path.exists
+    uuid_nodes = iter(
+        [
+            ["11:11:11:11:11:11"],
+            ["22:22:22:22:22:22"],
+        ]
+    )
+
+    def fake_exists(path):
+        if str(path) == "/sys/class/net":
+            return False
+        return original_exists(path)
+
+    def fake_run(*args, **kwargs):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout='    "IOPlatformUUID" = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(taiji_license, "sys", types.SimpleNamespace(platform="darwin"), raising=False)
+    monkeypatch.setattr(taiji_license, "subprocess", types.SimpleNamespace(run=fake_run), raising=False)
+    monkeypatch.setattr(taiji_license.Path, "exists", fake_exists)
+    monkeypatch.setattr(taiji_license, "_read_machine_file", lambda path: None)
+    monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: [])
+    monkeypatch.setattr(taiji_license, "_collect_uuid_node_mac", lambda: next(uuid_nodes))
+
+    first = taiji_license.get_machine_fingerprint(use_cache=False)
+    second = taiji_license.get_machine_fingerprint(use_cache=False)
+
+    assert first["machine_code"] == second["machine_code"]
+    assert any(
+        signal["name"] == "macos_platform_uuid" and signal["available"]
+        for signal in first["signals"]
+    )
 
 
 def test_expired_license_has_user_prompt(tmp_path, signing_keys):

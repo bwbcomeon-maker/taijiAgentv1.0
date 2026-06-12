@@ -26,6 +26,7 @@ def _create_license_app(adapter: APIServerAdapter) -> web.Application:
     app["api_server_adapter"] = adapter
     app.router.add_get("/health", adapter._handle_health)
     app.router.add_get("/v1/license/status", adapter._handle_license_status)
+    app.router.add_post("/v1/license/activate", adapter._handle_license_activate)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_post("/v1/runs", adapter._handle_runs)
@@ -58,6 +59,23 @@ async def test_license_status_is_public_and_health_stays_available(required_miss
     assert data["code"] == "license_missing"
     assert "path" not in data
     assert "token" not in data
+
+
+@pytest.mark.asyncio
+async def test_license_activate_endpoint_is_reserved_and_stable(monkeypatch):
+    monkeypatch.setenv("TAIJI_LICENSE_REQUIRED", "1")
+    adapter = _make_adapter()
+    app = _create_license_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        with patch("gateway.platforms.api_server.taiji_license.require_valid_license") as guard:
+            resp = await cli.post("/v1/license/activate", json={"activation_code": "TAIJI-TEST"})
+            body = await resp.json()
+
+    assert resp.status == 501
+    assert body["error"]["code"] == "license_online_activation_unavailable"
+    assert "后续版本" in body["error"]["message"]
+    guard.assert_not_called()
 
 
 @pytest.mark.asyncio

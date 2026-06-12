@@ -4183,6 +4183,32 @@ def _handle_license_machine_request(handler, parsed):
         return bad(handler, f"machine request failed: {_sanitize_error(exc)}", status=500)
 
 
+def _taiji_license_online_activation_unavailable() -> dict:
+    try:
+        message = _taiji_license_module().MESSAGE_ONLINE_ACTIVATION_UNAVAILABLE
+    except Exception:
+        message = "联网激活将在后续版本支持。当前请使用离线授权文件。"
+    return {
+        "status": "unavailable",
+        "required": True,
+        "code": "license_online_activation_unavailable",
+        "message": message,
+        "features": [],
+    }
+
+
+def _handle_license_activate(handler, body):
+    return j(handler, _taiji_license_online_activation_unavailable(), status=501)
+
+
+def _handle_license_qr_request(handler, body):
+    return j(handler, _taiji_license_online_activation_unavailable(), status=501)
+
+
+def _handle_license_qr_complete(handler, body):
+    return j(handler, _taiji_license_online_activation_unavailable(), status=501)
+
+
 def _handle_license_import(handler, body):
     raw = body.get("license") if isinstance(body, dict) else None
     if not isinstance(raw, str) or not raw.strip():
@@ -9106,6 +9132,15 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/license/import":
         return _handle_license_import(handler, body)
+
+    if parsed.path == "/api/license/activate":
+        return _handle_license_activate(handler, body)
+
+    if parsed.path == "/api/license/qr-request":
+        return _handle_license_qr_request(handler, body)
+
+    if parsed.path == "/api/license/qr-complete":
+        return _handle_license_qr_complete(handler, body)
 
     if parsed.path == "/api/image-gen/config":
         from api.model_config import set_image_gen_config

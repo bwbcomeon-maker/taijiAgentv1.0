@@ -12,6 +12,7 @@ const DEFAULT_PUBLIC_KEY_NAME = "signing-public.pem";
 const MACHINE_BINDING_TYPE = "machine_fingerprint_v1";
 const MACHINE_REQUEST_TYPE = "taiji_machine_license_request";
 const MACHINE_CODE_RE = /^sha256:[0-9a-f]{64}$/;
+const ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file";
 
 function isoUtc(date) {
   return date.toISOString().replace(".000Z", "Z");
@@ -232,6 +233,7 @@ function issueLicense(options) {
     exp: Math.floor(exp.getTime() / 1000),
     expires_at: isoUtc(exp),
     features,
+    activation_mode: ACTIVATION_MODE_OFFLINE_MACHINE_FILE,
     binding_type: MACHINE_BINDING_TYPE,
     machine_code: machineRequest.machineCode,
   };
@@ -314,6 +316,7 @@ function recordForIssue({ result, outputPath, now, machineRequest }) {
     not_before: result.payload.not_before,
     expires_at: result.payload.expires_at,
     features: result.payload.features,
+    activation_mode: result.payload.activation_mode || "",
     max_version: result.payload.max_version || "",
     machine_code_short: machineRequest.machineCodeShort,
     machine_label: machineRequest.machineLabel || "",
