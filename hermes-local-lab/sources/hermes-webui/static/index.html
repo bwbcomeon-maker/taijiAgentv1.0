@@ -1376,8 +1376,11 @@
                       <strong id="taijiLicenseStatus">正在读取授权</strong>
                       <span class="model-config-pill" id="taijiLicenseRemainingBadge">—</span>
                     </div>
+                    <div class="model-config-license-customer">
+                      <b>授权客户</b>
+                      <em id="taijiLicenseCustomer">—</em>
+                    </div>
                     <div class="model-config-license-facts">
-                      <span class="model-config-license-fact"><b>客户</b><em id="taijiLicenseCustomer">—</em></span>
                       <span class="model-config-license-fact"><b>到期</b><em id="taijiLicenseExpires">—</em></span>
                       <span class="model-config-license-fact"><b>本机</b><em id="taijiLicenseMachine">—</em></span>
                       <span class="model-config-license-fact"><b>来源</b><em id="taijiLicenseSource">—</em></span>
@@ -1388,10 +1391,12 @@
                 </div>
                 <div class="model-config-actions model-config-license-actions">
                   <input id="taijiLicenseFile" type="file" accept=".jwt,.txt,application/jwt,text/plain" hidden>
-                  <button class="sm-btn model-config-license-primary-action" type="button" id="btnImportTaijiLicense">导入授权文件</button>
-                  <div class="model-config-license-secondary-actions">
-                    <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest">导出本机机器码</button>
-                    <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权</button>
+                  <div class="model-config-license-toolbar">
+                    <button class="sm-btn model-config-license-primary-action" type="button" id="btnImportTaijiLicense" aria-label="导入授权文件" title="导入授权文件">导入</button>
+                    <div class="model-config-license-secondary-actions">
+                      <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest" aria-label="导出本机机器码" title="导出本机机器码">机器码</button>
+                      <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense" aria-label="刷新授权状态" title="刷新授权状态">刷新</button>
+                    </div>
                   </div>
                   <span class="model-config-license-online-note">联网激活后续版本支持</span>
                 </div>
