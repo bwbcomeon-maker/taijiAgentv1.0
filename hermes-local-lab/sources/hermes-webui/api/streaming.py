@@ -55,6 +55,7 @@ from api.attachment_context import (
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.turn_duration import compute_turn_duration_seconds, stamp_turn_duration_on_latest_assistant
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
@@ -817,6 +818,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
     """
+    _turn_started_at = getattr(session, 'pending_started_at', None)
     _materialize_pending_user_turn_before_error(session)
     session.active_stream_id = None
     session.pending_user_message = None
@@ -832,6 +834,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
         })
+        stamp_turn_duration_on_latest_assistant(session, _turn_started_at, time.time())
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -5705,6 +5708,7 @@ def _run_agent_streaming(
                         # Persist the error so it survives page reload.
                         # _error=True ensures _sanitize_messages_for_api excludes it from
                         # subsequent API calls so the LLM never sees its own error as prior context.
+                        _error_turn_started_at = getattr(s, 'pending_started_at', None)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
@@ -5723,6 +5727,7 @@ def _run_agent_streaming(
                         elif _err_type == 'interrupted':
                             _error_message['provider_details_label'] = 'Interruption details'
                         s.messages.append(_error_message)
+                        stamp_turn_duration_on_latest_assistant(s, _error_turn_started_at, time.time())
                         try:
                             s.save()
                         except Exception:
@@ -6009,9 +6014,12 @@ def _run_agent_streaming(
                         if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
                             _rm['reasoning'] = _reasoning_text
                             break
-                try:
-                    _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
-                except Exception:
+                _turn_finished_at = time.time()
+                _turn_duration_seconds = compute_turn_duration_seconds(
+                    _turn_started_at,
+                    _turn_finished_at,
+                )
+                if _turn_duration_seconds is None:
                     _turn_duration_seconds = 0.0
                 _turn_tps = None
                 if output_tokens and _turn_duration_seconds > 0:
@@ -6028,9 +6036,13 @@ def _run_agent_streaming(
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
                 if s.messages:
+                    stamp_turn_duration_on_latest_assistant(
+                        s,
+                        _turn_started_at,
+                        _turn_finished_at,
+                    )
                     for _dm in reversed(s.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
-                            _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
                                 _dm['_turnTps'] = _turn_tps
                             if _gateway_routing:
@@ -6746,6 +6758,7 @@ def _run_agent_streaming(
                         getattr(s, 'active_stream_id', None),
                     )
                     return
+                _error_turn_started_at = getattr(s, 'pending_started_at', None)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -6764,6 +6777,7 @@ def _run_agent_streaming(
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
                 s.messages.append(_error_message)
+                stamp_turn_duration_on_latest_assistant(s, _error_turn_started_at, time.time())
                 try:
                     s.save()
                 except Exception:

@@ -28,9 +28,12 @@ function _isSessionActivelyViewed(sid) {
 function _attachFallbackTurnDuration(messages, startedAt, endedAt){
   const started=Number(startedAt);
   const ended=Number(endedAt||Date.now()/1000);
-  if(!Number.isFinite(started)||started<=0||!Number.isFinite(ended)||ended<started) return;
+  if(!Number.isFinite(started)||started<=0||!Number.isFinite(ended)||ended<=started) return;
   const last=[...(messages||[])].reverse().find(m=>m&&m.role==='assistant');
-  if(last&&last._turnDuration===undefined) last._turnDuration=Math.max(0,ended-started);
+  if(last&&last._turnDuration===undefined){
+    const elapsed=ended-started;
+    last._turnDuration=(elapsed>0&&elapsed<0.001)?0.001:elapsed;
+  }
 }
 
 function _markActiveSessionViewedOnReturn() {

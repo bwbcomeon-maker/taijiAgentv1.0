@@ -3138,10 +3138,11 @@ function _formatActiveElapsedTimer(seconds){
   const s=total%60;
   return`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
-function _formatPublicActivityDuration(seconds){
+function _formatPublicActivityDuration(seconds, minimumPositiveSecond){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'';
-  return _formatActiveElapsedTimer(n);
+  const visible=(minimumPositiveSecond&&n>0&&n<1)?1:n;
+  return _formatActiveElapsedTimer(visible);
 }
 function isActivityDetailsVisible(){
   return isUiFeatureVisible('chat','activity_details');
@@ -3179,10 +3180,10 @@ function _previousUserStartedAtForAssistant(messages, aIdx){
 }
 function _publicActivityDurationForMessage(msg, startedAt=null, endedAt=null){
   const direct=Number(msg&&msg._turnDuration);
-  if(Number.isFinite(direct)&&direct>=0)return direct;
+  if(Number.isFinite(direct)&&direct>0)return direct;
   const started=Number(startedAt);
   const ended=Number(endedAt!==null&&endedAt!==undefined?endedAt:_messageEpochSeconds(msg));
-  if(Number.isFinite(started)&&started>0&&Number.isFinite(ended)&&ended>=started)return ended-started;
+  if(Number.isFinite(started)&&started>0&&Number.isFinite(ended)&&ended>started)return ended-started;
   return null;
 }
 function _syncPublicActivityStatus(row){
@@ -3198,7 +3199,7 @@ function _syncPublicActivityStatus(row){
     const started=Number(row.getAttribute('data-turn-started-at'));
     if(Number.isFinite(started)&&started>0) durationText=_formatPublicActivityDuration(_activityNowSeconds()-started);
   }else{
-    durationText=_formatPublicActivityDuration(row.getAttribute('data-public-activity-duration'));
+    durationText=_formatPublicActivityDuration(row.getAttribute('data-public-activity-duration'), true);
   }
   const fullDurationLabel=durationText?`· ${durationPrefix} ${durationText}`:`· ${durationPrefix}`;
   row.setAttribute('data-public-activity-label',statusText);

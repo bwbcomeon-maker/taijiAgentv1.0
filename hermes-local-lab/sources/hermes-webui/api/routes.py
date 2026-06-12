@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
+from api.turn_duration import stamp_turn_duration_on_latest_assistant
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     is_cli_session_row,
@@ -13491,6 +13492,7 @@ def _start_brand_privacy_safe_stream_for_session(
     now = time.time()
     reply = brand_safe_reply(msg)
     with _get_session_agent_lock(s.session_id):
+        turn_started_at = getattr(s, "pending_started_at", None) or now
         was_hidden_empty_session = _is_hidden_empty_session(s)
         s.workspace = workspace
         s.model = model
@@ -13502,6 +13504,7 @@ def _start_brand_privacy_safe_stream_for_session(
         user_msg = {"role": "user", "content": msg, "timestamp": int(now)}
         assistant_msg = {"role": "assistant", "content": reply, "timestamp": int(now)}
         s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
+        stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
         s.context_messages = list(getattr(s, "context_messages", None) or []) + [
             {"role": "user", "content": msg},
             {"role": "assistant", "content": reply},
@@ -13593,6 +13596,7 @@ def _record_license_blocked_turn_for_session(
         or "授权不可用，请联系服务方更新授权。"
     )
     with _get_session_agent_lock(s.session_id):
+        turn_started_at = getattr(s, "pending_started_at", None) or now
         was_hidden_empty_session = _is_hidden_empty_session(s)
         s.workspace = workspace
         s.model = model
@@ -13611,6 +13615,7 @@ def _record_license_blocked_turn_for_session(
             "license_blocked": True,
         }
         s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
+        stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
         s.context_messages = list(getattr(s, "context_messages", None) or []) + [
             {"role": "user", "content": msg},
             {"role": "assistant", "content": reply},
@@ -14173,10 +14178,12 @@ def _handle_chat_sync(handler, body):
         if is_brand_probe(msg):
             reply = brand_safe_reply(msg)
             now = int(time.time())
+            turn_started_at = getattr(s, "pending_started_at", None) or now
             s.messages = list(getattr(s, "messages", None) or []) + [
                 {"role": "user", "content": msg, "timestamp": now},
                 {"role": "assistant", "content": reply, "timestamp": now},
             ]
+            stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
             s.context_messages = list(getattr(s, "context_messages", None) or []) + [
                 {"role": "user", "content": msg},
                 {"role": "assistant", "content": reply},

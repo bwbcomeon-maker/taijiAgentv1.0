@@ -33,6 +33,7 @@ from api.brand_privacy import (
 )
 from api.models import get_session
 from api.run_journal import RunJournalWriter
+from api.turn_duration import stamp_turn_duration_on_latest_assistant
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +475,7 @@ def _run_gateway_chat_streaming(
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
                 return
+            turn_started_at = getattr(s, "pending_started_at", None)
             now = time.time()
             # Preserve subsecond ordering for gateway-backed turns. Using an
             # integer seconds timestamp gives the user and assistant rows the
@@ -496,6 +498,9 @@ def _run_gateway_chat_streaming(
                     if latest_text == msg_norm:
                         display = display[:-1]
             s.messages = scrub_messages(display + [user_msg, assistant_msg])
+            duration_seconds = stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
+            if duration_seconds is not None:
+                usage["duration_seconds"] = duration_seconds
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None

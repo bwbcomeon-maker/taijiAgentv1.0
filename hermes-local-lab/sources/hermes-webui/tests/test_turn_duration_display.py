@@ -9,6 +9,7 @@ REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+TURN_DURATION_PY = (REPO / "api" / "turn_duration.py").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
@@ -26,9 +27,12 @@ def test_streaming_done_payload_includes_backend_turn_duration():
         "The missing-start fallback should be documented so it is not mistaken "
         "for the primary timing path."
     )
-    assert "_turnDuration" in STREAMING_PY, (
-        "The measured duration should be persisted on the assistant message so "
-        "it survives reload after the SSE stream settles."
+    assert (
+        "stamp_turn_duration_on_latest_assistant" in STREAMING_PY
+        and "_turnDuration" in TURN_DURATION_PY
+    ), (
+        "The measured duration should be persisted through the shared turn-duration "
+        "helper so it survives reload after the SSE stream settles."
     )
 
 
@@ -77,6 +81,28 @@ def test_public_activity_duration_row_covers_plain_assistant_turns():
         "The footer duration chip should be suppressed when the public duration "
         "row is rendered, avoiding duplicate per-turn time labels."
     )
+
+
+def test_public_activity_duration_does_not_invent_zero_from_equal_timestamps():
+    helper_start = UI_JS.index("function _publicActivityDurationForMessage")
+    helper_end = UI_JS.index("function _syncPublicActivityStatus", helper_start)
+    helper = UI_JS[helper_start:helper_end]
+    assert "direct>0" in helper
+    assert "direct>=0" not in helper
+    assert "ended>started" in helper, (
+        "Timestamp fallback must only render a duration when the end timestamp is "
+        "strictly later than the start timestamp; equal timestamps mean unknown "
+        "legacy duration, not '00:00'."
+    )
+    assert "ended>=started" not in helper
+    fallback_start = MESSAGES_JS.index("function _attachFallbackTurnDuration")
+    fallback_end = MESSAGES_JS.index("function _markActiveSessionViewedOnReturn", fallback_start)
+    fallback = MESSAGES_JS[fallback_start:fallback_end]
+    assert "ended<=started" in fallback, (
+        "The client-side fallback should not write _turnDuration=0 when start "
+        "and end timestamps collapse to the same second."
+    )
+    assert "Math.max(0,ended-started)" not in fallback
 
 
 def test_active_compact_activity_elapsed_timer_uses_persisted_start_time():

@@ -301,6 +301,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     saved = models.get_session(s.session_id)
     assert [m["role"] for m in saved.messages] == ["user", "assistant"]
     assert saved.messages[-1]["content"] == "hello"
+    assert saved.messages[-1]["_turnDuration"] > 0
+    reloaded = models.Session.load(s.session_id)
+    assert reloaded.messages[-1]["_turnDuration"] == saved.messages[-1]["_turnDuration"]
     assert isinstance(saved.messages[0]["timestamp"], float)
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
@@ -341,6 +344,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "is_error": False,
         "tid": "call-1",
     }) in events
+    done_events = [payload for name, payload in events if name == "done"]
+    assert done_events
+    assert done_events[-1]["usage"]["duration_seconds"] == saved.messages[-1]["_turnDuration"]
 
 
 def test_gateway_chat_worker_maps_sse_error_to_taiji_message(tmp_path, monkeypatch):
