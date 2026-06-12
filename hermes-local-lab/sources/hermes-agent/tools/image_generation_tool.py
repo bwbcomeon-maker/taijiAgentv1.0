@@ -2,9 +2,9 @@
 """
 Image Generation Tools Module
 
-Provides image generation via FAL.ai. Multiple FAL models are supported and
-selectable via ``hermes tools`` → Image Generation; the active model is
-persisted to ``image_gen.model`` in ``config.yaml``.
+Provides image generation through provider plugins. The active provider and
+model are selected through Taiji image generation settings and persisted in
+runtime configuration.
 
 Architecture:
 - ``FAL_MODELS`` is a catalog of supported models with per-model metadata
@@ -453,22 +453,10 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
         # of a raw HTTP error from httpx.
         status = _extract_http_status(exc)
         if status is not None and 400 <= status < 500:
-            gateway_message = ""
-            if status in {401, 402, 403}:
-                gateway_message = (
-                    "\n\n"
-                    + nous_tool_gateway_unavailable_message(
-                        "managed FAL image generation",
-                        force_fresh=True,
-                    )
-                )
             raise ValueError(
-                f"Nous Subscription gateway rejected model '{model}' "
-                f"(HTTP {status}). This model may not yet be enabled on "
-                f"the Nous Portal's FAL proxy. Either:\n"
-                f"  • Set FAL_KEY in your environment to use FAL.ai directly, or\n"
-                f"  • Pick a different model via `hermes tools` → Image Generation."
-                f"{gateway_message}"
+                f"图像生成托管服务暂不支持当前模型 '{model}' "
+                f"(HTTP {status})。请在太极智能体中切换可用图像模型，"
+                f"或联系服务方检查图像生成授权。"
             ) from exc
         raise
 
@@ -770,78 +758,174 @@ def _build_no_backend_setup_message() -> str:
       - plugin alternative pointer (so users on a stale ``image_gen.provider``
         know the registry exists and how to inspect it)
     """
-    lines = ["Image generation is unavailable in this environment.", ""]
-    lines.append("Missing requirements:")
+    lines = ["图像生成服务暂不可用。", ""]
+    lines.append("缺少可用的图像生成授权或后端：")
     if managed_nous_tools_enabled():
         lines.append(
-            "  - FAL_KEY is not set and the managed FAL gateway is unreachable"
+            "  - 图像生成授权未完成，托管图像生成服务暂不可达"
         )
     else:
-        lines.append("  - FAL_KEY environment variable is not set")
-        gateway_message = nous_tool_gateway_unavailable_message(
-            "managed FAL image generation",
-        )
-        if gateway_message:
-            lines.append(f"  - {gateway_message}")
+        lines.append("  - 图像生成授权未完成")
     lines.append("")
-    lines.append("To enable image generation, do one of:")
-    lines.append(
-        "  1. Get a free API key at https://fal.ai and set "
-        "FAL_KEY=<your-key> (then restart the session)"
-    )
+    lines.append("请先在太极智能体中完成图像生成授权或切换到可用的图像生成服务。")
     if managed_nous_tools_enabled():
-        lines.append(
-            "  2. Sign in to a Nous account that has the managed FAL "
-            "gateway enabled (`hermes setup`)"
-        )
-    lines.append(
-        "  3. Configure a different image_gen provider via `hermes tools` "
-        "→ Image Generation (run `hermes plugins list` to see installed "
-        "backends)"
-    )
+        lines.append("如果已完成授权，请稍后重试或联系服务方检查托管图像生成服务。")
     return "\n".join(lines)
 
 
-def check_image_generation_requirements() -> bool:
-    """True if any image gen backend is available.
-
-    Providers are considered in this order:
-
-    1. The in-tree FAL backend (FAL_KEY or managed gateway).
-    2. Any plugin-registered provider whose ``is_available()`` returns True.
-
-    Plugins win only when the in-tree FAL path is NOT ready, which matches
-    the historical behavior: shipping hermes with a FAL key configured
-    should still expose the tool. The active selection among ready
-    providers is resolved per-call by ``image_gen.provider``.
-    """
+def _load_image_gen_config() -> Dict[str, Any]:
+    """Read the image generation config section without exposing secrets."""
     try:
-        if check_fal_api_key():
-            # Trigger the lazy fal_client import here as the SDK presence
-            # check. Raises ImportError if the optional ``fal-client``
-            # package isn't installed; the caller's except ImportError
-            # below catches that and continues to plugin probing.
-            _load_fal_client()
-            return True
-    except ImportError:
-        pass
+        from hermes_cli.config import load_config
 
-    # Probe plugin providers. Discovery is idempotent and cheap.
+        cfg = load_config()
+        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        return section if isinstance(section, dict) else {}
+    except Exception as exc:
+        logger.debug("Could not load image_gen config: %s", exc)
+        return {}
+
+
+def _iter_image_generation_providers():
+    """Return registered image generation providers, best-effort."""
     try:
         from agent.image_gen_registry import list_providers
         from hermes_cli.plugins import _ensure_plugins_discovered
 
         _ensure_plugins_discovered()
-        for provider in list_providers():
-            try:
-                if provider.is_available():
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
+        return list(list_providers())
+    except Exception as exc:
+        logger.debug("Could not list image generation providers: %s", exc)
+        return []
 
-    return False
+
+def _image_gen_public_message(reason_code: str) -> str:
+    if reason_code == "ready":
+        return "图像生成已就绪。"
+    if reason_code == "disabled":
+        return "图像生成未启用。"
+    if reason_code == "not_configured":
+        return "图像生成未配置，请先在太极智能体中完成图像生成配置。"
+    if reason_code == "authorization_required":
+        return "图像生成未授权，请先在太极智能体中完成图像生成授权。"
+    return "图像生成服务暂不可用，请检查太极智能体图像生成配置。"
+
+
+def get_image_generation_readiness() -> Dict[str, Any]:
+    """Return the product-facing readiness state for the image tool.
+
+    ``configured`` means the user selected or supplied a backend. ``available``
+    means the currently selected backend can actually service an
+    ``image_generate`` call and therefore the tool schema may be shown to the
+    model.
+    """
+    image_cfg = _load_image_gen_config()
+    provider = str(image_cfg.get("provider") or "").strip().lower()
+    model = str(image_cfg.get("model") or "").strip()
+    disabled_values = {"none", "disabled", "off", "false", "0"}
+
+    if provider in disabled_values:
+        reason = "disabled"
+        return {
+            "configured": False,
+            "available": False,
+            "reason_code": reason,
+            "public_message": _image_gen_public_message(reason),
+            "provider": provider,
+            "model": model,
+        }
+
+    has_inline_config = bool(
+        provider
+        or model
+        or any(str(image_cfg.get(field) or "").strip() for field in ("api_key", "key", "token"))
+        or str(image_cfg.get("key_env") or image_cfg.get("api_key_env") or "").strip()
+    )
+    configured = bool(has_inline_config or os.getenv("FAL_KEY") or os.getenv("FAL_API_KEY"))
+
+    if provider in {"", "fal"}:
+        try:
+            if check_fal_api_key():
+                _load_fal_client()
+                reason = "ready"
+                return {
+                    "configured": True,
+                    "available": True,
+                    "reason_code": reason,
+                    "public_message": _image_gen_public_message(reason),
+                    "provider": provider or "fal",
+                    "model": model,
+                }
+        except ImportError:
+            reason = "provider_unavailable"
+            return {
+                "configured": True,
+                "available": False,
+                "reason_code": reason,
+                "public_message": _image_gen_public_message(reason),
+                "provider": provider or "fal",
+                "model": model,
+            }
+
+    providers = _iter_image_generation_providers()
+    if provider:
+        selected = next(
+            (item for item in providers if str(getattr(item, "name", "") or "").strip().lower() == provider),
+            None,
+        )
+        if selected is None:
+            reason = "provider_unavailable"
+            return {
+                "configured": True,
+                "available": False,
+                "reason_code": reason,
+                "public_message": _image_gen_public_message(reason),
+                "provider": provider,
+                "model": model,
+            }
+        try:
+            available = bool(selected.is_available())
+        except Exception:
+            available = False
+        reason = "ready" if available else "authorization_required"
+        return {
+            "configured": True,
+            "available": available,
+            "reason_code": reason,
+            "public_message": _image_gen_public_message(reason),
+            "provider": provider,
+            "model": model,
+        }
+
+    for item in providers:
+        try:
+            if item.is_available():
+                reason = "ready"
+                return {
+                    "configured": True,
+                    "available": True,
+                    "reason_code": reason,
+                    "public_message": _image_gen_public_message(reason),
+                    "provider": str(getattr(item, "name", "") or ""),
+                    "model": model,
+                }
+        except Exception:
+            continue
+
+    reason = "authorization_required" if configured else "not_configured"
+    return {
+        "configured": configured,
+        "available": False,
+        "reason_code": reason,
+        "public_message": _image_gen_public_message(reason),
+        "provider": provider,
+        "model": model,
+    }
+
+
+def check_image_generation_requirements() -> bool:
+    """True if the active image generation backend can service calls."""
+    return bool(get_image_generation_readiness().get("available"))
 
 
 # ---------------------------------------------------------------------------
@@ -997,9 +1081,7 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
             "success": False,
             "image": None,
             "error": (
-                f"image_gen.provider='{configured}' is set but no plugin "
-                f"registered that name. Run `hermes plugins list` to see "
-                f"available image gen backends."
+                "当前图像生成服务未注册或不可用，请在太极智能体中重新选择图像生成服务。"
             ),
             "error_type": "provider_not_registered",
         })

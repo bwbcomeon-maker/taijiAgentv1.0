@@ -1,11 +1,10 @@
-"""OpenAI image generation backend — ChatGPT/Codex OAuth variant.
+"""OpenAI image generation backend using the local Taiji authorization store.
 
 Identical model catalog and tier semantics to the ``openai`` image-gen plugin
 (``gpt-image-2`` at low/medium/high quality), but routes the request through
-the Codex Responses API ``image_generation`` tool instead of the
-``images.generate`` REST endpoint. This lets users who are already
-authenticated with Codex/ChatGPT generate images without configuring a
-separate ``OPENAI_API_KEY``.
+the Responses API ``image_generation`` tool instead of the ``images.generate``
+REST endpoint. This lets Taiji-managed local authorization generate images
+without configuring a separate ``OPENAI_API_KEY``.
 
 Selection precedence for the tier (first hit wins):
 
@@ -14,7 +13,7 @@ Selection precedence for the tier (first hit wins):
 3. ``image_gen.model`` in ``config.yaml`` (when it's one of our tier IDs)
 4. :data:`DEFAULT_MODEL` — ``gpt-image-2-medium``
 
-Output is saved as PNG under ``$HERMES_HOME/cache/images/``.
+Output is saved as PNG under the runtime image cache.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.credential_pool import load_pool
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
@@ -126,20 +126,18 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
 
 
 def _read_codex_access_token() -> Optional[str]:
-    """Return a usable Codex OAuth token, or None.
-
-    Delegates to the canonical reader in ``agent.auxiliary_client`` so token
-    expiry, credential pool selection, and JWT decoding stay in one place.
-    """
+    """Return a usable Taiji-managed image generation token, or None."""
     try:
-        from agent.auxiliary_client import _read_codex_access_token as _reader
-
-        token = _reader()
+        pool = load_pool("openai-codex")
+        entry = pool.select()
+        if entry is None:
+            return None
+        token = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         if isinstance(token, str) and token.strip():
             return token.strip()
         return None
     except Exception as exc:
-        logger.debug("Could not resolve Codex access token: %s", exc)
+        logger.debug("Could not resolve Taiji image generation authorization: %s", exc)
         return None
 
 
@@ -265,7 +263,7 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
                 exc.response.read()
                 body = exc.response.text[:500]
                 raise RuntimeError(
-                    f"Codex Responses API returned HTTP {exc.response.status_code}: {body}"
+                    f"图像生成服务返回 HTTP {exc.response.status_code}: {body}"
                 ) from exc
             for event in _iter_sse_json(response):
                 found = _extract_image_b64(event)
@@ -281,7 +279,7 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
 
 
 class OpenAICodexImageGenProvider(ImageGenProvider):
-    """gpt-image-2 routed through ChatGPT/Codex OAuth instead of an API key."""
+    """gpt-image-2 routed through Taiji-managed local authorization."""
 
     @property
     def name(self) -> str:
@@ -289,7 +287,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
 
     @property
     def display_name(self) -> str:
-        return "OpenAI (Codex auth)"
+        return "OpenAI 图像生成"
 
     def is_available(self) -> bool:
         if not _read_codex_access_token():
@@ -317,13 +315,12 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
-            "name": "OpenAI (Codex auth)",
-            "badge": "free",
-            "tag": "gpt-image-2 via ChatGPT/Codex OAuth — no API key required",
+            "name": "OpenAI 图像生成",
+            "badge": "授权",
+            "tag": "通过太极智能体授权使用 GPT Image 2",
             "env_vars": [],
             "post_setup_hint": (
-                "Sign in with `hermes auth codex` (or `hermes setup` → Codex) "
-                "if you haven't already. No API key needed."
+                "请先在太极智能体中完成图像生成授权。"
             ),
         }
 
@@ -347,8 +344,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         if not _read_codex_access_token():
             return error_response(
                 error=(
-                    "No Codex/ChatGPT OAuth credentials available. Run "
-                    "`hermes auth codex` (or `hermes setup` → Codex) to sign in."
+                    "图像生成未授权，请先在太极智能体中完成图像生成授权。"
                 ),
                 error_type="auth_required",
                 provider="openai-codex",
@@ -372,8 +368,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         if not token:
             return error_response(
                 error=(
-                    "No Codex/ChatGPT OAuth credentials available. Run "
-                    "`hermes auth codex` (or `hermes setup` → Codex) to sign in."
+                    "图像生成未授权，请先在太极智能体中完成图像生成授权。"
                 ),
                 error_type="auth_required",
                 provider="openai-codex",
@@ -392,7 +387,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
             return error_response(
-                error=f"OpenAI image generation via Codex auth failed: {exc}",
+                error=f"OpenAI 图像生成失败：{exc}",
                 error_type="api_error",
                 provider="openai-codex",
                 model=tier_id,
@@ -402,7 +397,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
 
         if not b64:
             return error_response(
-                error="Codex response contained no image_generation_call result",
+                error="图像生成服务未返回图片结果。",
                 error_type="empty_response",
                 provider="openai-codex",
                 model=tier_id,

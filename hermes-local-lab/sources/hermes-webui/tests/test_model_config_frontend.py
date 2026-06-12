@@ -89,6 +89,29 @@ def test_model_config_js_updates_focus_summaries():
         assert marker in PANELS_JS
 
 
+def test_image_generation_summary_uses_real_availability():
+    assert "imageRow.available===true" in PANELS_JS
+    assert "imageRow.oauth_managed));" not in PANELS_JS
+
+
+def test_image_generation_auth_hint_is_taiji_branded():
+    assert "此图片生成服务由太极智能体授权管理" in PANELS_JS
+    assert "Codex/ChatGPT OAuth" not in PANELS_JS
+
+
+def test_model_config_license_layout_prioritizes_customer_and_compacts_actions():
+    assert 'class="model-config-license-customer"' in INDEX_HTML
+    assert 'id="taijiLicenseCustomer"' in INDEX_HTML
+    assert 'class="model-config-license-toolbar"' in INDEX_HTML
+    assert "#settingsPaneModels .model-config-license-customer" in STYLE_CSS
+    assert "#settingsPaneModels .model-config-license-toolbar" in STYLE_CSS
+    assert "grid-template-columns:minmax(0,1fr) auto" in STYLE_CSS
+    assert (
+        "#settingsPaneModels .model-config-license-actions{display:grid;gap:6px;"
+        "justify-items:end;align-self:start;min-width:0;max-width:220px;}"
+    ) in STYLE_CSS
+
+
 def test_model_config_styles_are_present():
     assert ".model-config-status" in STYLE_CSS
     assert ".model-config-panel" in STYLE_CSS

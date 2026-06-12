@@ -1047,6 +1047,13 @@ def _writeflow_read_state(workspace: Path) -> tuple[dict, bool, str | None]:
 
 def _writeflow_image_generation_ready() -> bool:
     try:
+        from tools.image_generation_tool import get_image_generation_readiness
+
+        return bool(get_image_generation_readiness().get("available"))
+    except Exception:
+        pass
+
+    try:
         from api.config import get_config
 
         cfg = get_config()
@@ -1059,7 +1066,7 @@ def _writeflow_image_generation_ready() -> bool:
     if provider in {"", "none", "disabled", "off"}:
         return False
     if provider == "openai-codex":
-        return True
+        return False
     key_fields = ("api_key", "key", "token")
     if any(str(image_cfg.get(field) or "").strip() for field in key_fields):
         return True
@@ -12643,7 +12650,7 @@ def _handle_live_models(handler, parsed):
     - OpenRouter: live fetch from /api/v1/models
     - Anthropic: live fetch from /v1/models (API key or OAuth token)
     - Copilot: live fetch from api.githubcopilot.com/models with correct headers
-    - openai-codex: Codex OAuth endpoint + local ~/.codex/ cache fallback
+    - openai-codex: local Taiji authorization store
     - Nous: live fetch from inference-api.nousresearch.com/v1/models
     - DeepSeek, kimi-coding, opencode-zen/go, custom: generic OpenAI-compat /v1/models
     - ZAI, MiniMax, Google/Gemini: fall back to static list (non-standard endpoints)

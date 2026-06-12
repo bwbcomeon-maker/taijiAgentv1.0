@@ -1,0 +1,79 @@
+"""Regression tests for image generation tool readiness."""
+
+from __future__ import annotations
+
+from model_tools import get_tool_definitions
+
+
+def _tool_names(tool_defs):
+    return {item["function"]["name"] for item in tool_defs}
+
+
+def test_readiness_reports_configured_but_unavailable_without_provider_auth(monkeypatch):
+    from tools import image_generation_tool as image_tool
+
+    monkeypatch.setattr(
+        image_tool,
+        "_load_image_gen_config",
+        lambda: {"provider": "openai-codex", "model": "gpt-image-2-medium"},
+        raising=False,
+    )
+    monkeypatch.setattr(image_tool, "check_fal_api_key", lambda: False)
+
+    class _Provider:
+        name = "openai-codex"
+
+        def is_available(self):
+            return False
+
+    monkeypatch.setattr(
+        image_tool,
+        "_iter_image_generation_providers",
+        lambda: [_Provider()],
+        raising=False,
+    )
+
+    status = image_tool.get_image_generation_readiness()
+
+    assert status["configured"] is True
+    assert status["available"] is False
+    assert status["reason_code"] == "authorization_required"
+    assert "太极智能体" in status["public_message"]
+    assert "Hermes" not in status["public_message"]
+    assert "Codex" not in status["public_message"]
+
+
+def test_image_generate_schema_appears_only_when_provider_available(monkeypatch):
+    from tools import image_generation_tool as image_tool
+    from tools.registry import invalidate_check_fn_cache
+    import model_tools
+
+    monkeypatch.setattr(
+        image_tool,
+        "get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": False,
+            "reason_code": "authorization_required",
+            "public_message": "图像生成未授权，请先在太极智能体中完成图像生成授权。",
+        },
+    )
+    invalidate_check_fn_cache()
+    model_tools._clear_tool_defs_cache()
+    unavailable = get_tool_definitions(enabled_toolsets=["image_gen"], quiet_mode=True)
+    assert "image_generate" not in _tool_names(unavailable)
+
+    monkeypatch.setattr(
+        image_tool,
+        "get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": True,
+            "reason_code": "ready",
+            "public_message": "图像生成已就绪。",
+        },
+    )
+    invalidate_check_fn_cache()
+    model_tools._clear_tool_defs_cache()
+    available = get_tool_definitions(enabled_toolsets=["image_gen"], quiet_mode=True)
+    assert "image_generate" in _tool_names(available)

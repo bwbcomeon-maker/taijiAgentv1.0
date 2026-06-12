@@ -1273,12 +1273,60 @@ class APIServerAdapter(BasePlatformAdapter):
                 except Exception:
                     tools = []
                 is_enabled = name in enabled_toolsets
+                configured = _toolset_has_keys(name, config)
+                available = bool(is_enabled and configured)
+                reason_code = "ready" if available else (
+                    "disabled" if not is_enabled else "not_configured"
+                )
+                public_message = ""
+                if name == "image_gen":
+                    try:
+                        from tools.image_generation_tool import get_image_generation_readiness
+                        import model_tools
+
+                        readiness = get_image_generation_readiness()
+                        configured = bool(readiness.get("configured"))
+                        tool_defs = model_tools.get_tool_definitions(
+                            enabled_toolsets=[name],
+                            quiet_mode=True,
+                        )
+                        schema_names = {
+                            item.get("function", {}).get("name")
+                            for item in tool_defs
+                            if isinstance(item, dict)
+                        }
+                        if not is_enabled:
+                            available = False
+                            reason_code = "disabled"
+                            public_message = "图像生成未启用。"
+                            tools = []
+                        else:
+                            available = bool(
+                                readiness.get("available")
+                                and "image_generate" in schema_names
+                            )
+                            reason_code = str(
+                                readiness.get("reason_code")
+                                or ("ready" if available else "unavailable")
+                            )
+                            public_message = str(readiness.get("public_message") or "")
+                            tools = sorted(schema_names) if available else []
+                    except Exception:
+                        logger.debug("Failed to resolve image generation readiness", exc_info=True)
+                        configured = False
+                        available = False
+                        reason_code = "unavailable"
+                        public_message = "图像生成服务暂不可用，请检查太极智能体图像生成配置。"
+                        tools = []
                 data.append({
                     "name": name,
                     "label": label,
                     "description": desc,
                     "enabled": is_enabled,
-                    "configured": _toolset_has_keys(name, config),
+                    "configured": configured,
+                    "available": available,
+                    "reason_code": reason_code,
+                    "public_message": public_message,
                     "tools": tools,
                 })
         except Exception:

@@ -53,7 +53,7 @@ class TestMetadata:
         assert provider.name == "openai-codex"
 
     def test_display_name(self, provider):
-        assert provider.display_name == "OpenAI (Codex auth)"
+        assert provider.display_name == "OpenAI 图像生成"
 
     def test_default_model(self, provider):
         assert provider.default_model() == "gpt-image-2-medium"
@@ -65,13 +65,39 @@ class TestMetadata:
     def test_setup_schema_has_no_required_env_vars(self, provider):
         schema = provider.get_setup_schema()
         assert schema["env_vars"] == []
-        assert schema["badge"] == "free"
+        assert schema["badge"] == "授权"
+        visible = str(schema)
+        assert "Codex" not in visible
+        assert "Hermes" not in visible
+        assert "hermes" not in visible
 
 
 # ── Availability ────────────────────────────────────────────────────────────
 
 
 class TestAvailability:
+    def test_token_reader_uses_taiji_pool_only(self, monkeypatch):
+        class _Pool:
+            def select(self):
+                return None
+
+        monkeypatch.setattr(codex_plugin, "load_pool", lambda provider: _Pool())
+
+        assert codex_plugin._read_codex_access_token() is None
+
+    def test_token_reader_returns_taiji_pool_token(self, monkeypatch):
+        class _Entry:
+            runtime_api_key = "taiji-image-token"
+            access_token = "fallback-token"
+
+        class _Pool:
+            def select(self):
+                return _Entry()
+
+        monkeypatch.setattr(codex_plugin, "load_pool", lambda provider: _Pool())
+
+        assert codex_plugin._read_codex_access_token() == "taiji-image-token"
+
     def test_unavailable_without_codex_token(self, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: None)
@@ -99,6 +125,10 @@ class TestGenerate:
         result = provider.generate("a cat")
         assert result["success"] is False
         assert result["error_type"] == "auth_required"
+        assert "太极智能体" in result["error"]
+        assert "Codex" not in result["error"]
+        assert "Hermes" not in result["error"]
+        assert "hermes" not in result["error"]
 
     def test_returns_invalid_argument_for_empty_prompt(self, provider, monkeypatch):
         monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")

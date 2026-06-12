@@ -45,7 +45,7 @@ def test_fal_key_empty_is_unset(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_no_backend_message_mentions_fal_signup_and_plugins(monkeypatch):
+def test_no_backend_message_uses_taiji_authorization_copy(monkeypatch):
     from tools import image_generation_tool
 
     monkeypatch.setattr(
@@ -54,13 +54,14 @@ def test_no_backend_message_mentions_fal_signup_and_plugins(monkeypatch):
 
     msg = image_generation_tool._build_no_backend_setup_message()
 
-    assert "FAL_KEY" in msg
-    assert "https://fal.ai" in msg
-    # Plugin pointer so users on a stale image_gen.provider know where to look.
-    assert "hermes tools" in msg or "hermes plugins" in msg
+    assert "太极智能体" in msg
+    assert "图像生成授权" in msg
+    assert "FAL_KEY" not in msg
+    assert "hermes tools" not in msg
+    assert "hermes plugins" not in msg
 
 
-def test_no_backend_message_mentions_managed_gateway_when_enabled(monkeypatch):
+def test_no_backend_message_mentions_service_when_managed_gateway_enabled(monkeypatch):
     from tools import image_generation_tool
 
     monkeypatch.setattr(
@@ -69,8 +70,9 @@ def test_no_backend_message_mentions_managed_gateway_when_enabled(monkeypatch):
 
     msg = image_generation_tool._build_no_backend_setup_message()
 
-    assert "managed FAL gateway" in msg
-    assert "Nous account" in msg or "hermes setup" in msg
+    assert "太极智能体" in msg
+    assert "托管图像生成服务" in msg
+    assert "hermes setup" not in msg
 
 
 def test_image_generate_tool_returns_actionable_error_when_no_backend(monkeypatch):
@@ -94,5 +96,8 @@ def test_image_generate_tool_returns_actionable_error_when_no_backend(monkeypatc
     )
 
     assert result["success"] is False
-    assert "https://fal.ai" in result["error"]
-    assert "FAL_KEY" in result["error"]
+    assert "太极智能体" in result["error"]
+    assert "图像生成授权" in result["error"]
+    assert "https://fal.ai" not in result["error"]
+    assert "FAL_KEY" not in result["error"]
+    assert "hermes" not in result["error"]

@@ -67,7 +67,9 @@ class TestPluginDispatch:
 
         assert payload["success"] is False
         assert payload["error_type"] == "provider_not_registered"
-        assert "image_gen.provider='missing-codex'" in payload["error"]
+        assert "太极智能体" in payload["error"]
+        assert "image_gen.provider" not in payload["error"]
+        assert "hermes" not in payload["error"]
 
     def test_dispatch_force_refreshes_plugins_when_provider_initially_missing(self, monkeypatch, tmp_path):
         from tools import image_generation_tool

@@ -44,6 +44,23 @@ _IMAGE_GEN_KEY_ENV: dict[str, str] = {
     "xai": "XAI_API_KEY",
     "krea": "KREA_API_KEY",
 }
+_IMAGE_GEN_FALLBACK_META: dict[str, dict[str, Any]] = {
+    "doubao": {
+        "name": "Doubao Seedream",
+        "models": [
+            {"id": "doubao-seedream-5-0-260128", "label": "Doubao Seedream 5.0 Lite"},
+            {"id": "doubao-seedream-5-0-lite-260128", "label": "Doubao Seedream 5.0 Lite (alias)"},
+        ],
+        "default_model": "doubao-seedream-5-0-260128",
+    },
+}
+_IMAGE_GEN_PUBLIC_PROVIDER_IDS = {
+    "openai-codex": "taiji-image",
+}
+_IMAGE_GEN_INTERNAL_PROVIDER_IDS = {
+    public_id: internal_id
+    for internal_id, public_id in _IMAGE_GEN_PUBLIC_PROVIDER_IDS.items()
+}
 _BUILTIN_IMAGE_GEN_MODULES: tuple[str, ...] = (
     "plugins.image_gen.doubao",
     "plugins.image_gen.fal",
@@ -127,7 +144,25 @@ def _ensure_image_gen_plugins_registered() -> None:
             logger.debug("Failed to register image_gen plugin %s", module_name, exc_info=True)
 
 
+def _public_image_gen_provider_id(provider_id: str) -> str:
+    provider = str(provider_id or "").strip().lower()
+    return _IMAGE_GEN_PUBLIC_PROVIDER_IDS.get(provider, provider)
+
+
+def _internal_image_gen_provider_id(provider_id: str) -> str:
+    provider = str(provider_id or "").strip().lower()
+    return _IMAGE_GEN_INTERNAL_PROVIDER_IDS.get(provider, provider)
+
+
 def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
+    readiness: dict[str, Any] = {}
+    try:
+        from tools.image_generation_tool import get_image_generation_readiness
+
+        readiness = get_image_generation_readiness()
+    except Exception:
+        readiness = {}
+
     try:
         _ensure_image_gen_plugins_registered()
         from agent import image_gen_registry
@@ -170,21 +205,42 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
             if isinstance(item, dict) and item.get("key"):
                 env_vars.append(str(item.get("key")).strip())
         env_var = _IMAGE_GEN_KEY_ENV.get(pid) or (env_vars[0] if env_vars else "")
-        key_status = (
-            {"configured": True, "source": "oauth", "env_var": ""}
-            if pid == "openai-codex"
-            else _key_status_for_env(env_var)
-        )
+        active = pid == active_provider
+        public_pid = _public_image_gen_provider_id(pid)
+        if pid == "openai-codex":
+            key_status = {
+                "configured": bool(available),
+                "source": "taiji_auth",
+                "env_var": "",
+            }
+            display_name = "OpenAI 图像生成"
+            description = "通过太极智能体授权使用图像生成"
+            badge = "授权"
+        else:
+            key_status = _key_status_for_env(env_var)
+            display_name = str(schema.get("name") or getattr(provider, "display_name", "") or pid)
+            description = str(schema.get("tag") or "")
+            badge = str(schema.get("badge") or "")
+        if active and readiness:
+            available = bool(readiness.get("available"))
+            key_status["configured"] = bool(readiness.get("available"))
+            reason_code = str(readiness.get("reason_code") or "")
+            status_message = str(readiness.get("public_message") or "")
+        else:
+            reason_code = "ready" if available else ""
+            status_message = ""
         rows.append(
             {
-                "id": pid,
-                "name": str(schema.get("name") or getattr(provider, "display_name", "") or pid),
-                "description": str(schema.get("tag") or ""),
-                "badge": str(schema.get("badge") or ""),
-                "available": available or bool(key_status.get("configured")) or pid == "openai-codex",
-                "active": pid == active_provider,
+                "id": public_pid,
+                "name": display_name,
+                "description": description,
+                "badge": badge,
+                "available": bool(available),
+                "active": active,
                 "requires_env": env_vars or ([env_var] if env_var else []),
                 "key_status": key_status,
+                "reason_code": reason_code,
+                "status_message": status_message,
                 "models": [
                     {
                         "id": str(item.get("id") or "").strip(),
@@ -201,32 +257,37 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
     for pid, env_var in _IMAGE_GEN_KEY_ENV.items():
         if pid in seen:
             continue
+        fallback = _IMAGE_GEN_FALLBACK_META.get(pid, {})
         rows.append(
             {
                 "id": pid,
-                "name": pid.replace("-", " ").title(),
+                "name": str(fallback.get("name") or pid.replace("-", " ").title()),
                 "description": "",
                 "badge": "",
                 "available": bool(_key_status_for_env(env_var).get("configured")),
                 "active": pid == active_provider,
                 "requires_env": [env_var],
                 "key_status": _key_status_for_env(env_var),
-                "models": [],
-                "default_model": "",
+                "models": list(fallback.get("models") or []),
+                "default_model": str(fallback.get("default_model") or ""),
                 "oauth_managed": False,
             }
         )
     if "openai-codex" not in seen:
+        active = active_provider == "openai-codex"
+        available = bool(readiness.get("available")) if active else False
         rows.append(
             {
-                "id": "openai-codex",
-                "name": "OpenAI Codex",
-                "description": "ChatGPT/Codex OAuth image generation",
-                "badge": "oauth",
-                "available": True,
-                "active": active_provider == "openai-codex",
+                "id": _public_image_gen_provider_id("openai-codex"),
+                "name": "OpenAI 图像生成",
+                "description": "通过太极智能体授权使用图像生成",
+                "badge": "授权",
+                "available": available,
+                "active": active,
                 "requires_env": [],
-                "key_status": {"configured": True, "source": "oauth", "env_var": ""},
+                "key_status": {"configured": available, "source": "taiji_auth", "env_var": ""},
+                "reason_code": str(readiness.get("reason_code") or "") if active else "",
+                "status_message": str(readiness.get("public_message") or "") if active else "",
                 "models": [],
                 "default_model": "",
                 "oauth_managed": True,
@@ -249,7 +310,7 @@ def get_image_gen_config() -> dict[str, Any]:
         "profile": _active_profile_name(),
         "config_path": str(config_path),
         "image_gen": {
-            "provider": active_provider,
+            "provider": _public_image_gen_provider_id(active_provider),
             "model": active_model,
             "use_gateway": bool(image_cfg.get("use_gateway")),
         },
@@ -258,16 +319,17 @@ def get_image_gen_config() -> dict[str, Any]:
 
 
 def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
-    provider_id = str(body.get("provider") or "").strip().lower()
+    requested_provider_id = str(body.get("provider") or "").strip().lower()
+    provider_id = _internal_image_gen_provider_id(requested_provider_id)
     model_id = str(body.get("model") or "").strip()
     api_key = body.get("api_key")
-    if not provider_id:
+    if not requested_provider_id:
         raise ValueError("provider is required")
 
     rows = _image_gen_provider_rows(provider_id)
-    selected = next((row for row in rows if row.get("id") == provider_id), None)
+    selected = next((row for row in rows if row.get("id") == requested_provider_id), None)
     if selected is None:
-        raise ValueError(f"unknown image generation provider: {provider_id}")
+        raise ValueError(f"unknown image generation provider: {requested_provider_id}")
     if not model_id:
         model_id = str(selected.get("default_model") or "").strip()
         models = selected.get("models") if isinstance(selected.get("models"), list) else []
@@ -337,7 +399,7 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
 
     if provider_id in _OAUTH_PROVIDERS or _provider_is_oauth(provider_id):
         label = _PROVIDER_DISPLAY.get(provider_id, provider_id)
-        raise ValueError(f"{label} uses OAuth. Run `hermes model` or `hermes auth` in the terminal.")
+        raise ValueError(f"{label} 使用网页登录授权，请在太极智能体中完成授权。")
 
     if provider_id == "custom":
         if not base_url:

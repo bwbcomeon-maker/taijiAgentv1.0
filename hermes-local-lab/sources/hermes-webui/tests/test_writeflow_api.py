@@ -17,6 +17,22 @@ def test_writeflow_status_without_state_file(tmp_path):
     assert data["state_path"].endswith("articles/.writeflow/state.json")
 
 
+def test_writeflow_image_generation_ready_uses_real_tool_readiness(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": False,
+            "reason_code": "authorization_required",
+            "public_message": "图像生成未授权，请先在太极智能体中完成图像生成授权。",
+        },
+    )
+
+    assert routes._writeflow_image_generation_ready() is False
+
+
 def test_writeflow_status_reads_state_file(tmp_path):
     import api.routes as routes
 

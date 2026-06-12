@@ -102,8 +102,10 @@ def test_oauth_main_provider_rejected_from_webui(monkeypatch, tmp_path):
             {"provider": "openai-codex", "model": "gpt-5.1-codex"}
         )
     except ValueError as exc:
-        assert "OAuth" in str(exc)
-        assert "hermes" in str(exc)
+        assert "网页登录授权" in str(exc)
+        assert "太极智能体" in str(exc)
+        assert "hermes" not in str(exc)
+        assert "Hermes" not in str(exc)
     else:
         raise AssertionError("OAuth provider accepted WebUI API-key setup")
 
@@ -184,6 +186,60 @@ def test_image_gen_config_writes_doubao_ark_key_without_echo(monkeypatch, tmp_pa
     os.environ.pop("ARK_API_KEY", None)
 
 
+def test_image_gen_config_maps_taiji_public_provider_to_internal_id(monkeypatch, tmp_path):
+    real_get_image_gen_config = model_config.get_image_gen_config
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(model_config, "get_image_gen_config", real_get_image_gen_config)
+
+    class _Provider:
+        name = "openai-codex"
+        display_name = "OpenAI 图像生成"
+
+        def get_setup_schema(self):
+            return {
+                "name": "OpenAI 图像生成",
+                "badge": "授权",
+                "tag": "通过太极智能体授权使用图像生成",
+                "env_vars": [],
+            }
+
+        def list_models(self):
+            return [{"id": "gpt-image-2-medium", "display": "GPT Image 2"}]
+
+        def default_model(self):
+            return "gpt-image-2-medium"
+
+        def is_available(self):
+            return False
+
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr(
+        "agent.image_gen_registry.list_providers",
+        lambda: [_Provider()],
+    )
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": False,
+            "reason_code": "authorization_required",
+            "public_message": "图像生成未授权，请先在太极智能体中完成图像生成授权。",
+        },
+    )
+
+    result = model_config.set_image_gen_config(
+        {
+            "provider": "taiji-image",
+            "model": "gpt-image-2-medium",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["image_gen"]["provider"] == "openai-codex"
+    assert cfg["image_gen"]["model"] == "gpt-image-2-medium"
+    assert result["image_gen"]["provider"] == "taiji-image"
+
+
 def test_image_gen_provider_rows_include_doubao(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
@@ -198,3 +254,58 @@ def test_image_gen_provider_rows_include_doubao(monkeypatch, tmp_path):
     model_ids = {item["id"] for item in doubao["models"]}
     assert "doubao-seedream-5-0-260128" in model_ids
     assert "doubao-seedream-5-0-lite-260128" in model_ids
+
+
+def test_openai_codex_image_provider_reflects_real_readiness(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+
+    class _Provider:
+        name = "openai-codex"
+        display_name = "OpenAI 图像生成"
+
+        def get_setup_schema(self):
+            return {
+                "name": "OpenAI 图像生成",
+                "badge": "授权",
+                "tag": "通过太极智能体授权使用图像生成",
+                "env_vars": [],
+            }
+
+        def list_models(self):
+            return [{"id": "gpt-image-2-medium", "display": "GPT Image 2"}]
+
+        def default_model(self):
+            return "gpt-image-2-medium"
+
+        def is_available(self):
+            return False
+
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr(
+        "agent.image_gen_registry.list_providers",
+        lambda: [_Provider()],
+    )
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": False,
+            "reason_code": "authorization_required",
+            "public_message": "图像生成未授权，请先在太极智能体中完成图像生成授权。",
+        },
+    )
+
+    rows = model_config._image_gen_provider_rows("openai-codex")
+    row = next(item for item in rows if item["id"] == "taiji-image")
+
+    assert row["active"] is True
+    assert row["available"] is False
+    assert row["key_status"]["configured"] is False
+    assert row["key_status"]["source"] == "taiji_auth"
+    assert row["reason_code"] == "authorization_required"
+    assert row["status_message"] == "图像生成未授权，请先在太极智能体中完成图像生成授权。"
+    visible = json.dumps(row, ensure_ascii=False)
+    assert "Hermes" not in visible
+    assert "Codex" not in visible
+    assert "openai-codex" not in visible
+    assert ("her" "mes tools") not in visible

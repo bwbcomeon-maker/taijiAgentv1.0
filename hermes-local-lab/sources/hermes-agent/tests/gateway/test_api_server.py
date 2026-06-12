@@ -769,6 +769,7 @@ class TestToolsetsEndpoint:
                 assert by_name["web"]["enabled"] is False
                 assert by_name["web"]["tools"] == ["web_search"]
                 assert by_name["default"]["configured"] is True
+                assert by_name["default"]["available"] is True
 
     @pytest.mark.asyncio
     async def test_toolsets_handles_resolution_failure_per_toolset(self, adapter):
@@ -804,6 +805,93 @@ class TestToolsetsEndpoint:
                 by_name = {ts["name"]: ts for ts in data["data"]}
                 assert by_name["broken"]["tools"] == []
                 assert by_name["ok"]["tools"] == ["some_tool"]
+
+    @pytest.mark.asyncio
+    async def test_toolsets_reports_image_gen_configured_but_unavailable(self, adapter):
+        fake_toolsets = [
+            ("image_gen", "Image Generation", "image_generate"),
+        ]
+        readiness = {
+            "configured": True,
+            "available": False,
+            "reason_code": "authorization_required",
+            "public_message": "图像生成未授权，请先在太极智能体中完成图像生成授权。",
+        }
+        with patch(
+            "hermes_cli.tools_config._get_effective_configurable_toolsets",
+            return_value=fake_toolsets,
+        ), patch(
+            "hermes_cli.tools_config._get_platform_tools",
+            return_value={"image_gen"},
+        ), patch(
+            "hermes_cli.tools_config._toolset_has_keys",
+            return_value=True,
+        ), patch(
+            "toolsets.resolve_toolset",
+            return_value=["image_generate"],
+        ), patch(
+            "tools.image_generation_tool.get_image_generation_readiness",
+            return_value=readiness,
+        ), patch(
+            "model_tools.get_tool_definitions",
+            return_value=[],
+        ):
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/toolsets")
+                assert resp.status == 200
+                data = await resp.json()
+                image_gen = {ts["name"]: ts for ts in data["data"]}["image_gen"]
+                assert image_gen["enabled"] is True
+                assert image_gen["configured"] is True
+                assert image_gen["available"] is False
+                assert image_gen["reason_code"] == "authorization_required"
+                assert "太极智能体" in image_gen["public_message"]
+                assert "Hermes" not in image_gen["public_message"]
+                assert "Codex" not in image_gen["public_message"]
+                assert image_gen["tools"] == []
+
+    @pytest.mark.asyncio
+    async def test_toolsets_reports_image_gen_disabled_before_readiness(self, adapter):
+        fake_toolsets = [
+            ("image_gen", "Image Generation", "image_generate"),
+        ]
+        readiness = {
+            "configured": True,
+            "available": True,
+            "reason_code": "ready",
+            "public_message": "图像生成已就绪。",
+        }
+        with patch(
+            "hermes_cli.tools_config._get_effective_configurable_toolsets",
+            return_value=fake_toolsets,
+        ), patch(
+            "hermes_cli.tools_config._get_platform_tools",
+            return_value=set(),
+        ), patch(
+            "hermes_cli.tools_config._toolset_has_keys",
+            return_value=True,
+        ), patch(
+            "toolsets.resolve_toolset",
+            return_value=["image_generate"],
+        ), patch(
+            "tools.image_generation_tool.get_image_generation_readiness",
+            return_value=readiness,
+        ), patch(
+            "model_tools.get_tool_definitions",
+            return_value=[{"function": {"name": "image_generate"}}],
+        ):
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/toolsets")
+                assert resp.status == 200
+                data = await resp.json()
+                image_gen = {ts["name"]: ts for ts in data["data"]}["image_gen"]
+                assert image_gen["enabled"] is False
+                assert image_gen["configured"] is True
+                assert image_gen["available"] is False
+                assert image_gen["reason_code"] == "disabled"
+                assert image_gen["tools"] == []
 
     @pytest.mark.asyncio
     async def test_toolsets_requires_auth_when_key_configured(self, auth_adapter):

@@ -8117,8 +8117,7 @@ function _renderModelConfigFocusSummary(data){
  const imageRow=_modelConfigImageProviderRow(imageProvider,data)||{};
  const imageKeyStatus=imageRow.key_status||{};
  const imageKeyLabel=_modelConfigKeyLabel(imageKeyStatus);
- const imageNeedsKey=!!(imageKeyStatus&&imageKeyStatus.env_var)&&!imageRow.oauth_managed;
- const imageReady=!!(imageProvider&&imageModel&&(!imageNeedsKey||imageKeyStatus.configured||imageKeyStatus.source==='oauth'||imageRow.oauth_managed));
+ const imageReady=!!(imageProvider&&imageModel&&imageRow.available===true);
  _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(imageProvider,imageRow.name));
  _setModelConfigText('imageGenConfigModelSummary',imageModel||String(imageRow.default_model||''));
  _setModelConfigText('imageGenConfigKeyState',imageKeyLabel);
@@ -8205,7 +8204,7 @@ function _syncImageGenConfigControls(){
  if(keyRow) keyRow.style.display=envVar&&!oauth?'':'none';
  if(hint){
   if(oauth){
-   hint.textContent='此图片 provider 由 Codex/ChatGPT OAuth 管理，不需要在 WebUI 输入 API key。';
+   hint.textContent='此图片生成服务由太极智能体授权管理，不需要在此输入 API key。';
   }else if(envVar){
    hint.textContent=_modelConfigKeyLabel(provider.key_status);
   }else{

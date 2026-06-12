@@ -418,7 +418,7 @@ class TestManagedGatewayErrorTranslation:
     """4xx from the Nous managed gateway should be translated to a user-actionable message."""
 
     def test_4xx_translates_to_value_error_with_remediation(self, image_tool, monkeypatch):
-        """403 from managed gateway → ValueError mentioning FAL_KEY + hermes tools."""
+        """403 from managed gateway -> Taiji-facing remediation."""
         from unittest.mock import MagicMock
 
         # Simulate: managed mode active, managed submit raises 4xx.
@@ -440,8 +440,10 @@ class TestManagedGatewayErrorTranslation:
         msg = str(exc_info.value)
         assert "fal-ai/nano-banana-pro" in msg
         assert "403" in msg
-        assert "FAL_KEY" in msg
-        assert "hermes tools" in msg
+        assert "太极智能体" in msg
+        assert "图像生成授权" in msg
+        assert "FAL_KEY" not in msg
+        assert "hermes tools" not in msg
         # Original exception chained for debugging
         assert exc_info.value.__cause__ is bad_request
 
