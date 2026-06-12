@@ -8052,6 +8052,119 @@ function _setDatalistOptions(id,models){
  });
 }
 
+function _setModelConfigText(id,value){
+ const el=$(id);
+ if(el) el.textContent=(value==null||value==='')?'—':String(value);
+}
+
+function _setModelConfigStatusBadge(id,label,state){
+ const el=$(id);
+ if(!el) return;
+ el.textContent=label||'—';
+ el.dataset.state=state||'neutral';
+}
+
+function _modelConfigProviderDisplay(providerId,data){
+ const id=String(providerId||'').trim();
+ if(!id) return '';
+ const rows=_modelConfigProviderRows(data);
+ const row=rows.find(p=>String(p&&p.id||'')===id)||null;
+ return String((row&&(row.display_name||row.name))||id).trim();
+}
+
+function _modelConfigImageProviderRow(providerId,data){
+ const id=String(providerId||'').trim();
+ const rows=Array.isArray(data&&data.image_gen_providers)?data.image_gen_providers:[];
+ return rows.find(p=>String(p&&p.id||'')===id)||null;
+}
+
+function _formatModelConfigProvider(providerId,display){
+ const id=String(providerId||'').trim();
+ const label=String(display||'').trim();
+ if(!id&&!label) return '—';
+ if(label&&id&&label.toLowerCase()!==id.toLowerCase()) return label+' · '+id;
+ return label||id;
+}
+
+function _renderModelConfigFocusSummary(data){
+ const main=(data&&data.main)||{};
+ const mainProvider=String(main.provider||'').trim();
+ const mainModel=String(main.model||'').trim();
+ const mainKeyLabel=_modelConfigKeyLabel(main.key_status);
+ const mainProviderDisplay=_modelConfigProviderDisplay(mainProvider,data);
+ const mainReady=!!(mainProvider&&mainModel&&main.key_status&&main.key_status.configured);
+ _setModelConfigText('modelConfigMainModelName',mainModel||'未配置主模型');
+ _setModelConfigText('modelConfigProviderSummary',_formatModelConfigProvider(mainProvider,mainProviderDisplay));
+ _setModelConfigText('modelConfigModelSummary',mainModel);
+ _setModelConfigText('modelConfigKeySummary',mainKeyLabel);
+ _setModelConfigStatusBadge('modelConfigMainEffective',mainReady?'已生效':'待配置',mainReady?'ok':'warn');
+ _setModelConfigStatusBadge('modelConfigMainStatusBadge',mainReady?'主模型可用':'主模型待配置',mainReady?'ok':'warn');
+
+ const hero=$('modelConfigHero');
+ if(hero){
+  hero.dataset.state=mainReady?'ok':'warn';
+  const icon=hero.querySelector('.model-config-state-icon');
+  if(icon) icon.textContent=mainReady?'✓':'!';
+ }
+ _setModelConfigText('modelConfigHeroTitle',mainReady?'主模型已生效，可以开始新会话':'主模型尚未配置完整');
+ _setModelConfigText('modelConfigHeroMessage',mainReady
+  ? ('当前生效模型：'+mainModel+'。页面只突出当前能否使用和需要处理的阻断项。')
+  : '请先完成主模型和 API 密钥配置，再开始新会话。');
+
+ const imageGen=(data&&data.image_gen)||{};
+ const imageProvider=String(imageGen.provider||'').trim();
+ const imageModel=String(imageGen.model||'').trim();
+ const imageRow=_modelConfigImageProviderRow(imageProvider,data)||{};
+ const imageKeyStatus=imageRow.key_status||{};
+ const imageKeyLabel=_modelConfigKeyLabel(imageKeyStatus);
+ const imageNeedsKey=!!(imageKeyStatus&&imageKeyStatus.env_var)&&!imageRow.oauth_managed;
+ const imageReady=!!(imageProvider&&imageModel&&(!imageNeedsKey||imageKeyStatus.configured||imageKeyStatus.source==='oauth'||imageRow.oauth_managed));
+ _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(imageProvider,imageRow.name));
+ _setModelConfigText('imageGenConfigModelSummary',imageModel||String(imageRow.default_model||''));
+ _setModelConfigText('imageGenConfigKeyState',imageKeyLabel);
+ _setModelConfigStatusBadge('imageGenConfigStatusBadge',imageReady?'图片生成可用':'图片生成待配置',imageReady?'ok':'warn');
+ const imageCard=$('modelConfigImageSummaryCard');
+ if(imageCard){
+  imageCard.dataset.state=imageReady?'ok':'warn';
+  const icon=imageCard.querySelector('.model-config-warning-icon');
+  if(icon) icon.textContent=imageReady?'✓':'!';
+ }
+ _setModelConfigText('imageGenConfigCardTitle',imageReady?'图片生成模型已配置':'待处理：图片生成密钥');
+ _setModelConfigText('imageGenConfigSummary',imageReady
+  ? '图片生成配置已可用于 image_generate；正文写作仍由主模型负责。'
+  : '只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。');
+}
+
+function toggleModelConfigSection(sectionId,forceOpen){
+ const section=$(sectionId);
+ if(!section) return false;
+ const open=(typeof forceOpen==='boolean')?forceOpen:section.hidden;
+ section.hidden=!open;
+ section.dataset.expanded=open?'1':'0';
+ const labels={
+  modelConfigMainEdit:['修改主模型配置','收起主模型配置'],
+  imageGenConfigEdit:['修改配置','收起配置'],
+  modelConfigAuxEdit:['展开辅助模型','收起辅助模型'],
+ };
+ document.querySelectorAll('[data-model-config-toggle="'+sectionId+'"]').forEach(btn=>{
+  const pair=labels[sectionId];
+  if(pair) btn.textContent=open?pair[1]:pair[0];
+  btn.setAttribute('aria-expanded',open?'true':'false');
+ });
+ return open;
+}
+
+function openModelConfigSecretEditor(sectionId,inputId){
+ toggleModelConfigSection(sectionId,true);
+ const input=$(inputId);
+ if(input) setTimeout(()=>{ input.focus(); },0);
+}
+
+async function openImageGenKeyEditor(){
+ openModelConfigSecretEditor('imageGenConfigEdit','imageGenConfigApiKey');
+ await pasteSecretToInput('imageGenConfigApiKey');
+}
+
 function _syncMainModelConfigControls(){
  const providerSel=$('modelConfigProvider');
  const baseRow=$('modelConfigBaseUrlRow');
@@ -8112,6 +8225,7 @@ function _renderModelConfigPanel(data){
  if(path) path.textContent='本机配置';
  if(active) active.textContent=[main.provider,main.model].filter(Boolean).join(' / ')||'—';
  if(keyState) keyState.textContent=_modelConfigKeyLabel(main.key_status);
+ _renderModelConfigFocusSummary(data);
 
  const providerSel=$('modelConfigProvider');
  if(providerSel){
@@ -8165,11 +8279,11 @@ let _taijiLicenseData=null;
 
 function _taijiLicenseStatusLabel(status){
  const s=String(status&&status.status||'').toLowerCase();
- if(s==='valid') return '有效';
- if(s==='expired') return '已到期';
- if(s==='missing') return '未安装';
- if(s==='invalid') return '无效';
- return '未知';
+ if(s==='valid') return '授权有效';
+ if(s==='expired') return '授权已到期';
+ if(s==='missing') return '未安装授权';
+ if(s==='invalid') return '授权无效';
+ return '授权未知';
 }
 
 function _formatTaijiLicenseDate(value){
@@ -8185,10 +8299,13 @@ function _renderTaijiLicenseStatus(data){
  const customerEl=$('taijiLicenseCustomer');
  const expiresEl=$('taijiLicenseExpires');
  const remainingEl=$('taijiLicenseRemaining');
+ const remainingBadge=$('taijiLicenseRemainingBadge');
  const machineEl=$('taijiLicenseMachine');
  const summaryEl=$('taijiLicenseSummary');
  const panel=$('taijiLicensePanel');
  const label=_taijiLicenseStatusLabel(_taijiLicenseData);
+ const status=String(_taijiLicenseData.status||'unknown').toLowerCase();
+ const state=status==='valid'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
  if(statusEl) statusEl.textContent=label;
  if(customerEl) customerEl.textContent=_taijiLicenseData.customer||'—';
  if(expiresEl) expiresEl.textContent=_formatTaijiLicenseDate(_taijiLicenseData.expires_at);
@@ -8196,6 +8313,12 @@ function _renderTaijiLicenseStatus(data){
   remainingEl.textContent=typeof _taijiLicenseData.remaining_days==='number'
    ? (_taijiLicenseData.remaining_days+' 天')
    : '—';
+ }
+ if(remainingBadge){
+  remainingBadge.textContent=typeof _taijiLicenseData.remaining_days==='number'
+   ? ('剩余 '+_taijiLicenseData.remaining_days+' 天')
+   : '剩余 —';
+  remainingBadge.dataset.state=state;
  }
  if(machineEl){
   const shortCode=_taijiLicenseData.machine_code_short||'—';
@@ -8210,6 +8333,8 @@ function _renderTaijiLicenseStatus(data){
  if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(_taijiLicenseData.status==='valid'?'授权可用':'授权状态不可用');
  if(panel){
   panel.dataset.licenseStatus=_taijiLicenseData.status||'unknown';
+  const icon=panel.querySelector('.model-config-state-icon');
+  if(icon) icon.textContent=status==='valid'?'✓':'!';
  }
 }
 
@@ -8353,6 +8478,7 @@ async function saveMainModelConfig(){
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload)});
   _renderModelConfigPanel(data);
+  toggleModelConfigSection('modelConfigMainEdit',false);
   if(typeof populateModelDropdown==='function') populateModelDropdown();
   if(typeof showToast==='function') showToast('主模型配置已保存');
  }catch(e){
@@ -8377,6 +8503,7 @@ async function saveImageGenConfig(){
    image_gen_providers:data.providers,
   });
   _renderModelConfigPanel(_modelConfigData);
+  toggleModelConfigSection('imageGenConfigEdit',false);
   if(typeof showToast==='function') showToast('图片生成配置已保存');
  }catch(e){
   if(typeof showToast==='function') showToast('保存图片生成配置失败：'+(e.message||e),5000,'error');
@@ -8391,6 +8518,20 @@ function _modelConfigBuildAuxProviderOptions(sel,providers,currentProvider){
 
 function _modelConfigBuildAuxModelOptions(sel,provider,providers,currentModel){
  _buildAuxModelOptions(sel,provider,providers,currentModel);
+}
+
+function _modelConfigAuxChipText(taskMap,key,label){
+ const cfg=(taskMap&&taskMap[key])||{};
+ const provider=String(cfg.provider||'auto').trim();
+ const model=String(cfg.model||'').trim();
+ if(!provider||provider==='auto') return label+' 跟随主模型';
+ return label+' '+provider+(model?' / '+model:'');
+}
+
+function _renderModelConfigAuxSummary(taskMap){
+ _setModelConfigText('modelConfigAuxVision',_modelConfigAuxChipText(taskMap,'vision','Vision'));
+ _setModelConfigText('modelConfigAuxCompression',_modelConfigAuxChipText(taskMap,'compression','压缩'));
+ _setModelConfigText('modelConfigAuxTitle',_modelConfigAuxChipText(taskMap,'title_generation','标题生成'));
 }
 
 function _markModelConfigAuxDirty(){
@@ -8442,6 +8583,7 @@ async function _loadModelConfigAuxiliaryModels(){
   const taskMap={};
   for(const task of ((auxData&&auxData.tasks)||[])) taskMap[task.task]=task;
   _modelConfigAuxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
+  _renderModelConfigAuxSummary(taskMap);
   container.innerHTML='';
   for(const slot of _AUX_TASK_SLOTS){
    const cfg=taskMap[slot.key]||{provider:'auto',model:''};
@@ -8487,6 +8629,7 @@ async function _loadModelConfigAuxiliaryModels(){
   }
  }catch(e){
   console.warn('[settings] model config auxiliary load failed',e);
+  _renderModelConfigAuxSummary({});
   container.innerHTML='<div class="model-config-loading">无法加载辅助模型配置。</div>';
  }
 }
@@ -8506,6 +8649,7 @@ async function _applyModelConfigAuxModels(){
   }
  }
  if(typeof showToast==='function') showToast(saved?'辅助模型已保存':'辅助模型没有变化');
+ toggleModelConfigSection('modelConfigAuxEdit',false);
  _loadModelConfigAuxiliaryModels();
 }
 

@@ -48,7 +48,51 @@ def test_secret_paste_uses_desktop_clipboard_bridge_when_available():
     assert "navigator.clipboard.readText" in PANELS_JS
 
 
+def test_model_config_focus_layout_has_summary_cards():
+    for marker in (
+        'class="model-config-focus-layout"',
+        "model-config-license-strip",
+        'id="modelConfigMainSummaryCard"',
+        'id="modelConfigImageSummaryCard"',
+        'id="modelConfigAuxSummary"',
+    ):
+        assert marker in INDEX_HTML
+
+
+def test_model_config_license_actions_remain_visible():
+    for marker in (
+        'id="btnImportTaijiLicense"',
+        'id="btnExportTaijiMachineRequest"',
+        'id="btnRefreshTaijiLicense"',
+    ):
+        assert marker in INDEX_HTML
+
+
+def test_model_config_edit_forms_are_collapsible_in_cards():
+    for marker in (
+        'id="modelConfigMainEdit"',
+        'id="imageGenConfigEdit"',
+        'id="modelConfigAuxEdit"',
+        'toggleModelConfigSection',
+    ):
+        assert marker in INDEX_HTML or marker in PANELS_JS
+
+
+def test_model_config_js_updates_focus_summaries():
+    for marker in (
+        "_setModelConfigStatusBadge",
+        "_renderModelConfigFocusSummary",
+        "modelConfigMainEffective",
+        "imageGenConfigKeyState",
+        "taijiLicenseRemainingBadge",
+    ):
+        assert marker in PANELS_JS
+
+
 def test_model_config_styles_are_present():
     assert ".model-config-status" in STYLE_CSS
     assert ".model-config-panel" in STYLE_CSS
     assert ".model-config-aux-row" in STYLE_CSS
+    assert ".model-config-focus-layout" in STYLE_CSS
+    assert ".model-config-summary-card" in STYLE_CSS
+    assert ".model-config-collapsible" in STYLE_CSS

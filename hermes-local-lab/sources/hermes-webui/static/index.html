@@ -1361,92 +1361,157 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title">模型配置</div>
-                <div class="settings-section-meta">写入当前 taiji Agent 配置档，影响 CLI 和新会话；不会热切换正在运行的回复。</div>
+                <div class="settings-section-meta">只影响 CLI 和新会话；正在运行中的回复不会被热切换。</div>
               </div>
-              <button class="btn-tiny" type="button" onclick="loadModelConfigPanel(true)">刷新</button>
+              <button class="btn-tiny" type="button" onclick="loadModelConfigPanel(true)">刷新状态</button>
             </div>
-            <section class="model-config-panel model-config-panel-wide taiji-license-panel" id="taijiLicensePanel">
-              <div class="model-config-panel-head">
-                <strong>授权</strong>
-                <span id="taijiLicenseSummary">正在读取授权状态</span>
-              </div>
-              <div class="model-config-status taiji-license-status" aria-live="polite">
-                <span><b>状态</b><em id="taijiLicenseStatus">—</em></span>
-                <span><b>客户</b><em id="taijiLicenseCustomer">—</em></span>
-                <span><b>到期</b><em id="taijiLicenseExpires">—</em></span>
-                <span><b>剩余</b><em id="taijiLicenseRemaining">—</em></span>
-                <span><b>本机</b><em id="taijiLicenseMachine">—</em></span>
-              </div>
-              <div class="model-config-actions">
-                <input id="taijiLicenseFile" type="file" accept=".jwt,.txt,application/jwt,text/plain" hidden>
-                <button class="sm-btn" type="button" id="btnImportTaijiLicense">导入授权文件</button>
-                <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest">导出本机机器码</button>
-                <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权状态</button>
-              </div>
-            </section>
-            <div class="model-config-status" id="modelConfigStatus" aria-live="polite">
-              <span><b>配置档</b><em id="modelConfigProfile">—</em></span>
-              <span><b>配置文件</b><em id="modelConfigPath">—</em></span>
-              <span><b>主模型</b><em id="modelConfigActive">—</em></span>
-              <span><b>密钥</b><em id="modelConfigKeyState">—</em></span>
-            </div>
-            <div class="model-config-grid">
-              <section class="model-config-panel">
-                <div class="model-config-panel-head">
-                  <strong>主聊天模型</strong>
-                  <span>全局默认，CLI 与新会话共用。</span>
-                </div>
-                <label for="modelConfigProvider">Provider</label>
-                <select id="modelConfigProvider"></select>
-                <label for="modelConfigModel">模型 ID</label>
-                <input id="modelConfigModel" list="modelConfigModelOptions" placeholder="deepseek-chat" autocomplete="off">
-                <datalist id="modelConfigModelOptions"></datalist>
-                <div id="modelConfigBaseUrlRow">
-                  <label for="modelConfigBaseUrl">Base URL</label>
-                  <input id="modelConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
-                </div>
-                <div id="modelConfigApiKeyRow">
-                  <label for="modelConfigApiKey">API 密钥</label>
-                  <div class="model-config-secret-row">
-                    <input id="modelConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
-                    <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('modelConfigApiKey')">粘贴</button>
+
+            <div class="model-config-focus-layout">
+              <section class="model-config-license-strip taiji-license-panel" id="taijiLicensePanel" data-license-status="unknown">
+                <div class="model-config-license-main">
+                  <span class="model-config-state-icon" aria-hidden="true">✓</span>
+                  <div class="model-config-license-copy">
+                    <div class="model-config-license-title">
+                      <strong id="taijiLicenseStatus">正在读取授权</strong>
+                      <span class="model-config-pill" id="taijiLicenseRemainingBadge">—</span>
+                    </div>
+                    <div class="model-config-license-meta">
+                      <span>客户：<em id="taijiLicenseCustomer">—</em></span>
+                      <span>到期：<em id="taijiLicenseExpires">—</em></span>
+                      <span>本机：<em id="taijiLicenseMachine">—</em></span>
+                    </div>
+                    <div class="model-config-muted" id="taijiLicenseSummary">正在读取授权状态</div>
+                    <em id="taijiLicenseRemaining" class="model-config-sr">—</em>
                   </div>
-                  <div class="model-config-hint" id="modelConfigProviderHint">—</div>
                 </div>
-                <button class="sm-btn" id="btnSaveMainModel" type="button" onclick="saveMainModelConfig()">保存主模型配置</button>
+                <div class="model-config-actions">
+                  <input id="taijiLicenseFile" type="file" accept=".jwt,.txt,application/jwt,text/plain" hidden>
+                  <button class="sm-btn" type="button" id="btnImportTaijiLicense">导入授权文件</button>
+                  <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest">导出本机机器码</button>
+                  <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权</button>
+                </div>
               </section>
-              <section class="model-config-panel">
-                <div class="model-config-panel-head">
-                  <strong>图片生成模型</strong>
-                  <span>配置 image_generate 使用的专用后端。</span>
+
+              <section class="model-config-hero" id="modelConfigHero" data-state="loading">
+                <span class="model-config-state-icon" aria-hidden="true">✓</span>
+                <div class="model-config-hero-copy">
+                  <strong id="modelConfigHeroTitle">正在读取模型配置</strong>
+                  <span id="modelConfigHeroMessage">页面只突出当前能否使用和需要处理的阻断项。</span>
                 </div>
-                <label for="imageGenConfigProvider">Provider</label>
-                <select id="imageGenConfigProvider"></select>
-                <label for="imageGenConfigModel">模型 ID</label>
-                <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
-                <datalist id="imageGenConfigModelOptions"></datalist>
-                <div id="imageGenConfigApiKeyRow">
-                  <label for="imageGenConfigApiKey">API 密钥</label>
-                  <div class="model-config-secret-row">
-                    <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
-                    <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
+                <div class="model-config-hero-badges" id="modelConfigStatus" aria-live="polite">
+                  <span class="model-config-pill" id="modelConfigMainStatusBadge">主模型 —</span>
+                  <span class="model-config-pill" id="imageGenConfigStatusBadge">图片生成 —</span>
+                  <em id="modelConfigProfile" class="model-config-sr">—</em>
+                  <em id="modelConfigPath" class="model-config-sr">—</em>
+                  <em id="modelConfigActive" class="model-config-sr">—</em>
+                  <em id="modelConfigKeyState" class="model-config-sr">—</em>
+                </div>
+              </section>
+
+              <div class="model-config-summary-grid">
+                <section class="model-config-panel model-config-summary-card model-config-main-card" id="modelConfigMainSummaryCard">
+                  <div class="model-config-card-head">
+                    <div>
+                      <strong>当前生效主模型</strong>
+                      <span>这是聊天、专家团正文和新会话默认使用的模型。</span>
+                    </div>
+                    <span class="model-config-pill" id="modelConfigMainEffective">—</span>
                   </div>
-                  <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
+                  <div class="model-config-primary-value" id="modelConfigMainModelName">—</div>
+                  <div class="model-config-facts">
+                    <span><b>Provider</b><em id="modelConfigProviderSummary">—</em></span>
+                    <span><b>模型 ID</b><em id="modelConfigModelSummary">—</em></span>
+                    <span><b>API 密钥</b><em id="modelConfigKeySummary">—</em></span>
+                  </div>
+                  <div class="model-config-actions">
+                    <button class="sm-btn" type="button" data-model-config-toggle="modelConfigMainEdit" onclick="toggleModelConfigSection('modelConfigMainEdit')">修改主模型配置</button>
+                    <button class="btn-tiny" type="button" onclick="openModelConfigSecretEditor('modelConfigMainEdit','modelConfigApiKey')">更新密钥</button>
+                  </div>
+                  <div class="model-config-collapsible" id="modelConfigMainEdit" hidden>
+                    <label for="modelConfigProvider">Provider</label>
+                    <select id="modelConfigProvider"></select>
+                    <label for="modelConfigModel">模型 ID</label>
+                    <input id="modelConfigModel" list="modelConfigModelOptions" placeholder="deepseek-chat" autocomplete="off">
+                    <datalist id="modelConfigModelOptions"></datalist>
+                    <div id="modelConfigBaseUrlRow">
+                      <label for="modelConfigBaseUrl">Base URL</label>
+                      <input id="modelConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+                    </div>
+                    <div id="modelConfigApiKeyRow">
+                      <label for="modelConfigApiKey">API 密钥</label>
+                      <div class="model-config-secret-row">
+                        <input id="modelConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                        <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('modelConfigApiKey')">粘贴</button>
+                      </div>
+                      <div class="model-config-hint" id="modelConfigProviderHint">—</div>
+                    </div>
+                    <button class="sm-btn" id="btnSaveMainModel" type="button" onclick="saveMainModelConfig()">保存主模型配置</button>
+                  </div>
+                </section>
+
+                <section class="model-config-panel model-config-summary-card model-config-image-card" id="modelConfigImageSummaryCard">
+                  <div class="model-config-card-head">
+                    <div>
+                      <strong id="imageGenConfigCardTitle">待处理：图片生成密钥</strong>
+                      <span>不影响正文写作，只会影响实际出图。</span>
+                    </div>
+                    <span class="model-config-warning-icon" aria-hidden="true">!</span>
+                  </div>
+                  <div class="model-config-facts model-config-facts-vertical">
+                    <span><b>Provider</b><em id="imageGenConfigProviderSummary">—</em></span>
+                    <span><b>模型 ID</b><em id="imageGenConfigModelSummary">—</em></span>
+                    <span><b>密钥状态</b><em id="imageGenConfigKeyState">—</em></span>
+                  </div>
+                  <p class="model-config-muted" id="imageGenConfigSummary">只有调用 image_generate 或需要实际生成图片时才会失败。</p>
+                  <div class="model-config-actions">
+                    <button class="sm-btn" type="button" onclick="openImageGenKeyEditor()">粘贴并验证</button>
+                    <button class="btn-tiny" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">修改配置</button>
+                  </div>
+                  <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
+                    <label for="imageGenConfigProvider">Provider</label>
+                    <select id="imageGenConfigProvider"></select>
+                    <label for="imageGenConfigModel">模型 ID</label>
+                    <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
+                    <datalist id="imageGenConfigModelOptions"></datalist>
+                    <div id="imageGenConfigApiKeyRow">
+                      <label for="imageGenConfigApiKey">API 密钥</label>
+                      <div class="model-config-secret-row">
+                        <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                        <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
+                      </div>
+                      <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
+                    </div>
+                    <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存图片生成配置</button>
+                  </div>
+                </section>
+              </div>
+
+              <section class="model-config-panel model-config-aux-summary" id="modelConfigAuxSummary">
+                <div>
+                  <strong>辅助模型</strong>
+                  <div class="model-config-chip-row">
+                    <span class="model-config-chip" id="modelConfigAuxVision">Vision 跟随主模型</span>
+                    <span class="model-config-chip" id="modelConfigAuxCompression">压缩 跟随主模型</span>
+                    <span class="model-config-chip" id="modelConfigAuxTitle">标题生成 跟随主模型</span>
+                  </div>
                 </div>
-                <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存图片生成配置</button>
+                <div>
+                  <strong>生效规则</strong>
+                  <p class="model-config-muted"><b>保存后：</b>写入当前配置档，影响 CLI 和新会话。</p>
+                  <p class="model-config-muted"><b>密钥：</b>页面只显示来源和状态，不展示 API key 明文。</p>
+                </div>
+                <div class="model-config-actions">
+                  <button class="btn-tiny" type="button" data-model-config-toggle="modelConfigAuxEdit" onclick="toggleModelConfigSection('modelConfigAuxEdit')">展开辅助模型</button>
+                </div>
+                <div class="model-config-collapsible model-config-aux-edit" id="modelConfigAuxEdit" hidden>
+                  <div id="modelConfigAuxContainer"></div>
+                  <div class="model-config-actions">
+                    <button class="sm-btn" id="btnResetModelConfigAux" type="button">重置辅助模型</button>
+                    <button class="sm-btn" id="btnApplyModelConfigAux" type="button" style="display:none">保存辅助模型</button>
+                  </div>
+                </div>
               </section>
             </div>
-            <section class="model-config-panel model-config-panel-wide">
-              <div class="model-config-panel-head">
-                <strong>专用/辅助模型</strong>
-                <span>Vision、压缩、标题生成等任务可单独路由；Auto 表示使用主模型。</span>
-              </div>
-              <div id="modelConfigAuxContainer"></div>
-              <div class="model-config-actions">
-                <button class="sm-btn" id="btnResetModelConfigAux" type="button">重置辅助模型</button>
-                <button class="sm-btn" id="btnApplyModelConfigAux" type="button" style="display:none">保存辅助模型</button>
-              </div>
-            </section>
           </div>
           <div class="settings-pane" id="settingsPaneProviders">
             <div class="settings-section-head">
