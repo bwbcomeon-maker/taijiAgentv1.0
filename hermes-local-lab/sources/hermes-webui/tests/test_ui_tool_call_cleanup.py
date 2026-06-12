@@ -172,6 +172,35 @@ class TestToolCallGroupingStatic:
             "Live grouping must preserve data-live-tid so tool_start/tool_complete updates still replace the correct card."
         )
 
+    def test_public_activity_mode_hides_internal_tool_details(self):
+        public_helper = _function_body(UI_JS, "isActivityDetailsVisible")
+        public_status = _function_body(UI_JS, "renderPublicActivityStatus")
+        live_fn = _function_body(UI_JS, "appendLiveToolCard")
+        thinking_fn = _function_body(UI_JS, "appendThinking")
+        render_fn = _function_body(UI_JS, "renderMessages")
+
+        assert "isUiFeatureVisible('chat','activity_details')" in public_helper, (
+            "Public activity detail visibility should be driven by webui.feature_visibility.chat.activity_details."
+        )
+        assert "data-agent-activity-public-only" in public_status, (
+            "The public-only status row needs a stable hook for privacy and visual regression tests."
+        )
+        assert "已运行" in public_status and "用时" in public_status, (
+            "Public status must show live elapsed time and settled task duration."
+        )
+        assert "tool-card" not in public_status and "_toggleActivityGroup" not in public_status, (
+            "The public-only status row must not expose expandable tool cards or Activity disclosure controls."
+        )
+        assert "!isActivityDetailsVisible()" in live_fn, (
+            "Live tool events must short-circuit to the public status row when activity details are hidden."
+        )
+        assert "!isActivityDetailsVisible()" in thinking_fn, (
+            "Live thinking placeholders must short-circuit to the public status row when activity details are hidden."
+        )
+        assert "isActivityDetailsVisible()" in render_fn and "renderPublicActivityStatus" in render_fn, (
+            "Settled transcript rendering must render public duration status instead of rebuilding tool details."
+        )
+
     def test_activity_disclosure_state_is_session_and_turn_scoped(self):
         helper = _function_body(UI_JS, "ensureActivityGroup")
         toggle_fn = _function_body(UI_JS, "_toggleActivityGroup")

@@ -26,6 +26,7 @@ def test_backend_ui_visibility_defaults_fail_open():
     assert all(vis["nav"].values())
     assert all(vis["settings_sections"].values())
     assert all(vis["composer"].values())
+    assert vis["chat"]["activity_details"] is True
 
 
 def test_backend_ui_visibility_hides_known_features_and_ignores_unknown():
@@ -70,6 +71,7 @@ def test_backend_feature_visibility_boolean_schema_controls_visibility():
                         "workspace_files": True,
                         "model": "false",
                     },
+                    "chat": {"activity_details": False},
                 }
             }
         }
@@ -84,6 +86,7 @@ def test_backend_feature_visibility_boolean_schema_controls_visibility():
     assert vis["composer"]["profile"] is False
     assert vis["composer"]["workspace_files"] is True
     assert vis["composer"]["model"] is True
+    assert vis["chat"]["activity_details"] is False
 
 
 def test_feature_visibility_schema_overrides_legacy_hidden_features():
@@ -101,6 +104,7 @@ def test_feature_visibility_schema_overrides_legacy_hidden_features():
                     "nav": {"tasks": True, "skills": False},
                     "settings_sections": {"models": True},
                     "composer": {"model": True},
+                    "chat": {"activity_details": True},
                 },
             }
         }
@@ -111,6 +115,7 @@ def test_feature_visibility_schema_overrides_legacy_hidden_features():
     assert vis["nav"]["skills"] is False
     assert vis["settings_sections"]["models"] is True
     assert vis["composer"]["model"] is True
+    assert vis["chat"]["activity_details"] is True
 
 
 def test_settings_api_returns_computed_visibility_not_raw_config():
@@ -173,16 +178,19 @@ def test_packaged_config_lists_all_features_with_chinese_explanations():
         "toolsets",
         "quota",
     }
+    assert set(feature_visibility["chat"]) == {"activity_details"}
+    assert feature_visibility["chat"]["activity_details"] is False
     assert all(isinstance(value, bool) for value in feature_visibility["nav"].values())
     assert all(isinstance(value, bool) for value in feature_visibility["settings_sections"].values())
     assert all(isinstance(value, bool) for value in feature_visibility["composer"].values())
+    assert all(isinstance(value, bool) for value in feature_visibility["chat"].values())
 
 
 def test_runtime_env_syncs_packaged_feature_visibility_on_startup():
     assert "sync-packaged-config.py" in RUNTIME_ENV_SH
     assert "TAIJI_AGENT_SYNC_PACKAGED_CONFIG" in RUNTIME_ENV_SH
     assert "$LAB_DIR/config/taiji-default-config.yaml" in RUNTIME_ENV_SH
-    assert "$HERMES_HOME/config.yaml" in RUNTIME_ENV_SH
+    assert "$TAIJI_RUNTIME_HOME/config.yaml" in RUNTIME_ENV_SH
 
 
 def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):

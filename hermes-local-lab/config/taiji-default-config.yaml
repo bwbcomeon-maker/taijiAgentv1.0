@@ -45,3 +45,6 @@ webui:
       reasoning: true
       toolsets: false
       quota: false
+    # 聊天过程内部轨迹。true=可展开调试明细，false=只显示安全运行状态。
+    chat:
+      activity_details: false

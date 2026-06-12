@@ -31,6 +31,7 @@
 - Writing expert-team status docks are now bound to the active session run only, so a newly summoned team cannot fall back to another conversation's latest board.
 - Writing expert-team boards now separate current-run artifacts from historical references, so same-topic old drafts or chat-mentioned paths cannot appear as downloadable results before the current task actually produces them.
 - Writing expert-team summons now stay in the current window: choosing a team creates and selects a new chat task, then shows the live team board above the composer instead of opening a separate task window.
+- Taiji chat can now hide internal Activity/tool/thinking details behind `webui.feature_visibility.chat.activity_details=false`, showing only safe public progress text and elapsed task duration.
 
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 

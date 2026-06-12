@@ -59,3 +59,9 @@ def test_activity_status_rows_have_quiet_metadata_styling():
     assert ".agent-activity-status-detail" in STYLE_CSS
     assert ".agent-activity-status-time" in STYLE_CSS
     assert ".agent-activity-status-error .agent-activity-status-label{color:var(--error);}" in STYLE_CSS
+
+
+def test_public_activity_status_has_non_expandable_metadata_styling():
+    assert ".agent-public-activity-status{" in STYLE_CSS
+    assert "data-agent-activity-public-only" in UI_JS
+    assert "agent-public-activity-duration" in UI_JS

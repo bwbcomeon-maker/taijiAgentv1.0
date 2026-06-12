@@ -5009,6 +5009,9 @@ _UI_VISIBILITY_FEATURES = {
         "toolsets",
         "quota",
     ),
+    "chat": (
+        "activity_details",
+    ),
 }
 
 

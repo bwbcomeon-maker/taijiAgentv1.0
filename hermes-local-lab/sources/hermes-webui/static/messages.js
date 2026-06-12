@@ -25,6 +25,14 @@ function _isSessionActivelyViewed(sid) {
   return true;
 }
 
+function _attachFallbackTurnDuration(messages, startedAt, endedAt){
+  const started=Number(startedAt);
+  const ended=Number(endedAt||Date.now()/1000);
+  if(!Number.isFinite(started)||started<=0||!Number.isFinite(ended)||ended<started) return;
+  const last=[...(messages||[])].reverse().find(m=>m&&m.role==='assistant');
+  if(last&&last._turnDuration===undefined) last._turnDuration=Math.max(0,ended-started);
+}
+
 function _markActiveSessionViewedOnReturn() {
   if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;
   _markSessionViewed(S.session.session_id, S.session.message_count || (S.messages&&S.messages.length) || 0);
@@ -600,13 +608,13 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    if(S.session&&typeof startData.pending_started_at==='number'){
+      S.session.pending_started_at=startData.pending_started_at;
+    }
     if(typeof appendThinking==='function') appendThinking('',{pending:true});
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
     if(typeof updateSendBtn==='function') updateSendBtn();
-    if(S.session&&typeof startData.pending_started_at==='number'){
-      S.session.pending_started_at=startData.pending_started_at;
-    }
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id = streamId;
     }
@@ -1945,6 +1953,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
+          const _turnStartedAt=Number(S.session&&S.session.pending_started_at);
           S.session=(typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(d.session,S.session&&S.session.workspace):d.session);S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(S.session&&S.session.session_id){
@@ -2001,6 +2010,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                 else if(S.session)S.session.gateway_routing_history=[d.usage.gateway_routing];
               }
             }
+          }
+          if(lastAsst&&lastAsst._turnDuration===undefined){
+            _attachFallbackTurnDuration(S.messages,_turnStartedAt);
           }
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
@@ -2235,6 +2247,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       if(S.session&&S.session.session_id===activeSid){
+        const _errorTurnStartedAt=Number(S.session&&S.session.pending_started_at);
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         let isRecoveryControlMessage=false;
@@ -2261,6 +2274,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
+        _attachFallbackTurnDuration(S.messages,_errorTurnStartedAt);
         if(isRecoveryControlMessage){
           (async()=>{
             if(await _restoreSettledSession(source)) return;
@@ -2367,9 +2381,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
           if(data&&data.session&&S.session&&S.session.session_id===activeSid){
+            const _cancelTurnStartedAt=Number(S.session&&S.session.pending_started_at);
             S.session=(typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session);
             const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+            _attachFallbackTurnDuration(S.messages,_cancelTurnStartedAt);
             clearLiveToolCards();if(!assistantText)removeThinking();
             _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
             renderMessages({preserveScroll:true});
@@ -2377,9 +2393,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
+            const _cancelTurnStartedAt=Number(S.session&&S.session.pending_started_at);
             clearLiveToolCards();if(!assistantText)removeThinking();
             const cancelAgentName=(assistantDisplayName()+'').trim()||'taiji Agent';
-            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
+            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});
+            _attachFallbackTurnDuration(S.messages,_cancelTurnStartedAt);
+            renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
         }

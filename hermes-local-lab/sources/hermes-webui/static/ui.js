@@ -76,7 +76,8 @@ let _taijiFloatingListenersReady=false;
 const UI_VISIBILITY_DEFAULTS={
   nav:['chat','tasks','kanban','writing','skills','memory','workspaces','profiles','todos','insights','logs','settings'],
   settings_sections:['conversation','appearance','preferences','models','providers','plugins','system'],
-  composer:['profile','workspace_files','workspace_switcher','model','reasoning','toolsets','quota']
+  composer:['profile','workspace_files','workspace_switcher','model','reasoning','toolsets','quota'],
+  chat:['activity_details']
 };
 
 function isUiFeatureVisible(group,key){
@@ -3136,6 +3137,126 @@ function _formatActiveElapsedTimer(seconds){
   const m=Math.floor(total/60);
   const s=total%60;
   return`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+function _formatPublicActivityDuration(seconds){
+  const n=Number(seconds);
+  if(!Number.isFinite(n)||n<0)return'';
+  return _formatActiveElapsedTimer(n);
+}
+function isActivityDetailsVisible(){
+  return isUiFeatureVisible('chat','activity_details');
+}
+function _messageEpochSeconds(m){
+  const raw=m&&(m._ts!==undefined?m._ts:m.timestamp);
+  if(raw===undefined||raw===null||raw==='')return null;
+  const n=Number(raw);
+  if(Number.isFinite(n)&&n>0)return n>100000000000?Math.floor(n/1000):n;
+  const parsed=Date.parse(String(raw));
+  return Number.isFinite(parsed)&&parsed>0?parsed/1000:null;
+}
+let _publicActivityElapsedTimer=null;
+let _publicActivityElapsedNode=null;
+function _publicActivityStatusLabel(state, live){
+  const normalized=String(state||'').trim().toLowerCase();
+  if(live)return normalized==='thinking'?'思考中':'执行中';
+  if(normalized==='cancelled'||normalized==='canceled')return'已取消';
+  if(normalized==='error'||normalized==='failed')return'执行异常';
+  return'已完成';
+}
+function _publicActivityFinalStateForMessage(msg){
+  const content=String((msg&&msg.content)||'').trim().toLowerCase();
+  if(msg&&msg._error)return content.includes('cancel')?'cancelled':'error';
+  if(content.includes('**task cancelled')||content.includes('task cancelled'))return'cancelled';
+  if(content.startsWith('**error')||content.startsWith('error:'))return'error';
+  return'done';
+}
+function _syncPublicActivityStatus(row){
+  if(!row)return;
+  const live=row.getAttribute('data-live-public-activity')==='1';
+  const state=row.getAttribute('data-public-activity-state')||(live?'executing':'done');
+  const labelEl=row.querySelector('.agent-public-activity-label');
+  const durationEl=row.querySelector('.agent-public-activity-duration');
+  const statusText=_publicActivityStatusLabel(state, live);
+  let durationText='';
+  const durationPrefix=live?'已运行':'用时';
+  if(live){
+    const started=Number(row.getAttribute('data-turn-started-at'));
+    if(Number.isFinite(started)&&started>0) durationText=_formatPublicActivityDuration(_activityNowSeconds()-started);
+  }else{
+    durationText=_formatPublicActivityDuration(row.getAttribute('data-public-activity-duration'));
+  }
+  const fullDurationLabel=durationText?`· ${durationPrefix} ${durationText}`:`· ${durationPrefix}`;
+  row.setAttribute('data-public-activity-label',statusText);
+  if(labelEl) labelEl.textContent=`${statusText} ${fullDurationLabel}`;
+  if(durationEl){
+    durationEl.textContent='';
+    durationEl.hidden=true;
+  }
+  row.setAttribute('data-public-activity-duration-label',fullDurationLabel);
+}
+function renderPublicActivityStatus(parent, options){
+  if(!parent)return null;
+  const opts=options||{};
+  const live=opts.live!==false;
+  const liveDurationLabel='已运行';
+  const settledDurationLabel='用时';
+  let row=live?parent.querySelector('.agent-public-activity-status[data-live-public-activity="1"]'):null;
+  if(!row){
+    row=document.createElement('div');
+    row.className='agent-public-activity-status';
+    row.setAttribute('data-agent-activity-public-only','1');
+    row.innerHTML='<span class="agent-public-activity-dot" aria-hidden="true"></span><span class="agent-public-activity-label"></span><span class="agent-public-activity-duration"></span>';
+    const anchor=opts.anchor||null;
+    if(anchor&&anchor.parentElement===parent){
+      const ref=anchor.nextSibling;
+      if(ref) parent.insertBefore(row,ref);
+      else parent.appendChild(row);
+    }else{
+      parent.appendChild(row);
+    }
+  }
+  const state=String(opts.state||'').trim()||(live?'executing':'done');
+  row.setAttribute('data-public-activity-state',state);
+  row.setAttribute('data-public-activity-duration-prefix',live?liveDurationLabel:settledDurationLabel);
+  if(live){
+    const started=Number(opts.startedAt||(S.session&&S.session.pending_started_at)||row.getAttribute('data-turn-started-at')||_activityNowSeconds());
+    row.setAttribute('data-live-public-activity','1');
+    if(Number.isFinite(started)&&started>0) row.setAttribute('data-turn-started-at',String(started));
+    _syncPublicActivityStatus(row);
+    _startPublicActivityElapsedTimer(row);
+  }else{
+    row.removeAttribute('data-live-public-activity');
+    const started=Number(opts.startedAt||row.getAttribute('data-turn-started-at'));
+    const ended=Number(opts.endedAt||_activityNowSeconds());
+    let duration=Number(opts.duration);
+    if(!Number.isFinite(duration)&&Number.isFinite(started)&&started>0&&Number.isFinite(ended)&&ended>=started) duration=ended-started;
+    if(Number.isFinite(duration)&&duration>=0) row.setAttribute('data-public-activity-duration',String(duration));
+    else row.removeAttribute('data-public-activity-duration');
+    _syncPublicActivityStatus(row);
+  }
+  return row;
+}
+function _updatePublicActivityElapsedTimer(){
+  const row=_publicActivityElapsedNode;
+  if(!row||!row.isConnected||row.getAttribute('data-live-public-activity')!=='1'){
+    _clearPublicActivityElapsedTimer();
+    return;
+  }
+  _syncPublicActivityStatus(row);
+}
+function _startPublicActivityElapsedTimer(row){
+  if(!row||row.getAttribute('data-live-public-activity')!=='1')return;
+  if(_publicActivityElapsedNode&&_publicActivityElapsedNode!==row)_clearPublicActivityElapsedTimer();
+  _publicActivityElapsedNode=row;
+  _updatePublicActivityElapsedTimer();
+  if(!_publicActivityElapsedTimer)_publicActivityElapsedTimer=setInterval(_updatePublicActivityElapsedTimer,1000);
+}
+function _clearPublicActivityElapsedTimer(){
+  if(_publicActivityElapsedTimer){
+    clearInterval(_publicActivityElapsedTimer);
+    _publicActivityElapsedTimer=null;
+  }
+  _publicActivityElapsedNode=null;
 }
 const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;
 let _compressionElapsedTimer=null;
@@ -7692,7 +7813,7 @@ function renderMessages(options){
     if(derived.length) S.toolCalls=derived;
   }
   if(!S.busy){
-    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]),.agent-public-activity-status').forEach(el=>el.remove());
     const byAssistant = {};
     for(const tc of (S.toolCalls||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
@@ -7701,7 +7822,40 @@ function renderMessages(options){
     }
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
-    if(isSimplifiedToolCalling()){
+    const _renderPublicActivityForAssistant=(aIdx)=>{
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        if(aIdx<assistantIdxs[0]) return null;
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      }
+      if(!anchorRow) return null;
+      const anchorParent=anchorRow.parentElement;
+      const insertAfterNode=anchorInsertAfter.get(anchorRow)||anchorRow;
+      const sourceMsg=S.messages[aIdx]||{};
+      let startedAt=null;
+      for(let i=aIdx-1;i>=0;i--){
+        const candidate=S.messages[i];
+        if(candidate&&candidate.role==='user'){
+          startedAt=_messageEpochSeconds(candidate);
+          break;
+        }
+      }
+      const publicRow=renderPublicActivityStatus(anchorParent,{
+        live:false,
+        state:_publicActivityFinalStateForMessage(sourceMsg),
+        duration:sourceMsg._turnDuration,
+        startedAt,
+        endedAt:_messageEpochSeconds(sourceMsg),
+        anchor:insertAfterNode,
+      });
+      if(anchorRow&&publicRow) anchorInsertAfter.set(anchorRow, publicRow);
+      return publicRow;
+    };
+    if(!isActivityDetailsVisible()){
+      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].filter(Number.isFinite).sort((a,b)=>a-b);
+      for(const aIdx of activityIdxs) _renderPublicActivityForAssistant(aIdx);
+    }else if(isSimplifiedToolCalling()){
       const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
       for(const aIdx of activityIdxs){
         const cards=byAssistant[aIdx]||[];
@@ -7786,7 +7940,7 @@ function renderMessages(options){
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
-      const compactActivityForMessage=isSimplifiedToolCalling()&&(
+      const compactActivityForMessage=(!isActivityDetailsVisible()||isSimplifiedToolCalling())&&(
         assistantThinking.has(mi)||
         toolCallAssistantIdxs.has(mi)
       );
@@ -8114,6 +8268,11 @@ function appendLiveToolCard(tc){
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
   const tid=tc.tid||'';
+  if(!isActivityDetailsVisible()){
+    renderPublicActivityStatus(inner,{live:true,state:'executing'});
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
+  }
   if(!isSimplifiedToolCalling()){
     // Update existing card in place (tool_complete after tool_start)
     if(tid){
@@ -8189,8 +8348,9 @@ function appendLiveToolCard(tc){
 
 function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
+  if(typeof _clearPublicActivityElapsedTimer==='function') _clearPublicActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],.agent-public-activity-status[data-live-public-activity="1"]').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
@@ -8989,6 +9149,11 @@ function appendThinking(text='', options){
   }
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;
+  if(!isActivityDetailsVisible()){
+    renderPublicActivityStatus(blocks,{live:true,state:'thinking'});
+    scrollIfPinned();
+    return;
+  }
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){
