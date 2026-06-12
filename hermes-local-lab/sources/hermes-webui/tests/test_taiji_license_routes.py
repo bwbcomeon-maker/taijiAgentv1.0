@@ -11,21 +11,25 @@ def _read(rel_path: str) -> str:
 def test_license_settings_panel_and_import_controls_are_present():
     html = _read("static/index.html")
     panels_js = _read("static/panels.js")
+    styles = _read("static/style.css")
 
     assert "taijiLicensePanel" in html
     assert "taijiLicenseFile" in html
     assert "taijiLicenseMachine" in html
     assert "taijiLicenseSource" in html
     assert "btnExportTaijiMachineRequest" in html
-    assert "btnTaijiOnlineActivate" in html
-    assert "btnTaijiQrActivate" in html
-    assert "btnRefreshTaijiActivation" in html
+    assert "btnTaijiOnlineActivate" not in html
+    assert "btnTaijiQrActivate" not in html
+    assert "btnRefreshTaijiActivation" not in html
+    assert "model-config-license-online-note" in html
     assert "/api/license/status" in panels_js
     assert "/api/license/import" in panels_js
     assert "/api/license/machine-request" in panels_js
-    assert "/api/license/activate" in panels_js
-    assert "/api/license/qr-request" in panels_js
-    assert "/api/license/qr-complete" in panels_js
+    assert "/api/license/activate" not in panels_js
+    assert "/api/license/qr-request" not in panels_js
+    assert "/api/license/qr-complete" not in panels_js
+    assert "#settingsPaneModels .model-config-license-meta span" in styles
+    assert "#settingsPaneModels .model-config-license-strip>.model-config-actions" in styles
     assert "后续版本支持" in html
 
 

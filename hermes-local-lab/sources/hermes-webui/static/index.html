@@ -1385,15 +1385,14 @@
                     <em id="taijiLicenseRemaining" class="model-config-sr">—</em>
                   </div>
                 </div>
-                <div class="model-config-actions">
+                <div class="model-config-actions model-config-license-actions">
                   <input id="taijiLicenseFile" type="file" accept=".jwt,.txt,application/jwt,text/plain" hidden>
-                  <button class="sm-btn" type="button" id="btnImportTaijiLicense">导入授权文件</button>
-                  <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest">导出本机机器码</button>
-                  <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权</button>
-                  <span class="model-config-muted">联网激活（后续版本支持）</span>
-                  <button class="btn-tiny" type="button" id="btnTaijiOnlineActivate" disabled title="后续版本支持">联网激活</button>
-                  <button class="btn-tiny" type="button" id="btnTaijiQrActivate" disabled title="后续版本支持">扫码激活</button>
-                  <button class="btn-tiny" type="button" id="btnRefreshTaijiActivation" disabled title="后续版本支持">刷新激活状态</button>
+                  <div class="model-config-license-action-buttons">
+                    <button class="sm-btn" type="button" id="btnImportTaijiLicense">导入授权文件</button>
+                    <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest">导出本机机器码</button>
+                    <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权</button>
+                  </div>
+                  <span class="model-config-license-online-note">联网激活后续版本支持</span>
                 </div>
               </section>
 
