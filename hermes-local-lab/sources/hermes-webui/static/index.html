@@ -1371,15 +1371,16 @@
                 <div class="model-config-license-main">
                   <span class="model-config-state-icon" aria-hidden="true">✓</span>
                   <div class="model-config-license-copy">
-                    <div class="model-config-license-title">
+                    <div class="model-config-license-status">
+                      <span class="model-config-license-kicker">授权状态</span>
                       <strong id="taijiLicenseStatus">正在读取授权</strong>
                       <span class="model-config-pill" id="taijiLicenseRemainingBadge">—</span>
                     </div>
-                    <div class="model-config-license-meta">
-                      <span>客户：<em id="taijiLicenseCustomer">—</em></span>
-                      <span>到期：<em id="taijiLicenseExpires">—</em></span>
-                      <span>本机：<em id="taijiLicenseMachine">—</em></span>
-                      <span>来源：<em id="taijiLicenseSource">—</em></span>
+                    <div class="model-config-license-facts">
+                      <span class="model-config-license-fact"><b>客户</b><em id="taijiLicenseCustomer">—</em></span>
+                      <span class="model-config-license-fact"><b>到期</b><em id="taijiLicenseExpires">—</em></span>
+                      <span class="model-config-license-fact"><b>本机</b><em id="taijiLicenseMachine">—</em></span>
+                      <span class="model-config-license-fact"><b>来源</b><em id="taijiLicenseSource">—</em></span>
                     </div>
                     <div class="model-config-muted" id="taijiLicenseSummary">正在读取授权状态</div>
                     <em id="taijiLicenseRemaining" class="model-config-sr">—</em>
@@ -1387,8 +1388,8 @@
                 </div>
                 <div class="model-config-actions model-config-license-actions">
                   <input id="taijiLicenseFile" type="file" accept=".jwt,.txt,application/jwt,text/plain" hidden>
-                  <div class="model-config-license-action-buttons">
-                    <button class="sm-btn" type="button" id="btnImportTaijiLicense">导入授权文件</button>
+                  <button class="sm-btn model-config-license-primary-action" type="button" id="btnImportTaijiLicense">导入授权文件</button>
+                  <div class="model-config-license-secondary-actions">
                     <button class="btn-tiny" type="button" id="btnExportTaijiMachineRequest">导出本机机器码</button>
                     <button class="btn-tiny" type="button" id="btnRefreshTaijiLicense">刷新授权</button>
                   </div>

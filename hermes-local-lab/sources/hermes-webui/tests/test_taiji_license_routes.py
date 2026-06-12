@@ -15,6 +15,11 @@ def test_license_settings_panel_and_import_controls_are_present():
 
     assert "taijiLicensePanel" in html
     assert "taijiLicenseFile" in html
+    assert "model-config-license-status" in html
+    assert "model-config-license-facts" in html
+    assert html.count("model-config-license-fact") >= 4
+    assert "model-config-license-primary-action" in html
+    assert "model-config-license-secondary-actions" in html
     assert "taijiLicenseMachine" in html
     assert "taijiLicenseSource" in html
     assert "btnExportTaijiMachineRequest" in html
@@ -28,8 +33,10 @@ def test_license_settings_panel_and_import_controls_are_present():
     assert "/api/license/activate" not in panels_js
     assert "/api/license/qr-request" not in panels_js
     assert "/api/license/qr-complete" not in panels_js
-    assert "#settingsPaneModels .model-config-license-meta span" in styles
-    assert "#settingsPaneModels .model-config-license-strip>.model-config-actions" in styles
+    assert "#settingsPaneModels .model-config-license-status" in styles
+    assert "#settingsPaneModels .model-config-license-facts" in styles
+    assert "#settingsPaneModels .model-config-license-fact" in styles
+    assert "#settingsPaneModels .model-config-license-actions" in styles
     assert "后续版本支持" in html
 
 
