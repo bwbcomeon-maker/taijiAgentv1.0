@@ -3,9 +3,11 @@
 const form = document.getElementById("licenseForm");
 const keyStatus = document.getElementById("keyStatus");
 const keyPath = document.getElementById("keyPath");
+const publicKeyPath = document.getElementById("publicKeyPath");
 const resultBox = document.getElementById("resultBox");
 const outputPath = document.getElementById("outputPath");
 const chooseOutput = document.getElementById("chooseOutput");
+const initializeKey = document.getElementById("initializeKey");
 const resetBtn = document.getElementById("resetBtn");
 const summary = document.getElementById("summary");
 
@@ -69,17 +71,42 @@ function readForm() {
 
 async function loadStatus() {
   const status = await window.taijiLicenseIssuer.getStatus();
-  outputPath.value = status.suggestedOutputPath || "";
+  if (!outputPath.value) {
+    outputPath.value = status.suggestedOutputPath || "";
+  }
   keyPath.textContent = status.privateKeyPath || "-";
+  publicKeyPath.textContent = status.publicKeyPath ? `公钥：${status.publicKeyPath}` : "-";
   if (status.privateKeyInstalled) {
     keyStatus.textContent = status.privateKeyFromEnv ? "私钥已安装 (环境变量)" : "私钥已安装";
     keyStatus.className = "status-pill ok";
+    initializeKey.disabled = true;
   } else {
     keyStatus.textContent = "发证私钥未安装";
     keyStatus.className = "status-pill danger";
-    setResult("发证私钥未安装，无法导出授权文件。", "danger");
+    initializeKey.disabled = false;
+    setResult("缺少签发私钥。点击“初始化签发密钥”后可导出 license.jwt。", "danger");
   }
   updateSummary();
+}
+
+async function initializeSigningKey() {
+  setResult("正在初始化签发密钥...", "muted");
+  const response = await window.taijiLicenseIssuer.initializeKey();
+  if (!response.ok) {
+    setResult(response.error || "初始化签发密钥失败", "danger");
+    return false;
+  }
+  await loadStatus();
+  setResult(
+    [
+      response.existing ? "签发私钥已存在。" : "已初始化签发密钥。",
+      `私钥：${response.privateKeyPath}`,
+      `公钥：${response.publicKeyPath}`,
+      "生成的 license 需要使用这份公钥进行产品校验。",
+    ].join("\n"),
+    "ok",
+  );
+  return true;
 }
 
 chooseOutput.addEventListener("click", async () => {
@@ -87,6 +114,10 @@ chooseOutput.addEventListener("click", async () => {
   if (!selected.canceled && selected.filePath) {
     outputPath.value = selected.filePath;
   }
+});
+
+initializeKey.addEventListener("click", () => {
+  initializeSigningKey().catch((err) => setResult(err.message || String(err), "danger"));
 });
 
 resetBtn.addEventListener("click", () => {
@@ -101,7 +132,17 @@ form.addEventListener("input", updateSummary);
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   setResult("正在生成...", "muted");
-  const response = await window.taijiLicenseIssuer.generate(readForm());
+  let response = await window.taijiLicenseIssuer.generate(readForm());
+  if (!response.ok && response.code === "private_key_missing") {
+    const confirmed = window.confirm("缺少签发私钥。是否现在初始化签发密钥并继续导出？");
+    if (confirmed) {
+      const initialized = await initializeSigningKey();
+      if (initialized) {
+        setResult("正在生成...", "muted");
+        response = await window.taijiLicenseIssuer.generate(readForm());
+      }
+    }
+  }
   if (!response.ok) {
     setResult(response.error || "生成失败", "danger");
     return;
@@ -110,6 +151,7 @@ form.addEventListener("submit", async (event) => {
     [
       `已导出：${response.outputPath}`,
       `到期时间：${response.payload.expires_at}`,
+      `公钥：${response.publicKeyPath}`,
       `签发记录：${response.recordPath}`,
       `摘要：${response.tokenHash}`,
     ].join("\n"),

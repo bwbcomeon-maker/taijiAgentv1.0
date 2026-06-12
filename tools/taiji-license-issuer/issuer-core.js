@@ -8,6 +8,7 @@ const path = require("path");
 const PRODUCT = "taiji-agent";
 const PRIVATE_KEY_ENV = "TAIJI_LICENSE_PRIVATE_KEY_FILE";
 const DEFAULT_PRIVATE_KEY_NAME = "signing-private.pem";
+const DEFAULT_PUBLIC_KEY_NAME = "signing-public.pem";
 
 function isoUtc(date) {
   return date.toISOString().replace(".000Z", "Z");
@@ -70,6 +71,11 @@ function resolvePrivateKeyPath(options = {}) {
     return path.resolve(String(env[PRIVATE_KEY_ENV]).trim());
   }
   return path.join(__dirname, "private", DEFAULT_PRIVATE_KEY_NAME);
+}
+
+function resolvePublicKeyPath(options = {}) {
+  const privateKeyPath = options.privateKeyPath || resolvePrivateKeyPath(options);
+  return path.join(path.dirname(privateKeyPath), DEFAULT_PUBLIC_KEY_NAME);
 }
 
 function defaultRecordPath() {
@@ -157,6 +163,34 @@ function writeFile0600(filePath, content) {
   }
 }
 
+function writePublicKeyFile(filePath, content) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, content, { encoding: "utf8", mode: 0o644 });
+  try {
+    fs.chmodSync(filePath, 0o644);
+  } catch (_) {
+    // Public keys are not secret; chmod is best effort for filesystem portability.
+  }
+}
+
+function initializeSigningKeyPair(options = {}) {
+  const privateKeyPath = path.resolve(options.privateKeyPath || resolvePrivateKeyPath());
+  const publicKeyPath = path.resolve(options.publicKeyPath || resolvePublicKeyPath({ privateKeyPath }));
+  if (fs.existsSync(privateKeyPath) && !options.overwrite) {
+    throw new Error(`发证私钥已存在：${privateKeyPath}`);
+  }
+  const keys = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = keys.privateKey.export({ type: "pkcs8", format: "pem" });
+  const publicKeyPem = keys.publicKey.export({ type: "spki", format: "pem" });
+  writeFile0600(privateKeyPath, privateKeyPem);
+  writePublicKeyFile(publicKeyPath, publicKeyPem);
+  return {
+    privateKeyPath,
+    publicKeyPath,
+    publicKeyPem,
+  };
+}
+
 function appendIssueRecord(recordPath, record) {
   fs.mkdirSync(path.dirname(recordPath), { recursive: true, mode: 0o700 });
   fs.appendFileSync(recordPath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -198,9 +232,11 @@ module.exports = {
   PRODUCT,
   PRIVATE_KEY_ENV,
   defaultRecordPath,
+  initializeSigningKeyPair,
   issueAndWriteLicense,
   issueLicense,
   parseFeatures,
   parseUtcDate,
   resolvePrivateKeyPath,
+  resolvePublicKeyPath,
 };

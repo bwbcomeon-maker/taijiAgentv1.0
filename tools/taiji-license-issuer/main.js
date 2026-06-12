@@ -20,6 +20,7 @@ function privateKeyStatus() {
   const privateKeyPath = core.resolvePrivateKeyPath();
   return {
     privateKeyPath,
+    publicKeyPath: core.resolvePublicKeyPath({ privateKeyPath }),
     privateKeyInstalled: fs.existsSync(privateKeyPath),
     privateKeyFromEnv: Boolean(process.env[core.PRIVATE_KEY_ENV]),
     recordPath: core.defaultRecordPath(),
@@ -53,6 +54,30 @@ ipcMain.handle("issuer:get-status", () => {
   return privateKeyStatus();
 });
 
+ipcMain.handle("issuer:initialize-key", async () => {
+  try {
+    const privateKeyPath = core.resolvePrivateKeyPath();
+    if (fs.existsSync(privateKeyPath)) {
+      return {
+        ok: true,
+        existing: true,
+        privateKeyPath,
+        publicKeyPath: core.resolvePublicKeyPath({ privateKeyPath }),
+      };
+    }
+    const result = core.initializeSigningKeyPair({ privateKeyPath });
+    return {
+      ok: true,
+      existing: false,
+      privateKeyPath: result.privateKeyPath,
+      publicKeyPath: result.publicKeyPath,
+      publicKeyPem: result.publicKeyPem,
+    };
+  } catch (err) {
+    return { ok: false, error: safeError(err) };
+  }
+});
+
 ipcMain.handle("issuer:choose-output", async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: "导出授权文件",
@@ -69,7 +94,7 @@ ipcMain.handle("issuer:generate", async (_event, form) => {
   try {
     const privateKeyPath = core.resolvePrivateKeyPath();
     if (!fs.existsSync(privateKeyPath)) {
-      return { ok: false, error: `发证私钥未安装：${privateKeyPath}` };
+      return { ok: false, code: "private_key_missing", error: `发证私钥未安装：${privateKeyPath}` };
     }
     const result = core.issueAndWriteLicense({
       customer: form.customer,
@@ -84,6 +109,7 @@ ipcMain.handle("issuer:generate", async (_event, form) => {
     return {
       ok: true,
       outputPath: result.outputPath,
+      publicKeyPath: core.resolvePublicKeyPath({ privateKeyPath }),
       recordPath: result.recordPath,
       payload: result.payload,
       tokenHash: result.tokenHash,

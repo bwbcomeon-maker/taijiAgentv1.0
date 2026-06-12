@@ -171,6 +171,12 @@ button:active {
   transform: translateY(1px);
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
 .primary {
   background: var(--accent);
   color: #fff;
@@ -188,6 +194,10 @@ button:active {
 
 .secondary:hover {
   border-color: #aec2cc;
+}
+
+.full-width {
+  width: 100%;
 }
 
 .panel-section {

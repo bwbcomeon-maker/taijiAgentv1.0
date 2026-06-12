@@ -158,6 +158,81 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             data = _node(script)
             self.assertEqual(data["path"], str(override))
 
+    def test_initializer_creates_signing_key_pair_and_license_can_be_verified(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            script = textwrap.dedent(
+                f"""
+                const core = require({json.dumps(str(CORE_JS))});
+                const result = core.initializeSigningKeyPair({{
+                  privateKeyPath: {json.dumps(str(tmp / "private" / "signing-private.pem"))}
+                }});
+                const issued = core.issueAndWriteLicense({{
+                  customer: '国家电网',
+                  days: 30,
+                  features: 'chat,writing',
+                  outputPath: {json.dumps(str(tmp / "license.jwt"))},
+                  privateKeyPath: result.privateKeyPath,
+                  recordPath: {json.dumps(str(tmp / "issued_licenses.jsonl"))},
+                  now: new Date('2026-06-12T00:00:00Z')
+                }});
+                console.log(JSON.stringify({{
+                  privateKeyPath: result.privateKeyPath,
+                  publicKeyPath: result.publicKeyPath,
+                  publicKeyPem: result.publicKeyPem,
+                  payload: issued.payload,
+                  tokenPath: issued.outputPath
+                }}));
+                """
+            )
+            data = _node(script)
+
+            private_key = Path(data["privateKeyPath"])
+            public_key = Path(data["publicKeyPath"])
+            self.assertTrue(private_key.is_file())
+            self.assertTrue(public_key.is_file())
+            self.assertEqual(private_key.stat().st_mode & 0o777, 0o600)
+            self.assertIn("BEGIN PUBLIC KEY", data["publicKeyPem"])
+
+            verify_script = textwrap.dedent(
+                f"""
+                import pathlib
+                import sys
+                sys.path.insert(0, {json.dumps(str(AGENT_DIR))})
+                import taiji_license
+                status = taiji_license.load_license_status(
+                    path=pathlib.Path({json.dumps(data["tokenPath"])}),
+                    public_key={json.dumps(data["publicKeyPem"])},
+                    now=1781222400,
+                    environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
+                    check_state=False,
+                )
+                print(status.status)
+                """
+            )
+            verifier = subprocess.run(
+                [str(AGENT_PYTHON), "-c", verify_script],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertEqual(verifier.stdout.strip(), "valid")
+
+    def test_gui_exposes_signing_key_initialization_action(self):
+        index_html = (ROOT / "tools" / "taiji-license-issuer" / "index.html").read_text(encoding="utf-8")
+        preload_js = (ROOT / "tools" / "taiji-license-issuer" / "preload.js").read_text(encoding="utf-8")
+        main_js = (ROOT / "tools" / "taiji-license-issuer" / "main.js").read_text(encoding="utf-8")
+        renderer_js = (ROOT / "tools" / "taiji-license-issuer" / "renderer.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="initializeKey"', index_html)
+        self.assertIn("初始化签发密钥", index_html)
+        self.assertIn("initializeKey", preload_js)
+        self.assertIn('issuer:initialize-key', main_js)
+        self.assertIn("initializeKey.addEventListener", renderer_js)
+        self.assertIn("缺少签发私钥", renderer_js)
+
     def test_macos_app_bundle_double_click_launcher_is_structurally_valid(self):
         info_path = APP_BUNDLE / "Contents" / "Info.plist"
         launcher_path = APP_BUNDLE / "Contents" / "MacOS" / "taiji-license-issuer-launcher"
