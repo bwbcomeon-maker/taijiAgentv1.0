@@ -971,6 +971,19 @@ def _writeflow_workspace(session_id: str | None = None) -> Path:
     return resolve_trusted_workspace(workspace)
 
 
+def _expert_team_workspace(session_id: str | None = None) -> Path:
+    if session_id:
+        try:
+            session = get_session(session_id, metadata_only=True)
+        except (KeyError, FileNotFoundError):
+            session = None
+        if session is not None:
+            workspace = getattr(session, "workspace", "") or ""
+            if workspace:
+                return resolve_trusted_workspace(workspace)
+    return resolve_trusted_workspace(get_last_workspace())
+
+
 def _writeflow_state_path(workspace: Path) -> Path:
     return workspace / "articles" / ".writeflow" / "state.json"
 
@@ -8537,6 +8550,35 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, f"Invalid writeflow workspace: {_sanitize_error(exc)}", 400)
         return j(handler, _writeflow_public_status(workspace, project))
 
+    if parsed.path == "/api/expert-teams/catalog":
+        from api import expert_teams
+
+        return j(handler, expert_teams.expert_team_catalog())
+
+    if parsed.path == "/api/expert-teams/run":
+        from api import expert_teams
+
+        qs = parse_qs(parsed.query)
+        session_id = qs.get("session_id", [""])[0].strip() or None
+        run_id = qs.get("run_id", [""])[0].strip()
+        if not run_id and not session_id:
+            return bad(handler, "run_id or session_id required", 400)
+        try:
+            workspace = _expert_team_workspace(session_id)
+            if run_id:
+                run = expert_teams.read_expert_team_run(workspace, run_id)
+            else:
+                run = expert_teams.latest_expert_team_run_for_session(workspace, session_id or "")
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Invalid expert team run: {_sanitize_error(exc)}", 400)
+        if run and session_id:
+            run_sid = str(run.get("session_id") or "").strip()
+            if run_sid and run_sid != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+        return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+
     if parsed.path == "/api/writeflow/runs":
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
@@ -9825,6 +9867,43 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
+
+    if parsed.path == "/api/expert-teams/start":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.start_expert_team(workspace, body)
+            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+        except Exception as exc:
+            return bad(handler, f"Failed to start expert team: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/answer":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.answer_expert_team(workspace, body)
+            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/cancel":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.cancel_expert_team(workspace, str(body.get("run_id") or ""))
+            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Failed to cancel expert team: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/writeflow/compose":
         try:

@@ -560,14 +560,22 @@ const STATUS_CARD_WRITEFLOW_MEMBER_IMAGES={
   'outline-architect':'static/assets/writeflow/member-outline-architect.png',
   'style-modeler':'static/assets/writeflow/member-style-modeler.png',
   'web-article-extractor':'static/assets/writeflow/team-extractor.png',
+  'creative-director':'static/assets/writeflow/team-content-creator.png',
+  'creative-strategist':'static/assets/writeflow/member-workflow-producer.png',
+  'image-creator':'static/assets/writeflow/team-content-creator.png',
 };
 const STATUS_CARD_WRITEFLOW_TEAM_IMAGES={
   'content-creator-team':'static/assets/writeflow/team-content-creator.png',
   'deep-research-team':'static/assets/writeflow/team-research.png',
   'style-modeler':'static/assets/writeflow/team-style-modeler.png',
   'web-article-extractor':'static/assets/writeflow/team-extractor.png',
+  'ai-content-creator-brand-moodboard':'static/assets/writeflow/team-content-creator.png',
 };
 const STATUS_CARD_WRITEFLOW_PHASES=['确定方向','生成初稿','打磨发布'];
+const STATUS_CARD_EXPERT_TEAM_PHASES={
+  'ai-content-creator-brand-moodboard':['需求确认','创意策划','方向确认','图像生成','交付'],
+  'content-creator-team':['需求确认','生成初稿','打磨发布','交付'],
+};
 
 function _writeflowStatusCardFromRun(run,data){
   if(!run||!run.run_id)return null;
@@ -653,6 +661,38 @@ function _writeflowStatusCardFromRun(run,data){
   };
 }
 
+function _expertTeamStatusCardFromRun(run,data){
+  if(!run||!run.run_id)return null;
+  data=data||{};
+  const card=_writeflowStatusCardFromRun(run,data);
+  if(!card)return null;
+  const questions=Array.isArray(run.questions)?run.questions:[];
+  const visualQuestions=questions.map(question=>({
+    id:question.id||'',
+    title:question.title||question.id||'问题',
+    type:question.type||'text',
+    options:Array.isArray(question.options)?question.options:[],
+    answer:question.answer||'',
+    status:question.status||'pending',
+    required:question.required!==false,
+  }));
+  card.kind='expert_team';
+  card.title='专家团运行';
+  card.questions=visualQuestions;
+  card.phases=STATUS_CARD_EXPERT_TEAM_PHASES[run.team_id]||STATUS_CARD_EXPERT_TEAM_PHASES['content-creator-team'];
+  card.team.title=run.team_title||card.team.title;
+  card.team.category=run.team_category||card.team.category;
+  card.rows=[
+    {label:'团队',value:card.team.title},
+    {label:'阶段',value:run.phase||card.phase||'需求确认'},
+    {label:'进度',value:`${card.progress.done}/${card.progress.total||card.tasks.length||0} · ${card.statusLabel}`},
+    {label:'问答',value:visualQuestions.length?`${visualQuestions.filter(q=>q.status==='answered').length}/${visualQuestions.length} 已回复`:'无需确认'},
+    {label:'产物',value:card.artifacts.filter(item=>item&&!item.placeholder&&item.exists!==false).length?`${card.artifacts.length} 个产物`:'等待产物生成'},
+  ];
+  return card;
+}
+if(typeof window!=='undefined')window._expertTeamStatusCardFromRun=_expertTeamStatusCardFromRun;
+
 function _statusCardStateClass(status){
   const text=String(status||'').toLowerCase();
   if(text.includes('完成')||text==='done'||text==='complete'||text==='completed')return 'done';
@@ -719,12 +759,35 @@ if(typeof window!=='undefined'){
   window.downloadWriteflowArtifact=downloadWriteflowArtifact;
 }
 
+async function answerExpertTeamQuestion(btn){
+  const qid=btn&&btn.dataset?btn.dataset.expertTeamQuestionId:'';
+  const answer=btn&&btn.dataset?btn.dataset.expertTeamAnswer:'';
+  const root=btn&&btn.closest?btn.closest('.status-card-writeflow'):null;
+  const runId=root&&root.dataset?root.dataset.expertTeamRunId:'';
+  const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
+  if(!qid||!answer||!runId)return;
+  try{
+    const data=await api('/api/expert-teams/answer',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,run_id:runId,answers:{[qid]:answer}})
+    });
+    const run=data&&data.run;
+    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
+    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(typeof renderSessionList==='function')renderSessionList();
+  }catch(e){
+    showToast('提交专家团确认失败：'+(e&&e.message||e));
+  }
+}
+if(typeof window!=='undefined')window.answerExpertTeamQuestion=answerExpertTeamQuestion;
+
 function _statusCardWriteflowHtml(card,copyBtn){
   const team=card.team||{};
   const members=Array.isArray(card.members)?card.members:[];
   const tasks=Array.isArray(card.tasks)?card.tasks:[];
   const artifacts=Array.isArray(card.artifacts)?card.artifacts:[];
   const referenceArtifacts=Array.isArray(card.referenceArtifacts)?card.referenceArtifacts:[];
+  const questions=Array.isArray(card.questions)?card.questions:[];
   const readyArtifacts=artifacts.filter(item=>item&&!item.placeholder&&item.exists!==false);
   const progress=card.progress||{};
   const done=Math.max(0,Number(progress.done||0));
@@ -738,8 +801,9 @@ function _statusCardWriteflowHtml(card,copyBtn){
   const activeLabel=activeMembers.length
     ? activeMembers.slice(0,2).map(member=>member.name||member.id||'成员').join('、')
     : '待命';
-  const phase=STATUS_CARD_WRITEFLOW_PHASES.includes(card.phase)?card.phase:STATUS_CARD_WRITEFLOW_PHASES[0];
-  const phaseIdx=STATUS_CARD_WRITEFLOW_PHASES.indexOf(phase);
+  const phaseList=Array.isArray(card.phases)&&card.phases.length?card.phases:STATUS_CARD_WRITEFLOW_PHASES;
+  const phase=phaseList.includes(card.phase)?card.phase:phaseList[0];
+  const phaseIdx=phaseList.indexOf(phase);
   const teamImage=team.image||STATUS_CARD_WRITEFLOW_TEAM_IMAGES[team.id]||'';
   const stateClass=_statusCardStateClass(card.statusLabel||card.status);
   const storageKey=_statusCardWriteflowStorageKey(card);
@@ -778,7 +842,7 @@ function _statusCardWriteflowHtml(card,copyBtn){
     {label:'完成',value:`${memberDone}/${members.length||0}`},
     {label:'产物',value:String(readyArtifacts.length||0)},
   ].map(item=>`<span class="status-card-writeflow-metric"><b>${esc(item.value)}</b><small>${esc(item.label)}</small></span>`).join('');
-  const phaseHtml=STATUS_CARD_WRITEFLOW_PHASES.map((label,idx)=>{
+  const phaseHtml=phaseList.map((label,idx)=>{
     const cls=idx<phaseIdx?'done':(idx===phaseIdx?'active':'todo');
     return `<span class="status-card-writeflow-phase ${cls}"><i>${idx+1}</i><b>${esc(label)}</b></span>`;
   }).join('');
@@ -806,6 +870,25 @@ function _statusCardWriteflowHtml(card,copyBtn){
       </span>
     </span>`;
   }).join(''):'<span class="status-card-writeflow-empty">等待任务拆解</span>';
+  const questionHtml=questions.length?questions.map(question=>{
+    const answered=String(question.status||'')==='answered';
+    const options=Array.isArray(question.options)?question.options:[];
+    const optionHtml=options.length?`<span class="status-card-expert-question-options">${options.map(option=>{
+      return answered
+        ? `<em>${esc(option)}</em>`
+        : `<button type="button" data-expert-team-question-id="${esc(question.id||'')}" data-expert-team-answer="${esc(option)}" onclick="answerExpertTeamQuestion(this);event.stopPropagation()">${esc(option)}</button>`;
+    }).join('')}</span>`:'';
+    return `<span class="status-card-expert-question ${answered?'answered':'pending'}" data-expert-team-question-id="${esc(question.id||'')}">
+      <strong>${esc(question.title||question.id||'问题')}</strong>
+      <small>${answered?`已回复：${question.answer||'已确认'}`:'等待用户确认'}</small>
+      ${optionHtml}
+    </span>`;
+  }).join(''):'';
+  const memberStripHtml=members.length?`<div class="expert-team-member-strip" aria-label="专家团成员状态">${members.map(member=>{
+    const cls=_statusCardStateClass(member.status);
+    const image=member.image||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[member.id]||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[member.skill]||'';
+    return `<span class="expert-team-member ${cls}">${_statusCardAvatarHtml(image,member.name,'status-card-writeflow-mini-avatar')}<span><strong>${esc(member.name||member.id||'成员')}</strong><small>${esc(member.status||'待命')}</small></span></span>`;
+  }).join('')}</div>`:'';
   const artifactItemHtml=(item,reference)=>{
     const isReady=!!item.path&&!item.placeholder&&item.exists!==false;
     const cls=item.placeholder?' placeholder':(isReady?' ready':' missing');
@@ -826,7 +909,12 @@ function _statusCardWriteflowHtml(card,copyBtn){
   };
   const artifactHtml=artifacts.length?artifacts.slice(0,6).map(item=>artifactItemHtml(item,false)).join(''):'<span class="status-card-writeflow-empty">等待本轮产物生成</span>';
   const referenceArtifactHtml=referenceArtifacts.length?referenceArtifacts.slice(0,6).map(item=>artifactItemHtml(item,true)).join(''):'';
-  return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}">
+  const processPanelHtml=`<div class="expert-team-process-panel" aria-label="任务进程">
+    <div class="expert-team-process-head"><strong>任务进程</strong><small>${esc(card.subtitle||'专家团任务')}</small></div>
+    <div class="expert-team-process-tasks">${taskHtml}</div>
+    <div class="expert-team-process-artifacts">${artifactHtml}</div>
+  </div>`;
+  return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}" data-expert-team-run-id="${esc(card.runId||card.sessionId||'')}">
     ${miniHtml}
     <div class="status-card-head status-card-writeflow-head">
       <div class="status-card-title-wrap">
@@ -845,6 +933,8 @@ function _statusCardWriteflowHtml(card,copyBtn){
         <span class="status-card-writeflow-badge ${esc(stateClass)}">${esc(card.statusLabel||card.status||'执行中')}</span>
         ${metricHtml}
       </div>
+      ${memberStripHtml}
+      ${questions.length?`<div class="status-card-expert-questions">${questionHtml}</div>`:''}
       <div class="status-card-writeflow-progress" style="--status-card-progress:${pct}%">
         <span><b>${done}/${total||tasks.length||2}</b> 任务进度</span>
         <i></i>
@@ -859,6 +949,7 @@ function _statusCardWriteflowHtml(card,copyBtn){
           <div class="status-card-writeflow-section-title"><span>任务进展</span><small>${esc(team.category||'写作')}</small></div>
           <div class="status-card-writeflow-tasks">${taskHtml}</div>
         </div>
+        ${card.kind==='expert_team'?processPanelHtml:''}
         <div class="status-card-writeflow-section">
           <div class="status-card-writeflow-section-title"><span>本轮产物</span><small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:'待生成'}</small></div>
           <div class="status-card-writeflow-artifacts">${artifactHtml}</div>

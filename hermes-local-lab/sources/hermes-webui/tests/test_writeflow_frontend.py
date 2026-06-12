@@ -94,7 +94,8 @@ def test_writeflow_expert_center_interactions_are_chat_first():
     assert "function summonWriteflowTeam" in PANELS_JS
     assert "data-example-prompt" in PANELS_JS
     assert "modalPrompt.value = prompt" in PANELS_JS
-    assert "sendWriteflowAction({" in fn_body
+    assert "sendExpertTeamAction({" in fn_body
+    assert "sendWriteflowAction({" not in fn_body
     assert "team_id: team.id" in fn_body
     assert "new_session: true" in fn_body
     assert "open_new_window" not in fn_body

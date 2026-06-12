@@ -3579,6 +3579,9 @@ const WRITEFLOW_MEMBER_IMAGES = {
   'outline-architect': 'static/assets/writeflow/member-outline-architect.png',
   'style-modeler': 'static/assets/writeflow/member-style-modeler.png',
   'web-article-extractor': 'static/assets/writeflow/team-extractor.png',
+  'creative-director': 'static/assets/writeflow/team-content-creator.png',
+  'creative-strategist': 'static/assets/writeflow/member-workflow-producer.png',
+  'image-creator': 'static/assets/writeflow/team-content-creator.png',
 };
 
 function _writeflowStatusUrl() {
@@ -3608,7 +3611,14 @@ function _writeflowNormalizeServerTeam(team) {
 
 function _writeflowApplyServerTeams(teams) {
   if (!Array.isArray(teams) || !teams.length) return;
-  WRITEFLOW_TEAMS = teams.map(team => _writeflowNormalizeServerTeam(team));
+  const merged = [...WRITEFLOW_TEAMS];
+  for (const team of teams) {
+    const idx = merged.findIndex(item => item.id === team.id);
+    const normalized = _writeflowNormalizeServerTeam(team);
+    if (idx >= 0) merged[idx] = normalized;
+    else merged.push(normalized);
+  }
+  WRITEFLOW_TEAMS = merged;
   if (!WRITEFLOW_TEAMS.some(team => team.id === _writeflowSelectedTeamId)) {
     _writeflowSelectedTeamId = WRITEFLOW_TEAMS[0].id;
   }
@@ -3690,6 +3700,10 @@ async function loadWriteflow(force) {
   try {
     const data = await api(_writeflowStatusUrl());
     _writeflowApplyServerTeams(data.teams);
+    try {
+      const expertCatalog = await api('/api/expert-teams/catalog');
+      _writeflowApplyServerTeams(expertCatalog && expertCatalog.teams);
+    } catch (_) {}
     _writeflowData = data;
     renderWriteflow(data);
   } catch (e) {
@@ -3835,7 +3849,7 @@ async function summonWriteflowTeam() {
   const panelPrompt = (($('writeflowPrompt') || {}).value || '').trim();
   const prompt = modalPrompt || panelPrompt;
   if (!prompt) {
-    showToast('请先填写本次写作需求。');
+    showToast('请先填写本次需求。');
     return;
   }
   const panelPromptEl = $('writeflowPrompt');
@@ -3844,7 +3858,7 @@ async function summonWriteflowTeam() {
   const project = ((projectInput || {}).value || '').trim() || _writeflowProjectTitleFromPrompt(prompt, team);
   if (projectInput && !projectInput.value.trim()) projectInput.value = project;
   closeWriteflowTeamModal();
-  await sendWriteflowAction({
+  await sendExpertTeamAction({
     action: team.defaultAction || 'start',
     project,
     mode: (($('writeflowMode') || {}).value || '').trim() || team.defaultMode || '',

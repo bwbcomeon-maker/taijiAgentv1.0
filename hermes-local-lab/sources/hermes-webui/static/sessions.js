@@ -996,12 +996,37 @@ function _scheduleWriteflowStatusRefresh(sid,run){
   },_WRITEFLOW_STATUS_REFRESH_MS);
 }
 
+async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
+  if(!sid||!Array.isArray(S.messages)||!_isWriteflowHydrationForActiveSession(sid)){
+    return false;
+  }
+  let data;
+  try{
+    data=await api(`/api/expert-teams/run?session_id=${encodeURIComponent(sid)}`);
+  }catch(_){
+    return false;
+  }
+  if(!_isWriteflowHydrationForActiveSession(sid))return false;
+  const run=(data&&data.run&&data.run.session_id===sid)?data.run:null;
+  if(!run||!run.run_id)return false;
+  const card=typeof _expertTeamStatusCardFromRun==='function'
+    ? _expertTeamStatusCardFromRun(run,data)
+    : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);
+  if(!card)return false;
+  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+  _scheduleWriteflowStatusRefresh(sid,run);
+  _removeWriteflowStatusCardsFromMessages();
+  if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();
+  return true;
+}
+
 async function _hydrateWriteflowStatusCardForSession(sid,options={}){
   if(!sid||!Array.isArray(S.messages)||!_isWriteflowHydrationForActiveSession(sid)){
     _stopWriteflowStatusRefresh();
     if(_isWriteflowHydrationForActiveSession(sid)&&typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
+  if(await _hydrateExpertTeamStatusCardForSession(sid))return true;
   let data;
   try{
     data=await api(`/api/writeflow/run?session_id=${encodeURIComponent(sid)}`);

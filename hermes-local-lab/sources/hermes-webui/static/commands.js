@@ -883,12 +883,16 @@ const WRITEFLOW_STATUS_MEMBER_IMAGES={
   'outline-architect':'static/assets/writeflow/member-outline-architect.png',
   'style-modeler':'static/assets/writeflow/member-style-modeler.png',
   'web-article-extractor':'static/assets/writeflow/team-extractor.png',
+  'creative-director':'static/assets/writeflow/team-content-creator.png',
+  'creative-strategist':'static/assets/writeflow/member-workflow-producer.png',
+  'image-creator':'static/assets/writeflow/team-content-creator.png',
 };
 const WRITEFLOW_STATUS_TEAM_IMAGES={
   'content-creator-team':'static/assets/writeflow/team-content-creator.png',
   'deep-research-team':'static/assets/writeflow/team-research.png',
   'style-modeler':'static/assets/writeflow/team-style-modeler.png',
   'web-article-extractor':'static/assets/writeflow/team-extractor.png',
+  'ai-content-creator-brand-moodboard':'static/assets/writeflow/team-content-creator.png',
 };
 
 function _writeflowStatusCardFromCompose(data){
@@ -967,6 +971,46 @@ function _queueWriteflowStatusCard(data){
     createdAt:Date.now(),
   };
 }
+
+async function sendExpertTeamAction(payload){
+  const body={...(payload||{})};
+  const wantsNewSession=body.new_session===true||body.open_new_session===true;
+  delete body.new_session;
+  delete body.open_new_session;
+  if(S.busy&&!wantsNewSession){
+    showToast('专家团任务正在执行。');
+    return;
+  }
+  if(wantsNewSession||!S.session){
+    await newSession(wantsNewSession);
+    await renderSessionList();
+  }
+  body.session_id=S.session&&S.session.session_id;
+  try{
+    const data=await api('/api/expert-teams/start',{method:'POST',body:JSON.stringify(body)});
+    const run=data&&data.run;
+    if(!run||!run.run_id)throw new Error('专家团启动失败');
+    const card=typeof _expertTeamStatusCardFromRun==='function'
+      ? _expertTeamStatusCardFromRun(run,data)
+      : (typeof _writeflowStatusCardFromCompose==='function'?_writeflowStatusCardFromCompose({run}):null);
+    if(!card)throw new Error('专家团状态不可用');
+    if(typeof switchPanel==='function')await switchPanel('chat');
+    if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(typeof window!=='undefined'){
+      window._pendingWriteflowStatusCard={
+        sessionId:S.session&&S.session.session_id||'',
+        card,
+        createdAt:Date.now(),
+      };
+    }
+    if(typeof refreshWriteflowStatusDockForActiveSession==='function')refreshWriteflowStatusDockForActiveSession();
+    await renderSessionList();
+    showToast('专家团已创建，请先完成需求确认。');
+  }catch(e){
+    showToast('专家团启动失败：'+(e&&e.message||e));
+  }
+}
+if(typeof window!=='undefined')window.sendExpertTeamAction=sendExpertTeamAction;
 
 async function cmdPersonality(args){
   if(!S.session){showToast(t('no_active_session'));return;}
