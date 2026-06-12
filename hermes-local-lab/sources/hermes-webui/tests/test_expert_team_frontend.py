@@ -51,6 +51,15 @@ def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks()
     assert ".expert-team-process-panel" in STYLE_CSS
 
 
+def test_pending_expert_team_questions_are_visible_and_answerable():
+    assert "card.kind==='expert_team'" in UI_JS
+    assert "question.status||'')!=='answered'" in UI_JS
+    assert "data-expert-team-answer-input" in UI_JS
+    assert "status-card-expert-question-input" in UI_JS
+    assert "请先填写确认信息。" in UI_JS
+    assert ".status-card-expert-question-input" in STYLE_CSS
+
+
 def test_expert_team_hydrates_before_writeflow_fallback():
     assert "async function _hydrateExpertTeamStatusCardForSession" in SESSIONS_JS
     assert "/api/expert-teams/run?session_id=" in SESSIONS_JS

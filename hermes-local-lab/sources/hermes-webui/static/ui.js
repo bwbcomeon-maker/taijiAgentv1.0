@@ -717,7 +717,12 @@ function _statusCardWriteflowStorageKey(card){
 
 function _statusCardWriteflowExpanded(card){
   const key=_statusCardWriteflowStorageKey(card||{});
-  try{return localStorage.getItem(key)==='1';}catch(_){return false;}
+  try{
+    const stored=localStorage.getItem(key);
+    if(stored==='1')return true;
+    if(stored==='0')return false;
+  }catch(_){}
+  return !!(card&&card.kind==='expert_team'&&Array.isArray(card.questions)&&card.questions.some(question=>String(question.status||'')!=='answered'));
 }
 
 function toggleWriteflowStatusCard(btn){
@@ -761,11 +766,21 @@ if(typeof window!=='undefined'){
 
 async function answerExpertTeamQuestion(btn){
   const qid=btn&&btn.dataset?btn.dataset.expertTeamQuestionId:'';
-  const answer=btn&&btn.dataset?btn.dataset.expertTeamAnswer:'';
+  const questionEl=btn&&btn.closest?btn.closest('.status-card-expert-question'):null;
+  let answer=btn&&btn.dataset?btn.dataset.expertTeamAnswer:'';
+  if(!answer&&questionEl){
+    const input=questionEl.querySelector('[data-expert-team-answer-input]');
+    answer=input?String(input.value||'').trim():'';
+  }
   const root=btn&&btn.closest?btn.closest('.status-card-writeflow'):null;
   const runId=root&&root.dataset?root.dataset.expertTeamRunId:'';
   const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
-  if(!qid||!answer||!runId)return;
+  const required=!(btn&&btn.dataset&&btn.dataset.expertTeamRequired==='0');
+  if(!qid||!runId)return;
+  if(!answer&&required){
+    showToast('请先填写确认信息。');
+    return;
+  }
   try{
     const data=await api('/api/expert-teams/answer',{
       method:'POST',
@@ -873,15 +888,22 @@ function _statusCardWriteflowHtml(card,copyBtn){
   const questionHtml=questions.length?questions.map(question=>{
     const answered=String(question.status||'')==='answered';
     const options=Array.isArray(question.options)?question.options:[];
+    const qType=String(question.type||'text').toLowerCase();
+    const isTextQuestion=!options.length&&(qType==='text'||qType==='textarea'||qType==='long_text');
     const optionHtml=options.length?`<span class="status-card-expert-question-options">${options.map(option=>{
       return answered
         ? `<em>${esc(option)}</em>`
         : `<button type="button" data-expert-team-question-id="${esc(question.id||'')}" data-expert-team-answer="${esc(option)}" onclick="answerExpertTeamQuestion(this);event.stopPropagation()">${esc(option)}</button>`;
     }).join('')}</span>`:'';
+    const inputHtml=(!answered&&isTextQuestion)?`<span class="status-card-expert-question-input">
+      <textarea rows="2" data-expert-team-answer-input="1" placeholder="${esc(question.required===false?'可选补充':'请输入确认内容')}"></textarea>
+      <button type="button" data-expert-team-question-id="${esc(question.id||'')}" data-expert-team-required="${question.required===false?'0':'1'}" onclick="answerExpertTeamQuestion(this);event.stopPropagation()">确认</button>
+    </span>`:'';
     return `<span class="status-card-expert-question ${answered?'answered':'pending'}" data-expert-team-question-id="${esc(question.id||'')}">
       <strong>${esc(question.title||question.id||'问题')}</strong>
       <small>${answered?`已回复：${question.answer||'已确认'}`:'等待用户确认'}</small>
       ${optionHtml}
+      ${inputHtml}
     </span>`;
   }).join(''):'';
   const memberStripHtml=members.length?`<div class="expert-team-member-strip" aria-label="专家团成员状态">${members.map(member=>{
