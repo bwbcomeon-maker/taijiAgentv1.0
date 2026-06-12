@@ -3170,6 +3170,21 @@ function _publicActivityFinalStateForMessage(msg){
   if(content.startsWith('**error')||content.startsWith('error:'))return'error';
   return'done';
 }
+function _previousUserStartedAtForAssistant(messages, aIdx){
+  for(let i=aIdx-1;i>=0;i--){
+    const candidate=messages&&messages[i];
+    if(candidate&&candidate.role==='user')return _messageEpochSeconds(candidate);
+  }
+  return null;
+}
+function _publicActivityDurationForMessage(msg, startedAt=null, endedAt=null){
+  const direct=Number(msg&&msg._turnDuration);
+  if(Number.isFinite(direct)&&direct>=0)return direct;
+  const started=Number(startedAt);
+  const ended=Number(endedAt!==null&&endedAt!==undefined?endedAt:_messageEpochSeconds(msg));
+  if(Number.isFinite(started)&&started>0&&Number.isFinite(ended)&&ended>=started)return ended-started;
+  return null;
+}
 function _syncPublicActivityStatus(row){
   if(!row)return;
   const live=row.getAttribute('data-live-public-activity')==='1';
@@ -7833,27 +7848,25 @@ function renderMessages(options){
       const anchorParent=anchorRow.parentElement;
       const insertAfterNode=anchorInsertAfter.get(anchorRow)||anchorRow;
       const sourceMsg=S.messages[aIdx]||{};
-      let startedAt=null;
-      for(let i=aIdx-1;i>=0;i--){
-        const candidate=S.messages[i];
-        if(candidate&&candidate.role==='user'){
-          startedAt=_messageEpochSeconds(candidate);
-          break;
-        }
-      }
+      const startedAt=_previousUserStartedAtForAssistant(S.messages,aIdx);
+      const endedAt=_messageEpochSeconds(sourceMsg);
+      const duration=_publicActivityDurationForMessage(sourceMsg, startedAt, endedAt);
+      const hasObservableActivity=!!((byAssistant[aIdx]&&byAssistant[aIdx].length)||assistantThinking.has(aIdx));
+      if(duration===null&&!hasObservableActivity)return null;
       const publicRow=renderPublicActivityStatus(anchorParent,{
         live:false,
         state:_publicActivityFinalStateForMessage(sourceMsg),
-        duration:sourceMsg._turnDuration,
+        duration,
         startedAt,
-        endedAt:_messageEpochSeconds(sourceMsg),
+        endedAt,
         anchor:insertAfterNode,
       });
       if(anchorRow&&publicRow) anchorInsertAfter.set(anchorRow, publicRow);
       return publicRow;
     };
     if(!isActivityDetailsVisible()){
-      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].filter(Number.isFinite).sort((a,b)=>a-b);
+      const publicDurationAssistantIdxs=assistantIdxs.filter(aIdx=>_publicActivityDurationForMessage(S.messages[aIdx],_previousUserStartedAtForAssistant(S.messages,aIdx),_messageEpochSeconds(S.messages[aIdx]))!==null);
+      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys(), ...publicDurationAssistantIdxs])].filter(Number.isFinite).sort((a,b)=>a-b);
       for(const aIdx of activityIdxs) _renderPublicActivityForAssistant(aIdx);
     }else if(isSimplifiedToolCalling()){
       const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
@@ -7940,9 +7953,15 @@ function renderMessages(options){
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
-      const compactActivityForMessage=(!isActivityDetailsVisible()||isSimplifiedToolCalling())&&(
+      const publicActivityForMessage=!isActivityDetailsVisible()&&(
+        assistantThinking.has(mi)||
+        toolCallAssistantIdxs.has(mi)||
+        _publicActivityDurationForMessage(msg,_previousUserStartedAtForAssistant(S.messages,mi),_messageEpochSeconds(msg))!==null
+      );
+      const compactActivityForMessage=publicActivityForMessage||(isSimplifiedToolCalling()&&(
         assistantThinking.has(mi)||
         toolCallAssistantIdxs.has(mi)
+      )
       );
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;

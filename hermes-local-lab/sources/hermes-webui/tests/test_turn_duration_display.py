@@ -64,6 +64,21 @@ def test_ui_formats_and_renders_turn_duration_in_footer_and_activity_summary():
     )
 
 
+def test_public_activity_duration_row_covers_plain_assistant_turns():
+    assert "function _publicActivityDurationForMessage" in UI_JS, (
+        "Public activity mode should compute a visible duration for plain assistant "
+        "turns, not only turns that had tool or thinking metadata."
+    )
+    assert "assistantIdxs.filter" in UI_JS and "_publicActivityDurationForMessage(S.messages[aIdx]" in UI_JS, (
+        "When activity_details=false, settled public duration rows should include "
+        "assistant messages with _turnDuration even if there were no tools."
+    )
+    assert "publicActivityForMessage" in UI_JS and "_publicActivityDurationForMessage(msg" in UI_JS, (
+        "The footer duration chip should be suppressed when the public duration "
+        "row is rendered, avoiding duplicate per-turn time labels."
+    )
+
+
 def test_active_compact_activity_elapsed_timer_uses_persisted_start_time():
     assert '"pending_started_at": s.pending_started_at' in ROUTES_PY, (
         "/api/chat/start should return the persisted pending_started_at timestamp "
