@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>太极 License 签发工具</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">内部工具</p>
+          <h1>太极 License 签发</h1>
+        </div>
+        <div id="keyStatus" class="status-pill">检查私钥中</div>
+      </header>
+
+      <form id="licenseForm" class="form-grid">
+        <label class="field span-2">
+          <span>客户名称</span>
+          <input id="customer" name="customer" autocomplete="off" required placeholder="例如：某某电力公司">
+        </label>
+
+        <label class="field">
+          <span>有效天数</span>
+          <input id="days" name="days" type="number" min="1" step="1" value="30" required>
+        </label>
+
+        <label class="field">
+          <span>功能包</span>
+          <input id="features" name="features" value="chat,writing" required>
+        </label>
+
+        <label class="field">
+          <span>License ID</span>
+          <input id="licenseId" name="licenseId" autocomplete="off" placeholder="自动生成">
+        </label>
+
+        <label class="field">
+          <span>起始时间 UTC</span>
+          <input id="notBefore" name="notBefore" autocomplete="off" placeholder="默认当前时间">
+        </label>
+
+        <label class="field">
+          <span>最高版本</span>
+          <input id="maxVersion" name="maxVersion" autocomplete="off" placeholder="可选">
+        </label>
+
+        <label class="field span-2">
+          <span>导出路径</span>
+          <div class="path-row">
+            <input id="outputPath" name="outputPath" autocomplete="off" required>
+            <button id="chooseOutput" type="button" class="secondary">选择</button>
+          </div>
+        </label>
+
+        <div class="actions span-2">
+          <button id="generateBtn" type="submit" class="primary">导出 license.jwt</button>
+          <button id="resetBtn" type="button" class="secondary">重置</button>
+        </div>
+      </form>
+    </section>
+
+    <aside class="side-panel">
+      <section class="panel-section">
+        <h2>授权摘要</h2>
+        <dl id="summary" class="summary-list">
+          <div><dt>客户</dt><dd>-</dd></div>
+          <div><dt>起始</dt><dd>-</dd></div>
+          <div><dt>到期</dt><dd>-</dd></div>
+          <div><dt>功能</dt><dd>-</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel-section">
+        <h2>签发状态</h2>
+        <div id="resultBox" class="result-box muted">等待生成</div>
+      </section>
+
+      <section class="panel-section">
+        <h2>密钥</h2>
+        <p id="keyPath" class="path-text">-</p>
+      </section>
+    </aside>
+  </main>
+  <script src="./renderer.js"></script>
+</body>
+</html>

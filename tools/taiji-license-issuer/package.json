@@ -1,0 +1,7 @@
+{
+  "name": "taiji-license-issuer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Internal GUI issuer for Taiji Agent trial licenses.",
+  "main": "main.js"
+}

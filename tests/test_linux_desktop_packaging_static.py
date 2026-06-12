@@ -161,12 +161,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_packaging_never_embeds_customer_license_or_private_key_inputs(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
+        gitignore = read_text(".gitignore")
 
         self.assertIn("scan_private_key_material", build)
         self.assertIn("license.jwt", build)
         self.assertIn("TAIJI_LICENSE_PRIVATE_KEY", build)
         self.assertNotIn("cp \"$ROOT_DIR/license.jwt\"", build)
         self.assertNotIn("BEGIN RSA PRIVATE KEY", build)
+        self.assertNotIn("taiji-license-issuer", build)
+        self.assertIn("tools/taiji-license-issuer/private/signing-private.pem", gitignore)
+        self.assertIn("tools/taiji-license-issuer/*.jwt", gitignore)
 
     def test_packaged_runtime_uses_product_layout_and_sourceless_python(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

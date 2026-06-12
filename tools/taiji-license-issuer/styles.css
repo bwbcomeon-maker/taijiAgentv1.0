@@ -1,0 +1,262 @@
+:root {
+  color-scheme: light;
+  --bg: #eef3f5;
+  --surface: #ffffff;
+  --ink: #17212b;
+  --muted: #667684;
+  --line: #d8e1e6;
+  --accent: #0f7f8f;
+  --accent-dark: #075b68;
+  --danger: #b42318;
+  --ok: #147a4a;
+  --shadow: 0 18px 50px rgba(28, 56, 71, 0.12);
+  font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    linear-gradient(135deg, rgba(15, 127, 143, 0.12), transparent 42%),
+    linear-gradient(315deg, rgba(217, 151, 57, 0.13), transparent 38%),
+    var(--bg);
+  color: var(--ink);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 18px;
+  min-height: 100vh;
+  padding: 22px;
+}
+
+.workspace,
+.side-panel {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(216, 225, 230, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.workspace {
+  padding: 28px;
+}
+
+.side-panel {
+  display: grid;
+  align-content: start;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 30px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+h1,
+h2 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: 32px;
+  line-height: 1.15;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+.status-pill {
+  min-width: 132px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  background: #f7fafb;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.status-pill.ok {
+  color: var(--ok);
+  border-color: rgba(20, 122, 74, 0.28);
+  background: rgba(20, 122, 74, 0.08);
+}
+
+.status-pill.danger {
+  color: var(--danger);
+  border-color: rgba(180, 35, 24, 0.24);
+  background: rgba(180, 35, 24, 0.08);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.span-2 {
+  grid-column: 1 / -1;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  color: #2d3b46;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  background: #fbfdfe;
+  color: var(--ink);
+  padding: 0 13px;
+  outline: none;
+}
+
+input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(15, 127, 143, 0.13);
+}
+
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 10px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+button {
+  min-height: 44px;
+  border: 1px solid transparent;
+  padding: 0 18px;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.primary:hover {
+  background: var(--accent-dark);
+}
+
+.secondary {
+  border-color: var(--line);
+  background: #f7fafb;
+  color: #24404c;
+}
+
+.secondary:hover {
+  border-color: #aec2cc;
+}
+
+.panel-section {
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.summary-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.summary-list div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 10px;
+}
+
+dt {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.result-box {
+  min-height: 116px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--line);
+  background: #fbfdfe;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.result-box.ok {
+  color: var(--ok);
+  border-color: rgba(20, 122, 74, 0.22);
+  background: rgba(20, 122, 74, 0.07);
+}
+
+.result-box.danger {
+  color: var(--danger);
+  border-color: rgba(180, 35, 24, 0.22);
+  background: rgba(180, 35, 24, 0.07);
+}
+
+.path-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
