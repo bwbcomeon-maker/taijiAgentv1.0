@@ -266,6 +266,12 @@ def test_writeflow_status_card_is_visual_team_board():
     assert ".writeflow-status-dock .status-card-writeflow.is-expanded{max-height:min(38vh,420px);" in STYLE_CSS
     assert ".status-card-writeflow-artifact-actions" in STYLE_CSS
     assert ".writeflow-status-dock" in STYLE_CSS
+    assert "function _isExpertTeamStatusCard" in ui_js
+    assert "renderExpertTeamWorkspacePanel(card)" in ui_js
+    assert "else clearExpertTeamWorkspacePanel();" in ui_js
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow-head" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow-body" in STYLE_CSS
+    assert ".taiji-home-shell:not(.taiji-expert-team-active) .expert-team-workspace-panel" in STYLE_CSS
 
 
 def test_writeflow_status_card_hydrates_into_composer_dock_on_session_load():

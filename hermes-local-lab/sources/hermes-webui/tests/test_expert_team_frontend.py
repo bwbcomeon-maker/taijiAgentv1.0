@@ -35,20 +35,35 @@ def test_writeflow_summon_routes_through_expert_team_runtime():
 
 def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks():
     assert "function _expertTeamStatusCardFromRun" in UI_JS
+    assert "function _isExpertTeamStatusCard" in UI_JS
+    assert "function _expertTeamDockSummary" in UI_JS
+    assert "function _expertTeamWorkspacePanelHtml" in UI_JS
+    assert "function renderExpertTeamWorkspacePanel" in UI_JS
+    assert "function clearExpertTeamWorkspacePanel" in UI_JS
     assert "async function answerExpertTeamQuestion" in UI_JS
     assert "/api/expert-teams/answer" in UI_JS
     assert "card.questions=visualQuestions" in UI_JS
+    assert "taiji-expert-team-active" in UI_JS
+    assert "renderExpertTeamWorkspacePanel(card)" in UI_JS
+    assert "clearExpertTeamWorkspacePanel()" in UI_JS
     assert "status-card-expert-questions" in UI_JS
     assert "status-card-expert-question" in UI_JS
+    assert "expert-team-workspace-panel" in UI_JS
+    assert "expert-team-panel-questions" in UI_JS
     assert "data-expert-team-question-id" in UI_JS
+    assert "data-expert-team-run-id" in UI_JS
     assert "data-expert-team-answer" in UI_JS
     assert "expert-team-member-strip" in UI_JS
     assert "expert-team-process-panel" in UI_JS
     assert "任务进程" in UI_JS
+    assert "status-card-expert-dock-summary" in UI_JS
 
     assert ".status-card-expert-questions" in STYLE_CSS
     assert ".expert-team-member-strip" in STYLE_CSS
     assert ".expert-team-process-panel" in STYLE_CSS
+    assert ".expert-team-workspace-panel" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active" in STYLE_CSS
+    assert ".status-card-expert-dock-summary" in STYLE_CSS
 
 
 def test_pending_expert_team_questions_are_visible_and_answerable():
@@ -56,6 +71,8 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert "question.status||'')!=='answered'" in UI_JS
     assert "data-expert-team-answer-input" in UI_JS
     assert "status-card-expert-question-input" in UI_JS
+    assert "questionEl&&questionEl.dataset?questionEl.dataset.expertTeamRunId" in UI_JS
+    assert "root.dataset.expertTeamRunId" in UI_JS
     assert "请先填写确认信息。" in UI_JS
     assert ".status-card-expert-question-input" in STYLE_CSS
 
