@@ -4798,13 +4798,16 @@ main.main > #mainPlugin{display:none;}
 .status-card-expert-dock-summary.done .status-card-expert-dock-action{color:var(--success);border-color:color-mix(in srgb,var(--success) 38%,var(--border-subtle));background:color-mix(in srgb,var(--success) 9%,transparent);}
 .expert-team-workspace-panel{display:none;}
 .expert-team-workspace-panel[hidden]{display:none!important;}
-.taiji-home-shell:not(.taiji-expert-team-active) .expert-team-workspace-panel{display:none!important;}
+.taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel{display:none!important;}
 .expert-team-panel-inner{height:auto;min-height:100%;display:flex;flex-direction:column;gap:12px;}
 .expert-team-panel-head{position:relative;display:flex;flex-direction:column;gap:5px;border:1px solid var(--taiji-ui-line,var(--border-subtle));border-radius:12px;background:rgba(255,255,255,.72);padding:14px 14px 12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.72);}
+.expert-team-panel-hide{appearance:none;-webkit-appearance:none;position:absolute;right:12px;top:12px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--taiji-ui-line,var(--border-subtle));border-radius:9px;background:rgba(255,255,255,.78);color:var(--muted);cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.78);}
+.expert-team-panel-hide:hover{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+.expert-team-panel-hide svg{width:14px;height:14px;}
 .expert-team-panel-eyebrow{color:var(--accent-text);font-size:11px;font-weight:760;line-height:1.2;}
 .expert-team-panel-head strong{color:var(--text);font-size:16px;line-height:1.25;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .expert-team-panel-head small{color:var(--muted);font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.expert-team-panel-status{position:absolute;right:12px;top:12px;display:inline-flex;align-items:center;min-height:24px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--surface);padding:0 9px;color:var(--muted);font-size:11px;font-weight:760;white-space:nowrap;}
+.expert-team-panel-status{position:absolute;right:46px;top:12px;display:inline-flex;align-items:center;min-height:24px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--surface);padding:0 9px;color:var(--muted);font-size:11px;font-weight:760;white-space:nowrap;}
 .expert-team-panel-status.running{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
 .expert-team-panel-status.waiting{color:var(--warning);border-color:color-mix(in srgb,var(--warning) 35%,var(--border-subtle));background:color-mix(in srgb,var(--warning) 8%,transparent);}
 .expert-team-panel-status.done{color:var(--success);border-color:color-mix(in srgb,var(--success) 35%,var(--border-subtle));background:color-mix(in srgb,var(--success) 8%,transparent);}
@@ -9624,10 +9627,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
     --taiji-expert-panel-w:clamp(360px,24vw,400px);
     --taiji-expert-panel-gap:14px;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .taiji-main-workspace{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .taiji-main-workspace{
     position:relative!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel{
     position:absolute!important;
     z-index:5!important;
     top:32px!important;
@@ -9654,7 +9657,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active.taiji-welcome #emptyState{
     display:none!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active main.main.taiji-real-main #mainChat .messages-shell{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #mainChat .messages-shell{
     display:block!important;
     position:absolute!important;
     inset:auto!important;
@@ -9675,23 +9678,23 @@ main.main.showing-logs > #mainLogs{display:flex;}
     -webkit-backdrop-filter:none!important;
     overflow:visible!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow) main.main.taiji-real-main #mainChat .messages-shell{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow) main.main.taiji-real-main #mainChat .messages-shell{
     bottom:clamp(214px,24vh,292px)!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active main.main.taiji-real-main #messages{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #messages{
     padding:0!important;
     background:transparent!important;
     overflow:auto!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active main.main.taiji-real-main #msgInner,
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active main.main.taiji-real-main .live-compression-cards,
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active main.main.taiji-real-main #liveToolCards{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #msgInner,
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main .live-compression-cards,
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #liveToolCards{
     width:100%!important;
     max-width:100%!important;
     margin-left:0!important;
     margin-right:0!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #composerWrap{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #composerWrap{
     inset:auto!important;
     left:clamp(28px,3vw,42px)!important;
     right:calc(var(--taiji-expert-panel-w) + var(--taiji-expert-panel-gap) + clamp(18px,2vw,28px))!important;
@@ -9702,13 +9705,13 @@ main.main.showing-logs > #mainLogs{display:flex;}
     min-height:0!important;
     transform:none!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #composerWrap .composer-box{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-box{
     width:100%!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #composerWrap .composer-left > .composer-model-wrap:not([data-ui-visibility-hidden="1"]){
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-left > .composer-model-wrap:not([data-ui-visibility-hidden="1"]){
     display:block!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #composerWrap .composer-model-chip:not([data-ui-visibility-hidden="1"]){
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-model-chip:not([data-ui-visibility-hidden="1"]){
     box-sizing:border-box!important;
     display:inline-flex!important;
     flex:0 0 auto!important;
@@ -9721,14 +9724,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
     border-radius:12px!important;
     background:rgba(255,255,255,.66)!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #composerWrap .composer-model-label{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-model-label{
     display:inline-block!important;
     max-width:98px!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #composerWrap .composer-model-chevron{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-model-chevron{
     display:inline-flex!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock{
     position:absolute!important;
     left:0!important;
     right:0!important;
@@ -9739,7 +9742,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     padding:0!important;
     transform:none!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock .status-card-writeflow{
     width:100%!important;
     max-width:none!important;
     border-color:rgba(172,216,231,.86)!important;
@@ -9748,11 +9751,11 @@ main.main.showing-logs > #mainLogs{display:flex;}
     box-shadow:0 14px 28px rgba(47,95,135,.13),inset 0 1px 0 rgba(255,255,255,.85)!important;
     overflow:hidden!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow-head,
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow-body{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock .status-card-writeflow-head,
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock .status-card-writeflow-body{
     display:none!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-dock-summary{
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock .status-card-expert-dock-summary{
     display:grid!important;
     min-height:58px!important;
     padding:10px 12px!important;

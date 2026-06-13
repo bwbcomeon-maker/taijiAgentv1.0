@@ -103,6 +103,44 @@ def test_expert_team_question_inputs_survive_status_refresh_rerender():
     assert "delete dock.dataset.expertTeamRenderKey" in UI_JS
 
 
+def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
+    assert "function _expertTeamActivePanelName" in UI_JS
+    assert "function _syncExpertTeamWorkspacePanelVisibility" in UI_JS
+    assert "function hideExpertTeamWorkspacePanel" in UI_JS
+    assert "function showExpertTeamWorkspacePanel" in UI_JS
+    assert "function _expertTeamWorkspaceStorageKey" in UI_JS
+    assert "expert-team-workspace-panel:" in UI_JS
+    assert "taiji-expert-team-panel-visible" in UI_JS
+    assert "taiji-expert-team-panel-hidden" in UI_JS
+    assert "data-expert-team-hide-run-id" in UI_JS
+    assert "hideExpertTeamWorkspacePanel(this)" in UI_JS
+    assert "window._syncExpertTeamWorkspacePanelVisibility=_syncExpertTeamWorkspacePanelVisibility" in UI_JS
+    assert "window.hideExpertTeamWorkspacePanel=hideExpertTeamWorkspacePanel" in UI_JS
+    assert "window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel" in UI_JS
+
+    focus_start = UI_JS.index("function focusExpertTeamWorkspacePanel")
+    focus_body = UI_JS[focus_start : UI_JS.index("if(typeof window!=='undefined'){", focus_start)]
+    assert "_setExpertTeamWorkspacePanelHiddenForRun(runId,false)" in focus_body
+    assert "_syncExpertTeamWorkspacePanelVisibility()" in focus_body
+
+    assert ".taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #mainChat .messages-shell" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-panel-visible #composerWrap" in STYLE_CSS
+    assert ".expert-team-panel-hide" in STYLE_CSS
+
+
+def test_expert_team_workspace_visibility_syncs_on_panel_switches():
+    switch_start = PANELS_JS.index("async function switchPanel")
+    switch_body = PANELS_JS[switch_start : PANELS_JS.index("// ── Cron panel ──", switch_start)]
+    assert "_syncExpertTeamWorkspacePanelVisibility()" in switch_body
+    assert switch_body.find("mainEl.classList.toggle('showing-' + p, nextPanel === p);") < switch_body.find("_syncExpertTeamWorkspacePanelVisibility()")
+
+    force_start = SESSIONS_JS.index("function _forceChatSessionPanel")
+    force_body = SESSIONS_JS[force_start : SESSIONS_JS.index("async function openChatSession", force_start)]
+    assert "_syncExpertTeamWorkspacePanelVisibility()" in force_body
+
+
 def test_expert_team_answer_response_attaches_real_stream_runtime():
     assert "function _applyExpertTeamStreamResponse" in UI_JS
     assert "data&&data.stream_id" in UI_JS

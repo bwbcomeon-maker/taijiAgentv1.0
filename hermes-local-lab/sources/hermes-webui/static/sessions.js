@@ -935,6 +935,7 @@ function _forceChatSessionPanel(){
   if(typeof window!=='undefined'&&window.TaijiHomeController&&typeof window.TaijiHomeController.syncShellState==='function'){
     try{window.TaijiHomeController.syncShellState();}catch(_){}
   }
+  if(typeof _syncExpertTeamWorkspacePanelVisibility==='function')_syncExpertTeamWorkspacePanelVisibility();
 }
 
 async function openChatSession(sid, options={}){

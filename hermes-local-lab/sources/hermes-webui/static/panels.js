@@ -252,6 +252,7 @@ async function switchPanel(name, opts = {}) {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
+  if (typeof _syncExpertTeamWorkspacePanelVisibility === 'function') _syncExpertTeamWorkspacePanelVisibility();
   const layoutEl = document.querySelector('.layout');
   if (layoutEl) layoutEl.classList.toggle('writing-center-mode', nextPanel === 'writing');
   // Lazy-load panel data
