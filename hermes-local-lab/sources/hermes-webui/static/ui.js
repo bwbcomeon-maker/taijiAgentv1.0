@@ -657,6 +657,8 @@ function _writeflowStatusCardFromRun(run,data){
     artifacts:visualArtifacts,
     referenceArtifacts:visualReferenceArtifacts,
     fileChanges:fileChanges,
+    needsResume:!!(run.needs_resume||run.needsResume),
+    executionStatus:run.execution_status||'',
     rows,
   };
 }
@@ -679,6 +681,8 @@ function _expertTeamStatusCardFromRun(run,data){
   card.kind='expert_team';
   card.title='专家团运行';
   card.questions=visualQuestions;
+  card.needsResume=!!(run.needs_resume||run.needsResume);
+  card.executionStatus=run.execution_status||'';
   card.phases=STATUS_CARD_EXPERT_TEAM_PHASES[run.team_id]||STATUS_CARD_EXPERT_TEAM_PHASES['content-creator-team'];
   card.team.title=run.team_title||card.team.title;
   card.team.category=run.team_category||card.team.category;
@@ -744,6 +748,14 @@ function _expertTeamDockSummary(card){
   const readyArtifacts=_expertTeamReadyArtifacts(card);
   const stateClass=_statusCardStateClass(card&&card.statusLabel||card&&card.status);
   const phase=(card&&card.phase)||'当前阶段';
+  if(card&&(card.needsResume||card.needs_resume)){
+    return {
+      state:'waiting',
+      title:'需要继续生成',
+      detail:`${phase} · 执行流未启动或已中断`,
+      action:'继续生成',
+    };
+  }
   if(pending.length){
     return {
       state:'waiting',
@@ -878,6 +890,8 @@ function _expertTeamWorkspaceRenderKey(card){
     team:card.team||{},
     status:card.status||'',
     statusLabel:card.statusLabel||'',
+    needsResume:!!(card.needsResume||card.needs_resume),
+    executionStatus:card.executionStatus||card.execution_status||'',
     phase:card.phase||'',
     phases:Array.isArray(card.phases)?card.phases:[],
     progress:card.progress||{},
@@ -930,6 +944,8 @@ function _expertTeamWorkspacePanelHtml(card){
   const runId=card.runId||card.sessionId||'';
   const stateClass=_statusCardStateClass(card.statusLabel||card.status);
   const summary=_expertTeamDockSummary(card);
+  const needsResume=!!(card.needsResume||card.needs_resume);
+  const resumeHtml=needsResume?`<button class="expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
   const phaseHtml=phaseList.map((label,idx)=>{
     const cls=idx<phaseIdx?'done':(idx===phaseIdx?'active':'todo');
     return `<span class="expert-team-panel-phase ${cls}"><i>${idx+1}</i><b>${esc(label)}</b></span>`;
@@ -975,6 +991,7 @@ function _expertTeamWorkspacePanelHtml(card){
       <strong>${esc(card.subtitle||team.title||'专家团任务')}</strong>
       <small>${esc(summary.title)}</small>
       <span class="expert-team-panel-status ${esc(summary.state||stateClass)}">${esc(card.statusLabel||card.status||'执行中')}</span>
+      ${resumeHtml}
     </header>
     <section class="expert-team-panel-progress" style="--expert-team-panel-progress:${pct}%">
       <span><b>${done}/${total||tasks.length||0}</b> 任务进度</span>
@@ -1139,12 +1156,63 @@ async function answerExpertTeamQuestion(btn){
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
     if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    _applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
   }catch(e){
     showToast('提交专家团确认失败：'+(e&&e.message||e));
   }
 }
 if(typeof window!=='undefined')window.answerExpertTeamQuestion=answerExpertTeamQuestion;
+
+function _applyExpertTeamStreamResponse(data){
+  if(!(data&&data.stream_id))return false;
+  const sid=data.session_id||(data.run&&data.run.session_id)||(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
+  if(!sid||typeof S==='undefined'||!S.session||S.session.session_id!==sid)return false;
+  S.busy=true;
+  S.activeStreamId=data.stream_id;
+  S.session.active_stream_id=data.stream_id;
+  S.session.pending_user_message=data.pending_user_message||S.session.pending_user_message||'';
+  if(typeof data.pending_started_at==='number')S.session.pending_started_at=data.pending_started_at;
+  if(typeof _mergePendingSessionMessage==='function')_mergePendingSessionMessage(S.session,S.messages);
+  if(typeof updateSendBtn==='function')updateSendBtn();
+  if(typeof syncTopbar==='function')syncTopbar();
+  if(typeof renderMessages==='function')renderMessages();
+  if(typeof appendThinking==='function')appendThinking();
+  if(typeof markInflight==='function')markInflight(sid,data.stream_id);
+  if(typeof saveInflightState==='function')saveInflightState(sid,{streamId:data.stream_id,messages:(typeof INFLIGHT!=='undefined'&&INFLIGHT[sid]&&INFLIGHT[sid].messages)||S.messages||[],uploaded:[],toolCalls:[]});
+  if(typeof attachLiveStream==='function')attachLiveStream(sid,data.stream_id,[]);
+  else if(typeof watchInflightSession==='function')watchInflightSession(sid,data.stream_id);
+  if(typeof startApprovalPolling==='function')startApprovalPolling(sid);
+  if(typeof startClarifyPolling==='function')startClarifyPolling(sid);
+  return true;
+}
+
+async function resumeExpertTeamRun(btn){
+  const runId=(btn&&btn.dataset&&btn.dataset.expertTeamResumeRunId)
+    ||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)
+    ||'';
+  const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
+  if(!runId||!sid)return false;
+  try{
+    const data=await api('/api/expert-teams/resume',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,run_id:runId})
+    });
+    const run=data&&data.run;
+    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
+    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    _applyExpertTeamStreamResponse(data);
+    if(typeof renderSessionList==='function')renderSessionList();
+    return true;
+  }catch(e){
+    showToast('继续专家团任务失败：'+(e&&e.message||e));
+    return false;
+  }
+}
+if(typeof window!=='undefined'){
+  window._applyExpertTeamStreamResponse=_applyExpertTeamStreamResponse;
+  window.resumeExpertTeamRun=resumeExpertTeamRun;
+}
 
 function _statusCardWriteflowHtml(card,copyBtn){
   const isExpertTeam=_isExpertTeamStatusCard(card);

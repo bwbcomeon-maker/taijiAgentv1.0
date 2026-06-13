@@ -984,6 +984,217 @@ def _expert_team_workspace(session_id: str | None = None) -> Path:
     return resolve_trusted_workspace(get_last_workspace())
 
 
+def _active_stream_id_set() -> set[str]:
+    try:
+        from api.models import _active_stream_ids
+
+        return set(_active_stream_ids())
+    except Exception:
+        return set()
+
+
+def _expert_team_has_pending_required_questions(run: dict) -> bool:
+    return any(
+        bool(question.get("required", True)) and str(question.get("status") or "") != "answered"
+        for question in run.get("questions") or []
+        if isinstance(question, dict)
+    )
+
+
+def _expert_team_answers_by_id(run: dict) -> dict[str, str]:
+    answers: dict[str, str] = {}
+    for question in run.get("questions") or []:
+        if not isinstance(question, dict):
+            continue
+        qid = str(question.get("id") or "").strip()
+        if qid and str(question.get("status") or "") == "answered":
+            answers[qid] = str(question.get("answer") or "").strip()
+    return answers
+
+
+def _content_expert_team_execution_prompt(run: dict) -> str:
+    answers = _expert_team_answers_by_id(run)
+    topic = answers.get("topic") or run.get("title") or "本次内容主题"
+    audience = answers.get("audience") or "目标读者"
+    boundary = answers.get("boundary") or "没有额外限制"
+    return (
+        "你现在作为内容创作专家团执行本次任务。请基于已确认需求完成可直接交付的公众号长文协作结果。\n\n"
+        f"主题：{topic}\n"
+        f"目标读者：{audience}\n"
+        f"素材、篇幅或表达边界：{boundary}\n\n"
+        "请用中文输出，结构必须包含：\n"
+        "1. 标题方案：给出 3 个可选标题，并说明推荐标题。\n"
+        "2. 公众号长文初稿：有清晰导语、分节标题、正文和结尾行动建议。\n"
+        "3. 配图建议：给出封面图和 2-3 张文中配图的画面描述或可复用提示词。\n"
+        "4. 发布检查：列出发布前需要人工确认的事实、口径和风险。\n\n"
+        "不要夸大产品能力；不确定的信息必须标注需要人工确认。"
+    )
+
+
+def _expert_team_execution_display_message(run: dict) -> str:
+    title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
+    return f"专家团开始生成：{title[:80]}"
+
+
+def _append_expert_team_session_entry(run: dict) -> None:
+    sid = str(run.get("session_id") or "").strip()
+    if not sid:
+        return
+    try:
+        session = get_session(sid)
+    except Exception:
+        return
+    run_id = str(run.get("run_id") or "")
+    messages = list(getattr(session, "messages", None) or [])
+    if any(isinstance(msg, dict) and msg.get("expert_team_run_id") == run_id for msg in messages):
+        return
+    title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
+    team_title = str(run.get("team_title") or "专家团").strip()
+    now = time.time()
+    messages.append(
+        {
+            "role": "user",
+            "content": f"召唤{team_title}：{title[:120]}",
+            "timestamp": now,
+            "type": "expert_team_start",
+            "expert_team_run_id": run_id,
+        }
+    )
+    session.messages = scrub_messages(messages)
+    if _is_default_or_empty_session_title(getattr(session, "title", None)):
+        session.title = title_from(session.messages, getattr(session, "title", None) or "Untitled")
+    try:
+        session.save()
+        publish_session_list_changed("session_update")
+    except Exception:
+        logger.debug("Failed to persist expert team session entry", exc_info=True)
+
+
+def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
+    started_at = 0.0
+    raw_started = str(run.get("execution_started_at") or "")
+    if raw_started:
+        try:
+            started_at = datetime.fromisoformat(raw_started).timestamp()
+        except Exception:
+            started_at = 0.0
+    for msg in getattr(session, "messages", None) or []:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant" or msg.get("_error"):
+            continue
+        if not str(msg.get("content") or "").strip():
+            continue
+        if not started_at:
+            return True
+        try:
+            msg_ts = float(msg.get("timestamp") or msg.get("_ts") or 0)
+        except Exception:
+            msg_ts = 0.0
+        if msg_ts >= started_at - 2:
+            return True
+    return False
+
+
+def _expert_team_run_as_needs_resume(run: dict) -> dict:
+    run = copy.deepcopy(run or {})
+    run["status"] = "awaiting_user"
+    run["status_label"] = "等待继续"
+    run["execution_status"] = "needs_resume"
+    run["needs_resume"] = True
+    run["last_execution_error"] = run.get("last_execution_error") or "执行流未启动或已中断"
+    for task in run.get("tasks") or []:
+        if isinstance(task, dict) and str(task.get("status") or "") == "running":
+            task["status"] = "waiting_user"
+            task["status_label"] = "等待继续"
+    for member in run.get("members") or []:
+        if isinstance(member, dict) and str(member.get("status") or "") == "执行中":
+            member["status"] = "等待继续"
+    return run
+
+
+def _expert_team_run_has_ready_result(run: dict) -> bool:
+    if str(run.get("status") or "") in {"done", "error", "cancelled"}:
+        return True
+    if any(
+        isinstance(item, dict) and not item.get("placeholder") and item.get("exists") is not False
+        for item in run.get("artifacts") or []
+    ):
+        return True
+    return any(
+        isinstance(task, dict) and str(task.get("status") or "") == "done"
+        for task in run.get("tasks") or []
+    )
+
+
+def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> dict | None:
+    if not run or str(run.get("team_id") or "") != "content-creator-team":
+        return run
+    if _expert_team_has_pending_required_questions(run):
+        return run
+    stream_id = str(run.get("execution_stream_id") or "")
+    active_stream_ids = _active_stream_id_set()
+    if stream_id and stream_id in active_stream_ids:
+        run["execution_status"] = "running"
+        run["needs_resume"] = False
+        return run
+    if stream_id and str(run.get("execution_status") or "") == "running":
+        try:
+            session = get_session(str(run.get("session_id") or ""))
+            if (
+                not getattr(session, "active_stream_id", None)
+                and not getattr(session, "pending_user_message", None)
+                and _session_has_expert_team_assistant_after_execution(session, run)
+            ):
+                from api import expert_teams
+
+                return expert_teams.mark_content_expert_team_execution_complete(workspace, str(run.get("run_id") or ""))
+        except Exception:
+            pass
+    if str(run.get("status") or "") == "running" and not _expert_team_run_has_ready_result(run):
+        return _expert_team_run_as_needs_resume(run)
+    return run
+
+
+def _start_expert_team_execution(workspace: Path, run: dict, body: dict) -> tuple[dict, int]:
+    from api import expert_teams
+
+    sid = str(run.get("session_id") or body.get("session_id") or "").strip()
+    if not sid:
+        return {"ok": False, "error": "expert team session_id is required", "run": run}, 400
+    try:
+        session = get_session(sid)
+    except KeyError:
+        return {"ok": False, "error": "Session not found", "run": run}, 404
+    requested_model = body.get("model") or getattr(session, "model", None)
+    requested_provider = (
+        body.get("model_provider")
+        if "model_provider" in body
+        else getattr(session, "model_provider", None)
+    )
+    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+        requested_model,
+        requested_provider,
+    )
+    display_msg = _expert_team_execution_display_message(run)
+    response = _start_chat_stream_for_session(
+        session,
+        msg=_content_expert_team_execution_prompt(run),
+        display_msg=display_msg,
+        attachments=[],
+        workspace=str(workspace),
+        model=model,
+        model_provider=model_provider,
+        normalized_model=normalized_model,
+    )
+    status = int(response.pop("_status", 200) or 200)
+    if status >= 400:
+        return {"ok": False, "run": run, **response}, status
+    updated_run = expert_teams.mark_expert_team_execution_started(workspace, str(run.get("run_id") or ""), response)
+    response["run"] = updated_run
+    response["pending_user_message"] = display_msg
+    response["ok"] = True
+    return response, status
+
+
 def _writeflow_state_path(workspace: Path) -> Path:
     return workspace / "articles" / ".writeflow" / "state.json"
 
@@ -8577,6 +8788,7 @@ def handle_get(handler, parsed) -> bool:
             run_sid = str(run.get("session_id") or "").strip()
             if run_sid and run_sid != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
+        run = _expert_team_run_with_execution_truth(workspace, run)
         return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
 
     if parsed.path == "/api/writeflow/runs":
@@ -9875,6 +10087,7 @@ def handle_post(handler, parsed) -> bool:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.start_expert_team(workspace, body)
+            _append_expert_team_session_entry(run)
             return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
         except Exception as exc:
             return bad(handler, f"Failed to start expert team: {_sanitize_error(exc)}", 400)
@@ -9886,11 +10099,42 @@ def handle_post(handler, parsed) -> bool:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.answer_expert_team(workspace, body)
-            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+            if (
+                str(run.get("team_id") or "") == "content-creator-team"
+                and str(run.get("status") or "") == "running"
+                and not _expert_team_has_pending_required_questions(run)
+                and not str(run.get("execution_stream_id") or "")
+            ):
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+                payload.update(stream_payload)
+                payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+                return j(handler, payload, status=status)
+            return j(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except Exception as exc:
             return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/resume":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(run.get("session_id") or "") != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+            display_run = _expert_team_run_with_execution_truth(workspace, run)
+            if not (display_run and display_run.get("needs_resume")):
+                return j(handler, {"ok": True, "run": display_run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return j(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Failed to resume expert team: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/expert-teams/cancel":
         from api import expert_teams
@@ -13495,6 +13739,7 @@ def _prepare_chat_start_session_for_stream(
     s,
     *,
     msg: str,
+    display_msg: str | None = None,
     attachments,
     workspace: str,
     model: str,
@@ -13515,18 +13760,19 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
-    s.pending_user_message = msg
+    persisted_msg = display_msg if display_msg is not None else msg
+    s.pending_user_message = persisted_msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
-        provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
+        provisional_title = _provisional_title_from_prompt(persisted_msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
     if get_webui_session_save_mode() == "eager":
         _checkpoint_user_message_for_eager_session_save(
             s,
-            msg,
+            persisted_msg,
             attachments,
             s.pending_started_at,
         )
@@ -13734,6 +13980,7 @@ def _start_chat_stream_for_session(
     s,
     *,
     msg: str,
+    display_msg: str | None = None,
     attachments=None,
     workspace: str,
     model: str,
@@ -13772,6 +14019,7 @@ def _start_chat_stream_for_session(
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
     stream_id = uuid.uuid4().hex
+    persisted_msg = display_msg if display_msg is not None else msg
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
     with session_lock:
@@ -13780,6 +14028,7 @@ def _start_chat_stream_for_session(
         _prepare_chat_start_session_for_stream(
             s,
             msg=msg,
+            display_msg=persisted_msg,
             attachments=attachments,
             workspace=workspace,
             model=model,
@@ -13798,7 +14047,7 @@ def _start_chat_stream_for_session(
                 "event": "submitted",
                 "stream_id": stream_id,
                 "role": "user",
-                "content": msg,
+                "content": persisted_msg,
                 "attachments": attachments,
                 "workspace": workspace,
                 "model": model,
@@ -13820,7 +14069,7 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider}
+    worker_kwargs = {"model_provider": model_provider, "display_msg": persisted_msg}
     if not backend_is_gateway:
         worker_kwargs["goal_related"] = goal_related
     thr = threading.Thread(
@@ -13834,6 +14083,7 @@ def _start_chat_stream_for_session(
         "stream_id": stream_id,
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
+        "pending_user_message": persisted_msg,
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
     }

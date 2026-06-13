@@ -3976,6 +3976,7 @@ def _run_agent_streaming(
     ephemeral=False,
     model_provider=None,
     goal_related=False,
+    display_msg=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -3985,6 +3986,7 @@ def _run_agent_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    persist_msg_text = display_msg if display_msg is not None else msg_text
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -5305,7 +5307,7 @@ def _run_agent_streaming(
                     prefer_context=True,
                     state_messages=_external_state_messages,
                 ),
-                msg_text,
+                persist_msg_text,
             )
             # Dedup before feeding to agent — merge_session_messages_append_only
             # can produce duplicates when context_messages and state.db share
@@ -5400,7 +5402,7 @@ def _run_agent_streaming(
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
-                persist_user_message=msg_text,
+                persist_user_message=persist_msg_text,
             )
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
@@ -5471,7 +5473,7 @@ def _run_agent_streaming(
                 return
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
+                    if _stream_writeback_can_supersede_recovery_marker(s, persist_msg_text):
                         logger.info(
                             "Superseding stale recovery marker for session %s stream %s",
                             getattr(s, 'session_id', session_id),
@@ -5515,7 +5517,7 @@ def _run_agent_streaming(
                     _previous_messages,
                     _previous_context_messages,
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
-                    msg_text,
+                    persist_msg_text,
                 ))
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -5549,7 +5551,7 @@ def _run_agent_streaming(
                 _assistant_added = _assistant_reply_added_after_current_turn(
                     _all_result_messages,
                     _previous_context_messages,
-                    msg_text,
+                    persist_msg_text,
                 )
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if not _assistant_added and not _token_sent:
@@ -5626,7 +5628,7 @@ def _run_agent_streaming(
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
-                                    persist_user_message=msg_text,
+                                    persist_user_message=persist_msg_text,
                                 )
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
@@ -5662,7 +5664,7 @@ def _run_agent_streaming(
                                     _previous_messages,
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
-                                    msg_text,
+                                    persist_msg_text,
                                 ))
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
@@ -6683,7 +6685,7 @@ def _run_agent_streaming(
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                             task_id=session_id,
-                            persist_user_message=msg_text,
+                            persist_user_message=persist_msg_text,
                         )
                         # Retry succeeded — persist the result normally
                         if s is not None:
@@ -6714,7 +6716,7 @@ def _run_agent_streaming(
                                     _previous_messages,
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
-                                    msg_text,
+                                    persist_msg_text,
                                 ))
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')

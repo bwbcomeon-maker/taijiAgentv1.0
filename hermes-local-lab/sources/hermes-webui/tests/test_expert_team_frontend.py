@@ -103,6 +103,37 @@ def test_expert_team_question_inputs_survive_status_refresh_rerender():
     assert "delete dock.dataset.expertTeamRenderKey" in UI_JS
 
 
+def test_expert_team_answer_response_attaches_real_stream_runtime():
+    assert "function _applyExpertTeamStreamResponse" in UI_JS
+    assert "data&&data.stream_id" in UI_JS
+    assert "S.activeStreamId=data.stream_id" in UI_JS
+    assert "S.session.active_stream_id=data.stream_id" in UI_JS
+    assert "S.session.pending_user_message=data.pending_user_message" in UI_JS
+    assert "S.session.pending_started_at=data.pending_started_at" in UI_JS
+    assert "markInflight(sid,data.stream_id)" in UI_JS
+    assert "saveInflightState(sid,{streamId:data.stream_id" in UI_JS
+    assert "attachLiveStream(sid,data.stream_id" in UI_JS
+    assert "_applyExpertTeamStreamResponse(data);" in UI_JS
+
+
+def test_expert_team_workspace_shows_resume_action_for_stale_running_runs():
+    assert "function resumeExpertTeamRun" in UI_JS
+    assert "/api/expert-teams/resume" in UI_JS
+    assert "card.needsResume||card.needs_resume" in UI_JS
+    assert "expert-team-panel-resume" in UI_JS
+    assert "继续生成" in UI_JS
+    assert "data-expert-team-resume-run-id" in UI_JS
+    assert "window.resumeExpertTeamRun=resumeExpertTeamRun" in UI_JS
+
+
+def test_expert_team_session_refresh_does_not_require_loaded_message_array():
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]
+
+    assert "!Array.isArray(S.messages)" not in hydrate_body
+    assert "_isWriteflowHydrationForActiveSession(sid)" in hydrate_body
+
+
 def test_expert_team_hydrates_before_writeflow_fallback():
     assert "async function _hydrateExpertTeamStatusCardForSession" in SESSIONS_JS
     assert "/api/expert-teams/run?session_id=" in SESSIONS_JS

@@ -27,6 +27,7 @@ STATUS_LABELS = {
     "pending": "待执行",
     "waiting_user": "等待确认",
 }
+EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume"}
 
 
 EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
@@ -218,6 +219,13 @@ def _normalize_run(run: dict) -> dict:
     run["tasks"] = run.get("tasks") if isinstance(run.get("tasks"), list) else []
     run["events"] = run.get("events") if isinstance(run.get("events"), list) else []
     run["artifacts"] = run.get("artifacts") if isinstance(run.get("artifacts"), list) else []
+    run["execution_stream_id"] = str(run.get("execution_stream_id") or "")
+    run["execution_session_id"] = str(run.get("execution_session_id") or run.get("session_id") or "")
+    run["execution_started_at"] = str(run.get("execution_started_at") or "")
+    run["execution_status"] = str(run.get("execution_status") or "idle")
+    if run["execution_status"] not in EXECUTION_STATUSES:
+        run["execution_status"] = "idle"
+    run["last_execution_error"] = str(run.get("last_execution_error") or "")
     run["created_at"] = str(run.get("created_at") or now)
     run["started_at"] = str(run.get("started_at") or run["created_at"])
     run["updated_at"] = str(run.get("updated_at") or now)
@@ -302,6 +310,66 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "updated_at": now,
         "completed_at": "",
     }
+    return write_expert_team_run(Path(workspace), run)
+
+
+def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_response: dict) -> dict:
+    run = read_expert_team_run(Path(workspace), run_id)
+    now = _now()
+    stream_id = str((stream_response or {}).get("stream_id") or "")
+    session_id = str((stream_response or {}).get("session_id") or run.get("session_id") or "")
+    if not stream_id:
+        raise ValueError("stream_id is required")
+    run["status"] = "running"
+    run["phase"] = run.get("phase") or "生成初稿"
+    run["execution_stream_id"] = stream_id
+    run["execution_session_id"] = session_id
+    run["execution_started_at"] = now
+    run["execution_status"] = "running"
+    run["last_execution_error"] = ""
+    for task in run.get("tasks") or []:
+        if task.get("status") == "waiting_user":
+            task["status"] = "running"
+            task["status_label"] = STATUS_LABELS["running"]
+            break
+    run["updated_at"] = now
+    if not _has_event(run, "execution_started"):
+        _append_event(run, "execution_started", "专家团开始生成内容")
+    return write_expert_team_run(Path(workspace), run)
+
+
+def mark_content_expert_team_execution_complete(workspace: Path, run_id: str) -> dict:
+    run = read_expert_team_run(Path(workspace), run_id)
+    now = _now()
+    for task in run.get("tasks") or []:
+        if str(task.get("status") or "") in {"pending", "running", "waiting_user"}:
+            task["status"] = "done"
+            task["status_label"] = STATUS_LABELS["done"]
+            if not task.get("result_summary"):
+                task["result_summary"] = "已写入当前对话。"
+    for member in run.get("members") or []:
+        if str(member.get("status") or "") in {"待命", "执行中", "监督中", "等待继续"}:
+            member["status"] = "已完成"
+    if not run.get("artifacts"):
+        run["artifacts"] = [
+            {
+                "id": "expert-team-chat-delivery",
+                "label": "专家团生成结果",
+                "kind": "chat",
+                "path": "",
+                "status": "ready",
+                "placeholder": False,
+                "exists": True,
+                "note": "已写入当前对话",
+            }
+        ]
+    run["status"] = "done"
+    run["phase"] = "交付"
+    run["execution_status"] = "done"
+    run["completed_at"] = now
+    run["updated_at"] = now
+    if not _has_event(run, "run_done"):
+        _append_event(run, "run_done", "专家团任务已完成")
     return write_expert_team_run(Path(workspace), run)
 
 

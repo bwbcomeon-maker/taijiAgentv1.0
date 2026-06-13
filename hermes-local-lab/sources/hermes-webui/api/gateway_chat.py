@@ -233,6 +233,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    display_msg=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -245,6 +246,7 @@ def _run_gateway_chat_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    persist_msg_text = display_msg if display_msg is not None else msg_text
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -482,7 +484,7 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
+            user_msg = {"role": "user", "content": str(persist_msg_text or ""), "timestamp": now}
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
@@ -494,7 +496,7 @@ def _run_gateway_chat_streaming(
                 latest = display[-1]
                 if isinstance(latest, dict) and latest.get("role") == "user":
                     latest_text = " ".join(str(latest.get("content") or "").split())
-                    msg_norm = " ".join(str(msg_text or "").split())
+                    msg_norm = " ".join(str(persist_msg_text or "").split())
                     if latest_text == msg_norm:
                         display = display[:-1]
             s.messages = scrub_messages(display + [user_msg, assistant_msg])

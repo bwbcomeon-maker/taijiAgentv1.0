@@ -198,6 +198,221 @@ def test_expert_team_routes_start_answer_and_read(monkeypatch, tmp_path):
     assert sent["payload"]["run"]["phase"] == "方向确认"
 
 
+def test_content_expert_team_answer_starts_real_stream_without_exposing_internal_prompt(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-stream",
+            "team_id": "content-creator-team",
+            "prompt": "帮我写一篇公众号长文",
+        },
+    )
+    sent = {}
+    calls = {}
+    session = SimpleNamespace(
+        session_id="sid-stream",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+
+    def fake_j(_handler, payload, status=200, **_kwargs):
+        sent["payload"] = payload
+        sent["status"] = status
+        return payload
+
+    def fake_start_stream(s, **kwargs):
+        calls["session"] = s
+        calls.update(kwargs)
+        return {
+            "stream_id": "stream-real-1",
+            "session_id": s.session_id,
+            "pending_started_at": 1781346000.0,
+            "title": "专家团任务",
+        }
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start_stream)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "sid-stream",
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/answer"))
+
+    assert response["stream_id"] == "stream-real-1"
+    assert response["run"]["execution_stream_id"] == "stream-real-1"
+    assert response["run"]["execution_status"] == "running"
+    assert calls["session"] is session
+    assert calls["workspace"] == str(tmp_path)
+    assert calls["model"] == "deepseek-v4-pro"
+    assert calls["display_msg"].startswith("专家团开始生成：")
+    assert "本地优先 AI 助理" in calls["msg"]
+    assert calls["msg"] != calls["display_msg"]
+    assert "需求确认" not in calls["display_msg"]
+    assert "内部" not in calls["display_msg"]
+
+
+def test_content_expert_team_answer_waits_until_required_questions_are_done(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-wait", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    called = {"stream": False}
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", lambda *args, **kwargs: called.update(stream=True))
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "sid-wait",
+            "run_id": run["run_id"],
+            "answers": {"topic": "本地优先 AI 助理"},
+        },
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/answer"))
+
+    assert called["stream"] is False
+    assert response["run"]["status"] == "awaiting_user"
+    assert "stream_id" not in response
+
+
+def test_expert_team_run_marks_legacy_running_without_stream_as_needs_resume(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-stale", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    stale = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    assert stale["status"] == "running"
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: set())
+
+    response = routes.handle_get(object(), urlparse("/api/expert-teams/run?session_id=sid-stale"))
+
+    assert response["run"]["status"] == "awaiting_user"
+    assert response["run"]["status_label"] == "等待继续"
+    assert response["run"]["execution_status"] == "needs_resume"
+    assert response["run"]["needs_resume"] is True
+    assert response["run"]["tasks"][0]["status"] == "waiting_user"
+
+
+def test_expert_team_resume_starts_legacy_stale_run_on_explicit_action(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-resume", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    stale = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    session = SimpleNamespace(
+        session_id="sid-resume",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda s, **kwargs: {
+            "stream_id": "stream-resumed",
+            "session_id": s.session_id,
+            "pending_started_at": 1781346100.0,
+            "title": "专家团任务",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": "sid-resume", "run_id": stale["run_id"]},
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/resume"))
+
+    assert response["stream_id"] == "stream-resumed"
+    assert response["run"]["status"] == "running"
+    assert response["run"]["execution_status"] == "running"
+    assert response["run"]["execution_stream_id"] == "stream-resumed"
+
+
 def test_expert_team_start_rejects_invalid_existing_session_workspace(monkeypatch):
     import api.routes as routes
 
