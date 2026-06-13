@@ -141,6 +141,51 @@ def test_expert_team_workspace_visibility_syncs_on_panel_switches():
     assert "_syncExpertTeamWorkspacePanelVisibility()" in force_body
 
 
+def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifacts():
+    assert "function _expertTeamPrimaryArtifact" in UI_JS
+    assert "function _expertTeamAnsweredQuestionsSummary" in UI_JS
+    assert "function handleExpertTeamDockAction" in UI_JS
+    assert "onclick=\"handleExpertTeamDockAction(this);event.stopPropagation()\"" in UI_JS
+    assert "data-expert-team-primary-artifact-path" in UI_JS
+    assert "data-writeflow-artifact-path" in UI_JS
+    assert "expert-team-panel-topbar" in UI_JS
+    assert "expert-team-panel-title" in UI_JS
+    assert "title=\"${esc(taskTitle)}\"" in UI_JS
+    assert "<span>收起任务区</span>" in UI_JS
+    assert "expert-team-panel-answered-summary" in UI_JS
+    assert "expert-team-panel-artifacts-section is-priority" in UI_JS
+    assert "card.type==='writeflow'||card.kind==='writeflow'||_isExpertTeamStatusCard(card)" in UI_JS
+
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    assert "const taskTitle=card.subtitle||team.title||'专家团任务';" in panel_body
+    assert "const artifactSectionHtml=" in panel_body
+    assert "const questionSectionHtml=" in panel_body
+    assert "${readyArtifacts.length?artifactSectionHtml:''}" in panel_body
+    assert "${readyArtifacts.length?'':artifactSectionHtml}" in panel_body
+    assert panel_body.find("${readyArtifacts.length?artifactSectionHtml:''}") < panel_body.find("${questionSectionHtml}")
+
+    assert ".expert-team-panel-title" in STYLE_CSS
+    assert "-webkit-line-clamp:3" in STYLE_CSS
+    assert ".expert-team-panel-hide span" in STYLE_CSS
+    assert ".expert-team-panel-artifacts-section.is-priority" in STYLE_CSS
+    assert ".expert-team-panel-answered-summary" in STYLE_CSS
+    assert ".expert-team-panel-head strong{color:var(--text);font-size:16px;line-height:1.25;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" not in STYLE_CSS
+
+
+def test_expert_team_artifact_actions_open_products_before_focusing_panel():
+    assert "async function openWriteflowArtifact" in UI_JS
+    assert "await openArtifactPath(path)" in UI_JS
+    assert "无法打开产物" in UI_JS
+    assert "window.handleExpertTeamDockAction=handleExpertTeamDockAction" in UI_JS
+
+    handler_start = UI_JS.index("async function handleExpertTeamDockAction")
+    handler_body = UI_JS[handler_start : UI_JS.index("if(typeof window!=='undefined'){", handler_start)]
+    assert "btn.dataset.expertTeamPrimaryArtifactPath" in handler_body
+    assert "await openWriteflowArtifact(btn)" in handler_body
+    assert "return focusExpertTeamWorkspacePanel(btn)" in handler_body
+
+
 def test_expert_team_answer_response_attaches_real_stream_runtime():
     assert "function _applyExpertTeamStreamResponse" in UI_JS
     assert "data&&data.stream_id" in UI_JS

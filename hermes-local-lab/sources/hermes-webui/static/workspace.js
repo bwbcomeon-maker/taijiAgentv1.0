@@ -372,7 +372,7 @@ async function _workspacePathExists(path){
 }
 
 async function openArtifactPath(path){
-  if(!path) return;
+  if(!path) return false;
   switchWorkspacePanelTab('files');
   let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
@@ -386,13 +386,14 @@ async function openArtifactPath(path){
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
-      return;
+      return false;
     }
   }catch(_){
     setStatus(t('file_open_failed'));
-    return;
+    return false;
   }
   openFile(rel);
+  return true;
 }
 
 async function loadDir(path, opts={}){
