@@ -20,6 +20,26 @@ def test_user_env_overrides_stale_shell_values(tmp_path, monkeypatch):
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
 
 
+def test_taiji_runtime_home_is_default_user_env(tmp_path, monkeypatch):
+    taiji_home = tmp_path / "taiji-runtime"
+    taiji_home.mkdir()
+    taiji_env = taiji_home / ".env"
+    taiji_env.write_text("DEEPSEEK_API_KEY=taiji-key\n", encoding="utf-8")
+
+    legacy_home = tmp_path / "legacy"
+    legacy_home.mkdir()
+    (legacy_home / ".env").write_text("DEEPSEEK_API_KEY=legacy-key\n", encoding="utf-8")
+
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(taiji_home))
+    monkeypatch.setenv("HERMES_HOME", str(legacy_home))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    loaded = load_hermes_dotenv()
+
+    assert loaded == [taiji_env]
+    assert os.getenv("DEEPSEEK_API_KEY") == "taiji-key"
+
+
 def test_project_env_overrides_stale_shell_values_when_user_env_missing(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     project_env = tmp_path / ".env"

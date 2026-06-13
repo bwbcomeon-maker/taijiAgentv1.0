@@ -59,6 +59,10 @@ def _platform_default_hermes_home() -> Path:
     legacy path is never preferred.  Explicit HERMES_HOME / HERMES_WEBUI_STATE_DIR
     overrides take precedence upstream and are unaffected.
     """
+    taiji_runtime_home = os.getenv("TAIJI_RUNTIME_HOME", "").strip()
+    if taiji_runtime_home:
+        return Path(taiji_runtime_home).expanduser()
+
     if os.name == "nt":
         local_app_data = os.getenv("LOCALAPPDATA", "").strip()
         if local_app_data:

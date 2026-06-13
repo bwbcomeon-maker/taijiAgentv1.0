@@ -17,6 +17,14 @@ _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
 )
 
 
+def get_taiji_runtime_home() -> Path | None:
+    """Return the Taiji product runtime home when explicitly configured."""
+    value = os.environ.get("TAIJI_RUNTIME_HOME", "").strip()
+    if not value:
+        return None
+    return Path(value)
+
+
 def set_hermes_home_override(path: str | Path | None) -> Token:
     """Set a context-local Hermes home override and return its reset token.
 
@@ -59,6 +67,10 @@ def get_hermes_home() -> Path:
     override = get_hermes_home_override()
     if override:
         return Path(override)
+
+    taiji_runtime_home = get_taiji_runtime_home()
+    if taiji_runtime_home is not None:
+        return taiji_runtime_home
 
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
@@ -117,6 +129,10 @@ def get_default_hermes_root() -> Path:
 
     Import-safe — no dependencies beyond stdlib.
     """
+    taiji_runtime_home = get_taiji_runtime_home()
+    if taiji_runtime_home is not None:
+        return taiji_runtime_home
+
     native_home = Path.home() / ".hermes"
     env_home = os.environ.get("HERMES_HOME", "")
     if not env_home:

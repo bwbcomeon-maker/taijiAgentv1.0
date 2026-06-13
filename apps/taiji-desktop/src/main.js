@@ -53,6 +53,11 @@ function userStateDir() {
   return path.join(base, "taiji-agent");
 }
 
+function userDataDir() {
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  return path.join(base, "taiji-agent");
+}
+
 function htmlEscape(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -316,6 +321,8 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   delete env.ELECTRON_RUN_AS_NODE;
   env.TAIJI_AGENT_ROOT = labDir;
   env.TAIJI_AGENT_USE_USER_DIRS = "1";
+  env.TAIJI_RUNTIME_HOME = process.env.TAIJI_RUNTIME_HOME || path.join(userDataDir(), "runtime-home");
+  env.TAIJI_WORKSPACE = process.env.TAIJI_WORKSPACE || path.join(userDataDir(), "workspace");
   env.TAIJI_AGENT_LOG_DIR = logDir;
   env.AGENT_API_HOST = "127.0.0.1";
   env.AGENT_API_PORT = String(agentPort);

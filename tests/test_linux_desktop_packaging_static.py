@@ -73,10 +73,19 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_health_check_reads_user_dir_runtime_env_for_desktop_launches(self):
         health_check = read_text("hermes-local-lab/scripts/health-check.sh")
+        runtime_env = read_text("hermes-local-lab/scripts/runtime-env.sh")
+        main_js = read_text("apps/taiji-desktop/src/main.js")
 
         self.assertIn('TAIJI_AGENT_USE_USER_DIRS:-0', health_check)
         self.assertIn('TAIJI_AGENT_RUNTIME_ENV:-$TMP_DIR/runtime.env', health_check)
-        self.assertIn('TAIJI_AGENT_ENV_FILE:-$TAIJI_CONFIG_DIR/.env', health_check)
+        self.assertIn('TAIJI_ENV_FILE="$TAIJI_RUNTIME_HOME/.env"', health_check)
+        self.assertIn('TAIJI_ENV_FILE="$TAIJI_RUNTIME_HOME/.env"', runtime_env)
+        self.assertNotIn("${TAIJI_AGENT_ENV_FILE", health_check)
+        self.assertNotIn("${TAIJI_AGENT_ENV_FILE", runtime_env)
+        self.assertIn("TAIJI_IGNORED_RUNTIME_SELECTOR_COUNT", runtime_env)
+        self.assertIn("ignored_legacy_runtime_selectors=", read_text("hermes-local-lab/scripts/taiji-agent-diagnose"))
+        self.assertIn("env.TAIJI_RUNTIME_HOME", main_js)
+        self.assertIn('path.join(userDataDir(), "runtime-home")', main_js)
 
     def test_desktop_startup_errors_include_recent_script_output(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")

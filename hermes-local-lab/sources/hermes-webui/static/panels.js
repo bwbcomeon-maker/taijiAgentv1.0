@@ -5619,18 +5619,21 @@ async function loadProfilesPanel() {
   try {
     const data = await api('/api/profiles');
     _profilesCache = data;
+    S.singleRuntime = !!data.single_runtime;
     panel.innerHTML = '';
-    const explainer = document.createElement('div');
-    explainer.className = 'profile-card profile-help-card';
-    explainer.innerHTML = `
-      <div class="profile-card-header">
-        <div style="min-width:0;flex:1">
-          <div class="profile-card-name">配置文件说明</div>
-          <div class="profile-card-meta">配置文件用于管理智能体工作方式；文件范围由管理员统一配置。</div>
-        </div>
-      </div>`;
-    explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
-    panel.appendChild(explainer);
+    if (!data.single_runtime) {
+      const explainer = document.createElement('div');
+      explainer.className = 'profile-card profile-help-card';
+      explainer.innerHTML = `
+        <div class="profile-card-header">
+          <div style="min-width:0;flex:1">
+            <div class="profile-card-name">配置文件说明</div>
+            <div class="profile-card-meta">配置文件用于管理智能体工作方式；文件范围由管理员统一配置。</div>
+          </div>
+        </div>`;
+      explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
+      panel.appendChild(explainer);
+    }
     if (!data.profiles || !data.profiles.length) {
       const emptyMsg = document.createElement('div');
       emptyMsg.style.cssText = 'padding:16px;color:var(--muted);font-size:12px';
@@ -5746,6 +5749,11 @@ function _setProfileHeaderButtons(mode, p, activeName){
   const saveBtn = $('btnSaveProfileDetail');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
+  const singleRuntime = !!(_profilesCache && _profilesCache.single_runtime);
+  if (singleRuntime) {
+    [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
+    return;
+  }
   if (mode === 'read') {
     const isActive = p && p.name === activeName;
     const isDefault = !!(p && p.is_default);
@@ -5805,6 +5813,10 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
+  if (data && data.single_runtime) {
+    closeProfileDropdown();
+    return;
+  }
   const profiles = data.profiles || [];
   const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
@@ -5846,6 +5858,13 @@ function toggleProfileDropdown() {
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   api('/api/profiles').then(data => {
+    S.singleRuntime = !!data.single_runtime;
+    if(data.single_runtime){
+      const chip=$('profileChip');
+      if(chip) chip.classList.remove('active');
+      closeProfileDropdown();
+      return;
+    }
     renderProfileDropdown(data);
     dd.classList.add('open');
     _positionProfileDropdown();

@@ -48,7 +48,15 @@ TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
 _DEFAULT_HERMES_HOME = _platform_default_hermes_home()
 
 STATE_DIR = (
-    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(_DEFAULT_HERMES_HOME / "webui")))
+    Path(
+        os.getenv("TAIJI_WEBUI_STATE_DIR")
+        or os.getenv("HERMES_WEBUI_STATE_DIR")
+        or (
+            str(Path(os.getenv("TAIJI_RUNTIME_HOME")).expanduser() / "web")
+            if os.getenv("TAIJI_RUNTIME_HOME")
+            else str(_DEFAULT_HERMES_HOME / "webui")
+        )
+    )
     .expanduser()
     .resolve()
 )
@@ -272,6 +280,9 @@ def _cfg_has_in_memory_overrides() -> bool:
 
 def _get_config_path() -> Path:
     """Return config.yaml path for the active profile."""
+    taiji_runtime_home = os.getenv("TAIJI_RUNTIME_HOME", "").strip()
+    if taiji_runtime_home:
+        return Path(taiji_runtime_home).expanduser() / "config.yaml"
     env_override = os.getenv("HERMES_CONFIG_PATH")
     if env_override:
         return Path(env_override).expanduser()

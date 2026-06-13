@@ -98,8 +98,8 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #   ``$EDITOR``.
 # * ``SHELL`` — what subprocess uses with ``shell=True`` (we try to
 #   avoid that, but defense in depth).
-# * ``HERMES_HOME`` / ``HERMES_PROFILE`` / ``HERMES_CONFIG`` /
-#   ``HERMES_ENV`` — Hermes runtime location flags. Writing these into
+# * ``TAIJI_RUNTIME_HOME`` / ``HERMES_HOME`` / ``HERMES_PROFILE`` /
+#   ``HERMES_CONFIG`` / ``HERMES_ENV`` — runtime location flags. Writing these into
 #   ``.env`` would relocate state in ways the user did not request from
 #   the dashboard. ``config.yaml`` is the supported surface for these.
 #
@@ -127,9 +127,11 @@ _ENV_VAR_NAME_DENYLIST: frozenset[str] = frozenset({
     "PATH", "SHELL", "BROWSER", "EDITOR", "VISUAL", "PAGER",
     # Git
     "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_SHELL",
-    # Hermes runtime location — never via dashboard env writer.
+    # Runtime location — never via dashboard env writer.
     # NOT a HERMES_* blanket: integration credentials (HERMES_GEMINI_*,
     # HERMES_LANGFUSE_*, HERMES_SPOTIFY_*, ...) ARE allowed.
+    "TAIJI_RUNTIME_HOME", "TAIJI_AGENT_HOME", "TAIJI_AGENT_RUNTIME_HOME",
+    "TAIJI_CONFIG_PATH", "TAIJI_AGENT_ENV_FILE",
     "HERMES_HOME", "HERMES_PROFILE", "HERMES_CONFIG", "HERMES_ENV",
 })
 
@@ -144,10 +146,10 @@ def _reject_denylisted_env_var(key: str) -> None:
         raise ValueError(
             f"Environment variable {key!r} is on the writer denylist. "
             "Names that influence subprocess execution (LD_PRELOAD, "
-            "PYTHONPATH, PATH, EDITOR, ...) or Hermes runtime location "
-            "(HERMES_HOME, HERMES_PROFILE, ...) cannot be persisted via "
-            "the env writer. If you really need this, edit "
-            "~/.hermes/.env directly."
+            "PYTHONPATH, PATH, EDITOR, ...) or Taiji runtime location "
+            "(TAIJI_RUNTIME_HOME and legacy home/profile/config aliases) "
+            "cannot be persisted via the env writer. If you really need this, "
+            "edit the runtime .env directly."
         )
 
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
@@ -5261,13 +5263,14 @@ def reload_env() -> int:
 
 def get_env_value(key: str) -> Optional[str]:
     """Get a value from ~/.hermes/.env or environment."""
-    # Check environment first
-    if key in os.environ:
-        return os.environ[key]
-    
-    # Then check .env file
+    # The runtime .env is the canonical mutable store. Prefer it over
+    # process-global os.environ so long-running WebUI/CLI processes do not keep
+    # using stale keys after the user updates the shared runtime home.
     env_vars = load_env()
-    return env_vars.get(key)
+    if key in env_vars:
+        return env_vars[key]
+
+    return os.environ.get(key)
 
 
 # =============================================================================

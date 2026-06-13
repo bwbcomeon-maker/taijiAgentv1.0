@@ -23,6 +23,11 @@ def _set_legacy_default(parts: tuple[str, ...], value: str | None) -> None:
         os.environ.setdefault(_legacy_key(*parts), value)
 
 
+def _set_legacy_value(parts: tuple[str, ...], value: str | None) -> None:
+    if value:
+        os.environ[_legacy_key(*parts)] = value
+
+
 def _spec_from_path(fullname: str, path: Path, *, package: bool = False):
     if not path.exists():
         return None
@@ -91,15 +96,15 @@ def _install_product_import_aliases() -> None:
 def _bridge_product_environment() -> None:
     runtime_home = (
         os.environ.get("TAIJI_RUNTIME_HOME")
-        or os.environ.get("TAIJI_AGENT_HOME")
         or str(Path.home() / ".local" / "share" / "taiji-agent" / "runtime-home")
     )
+    os.environ["TAIJI_RUNTIME_HOME"] = runtime_home
     workspace = os.environ.get("TAIJI_WORKSPACE") or str(
         Path.home() / ".local" / "share" / "taiji-agent" / "workspace"
     )
 
-    _set_legacy_default(("HER", "MES_HOME"), runtime_home)
-    _set_legacy_default(("HER", "MES_WORKSPACE"), workspace)
+    _set_legacy_value(("HER", "MES_HOME"), runtime_home)
+    _set_legacy_value(("HER", "MES_WORKSPACE"), workspace)
     _set_legacy_default(("HER", "MES_ACCEPT_HOOKS"), os.environ.get("TAIJI_ACCEPT_HOOKS", "1"))
     _set_legacy_default(("HER", "MES_SESSION_SOURCE"), os.environ.get("TAIJI_SESSION_SOURCE", "desktop"))
 

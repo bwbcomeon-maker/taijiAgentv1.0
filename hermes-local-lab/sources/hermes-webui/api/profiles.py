@@ -45,6 +45,11 @@ _tls = threading.local()
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
 
 
+def taiji_single_runtime_mode() -> bool:
+    """True when Taiji exposes one public runtime home via TAIJI_RUNTIME_HOME."""
+    return bool(os.getenv("TAIJI_RUNTIME_HOME", "").strip())
+
+
 def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
     """Snapshot imported skill-module path globals before a temporary patch."""
     snapshot: dict[str, dict[str, object]] = {}
@@ -139,6 +144,10 @@ def _resolve_base_hermes_home() -> Path:
     well.  Normalize both env vars through the same helper so active-profile
     and per-request resolution share one base-root contract (#749).
     """
+    taiji_runtime_home = os.getenv('TAIJI_RUNTIME_HOME', '').strip()
+    if taiji_runtime_home:
+        return Path(taiji_runtime_home).expanduser()
+
     # Explicit override for tests or unusual setups
     base_override = os.getenv('HERMES_BASE_HOME', '').strip()
     if base_override:
@@ -165,6 +174,9 @@ _DEFAULT_HERMES_HOME = _resolve_base_hermes_home()
 
 def _read_active_profile_file() -> str:
     """Read the sticky active profile from ~/.hermes/active_profile."""
+    if taiji_single_runtime_mode():
+        return 'default'
+
     ap_file = _DEFAULT_HERMES_HOME / 'active_profile'
     if ap_file.exists():
         try:
@@ -265,6 +277,9 @@ def _profiles_match(row_profile, active_profile) -> bool:
     out-of-process consumers (mcp_server.py) can import the canonical helper
     instead of duplicating the body. See #1614 for the visibility model.
     """
+    if taiji_single_runtime_mode():
+        return True
+
     row = row_profile or 'default'
     active = active_profile or 'default'
     if row == active:
@@ -282,6 +297,9 @@ def get_active_profile_name() -> str:
       1. Thread-local (set per-request from hermes_profile cookie) — issue #798
       2. Process-level default (_active_profile)
     """
+    if taiji_single_runtime_mode():
+        return 'default'
+
     tls_name = getattr(_tls, 'profile', None)
     if tls_name is not None:
         return tls_name
@@ -295,7 +313,7 @@ def set_request_profile(name: str) -> None:
     cookie is present.  Always paired with clear_request_profile() in a
     finally block so the thread-local is released after the request.
     """
-    _tls.profile = name
+    _tls.profile = None if taiji_single_runtime_mode() else name
 
 
 def clear_request_profile() -> None:
@@ -316,6 +334,9 @@ def _resolve_profile_home_for_name(name: str) -> Path:
     names fall back to the base home so traversal-shaped cookie values cannot
     influence filesystem paths.
     """
+    if taiji_single_runtime_mode():
+        return _DEFAULT_HERMES_HOME
+
     if not name or _is_root_profile(name):
         return _DEFAULT_HERMES_HOME
     if not _PROFILE_ID_RE.fullmatch(name):
@@ -842,6 +863,14 @@ def init_profile_state() -> None:
     module-level cached paths.  Called once from config.py after imports.
     """
     global _active_profile
+    if taiji_single_runtime_mode():
+        _active_profile = 'default'
+        home = get_active_hermes_home()
+        _set_hermes_home(home)
+        install_cron_scheduler_profile_isolation()
+        _reload_dotenv(home)
+        return
+
     _active_profile = _read_active_profile_file()
     home = get_active_hermes_home()
     _set_hermes_home(home)
@@ -865,6 +894,18 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     Raises ValueError if profile doesn't exist or agent is busy.
     """
     global _active_profile
+
+    if taiji_single_runtime_mode():
+        if not _is_root_profile(name):
+            raise ValueError("Profile switching is disabled in Taiji single runtime mode.")
+        _active_profile = 'default'
+        return {
+            'profiles': list_profiles_api(),
+            'active': 'default',
+            'default_model': None,
+            'default_model_provider': None,
+            'last_workspace': None,
+        }
 
     # Import here to avoid circular import at module load
     from api.config import STREAMS, STREAMS_LOCK, reload_config
@@ -893,7 +934,6 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     with _profile_lock:
         _SKILLS_STATS_CACHE.clear()
         if process_wide:
-            global _active_profile
             _active_profile = name
             _set_hermes_home(home)
             _reload_dotenv(home)
@@ -1067,6 +1107,9 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
 
 def list_profiles_api() -> list:
     """List all profiles with metadata, serialized for JSON response."""
+    if taiji_single_runtime_mode():
+        return [_default_profile_dict()]
+
     try:
         from hermes_cli.profiles import list_profiles
         infos = list_profiles()
@@ -1448,6 +1491,9 @@ def create_profile_api(name: str, clone_from: str = None,
                        default_model: str = None,
                        model_provider: str = None) -> dict:
     """Create a new profile. Returns the new profile info dict."""
+    if taiji_single_runtime_mode():
+        raise ValueError("Profile creation is disabled in Taiji single runtime mode.")
+
     _validate_profile_name(name)
     # Defense-in-depth: validate clone_from here too, even though routes.py
     # also validates it. Any caller that bypasses the HTTP layer gets protection.
@@ -1546,6 +1592,9 @@ def create_profile_api(name: str, clone_from: str = None,
 
 def delete_profile_api(name: str) -> dict:
     """Delete a profile. Switches to default first if it's the active one."""
+    if taiji_single_runtime_mode():
+        raise ValueError("Profile deletion is disabled in Taiji single runtime mode.")
+
     if _is_root_profile(name):
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)

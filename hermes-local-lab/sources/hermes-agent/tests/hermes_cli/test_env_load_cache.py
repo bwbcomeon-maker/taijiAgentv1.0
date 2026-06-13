@@ -146,6 +146,23 @@ def test_save_env_value_invalidates_cache(tmp_path, monkeypatch):
         invalidate_env_cache()
 
 
+def test_get_env_value_prefers_env_file_over_stale_process_env(tmp_path, monkeypatch):
+    """Canonical runtime .env wins over a stale process env value."""
+    from hermes_cli import config as config_mod
+    from hermes_cli.config import get_env_value, invalidate_env_cache
+
+    invalidate_env_cache()
+    env_path = tmp_path / ".env"
+    env_path.write_text("DEEPSEEK_API_KEY=fresh-file-key\n", encoding="utf-8")
+    monkeypatch.setattr(config_mod, "get_env_path", lambda: env_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "stale-process-key")
+
+    try:
+        assert get_env_value("DEEPSEEK_API_KEY") == "fresh-file-key"
+    finally:
+        invalidate_env_cache()
+
+
 def test_remove_env_value_invalidates_cache(tmp_path, monkeypatch):
     """remove_env_value() invalidates the cache so the removed key disappears."""
     from hermes_cli import config as config_mod

@@ -9,6 +9,7 @@ import pytest
 import hermes_constants
 from hermes_constants import (
     VALID_REASONING_EFFORTS,
+    get_hermes_home,
     get_default_hermes_root,
     is_container,
     parse_reasoning_effort,
@@ -19,8 +20,19 @@ from hermes_constants import (
 class TestGetDefaultHermesRoot:
     """Tests for get_default_hermes_root() — Docker/custom deployment awareness."""
 
+    def test_taiji_runtime_home_overrides_legacy_home(self, tmp_path, monkeypatch):
+        """Taiji product mode uses TAIJI_RUNTIME_HOME even if legacy home is set."""
+        taiji_home = tmp_path / "taiji-runtime"
+        legacy_home = tmp_path / "legacy-hermes"
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(taiji_home))
+        monkeypatch.setenv("HERMES_HOME", str(legacy_home))
+
+        assert get_hermes_home() == taiji_home
+        assert get_default_hermes_root() == taiji_home
+
     def test_no_hermes_home_returns_native(self, tmp_path, monkeypatch):
         """When HERMES_HOME is not set, returns ~/.hermes."""
+        monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -262,5 +274,4 @@ class TestSecureParentDir:
         secure_parent_dir(link_target)
         assert len(called_with) == 1
         assert called_with[0] == (str(real_dir), 0o700)
-
 

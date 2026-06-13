@@ -8871,19 +8871,27 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
-        from api.profiles import list_profiles_api, get_active_profile_name
+        from api.profiles import list_profiles_api, get_active_profile_name, taiji_single_runtime_mode
 
         return j(
             handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            {
+                "profiles": list_profiles_api(),
+                "active": get_active_profile_name(),
+                "single_runtime": taiji_single_runtime_mode(),
+            },
         )
 
     if parsed.path == "/api/profile/active":
-        from api.profiles import get_active_profile_name, get_active_hermes_home
+        from api.profiles import get_active_profile_name, get_active_hermes_home, taiji_single_runtime_mode
 
         return j(
             handler,
-            {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
+            {
+                "name": get_active_profile_name(),
+                "path": str(get_active_hermes_home()),
+                "single_runtime": taiji_single_runtime_mode(),
+            },
         )
 
     # ── Gateway Status (GET) ──
@@ -12265,7 +12273,11 @@ def _handle_media(handler, parsed):
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
     _HOME = Path(_os.path.expanduser("~"))
-    _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
+    _taiji_runtime_home = _os.getenv("TAIJI_RUNTIME_HOME", "").strip()
+    _product_single_runtime = bool(_taiji_runtime_home)
+    _HERMES_HOME = Path(
+        _taiji_runtime_home or _os.getenv("HERMES_HOME", str(_HOME / ".hermes"))
+    ).expanduser()
 
     # Auth check
     if is_auth_enabled():
@@ -12296,8 +12308,9 @@ def _handle_media(handler, parsed):
     allowed_roots = [
         _HERMES_HOME.resolve(),
         Path("/tmp").resolve(),
-        (_HOME / ".hermes").resolve(),
     ]
+    if not _product_single_runtime:
+        allowed_roots.append((_HOME / ".hermes").resolve())
     # Also allow the active workspace directory (where screenshots land)
     try:
         from api.workspace import get_last_workspace
@@ -12383,12 +12396,14 @@ def _handle_media(handler, parsed):
     except Exception:
         _base_hermes_home = None
     _hermes_roots = []
-    for _r in (
+    _root_candidates = [
         _HERMES_HOME.resolve(),
-        (_HOME / ".hermes").resolve(),
         _base_hermes_home,
         _state_dir,
-    ):
+    ]
+    if not _product_single_runtime:
+        _root_candidates.append((_HOME / ".hermes").resolve())
+    for _r in _root_candidates:
         if _r is not None and _r not in _hermes_roots:
             _hermes_roots.append(_r)
     # Enumerate named-profile roots (<root>/profiles/<name>) and treat each as a

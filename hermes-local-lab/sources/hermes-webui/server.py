@@ -137,7 +137,7 @@ def _bridge_taiji_environment() -> None:
     for legacy_parts, product_key in pairs:
         value = os.environ.get(product_key)
         if value:
-            os.environ.setdefault(_legacy_key(*legacy_parts), value)
+            os.environ[_legacy_key(*legacy_parts)] = value
 
 
 _bridge_taiji_environment()

@@ -1870,7 +1870,16 @@ function applyBotName(){
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  try{
+    const p=await api('/api/profile/active');
+    S.activeProfile=p.name||'default';
+    S.singleRuntime=!!p.single_runtime;
+  }catch(e){S.activeProfile='default';S.singleRuntime=false;}
+  if(S.singleRuntime){
+    document.querySelectorAll('[data-panel="profiles"],[data-taiji-panel="profiles"]').forEach(el=>{el.style.display='none';});
+    const profileWrap=$('profileChipWrap');
+    if(profileWrap) profileWrap.style.display='none';
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

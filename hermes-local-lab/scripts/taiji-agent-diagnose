@@ -228,6 +228,7 @@ printf 'install_root=%s\n' "$LAB_DIR"
 printf 'runtime_home=%s\n' "$TAIJI_RUNTIME_HOME"
 printf 'workspace=%s\n' "$TAIJI_WORKSPACE"
 printf 'log_dir=%s\n' "$LOG_DIR"
+printf 'ignored_legacy_runtime_selectors=%s\n' "${TAIJI_IGNORED_RUNTIME_SELECTOR_COUNT:-0}"
 
 section "System"
 run uname -a

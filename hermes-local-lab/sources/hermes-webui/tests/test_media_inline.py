@@ -242,7 +242,7 @@ class TestWorkspacePdfViewer(unittest.TestCase):
     def test_pdf_viewer_markup_exists(self):
         self.assertIn('id="previewPdfWrap"', self.INDEX_HTML)
         self.assertIn('id="previewPdfFrame"', self.INDEX_HTML)
-        self.assertIn('title="PDF preview"', self.INDEX_HTML)
+        self.assertIn('title="PDF 预览"', self.INDEX_HTML)
 
     def test_pdf_preview_css_defined(self):
         for cls in [".preview-pdf-wrap", ".preview-pdf-frame", ".preview-badge.pdf"]:
@@ -437,6 +437,62 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 self.assertEqual(
                     h2.status, 403,
                     "STATE_DIR/sessions/abc.json must stay denied (internal state)")
+
+    def test_taiji_runtime_does_not_allow_legacy_home_media_root(self):
+        """Product runtime mode must not auto-allow the old HERMES_HOME root."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+
+            def send_response(self, code):
+                self.status = code
+
+            def send_header(self, *a, **k):
+                pass
+
+            def end_headers(self):
+                pass
+
+            class _W:
+                def write(self_inner, b):
+                    pass
+
+                def flush(self_inner):
+                    pass
+
+            wfile = _W()
+
+        with tempfile.TemporaryDirectory(dir=str(REPO_ROOT)) as root:
+            base = pathlib.Path(root)
+            old_home = base / "old-home"
+            runtime_home = base / "taiji-runtime"
+            workspace = runtime_home / "workspace"
+            old_home.mkdir()
+            workspace.mkdir(parents=True)
+            old_media = old_home / "legacy.png"
+            old_media.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            handler = _Handler()
+            parsed = SimpleNamespace(
+                query=f"path={urllib.parse.quote(str(old_media.resolve()))}&inline=1",
+                path="/api/media",
+            )
+            env = {
+                "TAIJI_RUNTIME_HOME": str(runtime_home),
+                "HERMES_HOME": str(old_home),
+                "MEDIA_ALLOWED_ROOTS": "",
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(workspace)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                routes._handle_media(handler, parsed)
+
+            self.assertEqual(
+                handler.status, 403,
+                "TAIJI_RUNTIME_HOME mode must ignore old HERMES_HOME as a media root",
+            )
 
     def test_named_profile_workspace_serves_but_profile_secrets_denied(self):
         """#3234: a named-profile workspace (<base>/profiles/p1/workspace) is

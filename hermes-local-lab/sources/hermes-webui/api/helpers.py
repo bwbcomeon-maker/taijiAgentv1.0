@@ -432,6 +432,9 @@ def get_profile_cookie_name() -> str:
 
 def get_profile_cookie(handler) -> str | None:
     """Extract the active-profile cookie value from the request, or None."""
+    if os.getenv("TAIJI_RUNTIME_HOME", "").strip():
+        return None
+
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
@@ -467,6 +470,13 @@ def build_profile_cookie(name: str) -> str:
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
     cookie_name = get_profile_cookie_name()
+    if os.getenv("TAIJI_RUNTIME_HOME", "").strip():
+        cookie[cookie_name] = ""
+        cookie[cookie_name]['path'] = '/'
+        cookie[cookie_name]['max-age'] = 0
+        cookie[cookie_name]['samesite'] = 'Lax'
+        return cookie[cookie_name].OutputString()
+
     cookie[cookie_name] = name
     cookie[cookie_name]['path'] = '/'
     cookie[cookie_name]['httponly'] = True
