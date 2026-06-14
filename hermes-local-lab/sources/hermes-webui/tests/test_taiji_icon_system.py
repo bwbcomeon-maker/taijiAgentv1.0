@@ -115,7 +115,7 @@ def test_taiji_composer_uses_svg_controls_instead_of_png_pseudo_icons():
     assert "#composerWrap #btnMic::after" not in STYLE_CSS
     assert "background-image:var(--taiji-action-attach)" not in STYLE_CSS
     assert "background-image:var(--taiji-action-voice)" not in STYLE_CSS
-    assert "static/style.css?v=__WEBUI_VERSION__-taiji-shell-29" in INDEX_HTML
+    assert "static/style.css?v=__WEBUI_VERSION__-taiji-shell-30" in INDEX_HTML
 
 
 def test_taiji_composer_layout_does_not_clip_or_force_optional_toolsets():
@@ -241,7 +241,7 @@ def test_taiji_user_avatar_cache_bust_and_asset_source_are_locked():
     assert "taiji-shell-21" not in INDEX_HTML
     assert "taiji-shell-22" not in INDEX_HTML
     assert "taiji-shell-23" not in INDEX_HTML
-    assert "taiji-shell-29" in INDEX_HTML
+    assert "taiji-shell-30" in INDEX_HTML
 
     user_avatar_start = STYLE_CSS.rindex('.taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{')
     user_avatar = STYLE_CSS[user_avatar_start : STYLE_CSS.index("}", user_avatar_start)]

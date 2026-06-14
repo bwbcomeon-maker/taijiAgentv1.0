@@ -38,6 +38,7 @@
     sessions:[],
     projects:[],
     sessionFilter:'all',
+    showAllSessions:false,
     search:'',
     secondaryCollapsed:false,
     refreshInFlight:null,
@@ -423,22 +424,77 @@
     ].filter(Boolean).join(' ').toLowerCase();
   }
 
+  function taijiSafeProjectColor(project){
+    const color=String(project&&project.color||'').trim();
+    return /^#[0-9a-fA-F]{3,8}$/.test(color)?color:'';
+  }
+
+  function renderProjectFilters(){
+    const container=$('taijiProjectFilters');
+    if(!container) return;
+    const html=state.projects.map(project=>{
+      if(!project||!project.project_id) return '';
+      const projectId=escapeHtml(project.project_id);
+      const name=escapeHtml(project.name||'未命名分组');
+      const color=taijiSafeProjectColor(project);
+      const dot=color?`<span class="taiji-project-dot" style="background:${color}"></span>`:'';
+      const active=state.sessionFilter===`project:${project.project_id}`?' is-active':'';
+      return `<button class="taiji-filter taiji-project-filter${active}" type="button" data-taiji-session-filter="project:${projectId}" title="${name}">${dot}<span>${name}</span></button>`;
+    }).join('');
+    container.innerHTML=html;
+  }
+
+  function syncSessionFilterButtons(){
+    document.querySelectorAll('[data-taiji-session-filter]').forEach(btn=>{
+      btn.classList.toggle('is-active',(btn.dataset.taijiSessionFilter||'all')===state.sessionFilter);
+    });
+  }
+
+  function taijiViewAllLabel(){
+    return state.showAllSessions?'查看最近会话':'查看全部会话';
+  }
+
+  function syncViewAllButton(){
+    const btn=document.querySelector('.taiji-view-all');
+    if(!btn) return;
+    const label=taijiViewAllLabel();
+    btn.innerHTML=`${label} <span aria-hidden="true">›</span>`;
+    btn.setAttribute('aria-label',label);
+  }
+
+  function normalizeProjectFilter(){
+    if(!state.sessionFilter||!state.sessionFilter.startsWith('project:')) return;
+    const projectId=state.sessionFilter.slice('project:'.length);
+    if(!state.projects.some(project=>project&&project.project_id===projectId)){
+      state.sessionFilter=SESSION_FILTERS.all;
+    }
+  }
+
   function filteredSessions(){
     const q=state.search.trim().toLowerCase();
     return state.sessions.filter(session=>{
       if(!session||!session.session_id) return false;
-      if(state.sessionFilter===SESSION_FILTERS.ungrouped&&session.project_id) return false;
+      if(state.sessionFilter&&state.sessionFilter.startsWith('project:')){
+        const projectId=state.sessionFilter.slice('project:'.length);
+        if(session.project_id!==projectId) return false;
+      }else if(state.sessionFilter===SESSION_FILTERS.ungrouped&&session.project_id) return false;
       if(q){
         if(!taijiSessionSearchText(session).includes(q)) return false;
       }
-      const s=appState();
-      return (session.message_count||0)>0||session.active_stream_id||session.pending_user_message||(s&&s.session&&s.session.session_id===session.session_id);
+      if(!state.showAllSessions){
+        const s=appState();
+        return (session.message_count||0)>0||session.active_stream_id||session.pending_user_message||(s&&s.session&&s.session.session_id===session.session_id);
+      }
+      return true;
     });
   }
 
   function renderRecentSessions(){
     const container=$('taijiSessionGroups');
     if(!container) return;
+    renderProjectFilters();
+    syncSessionFilterButtons();
+    syncViewAllButton();
     const sessions=filteredSessions();
     const groups=['今天','昨天','本周','更早'];
     const s=appState();
@@ -451,7 +507,7 @@
     const html=groups.map(group=>{
       const items=sessions.filter(session=>groupNameForSession(session)===group);
       if(!items.length) return '';
-      const rows=items.slice(0,18).map(session=>{
+      const rows=(state.showAllSessions?items:items.slice(0,18)).map(session=>{
         const title=escapeHtml(taijiSessionDisplayTitle(session));
         const fullTitle=escapeHtml(taijiSessionFullTitle(session));
         const sid=escapeHtml(session.session_id);
@@ -487,6 +543,7 @@
         state.sessions=Array.isArray(sessionsData&&sessionsData.sessions)?sessionsData.sessions:[];
         state.projects=Array.isArray(projectsData&&projectsData.projects)?projectsData.projects:[];
         state.sessions.sort((a,b)=>sessionTimestamp(b)-sessionTimestamp(a));
+        normalizeProjectFilter();
         renderRecentSessions();
       }catch(error){
         const container=$('taijiSessionGroups');
@@ -523,15 +580,16 @@
         }
       });
     }
-    document.querySelectorAll('[data-taiji-session-filter]').forEach(btn=>{
-      if(btn.__taijiBound) return;
-      btn.__taijiBound=true;
-      btn.addEventListener('click',()=>{
-        state.sessionFilter=btn.dataset.taijiSessionFilter||'all';
-        document.querySelectorAll('[data-taiji-session-filter]').forEach(item=>item.classList.toggle('is-active',item===btn));
+    const filterRow=document.querySelector('.taiji-filter-row');
+    if(filterRow&&!filterRow.__taijiBound){
+      filterRow.__taijiBound=true;
+      filterRow.addEventListener('click',event=>{
+        const btn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-filter]'):null;
+        if(!btn||!filterRow.contains(btn)) return;
+        state.sessionFilter=btn.dataset.taijiSessionFilter||SESSION_FILTERS.all;
         renderRecentSessions();
       });
-    });
+    }
   }
 
   function bindQuickActions(){
@@ -574,7 +632,11 @@
     const colors=['#13b6c8','#2f80ed','#38bdf8','#22c55e','#f59e0b','#ef4444'];
     const color=colors[state.projects.length%colors.length];
     try{
-      await apiFn('/api/projects/create',{method:'POST',body:JSON.stringify({name:String(name).trim(),color})});
+      const res=await apiFn('/api/projects/create',{method:'POST',body:JSON.stringify({name:String(name).trim(),color})});
+      if(res&&res.project&&res.project.project_id){
+        state.projects=state.projects.filter(project=>project&&project.project_id!==res.project.project_id).concat(res.project);
+        state.sessionFilter=`project:${res.project.project_id}`;
+      }
       const renderListFn=globalFn('renderSessionList');
       if(renderListFn) await renderListFn();
       await refreshSessions();
@@ -657,6 +719,10 @@
     return true;
   };
   window.taijiHomeRefreshSessions=refreshSessions;
+  window.taijiHomeToggleAllSessions=function(){
+    state.showAllSessions=!state.showAllSessions;
+    renderRecentSessions();
+  };
   window.taijiHomeCreateProject=createProject;
   window.taijiHomeSend=function(){
     const sendFn=globalFn('send');

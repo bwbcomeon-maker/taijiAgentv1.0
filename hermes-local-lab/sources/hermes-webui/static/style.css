@@ -6499,6 +6499,39 @@ main.main.showing-logs > #mainLogs{display:flex;}
     border-color:rgba(8,176,197,.55);
     box-shadow:0 8px 16px rgba(0,164,190,.2);
   }
+  .taiji-project-filters{
+    grid-column:3;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    min-width:0;
+    overflow-x:auto;
+    padding:2px 0;
+    scrollbar-width:none;
+  }
+  .taiji-project-filters::-webkit-scrollbar{
+    display:none;
+  }
+  .taiji-project-filter{
+    display:inline-flex;
+    flex:0 0 auto;
+    align-items:center;
+    gap:7px;
+    max-width:min(150px,100%);
+  }
+  .taiji-project-filter span:last-child{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .taiji-project-dot{
+    flex:0 0 auto;
+    width:8px;
+    height:8px;
+    border-radius:999px;
+    box-shadow:0 0 0 2px rgba(255,255,255,.82);
+  }
   .taiji-filter-add{
     grid-column:4;
     width:clamp(34px,2.18vw,44px);
