@@ -35,10 +35,10 @@ PICKER_BODY = _show_project_picker_body()
 def test_no_project_branch_writes_to_allSessions_cache():
     """The 'No project' callback must update `_allSessions[idx].project_id`
     after the /api/session/move call so the re-render reflects the move."""
-    none_idx = PICKER_BODY.find("'Removed from project'")
-    assert none_idx != -1, "'Removed from project' branch not located"
-    # Look back over the callback body
-    window = PICKER_BODY[max(0, none_idx - 600): none_idx]
+    none_idx = PICKER_BODY.find("project_id:null")
+    assert none_idx != -1, "No-project /api/session/move branch not located"
+    # Look across the callback body after the move request.
+    window = PICKER_BODY[none_idx: none_idx + 700]
     assert "_allSessions.findIndex" in window, (
         "No-project branch must locate the session in _allSessions so the "
         "cache reflects the move (issue #2551)."
@@ -52,9 +52,9 @@ def test_no_project_branch_writes_to_allSessions_cache():
 def test_existing_project_branch_writes_to_allSessions_cache():
     """The existing-project callback must update `_allSessions[idx].project_id`
     after the /api/session/move call so the re-render reflects the move."""
-    moved_idx = PICKER_BODY.find("'Moved to '+p.name")
-    assert moved_idx != -1, "'Moved to '+p.name branch not located"
-    window = PICKER_BODY[max(0, moved_idx - 600): moved_idx]
+    moved_idx = PICKER_BODY.find("project_id:p.project_id")
+    assert moved_idx != -1, "Existing-project /api/session/move branch not located"
+    window = PICKER_BODY[moved_idx: moved_idx + 700]
     assert "_allSessions.findIndex" in window, (
         "Existing-project branch must locate the session in _allSessions so "
         "the cache reflects the move (issue #2551)."

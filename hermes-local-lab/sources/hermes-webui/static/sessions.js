@@ -504,7 +504,9 @@ async function newSession(flash, options={}){
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
-    if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+    if(options&&Object.prototype.hasOwnProperty.call(options,'project_id')){
+      if(options.project_id) reqBody.project_id=options.project_id;
+    }else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
     // Carry the visible picker selection into the new session. Without this,
     // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
     // when the user already chose cursor/composer-2.5 in the composer chip.
