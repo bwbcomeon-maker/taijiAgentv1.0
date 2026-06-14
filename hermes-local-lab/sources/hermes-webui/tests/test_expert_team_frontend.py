@@ -122,6 +122,7 @@ def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
     focus_body = UI_JS[focus_start : UI_JS.index("if(typeof window!=='undefined'){", focus_start)]
     assert "_setExpertTeamWorkspacePanelHiddenForRun(runId,false)" in focus_body
     assert "_syncExpertTeamWorkspacePanelVisibility()" in focus_body
+    assert "focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});" in focus_body
 
     assert ".taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel" in STYLE_CSS
     assert ".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel" in STYLE_CSS
@@ -173,6 +174,7 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert "${readyArtifacts.length?artifactSectionHtml:''}" in panel_body
     assert "${pending.length?questionSectionHtml:''}" in panel_body
     assert "成员简况" not in panel_body
+    assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-execution")
     assert panel_return.find("expert-team-panel-execution") < panel_return.find("${readyArtifacts.length?artifactSectionHtml:''}")
     assert "phaseList.map((label,idx)=>" in rows_body
     assert "members.length" in rows_body
@@ -183,6 +185,8 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert ".expert-team-panel-collapse-toggle" in STYLE_CSS
     assert ".expert-team-panel-priority-grid" in STYLE_CSS
     assert ".expert-team-panel-execution" in STYLE_CSS
+    assert ".expert-team-panel-expanded-body{min-height:0;display:flex;flex:1 1 auto;flex-direction:column;gap:7px;overflow:hidden auto;" in STYLE_CSS
+    assert ".expert-team-panel-execution{flex:0 0 auto;display:flex;flex-direction:column;overflow:visible;}" in STYLE_CSS
     assert ".expert-team-panel-member-avatars" in STYLE_CSS
     assert ".expert-team-panel-artifacts-section.is-priority" in STYLE_CSS
     assert ".expert-team-panel-answered-summary" in STYLE_CSS

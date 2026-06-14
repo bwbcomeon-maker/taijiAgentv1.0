@@ -1163,6 +1163,7 @@ function _expertTeamWorkspacePanelHtml(card){
           ${pendingButton}
         </span>
       </section>
+      ${pending.length?questionSectionHtml:''}
       <section class="expert-team-panel-section expert-team-panel-execution">
         <div class="expert-team-panel-section-title">
           <span>执行明细</span>
@@ -1170,7 +1171,6 @@ function _expertTeamWorkspacePanelHtml(card){
         </div>
         <div class="expert-team-panel-execution-list">${executionHtml}</div>
       </section>
-      ${pending.length?questionSectionHtml:''}
       ${readyArtifacts.length?artifactSectionHtml:''}
       ${referenceHtml}
     </div>
@@ -1318,6 +1318,7 @@ function focusExpertTeamWorkspacePanel(trigger){
   if(panel&&!panel.hidden){
     panel.scrollIntoView({block:'nearest',inline:'nearest'});
     const focusTarget=panel.querySelector('.status-card-expert-question.pending textarea,[data-expert-team-question-id].status-card-expert-question.pending button,.expert-team-panel-artifact.ready button');
+    if(focusTarget&&focusTarget.scrollIntoView)focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});
     if(focusTarget&&focusTarget.focus)focusTarget.focus({preventScroll:true});
     return true;
   }
