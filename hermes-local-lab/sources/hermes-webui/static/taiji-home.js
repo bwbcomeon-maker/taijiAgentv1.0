@@ -1,4 +1,4 @@
-/* global S, api, switchPanel, renderSessionList, loadSession, newSession, send, autoResize, updateSendBtn, showPromptDialog, showToast */
+/* global S, api, switchPanel, renderSessionList, loadSession, newSession, send, autoResize, updateSendBtn, showPromptDialog, showToast, deleteSession */
 (function(){
   'use strict';
 
@@ -457,7 +457,8 @@
         const sid=escapeHtml(session.session_id);
         const time=escapeHtml(sessionTimeLabel(session));
         const badge=session.is_streaming||session.active_stream_id?'<span class="taiji-session-live">运行中</span>':'';
-        return `<button class="taiji-session-row${activeSid===session.session_id?' is-active':''}" type="button" data-session-id="${sid}" title="${fullTitle}" aria-label="${fullTitle}" onclick="taijiHomeLoadSession('${sid}')"><span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time>${badge}</span></button>`;
+        const deleteLabel=escapeHtml(`删除会话：${taijiSessionFullTitle(session)}`);
+        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" aria-label="${fullTitle}"><span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time>${badge}</span></button><button class="taiji-session-delete" type="button" data-taiji-session-delete data-session-id="${sid}" title="${deleteLabel}" aria-label="${deleteLabel}">${typeof li==='function'?li('trash-2',15):'×'}</button></div>`;
       }).join('');
       return `<section class="taiji-session-group" aria-label="${group}"><header><span>${group}</span><span aria-hidden="true">⌃</span></header><div class="taiji-session-card">${rows}</div></section>`;
     }).join('');
@@ -505,6 +506,21 @@
       input.addEventListener('input',()=>{
         state.search=input.value||'';
         renderRecentSessions();
+      });
+    }
+    const groups=$('taijiSessionGroups');
+    if(groups&&!groups.__taijiBound){
+      groups.__taijiBound=true;
+      groups.addEventListener('click',event=>{
+        const deleteBtn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-delete]'):null;
+        if(deleteBtn&&groups.contains(deleteBtn)){
+          window.taijiHomeDeleteSession(deleteBtn.dataset.sessionId,event);
+          return;
+        }
+        const openBtn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-open]'):null;
+        if(openBtn&&groups.contains(openBtn)){
+          window.taijiHomeLoadSession(openBtn.dataset.sessionId);
+        }
       });
     }
     document.querySelectorAll('[data-taiji-session-filter]').forEach(btn=>{
@@ -619,6 +635,26 @@
       if(switchPanelFn) switchPanelFn('chat');
     }
     scheduleSync();
+  };
+  window.taijiHomeDeleteSession=async function(sid,event){
+    if(event){
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if(!sid) return false;
+    const deleteSessionFn=globalFn('deleteSession');
+    const renderListFn=globalFn('renderSessionList');
+    const toastFn=globalFn('showToast');
+    if(!deleteSessionFn){
+      if(toastFn) toastFn('删除功能暂不可用',2500,'error');
+      return false;
+    }
+    const deleted=await deleteSessionFn(sid);
+    if(!deleted) return false;
+    if(renderListFn) await renderListFn();
+    await refreshSessions();
+    scheduleSync();
+    return true;
   };
   window.taijiHomeRefreshSessions=refreshSessions;
   window.taijiHomeCreateProject=createProject;
