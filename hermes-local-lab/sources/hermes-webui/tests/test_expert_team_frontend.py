@@ -144,6 +144,7 @@ def test_expert_team_workspace_visibility_syncs_on_panel_switches():
 def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifacts():
     assert "function _expertTeamPrimaryArtifact" in UI_JS
     assert "function _expertTeamAnsweredQuestionsSummary" in UI_JS
+    assert "function _expertTeamExecutionRows" in UI_JS
     assert "function handleExpertTeamDockAction" in UI_JS
     assert "onclick=\"handleExpertTeamDockAction(this);event.stopPropagation()\"" in UI_JS
     assert "data-expert-team-primary-artifact-path" in UI_JS
@@ -151,26 +152,61 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert "expert-team-panel-topbar" in UI_JS
     assert "expert-team-panel-title" in UI_JS
     assert "title=\"${esc(taskTitle)}\"" in UI_JS
-    assert "<span>收起任务区</span>" in UI_JS
+    assert "expert-team-panel-collapse-toggle" in UI_JS
+    assert "expert-team-panel-priority-grid" in UI_JS
+    assert "expert-team-panel-execution" in UI_JS
+    assert "expert-team-panel-member-avatars" in UI_JS
     assert "expert-team-panel-answered-summary" in UI_JS
     assert "expert-team-panel-artifacts-section is-priority" in UI_JS
     assert "card.type==='writeflow'||card.kind==='writeflow'||_isExpertTeamStatusCard(card)" in UI_JS
 
     panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
     panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    rows_start = UI_JS.index("function _expertTeamExecutionRows")
+    rows_body = UI_JS[rows_start : UI_JS.index("function _expertTeamQuestionHtml", rows_start)]
+    panel_return = panel_body[panel_body.index("return `<div") :]
     assert "const taskTitle=card.subtitle||team.title||'专家团任务';" in panel_body
+    assert "const expertTeamMemberCount=members.length;" in panel_body
     assert "const artifactSectionHtml=" in panel_body
     assert "const questionSectionHtml=" in panel_body
+    assert "const executionRows=_expertTeamExecutionRows(card,{phaseList,pending,readyArtifacts,done,total,stateClass});" in panel_body
     assert "${readyArtifacts.length?artifactSectionHtml:''}" in panel_body
-    assert "${readyArtifacts.length?'':artifactSectionHtml}" in panel_body
-    assert panel_body.find("${readyArtifacts.length?artifactSectionHtml:''}") < panel_body.find("${questionSectionHtml}")
+    assert "${pending.length?questionSectionHtml:''}" in panel_body
+    assert "成员简况" not in panel_body
+    assert panel_return.find("expert-team-panel-execution") < panel_return.find("${readyArtifacts.length?artifactSectionHtml:''}")
+    assert "phaseList.map((label,idx)=>" in rows_body
+    assert "members.length" in rows_body
+    assert ".slice(0,4)" in rows_body
 
     assert ".expert-team-panel-title" in STYLE_CSS
-    assert "-webkit-line-clamp:3" in STYLE_CSS
-    assert ".expert-team-panel-hide span" in STYLE_CSS
+    assert "-webkit-line-clamp:2" in STYLE_CSS
+    assert ".expert-team-panel-collapse-toggle" in STYLE_CSS
+    assert ".expert-team-panel-priority-grid" in STYLE_CSS
+    assert ".expert-team-panel-execution" in STYLE_CSS
+    assert ".expert-team-panel-member-avatars" in STYLE_CSS
     assert ".expert-team-panel-artifacts-section.is-priority" in STYLE_CSS
     assert ".expert-team-panel-answered-summary" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-panel-collapsed .expert-team-panel-expanded-body" in STYLE_CSS
     assert ".expert-team-panel-head strong{color:var(--text);font-size:16px;line-height:1.25;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" not in STYLE_CSS
+
+
+def test_expert_team_workspace_uses_top_panel_without_composer_squeeze():
+    visible_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel")
+    visible_block = STYLE_CSS[visible_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active.taiji-welcome", visible_start)]
+    composer_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible #composerWrap")
+    composer_block = STYLE_CSS[composer_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-box", composer_start)]
+    messages_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #mainChat .messages-shell")
+    messages_block = STYLE_CSS[messages_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #messages", messages_start)]
+
+    assert "left:clamp(28px,3vw,42px)!important;" in visible_block
+    assert "right:clamp(28px,3vw,42px)!important;" in visible_block
+    assert "bottom:auto!important;" in visible_block
+    assert "width:auto!important;" in visible_block
+    assert "overflow:hidden!important;" in visible_block
+    assert "right:clamp(28px,3vw,42px)!important;" in composer_block
+    assert "right:clamp(28px,3vw,42px)!important;" in messages_block
+    assert "calc(var(--taiji-expert-panel-w)" not in composer_block
+    assert "calc(var(--taiji-expert-panel-w)" not in messages_block
 
 
 def test_expert_team_artifact_actions_open_products_before_focusing_panel():

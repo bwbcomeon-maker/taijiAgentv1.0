@@ -797,6 +797,100 @@ function _expertTeamDockSummary(card){
   };
 }
 
+function _expertTeamStateLabel(state,fallback){
+  if(state==='done')return '完成';
+  if(state==='waiting')return '待确认';
+  if(state==='issue')return '异常';
+  if(state==='running')return '进行中';
+  return fallback||'待执行';
+}
+
+function _expertTeamStatusBadgeLabel(card,state){
+  if(state==='done')return '已完成';
+  if(state==='waiting')return '待处理';
+  if(state==='issue')return '需关注';
+  if(state==='running')return '执行中';
+  return card&&card.statusLabel||card&&card.status||'待执行';
+}
+
+function _expertTeamMemberAvatarsHtml(members){
+  members=Array.isArray(members)?members:[];
+  return members.slice(0,4).map(member=>{
+    const image=member&&member.image||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[member&&member.id]||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[member&&member.skill]||'';
+    const name=member&&member.name||member&&member.id||'成员';
+    return `<span class="expert-team-panel-member-avatar" title="${esc(name)}">${_statusCardAvatarHtml(image,name,'status-card-writeflow-mini-avatar')}</span>`;
+  }).join('');
+}
+
+function _expertTeamExecutionRows(card,context){
+  card=card||{};
+  context=context||{};
+  const phaseList=Array.isArray(context.phaseList)?context.phaseList:[];
+  const tasks=Array.isArray(card.tasks)?card.tasks:[];
+  const members=Array.isArray(card.members)?card.members:[];
+  const visibleMembers=members.slice(0,4);
+  const pending=Array.isArray(context.pending)?context.pending:[];
+  const readyArtifacts=Array.isArray(context.readyArtifacts)?context.readyArtifacts:[];
+  const answeredSummary=_expertTeamAnsweredQuestionsSummary(card);
+  const done=Number(context.done||0);
+  const total=Number(context.total||tasks.length||0);
+  const overallState=context.stateClass||_statusCardStateClass(card.statusLabel||card.status);
+  const usedMemberIds=new Set();
+  return phaseList.map((label,idx)=>{
+    const phaseText=String(label||'');
+    const isConfirmPhase=phaseText.includes('需求')||phaseText.includes('确认');
+    const isDeliveryPhase=phaseText.includes('交付');
+    const exactTask=tasks.find(item=>{
+      const taskPhase=String(item&&item.phase||'');
+      return taskPhase&&taskPhase===phaseText;
+    })||null;
+    const task=exactTask||((!isConfirmPhase&&!isDeliveryPhase)?(tasks[idx-1]||tasks[idx]||null):null);
+    let member=null;
+    if(task&&task.worker_id){
+      member=visibleMembers.find(item=>item&&item.id===task.worker_id)||null;
+    }
+    if(!member){
+      member=visibleMembers.find(item=>item&&item.id&&!usedMemberIds.has(item.id))||visibleMembers[idx%Math.max(1,visibleMembers.length)]||null;
+    }
+    if(member&&member.id)usedMemberIds.add(member.id);
+    let title=task&&task.title||phaseText||'执行阶段';
+    let detail=task&&task.result_summary||task&&task.description||'等待推进';
+    let state=task?_statusCardStateClass(task.status_label||task.status):'idle';
+    let status=task?_expertTeamStateLabel(state,task.status_label||task.status):'待执行';
+    if(isConfirmPhase){
+      state=pending.length?'waiting':'done';
+      title='需求确认';
+      detail=pending.length?`${pending.length} 项信息待确认`:(answeredSummary.detail||'需求信息已确认');
+      status=pending.length?'待确认':'完成';
+    }else if(isDeliveryPhase){
+      const delivered=readyArtifacts.length>0||overallState==='done'||(total>0&&done>=total);
+      state=delivered?'done':(overallState==='issue'?'issue':'waiting');
+      title='交付整理';
+      detail=readyArtifacts.length?`产物已生成，${readyArtifacts.length} 个可打开`:(delivered?'结果已写入当前对话':'等待产物生成');
+      status=delivered?'完成':_expertTeamStateLabel(state);
+    }else if(task){
+      detail=task.result_summary||task.description||`${task.worker_name||task.worker_id||'专家'}处理中`;
+      status=task.status_label||_expertTeamStateLabel(state,task.status||'');
+    }else if(idx===phaseList.length-1){
+      const delivered=readyArtifacts.length>0||overallState==='done';
+      state=delivered?'done':'waiting';
+      title='交付整理';
+      detail=delivered?'结果已写入当前对话':'等待产物生成';
+      status=delivered?'完成':'待交付';
+    }
+    const role=(task&&task.worker_name)||(member&&(member.role||member.name))||(members.length?`${members.length} 位专家协作`:'专家团');
+    return {
+      index:idx+1,
+      phase:phaseText,
+      title,
+      detail,
+      role,
+      state,
+      status,
+    };
+  });
+}
+
 function _expertTeamQuestionHtml(question,runId){
   question=question||{};
   const answered=String(question.status||'')==='answered';
@@ -967,8 +1061,12 @@ function _expertTeamWorkspacePanelHtml(card){
   const summary=_expertTeamDockSummary(card);
   const needsResume=!!(card.needsResume||card.needs_resume);
   const resumeHtml=needsResume?`<button class="expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
-  const hideIcon=(typeof li==='function')?li('panel-right-close',14):'‹';
-  const hideHtml=`<button class="expert-team-panel-hide" type="button" data-expert-team-hide-run-id="${esc(runId)}" title="隐藏任务区" aria-label="隐藏专家团任务区" onclick="hideExpertTeamWorkspacePanel(this);event.stopPropagation()">${hideIcon}<span>收起任务区</span></button>`;
+  const collapseIcon=(typeof li==='function')?li('chevron-up',16):'⌃';
+  const expandIcon=(typeof li==='function')?li('chevron-down',16):'⌄';
+  const hideHtml=`<button class="expert-team-panel-hide expert-team-panel-collapse-toggle" type="button" data-expert-team-hide-run-id="${esc(runId)}" data-expert-team-show-run-id="${esc(runId)}" title="收起或展开任务区" aria-label="收起或展开专家团任务区" onclick="hideExpertTeamWorkspacePanel(this);event.stopPropagation()"><span class="expert-team-panel-collapse-icon is-collapse">${collapseIcon}</span><span class="expert-team-panel-collapse-icon is-expand">${expandIcon}</span></button>`;
+  const expertTeamMemberCount=members.length;
+  const memberAvatars=_expertTeamMemberAvatarsHtml(members);
+  const executionRows=_expertTeamExecutionRows(card,{phaseList,pending,readyArtifacts,done,total,stateClass});
   const phaseHtml=phaseList.map((label,idx)=>{
     const cls=idx<phaseIdx?'done':(idx===phaseIdx?'active':'todo');
     return `<span class="expert-team-panel-phase ${cls}"><i>${idx+1}</i><b>${esc(label)}</b></span>`;
@@ -980,22 +1078,6 @@ function _expertTeamWorkspacePanelHtml(card){
         <strong>${esc(answeredSummary.title)}</strong>
         <small>${esc(answeredSummary.detail||'需求已确认，可继续查看运行进度和产物。')}</small>
       </span>`:'<span class="expert-team-panel-empty">暂无待确认问题</span>');
-  const memberHtml=members.length?members.slice(0,8).map(member=>{
-    const cls=_statusCardStateClass(member.status);
-    const image=member.image||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[member.id]||STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[member.skill]||'';
-    return `<span class="expert-team-panel-member ${cls}">
-      ${_statusCardAvatarHtml(image,member.name,'status-card-writeflow-mini-avatar')}
-      <span><strong>${esc(member.name||member.id||'成员')}</strong><small>${esc(member.status||member.role||'待命')}</small></span>
-    </span>`;
-  }).join(''):'<span class="expert-team-panel-empty">等待成员接单</span>';
-  const taskHtml=tasks.length?tasks.slice(0,8).map(task=>{
-    const cls=_statusCardStateClass(task.status_label||task.status);
-    const image=STATUS_CARD_WRITEFLOW_MEMBER_IMAGES[task.worker_id]||'';
-    return `<span class="expert-team-panel-task ${cls}">
-      ${_statusCardAvatarHtml(image,task.worker_name||task.worker_id,'status-card-task-avatar')}
-      <span><strong>${esc(task.title||task.id||'任务')}</strong><small>${esc(task.worker_name||task.worker_id||'')} · ${esc(task.status_label||task.status||'待执行')}</small></span>
-    </span>`;
-  }).join(''):'<span class="expert-team-panel-empty">等待任务拆解</span>';
   const artifactItemHtml=(item,reference)=>{
     item=item||{};
     const isReady=!!item.path&&!item.placeholder&&item.exists!==false;
@@ -1019,6 +1101,23 @@ function _expertTeamWorkspacePanelHtml(card){
       <div class="expert-team-panel-section-title"><span>需求确认</span><small>${pending.length?`${pending.length} 项待确认`:'已确认'}</small></div>
       <div class="expert-team-panel-question-list">${questionHtml}</div>
     </section>`;
+  const primaryArtifact=_expertTeamPrimaryArtifact(card);
+  const artifactButton=primaryArtifact&&primaryArtifact.path
+    ? `<button type="button" data-writeflow-artifact-path="${esc(primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact.download_name||'')}" onclick="openWriteflowArtifact(this);event.stopPropagation()">查看产物 →</button>`
+    : `<button type="button" disabled>${readyArtifacts.length?'查看产物':'暂无产物'}</button>`;
+  const pendingAction=pending.length?`${pending.length} 项待确认`:(needsResume?'需要继续生成':'无需补充');
+  const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':(needsResume?'执行流需要重新接续。':'需求确认已完成');
+  const pendingButton=pending.length
+    ? `<button type="button" onclick="focusExpertTeamWorkspacePanel(this);event.stopPropagation()">去确认</button>`
+    : (needsResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>');
+  const executionHtml=executionRows.length?executionRows.map(row=>{
+    return `<span class="expert-team-panel-execution-row ${esc(row.state||'idle')}">
+      <i>${esc(row.index)}</i>
+      <span class="expert-team-panel-execution-main"><strong>${esc(row.title||row.phase||'执行阶段')}</strong><small>${esc(row.detail||'')}</small></span>
+      <span class="expert-team-panel-execution-role">${esc(row.role||'专家团')}</span>
+      <b>${esc(row.status||_expertTeamStateLabel(row.state))}</b>
+    </span>`;
+  }).join(''):'<span class="expert-team-panel-empty">等待执行明细生成</span>';
   const referenceHtml=referenceArtifacts.length?`<section class="expert-team-panel-section">
     <div class="expert-team-panel-section-title"><span>参考材料</span><small>${referenceArtifacts.length} 个</small></div>
     <div class="expert-team-panel-artifacts">${referenceArtifacts.slice(0,4).map(item=>artifactItemHtml(item,true)).join('')}</div>
@@ -1026,31 +1125,56 @@ function _expertTeamWorkspacePanelHtml(card){
   return `<div class="expert-team-panel-inner" data-expert-team-run-id="${esc(runId)}">
     <header class="expert-team-panel-head">
       <div class="expert-team-panel-topbar">
-        <span class="expert-team-panel-eyebrow">专家团任务区</span>
-        <span class="expert-team-panel-status ${esc(summary.state||stateClass)}">${esc(card.statusLabel||card.status||'执行中')}</span>
-        ${hideHtml}
+        <span class="expert-team-panel-eyebrow">专家团计划</span>
+        <span class="expert-team-panel-status ${esc(summary.state||stateClass)}">${esc(_expertTeamStatusBadgeLabel(card,summary.state||stateClass))}</span>
       </div>
-      <strong class="expert-team-panel-title" title="${esc(taskTitle)}">${esc(taskTitle)}</strong>
-      <small class="expert-team-panel-summary">${esc(summary.title)}</small>
+      <div class="expert-team-panel-overview">
+        <span class="expert-team-panel-copy">
+          <strong class="expert-team-panel-title" title="${esc(taskTitle)}">${esc(taskTitle)}</strong>
+          <small class="expert-team-panel-summary">${esc(summary.detail||summary.title)}</small>
+        </span>
+        <span class="expert-team-panel-progress-summary">
+          <b>${done}/${total||tasks.length||0}</b>
+          <i><em style="width:${pct}%"></em></i>
+          <small>当前：${esc(phase)}</small>
+        </span>
+      </div>
       ${resumeHtml}
     </header>
-    <section class="expert-team-panel-progress" style="--expert-team-panel-progress:${pct}%">
-      <span><b>${done}/${total||tasks.length||0}</b> 任务进度</span>
-      <i></i>
-    </section>
-    <section class="expert-team-panel-phases" aria-label="专家团阶段">${phaseHtml}</section>
-    ${readyArtifacts.length?artifactSectionHtml:''}
-    ${questionSectionHtml}
-    <section class="expert-team-panel-section">
-      <div class="expert-team-panel-section-title"><span>运行进度</span><small>${esc(team.title||'专家团队')}</small></div>
-      <div class="expert-team-panel-tasks">${taskHtml}</div>
-    </section>
-    <section class="expert-team-panel-section">
-      <div class="expert-team-panel-section-title"><span>成员简况</span><small>${members.length||0} 位</small></div>
-      <div class="expert-team-panel-members">${memberHtml}</div>
-    </section>
-    ${readyArtifacts.length?'':artifactSectionHtml}
-    ${referenceHtml}
+    <div class="expert-team-panel-expanded-body">
+      <section class="expert-team-panel-phases" aria-label="专家团阶段">${phaseHtml}</section>
+      <section class="expert-team-panel-priority-grid" aria-label="专家团重点信息">
+        <span class="expert-team-panel-priority-card progress ${esc(stateClass)}">
+          <strong>当前进度</strong>
+          <b>${esc(phase)}</b>
+          <small>${done>=total&&total?'全部任务已结束':'专家团正在按阶段推进'}</small>
+          <em>${esc(_expertTeamStatusBadgeLabel(card,stateClass))}</em>
+        </span>
+        <span class="expert-team-panel-priority-card artifact ${readyArtifacts.length?'done':'waiting'}">
+          <strong>成果物</strong>
+          <b>${readyArtifacts.length?`生成结果`:'等待产物'}</b>
+          <small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:'生成后会出现在这里'}</small>
+          ${artifactButton}
+        </span>
+        <span class="expert-team-panel-priority-card todo ${pending.length||needsResume?'waiting':'done'}">
+          <strong>待你处理</strong>
+          <b>${esc(pendingAction)}</b>
+          <small>${esc(pendingDetail)}</small>
+          ${pendingButton}
+        </span>
+      </section>
+      <section class="expert-team-panel-section expert-team-panel-execution">
+        <div class="expert-team-panel-section-title">
+          <span>执行明细</span>
+          <small class="expert-team-panel-member-avatars">${memberAvatars}<b>${expertTeamMemberCount} 位专家协作</b></small>
+        </div>
+        <div class="expert-team-panel-execution-list">${executionHtml}</div>
+      </section>
+      ${pending.length?questionSectionHtml:''}
+      ${readyArtifacts.length?artifactSectionHtml:''}
+      ${referenceHtml}
+    </div>
+    ${hideHtml}
   </div>`;
 }
 
@@ -1061,6 +1185,7 @@ function _setExpertTeamWorkspaceActive(active){
     if(!active){
       shell.classList.remove('taiji-expert-team-panel-visible');
       shell.classList.remove('taiji-expert-team-panel-hidden');
+      shell.classList.remove('taiji-expert-team-panel-collapsed');
     }
   }
 }
@@ -1114,12 +1239,13 @@ function _syncExpertTeamWorkspacePanelVisibility(){
   const hasExpertPanel=!!(panel&&runId);
   const hasCurrentExpert=!!(isCurrentSession&&(hasExpertPanel||hasExpertDock));
   const isChat=_expertTeamActivePanelName()==='chat';
-  const hiddenByUser=!!(runId&&_expertTeamWorkspacePanelHiddenForRun(runId));
-  const visible=!!(hasCurrentExpert&&hasExpertPanel&&isChat&&!hiddenByUser);
+  const collapsedByUser=!!(runId&&_expertTeamWorkspacePanelHiddenForRun(runId));
+  const visible=!!(hasCurrentExpert&&hasExpertPanel&&isChat);
   if(shell){
     shell.classList.toggle('taiji-expert-team-active',hasCurrentExpert);
     shell.classList.toggle('taiji-expert-team-panel-visible',visible);
-    shell.classList.toggle('taiji-expert-team-panel-hidden',!!(hasCurrentExpert&&hasExpertPanel&&isChat&&hiddenByUser));
+    shell.classList.toggle('taiji-expert-team-panel-hidden',!!(visible&&collapsedByUser));
+    shell.classList.toggle('taiji-expert-team-panel-collapsed',!!(visible&&collapsedByUser));
   }
   if(panel)panel.hidden=!visible;
   return visible;
@@ -1128,7 +1254,8 @@ function _syncExpertTeamWorkspacePanelVisibility(){
 function hideExpertTeamWorkspacePanel(btn){
   const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
   const runId=(btn&&btn.dataset&&btn.dataset.expertTeamHideRunId)||_expertTeamWorkspacePanelRunId(panel);
-  _setExpertTeamWorkspacePanelHiddenForRun(runId,true);
+  const next=!_expertTeamWorkspacePanelHiddenForRun(runId);
+  _setExpertTeamWorkspacePanelHiddenForRun(runId,next);
   return _syncExpertTeamWorkspacePanelVisibility();
 }
 
