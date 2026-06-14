@@ -168,9 +168,13 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     panel_return = panel_body[panel_body.index("return `<div") :]
     assert "const taskTitle=card.subtitle||team.title||'专家团任务';" in panel_body
     assert "const expertTeamMemberCount=members.length;" in panel_body
+    assert "const phaseProgress=_expertTeamPhaseProgress(card,{phaseList,phaseIdx,readyArtifacts,pending,stateClass});" in panel_body
     assert "const artifactSectionHtml=" in panel_body
     assert "const questionSectionHtml=" in panel_body
     assert "const executionRows=_expertTeamExecutionRows(card,{phaseList,pending,readyArtifacts,done,total,stateClass});" in panel_body
+    assert "${phaseProgress.done}/${phaseProgress.total}" in panel_body
+    assert "${done}/${total||tasks.length||0}" not in panel_body
+    assert "class=\"expert-team-panel-artifact-open\"" in panel_body
     assert "${readyArtifacts.length?artifactSectionHtml:''}" in panel_body
     assert "${pending.length?questionSectionHtml:''}" in panel_body
     assert "成员简况" not in panel_body
@@ -190,6 +194,7 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert ".expert-team-panel-member-avatars" in STYLE_CSS
     assert ".expert-team-panel-artifacts-section.is-priority" in STYLE_CSS
     assert ".expert-team-panel-answered-summary" in STYLE_CSS
+    assert ".expert-team-panel-artifact-open:not(:disabled)" in STYLE_CSS
     assert ".taiji-home-shell.taiji-expert-team-panel-collapsed .expert-team-panel-expanded-body" in STYLE_CSS
     assert ".expert-team-panel-head strong{color:var(--text);font-size:16px;line-height:1.25;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" not in STYLE_CSS
 
@@ -233,6 +238,8 @@ def test_expert_team_artifact_actions_open_products_before_focusing_panel():
     assert "await openWriteflowArtifact(btn)" in expert_body
     assert "ensureWorkspacePreviewVisible()" in expert_body
     assert "_focusExpertTeamArtifactEntry(btn,path)" in expert_body
+    assert "btn.classList.add('is-opening')" in expert_body
+    assert "btn.classList.add('is-opened')" in expert_body
 
     handler_start = UI_JS.index("async function handleExpertTeamDockAction")
     handler_body = UI_JS[handler_start : UI_JS.index("if(typeof window!=='undefined'){", handler_start)]

@@ -4842,6 +4842,11 @@ main.main > #mainPlugin{display:none;}
 .expert-team-panel-priority-card small{color:var(--muted);font-size:10px;line-height:1.22;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .expert-team-panel-priority-card em{justify-self:start;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);padding:3px 9px;font-size:10px;line-height:1.1;font-style:normal;font-weight:760;}
 .expert-team-panel-priority-card button{min-height:25px;border:1px solid color-mix(in srgb,var(--success) 45%,var(--border-subtle));border-radius:999px;background:rgba(255,255,255,.7);color:var(--success);font-size:11px;line-height:1;font-weight:780;cursor:pointer;}
+.expert-team-panel-artifact-open:not(:disabled){transition:background .18s ease,border-color .18s ease,box-shadow .18s ease,transform .18s ease,color .18s ease;}
+.expert-team-panel-priority-card .expert-team-panel-artifact-open:not(:disabled){background:linear-gradient(180deg,rgba(255,255,255,.96),color-mix(in srgb,var(--success) 13%,rgba(255,255,255,.82)));border-color:color-mix(in srgb,var(--success) 56%,var(--border-subtle));color:color-mix(in srgb,var(--success) 82%,var(--text));box-shadow:0 8px 18px rgba(48,137,79,.12),inset 0 1px 0 rgba(255,255,255,.85);}
+.expert-team-panel-priority-card .expert-team-panel-artifact-open:not(:disabled):hover{transform:translateY(-1px);border-color:color-mix(in srgb,var(--success) 72%,var(--border-subtle));background:linear-gradient(180deg,#fff,color-mix(in srgb,var(--success) 18%,rgba(255,255,255,.86)));box-shadow:0 10px 22px rgba(48,137,79,.18),inset 0 1px 0 rgba(255,255,255,.9);}
+.expert-team-panel-artifact-open.is-opening{cursor:progress;opacity:.78;}
+.expert-team-panel-artifact-open.is-opened{border-color:color-mix(in srgb,var(--accent-bg-strong) 68%,var(--success))!important;background:linear-gradient(180deg,rgba(236,252,255,.96),color-mix(in srgb,var(--accent-bg-strong) 20%,rgba(255,255,255,.84)))!important;color:var(--accent-text)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-bg-strong) 18%,transparent),0 10px 24px rgba(47,95,135,.16)!important;}
 .expert-team-panel-priority-card button:disabled{cursor:default;color:var(--muted);border-color:var(--border-subtle);background:rgba(255,255,255,.54);}
 .expert-team-panel-priority-card.done,.expert-team-panel-priority-card.artifact{border-color:color-mix(in srgb,var(--success) 28%,var(--border-subtle));background:linear-gradient(180deg,rgba(255,255,255,.8),color-mix(in srgb,var(--success) 8%,rgba(255,255,255,.62)));}
 .expert-team-panel-priority-card.waiting{border-color:color-mix(in srgb,var(--warning) 28%,var(--border-subtle));}
@@ -10011,6 +10016,50 @@ main.main.showing-logs > #mainLogs{display:flex;}
     display:grid!important;
     min-height:58px!important;
     padding:10px 12px!important;
+  }
+}
+
+@media (min-width:901px) and (max-width:1320px){
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active{
+    --taiji-expert-panel-h:clamp(488px,68vh,526px);
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel{
+    padding:10px!important;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-inner{
+    gap:5px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-head{
+    gap:5px;
+    padding:8px 12px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-expanded-body{
+    gap:5px;
+    padding-bottom:4px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-phase{
+    padding:5px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-priority-grid{
+    gap:7px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-priority-card{
+    min-height:66px;
+    padding:7px 8px;
+    gap:2px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-section{
+    padding:6px 8px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-section-title{
+    margin-bottom:5px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-execution-list{
+    gap:4px;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-panel-visible .expert-team-panel-execution-row{
+    min-height:24px;
+    padding:3px 7px;
   }
 }
 

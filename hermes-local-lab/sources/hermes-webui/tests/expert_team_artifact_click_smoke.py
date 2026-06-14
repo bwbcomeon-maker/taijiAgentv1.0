@@ -152,6 +152,44 @@ def _artifact_result_visible(page):
     )
 
 
+def _execution_row_titles(page):
+    return page.evaluate(
+        """
+        () => Array.from(document.querySelectorAll('.expert-team-panel-execution-main strong'))
+          .map((node) => (node.textContent || '').trim())
+        """
+    )
+
+
+def _execution_rows_visible(page):
+    return page.evaluate(
+        """
+        () => {
+          const body = document.querySelector('.expert-team-panel-expanded-body');
+          const bodyRect = body && body.getBoundingClientRect();
+          const rows = Array.from(document.querySelectorAll('.expert-team-panel-execution-row'));
+          return rows.map((row) => {
+            const rect = row.getBoundingClientRect();
+            const title = row.querySelector('.expert-team-panel-execution-main strong');
+            return {
+              title: title ? (title.textContent || '').trim() : '',
+              visible: Boolean(
+                bodyRect &&
+                rect.width > 0 &&
+                rect.height > 0 &&
+                rect.top >= bodyRect.top - 1 &&
+                rect.bottom <= bodyRect.bottom + 1
+              ),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              bodyBottom: bodyRect ? Math.round(bodyRect.bottom) : 0,
+            };
+          });
+        }
+        """
+    )
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -219,6 +257,16 @@ def main():
                 page.wait_for_selector(".taiji-main-workspace", timeout=10000)
                 _inject_expert_team_card(page, str(workspace))
                 page.wait_for_selector(".expert-team-panel-priority-card.artifact button", timeout=10000)
+                titles = _execution_row_titles(page)
+                expected_titles = ["需求确认", "撰写公众号长文", "生成封面和文中配图", "交付整理"]
+                if titles[:4] != expected_titles:
+                    failures.append(
+                        f"{width}x{height}: execution rows mismatch "
+                        f"(expected={expected_titles!r}, actual={titles[:4]!r})"
+                    )
+                visible_rows = _execution_rows_visible(page)
+                if len(visible_rows) < 4 or not all(row["visible"] for row in visible_rows[:4]):
+                    failures.append(f"{width}x{height}: execution rows not fully visible {visible_rows[:4]!r}")
                 page.click(".expert-team-panel-priority-card.artifact button")
                 try:
                     page.wait_for_function(
