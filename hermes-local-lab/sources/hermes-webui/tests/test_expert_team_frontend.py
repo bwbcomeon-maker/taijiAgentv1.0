@@ -215,14 +215,29 @@ def test_expert_team_workspace_uses_top_panel_without_composer_squeeze():
 
 def test_expert_team_artifact_actions_open_products_before_focusing_panel():
     assert "async function openWriteflowArtifact" in UI_JS
+    assert "async function openExpertTeamArtifact" in UI_JS
     assert "await openArtifactPath(path)" in UI_JS
+    assert "ensureWorkspacePreviewVisible" in UI_JS
+    assert "expert-team-panel-artifact-focus" in UI_JS
     assert "无法打开产物" in UI_JS
+    assert "window.openExpertTeamArtifact=openExpertTeamArtifact" in UI_JS
     assert "window.handleExpertTeamDockAction=handleExpertTeamDockAction" in UI_JS
+
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    assert "onclick=\"openExpertTeamArtifact(this);event.stopPropagation()\"" in panel_body
+    assert "onclick=\"openWriteflowArtifact(this);event.stopPropagation()\"" not in panel_body
+
+    expert_start = UI_JS.index("async function openExpertTeamArtifact")
+    expert_body = UI_JS[expert_start : UI_JS.index("function downloadWriteflowArtifact", expert_start)]
+    assert "await openWriteflowArtifact(btn)" in expert_body
+    assert "ensureWorkspacePreviewVisible()" in expert_body
+    assert "_focusExpertTeamArtifactEntry(btn,path)" in expert_body
 
     handler_start = UI_JS.index("async function handleExpertTeamDockAction")
     handler_body = UI_JS[handler_start : UI_JS.index("if(typeof window!=='undefined'){", handler_start)]
     assert "btn.dataset.expertTeamPrimaryArtifactPath" in handler_body
-    assert "await openWriteflowArtifact(btn)" in handler_body
+    assert "await openExpertTeamArtifact(btn)" in handler_body
     assert "return focusExpertTeamWorkspacePanel(btn)" in handler_body
 
 

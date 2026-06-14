@@ -4866,6 +4866,7 @@ main.main > #mainPlugin{display:none;}
 .expert-team-panel-task small,.expert-team-panel-member small,.expert-team-panel-artifact small{display:block;min-width:0;color:var(--muted);font-size:10px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .expert-team-panel-artifact{grid-template-columns:34px minmax(0,1fr);}
 .expert-team-panel-artifact.ready{border-color:color-mix(in srgb,var(--success) 26%,var(--border-subtle));}
+.expert-team-panel-artifact-focus{border-color:var(--accent-bg-strong)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-bg-strong) 20%,transparent),0 10px 24px rgba(47,95,135,.14)!important;}
 .expert-team-panel-artifact.placeholder,.expert-team-panel-artifact.missing{border-style:dashed;opacity:.82;}
 .expert-team-panel-artifact i{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;border:1px solid var(--border-subtle);background:var(--surface-subtle-hover);color:var(--muted);font-style:normal;font-size:10px;font-family:var(--font-mono);font-weight:780;}
 .expert-team-panel-artifact button{min-width:0;border:0;background:transparent;text-align:left;color:inherit;padding:0;cursor:pointer;}

@@ -1085,7 +1085,7 @@ function _expertTeamWorkspacePanelHtml(card){
     const meta=item.placeholder?(item.note||'待生成'):(item.exists===false?'文件未找到':(reference?(item.note||'历史参考材料'):(item.path||item.note||'')));
     return `<span class="expert-team-panel-artifact ${cls}">
       <i>${esc(String(item.kind||'file').slice(0,2).toUpperCase())}</i>
-      <button type="button" ${isReady?`data-writeflow-artifact-path="${esc(item.path||'')}" onclick="openWriteflowArtifact(this);event.stopPropagation()"`:'disabled'}>
+      <button type="button" ${isReady?`data-writeflow-artifact-path="${esc(item.path||'')}" onclick="openExpertTeamArtifact(this);event.stopPropagation()"`:'disabled'}>
         <strong>${esc(item.label||item.path||item.id||'产物')}</strong>
         <small>${esc(meta||'待生成')}</small>
       </button>
@@ -1103,7 +1103,7 @@ function _expertTeamWorkspacePanelHtml(card){
     </section>`;
   const primaryArtifact=_expertTeamPrimaryArtifact(card);
   const artifactButton=primaryArtifact&&primaryArtifact.path
-    ? `<button type="button" data-writeflow-artifact-path="${esc(primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact.download_name||'')}" onclick="openWriteflowArtifact(this);event.stopPropagation()">查看产物 →</button>`
+    ? `<button type="button" data-writeflow-artifact-path="${esc(primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact.download_name||'')}" onclick="openExpertTeamArtifact(this);event.stopPropagation()">查看产物 →</button>`
     : `<button type="button" disabled>${readyArtifacts.length?'查看产物':'暂无产物'}</button>`;
   const pendingAction=pending.length?`${pending.length} 项待确认`:(needsResume?'需要继续生成':'无需补充');
   const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':(needsResume?'执行流需要重新接续。':'需求确认已完成');
@@ -1383,6 +1383,55 @@ async function openWriteflowArtifact(btn){
   if(typeof showToast==='function')showToast('无法打开产物：文件浏览器未就绪');
   return false;
 }
+function _workspacePreviewVisibleToUser(){
+  if(typeof document==='undefined')return false;
+  const panel=document.querySelector('.rightpanel');
+  const preview=typeof $==='function'?$('previewArea'):document.getElementById('previewArea');
+  if(!panel||!preview||!preview.classList.contains('visible'))return false;
+  if(panel.dataset&&panel.dataset.uiVisibilityHidden==='1')return false;
+  try{
+    const style=typeof getComputedStyle==='function'?getComputedStyle(panel):null;
+    if(style&&(style.display==='none'||style.visibility==='hidden'||style.opacity==='0'))return false;
+  }catch(_){}
+  const rect=typeof panel.getBoundingClientRect==='function'?panel.getBoundingClientRect():null;
+  return !rect||(rect.width>0&&rect.height>0);
+}
+function _focusExpertTeamArtifactEntry(btn,path){
+  if(typeof document==='undefined')return false;
+  const panel=(btn&&btn.closest&&btn.closest('.expert-team-workspace-panel'))||document.getElementById('expertTeamWorkspacePanel');
+  if(!panel)return false;
+  if(typeof showExpertTeamWorkspacePanel==='function')showExpertTeamWorkspacePanel(btn);
+  const targets=Array.from(panel.querySelectorAll('[data-writeflow-artifact-path]'));
+  const matched=targets.find(el=>el&&el.dataset&&el.dataset.writeflowArtifactPath===path)||btn;
+  const card=(matched&&matched.closest&&matched.closest('.expert-team-panel-artifact'))||matched;
+  if(!card)return false;
+  try{card.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'});}catch(_){try{card.scrollIntoView();}catch(__){}}
+  if(typeof card.focus==='function'){
+    try{card.focus({preventScroll:true});}catch(_){card.focus();}
+  }
+  card.classList.add('expert-team-panel-artifact-focus');
+  setTimeout(()=>{try{card.classList.remove('expert-team-panel-artifact-focus');}catch(_){}},1800);
+  return true;
+}
+async function openExpertTeamArtifact(btn){
+  const data=btn&&btn.dataset?btn.dataset:{};
+  const path=data.writeflowArtifactPath||data.expertTeamPrimaryArtifactPath||'';
+  if(!path){
+    if(typeof showToast==='function')showToast('无法打开产物：没有可用路径');
+    _focusExpertTeamArtifactEntry(btn,path);
+    return false;
+  }
+  const opened=await openWriteflowArtifact(btn);
+  if(!opened){
+    _focusExpertTeamArtifactEntry(btn,path);
+    return false;
+  }
+  if(typeof ensureWorkspacePreviewVisible==='function'){
+    try{ensureWorkspacePreviewVisible();}catch(_){}
+  }
+  if(!_workspacePreviewVisibleToUser())_focusExpertTeamArtifactEntry(btn,path);
+  return true;
+}
 function downloadWriteflowArtifact(btn){
   const path=btn&&btn.dataset?btn.dataset.writeflowArtifactPath:'';
   const filename=btn&&btn.dataset?btn.dataset.writeflowArtifactDownload:'';
@@ -1394,13 +1443,14 @@ function downloadWriteflowArtifact(btn){
 async function handleExpertTeamDockAction(btn){
   const path=btn&&btn.dataset?btn.dataset.expertTeamPrimaryArtifactPath:'';
   if(path){
-    const opened=await openWriteflowArtifact(btn);
+    const opened=await openExpertTeamArtifact(btn);
     if(opened)return true;
   }
   return focusExpertTeamWorkspacePanel(btn);
 }
 if(typeof window!=='undefined'){
   window.openWriteflowArtifact=openWriteflowArtifact;
+  window.openExpertTeamArtifact=openExpertTeamArtifact;
   window.downloadWriteflowArtifact=downloadWriteflowArtifact;
   window.handleExpertTeamDockAction=handleExpertTeamDockAction;
 }
