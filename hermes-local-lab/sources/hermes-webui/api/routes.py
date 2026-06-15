@@ -1095,6 +1095,8 @@ def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bo
 
 
 def _expert_team_run_as_needs_resume(run: dict) -> dict:
+    from api import expert_teams
+
     run = copy.deepcopy(run or {})
     run["status"] = "awaiting_user"
     run["status_label"] = "等待继续"
@@ -1108,6 +1110,7 @@ def _expert_team_run_as_needs_resume(run: dict) -> dict:
     for member in run.get("members") or []:
         if isinstance(member, dict) and str(member.get("status") or "") == "执行中":
             member["status"] = "等待继续"
+    run["view"] = expert_teams.expert_team_run_view(run)
     return run
 
 
@@ -1146,7 +1149,17 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
             ):
                 from api import expert_teams
 
-                return expert_teams.mark_content_expert_team_execution_complete(workspace, str(run.get("run_id") or ""))
+                return expert_teams.mark_content_expert_team_execution_complete(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    delivery={
+                        "id": "expert-team-chat-delivery",
+                        "label": "专家团生成结果",
+                        "kind": "chat",
+                        "exists": True,
+                        "note": "已写入当前对话",
+                    },
+                )
         except Exception:
             pass
     if str(run.get("status") or "") == "running" and not _expert_team_run_has_ready_result(run):
@@ -10134,7 +10147,16 @@ def handle_post(handler, parsed) -> bool:
             if session_id and str(run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
             display_run = _expert_team_run_with_execution_truth(workspace, run)
-            if not (display_run and display_run.get("needs_resume")):
+            view_actions = ((display_run or {}).get("view") or {}).get("actions") or {}
+            can_start = bool(
+                display_run
+                and (
+                    display_run.get("needs_resume")
+                    or view_actions.get("can_resume")
+                    or view_actions.get("can_retry")
+                )
+            )
+            if not can_start:
                 return j(handler, {"ok": True, "run": display_run, "teams": expert_teams.expert_team_catalog()["teams"]})
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
@@ -10150,8 +10172,21 @@ def handle_post(handler, parsed) -> bool:
         try:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
-            run = expert_teams.cancel_expert_team(workspace, str(body.get("run_id") or ""))
-            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            existing_run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(existing_run.get("session_id") or "") != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+            stream_id = str(existing_run.get("execution_stream_id") or "")
+            cancelled_stream = cancel_stream(stream_id) if stream_id else False
+            run = expert_teams.cancel_expert_team(workspace, str(existing_run.get("run_id") or ""))
+            return j(
+                handler,
+                {
+                    "ok": True,
+                    "run": run,
+                    "cancelled_stream": bool(cancelled_stream),
+                    "teams": expert_teams.expert_team_catalog()["teams"],
+                },
+            )
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except Exception as exc:

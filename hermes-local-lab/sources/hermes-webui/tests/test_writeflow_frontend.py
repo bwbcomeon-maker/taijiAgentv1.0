@@ -240,7 +240,9 @@ def test_writeflow_status_card_is_visual_team_board():
     assert "status-card-writeflow-toggle" in ui_js
     assert "status-card-writeflow-mini" in ui_js
     assert "status-card-writeflow-mini-avatar" in ui_js
+    assert "bottom-dock-v1-expanded" in ui_js
     assert "compact-v2-expanded" in ui_js
+    assert "_statusCardWriteflowLegacyStorageKey" in ui_js
     assert "_statusCardStateClass(member.status)==='running'" in ui_js
     assert "card.querySelectorAll('.status-card-writeflow-toggle').forEach" in ui_js
     assert "status-card-writeflow-detail" in ui_js
@@ -269,9 +271,9 @@ def test_writeflow_status_card_is_visual_team_board():
     assert "function _isExpertTeamStatusCard" in ui_js
     assert "renderExpertTeamWorkspacePanel(card)" in ui_js
     assert "else clearExpertTeamWorkspacePanel();" in ui_js
-    assert ".taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock .status-card-writeflow-head" in STYLE_CSS
-    assert ".taiji-home-shell.taiji-expert-team-panel-visible #writeflowStatusDock .status-card-writeflow-body" in STYLE_CSS
-    assert ".taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-bottom-body" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" in STYLE_CSS
 
 
 def test_writeflow_status_card_hydrates_into_composer_dock_on_session_load():

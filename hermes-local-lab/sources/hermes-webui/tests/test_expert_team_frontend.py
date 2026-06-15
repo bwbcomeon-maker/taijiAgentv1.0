@@ -44,6 +44,10 @@ def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks()
     assert "async function answerExpertTeamQuestion" in UI_JS
     assert "/api/expert-teams/answer" in UI_JS
     assert "card.questions=visualQuestions" in UI_JS
+    assert "const view=run.view||{}" in UI_JS
+    assert "card.actions=view.actions||{}" in UI_JS
+    assert "card.health=view.health||{}" in UI_JS
+    assert "view.phase_progress||run.phase_progress" in UI_JS
     assert "taiji-expert-team-active" in UI_JS
     assert "syncExpertTeamBottomDockState(card)" in UI_JS
     assert "clearExpertTeamWorkspacePanel()" in UI_JS
@@ -208,7 +212,7 @@ def test_expert_team_workspace_uses_bottom_dock_without_top_panel_squeeze():
     assert "max-width:100%!important;" in dock_block
     assert "display:block!important;" in dock_block
     assert "display:none!important;" not in dock_block
-    assert "max-height:min(68vh,620px)!important;" in expanded_block
+    assert "max-height:min(72vh,620px)!important;" in expanded_block
 
     legacy_visible = STYLE_CSS.find(".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel")
     if legacy_visible != -1:
@@ -263,12 +267,22 @@ def test_expert_team_answer_response_attaches_real_stream_runtime():
 
 def test_expert_team_workspace_shows_resume_action_for_stale_running_runs():
     assert "function resumeExpertTeamRun" in UI_JS
+    assert "function cancelExpertTeamRun" in UI_JS
     assert "/api/expert-teams/resume" in UI_JS
+    assert "/api/expert-teams/cancel" in UI_JS
     assert "card.needsResume||card.needs_resume" in UI_JS
     assert "expert-team-panel-resume" in UI_JS
+    assert "expert-team-panel-cancel" in UI_JS
+    assert "expert-team-panel-retry" in UI_JS
     assert "继续生成" in UI_JS
+    assert "停止生成" in UI_JS
+    assert "重新尝试" in UI_JS
     assert "data-expert-team-resume-run-id" in UI_JS
+    assert "data-expert-team-cancel-run-id" in UI_JS
+    assert "card.actions&&card.actions.can_cancel" in UI_JS
+    assert "card.actions&&card.actions.can_retry" in UI_JS
     assert "window.resumeExpertTeamRun=resumeExpertTeamRun" in UI_JS
+    assert "window.cancelExpertTeamRun=cancelExpertTeamRun" in UI_JS
 
 
 def test_expert_team_session_refresh_does_not_require_loaded_message_array():

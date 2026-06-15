@@ -580,13 +580,17 @@ const STATUS_CARD_EXPERT_TEAM_PHASES={
 function _writeflowStatusCardFromRun(run,data){
   if(!run||!run.run_id)return null;
   data=data||{};
+  const view=run.view||{};
   const internalTasks=Array.isArray(run.tasks)?run.tasks:[];
   const tasks=Array.isArray(run.display_tasks)&&run.display_tasks.length?run.display_tasks:internalTasks;
   const members=Array.isArray(run.members)?run.members:[];
   const artifacts=Array.isArray(run.artifacts)?run.artifacts:[];
   const referenceArtifacts=Array.isArray(run.reference_artifacts)?run.reference_artifacts:[];
   const fileChanges=Array.isArray(run.file_changes)?run.file_changes:[];
-  const progress=run.display_progress||run.progress||{};
+  const phaseProgress=view.phase_progress||run.phase_progress||{};
+  const progress=(phaseProgress&&Number(phaseProgress.total||0)>0)?phaseProgress:(run.display_progress||run.progress||{});
+  const actions=view.actions||{};
+  const health=view.health||{};
   const teamTitle=(data.display_team&&data.display_team.title)||run.team_title||run.team_id||data.team_id||'内容创作专家团';
   const teamCategory=(data.display_team&&data.display_team.category)||run.team_category||'写作团队';
   const teamImage=(data.display_team&&data.display_team.image)||STATUS_CARD_WRITEFLOW_TEAM_IMAGES[run.team_id]||'';
@@ -648,17 +652,20 @@ function _writeflowStatusCardFromRun(run,data){
     runId:run.run_id,
     sourceSessionId:run.session_id||'',
     team:{id:run.team_id||data.team_id||'',title:teamTitle,category:teamCategory,image:teamImage},
-    status:run.status||'running',
-    statusLabel:run.status_label||run.status||'执行中',
-    phase:run.phase||data.display_phase||'确定方向',
+    status:view.status||run.status||'running',
+    statusLabel:view.status_label||run.status_label||run.status||'执行中',
+    phase:phaseProgress.current||run.phase||data.display_phase||'确定方向',
     progress:{done:Number(progress.done||0),total:Number(progress.total||tasks.length||2)},
     members:visualMembers,
     tasks:visualTasks,
     artifacts:visualArtifacts,
     referenceArtifacts:visualReferenceArtifacts,
     fileChanges:fileChanges,
-    needsResume:!!(run.needs_resume||run.needsResume),
-    executionStatus:run.execution_status||'',
+    needsResume:!!(health.needs_resume||run.needs_resume||run.needsResume),
+    executionStatus:view.execution_status||run.execution_status||'',
+    actions,
+    health,
+    phaseProgress,
     rows,
   };
 }
@@ -681,8 +688,12 @@ function _expertTeamStatusCardFromRun(run,data){
   card.kind='expert_team';
   card.title='专家团运行';
   card.questions=visualQuestions;
-  card.needsResume=!!(run.needs_resume||run.needsResume);
-  card.executionStatus=run.execution_status||'';
+  const view=run.view||{};
+  card.actions=view.actions||{};
+  card.health=view.health||{};
+  card.phaseProgress=view.phase_progress||run.phase_progress||card.phaseProgress||{};
+  card.needsResume=!!(card.health.needs_resume||run.needs_resume||run.needsResume);
+  card.executionStatus=view.execution_status||run.execution_status||'';
   card.phases=STATUS_CARD_EXPERT_TEAM_PHASES[run.team_id]||STATUS_CARD_EXPERT_TEAM_PHASES['content-creator-team'];
   card.team.title=run.team_title||card.team.title;
   card.team.category=run.team_category||card.team.category;
@@ -719,12 +730,22 @@ function _statusCardWriteflowStorageKey(card){
   return `writeflow-status-dock:${card.runId||card.sessionId||card.subtitle||'default'}:bottom-dock-v1-expanded`;
 }
 
+function _statusCardWriteflowLegacyStorageKey(card){
+  return `writeflow-status-dock:${card.runId||card.sessionId||card.subtitle||'default'}:compact-v2-expanded`;
+}
+
 function _statusCardWriteflowExpanded(card){
   const key=_statusCardWriteflowStorageKey(card||{});
+  const legacyKey=_statusCardWriteflowLegacyStorageKey(card||{});
   try{
     const stored=localStorage.getItem(key);
     if(stored==='1')return true;
     if(stored==='0')return false;
+    const legacyStored=localStorage.getItem(legacyKey);
+    if(legacyStored==='1'||legacyStored==='0'){
+      localStorage.setItem(key,legacyStored);
+      return legacyStored==='1';
+    }
   }catch(_){}
   return false;
 }
@@ -788,8 +809,17 @@ function _expertTeamDockSummary(card){
   const pending=_expertTeamPendingQuestions(card);
   const readyArtifacts=_expertTeamReadyArtifacts(card);
   const stateClass=_statusCardStateClass(card&&card.statusLabel||card&&card.status);
+  const actions=card&&card.actions||{};
   const phase=(card&&card.phase)||'当前阶段';
-  if(card&&(card.needsResume||card.needs_resume)){
+  if(actions.can_retry){
+    return {
+      state:'issue',
+      title:'生成未完成',
+      detail:`${phase} · 可重新尝试`,
+      action:'重新尝试',
+    };
+  }
+  if(card&&(actions.can_resume||card.needsResume||card.needs_resume)){
     return {
       state:'waiting',
       title:'需要继续生成',
@@ -811,6 +841,14 @@ function _expertTeamDockSummary(card){
       title:readyArtifacts.length?`已生成 ${readyArtifacts.length} 个产物`:'专家团任务已完成',
       detail:'可打开产物或继续补充要求',
       action:'查看产物',
+    };
+  }
+  if(actions.can_cancel){
+    return {
+      state:'running',
+      title:'正在生成内容',
+      detail:`${phase} · 可展开查看或停止生成`,
+      action:'查看详情',
     };
   }
   const runningLabel=(card&&card.statusLabel)||'正在执行';
@@ -1069,7 +1107,7 @@ function _expertTeamDockMiniHtml(card){
   const primaryArtifact=_expertTeamPrimaryArtifact(card||{});
   const actionLabel=summary.action;
   const actionIcon=(typeof li==='function')?li('arrow-right',13):'›';
-  return `<button class="status-card-writeflow-mini status-card-expert-dock-summary ${esc(summary.state||'running')}" type="button" aria-label="${esc(`专家团：${actionLabel}，${summary.title}`)}" data-expert-team-run-id="${esc(runId)}" data-expert-team-primary-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact&&primaryArtifact.download_name||'')}" onmousedown="event.preventDefault()" onclick="handleExpertTeamDockAction(this);event.stopPropagation()">
+  return `<button class="status-card-writeflow-mini status-card-expert-dock-summary ${esc(summary.state||'running')}" type="button" aria-label="${esc(`专家团：${actionLabel}，${summary.title}`)}" data-expert-team-run-id="${esc(runId)}" data-expert-team-primary-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact&&primaryArtifact.download_name||'')}" onclick="handleExpertTeamDockAction(this);event.stopPropagation()">
     <span class="status-card-expert-dock-copy">
       <strong>${esc(summary.title)}</strong>
       <small>${esc(summary.detail)}</small>
@@ -1100,7 +1138,13 @@ function _expertTeamWorkspacePanelHtml(card){
   const phaseProgress=_expertTeamPhaseProgress(card,{phaseList,phaseIdx,readyArtifacts,pending,stateClass});
   const summary=_expertTeamDockSummary(card);
   const needsResume=!!(card.needsResume||card.needs_resume);
-  const resumeHtml=needsResume?`<button class="expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
+  const canResume=!!(needsResume||(card.actions&&card.actions.can_resume));
+  const canCancel=!!(card.actions&&card.actions.can_cancel);
+  const canRetry=!!(card.actions&&card.actions.can_retry);
+  const resumeHtml=canResume?`<button class="expert-team-panel-action expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
+  const cancelHtml=canCancel?`<button class="expert-team-panel-action expert-team-panel-cancel" type="button" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:'';
+  const retryHtml=canRetry?`<button class="expert-team-panel-action expert-team-panel-retry" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:'';
+  const actionHtml=(resumeHtml||cancelHtml||retryHtml)?`<span class="expert-team-panel-actions">${resumeHtml}${cancelHtml}${retryHtml}</span>`:'';
   const collapseIcon=(typeof li==='function')?li('chevron-up',16):'⌃';
   const expandIcon=(typeof li==='function')?li('chevron-down',16):'⌄';
   const hideHtml=`<button class="expert-team-panel-hide expert-team-panel-collapse-toggle" type="button" data-expert-team-hide-run-id="${esc(runId)}" data-expert-team-show-run-id="${esc(runId)}" title="收起或展开任务区" aria-label="收起或展开专家团任务区" onclick="hideExpertTeamWorkspacePanel(this);event.stopPropagation()"><span class="expert-team-panel-collapse-icon is-collapse">${collapseIcon}</span><span class="expert-team-panel-collapse-icon is-expand">${expandIcon}</span></button>`;
@@ -1145,11 +1189,11 @@ function _expertTeamWorkspacePanelHtml(card){
   const artifactButton=primaryArtifact&&primaryArtifact.path
     ? `<button class="expert-team-panel-artifact-open" type="button" data-writeflow-artifact-path="${esc(primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact.download_name||'')}" onclick="openExpertTeamArtifact(this);event.stopPropagation()">打开产物 →</button>`
     : `<button class="expert-team-panel-artifact-open" type="button" disabled>${readyArtifacts.length?'查看产物':'暂无产物'}</button>`;
-  const pendingAction=pending.length?`${pending.length} 项待确认`:(needsResume?'需要继续生成':'无需补充');
-  const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':(needsResume?'执行流需要重新接续。':'需求确认已完成');
+  const pendingAction=pending.length?`${pending.length} 项待确认`:(canRetry?'可重新尝试':(canCancel?'正在生成':(canResume?'需要继续生成':'无需补充')));
+  const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成')));
   const pendingButton=pending.length
     ? `<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">去确认</button>`
-    : (needsResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>');
+    : (canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>')));
   const executionHtml=executionRows.length?executionRows.map(row=>{
     return `<span class="expert-team-panel-execution-row ${esc(row.state||'idle')}">
       <i>${esc(row.index)}</i>
@@ -1179,7 +1223,7 @@ function _expertTeamWorkspacePanelHtml(card){
           <small>阶段：${esc(phase)}</small>
         </span>
       </div>
-      ${resumeHtml}
+      ${actionHtml}
     </header>
     <div class="expert-team-panel-expanded-body">
       <section class="expert-team-panel-phases" aria-label="专家团阶段">${phaseHtml}</section>
@@ -1380,8 +1424,11 @@ function focusExpertTeamBottomDock(trigger){
     try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
   };
   applyFocus();
+  try{requestAnimationFrame(applyFocus);}catch(_){}
   try{setTimeout(applyFocus,0);}catch(_){}
   try{setTimeout(applyFocus,40);}catch(_){}
+  try{setTimeout(applyFocus,120);}catch(_){}
+  try{setTimeout(applyFocus,240);}catch(_){}
   return true;
 }
 
@@ -1615,9 +1662,43 @@ async function resumeExpertTeamRun(btn){
     return false;
   }
 }
+
+async function cancelExpertTeamRun(btn){
+  const runId=(btn&&btn.dataset&&btn.dataset.expertTeamCancelRunId)
+    ||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)
+    ||'';
+  const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
+  if(!runId||!sid)return false;
+  try{
+    const data=await api('/api/expert-teams/cancel',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,run_id:runId})
+    });
+    const run=data&&data.run;
+    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
+    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(typeof S!=='undefined'&&S.session&&S.session.session_id===sid){
+      S.busy=false;
+      S.activeStreamId=null;
+      S.session.active_stream_id=null;
+      S.session.pending_user_message=null;
+      S.session.pending_started_at=null;
+    }
+    if(typeof updateSendBtn==='function')updateSendBtn();
+    if(typeof syncTopbar==='function')syncTopbar();
+    if(typeof renderMessages==='function')renderMessages();
+    if(typeof renderSessionList==='function')renderSessionList();
+    showToast(data&&data.cancelled_stream?'专家团已停止生成。':'专家团任务已取消。');
+    return true;
+  }catch(e){
+    showToast('停止专家团任务失败：'+(e&&e.message||e));
+    return false;
+  }
+}
 if(typeof window!=='undefined'){
   window._applyExpertTeamStreamResponse=_applyExpertTeamStreamResponse;
   window.resumeExpertTeamRun=resumeExpertTeamRun;
+  window.cancelExpertTeamRun=cancelExpertTeamRun;
 }
 
 function _statusCardWriteflowHtml(card,copyBtn){

@@ -130,6 +130,59 @@ def _render_smoke_card(page, done=False):
     )
 
 
+def _render_action_smoke_card(page, state):
+    page.evaluate(
+        """
+        ({state}) => {
+          const isError = state === 'error';
+          const isRunning = state === 'running';
+          const base = {
+            type: 'expert-team',
+            kind: 'expert_team',
+            runId: `expert-team-action-${state}`,
+            sessionId: S.session.session_id,
+            sourceSessionId: S.session.session_id,
+            team: {id: 'content-creator-team', title: '内容创作专家团'},
+            subtitle: '专家团动作入口验收',
+            status: isError ? 'error' : 'running',
+            statusLabel: isError ? '执行异常' : '执行中',
+            phase: isError ? '生成初稿' : '打磨发布',
+            phases: ['需求确认', '生成初稿', '打磨发布', '交付'],
+            progress: {done: isError ? 1 : 2, total: 4},
+            actions: {
+              can_answer: false,
+              can_resume: false,
+              can_cancel: isRunning,
+              can_retry: isError,
+              can_open_artifact: false,
+            },
+            health: {
+              needs_resume: false,
+              active_stream_id: isRunning ? 'stream-action-smoke' : '',
+              last_error: isError ? '未检测到可交付结果' : '',
+            },
+            members: [
+              {id: 'flow', name: '流程编排', status: isError ? '执行异常' : '监督中'},
+              {id: 'writer', name: '文案创作专家', status: isError ? '执行异常' : '执行中'},
+              {id: 'image', name: '配图专家', status: '待命'},
+              {id: 'review', name: '审稿润色', status: '待命'},
+            ],
+            tasks: [
+              {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'done', status_label: '完成'},
+              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: isError ? 'error' : 'running', status_label: isError ? '执行异常' : '执行中'},
+              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: 'pending', status_label: '待执行'},
+              {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'pending', status_label: '待执行'},
+            ],
+            artifacts: [],
+            questions: [],
+          };
+          renderWriteflowStatusDock(base);
+        }
+        """,
+        {"state": state},
+    )
+
+
 def _dock_geometry(page):
     return page.evaluate(
         """
@@ -218,6 +271,37 @@ def _dock_a11y_state(page):
             dockBeforeComposer: dockIndex >= 0 && composerIndex >= 0 && dockIndex < composerIndex,
             dockIndex,
             composerIndex,
+          };
+        }
+        """
+    )
+
+
+def _expert_action_state(page):
+    return page.evaluate(
+        """
+        () => {
+          const visible = (node) => {
+            if (!node) return false;
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0 &&
+              style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const nameFor = (node) => (
+            node && (
+              node.getAttribute('aria-label') ||
+              node.getAttribute('title') ||
+              (node.textContent || '').trim()
+            ) || ''
+          ).replace(/\\s+/g, ' ').trim();
+          const cancel = document.querySelector('#writeflowStatusDock .expert-team-panel-cancel');
+          const retry = document.querySelector('#writeflowStatusDock .expert-team-panel-retry');
+          return {
+            cancelVisible: visible(cancel),
+            cancelName: nameFor(cancel),
+            retryVisible: visible(retry),
+            retryName: nameFor(retry),
           };
         }
         """
@@ -401,6 +485,22 @@ def main():
                 collapsed_state = _dock_geometry(page)
                 if not collapsed_state["collapsed"]:
                     failures.append(f"{width}x{height}: collapse button did not return to compact dock {collapsed_state!r}")
+
+                _render_action_smoke_card(page, "running")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .expert-team-panel-cancel", timeout=10000)
+                cancel_action = _expert_action_state(page)
+                if not (cancel_action["cancelVisible"] and "停止生成" in cancel_action["cancelName"]):
+                    failures.append(f"{width}x{height}: cancel action not discoverable {cancel_action!r}")
+
+                _render_action_smoke_card(page, "error")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .expert-team-panel-retry", timeout=10000)
+                retry_action = _expert_action_state(page)
+                if not (retry_action["retryVisible"] and "重新尝试" in retry_action["retryName"]):
+                    failures.append(f"{width}x{height}: retry action not discoverable {retry_action!r}")
 
                 _render_smoke_card(page, done=True)
                 page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)

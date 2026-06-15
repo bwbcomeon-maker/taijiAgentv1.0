@@ -279,6 +279,11 @@ def test_content_expert_team_answer_starts_real_stream_without_exposing_internal
     assert calls["msg"] != calls["display_msg"]
     assert "需求确认" not in calls["display_msg"]
     assert "内部" not in calls["display_msg"]
+    assert response["run"]["view"]["actions"]["can_cancel"] is True
+    assert response["run"]["view"]["health"]["active_stream_id"] == "stream-real-1"
+    assert response["run"]["view"]["health"]["needs_resume"] is False
+    assert response["run"]["view"]["phase_progress"]["total"] == 4
+    assert response["run"]["view"]["pending_questions"] == []
 
 
 def test_content_expert_team_answer_waits_until_required_questions_are_done(monkeypatch, tmp_path):
@@ -344,6 +349,10 @@ def test_expert_team_run_marks_legacy_running_without_stream_as_needs_resume(mon
     assert response["run"]["execution_status"] == "needs_resume"
     assert response["run"]["needs_resume"] is True
     assert response["run"]["tasks"][0]["status"] == "waiting_user"
+    assert response["run"]["view"]["actions"]["can_resume"] is True
+    assert response["run"]["view"]["actions"]["can_cancel"] is False
+    assert response["run"]["view"]["health"]["needs_resume"] is True
+    assert response["run"]["view"]["health"]["last_error"] == "执行流未启动或已中断"
 
 
 def test_expert_team_resume_starts_legacy_stale_run_on_explicit_action(monkeypatch, tmp_path):
@@ -411,6 +420,226 @@ def test_expert_team_resume_starts_legacy_stale_run_on_explicit_action(monkeypat
     assert response["run"]["status"] == "running"
     assert response["run"]["execution_status"] == "running"
     assert response["run"]["execution_stream_id"] == "stream-resumed"
+    assert response["run"]["view"]["actions"]["can_cancel"] is True
+    assert response["run"]["view"]["health"]["active_stream_id"] == "stream-resumed"
+
+
+def test_expert_team_resume_retries_error_run_on_explicit_action(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-retry", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-empty", "session_id": "sid-retry"},
+    )
+    failed = expert_teams.mark_content_expert_team_execution_complete(tmp_path, started["run_id"])
+    session = SimpleNamespace(
+        session_id="sid-retry",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda s, **kwargs: {
+            "stream_id": "stream-retry",
+            "session_id": s.session_id,
+            "pending_started_at": 1781346200.0,
+            "title": "专家团任务",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": "sid-retry", "run_id": failed["run_id"]},
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/resume"))
+
+    assert response["stream_id"] == "stream-retry"
+    assert response["run"]["status"] == "running"
+    assert response["run"]["execution_status"] == "running"
+    assert response["run"]["tasks"][0]["status"] == "running"
+
+
+def test_expert_team_start_returns_view_contract_for_pending_questions(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-view", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+
+    view = run["view"]
+    assert view["status"] == "awaiting_user"
+    assert view["execution_status"] == "idle"
+    assert view["phase_progress"] == {"done": 0, "total": 4, "current": "需求确认"}
+    assert [question["id"] for question in view["pending_questions"]] == ["topic", "audience", "boundary"]
+    assert view["actions"] == {
+        "can_answer": True,
+        "can_resume": False,
+        "can_cancel": False,
+        "can_retry": False,
+        "can_open_artifact": False,
+    }
+    assert view["health"] == {
+        "needs_resume": False,
+        "active_stream_id": "",
+        "last_error": "",
+    }
+    assert all(item["openable"] is False for item in view["artifacts"])
+
+
+def test_content_expert_team_completion_requires_real_delivery_evidence(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-evidence", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-without-result", "session_id": "sid-evidence"},
+    )
+
+    updated = expert_teams.mark_content_expert_team_execution_complete(tmp_path, started["run_id"])
+
+    assert updated["status"] == "error"
+    assert updated["execution_status"] == "error"
+    assert updated["tasks"][0]["status"] == "error"
+    assert updated["tasks"][1]["status"] == "pending"
+    assert updated["view"]["actions"]["can_retry"] is True
+    assert updated["view"]["health"]["last_error"] == "未检测到可交付结果"
+
+
+def test_content_expert_team_completion_marks_done_when_chat_delivery_exists(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-delivery", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-with-result", "session_id": "sid-delivery"},
+    )
+
+    updated = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={"kind": "chat", "label": "专家团生成结果", "exists": True},
+    )
+
+    assert updated["status"] == "done"
+    assert updated["execution_status"] == "done"
+    assert [task["status"] for task in updated["tasks"]] == ["done", "done"]
+    assert updated["artifacts"][0]["kind"] == "chat"
+    assert updated["artifacts"][0]["openable"] is False
+    assert updated["view"]["actions"]["can_open_artifact"] is False
+
+
+def test_expert_team_cancel_signals_active_execution_stream(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-cancel", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-cancel", "session_id": "sid-cancel"},
+    )
+    cancelled = {}
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "cancel_stream", lambda stream_id: cancelled.setdefault("stream_id", stream_id) or True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": "sid-cancel", "run_id": started["run_id"]},
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/cancel"))
+
+    assert cancelled["stream_id"] == "stream-cancel"
+    assert response["cancelled_stream"] is True
+    assert response["run"]["status"] == "cancelled"
+    assert response["run"]["execution_status"] == "cancelled"
+    assert response["run"]["view"]["health"]["active_stream_id"] == ""
 
 
 def test_expert_team_start_rejects_invalid_existing_session_workspace(monkeypatch):

@@ -4810,6 +4810,13 @@ main.main > #mainPlugin{display:none;}
 .expert-team-panel-hide svg{width:14px;height:14px;}
 .expert-team-panel-hide span{display:inline-block;line-height:1;}
 .expert-team-panel-collapse-toggle{align-self:center;margin-top:-1px;min-width:58px;min-height:28px;padding:0 14px;z-index:1;}
+.expert-team-panel-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;min-width:0;flex-wrap:wrap;}
+.expert-team-panel-action{min-height:28px;border:1px solid var(--accent-bg-strong);border-radius:999px;background:var(--accent-bg);color:var(--accent-text);padding:0 12px;font-size:11px;line-height:1;font-weight:760;cursor:pointer;white-space:nowrap;}
+.expert-team-panel-action:hover{background:var(--accent-bg-strong);}
+.expert-team-panel-cancel{border-color:color-mix(in srgb,var(--warning) 42%,var(--border-subtle))!important;background:color-mix(in srgb,var(--warning) 10%,rgba(255,255,255,.78))!important;color:var(--warning)!important;}
+.expert-team-panel-cancel:hover{background:color-mix(in srgb,var(--warning) 18%,rgba(255,255,255,.84))!important;}
+.expert-team-panel-retry{border-color:color-mix(in srgb,var(--error) 34%,var(--border-subtle))!important;background:color-mix(in srgb,var(--error) 8%,rgba(255,255,255,.78))!important;color:var(--error)!important;}
+.expert-team-panel-retry:hover{background:color-mix(in srgb,var(--error) 14%,rgba(255,255,255,.84))!important;}
 .expert-team-panel-collapse-icon{display:inline-flex;align-items:center;justify-content:center;}
 .expert-team-panel-collapse-icon.is-expand{display:none;}
 .expert-team-panel-eyebrow{color:var(--accent-text);font-size:11px;font-weight:760;line-height:1.2;}
@@ -10010,7 +10017,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     max-height:64px!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded{
-    max-height:min(68vh,620px)!important;
+    max-height:min(72vh,620px)!important;
     overflow:hidden auto!important;
     overscroll-behavior:contain!important;
   }
@@ -10026,13 +10033,13 @@ main.main.showing-logs > #mainLogs{display:flex;}
     background:transparent!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-bottom-body .expert-team-panel-inner{
-    max-height:calc(min(68vh,620px) - 2px)!important;
+    max-height:calc(min(72vh,620px) - 2px)!important;
     padding:10px!important;
     overflow:hidden auto!important;
     overscroll-behavior:contain!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow.is-expanded) main.main.taiji-real-main #mainChat .messages-shell{
-    bottom:clamp(500px,72vh,660px)!important;
+    bottom:clamp(500px,74vh,660px)!important;
   }
 }
 
@@ -10041,8 +10048,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
     padding:8px!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .expert-team-panel-head{
-    gap:5px;
-    padding:8px 12px;
+    gap:4px;
+    padding:7px 10px;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .expert-team-panel-expanded-body{
     gap:5px;
@@ -10055,8 +10062,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
     gap:7px;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .expert-team-panel-priority-card{
-    min-height:66px;
-    padding:7px 8px;
+    min-height:60px;
+    padding:6px 8px;
     gap:2px;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .expert-team-panel-section{
@@ -10069,8 +10076,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
     gap:4px;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .expert-team-panel-execution-row{
-    min-height:24px;
-    padding:3px 7px;
+    min-height:23px;
+    padding:2px 7px;
   }
 }
 

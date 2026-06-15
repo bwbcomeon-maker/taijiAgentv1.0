@@ -27,7 +27,11 @@ STATUS_LABELS = {
     "pending": "待执行",
     "waiting_user": "等待确认",
 }
-EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume"}
+EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume", "cancelled"}
+EXPERT_TEAM_PHASES = {
+    "ai-content-creator-brand-moodboard": ["需求确认", "创意策划", "方向确认", "图像生成", "交付"],
+    "content-creator-team": ["需求确认", "生成初稿", "打磨发布", "交付"],
+}
 
 
 EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
@@ -151,6 +155,21 @@ def _duration_seconds(run: dict) -> float:
     return round(ended - started, 3)
 
 
+def _status_class(value: str | None) -> str:
+    text = str(value or "").lower()
+    if text in {"done", "complete", "completed"} or "完成" in text:
+        return "done"
+    if text in {"awaiting_user", "waiting_user", "needs_resume", "waiting"} or "等待" in text or "确认" in text:
+        return "waiting"
+    if text in {"error", "blocked", "failed"} or "异常" in text or "失败" in text:
+        return "issue"
+    if text in {"cancelled", "canceled"} or "取消" in text:
+        return "cancelled"
+    if text in {"running", "in_progress", "working"} or "执行" in text or "处理中" in text:
+        return "running"
+    return "idle"
+
+
 def _safe_run_id(value: str) -> str:
     run_id = str(value or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{3,120}", run_id):
@@ -234,7 +253,102 @@ def _normalize_run(run: dict) -> dict:
     total = len(run["tasks"])
     done = sum(1 for task in run["tasks"] if str(task.get("status") or "") == "done")
     run["progress"] = {"done": done, "total": total}
+    for artifact in run["artifacts"]:
+        if isinstance(artifact, dict):
+            artifact["openable"] = _artifact_openable(artifact)
+    run["view"] = expert_team_run_view(run)
     return run
+
+
+def _artifact_openable(artifact: dict) -> bool:
+    return bool(
+        artifact
+        and str(artifact.get("path") or "").strip()
+        and not artifact.get("placeholder")
+        and artifact.get("exists") is not False
+    )
+
+
+def _phase_progress(run: dict) -> dict:
+    phases = EXPERT_TEAM_PHASES.get(str(run.get("team_id") or ""), EXPERT_TEAM_PHASES["content-creator-team"])
+    current = str(run.get("phase") or phases[0])
+    total = len(phases)
+    state = _status_class(run.get("status_label") or run.get("status"))
+    try:
+        phase_idx = phases.index(current)
+    except ValueError:
+        phase_idx = 0
+    if state == "done":
+        done = total
+    elif state == "cancelled":
+        done = min(total, max(0, phase_idx))
+    elif current == "交付" and any(_artifact_openable(item) for item in run.get("artifacts") or []):
+        done = total
+    else:
+        done = min(total, max(0, phase_idx))
+    return {"done": done, "total": total, "current": current}
+
+
+def _pending_questions(run: dict) -> list[dict]:
+    rows = []
+    for question in run.get("questions") or []:
+        if not isinstance(question, dict) or str(question.get("status") or "") == "answered":
+            continue
+        rows.append(
+            {
+                "id": str(question.get("id") or ""),
+                "title": str(question.get("title") or question.get("id") or ""),
+                "type": str(question.get("type") or "text"),
+                "required": question.get("required") is not False,
+            }
+        )
+    return rows
+
+
+def expert_team_run_view(run: dict) -> dict:
+    pending = _pending_questions(run)
+    status = str(run.get("status") or "awaiting_user")
+    execution_status = str(run.get("execution_status") or "idle")
+    needs_resume = bool(run.get("needs_resume") or execution_status == "needs_resume")
+    artifacts = []
+    for item in run.get("artifacts") or []:
+        if not isinstance(item, dict):
+            continue
+        openable = _artifact_openable(item)
+        artifacts.append(
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or item.get("path") or item.get("id") or "产物"),
+                "kind": str(item.get("kind") or "file"),
+                "path": str(item.get("path") or ""),
+                "status": str(item.get("status") or ""),
+                "exists": item.get("exists") is not False,
+                "placeholder": bool(item.get("placeholder")),
+                "openable": openable,
+            }
+        )
+    can_cancel = status == "running" and execution_status == "running" and bool(run.get("execution_stream_id"))
+    can_retry = status == "error" or execution_status == "error"
+    return {
+        "status": status,
+        "status_label": str(run.get("status_label") or STATUS_LABELS.get(status, status)),
+        "execution_status": execution_status,
+        "phase_progress": _phase_progress(run),
+        "pending_questions": pending,
+        "artifacts": artifacts,
+        "actions": {
+            "can_answer": bool(pending),
+            "can_resume": bool(needs_resume and not pending),
+            "can_cancel": can_cancel,
+            "can_retry": can_retry,
+            "can_open_artifact": any(item["openable"] for item in artifacts),
+        },
+        "health": {
+            "needs_resume": needs_resume,
+            "active_stream_id": str(run.get("execution_stream_id") or "") if can_cancel else "",
+            "last_error": str(run.get("last_execution_error") or ""),
+        },
+    }
 
 
 def expert_team_catalog() -> dict:
@@ -328,9 +442,10 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
     run["execution_status"] = "running"
     run["last_execution_error"] = ""
     for task in run.get("tasks") or []:
-        if task.get("status") == "waiting_user":
+        if task.get("status") in {"waiting_user", "error", "pending", "running"}:
             task["status"] = "running"
             task["status_label"] = STATUS_LABELS["running"]
+            task["result_summary"] = ""
             break
     run["updated_at"] = now
     if not _has_event(run, "execution_started"):
@@ -338,9 +453,33 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
     return write_expert_team_run(Path(workspace), run)
 
 
-def mark_content_expert_team_execution_complete(workspace: Path, run_id: str) -> dict:
+def mark_content_expert_team_execution_complete(workspace: Path, run_id: str, *, delivery: dict | None = None) -> dict:
     run = read_expert_team_run(Path(workspace), run_id)
     now = _now()
+    delivery = delivery if isinstance(delivery, dict) else None
+    has_delivery = bool(
+        delivery
+        or any(isinstance(item, dict) and not item.get("placeholder") and item.get("exists") is not False for item in run.get("artifacts") or [])
+    )
+    if not has_delivery:
+        run["status"] = "error"
+        run["phase"] = run.get("phase") or "生成初稿"
+        run["execution_status"] = "error"
+        run["last_execution_error"] = "未检测到可交付结果"
+        run["updated_at"] = now
+        for task in run.get("tasks") or []:
+            if str(task.get("status") or "") == "running":
+                task["status"] = "error"
+                task["status_label"] = STATUS_LABELS["error"]
+                if not task.get("result_summary"):
+                    task["result_summary"] = "本轮生成没有返回可交付结果。"
+                break
+        for member in run.get("members") or []:
+            if str(member.get("status") or "") in {"执行中", "监督中"}:
+                member["status"] = "执行异常"
+        if not _has_event(run, "execution_empty"):
+            _append_event(run, "execution_empty", "本轮生成没有返回可交付结果")
+        return write_expert_team_run(Path(workspace), run)
     for task in run.get("tasks") or []:
         if str(task.get("status") or "") in {"pending", "running", "waiting_user"}:
             task["status"] = "done"
@@ -350,7 +489,20 @@ def mark_content_expert_team_execution_complete(workspace: Path, run_id: str) ->
     for member in run.get("members") or []:
         if str(member.get("status") or "") in {"待命", "执行中", "监督中", "等待继续"}:
             member["status"] = "已完成"
-    if not run.get("artifacts"):
+    if delivery and not run.get("artifacts"):
+        run["artifacts"] = [
+            {
+                "id": str(delivery.get("id") or "expert-team-chat-delivery"),
+                "label": str(delivery.get("label") or "专家团生成结果"),
+                "kind": str(delivery.get("kind") or "chat"),
+                "path": str(delivery.get("path") or ""),
+                "status": str(delivery.get("status") or "ready"),
+                "placeholder": bool(delivery.get("placeholder", False)),
+                "exists": delivery.get("exists") is not False,
+                "note": str(delivery.get("note") or "已写入当前对话"),
+            }
+        ]
+    elif not run.get("artifacts"):
         run["artifacts"] = [
             {
                 "id": "expert-team-chat-delivery",
@@ -366,6 +518,7 @@ def mark_content_expert_team_execution_complete(workspace: Path, run_id: str) ->
     run["status"] = "done"
     run["phase"] = "交付"
     run["execution_status"] = "done"
+    run["last_execution_error"] = ""
     run["completed_at"] = now
     run["updated_at"] = now
     if not _has_event(run, "run_done"):
@@ -595,6 +748,9 @@ def cancel_expert_team(workspace: Path, run_id: str) -> dict:
     now = _now()
     run["status"] = "cancelled"
     run["status_label"] = STATUS_LABELS["cancelled"]
+    run["execution_status"] = "cancelled"
+    run["execution_stream_id"] = ""
+    run["last_execution_error"] = ""
     run["completed_at"] = now
     run["updated_at"] = now
     for task in run.get("tasks") or []:
