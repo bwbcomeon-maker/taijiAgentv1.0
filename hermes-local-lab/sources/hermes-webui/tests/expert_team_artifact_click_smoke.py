@@ -285,6 +285,52 @@ def _question_state(page):
     )
 
 
+def _confirmation_workflow_state(page):
+    return page.evaluate(
+        """
+        () => {
+          const body = document.querySelector('.expert-team-panel-expanded-body');
+          const workspace = document.querySelector('.expert-team-confirmation-workspace');
+          const phases = document.querySelector('.expert-team-panel-phases');
+          const priority = document.querySelector('.expert-team-panel-priority-grid');
+          const current = document.querySelector('.status-card-expert-question.pending.is-current');
+          const input = current && current.querySelector('[data-expert-team-answer-input]');
+          const button = current && current.querySelector('.status-card-expert-question-submit');
+          const rectFor = (node) => node ? node.getBoundingClientRect() : null;
+          const bodyRect = rectFor(body);
+          const workspaceRect = rectFor(workspace);
+          const phasesRect = rectFor(phases);
+          const priorityRect = rectFor(priority);
+          const inputRect = rectFor(input);
+          const buttonRect = rectFor(button);
+          const visibleInBody = (rect) => Boolean(
+            rect && bodyRect &&
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.top >= bodyRect.top - 1 &&
+            rect.bottom <= bodyRect.bottom + 1
+          );
+          return {
+            workspaceText: workspace ? workspace.textContent.replace(/\\s+/g, ' ').trim() : '',
+            currentText: current ? current.textContent.replace(/\\s+/g, ' ').trim() : '',
+            buttonText: button ? button.textContent.replace(/\\s+/g, ' ').trim() : '',
+            buttonDisabled: Boolean(button && button.disabled),
+            buttonBusy: Boolean(button && button.getAttribute('aria-busy') === 'true'),
+            buttonName: button ? (button.getAttribute('aria-label') || button.textContent || '').replace(/\\s+/g, ' ').trim() : '',
+            inputAria: input ? input.getAttribute('aria-label') || '' : '',
+            inputValue: input ? input.value : '',
+            inputActive: document.activeElement === input,
+            workspaceBeforePhases: Boolean(workspaceRect && phasesRect && workspaceRect.top <= phasesRect.top),
+            workspaceBeforePriority: Boolean(workspaceRect && priorityRect && workspaceRect.top <= priorityRect.top),
+            workspaceVisible: visibleInBody(workspaceRect),
+            inputVisible: visibleInBody(inputRect),
+            buttonVisible: Boolean(buttonRect && buttonRect.width > 0 && buttonRect.height > 0),
+          };
+        }
+        """
+    )
+
+
 def _dock_scroll_state(page):
     return page.evaluate(
         """
@@ -329,7 +375,7 @@ def _dock_a11y_state(page):
           const selectors = {
             dockMain: '.status-card-expert-dock-summary',
             collapse: '.expert-team-panel-hide',
-            confirm: '.status-card-expert-question-input button',
+            confirm: '.status-card-expert-question-submit',
             artifact: '.expert-team-panel-artifact-open, .expert-team-panel-priority-card.artifact button',
           };
           const names = {};
@@ -545,19 +591,44 @@ def main():
                 pending_state = _question_state(page)
                 if not (pending_state["expanded"] and pending_state["exists"] and pending_state["active"]):
                     failures.append(f"{width}x{height}: pending dock did not expand/focus textarea {pending_state!r}")
+                confirmation_state = _confirmation_workflow_state(page)
+                if not (
+                    confirmation_state["workspaceVisible"] and
+                    confirmation_state["inputVisible"] and
+                    confirmation_state["buttonVisible"] and
+                    confirmation_state["inputActive"] and
+                    confirmation_state["workspaceBeforePhases"] and
+                    confirmation_state["workspaceBeforePriority"] and
+                    "需要你确认 1/1" in confirmation_state["workspaceText"] and
+                    "确认此项并继续" in confirmation_state["workspaceText"] and
+                    confirmation_state["buttonText"] == "请先填写" and
+                    confirmation_state["buttonDisabled"] and
+                    "目标读者和发布口径" in confirmation_state["inputAria"]
+                ):
+                    failures.append(f"{width}x{height}: pending confirmation workspace not primary/actionable {confirmation_state!r}")
                 pending_a11y = _dock_a11y_state(page)
                 if not (
                     pending_a11y["names"]["dockMain"] and
                     pending_a11y["names"]["collapse"] and
-                    pending_a11y["names"]["confirm"] and
+                    "请先填写" in pending_a11y["names"]["confirm"] and
                     pending_a11y["dockBeforeComposer"]
                 ):
                     failures.append(f"{width}x{height}: pending dock a11y failed {pending_a11y!r}")
                 page.fill(".status-card-expert-question.pending textarea", "面向企业管理者，口径偏正式。")
+                filled_confirmation_state = _confirmation_workflow_state(page)
+                if not (
+                    filled_confirmation_state["buttonText"] == "确认此项并继续" and
+                    not filled_confirmation_state["buttonDisabled"] and
+                    "确认此项并继续" in filled_confirmation_state["buttonName"]
+                ):
+                    failures.append(f"{width}x{height}: confirmation button did not become a clear primary action {filled_confirmation_state!r}")
                 _render_smoke_card(page, done=False)
                 restored_state = _question_state(page)
                 if restored_state["value"] != "面向企业管理者，口径偏正式。" or not restored_state["active"]:
                     failures.append(f"{width}x{height}: input state not preserved after rerender {restored_state!r}")
+                restored_confirmation_state = _confirmation_workflow_state(page)
+                if restored_confirmation_state["buttonText"] != "确认此项并继续" or restored_confirmation_state["buttonDisabled"]:
+                    failures.append(f"{width}x{height}: restored confirmation state did not keep the submit affordance {restored_confirmation_state!r}")
 
                 _render_multi_question_card(page, answered_first=False)
                 page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
@@ -581,6 +652,13 @@ def main():
                 after_answer_state = _question_state(page)
                 if not (after_answer_state["expanded"] and after_answer_state["exists"] and after_answer_state["active"]):
                     failures.append(f"{width}x{height}: dock did not stay open and focus next question {after_answer_state!r}")
+                after_answer_confirmation = _confirmation_workflow_state(page)
+                if not (
+                    "需要你确认 2/2" in after_answer_confirmation["workspaceText"] and
+                    "目标读者和发布口径" in after_answer_confirmation["inputAria"] and
+                    after_answer_confirmation["buttonDisabled"]
+                ):
+                    failures.append(f"{width}x{height}: next confirmation item was not promoted after answer {after_answer_confirmation!r}")
                 scroll_state = _dock_scroll_state(page)
                 if scroll_state["cardOverflowY"] != "auto" or scroll_state["innerOverflowY"] != "visible" or scroll_state["innerCreatesScrollbar"]:
                     failures.append(f"{width}x{height}: dock should use one outer scrollbar {scroll_state!r}")

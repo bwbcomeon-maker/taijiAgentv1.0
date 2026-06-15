@@ -77,10 +77,24 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert "question.status||'')!=='answered'" in UI_JS
     assert "data-expert-team-answer-input" in UI_JS
     assert "status-card-expert-question-input" in UI_JS
+    assert "expert-team-confirmation-workspace" in UI_JS
+    assert "expert-team-confirmation-header" in UI_JS
+    assert "需要你确认 ${currentQuestionIndex}/${totalQuestions}" in UI_JS
+    assert "status-card-expert-question-submit" in UI_JS
+    assert "data-expert-team-empty-label=\"请先填写\"" in UI_JS
+    assert "data-expert-team-ready-label=\"确认此项并继续\"" in UI_JS
+    assert "aria-label=\"${esc(_expertTeamQuestionAriaLabel(question,context))}\"" in UI_JS
+    assert "oninput=\"syncExpertTeamQuestionInputState(this)\"" in UI_JS
+    assert "function syncExpertTeamQuestionInputState" in UI_JS
     assert "questionEl&&questionEl.dataset?questionEl.dataset.expertTeamRunId" in UI_JS
     assert "root.dataset.expertTeamRunId" in UI_JS
     assert "请先填写确认信息。" in UI_JS
+    assert "需求已确认，正在进入生成。" in UI_JS
     assert ".status-card-expert-question-input" in STYLE_CSS
+    assert ".expert-team-confirmation-workspace" in STYLE_CSS
+    assert ".status-card-expert-question.pending.is-current" in STYLE_CSS
+    assert ".status-card-expert-question-submit" in STYLE_CSS
+    assert ".status-card-expert-question-submit:disabled" in STYLE_CSS
 
 
 def test_expert_team_question_inputs_survive_status_refresh_rerender():
@@ -91,6 +105,7 @@ def test_expert_team_question_inputs_survive_status_refresh_rerender():
     assert "selectionStart" in UI_JS
     assert "selectionEnd" in UI_JS
     assert "focus({preventScroll:true})" in UI_JS
+    assert "_syncExpertTeamQuestionInputs(root)" in UI_JS
     assert ".classList.contains('answered')" in UI_JS
 
     panel_start = UI_JS.index("function renderExpertTeamWorkspacePanel")
@@ -185,6 +200,8 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert "${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}" in panel_body
     assert "${pending.length?questionSectionHtml:''}" in panel_body
     assert "成员简况" not in panel_body
+    assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-phases")
+    assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-priority-grid")
     assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-execution")
     assert panel_return.find("expert-team-panel-execution") < panel_return.find("${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}")
     assert "phaseList.map((label,idx)=>" in rows_body

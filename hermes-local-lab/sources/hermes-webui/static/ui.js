@@ -1001,25 +1001,83 @@ function _expertTeamExecutionRows(card,context){
   });
 }
 
-function _expertTeamQuestionHtml(question,runId){
+function _expertTeamQuestionDomId(question,runId){
+  const raw=`expert-team-question-${runId||'run'}-${question&&question.id||'question'}`;
+  return raw.replace(/[^a-zA-Z0-9_-]+/g,'-');
+}
+
+function _expertTeamQuestionAriaLabel(question,context){
+  context=context||{};
+  const idx=Number(context.index||1);
+  const total=Number(context.total||1);
+  return `需求确认第 ${idx}/${total} 项：${question&&question.title||question&&question.id||'问题'}`;
+}
+
+function _syncExpertTeamQuestionInputs(root){
+  if(typeof document==='undefined')return false;
+  root=(root&&root.closest&&(
+    root.closest('.status-card-writeflow')||
+    root.closest('#writeflowStatusDock')||
+    root.closest('.expert-team-workspace-panel')
+  ))||root||document;
+  if(!root.querySelectorAll)return false;
+  root.querySelectorAll('.status-card-expert-question.pending').forEach(questionEl=>{
+    const input=questionEl.querySelector('[data-expert-team-answer-input]');
+    const button=questionEl.querySelector('.status-card-expert-question-submit');
+    if(!button)return;
+    const required=button.dataset.expertTeamRequired!=='0';
+    const value=input?String(input.value||'').trim():String(button.dataset.expertTeamAnswer||'').trim();
+    const filled=!!value||!required;
+    const nextLabel=filled?(button.dataset.expertTeamReadyLabel||'确认此项并继续'):(button.dataset.expertTeamEmptyLabel||'请先填写');
+    questionEl.classList.toggle('is-filled',filled);
+    questionEl.classList.toggle('is-empty',!filled);
+    button.disabled=!filled;
+    button.textContent=nextLabel;
+    if(button.dataset.expertTeamAriaBase)button.setAttribute('aria-label',`${button.dataset.expertTeamAriaBase}，${nextLabel}`);
+    if(button.getAttribute('aria-busy')==='true')button.textContent='提交中...';
+  });
+  return true;
+}
+
+function syncExpertTeamQuestionInputState(target){
+  return _syncExpertTeamQuestionInputs(target);
+}
+
+function _expertTeamQuestionHtml(question,runId,context){
   question=question||{};
+  context=context||{};
   const answered=String(question.status||'')==='answered';
   const options=Array.isArray(question.options)?question.options:[];
   const qType=String(question.type||'text').toLowerCase();
   const isTextQuestion=!options.length&&(qType==='text'||qType==='textarea'||qType==='long_text');
   const qid=question.id||'';
-  const optionHtml=options.length?`<span class="status-card-expert-question-options">${options.map(option=>{
+  const current=!!context.current;
+  const idx=Number(context.index||1);
+  const total=Number(context.total||1);
+  const remaining=Number(context.remaining||1);
+  const required=question.required!==false;
+  const initialAnswer=String(question.answer||'');
+  const hasInitialAnswer=!!initialAnswer.trim()||!required;
+  const inputId=_expertTeamQuestionDomId(question,runId);
+  const ariaLabel=_expertTeamQuestionAriaLabel(question,{index:idx,total});
+  const stepHtml=`<span class="status-card-expert-question-step"><b>第 ${idx} 项</b><small>${remaining>1?`还剩 ${remaining} 项`:'最后一项'}</small></span>`;
+  const showControls=!answered&&current;
+  const optionHtml=(options.length&&(answered||showControls))?`<span class="status-card-expert-question-options">${options.map(option=>{
     return answered
       ? `<em>${esc(option)}</em>`
-      : `<button type="button" data-expert-team-run-id="${esc(runId||'')}" data-expert-team-question-id="${esc(qid)}" data-expert-team-answer="${esc(option)}" onclick="answerExpertTeamQuestion(this);event.stopPropagation()">${esc(option)}</button>`;
+      : `<button class="status-card-expert-question-option" type="button" data-expert-team-run-id="${esc(runId||'')}" data-expert-team-question-id="${esc(qid)}" data-expert-team-answer="${esc(option)}" data-expert-team-required="${required?'1':'0'}" onclick="answerExpertTeamQuestion(this);event.stopPropagation()">选择“${esc(option)}”并继续</button>`;
   }).join('')}</span>`:'';
-  const inputHtml=(!answered&&isTextQuestion)?`<span class="status-card-expert-question-input">
-    <textarea rows="2" data-expert-team-answer-input="1" placeholder="${esc(question.required===false?'可选补充':'请输入确认内容')}"></textarea>
-    <button type="button" data-expert-team-run-id="${esc(runId||'')}" data-expert-team-question-id="${esc(qid)}" data-expert-team-required="${question.required===false?'0':'1'}" onclick="answerExpertTeamQuestion(this);event.stopPropagation()">确认</button>
+  const inputHtml=(!answered&&isTextQuestion&&showControls)?`<span class="status-card-expert-question-input">
+    <textarea id="${esc(inputId)}" rows="3" data-expert-team-answer-input="1" aria-label="${esc(_expertTeamQuestionAriaLabel(question,context))}" placeholder="${esc(required?'请填写确认内容，填写后点击下方按钮继续':'可选补充，填写后点击下方按钮继续')}" oninput="syncExpertTeamQuestionInputState(this)">${esc(initialAnswer)}</textarea>
+    <button class="status-card-expert-question-submit" type="button" data-expert-team-run-id="${esc(runId||'')}" data-expert-team-question-id="${esc(qid)}" data-expert-team-required="${required?'1':'0'}" data-expert-team-empty-label="请先填写" data-expert-team-ready-label="确认此项并继续" data-expert-team-aria-base="${esc(ariaLabel)}" aria-label="${esc(`${ariaLabel}，${hasInitialAnswer?'确认此项并继续':'请先填写'}`)}" ${hasInitialAnswer?'':'disabled'} onclick="answerExpertTeamQuestion(this);event.stopPropagation()">${hasInitialAnswer?'确认此项并继续':'请先填写'}</button>
+    <small class="status-card-expert-question-hint">${required?'填写后点击“确认此项并继续”，专家团才会进入下一步。':'可以留空确认，也可以补充说明后继续。'}</small>
   </span>`:'';
-  return `<span class="status-card-expert-question ${answered?'answered':'pending'}" data-expert-team-run-id="${esc(runId||'')}" data-expert-team-question-id="${esc(qid)}">
-    <strong>${esc(question.title||qid||'问题')}</strong>
-    <small>${answered?`已回复：${question.answer||'已确认'}`:'等待用户确认'}</small>
+  return `<span class="status-card-expert-question ${answered?'answered':'pending'} ${current?'is-current':'is-queued'} ${hasInitialAnswer?'is-filled':'is-empty'}" data-expert-team-run-id="${esc(runId||'')}" data-expert-team-question-id="${esc(qid)}">
+    ${stepHtml}
+    <label class="status-card-expert-question-label" ${isTextQuestion?`for="${esc(inputId)}"`:''}>
+      <strong>${esc(question.title||qid||'问题')}</strong>
+      <small>${answered?`已回复：${question.answer||'已确认'}`:(current?'请先完成这一项，确认后自动进入下一项。':'下一项会在确认后自动展开。')}</small>
+    </label>
     ${optionHtml}
     ${inputHtml}
   </span>`;
@@ -1086,6 +1144,7 @@ function _restoreExpertTeamQuestionInputState(root,state){
       try{focusTarget.setSelectionRange(start,end);}catch(_){}
     }
   }
+  _syncExpertTeamQuestionInputs(root);
   return restored;
 }
 
@@ -1191,11 +1250,19 @@ function _expertTeamWorkspacePanelHtml(card){
     return `<span class="expert-team-panel-phase ${cls}"><i>${idx+1}</i><b>${esc(label)}</b></span>`;
   }).join('');
   const answeredSummary=_expertTeamAnsweredQuestionsSummary(card);
+  const totalQuestions=questions.length||pending.length||1;
+  const answeredCount=questions.filter(question=>String(question.status||'')==='answered').length;
+  const currentQuestionIndex=Math.min(totalQuestions,answeredCount+1);
   const questionHtml=pending.length
-    ? pending.map(question=>_expertTeamQuestionHtml(question,runId)).join('')
+    ? pending.map((question,idx)=>_expertTeamQuestionHtml(question,runId,{
+        index:answeredCount+idx+1,
+        total:totalQuestions,
+        current:idx===0,
+        remaining:pending.length-idx,
+      })).join('')
     : (questions.length?`<span class="expert-team-panel-answered-summary">
         <strong>${esc(answeredSummary.title)}</strong>
-        <small>${esc(answeredSummary.detail||'需求已确认，可继续查看运行进度和产物。')}</small>
+        <small>${esc(answeredSummary.detail||'需求已确认，正在进入生成。')}</small>
       </span>`:'<span class="expert-team-panel-empty">暂无待确认问题</span>');
   const artifactItemHtml=(item,reference)=>{
     item=item||{};
@@ -1220,8 +1287,8 @@ function _expertTeamWorkspacePanelHtml(card){
       <div class="expert-team-panel-section-title"><span>产物入口</span><small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:(deliveredArtifacts.length?'已写入当前对话':'待生成')}</small></div>
       <div class="expert-team-panel-artifacts">${artifactHtml}</div>
     </section>`;
-  const questionSectionHtml=`<section class="expert-team-panel-section expert-team-panel-questions">
-      <div class="expert-team-panel-section-title"><span>需求确认</span><small>${pending.length?`${pending.length} 项待确认`:'已确认'}</small></div>
+  const questionSectionHtml=`<section class="expert-team-panel-section expert-team-panel-questions expert-team-confirmation-workspace">
+      <div class="expert-team-panel-section-title expert-team-confirmation-header"><span>${pending.length?`需要你确认 ${currentQuestionIndex}/${totalQuestions}`:'需求确认完成'}</span><small>${pending.length?`剩余 ${pending.length} 项，确认后自动进入下一项`:'需求已确认，正在进入生成'}</small></div>
       <div class="expert-team-panel-question-list">${questionHtml}</div>
     </section>`;
   const primaryArtifact=_expertTeamPrimaryArtifact(card);
@@ -1268,6 +1335,7 @@ function _expertTeamWorkspacePanelHtml(card){
       ${actionHtml}
     </header>
     <div class="expert-team-panel-expanded-body">
+      ${pending.length?questionSectionHtml:''}
       <section class="expert-team-panel-phases" aria-label="专家团阶段">${phaseHtml}</section>
       <section class="expert-team-panel-priority-grid" aria-label="专家团重点信息">
         <span class="expert-team-panel-priority-card progress ${esc(stateClass)}">
@@ -1289,7 +1357,6 @@ function _expertTeamWorkspacePanelHtml(card){
           ${pendingButton}
         </span>
       </section>
-      ${pending.length?questionSectionHtml:''}
       <section class="expert-team-panel-section expert-team-panel-execution">
         <div class="expert-team-panel-section-title">
           <span>执行明细</span>
@@ -1650,9 +1717,11 @@ if(typeof window!=='undefined'){
 async function answerExpertTeamQuestion(btn){
   const qid=btn&&btn.dataset?btn.dataset.expertTeamQuestionId:'';
   const questionEl=btn&&btn.closest?btn.closest('.status-card-expert-question'):null;
+  const submitBtn=btn&&btn.matches&&btn.matches('.status-card-expert-question-submit')?btn:null;
   let answer=btn&&btn.dataset?btn.dataset.expertTeamAnswer:'';
+  let input=null;
   if(!answer&&questionEl){
-    const input=questionEl.querySelector('[data-expert-team-answer-input]');
+    input=questionEl.querySelector('[data-expert-team-answer-input]');
     answer=input?String(input.value||'').trim():'';
   }
   const root=btn&&btn.closest?(btn.closest('.status-card-writeflow')||btn.closest('.expert-team-workspace-panel')):null;
@@ -1665,7 +1734,16 @@ async function answerExpertTeamQuestion(btn){
   if(!qid||!runId)return;
   if(!answer&&required){
     showToast('请先填写确认信息。');
+    if(input&&typeof input.focus==='function'){
+      try{input.focus({preventScroll:true});}catch(_){input.focus();}
+    }
+    syncExpertTeamQuestionInputState(input||btn);
     return;
+  }
+  if(submitBtn){
+    submitBtn.disabled=true;
+    submitBtn.setAttribute('aria-busy','true');
+    submitBtn.textContent='提交中...';
   }
   try{
     const data=await api('/api/expert-teams/answer',{
@@ -1676,13 +1754,24 @@ async function answerExpertTeamQuestion(btn){
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
     if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
     if(card&&typeof focusExpertTeamBottomDock==='function')focusExpertTeamBottomDock(null);
+    const pendingAfter=card&&_expertTeamPendingQuestions(card)||[];
+    if(card&&Array.isArray(card.questions)&&card.questions.length&&!pendingAfter.length&&typeof showToast==='function'){
+      showToast('需求已确认，正在进入生成。');
+    }
     _applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
   }catch(e){
+    if(submitBtn){
+      submitBtn.removeAttribute('aria-busy');
+      syncExpertTeamQuestionInputState(submitBtn);
+    }
     showToast('提交专家团确认失败：'+(e&&e.message||e));
   }
 }
-if(typeof window!=='undefined')window.answerExpertTeamQuestion=answerExpertTeamQuestion;
+if(typeof window!=='undefined'){
+  window.answerExpertTeamQuestion=answerExpertTeamQuestion;
+  window.syncExpertTeamQuestionInputState=syncExpertTeamQuestionInputState;
+}
 
 function _applyExpertTeamStreamResponse(data){
   if(!(data&&data.stream_id))return false;
