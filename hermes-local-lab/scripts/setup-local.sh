@@ -46,6 +46,7 @@ uv pip install --python "$AGENT_DIR/venv/bin/python" \
 
 echo "Local dependencies installed."
 echo "Next:"
+echo "  $LAB_DIR/scripts/taiji --version"
 echo "  $LAB_DIR/scripts/start-agent.sh"
 echo "  $LAB_DIR/scripts/start-webui.sh"
 echo "  $LAB_DIR/scripts/health-check.sh"

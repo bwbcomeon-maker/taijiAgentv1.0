@@ -59,12 +59,23 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_desktop_runtime_does_not_depend_on_venv_console_script_shebang(self):
         start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
+        local_cli = read_text("hermes-local-lab/scripts/taiji")
         cli = read_text("packaging/linux/bin/taiji")
         health_check = read_text("hermes-local-lab/scripts/health-check.sh")
         build = read_text("packaging/linux/deb/build-deb.sh")
 
         self.assertIn("-m taiji_runtime.main gateway run --accept-hooks", start_agent)
         self.assertNotIn('venv/bin/hermes" gateway run', start_agent)
+        self.assertIn('source "$RUNTIME_ENV"', local_cli)
+        self.assertIn('TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"', local_cli)
+        self.assertIn("print_taiji_version", local_cli)
+        self.assertIn("--version|-V|version", local_cli)
+        self.assertIn('cd "$AGENT_DIR"', local_cli)
+        self.assertIn("-m taiji_runtime.main", local_cli)
+        self.assertNotIn("venv/bin/hermes", local_cli)
+        self.assertIn("print_taiji_version", cli)
+        self.assertIn("--version|-V|version", cli)
+        self.assertIn('cd "$APP_ROOT/runtime/agent"', cli)
         self.assertIn("-m taiji_runtime.main", cli)
         self.assertNotIn("venv/bin/hermes", cli)
         self.assertIn("-m taiji_runtime.main --help", health_check)
@@ -84,6 +95,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertNotIn("${TAIJI_AGENT_ENV_FILE", runtime_env)
         self.assertIn("TAIJI_IGNORED_RUNTIME_SELECTOR_COUNT", runtime_env)
         self.assertIn("ignored_legacy_runtime_selectors=", read_text("hermes-local-lab/scripts/taiji-agent-diagnose"))
+        diagnose = read_text("hermes-local-lab/scripts/taiji-agent-diagnose")
+        self.assertIn("canonical_env.exists=", diagnose)
+        self.assertIn("deepseek_key.canonical.suffix=", diagnose)
+        self.assertIn("legacy_runtime_differs=", diagnose)
         self.assertIn("env.TAIJI_RUNTIME_HOME", main_js)
         self.assertIn('path.join(userDataDir(), "runtime-home")', main_js)
 
@@ -201,6 +216,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "hermes-local-lab/scripts/start-agent.sh",
             "hermes-local-lab/scripts/start-webui.sh",
             "hermes-local-lab/scripts/stop-all.sh",
+            "hermes-local-lab/scripts/taiji",
             "hermes-local-lab/scripts/taiji-native-verify",
             "hermes-local-lab/scripts/taiji-agent-diagnose",
             "packaging/linux/bin/taiji",

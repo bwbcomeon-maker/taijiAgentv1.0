@@ -22,4 +22,22 @@ else
   export TAIJI_WORKSPACE="${TAIJI_WORKSPACE:-$HOME/.local/share/taiji-agent/workspace}"
 fi
 
+print_taiji_version() {
+  local version_line
+  version_line="$(cd "$APP_ROOT/runtime/agent" && "$TAIJI_PYTHON" -m taiji_runtime.main --version 2>/dev/null | head -1 || true)"
+  if [ -n "$version_line" ]; then
+    printf '%s\n' "$version_line" | sed -E 's/^.*Agent /Taiji Agent /'
+  else
+    printf 'Taiji Agent\n'
+  fi
+}
+
+case "${1:-}" in
+  --version|-V|version)
+    print_taiji_version
+    exit 0
+    ;;
+esac
+
+cd "$APP_ROOT/runtime/agent"
 exec "$TAIJI_PYTHON" -m taiji_runtime.main "$@"

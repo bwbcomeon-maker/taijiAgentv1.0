@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Local Taiji Agent CLI launcher for source-tree development.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+RUNTIME_ENV="$SCRIPT_DIR/runtime-env.sh"
+
+export TAIJI_AGENT_ROOT="$LAB_DIR"
+export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
+
+if [ -f "$RUNTIME_ENV" ]; then
+  # shellcheck source=/dev/null
+  source "$RUNTIME_ENV"
+else
+  export TAIJI_RUNTIME_HOME="${TAIJI_RUNTIME_HOME:-$HOME/.local/share/taiji-agent/runtime-home}"
+  export TAIJI_WORKSPACE="${TAIJI_WORKSPACE:-$HOME/.local/share/taiji-agent/workspace}"
+  AGENT_DIR="$LAB_DIR/sources/her""mes-agent"
+fi
+
+TAIJI_PYTHON="${TAIJI_PYTHON:-$AGENT_DIR/venv/bin/python}"
+export TAIJI_RUNTIME_HOME
+export TAIJI_WORKSPACE
+export TAIJI_ENV_FILE
+if [ ! -x "$TAIJI_PYTHON" ]; then
+  echo "Taiji Agent CLI runtime not found: $TAIJI_PYTHON" >&2
+  echo "Run: $LAB_DIR/scripts/setup-local.sh" >&2
+  exit 1
+fi
+
+print_taiji_version() {
+  local version_line
+  version_line="$(cd "$AGENT_DIR" && "$TAIJI_PYTHON" -m taiji_runtime.main --version 2>/dev/null | head -1 || true)"
+  if [ -n "$version_line" ]; then
+    printf '%s\n' "$version_line" | sed -E 's/^.*Agent /Taiji Agent /'
+  else
+    printf 'Taiji Agent\n'
+  fi
+}
+
+case "${1:-}" in
+  --version|-V|version)
+    print_taiji_version
+    exit 0
+    ;;
+esac
+
+cd "$AGENT_DIR"
+exec "$TAIJI_PYTHON" -m taiji_runtime.main "$@"

@@ -127,6 +127,53 @@ for group in ("nav", "settings_sections", "composer"):
 PY
 }
 
+runtime_key_summary() {
+  local py legacy_env
+  py="$(python_bin)"
+  legacy_env="$LAB_DIR/her""mes-home/.env"
+  if [ -z "$py" ]; then
+    printf 'python unavailable; skipped runtime key summary\n'
+    return 0
+  fi
+  "$py" - "$TAIJI_ENV_FILE" "$legacy_env" <<'PY' 2>&1 | redact_stream
+from pathlib import Path
+import sys
+
+canonical = Path(sys.argv[1])
+legacy = Path(sys.argv[2])
+
+def read_env_value(path: Path, key: str) -> str:
+    if not path.exists():
+        return ""
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            if name.strip() != key:
+                continue
+            return value.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+def suffix(value: str) -> str:
+    return value[-4:] if len(value) >= 4 else "-"
+
+canonical_key = read_env_value(canonical, "DEEPSEEK_API_KEY")
+legacy_key = read_env_value(legacy, "DEEPSEEK_API_KEY")
+
+print(f"canonical_env.exists={str(canonical.exists()).lower()}")
+print(f"deepseek_key.canonical.configured={str(bool(canonical_key)).lower()}")
+print(f"deepseek_key.canonical.suffix={suffix(canonical_key)}")
+print(f"legacy_env.exists={str(legacy.exists()).lower()}")
+print(f"deepseek_key.legacy.configured={str(bool(legacy_key)).lower()}")
+print(f"deepseek_key.legacy.suffix={suffix(legacy_key)}")
+print(f"legacy_runtime_differs={str(bool(canonical_key and legacy_key and canonical_key != legacy_key)).lower()}")
+PY
+}
+
 license_summary() {
   local py
   py="$(python_bin)"
@@ -171,14 +218,15 @@ PY
 }
 
 attachment_capabilities() {
-  local py
+  local py state_dir
   py="$(python_bin)"
   if [ -z "$py" ]; then
     printf 'python unavailable; skipped attachment capability summary\n'
     return 0
   fi
-  TAIJI_WEBUI_STATE_DIR="${TAIJI_WEBUI_STATE_DIR:-$TAIJI_RUNTIME_HOME/web}" \
-  "$py" - "$WEBUI_DIR" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME" "$TAIJI_WEBUI_STATE_DIR" <<'PY' 2>&1 | redact_stream
+  state_dir="${TAIJI_WEBUI_STATE_DIR:-$TAIJI_RUNTIME_HOME/web}"
+  TAIJI_WEBUI_STATE_DIR="$state_dir" \
+  "$py" - "$WEBUI_DIR" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME" "$state_dir" <<'PY' 2>&1 | redact_stream
 from pathlib import Path
 import json
 import os
@@ -270,6 +318,9 @@ fi
 
 section "Config Summary"
 config_summary
+
+section "Runtime Key Summary"
+runtime_key_summary
 
 section "License Summary"
 license_summary
