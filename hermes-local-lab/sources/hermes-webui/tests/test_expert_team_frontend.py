@@ -182,11 +182,11 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert "${phaseProgress.done}/${phaseProgress.total}" in panel_body
     assert "${done}/${total||tasks.length||0}" not in panel_body
     assert "class=\"expert-team-panel-artifact-open\"" in panel_body
-    assert "${readyArtifacts.length?artifactSectionHtml:''}" in panel_body
+    assert "${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}" in panel_body
     assert "${pending.length?questionSectionHtml:''}" in panel_body
     assert "成员简况" not in panel_body
     assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-execution")
-    assert panel_return.find("expert-team-panel-execution") < panel_return.find("${readyArtifacts.length?artifactSectionHtml:''}")
+    assert panel_return.find("expert-team-panel-execution") < panel_return.find("${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}")
     assert "phaseList.map((label,idx)=>" in rows_body
     assert "members.length" in rows_body
     assert ".slice(0,4)" in rows_body
@@ -262,6 +262,35 @@ def test_expert_team_artifact_actions_open_products_before_focusing_panel():
     assert "btn.dataset.expertTeamPrimaryArtifactPath" in handler_body
     assert "await openExpertTeamArtifact(btn)" in handler_body
     assert "return focusExpertTeamBottomDock(btn)" in handler_body
+
+
+def test_expert_team_chat_delivery_is_not_presented_as_openable_file_artifact():
+    ready_start = UI_JS.index("function _expertTeamArtifactIsOpenable")
+    ready_body = UI_JS[ready_start : UI_JS.index("function _expertTeamPhaseProgress", ready_start)]
+    assert "String(item.path||'').trim()" in ready_body
+    assert "item.openable!==false" in ready_body
+    assert "artifacts.filter(item=>_expertTeamArtifactIsOpenable(item))" in ready_body
+    assert "_expertTeamArtifactDeliveredToChat(item)" in UI_JS
+
+    summary_start = UI_JS.index("function _expertTeamDockSummary")
+    summary_body = UI_JS[summary_start : UI_JS.index("function _expertTeamStatusBadgeLabel", summary_start)]
+    assert "deliveredArtifacts.length" in summary_body
+    assert "结果已写入当前对话" in summary_body
+    assert "action:'查看结果'" in summary_body
+
+    card_start = UI_JS.index("function _writeflowStatusCardFromRun")
+    card_body = UI_JS[card_start : UI_JS.index("function _expertTeamStatusCardFromRun", card_start)]
+    assert "openable:item.openable===true" in card_body
+    assert "const readyArtifacts=visualArtifacts.filter(item=>item&&item.openable===true);" in card_body
+
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    assert "const deliveredArtifacts=" in panel_body
+    assert "deliveredArtifacts.length" in panel_body
+    assert "已写入当前对话" in panel_body
+    assert "data-expert-team-chat-delivery" in panel_body
+    assert "openExpertTeamChatDelivery(this)" in panel_body
+    assert "readyArtifacts.length?'查看产物':'查看对话结果'" in panel_body
 
 
 def test_expert_team_answer_response_attaches_real_stream_runtime():

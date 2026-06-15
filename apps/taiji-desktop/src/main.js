@@ -16,6 +16,14 @@ const SMOKE_TEST = process.env.TAIJI_DESKTOP_SMOKE_TEST === "1";
 let mainWindow = null;
 let runtimeEnv = null;
 let stopped = false;
+
+function configureDesktopUserDataDir() {
+  const override = process.env.TAIJI_DESKTOP_USER_DATA_DIR;
+  if (!override) return;
+  app.setPath("userData", path.resolve(override));
+}
+
+configureDesktopUserDataDir();
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 function desktopBootLog(message) {

@@ -620,6 +620,7 @@ function _writeflowStatusCardFromRun(run,data){
     status:item.status||'',
     placeholder:!!item.placeholder,
     exists:item.exists!==false,
+    openable:item.openable===true||((item.openable!==false)&&String(item.path||'').trim()&&!item.placeholder&&item.exists!==false),
     download_name:item.download_name||'',
     note:item.note||'',
     stale_reason:item.stale_reason||'',
@@ -632,17 +633,18 @@ function _writeflowStatusCardFromRun(run,data){
     status:item.status||'',
     placeholder:!!item.placeholder,
     exists:item.exists!==false,
+    openable:item.openable===true||((item.openable!==false)&&String(item.path||'').trim()&&!item.placeholder&&item.exists!==false),
     download_name:item.download_name||'',
     note:item.stale_reason||item.note||'历史参考材料',
   }));
-  const readyArtifacts=visualArtifacts.filter(item=>item&&!item.placeholder&&item.exists!==false);
+  const readyArtifacts=visualArtifacts.filter(item=>item&&item.openable===true);
   const rows=[
     {label:'团队',value:teamTitle},
     {label:'运行',value:run.run_id},
     {label:'进度',value:`${Number(progress.done||0)}/${Number(progress.total||tasks.length||2)} · ${run.status_label||run.status||'执行中'}`},
     {label:'任务',value:tasks.map(task=>`${task.title||task.id}：${task.status_label||task.status||'待执行'}`).join(' / ')||'等待任务拆解'},
     {label:'成员',value:members.map(member=>`${member.name||member.id} ${member.status||'待命'}`).join(' / ')||'等待成员接单'},
-    {label:'产物',value:readyArtifacts.length?`${readyArtifacts.length} 个可打开产物`:'等待产物生成'},
+    {label:'产物',value:readyArtifacts.length?`${readyArtifacts.length} 个可打开产物`:'等待文件产物生成'},
   ];
   return {
     type:'writeflow',
@@ -702,7 +704,7 @@ function _expertTeamStatusCardFromRun(run,data){
     {label:'阶段',value:run.phase||card.phase||'需求确认'},
     {label:'进度',value:`${card.progress.done}/${card.progress.total||card.tasks.length||0} · ${card.statusLabel}`},
     {label:'问答',value:visualQuestions.length?`${visualQuestions.filter(q=>q.status==='answered').length}/${visualQuestions.length} 已回复`:'无需确认'},
-    {label:'产物',value:card.artifacts.filter(item=>item&&!item.placeholder&&item.exists!==false).length?`${card.artifacts.length} 个产物`:'等待产物生成'},
+    {label:'产物',value:card.artifacts.filter(item=>_expertTeamArtifactIsOpenable(item)).length?`${card.artifacts.filter(item=>_expertTeamArtifactIsOpenable(item)).length} 个可打开产物`:'等待文件产物生成'},
   ];
   return card;
 }
@@ -759,9 +761,20 @@ function _expertTeamPendingQuestions(card){
   return questions.filter(question=>String(question.status||'')!=='answered');
 }
 
+function _expertTeamArtifactIsOpenable(item){
+  return !!(item&&String(item.path||'').trim()&&!item.placeholder&&item.exists!==false&&item.openable!==false);
+}
+
+function _expertTeamArtifactDeliveredToChat(item){
+  if(!item||_expertTeamArtifactIsOpenable(item)||item.placeholder||item.exists===false)return false;
+  const kind=String(item.kind||item.change_type||'').toLowerCase();
+  const note=String(item.note||item.status||'');
+  return !String(item.path||'').trim()&&(kind==='chat'||kind==='message'||note.includes('当前对话')||note.includes('已写入'));
+}
+
 function _expertTeamReadyArtifacts(card){
   const artifacts=Array.isArray(card&&card.artifacts)?card.artifacts:[];
-  return artifacts.filter(item=>item&&!item.placeholder&&item.exists!==false);
+  return artifacts.filter(item=>_expertTeamArtifactIsOpenable(item));
 }
 
 function _expertTeamPhaseProgress(card,context){
@@ -808,6 +821,8 @@ function _expertTeamAnsweredQuestionsSummary(card){
 function _expertTeamDockSummary(card){
   const pending=_expertTeamPendingQuestions(card);
   const readyArtifacts=_expertTeamReadyArtifacts(card);
+  const artifacts=Array.isArray(card&&card.artifacts)?card.artifacts:[];
+  const deliveredArtifacts=artifacts.filter(item=>_expertTeamArtifactDeliveredToChat(item));
   const stateClass=_statusCardStateClass(card&&card.statusLabel||card&&card.status);
   const actions=card&&card.actions||{};
   const phase=(card&&card.phase)||'当前阶段';
@@ -835,12 +850,28 @@ function _expertTeamDockSummary(card){
       action:'去确认',
     };
   }
-  if(readyArtifacts.length||stateClass==='done'){
+  if(readyArtifacts.length){
     return {
       state:'done',
-      title:readyArtifacts.length?`已生成 ${readyArtifacts.length} 个产物`:'专家团任务已完成',
+      title:`已生成 ${readyArtifacts.length} 个产物`,
       detail:'可打开产物或继续补充要求',
       action:'查看产物',
+    };
+  }
+  if(deliveredArtifacts.length&&stateClass==='done'){
+    return {
+      state:'done',
+      title:'专家团任务已完成',
+      detail:'结果已写入当前对话',
+      action:'查看结果',
+    };
+  }
+  if(stateClass==='done'){
+    return {
+      state:'done',
+      title:'专家团任务已完成',
+      detail:'全部任务已结束',
+      action:'查看进度',
     };
   }
   if(actions.can_cancel){
@@ -1128,6 +1159,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const referenceArtifacts=Array.isArray(card.referenceArtifacts)?card.referenceArtifacts:[];
   const questions=Array.isArray(card.questions)?card.questions:[];
   const readyArtifacts=_expertTeamReadyArtifacts(card);
+  const deliveredArtifacts=artifacts.filter(item=>_expertTeamArtifactDeliveredToChat(item));
   const pending=_expertTeamPendingQuestions(card);
   const progress=card.progress||{};
   const done=Math.max(0,Number(progress.done||0));
@@ -1167,21 +1199,25 @@ function _expertTeamWorkspacePanelHtml(card){
       </span>`:'<span class="expert-team-panel-empty">暂无待确认问题</span>');
   const artifactItemHtml=(item,reference)=>{
     item=item||{};
-    const isReady=!!item.path&&!item.placeholder&&item.exists!==false;
-    const cls=item.placeholder?'placeholder':(isReady?'ready':'missing');
-    const meta=item.placeholder?(item.note||'待生成'):(item.exists===false?'文件未找到':(reference?(item.note||'历史参考材料'):(item.path||item.note||'')));
+    const isOpenable=_expertTeamArtifactIsOpenable(item);
+    const isChatDelivery=_expertTeamArtifactDeliveredToChat(item);
+    const cls=item.placeholder?'placeholder':(isOpenable||isChatDelivery?'ready':'missing');
+    const meta=item.placeholder?(item.note||'待生成'):(item.exists===false?'文件未找到':(isChatDelivery?(item.note||'已写入当前对话'):(reference?(item.note||'历史参考材料'):(item.path||item.note||''))));
+    const actionAttrs=isOpenable
+      ? `class="expert-team-panel-artifact-item-open" data-writeflow-artifact-path="${esc(item.path||'')}" onclick="openExpertTeamArtifact(this);event.stopPropagation()"`
+      : (isChatDelivery?`class="expert-team-panel-artifact-item-open" data-expert-team-chat-delivery="1" onclick="openExpertTeamChatDelivery(this);event.stopPropagation()"`:'disabled');
     return `<span class="expert-team-panel-artifact ${cls}">
       <i>${esc(String(item.kind||'file').slice(0,2).toUpperCase())}</i>
-      <button type="button" ${isReady?`class="expert-team-panel-artifact-item-open" data-writeflow-artifact-path="${esc(item.path||'')}" onclick="openExpertTeamArtifact(this);event.stopPropagation()"`:'disabled'}>
+      <button type="button" ${actionAttrs}>
         <strong>${esc(item.label||item.path||item.id||'产物')}</strong>
         <small>${esc(meta||'待生成')}</small>
       </button>
     </span>`;
   };
   const artifactHtml=artifacts.length?artifacts.slice(0,6).map(item=>artifactItemHtml(item,false)).join(''):'<span class="expert-team-panel-empty">等待本轮产物生成</span>';
-  const artifactSectionClass=readyArtifacts.length?'expert-team-panel-artifacts-section is-priority':'expert-team-panel-artifacts-section is-pending';
+  const artifactSectionClass=readyArtifacts.length||deliveredArtifacts.length?'expert-team-panel-artifacts-section is-priority':'expert-team-panel-artifacts-section is-pending';
   const artifactSectionHtml=`<section class="expert-team-panel-section ${artifactSectionClass}">
-      <div class="expert-team-panel-section-title"><span>产物入口</span><small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:'待生成'}</small></div>
+      <div class="expert-team-panel-section-title"><span>产物入口</span><small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:(deliveredArtifacts.length?'已写入当前对话':'待生成')}</small></div>
       <div class="expert-team-panel-artifacts">${artifactHtml}</div>
     </section>`;
   const questionSectionHtml=`<section class="expert-team-panel-section expert-team-panel-questions">
@@ -1189,9 +1225,12 @@ function _expertTeamWorkspacePanelHtml(card){
       <div class="expert-team-panel-question-list">${questionHtml}</div>
     </section>`;
   const primaryArtifact=_expertTeamPrimaryArtifact(card);
+  const artifactActionLabel=readyArtifacts.length?'查看产物':'查看对话结果';
   const artifactButton=primaryArtifact&&primaryArtifact.path
     ? `<button class="expert-team-panel-artifact-open" type="button" data-writeflow-artifact-path="${esc(primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact.download_name||'')}" onclick="openExpertTeamArtifact(this);event.stopPropagation()">打开产物 →</button>`
-    : `<button class="expert-team-panel-artifact-open" type="button" disabled>${readyArtifacts.length?'查看产物':'暂无产物'}</button>`;
+    : (deliveredArtifacts.length
+      ? `<button class="expert-team-panel-artifact-open" type="button" data-expert-team-chat-delivery="1" onclick="openExpertTeamChatDelivery(this);event.stopPropagation()">${artifactActionLabel}</button>`
+      : `<button class="expert-team-panel-artifact-open" type="button" disabled>暂无产物</button>`);
   const pendingAction=pending.length?`${pending.length} 项待确认`:(canRetry?'可重新尝试':(canCancel?'正在生成':(canResume?'需要继续生成':'无需补充')));
   const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成')));
   const pendingButton=pending.length
@@ -1237,10 +1276,10 @@ function _expertTeamWorkspacePanelHtml(card){
           <small>${done>=total&&total?'全部任务已结束':'专家团正在按阶段推进'}</small>
           <em>${esc(_expertTeamStatusBadgeLabel(card,stateClass))}</em>
         </span>
-        <span class="expert-team-panel-priority-card artifact ${readyArtifacts.length?'done':'waiting'}">
+        <span class="expert-team-panel-priority-card artifact ${readyArtifacts.length||deliveredArtifacts.length?'done':'waiting'}">
           <strong>成果物</strong>
-          <b>${readyArtifacts.length?`生成结果`:'等待产物'}</b>
-          <small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:'生成后会出现在这里'}</small>
+          <b>${readyArtifacts.length||deliveredArtifacts.length?`生成结果`:'等待产物'}</b>
+          <small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:(deliveredArtifacts.length?'已写入当前对话':'生成后会出现在这里')}</small>
           ${artifactButton}
         </span>
         <span class="expert-team-panel-priority-card todo ${pending.length||needsResume?'waiting':'done'}">
@@ -1258,7 +1297,7 @@ function _expertTeamWorkspacePanelHtml(card){
         </div>
         <div class="expert-team-panel-execution-list">${executionHtml}</div>
       </section>
-      ${readyArtifacts.length?artifactSectionHtml:''}
+      ${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}
       ${referenceHtml}
     </div>
     ${hideHtml}
@@ -1537,6 +1576,17 @@ function _focusExpertTeamArtifactEntry(btn,path){
   setTimeout(()=>{try{card.classList.remove('expert-team-panel-artifact-focus');}catch(_){}},1800);
   return true;
 }
+function openExpertTeamChatDelivery(btn){
+  if(typeof hideExpertTeamWorkspacePanel==='function')hideExpertTeamWorkspacePanel(btn);
+  if(typeof scrollToBottom==='function'){
+    try{scrollToBottom();}catch(_){}
+  }else{
+    const messages=(typeof $==='function'&&$('messages'))||document.getElementById('messages');
+    if(messages)messages.scrollTop=messages.scrollHeight;
+  }
+  if(typeof showToast==='function')showToast('专家团结果已写入当前对话。');
+  return true;
+}
 async function openExpertTeamArtifact(btn){
   const data=btn&&btn.dataset?btn.dataset:{};
   const path=data.writeflowArtifactPath||data.expertTeamPrimaryArtifactPath||'';
@@ -1592,6 +1642,7 @@ async function handleExpertTeamDockAction(btn){
 if(typeof window!=='undefined'){
   window.openWriteflowArtifact=openWriteflowArtifact;
   window.openExpertTeamArtifact=openExpertTeamArtifact;
+  window.openExpertTeamChatDelivery=openExpertTeamChatDelivery;
   window.downloadWriteflowArtifact=downloadWriteflowArtifact;
   window.handleExpertTeamDockAction=handleExpertTeamDockAction;
 }

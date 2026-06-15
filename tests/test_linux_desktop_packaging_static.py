@@ -102,6 +102,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("env.TAIJI_RUNTIME_HOME", main_js)
         self.assertIn('path.join(userDataDir(), "runtime-home")', main_js)
 
+    def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+
+        self.assertIn("TAIJI_DESKTOP_USER_DATA_DIR", main_js)
+        self.assertIn('app.setPath("userData"', main_js)
+        self.assertLess(
+            main_js.index("app.setPath(\"userData\""),
+            main_js.index("app.requestSingleInstanceLock()"),
+        )
+
     def test_desktop_startup_errors_include_recent_script_output(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
 
