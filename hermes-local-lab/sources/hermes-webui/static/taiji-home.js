@@ -401,6 +401,21 @@
     return taijiCompactTopic(rawTitle)||taijiClampSessionTitle(rawTitle,32)||'未命名会话';
   }
 
+  function taijiSessionKind(session){
+    if(!session) return '问答';
+    const rawTitle=normalizeTaijiSessionTitle(session.title||session.name||'');
+    const displayTitle=normalizeTaijiSessionTitle(session.display_title||'');
+    const writeflowTitle=normalizeTaijiSessionTitle(session.writeflow_title||'');
+    const displayPrefix=normalizeTaijiSessionTitle((displayTitle.split(/[｜|]/)[0]||''));
+    const rawLooksWriteflow=rawTitle.startsWith('请【')&&rawTitle.includes('接手这个写作任务');
+    const displayLooksWriteflow=['内容创作','深度研究','写作团队','专家团'].includes(displayPrefix);
+    const text=[displayTitle,writeflowTitle,rawTitle].filter(Boolean).join(' ');
+    if(session.writeflow_team_id||writeflowTitle||rawLooksWriteflow||displayLooksWriteflow||/接手这个写作任务|workflow-producer/.test(text)){
+      return '专家团';
+    }
+    return '问答';
+  }
+
   function taijiSessionFullTitle(session){
     if(!session) return '未命名会话';
     const displayTitle=normalizeTaijiSessionTitle(session.display_title||'');
@@ -680,12 +695,15 @@
         const fullTitle=escapeHtml(taijiSessionFullTitle(session));
         const sid=escapeHtml(session.session_id);
         const time=escapeHtml(sessionTimeLabel(session));
-        const badge=session.is_streaming||session.active_stream_id?'<span class="taiji-session-live">运行中</span>':'';
+        const kind=taijiSessionKind(session);
+        const kindCode=kind==='专家团'?'expert':'qa';
+        const kindLabel=escapeHtml(kind);
+        const badge=session.is_streaming||session.active_stream_id?'<span class="taiji-session-live">运行</span>':'';
         const projectName=projectNameById(session.project_id);
         const moveLabel=escapeHtml(projectName?`更改分组：${projectName}`:`加入分组：${taijiSessionFullTitle(session)}`);
         const deleteLabel=escapeHtml(`删除会话：${taijiSessionFullTitle(session)}`);
         const folderIcon=typeof li==='function'?li('folder',15):'□';
-        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" aria-label="${fullTitle}"><span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time>${badge}</span></button><button class="taiji-session-move${session.project_id?' has-project':''}" type="button" data-taiji-session-move data-session-id="${sid}" title="${moveLabel}" aria-label="${moveLabel}">${folderIcon}</button><button class="taiji-session-delete" type="button" data-taiji-session-delete data-session-id="${sid}" title="${deleteLabel}" aria-label="${deleteLabel}">${typeof li==='function'?li('trash-2',15):'×'}</button></div>`;
+        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" title="${fullTitle}" aria-label="${fullTitle}"><span class="taiji-session-kind" data-kind="${kindCode}">${kindLabel}</span>${badge}<span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time></span></button><span class="taiji-session-action-separator" aria-hidden="true"></span><button class="taiji-session-move${session.project_id?' has-project':''}" type="button" data-taiji-session-move data-session-id="${sid}" title="${moveLabel}" aria-label="${moveLabel}">${folderIcon}</button><button class="taiji-session-delete" type="button" data-taiji-session-delete data-session-id="${sid}" title="${deleteLabel}" aria-label="${deleteLabel}">${typeof li==='function'?li('trash-2',15):'×'}</button></div>`;
       }).join('');
       return `<section class="taiji-session-group" aria-label="${group}"><header><span>${group}</span><span aria-hidden="true">⌃</span></header><div class="taiji-session-card">${rows}</div></section>`;
     }).join('');

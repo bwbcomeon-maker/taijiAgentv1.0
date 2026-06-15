@@ -274,29 +274,59 @@ def test_taiji_mic_and_voice_mode_icons_are_distinct_controls():
     assert 'data-tooltip="Voice mode"' in voice_button
 
 
-def test_taiji_recent_session_running_state_uses_meta_column():
+def test_taiji_recent_session_running_state_is_separated_from_time_column():
     home_js = (ROOT / "static" / "taiji-home.js").read_text(encoding="utf-8")
+    assert "function taijiSessionKind(session)" in home_js
     assert 'class="taiji-session-meta"' in home_js
-    assert '<span class="taiji-session-live">运行中</span>' in home_js
+    assert 'class="taiji-session-kind"' in home_js
+    assert '<span class="taiji-session-live">运行</span>' in home_js
 
     row_start = home_js.index('class="taiji-session-row')
-    row_template = home_js[row_start : home_js.index("</button>", row_start)]
+    row_template = home_js[row_start : home_js.index("taiji-session-move", row_start)]
+    meta_start = row_template.index('taiji-session-meta')
+    meta_end = row_template.index("</span>", meta_start)
+    meta_template = row_template[meta_start:meta_end]
+    assert 'taiji-session-kind' in row_template
+    assert '${badge}' in row_template
     assert 'taiji-session-title' in row_template
     assert 'taiji-session-meta' in row_template
+    assert row_template.index('taiji-session-kind') < row_template.index('taiji-session-title')
+    assert row_template.index('${badge}') < row_template.index('taiji-session-title')
     assert row_template.index('taiji-session-title') < row_template.index('taiji-session-meta')
+    assert 'taiji-session-live' not in meta_template
     assert '<time>' not in row_template
     assert '<time class="taiji-session-time">' in row_template
 
     row_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row{')
     row_rule = STYLE_CSS[row_rule_start : STYLE_CSS.index("}", row_rule_start)]
     assert "display:grid!important" in row_rule
-    assert "grid-template-columns:minmax(0,1fr) auto!important" in row_rule
+    assert "grid-template-columns:minmax(0,1fr) 1px 28px 28px!important" in row_rule
+
+    base_row_rule_start = STYLE_CSS.index('  .taiji-session-card .taiji-session-row{')
+    base_row_rule = STYLE_CSS[base_row_rule_start : STYLE_CSS.index("}", base_row_rule_start)]
+    assert "display:grid" in base_row_rule
+    assert "grid-template-columns:minmax(0,1fr) 1px 28px 28px" in base_row_rule
 
     meta_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-meta{')
     meta_rule = STYLE_CSS[meta_rule_start : STYLE_CSS.index("}", meta_rule_start)]
     assert "display:flex!important" in meta_rule
     assert "align-items:flex-end!important" in meta_rule
     assert "min-width:" in meta_rule
+
+    kind_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-kind{')
+    kind_rule = STYLE_CSS[kind_rule_start : STYLE_CSS.index("}", kind_rule_start)]
+    assert "white-space:nowrap!important" in kind_rule
+    assert "font-weight:600!important" in kind_rule
+
+    action_separator_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-action-separator{')
+    action_separator_rule = STYLE_CSS[action_separator_start : STYLE_CSS.index("}", action_separator_start)]
+    assert "width:1px!important" in action_separator_rule
+    assert "background:" in action_separator_rule
+
+    base_action_separator_start = STYLE_CSS.index('  .taiji-session-action-separator{')
+    base_action_separator_rule = STYLE_CSS[base_action_separator_start : STYLE_CSS.index("}", base_action_separator_start)]
+    assert "width:1px" in base_action_separator_rule
+    assert "background:" in base_action_separator_rule
 
     live_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-live{')
     live_rule = STYLE_CSS[live_rule_start : STYLE_CSS.index("}", live_rule_start)]

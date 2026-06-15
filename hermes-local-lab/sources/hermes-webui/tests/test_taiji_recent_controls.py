@@ -30,6 +30,18 @@ def test_taiji_recent_sessions_expose_project_move_action():
     assert ".taiji-project-menu" in STYLE_CSS
 
 
+def test_taiji_recent_sessions_render_only_expert_or_qa_kind_labels():
+    assert "function taijiSessionKind(session)" in HOME_JS
+    assert "return '专家团'" in HOME_JS
+    assert "return '问答'" in HOME_JS
+    assert "const kind=taijiSessionKind(session);" in HOME_JS
+    assert 'data-kind="${kindCode}"' in HOME_JS
+    assert 'class="taiji-session-kind"' in HOME_JS
+    assert ".taiji-session-kind" in STYLE_CSS
+    assert '[data-kind="expert"]' in STYLE_CSS
+    assert '[data-kind="qa"]' in STYLE_CSS
+
+
 def test_taiji_new_chat_inherits_active_project_filter():
     assert "function activeProjectId()" in HOME_JS
     assert "const projectId=activeProjectId();" in HOME_JS
