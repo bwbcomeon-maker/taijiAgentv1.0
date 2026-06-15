@@ -75,7 +75,7 @@ let _taijiFloatingListenersReady=false;
 
 const UI_VISIBILITY_DEFAULTS={
   nav:['chat','tasks','kanban','writing','skills','memory','workspaces','profiles','todos','insights','logs','settings'],
-  settings_sections:['conversation','appearance','preferences','models','providers','plugins','system'],
+  settings_sections:['conversation','appearance','preferences','models','providers','plugins','system','about'],
   composer:['profile','workspace_files','workspace_switcher','model','reasoning','toolsets','quota'],
   chat:['activity_details']
 };

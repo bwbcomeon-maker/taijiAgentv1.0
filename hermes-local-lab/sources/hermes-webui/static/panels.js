@@ -6340,6 +6340,40 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
+function loadAboutPanel(){
+  const pane=$('settingsPaneAbout');
+  if(!pane) return;
+  const setText=(id,value,fallback='—')=>{
+    const el=$(id);
+    if(el) el.textContent=(value==null||String(value).trim()==='')?fallback:String(value);
+  };
+  const status=$('settingsAboutStatus');
+  if(status) status.textContent='正在读取关于信息…';
+  api('/api/about',{timeoutToast:false}).then(data=>{
+    setText('settingsAboutProductName',data.product_name,'太极 Agent');
+    setText('settingsAboutDescription',data.description,'—');
+    setText('settingsAboutLicense',data.license_notice,'—');
+    setText('settingsAboutDeveloperNote',data.developer_note,'—');
+    setText('settings-about-webui-version-badge',`WebUI: ${data.webui_version||'unknown'}`,'WebUI: unknown');
+    setText('settings-about-agent-version-badge',`Agent: ${data.agent_version||'not detected'}`,'Agent: not detected');
+    const owner=(data.copyright_owner||'太极 Agent 项目组').toString().trim()||'太极 Agent 项目组';
+    setText('settingsAboutCopyright',`版权所有 © 2026 ${owner}。保留所有权利。`);
+    const list=$('settingsAboutHighlights');
+    if(list){
+      list.innerHTML='';
+      const highlights=Array.isArray(data.highlights)?data.highlights:[];
+      highlights.forEach(item=>{
+        const li=document.createElement('li');
+        li.textContent=String(item||'').trim();
+        if(li.textContent) list.appendChild(li);
+      });
+    }
+    if(status) status.textContent='关于信息已随当前版本固化。';
+  }).catch(()=>{
+    if(status) status.textContent='关于信息暂时无法读取。';
+  });
+}
+
 function switchSettingsSection(name){
   if(typeof isUiFeatureVisible==='function'&&!isUiFeatureVisible('nav','settings')){
     if(typeof switchPanel==='function') switchPanel('chat',{bypassSettingsGuard:true});
@@ -6355,7 +6389,7 @@ function switchSettingsSection(name){
       });
     }
   }
-  const requested=(name==='appearance'||name==='preferences'||name==='models'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const requested=(name==='appearance'||name==='preferences'||name==='models'||name==='providers'||name==='plugins'||name==='system'||name==='about')?name:'conversation';
   const section=typeof resolveUiSettingsSection==='function'?resolveUiSettingsSection(requested):requested;
   if(!section){
     if(typeof switchPanel==='function') switchPanel('chat',{bypassSettingsGuard:true});
@@ -6363,13 +6397,13 @@ function switchSettingsSection(name){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',models:'Models',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',models:'Models',providers:'Providers',plugins:'Plugins',system:'System',about:'About'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','models','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','models','providers','plugins','system','about'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -6380,6 +6414,7 @@ function switchSettingsSection(name){
   if(section==='models') loadModelConfigPanel();
   if(section==='providers') loadProvidersPanel();
   if(section==='plugins') loadPluginsPanel();
+  if(section==='about') loadAboutPanel();
 }
 
 function _syncHermesPanelSessionActions(){

@@ -5010,6 +5010,7 @@ _UI_VISIBILITY_FEATURES = {
         "providers",
         "plugins",
         "system",
+        "about",
     ),
     "composer": (
         "profile",

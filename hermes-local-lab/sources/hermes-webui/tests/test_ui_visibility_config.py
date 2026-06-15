@@ -168,6 +168,7 @@ def test_packaged_config_lists_all_features_with_chinese_explanations():
         "providers",
         "plugins",
         "system",
+        "about",
     }
     assert set(feature_visibility["composer"]) == {
         "profile",

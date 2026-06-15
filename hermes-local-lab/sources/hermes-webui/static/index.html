@@ -485,6 +485,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
           <span data-i18n="settings_tab_system">System</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="about" onclick="switchSettingsSection('about')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          <span>关于</span>
+        </button>
       </div>
     </div>
   <div class="resize-handle" id="sidebarResize"></div>
@@ -1650,6 +1654,40 @@
               <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneAbout">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">关于</div>
+                <div class="settings-section-meta">产品版本、版权归属和发行说明。</div>
+              </div>
+              <div id="settingsAboutVersionBlock">
+                <span class="settings-version-badge" id="settings-about-webui-version-badge">WebUI: —</span>
+                <span class="settings-version-badge" id="settings-about-agent-version-badge">Agent：未检测到</span>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label>产品名称</label>
+              <div id="settingsAboutProductName" style="font-size:16px;font-weight:700;color:var(--text);line-height:1.5">太极 Agent</div>
+            </div>
+            <div class="settings-field">
+              <label>产品说明</label>
+              <div id="settingsAboutDescription" style="font-size:13px;color:var(--text);line-height:1.7">正在读取关于信息…</div>
+            </div>
+            <div class="settings-field">
+              <label>主要能力</label>
+              <ul id="settingsAboutHighlights" style="margin:0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.7"></ul>
+            </div>
+            <div class="settings-field">
+              <label>版权与许可</label>
+              <div id="settingsAboutCopyright" style="font-size:13px;color:var(--text);line-height:1.7">版权所有 © 2026 太极 Agent 项目组。保留所有权利。</div>
+              <div id="settingsAboutLicense" style="font-size:12px;color:var(--muted);line-height:1.7;margin-top:8px">本产品仅在授权范围内使用。</div>
+            </div>
+            <div class="settings-field">
+              <label>维护方式</label>
+              <div id="settingsAboutDeveloperNote" style="font-size:12px;color:var(--muted);line-height:1.7">关于页文案由开发人员在源码中维护，重新打包后随产品版本固化。</div>
+              <div id="settingsAboutStatus" class="settings-autosave-status" aria-live="polite"></div>
+            </div>
           </div>
       </div>
     </div>

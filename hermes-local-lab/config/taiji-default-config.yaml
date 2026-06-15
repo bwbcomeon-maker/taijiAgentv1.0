@@ -36,6 +36,7 @@ webui:
       providers: true
       plugins: false
       system: true
+      about: true
     # 底部输入区控制条。true=显示，false=隐藏。
     composer:
       profile: false
