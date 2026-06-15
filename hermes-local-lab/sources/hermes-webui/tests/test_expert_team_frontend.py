@@ -39,13 +39,15 @@ def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks()
     assert "function _expertTeamDockSummary" in UI_JS
     assert "function _expertTeamWorkspacePanelHtml" in UI_JS
     assert "function renderExpertTeamWorkspacePanel" in UI_JS
+    assert "function syncExpertTeamBottomDockState" in UI_JS
     assert "function clearExpertTeamWorkspacePanel" in UI_JS
     assert "async function answerExpertTeamQuestion" in UI_JS
     assert "/api/expert-teams/answer" in UI_JS
     assert "card.questions=visualQuestions" in UI_JS
     assert "taiji-expert-team-active" in UI_JS
-    assert "renderExpertTeamWorkspacePanel(card)" in UI_JS
+    assert "syncExpertTeamBottomDockState(card)" in UI_JS
     assert "clearExpertTeamWorkspacePanel()" in UI_JS
+    assert "status-card-expert-bottom-body" in UI_JS
     assert "status-card-expert-questions" in UI_JS
     assert "status-card-expert-question" in UI_JS
     assert "expert-team-workspace-panel" in UI_JS
@@ -89,11 +91,9 @@ def test_expert_team_question_inputs_survive_status_refresh_rerender():
 
     panel_start = UI_JS.index("function renderExpertTeamWorkspacePanel")
     panel_body = UI_JS[panel_start : UI_JS.index("function clearExpertTeamWorkspacePanel", panel_start)]
-    assert "const renderKey=_expertTeamWorkspaceRenderKey(card);" in panel_body
-    assert "panel.dataset.expertTeamRenderKey===renderKey" in panel_body
-    assert "const inputState=_captureExpertTeamQuestionInputState(panel);" in panel_body
-    assert "panel.innerHTML=_expertTeamWorkspacePanelHtml(card);" in panel_body
-    assert "_restoreExpertTeamQuestionInputState(panel,inputState);" in panel_body
+    assert "document.createElement('aside')" not in panel_body
+    assert "panel.innerHTML=_expertTeamWorkspacePanelHtml(card);" not in panel_body
+    assert "return syncExpertTeamBottomDockState(card)" in panel_body
 
     dock_start = UI_JS.index("function renderWriteflowStatusDock")
     dock_body = UI_JS[dock_start : UI_JS.index("function clearWriteflowStatusDock", dock_start)]
@@ -106,28 +106,26 @@ def test_expert_team_question_inputs_survive_status_refresh_rerender():
 def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
     assert "function _expertTeamActivePanelName" in UI_JS
     assert "function _syncExpertTeamWorkspacePanelVisibility" in UI_JS
+    assert "function focusExpertTeamBottomDock" in UI_JS
+    assert "function _setExpertTeamBottomDockExpanded" in UI_JS
     assert "function hideExpertTeamWorkspacePanel" in UI_JS
     assert "function showExpertTeamWorkspacePanel" in UI_JS
-    assert "function _expertTeamWorkspaceStorageKey" in UI_JS
-    assert "expert-team-workspace-panel:" in UI_JS
-    assert "taiji-expert-team-panel-visible" in UI_JS
-    assert "taiji-expert-team-panel-hidden" in UI_JS
     assert "data-expert-team-hide-run-id" in UI_JS
     assert "hideExpertTeamWorkspacePanel(this)" in UI_JS
     assert "window._syncExpertTeamWorkspacePanelVisibility=_syncExpertTeamWorkspacePanelVisibility" in UI_JS
     assert "window.hideExpertTeamWorkspacePanel=hideExpertTeamWorkspacePanel" in UI_JS
     assert "window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel" in UI_JS
+    assert "window.focusExpertTeamBottomDock=focusExpertTeamBottomDock" in UI_JS
 
-    focus_start = UI_JS.index("function focusExpertTeamWorkspacePanel")
+    focus_start = UI_JS.index("function focusExpertTeamBottomDock")
     focus_body = UI_JS[focus_start : UI_JS.index("if(typeof window!=='undefined'){", focus_start)]
-    assert "_setExpertTeamWorkspacePanelHiddenForRun(runId,false)" in focus_body
-    assert "_syncExpertTeamWorkspacePanelVisibility()" in focus_body
+    assert "_setExpertTeamBottomDockExpanded(true,trigger)" in focus_body
     assert "focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});" in focus_body
+    assert ".status-card-expert-question.pending textarea" in focus_body
 
-    assert ".taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel" in STYLE_CSS
-    assert ".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel" in STYLE_CSS
-    assert ".taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #mainChat .messages-shell" in STYLE_CSS
-    assert ".taiji-home-shell.taiji-expert-team-panel-visible #composerWrap" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" in STYLE_CSS
     assert ".expert-team-panel-hide" in STYLE_CSS
 
 
@@ -195,27 +193,29 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert ".expert-team-panel-artifacts-section.is-priority" in STYLE_CSS
     assert ".expert-team-panel-answered-summary" in STYLE_CSS
     assert ".expert-team-panel-artifact-open:not(:disabled)" in STYLE_CSS
-    assert ".taiji-home-shell.taiji-expert-team-panel-collapsed .expert-team-panel-expanded-body" in STYLE_CSS
+    assert ".status-card-writeflow.is-collapsed .status-card-expert-bottom-body" in STYLE_CSS
     assert ".expert-team-panel-head strong{color:var(--text);font-size:16px;line-height:1.25;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" not in STYLE_CSS
 
 
-def test_expert_team_workspace_uses_top_panel_without_composer_squeeze():
-    visible_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel")
-    visible_block = STYLE_CSS[visible_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active.taiji-welcome", visible_start)]
-    composer_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible #composerWrap")
-    composer_block = STYLE_CSS[composer_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible #composerWrap .composer-box", composer_start)]
-    messages_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #mainChat .messages-shell")
-    messages_block = STYLE_CSS[messages_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-panel-visible main.main.taiji-real-main #messages", messages_start)]
+def test_expert_team_workspace_uses_bottom_dock_without_top_panel_squeeze():
+    dock_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock")
+    dock_block = STYLE_CSS[dock_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow", dock_start)]
+    expanded_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded")
+    expanded_block = STYLE_CSS[expanded_start : STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-dock-summary", expanded_start)]
 
-    assert "left:clamp(28px,3vw,42px)!important;" in visible_block
-    assert "right:clamp(28px,3vw,42px)!important;" in visible_block
-    assert "bottom:auto!important;" in visible_block
-    assert "width:auto!important;" in visible_block
-    assert "overflow:hidden!important;" in visible_block
-    assert "right:clamp(28px,3vw,42px)!important;" in composer_block
-    assert "right:clamp(28px,3vw,42px)!important;" in messages_block
-    assert "calc(var(--taiji-expert-panel-w)" not in composer_block
-    assert "calc(var(--taiji-expert-panel-w)" not in messages_block
+    assert "bottom:calc(100% + 12px)!important;" in dock_block
+    assert "width:100%!important;" in dock_block
+    assert "max-width:100%!important;" in dock_block
+    assert "display:block!important;" in dock_block
+    assert "display:none!important;" not in dock_block
+    assert "max-height:min(68vh,620px)!important;" in expanded_block
+
+    legacy_visible = STYLE_CSS.find(".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel")
+    if legacy_visible != -1:
+        legacy_block = STYLE_CSS[legacy_visible : STYLE_CSS.find("}", legacy_visible)]
+        assert "display:flex!important" not in legacy_block
+    assert "top:calc(var(--taiji-expert-panel-top) + var(--taiji-expert-panel-h)" not in STYLE_CSS
+    assert "#writeflowStatusDock{\n    position:absolute!important;" in STYLE_CSS
 
 
 def test_expert_team_artifact_actions_open_products_before_focusing_panel():
@@ -245,7 +245,7 @@ def test_expert_team_artifact_actions_open_products_before_focusing_panel():
     handler_body = UI_JS[handler_start : UI_JS.index("if(typeof window!=='undefined'){", handler_start)]
     assert "btn.dataset.expertTeamPrimaryArtifactPath" in handler_body
     assert "await openExpertTeamArtifact(btn)" in handler_body
-    assert "return focusExpertTeamWorkspacePanel(btn)" in handler_body
+    assert "return focusExpertTeamBottomDock(btn)" in handler_body
 
 
 def test_expert_team_answer_response_attaches_real_stream_runtime():

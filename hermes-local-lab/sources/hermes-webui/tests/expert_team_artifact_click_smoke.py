@@ -18,7 +18,7 @@ from pathlib import Path
 
 PORT = int(os.getenv("EXPERT_TEAM_SMOKE_PORT", "8797"))
 BASE = f"http://127.0.0.1:{PORT}"
-VIEWPORTS = [(1440, 900), (1280, 760), (1024, 720)]
+VIEWPORTS = [(1440, 900), (1280, 720), (1024, 720)]
 
 
 def _wait_for_health(timeout=30):
@@ -34,7 +34,7 @@ def _wait_for_health(timeout=30):
     return False
 
 
-def _inject_expert_team_card(page, workspace):
+def _prepare_expert_team_session(page, workspace):
     page.evaluate(
         """
         async ({workspace}) => {
@@ -74,8 +74,17 @@ def _inject_expert_team_card(page, workspace):
           if (typeof loadDir === 'function') {
             try { await loadDir('.'); } catch (_) {}
           }
+        }
+        """,
+        {"workspace": workspace},
+    )
 
-          renderExpertTeamWorkspacePanel({
+
+def _render_smoke_card(page, done=False):
+    page.evaluate(
+        """
+        ({done}) => {
+          const base = {
             type: 'expert-team',
             kind: 'expert_team',
             runId: 'expert-team-artifact-smoke',
@@ -83,24 +92,24 @@ def _inject_expert_team_card(page, workspace):
             sourceSessionId: S.session.session_id,
             team: {id: 'content-creator-team', title: '内容创作专家团'},
             subtitle: '围绕企业为什么需要本地 AI Agent 工作台做一篇公众号长文',
-            status: 'done',
-            statusLabel: '已完成',
-            phase: '交付',
+            status: done ? 'done' : 'waiting_user',
+            statusLabel: done ? '已完成' : '待确认',
+            phase: done ? '交付' : '需求确认',
             phases: ['需求确认', '生成初稿', '打磨发布', '交付'],
-            progress: {done: 4, total: 4},
+            progress: {done: done ? 4 : 0, total: 4},
             members: [
-              {id: 'flow', name: '流程编排', status: 'done'},
-              {id: 'writer', name: '文案创作专家', status: 'done'},
-              {id: 'image', name: '配图专家', status: 'done'},
-              {id: 'review', name: '审稿润色', status: 'done'},
+              {id: 'flow', name: '流程编排', status: done ? 'done' : 'waiting'},
+              {id: 'writer', name: '文案创作专家', status: done ? 'done' : 'idle'},
+              {id: 'image', name: '配图专家', status: done ? 'done' : 'idle'},
+              {id: 'review', name: '审稿润色', status: done ? 'done' : 'idle'},
             ],
             tasks: [
-              {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'done', status_label: '完成'},
-              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: 'done', status_label: '完成'},
-              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: 'done', status_label: '完成'},
-              {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'done', status_label: '完成'},
+              {id: 'direction', title: '需求确认', worker_name: '流程编排', status: done ? 'done' : 'waiting', status_label: done ? '完成' : '待确认'},
+              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
+              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
+              {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
             ],
-            artifacts: [
+            artifacts: done ? [
               {
                 id: 'draft',
                 label: '专家团生成结果',
@@ -109,12 +118,109 @@ def _inject_expert_team_card(page, workspace):
                 exists: true,
                 download_name: '专家团生成结果.md',
               },
+            ] : [],
+            questions: done ? [] : [
+              {id: 'audience', title: '目标读者和发布口径', type: 'text', status: 'pending', required: true},
             ],
-            questions: [],
-          });
+          };
+          renderWriteflowStatusDock(base);
         }
         """,
-        {"workspace": workspace},
+        {"done": done},
+    )
+
+
+def _dock_geometry(page):
+    return page.evaluate(
+        """
+        () => {
+          const dock = document.getElementById('writeflowStatusDock');
+          const box = document.querySelector('#composerWrap .composer-box');
+          const topPanel = document.getElementById('expertTeamWorkspacePanel');
+          const card = dock && dock.querySelector('.status-card-writeflow');
+          const dockRect = dock && dock.getBoundingClientRect();
+          const boxRect = box && box.getBoundingClientRect();
+          const active = document.querySelector('.taiji-home-shell')?.classList.contains('taiji-expert-team-active');
+          return {
+            active: Boolean(active),
+            collapsed: Boolean(card && card.classList.contains('is-collapsed')),
+            expanded: Boolean(card && card.classList.contains('is-expanded')),
+            topPanelExists: Boolean(topPanel),
+            dockAboveComposer: Boolean(dockRect && boxRect && dockRect.bottom <= boxRect.top + 1),
+            dockVisible: Boolean(dockRect && dockRect.width > 0 && dockRect.height > 0),
+            composerVisible: Boolean(boxRect && boxRect.width > 0 && boxRect.height > 0),
+            dockBottom: dockRect ? Math.round(dockRect.bottom) : 0,
+            composerTop: boxRect ? Math.round(boxRect.top) : 0,
+          };
+        }
+        """
+    )
+
+
+def _question_state(page):
+    return page.evaluate(
+        """
+        () => {
+          const input = document.querySelector('.status-card-expert-question.pending textarea');
+          const active = document.activeElement === input;
+          const card = document.querySelector('#writeflowStatusDock .status-card-writeflow');
+          return {
+            exists: Boolean(input),
+            active,
+            value: input ? input.value : '',
+            expanded: Boolean(card && card.classList.contains('is-expanded')),
+            collapsed: Boolean(card && card.classList.contains('is-collapsed')),
+          };
+        }
+        """
+    )
+
+
+def _dock_a11y_state(page):
+    return page.evaluate(
+        """
+        () => {
+          const visible = (node) => {
+            if (!node) return false;
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0 &&
+              style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const nameFor = (node) => (
+            node && (
+              node.getAttribute('aria-label') ||
+              node.getAttribute('title') ||
+              (node.textContent || '').trim()
+            ) || ''
+          ).replace(/\\s+/g, ' ').trim();
+          const selectors = {
+            dockMain: '.status-card-expert-dock-summary',
+            collapse: '.expert-team-panel-hide',
+            confirm: '.status-card-expert-question-input button',
+            artifact: '.expert-team-panel-artifact-open, .expert-team-panel-priority-card.artifact button',
+          };
+          const names = {};
+          const visibleFlags = {};
+          for (const [key, selector] of Object.entries(selectors)) {
+            const node = document.querySelector(`#writeflowStatusDock ${selector}`);
+            names[key] = nameFor(node);
+            visibleFlags[key] = visible(node);
+          }
+          const focusables = Array.from(document.querySelectorAll(
+            'a[href],button,textarea,input,select,[tabindex]:not([tabindex="-1"])'
+          )).filter((node) => !node.disabled && visible(node));
+          const dockIndex = focusables.findIndex((node) => node.closest('#writeflowStatusDock'));
+          const composerIndex = focusables.findIndex((node) => node.closest('#composerWrap .composer-box'));
+          return {
+            names,
+            visible: visibleFlags,
+            dockBeforeComposer: dockIndex >= 0 && composerIndex >= 0 && dockIndex < composerIndex,
+            dockIndex,
+            composerIndex,
+          };
+        }
+        """
     )
 
 
@@ -255,8 +361,90 @@ def main():
                 page = ctx.new_page()
                 page.goto("/", wait_until="domcontentloaded")
                 page.wait_for_selector(".taiji-main-workspace", timeout=10000)
-                _inject_expert_team_card(page, str(workspace))
-                page.wait_for_selector(".expert-team-panel-priority-card.artifact button", timeout=10000)
+                _prepare_expert_team_session(page, str(workspace))
+                _render_smoke_card(page, done=False)
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
+                compact = _dock_geometry(page)
+                if not (compact["active"] and compact["collapsed"] and compact["dockVisible"] and compact["composerVisible"] and compact["dockAboveComposer"] and not compact["topPanelExists"]):
+                    failures.append(f"{width}x{height}: compact dock geometry failed {compact!r}")
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending textarea", timeout=10000)
+                try:
+                    page.wait_for_function(
+                        """
+                        () => document.activeElement ===
+                          document.querySelector('#writeflowStatusDock .status-card-expert-question.pending textarea')
+                        """,
+                        timeout=1200,
+                    )
+                except Exception:
+                    pass
+                pending_state = _question_state(page)
+                if not (pending_state["expanded"] and pending_state["exists"] and pending_state["active"]):
+                    failures.append(f"{width}x{height}: pending dock did not expand/focus textarea {pending_state!r}")
+                pending_a11y = _dock_a11y_state(page)
+                if not (
+                    pending_a11y["names"]["dockMain"] and
+                    pending_a11y["names"]["collapse"] and
+                    pending_a11y["names"]["confirm"] and
+                    pending_a11y["dockBeforeComposer"]
+                ):
+                    failures.append(f"{width}x{height}: pending dock a11y failed {pending_a11y!r}")
+                page.fill(".status-card-expert-question.pending textarea", "面向企业管理者，口径偏正式。")
+                _render_smoke_card(page, done=False)
+                restored_state = _question_state(page)
+                if restored_state["value"] != "面向企业管理者，口径偏正式。" or not restored_state["active"]:
+                    failures.append(f"{width}x{height}: input state not preserved after rerender {restored_state!r}")
+                pending_screenshot = output_dir / f"expert-team-dock-pending-expanded-{width}x{height}.png"
+                page.screenshot(path=str(pending_screenshot), full_page=True)
+                page.click(".expert-team-panel-hide")
+                collapsed_state = _dock_geometry(page)
+                if not collapsed_state["collapsed"]:
+                    failures.append(f"{width}x{height}: collapse button did not return to compact dock {collapsed_state!r}")
+
+                _render_smoke_card(page, done=True)
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
+                done_compact = _dock_geometry(page)
+                if not (done_compact["collapsed"] and done_compact["dockAboveComposer"]):
+                    failures.append(f"{width}x{height}: completed compact dock geometry failed {done_compact!r}")
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                try:
+                    page.wait_for_function(
+                        """
+                        () => {
+                          const p = document.getElementById('previewPathText');
+                          return (p && p.textContent.includes('expert-team-smoke.md')) ||
+                            Boolean(document.querySelector('.expert-team-panel-artifact-focus'));
+                        }
+                        """,
+                        timeout=7000,
+                    )
+                except Exception:
+                    pass
+                compact_result = _artifact_result_visible(page)
+                if not (compact_result["previewVisible"] or compact_result["artifactFocused"]):
+                    failures.append(
+                        f"{width}x{height}: compact artifact action produced no visible feedback "
+                        f"(previewPath={compact_result['previewPath']!r})"
+                    )
+                page.evaluate(
+                    """
+                    () => focusExpertTeamBottomDock(
+                      document.querySelector('#writeflowStatusDock .status-card-expert-dock-summary')
+                    )
+                    """
+                )
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .expert-team-panel-priority-card.artifact button", timeout=10000)
+                done_a11y = _dock_a11y_state(page)
+                if not (
+                    done_a11y["names"]["dockMain"] and
+                    done_a11y["names"]["collapse"] and
+                    done_a11y["names"]["artifact"] and
+                    done_a11y["dockBeforeComposer"]
+                ):
+                    failures.append(f"{width}x{height}: completed dock a11y failed {done_a11y!r}")
+                done_screenshot = output_dir / f"expert-team-dock-done-expanded-{width}x{height}.png"
+                page.screenshot(path=str(done_screenshot), full_page=True)
                 titles = _execution_row_titles(page)
                 expected_titles = ["需求确认", "撰写公众号长文", "生成封面和文中配图", "交付整理"]
                 if titles[:4] != expected_titles:

@@ -716,7 +716,7 @@ function _statusCardAvatarHtml(src,label,cls){
 }
 
 function _statusCardWriteflowStorageKey(card){
-  return `writeflow-status-dock:${card.runId||card.sessionId||card.subtitle||'default'}:compact-v2-expanded`;
+  return `writeflow-status-dock:${card.runId||card.sessionId||card.subtitle||'default'}:bottom-dock-v1-expanded`;
 }
 
 function _statusCardWriteflowExpanded(card){
@@ -726,7 +726,7 @@ function _statusCardWriteflowExpanded(card){
     if(stored==='1')return true;
     if(stored==='0')return false;
   }catch(_){}
-  return !!(card&&card.kind==='expert_team'&&Array.isArray(card.questions)&&card.questions.some(question=>String(question.status||'')!=='answered'));
+  return false;
 }
 
 function _isExpertTeamStatusCard(card){
@@ -1067,10 +1067,9 @@ function _expertTeamDockMiniHtml(card){
   const summary=_expertTeamDockSummary(card||{});
   const runId=card&&card.runId||card&&card.sessionId||'';
   const primaryArtifact=_expertTeamPrimaryArtifact(card||{});
-  const hiddenByUser=!!(runId&&_expertTeamWorkspacePanelHiddenForRun(runId));
-  const actionLabel=hiddenByUser&&!primaryArtifact?'展开任务区':summary.action;
+  const actionLabel=summary.action;
   const actionIcon=(typeof li==='function')?li('arrow-right',13):'›';
-  return `<button class="status-card-writeflow-mini status-card-expert-dock-summary ${esc(summary.state||'running')}" type="button" aria-label="专家团当前动作" data-expert-team-run-id="${esc(runId)}" data-expert-team-primary-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact&&primaryArtifact.download_name||'')}" onclick="handleExpertTeamDockAction(this);event.stopPropagation()">
+  return `<button class="status-card-writeflow-mini status-card-expert-dock-summary ${esc(summary.state||'running')}" type="button" aria-label="${esc(`专家团：${actionLabel}，${summary.title}`)}" data-expert-team-run-id="${esc(runId)}" data-expert-team-primary-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-path="${esc(primaryArtifact&&primaryArtifact.path||'')}" data-writeflow-artifact-download="${esc(primaryArtifact&&primaryArtifact.download_name||'')}" onmousedown="event.preventDefault()" onclick="handleExpertTeamDockAction(this);event.stopPropagation()">
     <span class="status-card-expert-dock-copy">
       <strong>${esc(summary.title)}</strong>
       <small>${esc(summary.detail)}</small>
@@ -1149,7 +1148,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const pendingAction=pending.length?`${pending.length} 项待确认`:(needsResume?'需要继续生成':'无需补充');
   const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':(needsResume?'执行流需要重新接续。':'需求确认已完成');
   const pendingButton=pending.length
-    ? `<button type="button" onclick="focusExpertTeamWorkspacePanel(this);event.stopPropagation()">去确认</button>`
+    ? `<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">去确认</button>`
     : (needsResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>');
   const executionHtml=executionRows.length?executionRows.map(row=>{
     return `<span class="expert-team-panel-execution-row ${esc(row.state||'idle')}">
@@ -1223,12 +1222,20 @@ function _setExpertTeamWorkspaceActive(active){
   const shell=typeof document!=='undefined'?document.querySelector('.taiji-home-shell'):null;
   if(shell){
     shell.classList.toggle('taiji-expert-team-active',!!active);
-    if(!active){
-      shell.classList.remove('taiji-expert-team-panel-visible');
-      shell.classList.remove('taiji-expert-team-panel-hidden');
-      shell.classList.remove('taiji-expert-team-panel-collapsed');
-    }
+    shell.classList.remove('taiji-expert-team-panel-visible');
+    shell.classList.remove('taiji-expert-team-panel-hidden');
+    shell.classList.remove('taiji-expert-team-panel-collapsed');
   }
+}
+
+function _removeExpertTeamWorkspacePanelElement(){
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  if(panel){
+    panel.innerHTML='';
+    panel.hidden=true;
+    panel.remove();
+  }
+  return true;
 }
 
 function _expertTeamWorkspaceStorageKey(runId){
@@ -1277,109 +1284,119 @@ function _syncExpertTeamWorkspacePanelVisibility(){
   const activeSid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
   const isCurrentSession=!sourceSid||!activeSid||sourceSid===activeSid;
   const hasExpertDock=!!(dock&&dock.querySelector&&dock.querySelector('.status-card-expert-dock-summary'));
-  const hasExpertPanel=!!(panel&&runId);
-  const hasCurrentExpert=!!(isCurrentSession&&(hasExpertPanel||hasExpertDock));
+  const hasCurrentExpert=!!(isCurrentSession&&(runId||hasExpertDock));
   const isChat=_expertTeamActivePanelName()==='chat';
-  const collapsedByUser=!!(runId&&_expertTeamWorkspacePanelHiddenForRun(runId));
-  const visible=!!(hasCurrentExpert&&hasExpertPanel&&isChat);
+  const visible=!!(hasCurrentExpert&&isChat);
   if(shell){
-    shell.classList.toggle('taiji-expert-team-active',hasCurrentExpert);
-    shell.classList.toggle('taiji-expert-team-panel-visible',visible);
-    shell.classList.toggle('taiji-expert-team-panel-hidden',!!(visible&&collapsedByUser));
-    shell.classList.toggle('taiji-expert-team-panel-collapsed',!!(visible&&collapsedByUser));
+    shell.classList.toggle('taiji-expert-team-active',visible);
+    shell.classList.remove('taiji-expert-team-panel-visible');
+    shell.classList.remove('taiji-expert-team-panel-hidden');
+    shell.classList.remove('taiji-expert-team-panel-collapsed');
   }
-  if(panel)panel.hidden=!visible;
+  if(panel)panel.hidden=true;
   return visible;
 }
 
-function hideExpertTeamWorkspacePanel(btn){
-  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
-  const runId=(btn&&btn.dataset&&btn.dataset.expertTeamHideRunId)||_expertTeamWorkspacePanelRunId(panel);
-  const next=!_expertTeamWorkspacePanelHiddenForRun(runId);
-  _setExpertTeamWorkspacePanelHiddenForRun(runId,next);
+function syncExpertTeamBottomDockState(card){
+  if(!_isExpertTeamStatusCard(card))return clearExpertTeamWorkspacePanel();
+  _removeExpertTeamWorkspacePanelElement();
+  _setExpertTeamWorkspaceActive(true);
   return _syncExpertTeamWorkspacePanelVisibility();
 }
 
+function _expertTeamBottomDockTarget(trigger){
+  const triggerRoot=trigger&&trigger.closest?(
+    trigger.closest('#writeflowStatusDock')||
+    (trigger.closest('.status-card-writeflow')&&trigger.closest('.status-card-writeflow').closest('#writeflowStatusDock'))
+  ):null;
+  const dock=triggerRoot||((typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'));
+  const card=dock&&dock.querySelector?dock.querySelector('.status-card-writeflow'):null;
+  return {dock,card};
+}
+
+function _setExpertTeamBottomDockExpanded(expanded,trigger){
+  const target=_expertTeamBottomDockTarget(trigger);
+  const card=target.card;
+  if(!card)return false;
+  const shouldExpand=!!expanded;
+  if(card.classList.contains('is-expanded')!==shouldExpand){
+    const toggle=card.querySelector('.status-card-writeflow-toggle');
+    if(toggle&&typeof toggleWriteflowStatusCard==='function'){
+      toggleWriteflowStatusCard(toggle);
+    }else{
+      card.classList.toggle('is-expanded',shouldExpand);
+      card.classList.toggle('is-collapsed',!shouldExpand);
+    }
+  }
+  return true;
+}
+
+function hideExpertTeamWorkspacePanel(btn){
+  const collapsed=_setExpertTeamBottomDockExpanded(false,btn);
+  _syncExpertTeamWorkspacePanelVisibility();
+  return collapsed;
+}
+
 function showExpertTeamWorkspacePanel(btn){
-  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
-  const runId=(btn&&btn.dataset&&(btn.dataset.expertTeamShowRunId||btn.dataset.expertTeamResumeRunId))||_expertTeamWorkspacePanelRunId(panel);
-  _setExpertTeamWorkspacePanelHiddenForRun(runId,false);
-  return _syncExpertTeamWorkspacePanelVisibility();
+  const expanded=_setExpertTeamBottomDockExpanded(true,btn);
+  _syncExpertTeamWorkspacePanelVisibility();
+  return expanded;
 }
 
 function renderExpertTeamWorkspacePanel(card){
   if(!_isExpertTeamStatusCard(card))return clearExpertTeamWorkspacePanel();
-  const workspace=typeof document!=='undefined'?document.querySelector('.taiji-main-workspace'):null;
-  if(!workspace){
-    _setExpertTeamWorkspaceActive(false);
-    return false;
-  }
-  let panel=document.getElementById('expertTeamWorkspacePanel');
-  if(!panel){
-    panel=document.createElement('aside');
-    panel.id='expertTeamWorkspacePanel';
-    panel.className='expert-team-workspace-panel';
-    panel.setAttribute('aria-live','polite');
-    workspace.appendChild(panel);
-  }
-  const renderKey=_expertTeamWorkspaceRenderKey(card);
-  panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
-  panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||card.source_session_id||'';
-  if(panel.dataset.expertTeamRenderKey===renderKey&&panel.querySelector('.expert-team-panel-inner')){
-    _setExpertTeamWorkspaceActive(true);
-    _syncExpertTeamWorkspacePanelVisibility();
-    return true;
-  }
-  const inputState=_captureExpertTeamQuestionInputState(panel);
-  panel.innerHTML=_expertTeamWorkspacePanelHtml(card);
-  panel.dataset.expertTeamRenderKey=renderKey;
-  _restoreExpertTeamQuestionInputState(panel,inputState);
-  _setExpertTeamWorkspaceActive(true);
-  _syncExpertTeamWorkspacePanelVisibility();
-  return true;
+  return syncExpertTeamBottomDockState(card);
 }
 
 function clearExpertTeamWorkspacePanel(){
-  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
-  if(panel){
-    panel.innerHTML='';
-    panel.hidden=true;
-    panel.remove();
-  }
+  _removeExpertTeamWorkspacePanelElement();
   _setExpertTeamWorkspaceActive(false);
   return true;
 }
 
-function focusExpertTeamWorkspacePanel(trigger){
-  let panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
-  const runId=_expertTeamWorkspacePanelRunId(panel);
-  _setExpertTeamWorkspacePanelHiddenForRun(runId,false);
+function focusExpertTeamBottomDock(trigger){
+  const target=_expertTeamBottomDockTarget(trigger);
+  const dock=target.dock;
+  if(!dock)return false;
+  _setExpertTeamBottomDockExpanded(true,trigger);
   _syncExpertTeamWorkspacePanelVisibility();
-  panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
-  if(panel&&!panel.hidden){
-    panel.scrollIntoView({block:'nearest',inline:'nearest'});
-    const focusTarget=panel.querySelector('.status-card-expert-question.pending textarea,[data-expert-team-question-id].status-card-expert-question.pending button,.expert-team-panel-artifact.ready button');
-    if(focusTarget&&focusTarget.scrollIntoView)focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});
-    if(focusTarget&&focusTarget.focus)focusTarget.focus({preventScroll:true});
-    return true;
+  try{dock.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+  const focusSelectors=[
+    '.status-card-expert-question.pending textarea',
+    '.status-card-expert-question.pending [data-expert-team-question-id]',
+    '.expert-team-panel-artifact.ready button:not(:disabled)',
+    '.expert-team-panel-artifact-open:not(:disabled)',
+    '.status-card-writeflow-toggle',
+    '.status-card-expert-dock-summary',
+  ];
+  let focusTarget=null;
+  for(const selector of focusSelectors){
+    focusTarget=dock.querySelector(selector);
+    if(focusTarget)break;
   }
-  const card=trigger&&trigger.closest?trigger.closest('.status-card-writeflow'):null;
-  if(card&&!card.classList.contains('is-expanded')){
-    const toggle=card.querySelector('.status-card-writeflow-toggle');
-    if(toggle&&typeof toggleWriteflowStatusCard==='function'){
-      toggleWriteflowStatusCard(toggle);
-      return true;
-    }
-  }
-  return false;
+  if(focusTarget&&focusTarget.scrollIntoView)focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});
+  const applyFocus=()=>{
+    if(!(focusTarget&&focusTarget.focus))return;
+    try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
+  };
+  applyFocus();
+  try{setTimeout(applyFocus,0);}catch(_){}
+  try{setTimeout(applyFocus,40);}catch(_){}
+  return true;
+}
+
+function focusExpertTeamWorkspacePanel(trigger){
+  return focusExpertTeamBottomDock(trigger);
 }
 if(typeof window!=='undefined'){
   window.renderExpertTeamWorkspacePanel=renderExpertTeamWorkspacePanel;
   window.clearExpertTeamWorkspacePanel=clearExpertTeamWorkspacePanel;
+  window.focusExpertTeamBottomDock=focusExpertTeamBottomDock;
   window.focusExpertTeamWorkspacePanel=focusExpertTeamWorkspacePanel;
   window._syncExpertTeamWorkspacePanelVisibility=_syncExpertTeamWorkspacePanelVisibility;
   window.hideExpertTeamWorkspacePanel=hideExpertTeamWorkspacePanel;
   window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel;
+  window.syncExpertTeamBottomDockState=syncExpertTeamBottomDockState;
 }
 
 function toggleWriteflowStatusCard(btn){
@@ -1439,12 +1456,16 @@ function _workspacePreviewVisibleToUser(){
 }
 function _focusExpertTeamArtifactEntry(btn,path){
   if(typeof document==='undefined')return false;
-  const panel=(btn&&btn.closest&&btn.closest('.expert-team-workspace-panel'))||document.getElementById('expertTeamWorkspacePanel');
+  const panel=(btn&&btn.closest&&(
+    btn.closest('.expert-team-workspace-panel')||
+    btn.closest('#writeflowStatusDock')||
+    btn.closest('.status-card-writeflow')
+  ))||document.getElementById('expertTeamWorkspacePanel')||document.getElementById('writeflowStatusDock');
   if(!panel)return false;
   if(typeof showExpertTeamWorkspacePanel==='function')showExpertTeamWorkspacePanel(btn);
   const targets=Array.from(panel.querySelectorAll('[data-writeflow-artifact-path]'));
   const matched=targets.find(el=>el&&el.dataset&&el.dataset.writeflowArtifactPath===path)||btn;
-  const card=(matched&&matched.closest&&matched.closest('.expert-team-panel-artifact'))||matched;
+  const card=(matched&&matched.closest&&(matched.closest('.expert-team-panel-artifact')||matched.closest('.status-card-writeflow-artifact')))||matched;
   if(!card)return false;
   try{card.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'});}catch(_){try{card.scrollIntoView();}catch(__){}}
   if(typeof card.focus==='function'){
@@ -1504,7 +1525,7 @@ async function handleExpertTeamDockAction(btn){
     const opened=await openExpertTeamArtifact(btn);
     if(opened)return true;
   }
-  return focusExpertTeamWorkspacePanel(btn);
+  return focusExpertTeamBottomDock(btn);
 }
 if(typeof window!=='undefined'){
   window.openWriteflowArtifact=openWriteflowArtifact;
@@ -1720,9 +1741,10 @@ function _statusCardWriteflowHtml(card,copyBtn){
     <div class="expert-team-process-tasks">${taskHtml}</div>
     <div class="expert-team-process-artifacts">${artifactHtml}</div>
   </div>`;
+  const expertBodyHtml=isExpertTeam?_expertTeamWorkspacePanelHtml(card):'';
   return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}" data-expert-team-run-id="${esc(card.runId||card.sessionId||'')}">
     ${miniHtml}
-    <div class="status-card-head status-card-writeflow-head">
+    ${isExpertTeam?'':`<div class="status-card-head status-card-writeflow-head">
       <div class="status-card-title-wrap">
         <div class="status-card-writeflow-team">
           ${_statusCardAvatarHtml(teamImage,team.title||card.title,'status-card-writeflow-team-avatar')}
@@ -1733,9 +1755,9 @@ function _statusCardWriteflowHtml(card,copyBtn){
         </div>
       </div>
       <div class="status-card-actions">${copyBtn}${toggleBtn}</div>
-    </div>
-    <div class="status-card-writeflow-body">
-      <div class="status-card-writeflow-overview">
+    </div>`}
+    <div class="status-card-writeflow-body ${isExpertTeam?'status-card-expert-bottom-body':''}">
+      ${isExpertTeam?expertBodyHtml:`<div class="status-card-writeflow-overview">
         <span class="status-card-writeflow-badge ${esc(stateClass)}">${esc(card.statusLabel||card.status||'执行中')}</span>
         ${metricHtml}
       </div>
@@ -1764,7 +1786,7 @@ function _statusCardWriteflowHtml(card,copyBtn){
           <div class="status-card-writeflow-section-title"><span>历史参考材料</span><small>${referenceArtifacts.length} 个来自旧会话/历史目录</small></div>
           <div class="status-card-writeflow-artifacts">${referenceArtifactHtml}</div>
         </div>`:''}
-      </div>
+      </div>`}
     </div>
   </div>`;
 }
@@ -1824,7 +1846,7 @@ function renderWriteflowStatusDock(card){
   dock.hidden=false;
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
-  if(isExpertTeam)renderExpertTeamWorkspacePanel(card);
+  if(isExpertTeam)syncExpertTeamBottomDockState(card);
   else clearExpertTeamWorkspacePanel();
   return true;
 }
