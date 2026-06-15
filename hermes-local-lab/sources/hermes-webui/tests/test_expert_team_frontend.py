@@ -127,6 +127,11 @@ def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
     assert "focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});" in focus_body
     assert ".status-card-expert-question.pending textarea" in focus_body
 
+    expand_start = UI_JS.index("function _setExpertTeamBottomDockExpanded")
+    expand_body = UI_JS[expand_start : UI_JS.index("function hideExpertTeamWorkspacePanel", expand_start)]
+    assert "_persistExpertTeamBottomDockExpanded(card,shouldExpand)" in expand_body
+    assert "function _persistExpertTeamBottomDockExpanded" in UI_JS
+
     assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock" in STYLE_CSS
     assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded" in STYLE_CSS
     assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" in STYLE_CSS
@@ -213,6 +218,13 @@ def test_expert_team_workspace_uses_bottom_dock_without_top_panel_squeeze():
     assert "display:block!important;" in dock_block
     assert "display:none!important;" not in dock_block
     assert "max-height:min(72vh,620px)!important;" in expanded_block
+    assert "overflow:hidden auto!important;" in expanded_block
+
+    inner_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-bottom-body .expert-team-panel-inner")
+    inner_block = STYLE_CSS[inner_start : STYLE_CSS.index("}", inner_start)]
+    assert "max-height:none!important;" in inner_block
+    assert "overflow:visible!important;" in inner_block
+    assert "overflow:hidden auto!important;" not in inner_block
 
     legacy_visible = STYLE_CSS.find(".taiji-home-shell.taiji-expert-team-panel-visible .expert-team-workspace-panel")
     if legacy_visible != -1:

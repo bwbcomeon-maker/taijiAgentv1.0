@@ -10033,10 +10033,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
     background:transparent!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-bottom-body .expert-team-panel-inner{
-    max-height:calc(min(72vh,620px) - 2px)!important;
+    max-height:none!important;
     padding:10px!important;
-    overflow:hidden auto!important;
-    overscroll-behavior:contain!important;
+    overflow:visible!important;
+    overscroll-behavior:auto!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow.is-expanded) main.main.taiji-real-main #mainChat .messages-shell{
     bottom:clamp(500px,74vh,660px)!important;

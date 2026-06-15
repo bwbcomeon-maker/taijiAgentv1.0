@@ -1044,6 +1044,9 @@ function _restoreExpertTeamQuestionInputState(root,state){
       focusState=saved;
     }
   });
+  if(!focusTarget&&state.activeKey){
+    focusTarget=root.querySelector('.status-card-expert-question.pending [data-expert-team-answer-input]');
+  }
   if(focusTarget&&typeof focusTarget.focus==='function'){
     focusTarget.focus({preventScroll:true});
     const start=focusState&&typeof focusState.selectionStart==='number'?focusState.selectionStart:null;
@@ -1358,6 +1361,17 @@ function _expertTeamBottomDockTarget(trigger){
   return {dock,card};
 }
 
+function _persistExpertTeamBottomDockExpanded(card,expanded){
+  const key=card&&card.getAttribute?card.getAttribute('data-writeflow-card-key'):'';
+  if(!key)return false;
+  try{
+    localStorage.setItem(key,expanded?'1':'0');
+    return true;
+  }catch(_){
+    return false;
+  }
+}
+
 function _setExpertTeamBottomDockExpanded(expanded,trigger){
   const target=_expertTeamBottomDockTarget(trigger);
   const card=target.card;
@@ -1372,6 +1386,7 @@ function _setExpertTeamBottomDockExpanded(expanded,trigger){
       card.classList.toggle('is-collapsed',!shouldExpand);
     }
   }
+  _persistExpertTeamBottomDockExpanded(card,shouldExpand);
   return true;
 }
 
@@ -1609,6 +1624,7 @@ async function answerExpertTeamQuestion(btn){
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
     if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(card&&typeof focusExpertTeamBottomDock==='function')focusExpertTeamBottomDock(null);
     _applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
   }catch(e){

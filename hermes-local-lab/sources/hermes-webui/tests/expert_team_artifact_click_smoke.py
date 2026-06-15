@@ -130,6 +130,62 @@ def _render_smoke_card(page, done=False):
     )
 
 
+def _render_multi_question_card(page, answered_first=False):
+    page.evaluate(
+        """
+        ({answeredFirst}) => {
+          const questions = [
+            {
+              id: 'topic',
+              title: '文章主题和核心观点',
+              type: 'text',
+              status: answeredFirst ? 'answered' : 'pending',
+              answer: answeredFirst ? '本地优先 AI 助理' : '',
+              required: true,
+            },
+            {
+              id: 'audience',
+              title: '目标读者和发布口径',
+              type: 'text',
+              status: 'pending',
+              required: true,
+            },
+          ];
+          const base = {
+            type: 'expert-team',
+            kind: 'expert_team',
+            runId: 'expert-team-multi-question-smoke',
+            sessionId: S.session.session_id,
+            sourceSessionId: S.session.session_id,
+            team: {id: 'content-creator-team', title: '内容创作专家团'},
+            subtitle: '确认后保持展开验收',
+            status: 'waiting_user',
+            statusLabel: '待确认',
+            phase: '需求确认',
+            phases: ['需求确认', '生成初稿', '打磨发布', '交付'],
+            progress: {done: answeredFirst ? 1 : 0, total: 4},
+            members: [
+              {id: 'flow', name: '流程编排', status: 'waiting'},
+              {id: 'writer', name: '文案创作专家', status: 'idle'},
+              {id: 'image', name: '配图专家', status: 'idle'},
+              {id: 'review', name: '审稿润色', status: 'idle'},
+            ],
+            tasks: [
+              {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'waiting', status_label: '待确认'},
+              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: 'idle', status_label: '待执行'},
+              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: 'idle', status_label: '待执行'},
+              {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'idle', status_label: '待执行'},
+            ],
+            artifacts: [],
+            questions,
+          };
+          renderWriteflowStatusDock(base);
+        }
+        """,
+        {"answeredFirst": answered_first},
+    )
+
+
 def _render_action_smoke_card(page, state):
     page.evaluate(
         """
@@ -223,6 +279,29 @@ def _question_state(page):
             value: input ? input.value : '',
             expanded: Boolean(card && card.classList.contains('is-expanded')),
             collapsed: Boolean(card && card.classList.contains('is-collapsed')),
+          };
+        }
+        """
+    )
+
+
+def _dock_scroll_state(page):
+    return page.evaluate(
+        """
+        () => {
+          const card = document.querySelector('#writeflowStatusDock .status-card-writeflow');
+          const inner = document.querySelector('#writeflowStatusDock .status-card-expert-bottom-body .expert-team-panel-inner');
+          const overflowY = (node) => node ? getComputedStyle(node).overflowY : '';
+          const createsScrollbar = (node) => {
+            if (!node) return false;
+            const y = overflowY(node);
+            return (y === 'auto' || y === 'scroll') && node.scrollHeight > node.clientHeight + 1;
+          };
+          return {
+            cardOverflowY: overflowY(card),
+            innerOverflowY: overflowY(inner),
+            cardCreatesScrollbar: createsScrollbar(card),
+            innerCreatesScrollbar: createsScrollbar(inner),
           };
         }
         """
@@ -479,6 +558,32 @@ def main():
                 restored_state = _question_state(page)
                 if restored_state["value"] != "面向企业管理者，口径偏正式。" or not restored_state["active"]:
                     failures.append(f"{width}x{height}: input state not preserved after rerender {restored_state!r}")
+
+                _render_multi_question_card(page, answered_first=False)
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending textarea", timeout=10000)
+                page.fill(".status-card-expert-question.pending textarea", "本地优先 AI 助理")
+                _render_multi_question_card(page, answered_first=True)
+                try:
+                    page.wait_for_function(
+                        """
+                        () => {
+                          const card = document.querySelector('#writeflowStatusDock .status-card-writeflow');
+                          const pending = document.querySelector('#writeflowStatusDock .status-card-expert-question.pending textarea');
+                          return card && card.classList.contains('is-expanded') && document.activeElement === pending;
+                        }
+                        """,
+                        timeout=1200,
+                    )
+                except Exception:
+                    pass
+                after_answer_state = _question_state(page)
+                if not (after_answer_state["expanded"] and after_answer_state["exists"] and after_answer_state["active"]):
+                    failures.append(f"{width}x{height}: dock did not stay open and focus next question {after_answer_state!r}")
+                scroll_state = _dock_scroll_state(page)
+                if scroll_state["cardOverflowY"] != "auto" or scroll_state["innerOverflowY"] != "visible" or scroll_state["innerCreatesScrollbar"]:
+                    failures.append(f"{width}x{height}: dock should use one outer scrollbar {scroll_state!r}")
                 pending_screenshot = output_dir / f"expert-team-dock-pending-expanded-{width}x{height}.png"
                 page.screenshot(path=str(pending_screenshot), full_page=True)
                 page.click(".expert-team-panel-hide")
@@ -503,6 +608,14 @@ def main():
                     failures.append(f"{width}x{height}: retry action not discoverable {retry_action!r}")
 
                 _render_smoke_card(page, done=True)
+                page.evaluate(
+                    """
+                    () => {
+                      const card = document.querySelector('#writeflowStatusDock .status-card-writeflow');
+                      if (window.hideExpertTeamWorkspacePanel && card) window.hideExpertTeamWorkspacePanel(card);
+                    }
+                    """
+                )
                 page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-collapsed .status-card-expert-dock-summary", timeout=10000)
                 done_compact = _dock_geometry(page)
                 if not (done_compact["collapsed"] and done_compact["dockAboveComposer"]):
