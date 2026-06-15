@@ -67,6 +67,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("-m taiji_runtime.main gateway run --accept-hooks", start_agent)
         self.assertNotIn('venv/bin/hermes" gateway run', start_agent)
         self.assertIn('source "$RUNTIME_ENV"', local_cli)
+        self.assertIn('SOURCE_PATH="${BASH_SOURCE[0]}"', local_cli)
+        self.assertIn('while [ -L "$SOURCE_PATH" ]', local_cli)
+        self.assertIn('readlink "$SOURCE_PATH"', local_cli)
         self.assertIn('TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"', local_cli)
         self.assertIn("print_taiji_version", local_cli)
         self.assertIn("--version|-V|version", local_cli)
@@ -313,6 +316,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("uv sync --extra all --locked", setup)
         self.assertIn("uv sync --extra all", setup)
         self.assertIn("retrying without --locked", setup)
+
+    def test_setup_local_installs_user_taiji_launcher(self):
+        setup = read_text("hermes-local-lab/scripts/setup-local.sh")
+
+        self.assertIn('TAIJI_USER_BIN="${TAIJI_USER_BIN:-$HOME/.local/bin}"', setup)
+        self.assertIn('ln -sfn "$LAB_DIR/scripts/taiji" "$TAIJI_USER_BIN/taiji"', setup)
+        self.assertIn('hash -r', setup)
+        self.assertIn('$TAIJI_USER_BIN/taiji status', setup)
+        self.assertNotIn('venv/bin/hermes" "$@"', setup)
 
     def test_operator_doc_records_confirmed_kylin_target_and_offline_boundary(self):
         doc = read_text("docs/taiji-desktop-uos-packaging.md")

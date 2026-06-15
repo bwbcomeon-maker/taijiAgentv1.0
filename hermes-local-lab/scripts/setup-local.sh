@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DIR="$LAB_DIR/sources/hermes-agent"
 WEBUI_DIR="$LAB_DIR/sources/hermes-webui"
+TAIJI_USER_BIN="${TAIJI_USER_BIN:-$HOME/.local/bin}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required. Install it first: https://docs.astral.sh/uv/" >&2
@@ -44,9 +45,13 @@ sync_agent_dependencies
 uv pip install --python "$AGENT_DIR/venv/bin/python" \
   -r "$WEBUI_DIR/requirements.txt"
 
+mkdir -p "$TAIJI_USER_BIN"
+ln -sfn "$LAB_DIR/scripts/taiji" "$TAIJI_USER_BIN/taiji"
+hash -r
+
 echo "Local dependencies installed."
 echo "Next:"
-echo "  $LAB_DIR/scripts/taiji --version"
+echo "  $TAIJI_USER_BIN/taiji status"
 echo "  $LAB_DIR/scripts/start-agent.sh"
 echo "  $LAB_DIR/scripts/start-webui.sh"
 echo "  $LAB_DIR/scripts/health-check.sh"
