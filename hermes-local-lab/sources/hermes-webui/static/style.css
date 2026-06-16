@@ -3940,8 +3940,19 @@ main.main > #mainPlugin{display:none;}
 #checkUpdatesBlock .btn-tiny:disabled{opacity:.5;cursor:default;}
 #checkUpdatesBlock .btn-tiny .spinner-xs{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--text);border-radius:50%;animation:spin .6s linear infinite;display:none;}
 #checkUpdatesStatus{font-size:11px;font-weight:500;white-space:nowrap;}
-#settingsPaneAbout .settings-section-head{margin-bottom:14px;}
-.settings-about-copy{font-size:14px;color:var(--text);line-height:1.8;white-space:pre-line;max-width:720px;}
+#settingsPaneAbout{min-height:min(580px,calc(100vh - 150px));}
+.settings-about-shell{display:grid;place-items:center;min-height:inherit;padding:clamp(16px,3vw,40px) 12px;}
+.settings-about-card{position:relative;width:min(660px,100%);overflow:hidden;border:1px solid rgba(177,207,229,.86);border-radius:24px;background:linear-gradient(180deg,rgba(255,255,255,.96),rgba(247,251,254,.9));box-shadow:0 28px 72px rgba(36,86,132,.18),inset 0 1px 0 rgba(255,255,255,.86);}
+.settings-about-card::before{content:"";position:absolute;inset:0 0 auto;height:96px;background:linear-gradient(135deg,rgba(229,249,253,.92),rgba(255,255,255,0));pointer-events:none;}
+.settings-about-hero{position:relative;display:grid;place-items:center;padding:40px 32px 12px;}
+.settings-about-logo{display:block;width:84px;height:84px;object-fit:contain;filter:drop-shadow(0 16px 22px rgba(11,113,189,.2));}
+.settings-about-body{position:relative;padding:0 clamp(30px,5vw,60px) 34px;text-align:center;}
+.settings-about-product-name{margin-top:16px;color:#06284f;font-size:clamp(28px,3vw,34px);font-weight:850;line-height:1.12;letter-spacing:0;}
+.settings-about-subtitle{margin-top:8px;color:#61778f;font-size:14px;font-weight:750;line-height:1.4;}
+.settings-about-copy{margin:30px auto 0;max-width:540px;color:#15375f;font-size:18px;line-height:1.78;text-align:left;white-space:pre-line;}
+.settings-about-footer{display:flex;align-items:center;gap:28px;margin-top:26px;padding-top:16px;border-top:1px solid rgba(174,205,228,.75);text-align:left;}
+.settings-about-mark{flex:0 0 auto;color:#078ca6;font-size:12px;font-weight:900;letter-spacing:.18em;}
+.settings-about-note{color:#71889e;font-size:13px;font-weight:600;line-height:1.6;}
 
 /* Each logical form row is a card surface. Stack with comfortable gap. */
 #mainSettings .settings-field{margin-bottom:12px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);}
