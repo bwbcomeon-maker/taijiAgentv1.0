@@ -3939,8 +3939,14 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneAbout .settings-section-head{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;}
 #settingsPaneAbout .settings-version-badge{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 #settingsAboutVersionBlock{display:inline-flex;align-items:center;justify-content:flex-start;gap:6px;flex-wrap:wrap;font-size:12px;min-width:0;}
-#settingsPaneAbout .settings-field ul{margin-top:0;margin-bottom:0;}
+#settingsAboutSections{display:block;}
+#settingsAboutSections .settings-field ul{margin-top:0;margin-bottom:0;}
 #settingsPaneAbout .settings-autosave-status{margin-top:8px;}
+.settings-about-heading{font-size:16px;font-weight:700;color:var(--text);line-height:1.5;}
+.settings-about-body{font-size:13px;color:var(--text);line-height:1.7;}
+.settings-about-list{margin:0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.7;}
+.settings-about-paragraph{font-size:12px;color:var(--muted);line-height:1.7;}
+.settings-about-paragraph+.settings-about-paragraph{margin-top:8px;}
 
 /* Each logical form row is a card surface. Stack with comfortable gap. */
 #mainSettings .settings-field{margin-bottom:12px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);}

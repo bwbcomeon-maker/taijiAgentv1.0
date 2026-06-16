@@ -6340,37 +6340,86 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
+function setAboutText(id,value){
+  const el=$(id);
+  if(el) el.textContent=(value==null)?'':String(value);
+}
+
+function renderAboutVersionItems(items){
+  const block=$('settingsAboutVersionBlock');
+  if(!block) return;
+  block.innerHTML='';
+  (Array.isArray(items)?items:[]).forEach(item=>{
+    const text=String((item&&item.display_text)||'').trim();
+    if(!text) return;
+    const badge=document.createElement('span');
+    badge.className='settings-version-badge';
+    badge.textContent=text;
+    block.appendChild(badge);
+  });
+}
+
+function renderAboutSectionBody(card,section){
+  const kind=String((section&&section.kind)||'text');
+  if(kind==='list'){
+    const list=document.createElement('ul');
+    list.className='settings-about-list';
+    (Array.isArray(section.items)?section.items:[]).forEach(item=>{
+      const text=String(item||'').trim();
+      if(!text) return;
+      const li=document.createElement('li');
+      li.textContent=text;
+      list.appendChild(li);
+    });
+    card.appendChild(list);
+    return;
+  }
+  if(kind==='paragraphs'){
+    (Array.isArray(section.paragraphs)?section.paragraphs:[]).forEach(text=>{
+      const paragraph=document.createElement('div');
+      paragraph.className='settings-about-paragraph';
+      paragraph.textContent=String(text||'');
+      card.appendChild(paragraph);
+    });
+    return;
+  }
+  const body=document.createElement('div');
+  body.className=kind==='heading'?'settings-about-heading':'settings-about-body';
+  body.textContent=String((section&&section.body)||'');
+  card.appendChild(body);
+}
+
+function renderAboutSections(sections){
+  const container=$('settingsAboutSections');
+  if(!container) return;
+  container.innerHTML='';
+  (Array.isArray(sections)?sections:[]).forEach(section=>{
+    if(!section) return;
+    const card=document.createElement('div');
+    card.className='settings-field';
+    const label=document.createElement('label');
+    label.textContent=String(section.label||'');
+    card.appendChild(label);
+    renderAboutSectionBody(card,section);
+    container.appendChild(card);
+  });
+}
+
 function loadAboutPanel(){
   const pane=$('settingsPaneAbout');
   if(!pane) return;
-  const setText=(id,value,fallback='—')=>{
-    const el=$(id);
-    if(el) el.textContent=(value==null||String(value).trim()==='')?fallback:String(value);
-  };
   const status=$('settingsAboutStatus');
-  if(status) status.textContent='正在读取关于信息…';
+  if(status) status.textContent='';
   api('/api/about',{timeoutToast:false}).then(data=>{
-    setText('settingsAboutProductName',data.product_name,'太极 Agent');
-    setText('settingsAboutDescription',data.description,'—');
-    setText('settingsAboutLicense',data.license_notice,'—');
-    setText('settingsAboutDeveloperNote',data.developer_note,'—');
-    setText('settings-about-webui-version-badge',`WebUI: ${data.webui_version||'unknown'}`,'WebUI: unknown');
-    setText('settings-about-agent-version-badge',`Agent: ${data.agent_version||'not detected'}`,'Agent: not detected');
-    const owner=(data.copyright_owner||'太极 Agent 项目组').toString().trim()||'太极 Agent 项目组';
-    setText('settingsAboutCopyright',`版权所有 © 2026 ${owner}。保留所有权利。`);
-    const list=$('settingsAboutHighlights');
-    if(list){
-      list.innerHTML='';
-      const highlights=Array.isArray(data.highlights)?data.highlights:[];
-      highlights.forEach(item=>{
-        const li=document.createElement('li');
-        li.textContent=String(item||'').trim();
-        if(li.textContent) list.appendChild(li);
-      });
-    }
-    if(status) status.textContent='关于信息已随当前版本固化。';
+    setAboutText('settingsAboutTitle',data.title);
+    setAboutText('settingsAboutSubtitle',data.subtitle);
+    renderAboutVersionItems(data.version_items);
+    renderAboutSections(data.sections);
+    const menuLabel=document.querySelector('[data-settings-section="about"] span');
+    if(menuLabel&&data.menu_label) menuLabel.textContent=String(data.menu_label);
+    if(status) status.textContent=String(data.success_status||'');
   }).catch(()=>{
-    if(status) status.textContent='关于信息暂时无法读取。';
+    if(status) status.textContent='';
   });
 }
 
