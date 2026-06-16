@@ -32,6 +32,22 @@
 - 验收结论必须分清：源码仓库 grep 仍可能看到 Hermes；重新构建并安装后的用户安装目录、普通启动入口、进程命令、环境变量、日志和诊断输出才是去 Hermes 化的验收对象。旧安装包不会自动变化，必须重新打包并重新安装。
 - 若一次打包经过多轮目标机调试，调试成功并完成验证后，必须把新增经验同步回本项目 `AGENTS.md`。同步内容至少包括：实际问题根因、有效修复方式、必须保留的 release gate、目标机验收命令、仍需人工确认的风险；不要把未验证猜测写成长期规则。
 
+### 2026-06-16 Kylin V10 SP1 离线交付已确认经验
+
+本轮最终状态：用户已确认最新离线交付包在 Kylin V10 SP1 x86_64/amd64 终端完成制包、安装部署并可正常使用。以后维护同一条交付链路时，把下面规则当作已验证 release gate。
+
+- 离线交付目录必须只保留当前部署相关文件：`00_制包机_生成离线交付包.sh`、`02_目标终端_安装并验证.sh`、`03_目标终端_导出诊断报告.sh`、`操作说明.md`、`版本信息.txt`、`SHA256SUMS.txt`、当前 `taiji-agentv1.0-kylin-build-src-<hash>.tar.gz`，以及制包后生成的 `生成的安装包/`、`离线依赖/`、`构建日志/`。不要保留历史源码包、旧 DEB、旧清理脚本或清空对话 `.desktop`，避免现场误用。
+- `SHA256SUMS.txt` 中源码包条目必须写成 `hash  taiji-agentv1.0-kylin-build-src-<hash>.tar.gz` 这种 basename 形式；制包脚本也必须兼容误带 `taijiagent 打包交付/` 前缀的旧格式，并在校验成功后自动归一化。不要在目标机脚本里直接 `sha256sum -c SHA256SUMS.txt` 依赖原始路径。
+- 目标 Kylin 上的 `awk` 可能不支持 `[[:xdigit:]]{64}` 这类重复次数正则。交付 shell 中解析 checksum 时必须用 `length(hash) == 64` 加十六进制字符判断，或使用更保守的 POSIX 写法；每次改 `00_制包机_生成离线交付包.sh` 都要有真实 shell 级测试覆盖带中文/空格目录前缀的 checksum 行。
+- 本地 apt 离线仓库不能直接把含中文和空格的交付目录写进 `file:` 源。`02_目标终端_安装并验证.sh` 必须把 `离线依赖/` 映射或 symlink 到 `/tmp/taiji-agent-offline-repo.*` 这类无空格 ASCII 路径，再执行 `apt-get update/install`。
+- 打包副本不能整包排除 `plugins/`。Agent 初始化和 CLI/WebUI 对话需要 `plugins.memory`、`plugins.context_engine` 等模块；`taiji-native-verify` 必须实际 import `taiji_runtime.main`、`plugins`、`plugins.memory`、`plugins.context_engine`。只排除本轮桌面运行不需要且会触发旧品牌路径/文本扫描的插件目录。
+- 打包副本必须排除开发/构建元数据和模板：`.env.example`、`*.example`、`uv.lock`、`pyproject.toml`、`package*.json`、editable install metadata、egg-info、上游 helper scripts、Docker/website/docs/tests 等。否则会触发隐私扫描，或把构建机路径、旧品牌文本、模板变量打进安装树。
+- 授权问题要先区分“导入成功”和“runtime 公钥校验成功”。签发器私钥对应的 public key 必须和 `taiji_license.py` 默认公钥一致，并用测试证明签发器生成的 license 能被 runtime 验为 `valid`。
+- DeepSeek V4 配置里 `reasoning_effort=max` 是有效链路；共享解析器、CLI、Gateway `/reasoning` 命令和 DeepSeek provider 都必须支持 `max`，不要把它降级成 unknown/default。
+- 每次生成新源码包后，必须删除交付目录内旧的 `taiji-agentv1.0-kylin-build-src-*.tar.gz`，重新生成 `SHA256SUMS.txt`，并在最终回复里明确当前 hash；现场必须整体拷贝最新交付目录，不要混用旧脚本和新源码包。
+- 目标机验收命令至少包括：在制包机运行 `bash ./00_制包机_生成离线交付包.sh`；在目标机断网或按离线条件运行 `bash ./02_目标终端_安装并验证.sh`；运行 `/opt/taiji-agent/bin/taiji-native-verify`；运行 `taiji --help` 和一次真实 `taiji` CLI 对话；双击“太极 Agent”完成 WebUI 对话、关闭窗口后确认本次 Agent/WebUI 进程退出；必要时运行 `bash ./03_目标终端_导出诊断报告.sh`。
+- 当前仍需人工确认的风险：若目标机更换 apt 源、Kylin 小版本、CPU 架构、图形会话或模型服务/API key，必须重新跑上述验收；旧安装包、旧运行日志、旧诊断报告不会因为源码修复自动变成新结果。
+
 ## 前端 UX QA gate
 
 任何涉及前端、UI、UX、页面、组件、布局、样式、交互、表单、列表、表格、导航、弹窗、可访问性、浏览器测试、截图、视觉优化或功能完整性的任务，都必须显式使用 `$frontend-ux-qa`。
