@@ -33,15 +33,14 @@ APP_ROOT="/opt/taiji-agent"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-TAIJI_CONFIG_DIR="$XDG_CONFIG_HOME/taiji-agent"
 TAIJI_DATA_DIR="$XDG_DATA_HOME/taiji-agent"
 TAIJI_STATE_DIR="$XDG_STATE_HOME/taiji-agent"
-HERMES_HOME="$TAIJI_DATA_DIR/hermes-home"
-WEBUI_DIR="$HERMES_HOME/webui"
+TAIJI_RUNTIME_HOME="$TAIJI_DATA_DIR/runtime-home"
+WEBUI_DIR="$TAIJI_RUNTIME_HOME/webui"
 WEBUI_SESSIONS_DIR="$WEBUI_DIR/sessions"
 WEBUI_ATTACHMENTS_DIR="$WEBUI_DIR/attachments"
-AGENT_SESSIONS_DIR="$HERMES_HOME/sessions"
-STATE_DB="$HERMES_HOME/state.db"
+AGENT_SESSIONS_DIR="$TAIJI_RUNTIME_HOME/sessions"
+STATE_DB="$TAIJI_RUNTIME_HOME/state.db"
 BACKUP_DIR="$HOME/taiji-agent-会话备份-$(date +%Y%m%d_%H%M%S)"
 
 count_files() {
@@ -55,7 +54,7 @@ count_files() {
 
 echo "太极 Agent 对话记录清理工具"
 echo "当前用户：$USER"
-echo "Hermes home：$HERMES_HOME"
+echo "本机运行数据目录：$TAIJI_RUNTIME_HOME"
 echo
 echo "本工具会清理："
 echo "  - WebUI 对话 JSON：$WEBUI_SESSIONS_DIR"
@@ -64,14 +63,14 @@ echo "  - Agent 会话文件：$AGENT_SESSIONS_DIR"
 echo "  - state.db 里的 sessions/messages 会话记录"
 echo
 echo "本工具不会清理："
-echo "  - 模型配置和 API Key：$HERMES_HOME/config.yaml / $TAIJI_CONFIG_DIR/.env"
+echo "  - 模型配置和 API Key"
 echo "  - 工作区文件：$TAIJI_DATA_DIR/workspace"
-echo "  - 生成图片缓存：$HERMES_HOME/cache/images"
+echo "  - 生成图片缓存"
 echo "  - 安装目录：$APP_ROOT"
 echo
 
-if [ ! -d "$HERMES_HOME" ]; then
-  echo "[FAIL] 没找到太极 Agent 用户数据目录：$HERMES_HOME"
+if [ ! -d "$TAIJI_RUNTIME_HOME" ]; then
+  echo "[FAIL] 没找到太极 Agent 用户数据目录：$TAIJI_RUNTIME_HOME"
   echo "       请确认你是在安装太极 Agent 的同一个登录用户下运行。"
   exit 1
 fi

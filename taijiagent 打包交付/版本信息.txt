@@ -1,13 +1,13 @@
 太极 Agent 麒麟终端打包交付
 
-源码包：taiji-agentv1.0-kylin-build-src-22fda68.tar.gz
-源码 commit：22fda68893482f6d6456d4e88d603b4f7e69b64a
+源码包：taiji-agentv1.0-kylin-build-src-<hash>.tar.gz
+源码 commit：以源码包文件名、SHA256SUMS.txt 和制包机构建报告为准
 目标系统：Kylin V10 SP1 / Debian-like / x86_64 amd64 / glibc 2.31
-交付形态：目标终端本地构建 amd64 DEB，然后本机安装验证
+交付形态：联网 Linux amd64 制包机生成 DEB 和离线依赖仓库，完全离线目标终端只安装验证
 安装脚本：已支持同版本重装、apt 降级覆盖和 hold 包覆盖，不需要手动卸载旧 taiji-agent。
-旧版处理：安装前自动停止并禁用旧服务，清理旧进程，彻底删除旧 hermes-bwb WebUI 版系统安装，不保留两个 Agent 并存运行。
+旧版处理：安装前自动停止并禁用旧服务，清理旧进程，彻底删除旧浏览器 WebUI 版系统安装，不保留两个 Agent 并存运行。
 数据边界：旧 `/opt/taiji-agent`、旧配置、旧服务、旧入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不删除。
-启动修复：桌面启动和 taiji 命令已改为通过 `venv/bin/python -m hermes_cli.main` 启动 Agent，不再依赖 `venv/bin/hermes` 的绝对 shebang；交付目录可放在带空格或中文路径下。
+启动修复：桌面启动和 taiji 命令已改为通过产品运行时入口启动 Agent，不再依赖控制台脚本的绝对 shebang；交付目录可放在带空格或中文路径下。
 配置修复：安装包内置非密默认产品配置，启动时自动同步菜单显隐、默认模型和首页控件；不会内置或覆盖模型 Key。
 窗口修复：Linux 桌面端隐藏应用菜单栏，不再显示“太极 Agent / 视图”，保留麒麟原生窗口按钮。
 附件修复：上传 PDF、PPTX、DOCX、XLSX、TXT/MD/CSV 和图片后，会先生成受控的模型上下文；聊天界面不再显示本机绝对路径。未配置视觉模型时，图片分析会明确提示能力缺失，不再泛泛回答。

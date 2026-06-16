@@ -81,6 +81,18 @@ def _active_profile_name() -> str:
         return "default"
 
 
+def _public_config_summary(config_path: Any) -> dict[str, Any]:
+    try:
+        exists = bool(config_path.exists())
+    except AttributeError:
+        exists = os.path.exists(str(config_path))
+    return {
+        "label": "本机配置",
+        "exists": exists,
+        "source": "active_profile",
+    }
+
+
 def _safe_model_cfg(config_data: dict[str, Any]) -> dict[str, Any]:
     model_cfg = config_data.get("model")
     return model_cfg if isinstance(model_cfg, dict) else {}
@@ -308,7 +320,7 @@ def get_image_gen_config() -> dict[str, Any]:
     return {
         "ok": True,
         "profile": _active_profile_name(),
-        "config_path": str(config_path),
+        "config": _public_config_summary(config_path),
         "image_gen": {
             "provider": _public_image_gen_provider_id(active_provider),
             "model": active_model,
@@ -371,7 +383,7 @@ def get_model_config() -> dict[str, Any]:
     return {
         "ok": True,
         "profile": _active_profile_name(),
-        "config_path": str(config_path),
+        "config": _public_config_summary(config_path),
         "main": {
             "provider": provider,
             "model": model,

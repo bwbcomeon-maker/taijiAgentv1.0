@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
+CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
+BUILD_ROOT="$SCRIPT_DIR/构建工作区"
+SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
+OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
+OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
+LOG_DIR="$SCRIPT_DIR/构建日志"
+VERSION="${TAIJI_AGENT_VERSION:-0.1.0}"
+TOOL_ROOT="$SCRIPT_DIR/.构建工具"
+NODE_ROOT="$TOOL_ROOT/node"
+NODE_MAJOR="${TAIJI_NODE_MAJOR:-22}"
+BUILD_MARKER="$OUTPUT_DIR/.build-success"
+BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
+
+mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$OFFLINE_REPO"
+LOG_FILE="$LOG_DIR/00_offline_build_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'code=$?; printf "\n[FAIL] 离线交付包生成中断，请查看日志：%s\n" "$LOG_FILE" >&2; exit "$code"' ERR
+
+ok() { printf '[OK] %s\n' "$*"; }
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+require_cmd() { have "$1" || fail "缺少命令：$1"; }
+
+checksum_source_archive_name() {
+  [ -f "$CHECKSUM_FILE" ] || return 1
+  awk '$2 ~ /^taiji-agentv1\.0-kylin-build-src-.*\.tar\.gz$/ { print $2 }' "$CHECKSUM_FILE"
+}
+
+create_source_archive_from_git() {
+  local repo_root short archive_name
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  [ -d "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
+  git -C "$repo_root" diff --quiet || fail "源码仓库存在未提交改动，请先提交后再生成发布源码包"
+  git -C "$repo_root" diff --cached --quiet || fail "源码仓库存在已暂存未提交改动，请先提交后再生成发布源码包"
+  short="$(git -C "$repo_root" rev-parse --short HEAD)"
+  archive_name="taiji-agentv1.0-kylin-build-src-$short.tar.gz"
+  info "使用 git archive 生成源码包：$archive_name"
+  git -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
+  (cd "$SCRIPT_DIR" && sha256sum "$archive_name" > SHA256SUMS.txt)
+  SRC_ARCHIVE="$SCRIPT_DIR/$archive_name"
+  ok "源码包已生成并写入 SHA256SUMS.txt"
+}
+
+resolve_source_archive() {
+  if [ -n "$SRC_ARCHIVE" ]; then
+    [ -f "$SRC_ARCHIVE" ] || fail "未找到指定源码包：$SRC_ARCHIVE"
+    return
+  fi
+
+  if [ -f "$CHECKSUM_FILE" ]; then
+    local checksum_count checksum_archive
+    checksum_count="$(checksum_source_archive_name | wc -l | tr -d ' ')"
+    if [ "$checksum_count" = "1" ]; then
+      checksum_archive="$(checksum_source_archive_name)"
+      SRC_ARCHIVE="$SCRIPT_DIR/$checksum_archive"
+      [ -f "$SRC_ARCHIVE" ] || fail "校验文件指定的源码包不存在：$SRC_ARCHIVE"
+      ok "使用校验文件指定的源码包：$checksum_archive"
+      return
+    fi
+    warn "校验文件中源码包条目数量不是 1 个，将回退到目录扫描"
+  fi
+
+  local count
+  count="$(find "$SCRIPT_DIR" -maxdepth 1 -type f -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' | wc -l | tr -d ' ')"
+  if [ "$count" = "1" ]; then
+    SRC_ARCHIVE="$(find "$SCRIPT_DIR" -maxdepth 1 -type f -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' | sort | tail -1)"
+    return
+  fi
+
+  create_source_archive_from_git
+}
+
+cleanup_delivery_metadata() {
+  info "清理交付文件夹中的拷贝元数据"
+  find "$SCRIPT_DIR" \( -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -print -delete
+  ok "拷贝元数据检查完成"
+}
+
+preflight() {
+  info "检查制包机环境"
+  cleanup_delivery_metadata
+  [ "$(uname -s)" = "Linux" ] || fail "最终 DEB 必须在 Linux amd64 制包机生成，当前为：$(uname -s)"
+  case "$(uname -m)" in
+    x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
+    *) fail "当前 CPU 架构不是 x86_64/amd64：$(uname -m)" ;;
+  esac
+  require_cmd apt-get
+  require_cmd apt-cache
+  require_cmd dpkg
+  require_cmd dpkg-deb
+  require_cmd dpkg-scanpackages
+  require_cmd sha256sum
+  require_cmd tar
+  require_cmd gzip
+  require_cmd git
+  arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
+  resolve_source_archive
+  [ -f "$SRC_ARCHIVE" ] || fail "未找到源码包：$SRC_ARCHIVE"
+  if [ -f "$CHECKSUM_FILE" ]; then
+    (cd "$SCRIPT_DIR" && sha256sum -c SHA256SUMS.txt)
+    ok "源码包校验通过"
+  else
+    warn "未找到 SHA256SUMS.txt，跳过源码包传输校验"
+  fi
+}
+
+install_build_dependencies() {
+  info "安装制包依赖。这里可能需要输入 sudo 密码。"
+  sudo apt-get update
+  sudo apt-get install -y \
+    curl ca-certificates build-essential python3-dev libffi-dev git rsync \
+    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends
+}
+
+node_major() {
+  node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || printf '0\n'
+}
+
+npm_major() {
+  npm -v 2>/dev/null | awk -F. '{print $1 + 0}' || printf '0\n'
+}
+
+have_modern_node() {
+  have node || return 1
+  have npm || return 1
+  [ "$(node_major)" -ge 20 ] || return 1
+  [ "$(npm_major)" -ge 9 ] || return 1
+}
+
+ensure_uv() {
+  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+  if have uv; then
+    ok "uv 已存在：$(command -v uv)"
+    uv --version || true
+    return
+  fi
+  info "安装 uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+  have uv || fail "uv 安装后仍不可用，请检查网络或构建日志"
+  uv --version
+}
+
+install_portable_node() {
+  mkdir -p "$NODE_ROOT"
+  if [ -x "$NODE_ROOT/current/bin/node" ] && [ -x "$NODE_ROOT/current/bin/npm" ]; then
+    export PATH="$NODE_ROOT/current/bin:$PATH"
+    have_modern_node && return 0
+  fi
+
+  local mirror release_dir tmp_dir tarball
+  mirror="${NODE_MIRROR:-https://npmmirror.com/mirrors/node}"
+  release_dir="latest-v${NODE_MAJOR}.x"
+  tmp_dir="$NODE_ROOT/download"
+  rm -rf "$tmp_dir"
+  mkdir -p "$tmp_dir"
+
+  info "准备 Node.js ${NODE_MAJOR}.x Linux x64 构建工具"
+  curl -fsSL "$mirror/$release_dir/SHASUMS256.txt" -o "$tmp_dir/SHASUMS256.txt"
+  tarball="$(awk '/linux-x64.tar.xz$/ {print $2; exit}' "$tmp_dir/SHASUMS256.txt")"
+  [ -n "$tarball" ] || fail "未在 Node.js 校验清单中找到 linux-x64 tarball"
+  curl -fL "$mirror/$release_dir/$tarball" -o "$tmp_dir/$tarball"
+  (cd "$tmp_dir" && grep "  $tarball$" SHASUMS256.txt | sha256sum -c -)
+  tar -xJf "$tmp_dir/$tarball" -C "$NODE_ROOT"
+  ln -sfn "$NODE_ROOT/${tarball%.tar.xz}" "$NODE_ROOT/current"
+  export PATH="$NODE_ROOT/current/bin:$PATH"
+}
+
+ensure_node() {
+  export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+  if have_modern_node; then
+    ok "Node.js 可用：$(command -v node) ($(node --version), npm $(npm -v))"
+    return
+  fi
+  warn "系统 Node/npm 不满足要求，将使用交付目录内的隔离构建工具"
+  install_portable_node
+  have_modern_node || fail "Node.js 构建工具不可用，请检查网络或日志"
+  ok "Node.js 已准备：$(command -v node) ($(node --version), npm $(npm -v))"
+}
+
+unpack_source() {
+  info "解压源码到构建工作区"
+  rm -rf "$BUILD_ROOT"
+  mkdir -p "$BUILD_ROOT"
+  tar -xzf "$SRC_ARCHIVE" -C "$BUILD_ROOT"
+  [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
+  ok "源码已解压：$SRC_DIR"
+}
+
+build_runtime_and_deb() {
+  export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+  export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  export NPM_CONFIG_REGISTRY="${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}"
+  export ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://npmmirror.com/mirrors/electron/}"
+
+  info "刷新目标构建工作区 Python lock"
+  cd "$SRC_DIR/hermes-local-lab/sources/hermes-agent"
+  uv lock
+
+  info "生成 Linux Python venv"
+  cd "$SRC_DIR/hermes-local-lab"
+  TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh
+
+  info "获取 Linux Electron runtime"
+  cd "$SRC_DIR/apps/taiji-desktop"
+  npm --version
+  npm ci
+
+  info "构建 DEB 安装包"
+  cd "$SRC_DIR"
+  TAIJI_AGENT_VERSION="$VERSION" ./packaging/linux/deb/build-deb.sh
+}
+
+collect_artifacts() {
+  info "收集安装包产物"
+  local src_pkg_dir deb checksum deb_name checksum_name deb_sha src_name src_sha
+  src_pkg_dir="$SRC_DIR/packages/麒麟操作系统安装包"
+  deb="$src_pkg_dir/taiji-agent_${VERSION}_amd64.deb"
+  checksum="$deb.sha256"
+  [ -f "$deb" ] || fail "未找到 DEB：$deb"
+  [ -f "$checksum" ] || fail "未找到 DEB 校验文件：$checksum"
+
+  rm -f "$OUTPUT_DIR"/taiji-agent_*_amd64.deb "$OUTPUT_DIR"/taiji-agent_*_amd64.deb.sha256 "$BUILD_MARKER"
+  cp -f "$deb" "$OUTPUT_DIR/"
+  cp -f "$checksum" "$OUTPUT_DIR/"
+  (cd "$OUTPUT_DIR" && sha256sum -c "taiji-agent_${VERSION}_amd64.deb.sha256")
+  deb_name="taiji-agent_${VERSION}_amd64.deb"
+  checksum_name="$deb_name.sha256"
+  deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
+  src_name="$(basename "$SRC_ARCHIVE")"
+  src_sha="$(cd "$SCRIPT_DIR" && sha256sum "$src_name" | awk '{print $1}')"
+  {
+    printf 'version=%s\n' "$VERSION"
+    printf 'source_archive=%s\n' "$src_name"
+    printf 'source_sha256=%s\n' "$src_sha"
+    printf 'deb=%s\n' "$deb_name"
+    printf 'deb_sha256=%s\n' "$deb_sha"
+    printf 'checksum=%s\n' "$checksum_name"
+    printf 'built_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  } > "$BUILD_MARKER"
+  ok "安装包已生成：$OUTPUT_DIR/$deb_name"
+}
+
+package_names_from_depends() {
+  dpkg-deb -f "$1" Depends Pre-Depends 2>/dev/null \
+    | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]*\\([^)]*\\)//g; s/[[:space:]]*\\[[^]]*\\]//g; s/[[:space:]]*<[^>]*>//g; s/\\|.*$//' \
+    | awk 'NF { print $1 }' \
+    | sort -u
+}
+
+recursive_runtime_dependencies() {
+  local deb="$1" pkg
+  if have apt-rdepends; then
+    package_names_from_depends "$deb" | while read -r pkg; do
+      [ -n "$pkg" ] || continue
+      apt-rdepends "$pkg" 2>/dev/null | awk '/^[A-Za-z0-9.+:-]+$/ { print $1 }'
+    done | sort -u
+  else
+    package_names_from_depends "$deb" | while read -r pkg; do
+      [ -n "$pkg" ] || continue
+      printf '%s\n' "$pkg"
+      apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances "$pkg" \
+        | awk '/^[[:space:]]*Depends:/ { print $2 }'
+    done | sort -u
+  fi
+}
+
+build_offline_dependency_repo() {
+  info "生成完全离线 apt 依赖仓库"
+  local deb deb_name pkg repo_sha
+  deb="$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
+  [ -f "$deb" ] || fail "未找到待打包 DEB：$deb"
+  rm -rf "$OFFLINE_REPO"
+  mkdir -p "$OFFLINE_REPO"
+  cp -f "$deb" "$OFFLINE_REPO/"
+  recursive_runtime_dependencies "$deb" > "$OFFLINE_REPO/runtime-dependencies.txt"
+
+  while read -r pkg; do
+    [ -n "$pkg" ] || continue
+    case "$pkg" in
+      taiji-agent) continue ;;
+    esac
+    info "下载离线依赖：$pkg"
+    (cd "$OFFLINE_REPO" && apt-get download "$pkg") || fail "下载依赖失败：$pkg"
+  done < "$OFFLINE_REPO/runtime-dependencies.txt"
+
+  deb_name="$(basename "$deb")"
+  (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz)
+  (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
+  repo_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
+  ok "离线依赖仓库已生成：$OFFLINE_REPO/Packages.gz"
+  ok "主安装包已纳入离线仓库：$deb_name"
+  ok "Packages.gz SHA256：$repo_sha"
+}
+
+write_build_report() {
+  local commit system_info source_line deb_line repo_line
+  commit="$(tar -tzf "$SRC_ARCHIVE" 2>/dev/null | head -1 | sed 's#/.*##' || true)"
+  system_info="$(. /etc/os-release 2>/dev/null && printf '%s %s' "${PRETTY_NAME:-Linux}" "${VERSION_ID:-}" || uname -a)"
+  source_line="$(cd "$SCRIPT_DIR" && sha256sum "$(basename "$SRC_ARCHIVE")")"
+  deb_line="$(cd "$OUTPUT_DIR" && sha256sum "taiji-agent_${VERSION}_amd64.deb")"
+  repo_line="$(cd "$OFFLINE_REPO" && sha256sum Packages.gz)"
+  {
+    printf '太极 Agent 离线交付构建报告\n'
+    printf '生成时间：%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    printf '源码包前缀：%s\n' "${commit:-unknown}"
+    printf '制包机系统：%s\n' "$system_info"
+    printf '制包机架构：%s / %s\n' "$(uname -m)" "$(dpkg --print-architecture 2>/dev/null || true)"
+    printf '依赖源：%s\n' "$(grep -hE '^[[:space:]]*deb ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null | head -5 | tr '\n' '; ')"
+    printf '源码包 SHA256：%s\n' "$source_line"
+    printf 'DEB SHA256：%s\n' "$deb_line"
+    printf 'Packages.gz SHA256：%s\n' "$repo_line"
+    printf '目标机安装脚本：02_目标终端_安装并验证.sh\n'
+    printf '目标机离线仓库：离线依赖/Packages.gz\n'
+  } > "$BUILD_REPORT"
+  ok "构建报告已生成：$BUILD_REPORT"
+}
+
+main() {
+  preflight
+  install_build_dependencies
+  ensure_uv
+  ensure_node
+  unpack_source
+  build_runtime_and_deb
+  collect_artifacts
+  build_offline_dependency_repo
+  write_build_report
+  printf '\n[OK] 离线交付包生成完成。目标机断网后执行：\n'
+  printf 'bash ./02_目标终端_安装并验证.sh\n'
+  printf '\n日志：%s\n' "$LOG_FILE"
+}
+
+main "$@"

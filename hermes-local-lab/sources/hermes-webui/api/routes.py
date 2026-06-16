@@ -11429,7 +11429,7 @@ def _handle_session_export(handler, parsed):
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header(
-        "Content-Disposition", f'attachment; filename="hermes-{sid}.json"'
+        "Content-Disposition", f'attachment; filename="taiji-session-{sid}.json"'
     )
     handler.send_header("Content-Length", str(len(payload.encode("utf-8"))))
     handler.send_header("Cache-Control", "no-store")

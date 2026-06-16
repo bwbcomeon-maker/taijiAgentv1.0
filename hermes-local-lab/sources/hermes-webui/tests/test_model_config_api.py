@@ -12,7 +12,7 @@ import api.profiles as profiles
 from api import model_config
 
 
-def _use_home(monkeypatch, tmp_path):
+def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(tmp_path / "config.yaml"))
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
@@ -36,11 +36,16 @@ def _use_home(monkeypatch, tmp_path):
             "active_provider": "deepseek",
         },
     )
-    monkeypatch.setattr(
-        model_config,
-        "get_image_gen_config",
-        lambda: {"image_gen": {}, "providers": []},
-    )
+    if stub_image_gen:
+        monkeypatch.setattr(
+            model_config,
+            "get_image_gen_config",
+            lambda: {
+                "image_gen": {},
+                "providers": [],
+                "config": {"label": "本机配置", "exists": True},
+            },
+        )
 
 
 def _read_config(tmp_path):
@@ -184,6 +189,40 @@ def test_image_gen_config_writes_doubao_ark_key_without_echo(monkeypatch, tmp_pa
     )
     assert "ark-test-key-123456" not in json.dumps(result)
     os.environ.pop("ARK_API_KEY", None)
+
+
+def test_model_config_payload_hides_raw_config_path(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  provider: deepseek\n  default: deepseek-chat\n",
+        encoding="utf-8",
+    )
+
+    result = model_config.get_model_config()
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert "config_path" not in result
+    assert str(config_path) not in dumped
+    assert "config.yaml" not in dumped
+    assert result["config"]["label"] == "本机配置"
+    assert result["config"]["exists"] is True
+
+
+def test_image_gen_config_payload_hides_raw_config_path(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("image_gen:\n  provider: fal\n", encoding="utf-8")
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda active: [])
+
+    result = model_config.get_image_gen_config()
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert "config_path" not in result
+    assert str(config_path) not in dumped
+    assert "config.yaml" not in dumped
+    assert result["config"]["label"] == "本机配置"
+    assert result["config"]["exists"] is True
 
 
 def test_image_gen_config_maps_taiji_public_provider_to_internal_id(monkeypatch, tmp_path):

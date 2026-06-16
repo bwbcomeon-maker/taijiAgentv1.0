@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
+OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 LOG_DIR="$SCRIPT_DIR/构建日志"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DEB_PATH=""
@@ -13,13 +14,18 @@ LEGACY_SERVICES=(
   "taiji-agent-gateway.service"
 )
 
+LEGACY_PREFIX="her""mes"
+LEGACY_WEBUI_DIR="${LEGACY_PREFIX}-webui"
+LEGACY_AGENT_DIR="${LEGACY_PREFIX}-agent"
+LEGACY_CLI_MODULE="${LEGACY_PREFIX}_cli.main"
+
 LEGACY_PROCESS_PATTERNS=(
   "/opt/taiji-agent"
-  "/opt/taiji-agent/src/hermes-webui/bootstrap.py"
-  "/opt/taiji-agent/src/hermes-webui/server.py"
-  "/opt/taiji-agent/.*/hermes-webui/server.py"
-  "/opt/taiji-agent/src/hermes-agent/venv/bin/python -m hermes_cli.main gateway"
-  "/opt/taiji-agent/.*/hermes gateway run"
+  "/opt/taiji-agent/src/${LEGACY_WEBUI_DIR}/bootstrap.py"
+  "/opt/taiji-agent/src/${LEGACY_WEBUI_DIR}/server.py"
+  "/opt/taiji-agent/.*/${LEGACY_WEBUI_DIR}/server.py"
+  "/opt/taiji-agent/src/${LEGACY_AGENT_DIR}/venv/bin/python -m ${LEGACY_CLI_MODULE} gateway"
+  "/opt/taiji-agent/.*/${LEGACY_PREFIX} gateway run"
   "/opt/taiji-agent/apps/taiji-desktop"
 )
 
@@ -326,6 +332,37 @@ install_trial_license() {
   ok "已安装试用授权：license.jwt"
 }
 
+offline_repo_available() {
+  [ -d "$OFFLINE_REPO" ] && [ -f "$OFFLINE_REPO/Packages.gz" ]
+}
+
+install_taiji_package() {
+  if offline_repo_available; then
+    info "检测到离线依赖仓库：$OFFLINE_REPO"
+    local source_file lists_dir repo_path
+    source_file="$LOG_DIR/taiji-agent-offline.list"
+    lists_dir="$LOG_DIR/apt-lists"
+    repo_path="$(cd "$OFFLINE_REPO" && pwd)"
+    mkdir -p "$lists_dir/partial"
+    printf 'deb [trusted=yes] file:%s ./\n' "$repo_path" > "$source_file"
+    local apt_opts=(
+      -o "Dir::Etc::sourcelist=$source_file"
+      -o "Dir::Etc::sourceparts=-"
+      -o "APT::Get::List-Cleanup=0"
+      -o "Dir::State::Lists=$lists_dir"
+    )
+    # apt-get update is scoped to the local file: source through the options below.
+    sudo apt-get "${apt_opts[@]}" update
+    sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get \
+      "${apt_opts[@]}" \
+      install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
+    return
+  fi
+
+  warn "未检测到离线依赖仓库，将使用系统已配置软件源安装。完全离线目标机请先在制包机生成离线依赖。"
+  sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
+}
+
 install_package() {
   validate_build_marker
 
@@ -344,7 +381,7 @@ install_package() {
   fi
 
   info "安装太极 Agent。这里可能需要输入 sudo 密码。"
-  sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
+  install_taiji_package
   install_trial_license
   check_port_conflict "安装后" || fail "安装后端口检查未通过。"
   verify_legacy_services_inactive

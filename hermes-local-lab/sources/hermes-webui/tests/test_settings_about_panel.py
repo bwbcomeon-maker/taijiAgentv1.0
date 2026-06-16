@@ -76,6 +76,34 @@ def test_settings_menu_and_main_area_expose_about_panel():
     assert "display_text" not in panels_js
 
 
+def test_about_panel_uses_native_product_sheet_structure():
+    html = read("static/index.html")
+    about_html = html[
+        html.index('id="settingsPaneAbout"') : html.index(
+            '<button class="workspace-panel-edge-toggle'
+        )
+    ]
+
+    for expected in (
+        'class="settings-about-shell"',
+        'class="settings-about-card"',
+        'class="settings-about-hero"',
+        'class="settings-about-logo"',
+        'class="settings-about-product-name"',
+        'class="settings-about-subtitle"',
+        'class="settings-about-body"',
+        'id="settingsAboutDescription"',
+        'class="settings-about-footer"',
+        'class="settings-about-mark"',
+        'class="settings-about-note"',
+        'static/assets/taiji/logo/logo-mark.png',
+        "太极 Agent",
+        "企业级本地智能助理",
+        "此关于信息由开发人员在发行前维护，打包后随产品版本固定。",
+    ):
+        assert expected in about_html
+
+
 def test_about_panel_visible_text_is_rendered_from_payload_contract():
     html = read("static/index.html")
     panels_js = read("static/panels.js")
@@ -136,6 +164,17 @@ def test_about_section_is_part_of_product_visibility_schema():
 def test_about_panel_uses_single_readable_description_layout():
     css = read("static/style.css")
 
+    for expected in (
+        ".settings-about-shell",
+        ".settings-about-card",
+        ".settings-about-hero",
+        ".settings-about-logo",
+        ".settings-about-product-name",
+        ".settings-about-subtitle",
+        ".settings-about-body",
+        ".settings-about-footer",
+    ):
+        assert expected in css
     assert ".settings-about-copy" in css
     assert "white-space:pre-line" in css
     assert "#settingsAboutVersionBlock" not in css

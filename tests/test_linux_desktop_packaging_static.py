@@ -353,6 +353,21 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("新版桌面端会自动选择空闲端口", install)
         self.assertIn("03_目标终端_导出诊断报告.sh", install)
 
+    def test_delivery_install_script_supports_fully_offline_local_apt_repo(self):
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("OFFLINE_REPO", install)
+        self.assertIn("Packages.gz", install)
+        self.assertIn("file:", install)
+        self.assertIn("Dir::Etc::sourcelist", install)
+        self.assertIn("install_taiji_package", install)
+        self.assertIn("apt-get update", install)
+        self.assertIn("dpkg-scanpackages", builder)
+        self.assertIn("apt-get download", builder)
+        self.assertIn("build_offline_dependency_repo", builder)
+        self.assertIn("git archive", builder)
+
     def test_delivery_install_script_removes_legacy_runtime_without_backup(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
@@ -399,6 +414,39 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("redact_stream", diagnose)
         self.assertIn("/api/model-config", diagnose)
         self.assertIn("诊断报告", delivery)
+
+    def test_delivery_clear_chat_script_uses_product_runtime_home_without_internal_paths(self):
+        clear = read_text("taijiagent 打包交付/04_目标终端_清空对话记录.sh")
+
+        self.assertIn("TAIJI_RUNTIME_HOME", clear)
+        self.assertIn("runtime-home", clear)
+        for forbidden in (
+            "HERMES_HOME",
+            "Hermes home",
+            "hermes-home",
+            "config.yaml",
+            "$TAIJI_CONFIG_DIR/.env",
+        ):
+            self.assertNotIn(forbidden, clear)
+
+    def test_delivery_docs_hide_legacy_runtime_entrypoints_and_log_names(self):
+        texts = "\n".join(
+            read_text(path)
+            for path in (
+                "docs/taiji-desktop-uos-packaging.md",
+                "taijiagent 打包交付/操作说明.md",
+                "taijiagent 打包交付/版本信息.txt",
+            )
+        )
+
+        for forbidden in (
+            "venv/bin/hermes",
+            "hermes_cli.main",
+            "hermes-agent.log",
+            "hermes-home",
+            "Hermes home",
+        ):
+            self.assertNotIn(forbidden, texts)
 
 
 if __name__ == "__main__":

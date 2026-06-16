@@ -333,6 +333,18 @@ def test_writeflow_team_copy_uses_productized_desktop_language():
     assert "太极智能体网页能力" in routes
 
 
+def test_session_export_filename_uses_product_brand():
+    routes = (WEBUI_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    export_block = routes[
+        routes.index("def _handle_session_export") : routes.index(
+            "def _session_search_message_text"
+        )
+    ]
+
+    assert 'filename="hermes-{sid}.json"' not in export_block
+    assert 'filename="taiji-session-{sid}.json"' in export_block
+
+
 def test_default_soul_template_is_productized_chinese():
     default_soul_src = (REPO_ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "hermes_cli" / "default_soul.py").read_text(encoding="utf-8")
     namespace = {}
