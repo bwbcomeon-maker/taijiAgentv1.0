@@ -8,6 +8,8 @@ LOG_DIR="$SCRIPT_DIR/构建日志"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DEB_PATH=""
 CHECKSUM_PATH=""
+OFFLINE_APT_REPO_MOUNT=""
+OFFLINE_APT_REPO_SOURCE=""
 
 LEGACY_SERVICES=(
   "taiji-agent-webui.service"
@@ -41,6 +43,14 @@ warn() { printf '[WARN] %s\n' "$*" >&2; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 require_cmd() { have "$1" || fail "缺少命令：$1"; }
+
+cleanup_offline_apt_repo_mount() {
+  if [ -n "${OFFLINE_APT_REPO_MOUNT:-}" ] && [ -d "$OFFLINE_APT_REPO_MOUNT" ]; then
+    rm -rf -- "$OFFLINE_APT_REPO_MOUNT"
+  fi
+}
+
+trap cleanup_offline_apt_repo_mount EXIT
 
 marker_value() {
   key="${1:-}"
@@ -77,6 +87,7 @@ preflight() {
   have apt-get || fail "缺少 apt-get"
   have dpkg || fail "缺少 dpkg"
   have sha256sum || fail "缺少 sha256sum"
+  require_cmd mktemp
   require_cmd sudo
   require_cmd systemctl
   require_cmd pgrep
@@ -336,15 +347,24 @@ offline_repo_available() {
   [ -d "$OFFLINE_REPO" ] && [ -f "$OFFLINE_REPO/Packages.gz" ]
 }
 
+prepare_offline_apt_repo_source_path() {
+  local repo_path
+  repo_path="$(cd "$OFFLINE_REPO" && pwd)"
+  OFFLINE_APT_REPO_MOUNT="$(mktemp -d "/tmp/taiji-agent-offline-repo.XXXXXX")"
+  ln -s "$repo_path" "$OFFLINE_APT_REPO_MOUNT/repo"
+  OFFLINE_APT_REPO_SOURCE="$OFFLINE_APT_REPO_MOUNT/repo"
+}
+
 install_taiji_package() {
   if offline_repo_available; then
     info "检测到离线依赖仓库：$OFFLINE_REPO"
-    local source_file lists_dir repo_path
+    local source_file lists_dir
     source_file="$LOG_DIR/taiji-agent-offline.list"
     lists_dir="$LOG_DIR/apt-lists"
-    repo_path="$(cd "$OFFLINE_REPO" && pwd)"
+    prepare_offline_apt_repo_source_path
     mkdir -p "$lists_dir/partial"
-    printf 'deb [trusted=yes] file:%s ./\n' "$repo_path" > "$source_file"
+    # APT sources.list is whitespace separated; use a no-space /tmp symlink so copied folders may contain spaces.
+    printf 'deb [trusted=yes] file:%s ./\n' "$OFFLINE_APT_REPO_SOURCE" > "$source_file"
     local apt_opts=(
       -o "Dir::Etc::sourcelist=$source_file"
       -o "Dir::Etc::sourceparts=-"

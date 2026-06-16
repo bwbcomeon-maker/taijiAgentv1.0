@@ -4,8 +4,18 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-AGENT_DIR="$LAB_DIR/sources/her""mes-agent"
-WEBUI_DIR="$LAB_DIR/sources/her""mes-webui"
+_taiji_source_agent="$LAB_DIR/sources/her""mes-agent"
+_taiji_source_web="$LAB_DIR/sources/her""mes-webui"
+if [ -d "$LAB_DIR/runtime/agent" ]; then
+  AGENT_DIR="$LAB_DIR/runtime/agent"
+else
+  AGENT_DIR="$_taiji_source_agent"
+fi
+if [ -d "$LAB_DIR/runtime/web" ]; then
+  WEBUI_DIR="$LAB_DIR/runtime/web"
+else
+  WEBUI_DIR="$_taiji_source_web"
+fi
 LOG_DIR="$LAB_DIR/logs"
 TMP_DIR="$LAB_DIR/tmp"
 RUNTIME_ENV="$TMP_DIR/runtime.env"
@@ -116,13 +126,15 @@ echo "Taiji Agent health check"
 echo "Lab: $LAB_DIR"
 echo
 
-if [ -d "$AGENT_DIR" ] && [ -f "$AGENT_DIR/pyproject.toml" ]; then
-  ok "Taiji Agent source exists: $AGENT_DIR"
-  agent_commit="$(git -C "$AGENT_DIR" rev-parse HEAD 2>/dev/null || true)"
-  agent_tag="$(git -C "$AGENT_DIR" describe --tags --exact-match 2>/dev/null || true)"
-  ok "Taiji Agent version: tag=${agent_tag:-none} commit=${agent_commit:-unknown}"
+if [ -d "$AGENT_DIR" ]; then
+  ok "Taiji Agent runtime exists: $AGENT_DIR"
+  if git -C "$AGENT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    agent_commit="$(git -C "$AGENT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    agent_tag="$(git -C "$AGENT_DIR" describe --tags --exact-match 2>/dev/null || true)"
+    ok "Taiji Agent version: tag=${agent_tag:-none} commit=${agent_commit:-unknown}"
+  fi
 else
-  fail "Taiji Agent source missing: $AGENT_DIR"
+  fail "Taiji Agent runtime missing: $AGENT_DIR"
 fi
 
 TAIJI_AGENT_PYTHON="${TAIJI_AGENT_PYTHON:-$AGENT_DIR/venv/bin/python}"
@@ -203,13 +215,15 @@ fi
 
 echo
 
-if [ -d "$WEBUI_DIR" ] && [ -f "$WEBUI_DIR/server.py" ]; then
-  ok "Taiji WebUI source exists: $WEBUI_DIR"
-  webui_commit="$(git -C "$WEBUI_DIR" rev-parse HEAD 2>/dev/null || true)"
-  webui_tag="$(git -C "$WEBUI_DIR" describe --tags --exact-match 2>/dev/null || true)"
-  ok "Taiji WebUI version: tag=${webui_tag:-none} commit=${webui_commit:-unknown}"
+if [ -d "$WEBUI_DIR" ] && { [ -f "$WEBUI_DIR/server.py" ] || [ -f "$WEBUI_DIR/server.pyc" ]; }; then
+  ok "Taiji WebUI runtime exists: $WEBUI_DIR"
+  if git -C "$WEBUI_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    webui_commit="$(git -C "$WEBUI_DIR" rev-parse HEAD 2>/dev/null || true)"
+    webui_tag="$(git -C "$WEBUI_DIR" describe --tags --exact-match 2>/dev/null || true)"
+    ok "Taiji WebUI version: tag=${webui_tag:-none} commit=${webui_commit:-unknown}"
+  fi
 else
-  fail "Taiji WebUI source missing: $WEBUI_DIR"
+  fail "Taiji WebUI runtime missing: $WEBUI_DIR"
 fi
 
 check_pid "Taiji WebUI" "$LOG_DIR/web.pid" || true
@@ -278,6 +292,7 @@ fi
 echo
 echo "Summary: OK=$ok_count WARN=$warn_count FAIL=$fail_count"
 unset _TAIJI_CANONICAL_RUNTIME_HOME _TAIJI_CANONICAL_ENV_FILE
+unset _taiji_source_agent _taiji_source_web
 if [ "$fail_count" -gt 0 ]; then
   exit 1
 fi

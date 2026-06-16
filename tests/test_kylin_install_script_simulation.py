@@ -20,7 +20,8 @@ def write_executable(path: Path, body: str) -> None:
 class KylinInstallScriptSimulationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self.tmp.name)
+        self.tmp_path = Path(self.tmp.name) / "taijiagent 打包交付"
+        self.tmp_path.mkdir()
         self.fake_bin = self.tmp_path / "bin"
         self.fake_bin.mkdir()
         self.fake_state = self.tmp_path / "state"
@@ -319,6 +320,21 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn("apt-get purge -y taiji-agent", log)
         self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertIn("sudo apt-get install -y --reinstall", log)
+
+    def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
+        repo = self.tmp_path / "离线依赖"
+        repo.mkdir()
+        (repo / "Packages.gz").write_bytes(b"fake packages\n")
+
+        result = self.run_install_package()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        source_file = self.tmp_path / "构建日志" / "taiji-agent-offline.list"
+        source = source_file.read_text(encoding="utf-8").strip()
+        self.assertTrue(source.startswith("deb [trusted=yes] file:/tmp/taiji-agent-offline-repo."), source)
+        apt_uri = source.split("file:", 1)[1].split(" ", 1)[0]
+        self.assertNotIn(" ", apt_uri)
+        self.assertNotIn(str(repo), source)
 
     def test_adjacent_license_is_installed_to_user_config_with_owner_only_mode(self):
         (self.tmp_path / "license.jwt").write_text("signed-license-token\n", encoding="utf-8")
