@@ -252,6 +252,7 @@ stage_python_runtime() {
     --exclude 'packaging' \
     --exclude 'plugins' \
     --exclude 'skills' \
+    --exclude 'scripts' \
     --exclude 'optional-skills' \
     --exclude 'optional-mcps' \
     --exclude 'locales' \

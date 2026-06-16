@@ -223,6 +223,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("scan_product_privacy", build)
         self.assertNotIn('"$LAB_DIR"/ "$INSTALL_ROOT"/', build)
 
+    def test_packaged_agent_runtime_excludes_upstream_helper_scripts(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        stage_start = build.index("stage_python_runtime()")
+        stage = build[stage_start:build.index("rename_internal_agent_modules", stage_start)]
+        agent_copy = stage[:stage.index('"$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/')]
+
+        self.assertIn("--exclude 'scripts'", agent_copy)
+        self.assertIn("scan_product_privacy", build)
+        self.assertNotIn("scripts/hermes-gateway", build)
+
     def test_packaged_launch_surface_has_no_hermes_visible_tokens(self):
         paths = [
             "hermes-local-lab/scripts/runtime-env.sh",
@@ -415,19 +425,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("/api/model-config", diagnose)
         self.assertIn("诊断报告", delivery)
 
-    def test_delivery_clear_chat_script_uses_product_runtime_home_without_internal_paths(self):
-        clear = read_text("taijiagent 打包交付/04_目标终端_清空对话记录.sh")
+    def test_delivery_folder_does_not_include_chat_cleanup_utility(self):
+        docs = read_text("taijiagent 打包交付/操作说明.md")
+        gitignore = read_text(".gitignore")
 
-        self.assertIn("TAIJI_RUNTIME_HOME", clear)
-        self.assertIn("runtime-home", clear)
-        for forbidden in (
-            "HERMES_HOME",
-            "Hermes home",
-            "hermes-home",
-            "config.yaml",
-            "$TAIJI_CONFIG_DIR/.env",
-        ):
-            self.assertNotIn(forbidden, clear)
+        self.assertFalse((ROOT / "taijiagent 打包交付/04_目标终端_清空对话记录.sh").exists())
+        self.assertNotIn("04_目标终端_清空对话记录.sh", docs)
+        self.assertNotIn("04_目标终端_清空对话记录.sh", gitignore)
 
     def test_delivery_docs_hide_legacy_runtime_entrypoints_and_log_names(self):
         texts = "\n".join(
