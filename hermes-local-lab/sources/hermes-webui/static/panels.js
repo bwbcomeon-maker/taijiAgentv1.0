@@ -6340,86 +6340,14 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
-function setAboutText(id,value){
-  const el=$(id);
-  if(el) el.textContent=(value==null)?'':String(value);
-}
-
-function renderAboutVersionItems(items){
-  const block=$('settingsAboutVersionBlock');
-  if(!block) return;
-  block.innerHTML='';
-  (Array.isArray(items)?items:[]).forEach(item=>{
-    const text=String((item&&item.display_text)||'').trim();
-    if(!text) return;
-    const badge=document.createElement('span');
-    badge.className='settings-version-badge';
-    badge.textContent=text;
-    block.appendChild(badge);
-  });
-}
-
-function renderAboutSectionBody(card,section){
-  const kind=String((section&&section.kind)||'text');
-  if(kind==='list'){
-    const list=document.createElement('ul');
-    list.className='settings-about-list';
-    (Array.isArray(section.items)?section.items:[]).forEach(item=>{
-      const text=String(item||'').trim();
-      if(!text) return;
-      const li=document.createElement('li');
-      li.textContent=text;
-      list.appendChild(li);
-    });
-    card.appendChild(list);
-    return;
-  }
-  if(kind==='paragraphs'){
-    (Array.isArray(section.paragraphs)?section.paragraphs:[]).forEach(text=>{
-      const paragraph=document.createElement('div');
-      paragraph.className='settings-about-paragraph';
-      paragraph.textContent=String(text||'');
-      card.appendChild(paragraph);
-    });
-    return;
-  }
-  const body=document.createElement('div');
-  body.className=kind==='heading'?'settings-about-heading':'settings-about-body';
-  body.textContent=String((section&&section.body)||'');
-  card.appendChild(body);
-}
-
-function renderAboutSections(sections){
-  const container=$('settingsAboutSections');
-  if(!container) return;
-  container.innerHTML='';
-  (Array.isArray(sections)?sections:[]).forEach(section=>{
-    if(!section) return;
-    const card=document.createElement('div');
-    card.className='settings-field';
-    const label=document.createElement('label');
-    label.textContent=String(section.label||'');
-    card.appendChild(label);
-    renderAboutSectionBody(card,section);
-    container.appendChild(card);
-  });
-}
-
 function loadAboutPanel(){
-  const pane=$('settingsPaneAbout');
-  if(!pane) return;
-  const status=$('settingsAboutStatus');
-  if(status) status.textContent='';
+  const description=$('settingsAboutDescription');
+  if(!description) return;
+  description.textContent='';
   api('/api/about',{timeoutToast:false}).then(data=>{
-    setAboutText('settingsAboutTitle',data.title);
-    setAboutText('settingsAboutSubtitle',data.subtitle);
-    renderAboutVersionItems(data.version_items);
-    renderAboutSections(data.sections);
-    const menuLabel=document.querySelector('[data-settings-section="about"] span');
-    if(menuLabel&&data.menu_label) menuLabel.textContent=String(data.menu_label);
-    if(status) status.textContent=String(data.success_status||'');
+    description.textContent=String((data&&data.description)||'');
   }).catch(()=>{
-    if(status) status.textContent='';
+    description.textContent='';
   });
 }
 
