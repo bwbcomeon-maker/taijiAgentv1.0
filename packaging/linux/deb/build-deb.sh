@@ -274,6 +274,7 @@ stage_python_runtime() {
     --exclude 'website' \
     --exclude 'articles' \
     --exclude 'demos' \
+    --exclude 'datagen-config-examples' \
     --exclude 'docker' \
     --exclude 'nix' \
     --exclude 'packaging' \
@@ -288,6 +289,11 @@ stage_python_runtime() {
     --exclude 'venv' \
     --exclude 'Dockerfile' \
     --exclude 'docker-compose*' \
+    --exclude 'flake.*' \
+    --exclude 'MANIFEST.in' \
+    --exclude 'uv.lock' \
+    --exclude 'package*.json' \
+    --exclude 'pyproject.toml' \
     --exclude 'LICENSE' \
     --exclude '*.md' \
     "$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/
