@@ -30,7 +30,46 @@ require_cmd() { have "$1" || fail "缺少命令：$1"; }
 
 checksum_source_archive_name() {
   [ -f "$CHECKSUM_FILE" ] || return 1
-  awk '$2 ~ /^taiji-agentv1\.0-kylin-build-src-.*\.tar\.gz$/ { print $2 }' "$CHECKSUM_FILE"
+  awk '
+    /^[[:xdigit:]]{64}[[:space:]]+/ {
+      path = $0
+      sub(/^[[:xdigit:]]{64}[[:space:]]+\*?/, "", path)
+      n = split(path, parts, "/")
+      name = parts[n]
+      if (name ~ /^taiji-agentv1\.0-kylin-build-src-.*\.tar\.gz$/) {
+        print name
+      }
+    }
+  ' "$CHECKSUM_FILE"
+}
+
+checksum_source_archive_hash() {
+  local archive_name="$1"
+  [ -f "$CHECKSUM_FILE" ] || return 1
+  awk -v wanted="$archive_name" '
+    /^[[:xdigit:]]{64}[[:space:]]+/ {
+      hash = $1
+      path = $0
+      sub(/^[[:xdigit:]]{64}[[:space:]]+\*?/, "", path)
+      n = split(path, parts, "/")
+      name = parts[n]
+      if (name == wanted) {
+        print hash
+      }
+    }
+  ' "$CHECKSUM_FILE" | tail -1
+}
+
+verify_source_archive_checksum() {
+  local archive_name expected actual
+  archive_name="$(basename "$SRC_ARCHIVE")"
+  expected="$(checksum_source_archive_hash "$archive_name")"
+  [ -n "$expected" ] || fail "校验文件中未找到源码包条目：$archive_name"
+  actual="$(cd "$SCRIPT_DIR" && sha256sum "$archive_name" | awk '{print $1}')"
+  if [ "$actual" != "$expected" ]; then
+    fail "源码包 SHA256 不匹配：$archive_name"
+  fi
+  printf '%s  %s\n' "$actual" "$archive_name" > "$CHECKSUM_FILE"
 }
 
 create_source_archive_from_git() {
@@ -105,7 +144,7 @@ preflight() {
   resolve_source_archive
   [ -f "$SRC_ARCHIVE" ] || fail "未找到源码包：$SRC_ARCHIVE"
   if [ -f "$CHECKSUM_FILE" ]; then
-    (cd "$SCRIPT_DIR" && sha256sum -c SHA256SUMS.txt)
+    verify_source_archive_checksum
     ok "源码包校验通过"
   else
     warn "未找到 SHA256SUMS.txt，跳过源码包传输校验"

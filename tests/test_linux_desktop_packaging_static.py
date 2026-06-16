@@ -437,6 +437,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("build_offline_dependency_repo", builder)
         self.assertIn("git archive", builder)
 
+    def test_offline_builder_normalizes_source_checksum_paths(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("checksum_source_archive_hash", builder)
+        self.assertIn("verify_source_archive_checksum", builder)
+        self.assertIn('archive_name="$(basename "$SRC_ARCHIVE")"', builder)
+        self.assertIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
+        self.assertIn('verify_source_archive_checksum', builder)
+        self.assertNotIn("sha256sum -c SHA256SUMS.txt", builder)
+
     def test_offline_builder_has_network_mirror_fallbacks_for_build_tools(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
