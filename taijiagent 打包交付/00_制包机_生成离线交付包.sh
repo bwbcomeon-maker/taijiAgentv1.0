@@ -31,9 +31,13 @@ require_cmd() { have "$1" || fail "缺少命令：$1"; }
 checksum_source_archive_name() {
   [ -f "$CHECKSUM_FILE" ] || return 1
   awk '
-    /^[[:xdigit:]]{64}[[:space:]]+/ {
+    NF >= 2 {
+      hash = $1
+      if (length(hash) != 64 || hash !~ /^[0-9A-Fa-f]+$/) {
+        next
+      }
       path = $0
-      sub(/^[[:xdigit:]]{64}[[:space:]]+\*?/, "", path)
+      sub(/^[^[:space:]]+[[:space:]]+\*?/, "", path)
       n = split(path, parts, "/")
       name = parts[n]
       if (name ~ /^taiji-agentv1\.0-kylin-build-src-.*\.tar\.gz$/) {
@@ -47,10 +51,13 @@ checksum_source_archive_hash() {
   local archive_name="$1"
   [ -f "$CHECKSUM_FILE" ] || return 1
   awk -v wanted="$archive_name" '
-    /^[[:xdigit:]]{64}[[:space:]]+/ {
+    NF >= 2 {
       hash = $1
+      if (length(hash) != 64 || hash !~ /^[0-9A-Fa-f]+$/) {
+        next
+      }
       path = $0
-      sub(/^[[:xdigit:]]{64}[[:space:]]+\*?/, "", path)
+      sub(/^[^[:space:]]+[[:space:]]+\*?/, "", path)
       n = split(path, parts, "/")
       name = parts[n]
       if (name == wanted) {

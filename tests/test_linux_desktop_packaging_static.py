@@ -1,3 +1,7 @@
+import hashlib
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -445,7 +449,51 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('archive_name="$(basename "$SRC_ARCHIVE")"', builder)
         self.assertIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
         self.assertIn('verify_source_archive_checksum', builder)
+        self.assertIn("length(hash) != 64", builder)
+        self.assertNotIn("[[:xdigit:]]{64}", builder)
         self.assertNotIn("sha256sum -c SHA256SUMS.txt", builder)
+
+    def test_offline_builder_checksum_parser_accepts_prefixed_paths(self):
+        if shutil.which("sha256sum") is None:
+            self.skipTest("sha256sum is required for the shell-level checksum parser check")
+
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        builder = builder.replace('\nmain "$@"\n', '\n# main disabled for parser test\n')
+        archive_name = "taiji-agentv1.0-kylin-build-src-test123.tar.gz"
+        payload = b"payload\n"
+        expected = hashlib.sha256(payload).hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "builder.sh").write_text(builder, encoding="utf-8")
+            (tmp_path / archive_name).write_bytes(payload)
+            (tmp_path / "SHA256SUMS.txt").write_text(
+                f"{expected}  taijiagent 打包交付/{archive_name}\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    (
+                        "source ./builder.sh; "
+                        "resolve_source_archive; "
+                        "verify_source_archive_checksum; "
+                        'printf "SRC_ARCHIVE=%s\\n" "$SRC_ARCHIVE"; '
+                        "cat SHA256SUMS.txt"
+                    ),
+                ],
+                cwd=tmp_path,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+
+        self.assertIn("SRC_ARCHIVE=", result.stdout)
+        self.assertIn(f"/{archive_name}", result.stdout)
+        self.assertIn(f"{expected}  {archive_name}", result.stdout)
+        self.assertNotIn(f"taijiagent 打包交付/{archive_name}", result.stdout)
 
     def test_offline_builder_has_network_mirror_fallbacks_for_build_tools(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
