@@ -604,12 +604,26 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     description = description[:MAX_DESCRIPTION_LENGTH - 3] + "..."
 
                 category = _get_category_from_path(skill_md)
+                try:
+                    from agent.skill_protection import is_skill_protected
+
+                    protected = is_skill_protected(
+                        name=name,
+                        skill_md=skill_md,
+                        skill_dir=skill_dir,
+                        category=category,
+                        frontmatter=frontmatter,
+                    )
+                except Exception:
+                    protected = False
 
                 seen_names.add(name)
                 skills.append({
                     "name": name,
                     "description": description,
                     "category": category,
+                    "protected": protected,
+                    "content_available": not protected,
                 })
 
             except (UnicodeDecodeError, PermissionError) as e:

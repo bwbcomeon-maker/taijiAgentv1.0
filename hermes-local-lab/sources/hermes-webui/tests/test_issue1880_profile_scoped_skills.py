@@ -64,6 +64,20 @@ def _write_skill(skills_dir: pathlib.Path, name: str, description: str, body: st
     return skill_dir
 
 
+def _write_protection_config(profile_home: pathlib.Path, *skill_names: str) -> None:
+    profile_home.mkdir(parents=True, exist_ok=True)
+    protected_ids = "\n".join(f"      - {name}" for name in skill_names)
+    (profile_home / "config.yaml").write_text(
+        "skills:\n"
+        "  protection:\n"
+        "    enabled: true\n"
+        "    audit_enabled: true\n"
+        "    protected_ids:\n"
+        f"{protected_ids}\n",
+        encoding="utf-8",
+    )
+
+
 def _get(path: str, *, profile: str | None = None):
     headers = {}
     if profile:
@@ -164,6 +178,93 @@ def test_skill_detail_reads_resolved_file_without_skill_view_absolute_path(monke
         assert detail["name"] == "profile-direct-skill-1880"
         assert "resolved SKILL.md file" in detail["content"]
         assert isinstance(detail["linked_files"], dict)
+
+
+def test_protected_skill_metadata_only_and_content_blocked():
+    profile = "skills1880protected"
+    protected_name = "protected-skill-1880"
+    secret = "PROTECTED_SECRET_1880"
+    with _IsolatedSkillsDirs(profile) as dirs:
+        skill_dir = _write_skill(
+            dirs.profile_skills,
+            protected_name,
+            "Protected profile skill",
+            f"This body must not leak: {secret}.",
+        )
+        (skill_dir / "references" / "note.md").write_text(
+            f"linked file must not leak: {secret}\n",
+            encoding="utf-8",
+        )
+        _write_protection_config(dirs.profile_home, protected_name)
+
+        listing, list_status = _get("/api/skills", profile=profile)
+
+        assert list_status == 200
+        listed = {skill["name"]: skill for skill in listing.get("skills", [])}
+        assert protected_name in listed
+        assert listed[protected_name]["protected"] is True
+        assert listed[protected_name]["content_available"] is False
+        assert "content" not in listed[protected_name]
+        assert "skill_dir" not in listed[protected_name]
+
+        detail, detail_status = _get(
+            f"/api/skills/content?name={protected_name}",
+            profile=profile,
+        )
+
+        assert detail_status == 403
+        dumped = json.dumps(detail, ensure_ascii=False)
+        assert detail["protected"] is True
+        assert detail["code"] == "protected_skill_content_unavailable"
+        assert secret not in dumped
+        assert "content" not in detail
+        assert "linked_files" not in detail
+        assert "skill_dir" not in detail
+
+        linked_path = urllib.parse.quote("references/note.md", safe="")
+        linked, linked_status = _get(
+            f"/api/skills/content?name={protected_name}&file={linked_path}",
+            profile=profile,
+        )
+
+        assert linked_status == 403
+        assert secret not in json.dumps(linked, ensure_ascii=False)
+
+
+def test_protected_skill_cannot_be_saved_or_deleted_from_webui():
+    profile = "skills1880protectedwrite"
+    protected_name = "protected-write-skill-1880"
+    with _IsolatedSkillsDirs(profile) as dirs:
+        skill_dir = _write_skill(
+            dirs.profile_skills,
+            protected_name,
+            "Protected write skill",
+            "original protected body",
+        )
+        _write_protection_config(dirs.profile_home, protected_name)
+
+        saved, save_status = _post(
+            "/api/skills/save",
+            {
+                "name": protected_name,
+                "content": "---\nname: protected-write-skill-1880\n---\n\nchanged",
+            },
+            profile=profile,
+        )
+
+        assert save_status == 403
+        assert saved["code"] == "protected_skill_write_blocked"
+        assert "original protected body" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+        deleted, delete_status = _post(
+            "/api/skills/delete",
+            {"name": protected_name},
+            profile=profile,
+        )
+
+        assert delete_status == 403
+        assert deleted["code"] == "protected_skill_delete_blocked"
+        assert (skill_dir / "SKILL.md").exists()
 
 
 def test_skill_save_and_delete_respect_profile_cookie():

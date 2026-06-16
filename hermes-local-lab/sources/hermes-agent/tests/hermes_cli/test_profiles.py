@@ -726,6 +726,44 @@ class TestExportImport:
         assert Path(result).exists()
         assert tarfile.is_tarfile(str(result))
 
+    def test_export_named_profile_excludes_protected_skills(self, profile_env, tmp_path):
+        create_profile("coder", no_alias=True)
+        profile_dir = get_profile_dir("coder")
+        secret = "PROFILE_EXPORT_PROTECTED_SECRET_1880"
+        open_skill = profile_dir / "skills" / "open-profile-skill"
+        protected_skill = profile_dir / "skills" / "protected-profile-skill"
+        open_skill.mkdir(parents=True)
+        protected_skill.mkdir(parents=True)
+        (open_skill / "SKILL.md").write_text("# Open Profile Skill\n", encoding="utf-8")
+        (protected_skill / "SKILL.md").write_text(
+            f"# Protected Profile Skill\n{secret}\n",
+            encoding="utf-8",
+        )
+        (profile_dir / "config.yaml").write_text(
+            "skills:\n"
+            "  protection:\n"
+            "    enabled: true\n"
+            "    protected_ids:\n"
+            "      - protected-profile-skill\n",
+            encoding="utf-8",
+        )
+
+        output = tmp_path / "export" / "coder.tar.gz"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        export_profile("coder", str(output))
+
+        with tarfile.open(str(output), "r:gz") as tf:
+            names = tf.getnames()
+            text = "\n".join(
+                tf.extractfile(member).read().decode("utf-8", errors="ignore")
+                for member in tf.getmembers()
+                if member.isfile()
+            )
+
+        assert "coder/skills/open-profile-skill/SKILL.md" in names
+        assert "coder/skills/protected-profile-skill/SKILL.md" not in names
+        assert secret not in text
+
     def test_import_restores_from_archive(self, profile_env, tmp_path):
         # Create and export a profile
         create_profile("coder", no_alias=True)
@@ -873,6 +911,44 @@ class TestExportImport:
         assert "default/.env" not in names  # credentials excluded
         assert "default/SOUL.md" in names
         assert "default/memories/MEMORY.md" in names
+
+    def test_export_default_excludes_protected_skills(self, profile_env, tmp_path):
+        """Default profile export keeps open skills and strips protected skill source."""
+        default_dir = get_profile_dir("default")
+        secret = "DEFAULT_EXPORT_PROTECTED_SECRET_1880"
+        open_skill = default_dir / "skills" / "open-default-skill"
+        protected_skill = default_dir / "skills" / "protected-default-skill"
+        open_skill.mkdir(parents=True)
+        protected_skill.mkdir(parents=True)
+        (open_skill / "SKILL.md").write_text("# Open Default Skill\n", encoding="utf-8")
+        (protected_skill / "SKILL.md").write_text(
+            f"# Protected Default Skill\n{secret}\n",
+            encoding="utf-8",
+        )
+        (default_dir / "config.yaml").write_text(
+            "skills:\n"
+            "  protection:\n"
+            "    enabled: true\n"
+            "    protected_ids:\n"
+            "      - protected-default-skill\n",
+            encoding="utf-8",
+        )
+
+        output = tmp_path / "export" / "default.tar.gz"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        export_profile("default", str(output))
+
+        with tarfile.open(str(output), "r:gz") as tf:
+            names = tf.getnames()
+            text = "\n".join(
+                tf.extractfile(member).read().decode("utf-8", errors="ignore")
+                for member in tf.getmembers()
+                if member.isfile()
+            )
+
+        assert "default/skills/open-default-skill/SKILL.md" in names
+        assert "default/skills/protected-default-skill/SKILL.md" not in names
+        assert secret not in text
 
     def test_export_default_excludes_infrastructure(self, profile_env, tmp_path):
         """Repo checkout, worktrees, profiles, databases are excluded."""

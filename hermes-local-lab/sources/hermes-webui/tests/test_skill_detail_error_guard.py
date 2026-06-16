@@ -19,6 +19,15 @@ def test_skill_detail_no_longer_silently_falls_back_on_error_payload():
     assert success_guard < render_detail
 
 
+def test_protected_skill_detail_renders_controlled_card_before_error_guard():
+    assert "function _renderProtectedSkillDetail(name, data = {})" in PANELS_JS
+    protected_guard = PANELS_JS.index("if (data && data.protected)")
+    success_guard = PANELS_JS.index("data.success === false || data.error")
+    assert protected_guard < success_guard
+    assert "_setSkillHeaderButtons('empty');" in PANELS_JS
+    assert "if (_currentSkillDetail.protected) return;" in PANELS_JS
+
+
 def test_skill_linked_file_api_error_renders_in_detail_pane():
     file_fetch = PANELS_JS.index("/api/skills/content?name=${encodeURIComponent(skillName)}&file=")
     file_error_guard = PANELS_JS.index("if (data && data.error)", file_fetch)

@@ -1669,6 +1669,35 @@ def terminal_tool(
         default_timeout = config["timeout"]
         effective_timeout = timeout or default_timeout
 
+        try:
+            from agent.skill_protection import (
+                audit_skill_protection_event,
+                terminal_command_may_export_protected_skill,
+            )
+
+            command_workdir = workdir or cwd
+            if terminal_command_may_export_protected_skill(command, workdir=command_workdir):
+                audit_skill_protection_event(
+                    "blocked_terminal_skill_export",
+                    request_summary=command,
+                    source="terminal_tool",
+                )
+                return json.dumps(
+                    {
+                        "output": "",
+                        "exit_code": -1,
+                        "error": (
+                            "Blocked: command appears to read, copy, search, or archive "
+                            "protected Skill source. Use the Skill through Agent calls; "
+                            "protected Skill files are not exportable through terminal."
+                        ),
+                        "status": "error",
+                    },
+                    ensure_ascii=False,
+                )
+        except Exception:
+            pass
+
         # Reject foreground commands where the model explicitly requests
         # a timeout above FOREGROUND_MAX_TIMEOUT — nudge it toward background.
         if not background and timeout and timeout > FOREGROUND_MAX_TIMEOUT:

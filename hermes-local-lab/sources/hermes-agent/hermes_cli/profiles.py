@@ -1249,7 +1249,45 @@ def _default_export_ignore(root_dir: Path):
         # Root-level exclusions
         if Path(directory) == root_dir:
             ignored.update(c for c in contents if c in _DEFAULT_EXPORT_EXCLUDE_ROOT)
+        ignored.update(
+            _protected_skill_export_ignores(
+                directory,
+                contents,
+                config_path=root_dir / "config.yaml",
+            )
+        )
         return ignored
+
+    return _ignore
+
+
+def _protected_skill_export_ignores(
+    directory: str,
+    contents: list,
+    *,
+    config_path: Path,
+) -> set:
+    ignored: set = set()
+    try:
+        from agent.skill_protection import is_path_protected_skill
+
+        base = Path(directory)
+        for entry in contents:
+            if is_path_protected_skill(base / entry, config_path=config_path):
+                ignored.add(entry)
+    except Exception:
+        pass
+    return ignored
+
+
+def _named_profile_export_ignore(root_dir: Path):
+    def _ignore(directory: str, contents: list) -> set:
+        _CREDENTIAL_FILES = {"auth.json", ".env"}
+        return (_CREDENTIAL_FILES & set(contents)) | _protected_skill_export_ignores(
+            directory,
+            contents,
+            config_path=root_dir / "config.yaml",
+        )
 
     return _ignore
 
@@ -1288,11 +1326,10 @@ def export_profile(name: str, output_path: str) -> Path:
     # Named profiles — stage a filtered copy to exclude credentials
     with tempfile.TemporaryDirectory() as tmpdir:
         staged = Path(tmpdir) / canon
-        _CREDENTIAL_FILES = {"auth.json", ".env"}
         shutil.copytree(
             profile_dir,
             staged,
-            ignore=lambda d, contents: _CREDENTIAL_FILES & set(contents),
+            ignore=_named_profile_export_ignore(profile_dir),
         )
         result = shutil.make_archive(base, "gztar", tmpdir, canon)
         return Path(result)

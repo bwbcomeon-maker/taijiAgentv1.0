@@ -44,6 +44,110 @@ description: Description for {name}.
     return skill_dir
 
 
+def _write_skill_protection_config(hermes_home: Path, *skill_names: str) -> None:
+    protected_ids = "\n".join(f"      - {name}" for name in skill_names)
+    (hermes_home / "config.yaml").write_text(
+        "skills:\n"
+        "  protection:\n"
+        "    enabled: true\n"
+        "    audit_enabled: true\n"
+        "    protected_ids:\n"
+        f"{protected_ids}\n",
+        encoding="utf-8",
+    )
+
+
+class TestProtectedSkillVisibility:
+    def test_listing_marks_protected_but_internal_skill_view_still_loads(
+        self, tmp_path, monkeypatch
+    ):
+        secret = "INTERNAL_PROTECTED_BODY_1880"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills"
+        skill_dir = _make_skill(
+            skills_dir,
+            "protected-agent-skill",
+            body=f"Use the protected procedure. {secret}",
+        )
+        refs = skill_dir / "references"
+        refs.mkdir()
+        (refs / "secret.md").write_text(f"reference payload {secret}", encoding="utf-8")
+        _write_skill_protection_config(tmp_path, "protected-agent-skill")
+
+        with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
+            listed = _find_all_skills()
+            protected = next(s for s in listed if s["name"] == "protected-agent-skill")
+
+            assert protected["protected"] is True
+            assert protected["content_available"] is False
+            assert "content" not in protected
+            assert "skill_dir" not in protected
+
+            loaded = json.loads(skill_view("protected-agent-skill"))
+            assert loaded["success"] is True
+            assert secret in loaded["content"]
+
+            linked = json.loads(
+                skill_view("protected-agent-skill", file_path="references/secret.md")
+            )
+            assert linked["success"] is True
+            assert secret in linked["content"]
+
+    def test_read_file_tool_blocks_direct_protected_skill_file_read(
+        self, tmp_path, monkeypatch
+    ):
+        secret = "DIRECT_READ_MUST_NOT_LEAK_1880"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills"
+        skill_dir = _make_skill(
+            skills_dir,
+            "protected-read-skill",
+            body=f"Do not expose this body. {secret}",
+        )
+        _write_skill_protection_config(tmp_path, "protected-read-skill")
+
+        from tools.file_tools import read_file_tool
+
+        result = json.loads(read_file_tool(str(skill_dir / "SKILL.md")))
+
+        assert "error" in result
+        assert "protected skill" in result["error"].lower()
+        assert secret not in json.dumps(result, ensure_ascii=False)
+
+    def test_search_tool_filters_protected_skill_matches_from_parent_dir(
+        self, tmp_path, monkeypatch
+    ):
+        secret = "SEARCH_MUST_NOT_LEAK_1880"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills"
+        _make_skill(
+            skills_dir,
+            "protected-search-skill",
+            body=f"Search should never return this marker. {secret}",
+        )
+        _write_skill_protection_config(tmp_path, "protected-search-skill")
+
+        from tools.file_tools import search_tool
+
+        result = json.loads(search_tool(secret, path=str(tmp_path), limit=20))
+
+        assert secret not in json.dumps(result, ensure_ascii=False)
+        assert result.get("total_count", 0) == 0
+
+    def test_protected_ids_support_category_wildcards(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills"
+        _make_skill(skills_dir, "wildcard-skill", category="writing-agent")
+        _write_skill_protection_config(tmp_path, "writing-agent/*")
+
+        with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
+            listed = _find_all_skills()
+
+        protected = next(s for s in listed if s["name"] == "wildcard-skill")
+        assert protected["protected"] is True
+        assert protected["content_available"] is False
+
+
 def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Path:
     """Create a category symlink under skills_dir pointing outside the tree."""
     external_category = linked_root / category

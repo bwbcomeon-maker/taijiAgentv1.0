@@ -4286,6 +4286,29 @@ function _renderSkillDetail(name, content, linkedFiles) {
   _setSkillHeaderButtons('read');
 }
 
+function _renderProtectedSkillDetail(name, data = {}) {
+  const title = $('skillDetailTitle');
+  const body = $('skillDetailBody');
+  const empty = $('skillDetailEmpty');
+  if (title) title.textContent = name;
+  const desc = data.description ? `<p class="skill-protected-description">${esc(data.description)}</p>` : '';
+  if (body) {
+    body.innerHTML = `
+      <div class="main-view-content skill-detail-content">
+        <div class="skill-protected-card">
+          <h3>${esc(name)}</h3>
+          ${desc}
+          <p>该 Skill 可在对话中由太极智能体调用，但源码、引用文件、脚本和模板受保护，不支持查看、编辑、导出或搜索。</p>
+        </div>
+      </div>`;
+    body.style.display = '';
+  }
+  if (empty) empty.style.display = 'none';
+  _currentSkillDetail = { name, protected: true, content: '', linked_files: {} };
+  _skillMode = 'protected';
+  _setSkillHeaderButtons('empty');
+}
+
 function _renderSkillError(name, message) {
   const title = $('skillDetailTitle');
   const body = $('skillDetailBody');
@@ -4321,6 +4344,11 @@ async function openSkill(name, el) {
   _editingSkillName = null;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    if (data && data.protected) {
+      _renderProtectedSkillDetail(name, data);
+      setStatus(data.error || t('skill_load_failed'));
+      return;
+    }
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
@@ -4329,7 +4357,17 @@ async function openSkill(name, el) {
     }
     _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
     _renderSkillDetail(name, data.content || '', data.linked_files || {});
-  } catch(e) { setStatus(t('skill_load_failed') + e.message); }
+  } catch(e) {
+    try {
+      const data = e && e.body ? JSON.parse(e.body) : null;
+      if (data && data.protected) {
+        _renderProtectedSkillDetail(name, data);
+        setStatus(data.error || t('skill_load_failed'));
+        return;
+      }
+    } catch(_parseErr) {}
+    setStatus(t('skill_load_failed') + e.message);
+  }
 }
 
 async function openSkillFile(skillName, filePath) {
@@ -4374,6 +4412,7 @@ async function openSkillFile(skillName, filePath) {
 
 function editCurrentSkill() {
   if (!_currentSkillDetail) return;
+  if (_currentSkillDetail.protected) return;
   const s = _currentSkillDetail;
   let category = '';
   if (_skillsData) {

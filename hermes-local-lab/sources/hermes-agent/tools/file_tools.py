@@ -551,6 +551,24 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         _resolved = _resolve_path_for_task(path, task_id)
 
+        try:
+            from agent.skill_protection import (
+                audit_skill_protection_event,
+                is_path_protected_skill,
+                protected_skill_read_error,
+            )
+
+            if is_path_protected_skill(_resolved):
+                audit_skill_protection_event(
+                    "blocked_file_read",
+                    path=_resolved,
+                    request_summary=str(path),
+                    source="read_file_tool",
+                )
+                return json.dumps({"error": protected_skill_read_error(path)})
+        except Exception:
+            pass
+
         # ── Binary file guard ─────────────────────────────────────────
         # Block binary files by extension (no I/O).
         if has_binary_extension(str(_resolved)):
@@ -1147,11 +1165,54 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 "already_searched": count,
             }, ensure_ascii=False)
 
+        search_root = _resolve_path_for_task(path, task_id)
+        try:
+            from agent.skill_protection import (
+                audit_skill_protection_event,
+                is_path_protected_skill,
+                protected_skill_read_error,
+            )
+
+            if is_path_protected_skill(search_root):
+                audit_skill_protection_event(
+                    "blocked_file_search",
+                    path=search_root,
+                    request_summary=f"{pattern}:{path}",
+                    source="search_files",
+                )
+                return json.dumps({"error": protected_skill_read_error(path)}, ensure_ascii=False)
+        except Exception:
+            pass
+
         file_ops = _get_file_ops(task_id)
         result = file_ops.search(
             pattern=pattern, path=path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context
         )
+        try:
+            from agent.skill_protection import is_path_protected_skill
+
+            def _protected_result_path(candidate_path: str) -> bool:
+                candidate = Path(candidate_path).expanduser()
+                if not candidate.is_absolute():
+                    candidate = search_root / candidate
+                return is_path_protected_skill(candidate)
+
+            if hasattr(result, "matches") and result.matches:
+                result.matches = [m for m in result.matches if not _protected_result_path(m.path)]
+                result.total_count = len(result.matches)
+            if hasattr(result, "files") and result.files:
+                result.files = [f for f in result.files if not _protected_result_path(f)]
+                result.total_count = len(result.files)
+            if hasattr(result, "counts") and result.counts:
+                result.counts = {
+                    key: value
+                    for key, value in result.counts.items()
+                    if not _protected_result_path(key)
+                }
+                result.total_count = sum(result.counts.values())
+        except Exception:
+            pass
         if hasattr(result, 'matches'):
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:

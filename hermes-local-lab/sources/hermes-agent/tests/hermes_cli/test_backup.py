@@ -186,6 +186,47 @@ class TestBackup:
             # Skins
             assert "skins/cyber.yaml" in names
 
+    def test_excludes_protected_skills_but_keeps_open_skills(self, tmp_path, monkeypatch):
+        """Backup keeps user/open skills but does not ship protected skill source."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        secret = "BACKUP_PROTECTED_SECRET_1880"
+        protected_dir = hermes_home / "skills" / "protected-backup-skill"
+        protected_dir.mkdir(parents=True)
+        (protected_dir / "SKILL.md").write_text(
+            f"# Protected Backup Skill\n{secret}\n",
+            encoding="utf-8",
+        )
+        (hermes_home / "config.yaml").write_text(
+            "skills:\n"
+            "  protection:\n"
+            "    enabled: true\n"
+            "    protected_ids:\n"
+            "      - protected-backup-skill\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        args = Namespace(output=str(out_zip))
+
+        from hermes_cli.backup import run_backup
+        run_backup(args)
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            names = zf.namelist()
+            assert "skills/my-skill/SKILL.md" in names
+            assert "skills/protected-backup-skill/SKILL.md" not in names
+            archive_text = "\n".join(
+                zf.read(name).decode("utf-8", errors="ignore")
+                for name in names
+                if not name.endswith(".db")
+            )
+            assert secret not in archive_text
+
     def test_excludes_hermes_agent(self, tmp_path, monkeypatch):
         """Backup does NOT include hermes-agent/ directory."""
         hermes_home = tmp_path / ".hermes"

@@ -90,6 +90,14 @@ def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> 
     if _should_exclude(rel_path):
         return True
 
+    try:
+        from agent.skill_protection import is_path_protected_skill
+
+        if is_path_protected_skill(abs_path):
+            return True
+    except Exception:
+        pass
+
     # zipfile.write() follows file symlinks, so skip links before any archive
     # write can copy data from outside HERMES_HOME.
     if abs_path.is_symlink():

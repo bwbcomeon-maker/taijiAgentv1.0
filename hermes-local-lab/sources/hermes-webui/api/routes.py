@@ -3579,6 +3579,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
         _sort_skills,
         skill_matches_platform,
     )
+    from agent.skill_protection import is_skill_protected
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -3616,13 +3617,24 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                             break
                 if len(description) > MAX_DESCRIPTION_LENGTH:
                     description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
+                skill_category = _skill_category_from_path(skill_md, search_dirs)
+                protected = is_skill_protected(
+                    name=name,
+                    skill_md=skill_md,
+                    skill_dir=skill_dir,
+                    category=skill_category,
+                    frontmatter=frontmatter,
+                    config_path=_active_profile_config_path(),
+                )
                 seen_names.add(name)
                 all_skills.append(
                     {
                         "name": name,
                         "description": description,
-                        "category": _skill_category_from_path(skill_md, search_dirs),
+                        "category": skill_category,
                         "disabled": name in disabled,
+                        "protected": protected,
+                        "content_available": not protected,
                     }
                 )
             except (UnicodeDecodeError, PermissionError) as e:
@@ -3751,6 +3763,7 @@ def _linked_files_for_skill(skill_dir: Path | None) -> dict:
 
 def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
     from tools.skills_tool import _parse_frontmatter, _parse_tags, skill_matches_platform
+    from agent.skill_protection import is_skill_protected, protected_skill_public_payload
 
     content = skill_md.read_text(encoding="utf-8")
     frontmatter, _body = _parse_frontmatter(content)
@@ -3763,6 +3776,29 @@ def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
     related_skills = _parse_tags(
         hermes_meta.get("related_skills") or frontmatter.get("related_skills", "")
     )
+    name = frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)
+    category = None
+    try:
+        category = _skill_category_from_path(
+            skill_md,
+            _active_skill_search_dirs(_active_skills_dir()),
+        )
+    except Exception:
+        category = None
+    if is_skill_protected(
+        name=name,
+        skill_md=skill_md,
+        skill_dir=skill_dir,
+        category=category,
+        frontmatter=frontmatter,
+        content=content,
+        config_path=_active_profile_config_path(),
+    ):
+        return protected_skill_public_payload(
+            name=name,
+            description=frontmatter.get("description", ""),
+            category=category,
+        )
     try:
         path = str(skill_md.relative_to((skill_dir or skill_md.parent).parent))
     except ValueError:
@@ -3770,7 +3806,7 @@ def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
 
     return {
         "success": True,
-        "name": frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name),
+        "name": name,
         "description": frontmatter.get("description", ""),
         "tags": tags,
         "related_skills": related_skills,
@@ -8753,6 +8789,32 @@ def handle_get(handler, parsed) -> bool:
             )
             if not skill_dir:
                 return bad(handler, "Skill not found", 404)
+            if _skill_md:
+                from agent.skill_protection import (
+                    audit_skill_protection_event,
+                    is_skill_protected,
+                    protected_skill_public_payload,
+                )
+
+                if is_skill_protected(
+                    name=name,
+                    skill_md=_skill_md,
+                    skill_dir=skill_dir,
+                    config_path=_active_profile_config_path(),
+                ):
+                    audit_skill_protection_event(
+                        "blocked_linked_file_view",
+                        skill_id=name,
+                        path=file_path,
+                        request_summary=f"{name}:{file_path}",
+                        source="webui",
+                        config_path=_active_profile_config_path(),
+                    )
+                    return j(
+                        handler,
+                        protected_skill_public_payload(name=name, action="view_linked_file"),
+                        status=403,
+                    )
             target = (skill_dir / file_path).resolve()
             try:
                 target.relative_to(skill_dir.resolve())
@@ -8765,6 +8827,20 @@ def handle_get(handler, parsed) -> bool:
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
             )
         data = _skill_view_from_active_dir(name)
+        if data.get("protected") and data.get("content_available") is False:
+            try:
+                from agent.skill_protection import audit_skill_protection_event
+
+                audit_skill_protection_event(
+                    "blocked_skill_view",
+                    skill_id=name,
+                    request_summary=name,
+                    source="webui",
+                    config_path=_active_profile_config_path(),
+                )
+            except Exception:
+                pass
+            return j(handler, data, status=403)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)
@@ -12669,6 +12745,13 @@ def _folder_download_collect(target: Path, workspace_root: Path,
                 size = fp.stat().st_size
             except OSError:
                 continue
+            try:
+                from agent.skill_protection import is_path_protected_skill
+
+                if is_path_protected_skill(fp, config_path=_active_profile_config_path()):
+                    continue
+            except Exception:
+                pass
             if len(files) >= max_files:
                 return files, total_bytes, "max_files"
             if total_bytes + size > max_bytes:
@@ -12780,6 +12863,24 @@ def _handle_file_raw(handler, parsed):
     target = _file_raw_target(s, sid, rel)
     if target is None:
         return j(handler, {"error": "not found"}, status=404)
+    try:
+        from agent.skill_protection import (
+            audit_skill_protection_event,
+            is_path_protected_skill,
+            protected_skill_public_payload,
+        )
+
+        if is_path_protected_skill(target, config_path=_active_profile_config_path()):
+            audit_skill_protection_event(
+                "blocked_file_raw",
+                path=target,
+                request_summary=rel,
+                source="webui_file_raw",
+                config_path=_active_profile_config_path(),
+            )
+            return j(handler, protected_skill_public_payload(action="file_raw"), status=403)
+    except Exception:
+        pass
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
     # Security: force download for dangerous MIME types to prevent XSS.
@@ -12818,6 +12919,25 @@ def _handle_file_read(handler, parsed):
     if not rel:
         return bad(handler, "path is required")
     try:
+        target = safe_resolve(Path(s.workspace), rel)
+        try:
+            from agent.skill_protection import (
+                audit_skill_protection_event,
+                is_path_protected_skill,
+                protected_skill_public_payload,
+            )
+
+            if is_path_protected_skill(target, config_path=_active_profile_config_path()):
+                audit_skill_protection_event(
+                    "blocked_file_read",
+                    path=target,
+                    request_summary=rel,
+                    source="webui_file_read",
+                    config_path=_active_profile_config_path(),
+                )
+                return j(handler, protected_skill_public_payload(action="file_read"), status=403)
+        except Exception:
+            pass
         return j(handler, read_file_content(Path(s.workspace), rel))
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
@@ -17104,6 +17224,37 @@ def _handle_skill_save(handler, body):
         skill_dir.resolve().relative_to(skills_dir.resolve())
     except ValueError:
         return bad(handler, "Invalid skill path")
+    existing_dir, existing_md = _find_skill_in_dirs(skill_name, _active_skill_search_dirs(skills_dir))
+    if existing_md:
+        from agent.skill_protection import (
+            PROTECTED_WRITE_CODE,
+            audit_skill_protection_event,
+            is_skill_protected,
+            protected_skill_public_payload,
+        )
+
+        if is_skill_protected(
+            name=skill_name,
+            skill_md=existing_md,
+            skill_dir=existing_dir,
+            config_path=_active_profile_config_path(),
+        ):
+            audit_skill_protection_event(
+                "blocked_skill_save",
+                skill_id=skill_name,
+                request_summary=skill_name,
+                source="webui",
+                config_path=_active_profile_config_path(),
+            )
+            return j(
+                handler,
+                protected_skill_public_payload(
+                    name=skill_name,
+                    code=PROTECTED_WRITE_CODE,
+                    action="save",
+                ),
+                status=403,
+            )
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(body["content"], encoding="utf-8")
@@ -17125,6 +17276,35 @@ def _handle_skill_delete(handler, body):
     if not matches:
         return bad(handler, "Skill not found", 404)
     skill_dir = matches[0].parent
+    from agent.skill_protection import (
+        PROTECTED_DELETE_CODE,
+        audit_skill_protection_event,
+        is_skill_protected,
+        protected_skill_public_payload,
+    )
+
+    if is_skill_protected(
+        name=skill_name,
+        skill_md=matches[0],
+        skill_dir=skill_dir,
+        config_path=_active_profile_config_path(),
+    ):
+        audit_skill_protection_event(
+            "blocked_skill_delete",
+            skill_id=skill_name,
+            request_summary=skill_name,
+            source="webui",
+            config_path=_active_profile_config_path(),
+        )
+        return j(
+            handler,
+            protected_skill_public_payload(
+                name=skill_name,
+                code=PROTECTED_DELETE_CODE,
+                action="delete",
+            ),
+            status=403,
+        )
     shutil.rmtree(str(skill_dir))
     return j(handler, {"ok": True, "name": body["name"]})
 

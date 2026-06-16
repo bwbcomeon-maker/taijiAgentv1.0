@@ -161,6 +161,33 @@ def _pinned_guard(name: str) -> Optional[str]:
     return None
 
 
+def _protected_mutation_guard(name: str, skill_dir: Path, action: str) -> Optional[Dict[str, Any]]:
+    """Return a refusal payload when a protected skill is being mutated."""
+    try:
+        from agent.skill_protection import (
+            PROTECTED_DELETE_CODE,
+            PROTECTED_WRITE_CODE,
+            audit_skill_protection_event,
+            is_skill_protected,
+            protected_skill_public_payload,
+        )
+
+        skill_md = skill_dir / "SKILL.md"
+        if not is_skill_protected(name=name, skill_md=skill_md, skill_dir=skill_dir):
+            return None
+        code = PROTECTED_DELETE_CODE if action == "delete" else PROTECTED_WRITE_CODE
+        audit_skill_protection_event(
+            f"blocked_skill_manage_{action}",
+            skill_id=name,
+            path=skill_dir,
+            request_summary=f"skill_manage:{action}:{name}",
+            source="skill_manage",
+        )
+        return protected_skill_public_payload(name=name, code=code, action=action)
+    except Exception:
+        return None
+
+
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 
@@ -543,6 +570,9 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+    guard = _protected_mutation_guard(name, existing["path"], "edit")
+    if guard:
+        return guard
 
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
@@ -585,6 +615,9 @@ def _patch_skill(
         return {"success": False, "error": _skill_not_found_error(name)}
 
     skill_dir = existing["path"]
+    guard = _protected_mutation_guard(name, skill_dir, "patch")
+    if guard:
+        return guard
 
     if file_path:
         # Patching a supporting file
@@ -672,6 +705,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+    guard = _protected_mutation_guard(name, existing["path"], "delete")
+    if guard:
+        return guard
 
     pinned_err = _pinned_guard(name)
     if pinned_err:
@@ -741,6 +777,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name, " Create it first with action='create'.")}
+    guard = _protected_mutation_guard(name, existing["path"], "write_file")
+    if guard:
+        return guard
 
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
@@ -777,6 +816,9 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
         return {"success": False, "error": _skill_not_found_error(name)}
 
     skill_dir = existing["path"]
+    guard = _protected_mutation_guard(name, skill_dir, "remove_file")
+    if guard:
+        return guard
 
     target, err = _resolve_skill_target(skill_dir, file_path)
     if err:

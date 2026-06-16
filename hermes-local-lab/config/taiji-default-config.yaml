@@ -11,6 +11,15 @@ image_gen:
   use_gateway: false
   model: gpt-image-2-medium
 
+skills:
+  protection:
+    enabled: true
+    audit_enabled: true
+    protected_ids:
+      - workflow-producer
+      - web-article-extractor
+      - style-modeler
+
 webui:
   # 左侧主导航。true=显示，false=隐藏。
   feature_visibility:
