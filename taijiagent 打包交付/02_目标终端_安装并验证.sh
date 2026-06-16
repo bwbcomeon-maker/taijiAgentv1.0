@@ -49,7 +49,7 @@ marker_value() {
 }
 
 validate_build_marker() {
-  [ -f "$BUILD_MARKER" ] || fail "未找到构建成功标记，请先执行并确认成功：bash ./01_目标终端_构建安装包.sh"
+  [ -f "$BUILD_MARKER" ] || fail "未找到构建成功标记，请先在制包机执行并确认成功：bash ./00_制包机_生成离线交付包.sh"
 
   deb_name="$(marker_value deb)"
   checksum_name="$(marker_value checksum)"
