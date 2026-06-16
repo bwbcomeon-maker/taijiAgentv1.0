@@ -186,7 +186,13 @@ def test_taiji_recent_sessions_use_display_titles_for_rows_and_search():
     assert 'class="taiji-session-title"' in TAIJI_HOME_JS
     assert "title=\"${fullTitle}\" aria-label=\"${fullTitle}\"" in TAIJI_HOME_JS
     assert "请【[^】]+】接手这个写作任务" in TAIJI_HOME_JS
+    assert r"/^召唤[^：:\n]{0,64}专家团[：:]\s*/" in TAIJI_HOME_JS
     assert "taijiCompactTopic(displayTitle)" in TAIJI_HOME_JS
+    display_start = TAIJI_HOME_JS.index("function taijiSessionDisplayTitle(session)")
+    display_body = TAIJI_HOME_JS[display_start : TAIJI_HOME_JS.index("function taijiSessionFullTitle", display_start)]
+    assert "return `${label||taijiWriteflowTeamLabel(session,rawTitle)}｜${topic||'写作项目'}`;" not in display_body
+    assert "return topic||taijiCompactTopic(label)||'写作项目';" in display_body
+    assert "return topic||'写作项目';" in display_body
     assert "session.title||'未命名会话'" not in TAIJI_HOME_JS
     assert ".taiji-session-card .taiji-session-title{" in STYLE_CSS
     assert ":root[data-skin] .taiji-home-shell .taiji-session-card .taiji-session-title{" in STYLE_CSS

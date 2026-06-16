@@ -18,15 +18,21 @@ def test_taiji_project_filters_are_rendered_from_projects():
     assert ".taiji-project-filters" in STYLE_CSS
 
 
-def test_taiji_recent_sessions_expose_project_move_action():
+def test_taiji_recent_sessions_collect_crud_actions_in_more_menu():
+    assert "data-taiji-session-more" in HOME_JS
+    assert "function showSessionActionMenu" in HOME_JS
+    assert "function renameSessionFromRecent" in HOME_JS
+    assert "data-taiji-session-rename" in HOME_JS
     assert "data-taiji-session-move" in HOME_JS
-    assert "window.taijiHomeMoveSession" in HOME_JS
-    assert "taijiHomeMoveSession(moveBtn.dataset.sessionId,event)" in HOME_JS
+    assert "data-taiji-session-delete" in HOME_JS
+    assert "'/api/session/rename'" in HOME_JS
     assert "'/api/session/move'" in HOME_JS
     assert "project_id:projectId||null" in HOME_JS
     assert "moveSessionToProject(session,project.project_id" in HOME_JS
     assert "新建分组并加入" in HOME_JS
-    assert ".taiji-session-move" in STYLE_CSS
+    assert ".taiji-session-more" in STYLE_CSS
+    assert ".taiji-session-action-menu" in STYLE_CSS
+    assert ".taiji-session-action-menu-item" in STYLE_CSS
     assert ".taiji-project-menu" in STYLE_CSS
 
 

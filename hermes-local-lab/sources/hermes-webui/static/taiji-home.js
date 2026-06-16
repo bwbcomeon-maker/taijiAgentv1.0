@@ -49,6 +49,9 @@
   };
   let projectMenuClickClose=null;
   let projectMenuKeyClose=null;
+  let sessionActionMenuAnchor=null;
+  let sessionActionMenuClickClose=null;
+  let sessionActionMenuKeyClose=null;
 
   const $=id=>document.getElementById(id);
   const shell=()=>document.querySelector('.taiji-home-shell');
@@ -365,7 +368,12 @@
 
   function taijiCompactTopic(value){
     let text=normalizeTaijiSessionTitle(value);
+    const expertStartMatch=text.match(/^召唤[^：:\n]{0,64}专家团[：:]\s*(.+)$/);
+    if(expertStartMatch&&expertStartMatch[1]){
+      return taijiClampSessionTitle(expertStartMatch[1].trim(),32);
+    }
     text=text
+      .replace(/^召唤[^：:\n]{0,64}专家团[：:]\s*/,'')
       .replace(/^请【[^】]+】接手这个写作任务[。.\s]*/,'')
       .replace(/^请把这个任务交给[^，,。.!！?？]*[，,。.!！?？\s]*/,'')
       .replace(/^请?帮我(整理|写|生成|规划|输出|起草|做)?一篇(关于|有关)?/i,'')
@@ -388,13 +396,13 @@
       if(parts.length>=2){
         const label=normalizeTaijiSessionTitle(parts.shift());
         const topic=taijiCompactTopic(parts.join('｜'));
-        return `${label||taijiWriteflowTeamLabel(session,rawTitle)}｜${topic||'写作项目'}`;
+        return topic||taijiCompactTopic(label)||'写作项目';
       }
       return taijiCompactTopic(displayTitle)||taijiClampSessionTitle(displayTitle,32);
     }
     if(writeflowTitle||rawLooksWriteflow){
-      const topic=taijiCompactTopic(writeflowTitle||rawTitle)||'写作项目';
-      return `${taijiWriteflowTeamLabel(session,rawTitle)}｜${topic}`;
+      const topic=taijiCompactTopic(writeflowTitle||rawTitle);
+      return topic||'写作项目';
     }
     if(taijiSessionTitleIsGeneric(rawTitle)) return '普通会话';
     if(/^(你|您好?|hi|hello|hey|晚|早|上午好|下午好|晚上好)$/i.test(rawTitle)) return '日常问候';
@@ -475,6 +483,23 @@
     if(projectMenuKeyClose){
       document.removeEventListener('keydown',projectMenuKeyClose);
       projectMenuKeyClose=null;
+    }
+  }
+
+  function closeSessionActionMenu(){
+    document.querySelectorAll('.taiji-session-action-menu').forEach(menu=>menu.remove());
+    if(sessionActionMenuAnchor){
+      sessionActionMenuAnchor.classList.remove('is-active');
+      sessionActionMenuAnchor.setAttribute('aria-expanded','false');
+      sessionActionMenuAnchor=null;
+    }
+    if(sessionActionMenuClickClose){
+      document.removeEventListener('click',sessionActionMenuClickClose);
+      sessionActionMenuClickClose=null;
+    }
+    if(sessionActionMenuKeyClose){
+      document.removeEventListener('keydown',sessionActionMenuKeyClose);
+      sessionActionMenuKeyClose=null;
     }
   }
 
@@ -613,6 +638,122 @@
     },0);
   }
 
+  function buildSessionActionMenuItem(label,{icon='',danger=false,attr='',sid=''}={},onClick){
+    const btn=document.createElement('button');
+    btn.type='button';
+    btn.className='taiji-session-action-menu-item'+(danger?' is-danger':'');
+    btn.setAttribute('role','menuitem');
+    if(attr) btn.setAttribute(attr,'');
+    if(sid) btn.dataset.sessionId=sid;
+    btn.innerHTML=`<span class="taiji-session-action-menu-icon" aria-hidden="true">${icon}</span><span>${escapeHtml(label)}</span>`;
+    btn.addEventListener('click',async event=>{
+      event.preventDefault();
+      event.stopPropagation();
+      await onClick(event);
+    });
+    return btn;
+  }
+
+  async function renameSessionFromRecent(session){
+    if(!session||!session.session_id) return false;
+    const promptFn=globalFn('showPromptDialog');
+    const apiFn=globalFn('api');
+    const toastFn=globalFn('showToast');
+    if(!promptFn||!apiFn){
+      if(toastFn) toastFn('重命名功能暂不可用',2500,'error');
+      return false;
+    }
+    const currentTitle=taijiSessionDisplayTitle(session);
+    const next=await promptFn({
+      title:'重命名会话',
+      message:'输入新的会话标题',
+      value:currentTitle,
+      placeholder:'会话标题',
+      confirmLabel:'保存',
+      selectAll:true
+    });
+    const nextTitle=normalizeTaijiSessionTitle(next||'');
+    if(!nextTitle) return false;
+    try{
+      await apiFn('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,title:nextTitle})});
+      session.title=nextTitle;
+      session.display_title=nextTitle;
+      const s=appState();
+      if(s&&s.session&&s.session.session_id===session.session_id){
+        s.session.title=nextTitle;
+        s.session.display_title=nextTitle;
+      }
+      const renderListFn=globalFn('renderSessionList');
+      if(renderListFn) await renderListFn();
+      await refreshSessions();
+      scheduleSync();
+      if(toastFn) toastFn('已重命名会话');
+      return true;
+    }catch(error){
+      if(toastFn) toastFn('重命名失败：'+(error&&error.message||error),3000,'error');
+      return false;
+    }
+  }
+
+  function showSessionActionMenu(sid,anchorEl,event){
+    if(event){
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    const session=sessionById(sid);
+    if(!session||!anchorEl) return;
+    closeSessionActionMenu();
+    closeProjectMenu();
+    const sessionId=String(sid);
+    const editIcon=typeof li==='function'?li('pencil',15):'';
+    const folderIcon=typeof li==='function'?li('folder',15):'';
+    const trashIcon=typeof li==='function'?li('trash-2',15):'';
+    const menu=document.createElement('div');
+    menu.className='taiji-session-action-menu';
+    menu.setAttribute('role','menu');
+    menu.setAttribute('aria-label','会话操作');
+    menu.appendChild(buildSessionActionMenuItem('重命名',{icon:editIcon,attr:'data-taiji-session-rename',sid:sessionId},async ()=>{
+      closeSessionActionMenu();
+      await renameSessionFromRecent(session);
+    }));
+    menu.appendChild(buildSessionActionMenuItem('分组',{icon:folderIcon,attr:'data-taiji-session-move',sid:sessionId},async event=>{
+      closeSessionActionMenu();
+      showProjectMenuForSession(sid,anchorEl,event);
+    }));
+    menu.appendChild(buildSessionActionMenuItem('删除',{icon:trashIcon,danger:true,attr:'data-taiji-session-delete',sid:sessionId},async event=>{
+      closeSessionActionMenu();
+      await window.taijiHomeDeleteSession(sid,event);
+    }));
+    document.body.appendChild(menu);
+    sessionActionMenuAnchor=anchorEl;
+    anchorEl.classList.add('is-active');
+    anchorEl.setAttribute('aria-expanded','true');
+    const rect=anchorEl.getBoundingClientRect();
+    const width=Math.min(220,Math.max(168,menu.offsetWidth||168));
+    const left=Math.max(8,Math.min(window.innerWidth-width-8,rect.right-width));
+    const spaceBelow=window.innerHeight-rect.bottom;
+    menu.style.left=left+'px';
+    menu.style.position='fixed';
+    menu.style.zIndex='9999';
+    if(spaceBelow<132&&rect.top>132){
+      menu.style.bottom=(window.innerHeight-rect.top+6)+'px';
+      menu.style.top='auto';
+    }else{
+      menu.style.top=(rect.bottom+6)+'px';
+      menu.style.bottom='auto';
+    }
+    sessionActionMenuClickClose=e=>{
+      if(!menu.contains(e.target)&&e.target!==anchorEl) closeSessionActionMenu();
+    };
+    sessionActionMenuKeyClose=e=>{
+      if(e.key==='Escape') closeSessionActionMenu();
+    };
+    setTimeout(()=>{
+      document.addEventListener('click',sessionActionMenuClickClose);
+      document.addEventListener('keydown',sessionActionMenuKeyClose);
+    },0);
+  }
+
   function renderProjectFilters(){
     const container=$('taijiProjectFilters');
     if(!container) return;
@@ -700,11 +841,9 @@
         const kindCode=kind==='专家团'?'expert':'qa';
         const kindLabel=escapeHtml(kind);
         const badge=session.is_streaming||session.active_stream_id?'<span class="taiji-session-live">运行</span>':'';
-        const projectName=projectNameById(session.project_id);
-        const moveLabel=escapeHtml(projectName?`更改分组：${projectName}`:`加入分组：${taijiSessionFullTitle(session)}`);
-        const deleteLabel=escapeHtml(`删除会话：${taijiSessionFullTitle(session)}`);
-        const folderIcon=typeof li==='function'?li('folder',15):'□';
-        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" title="${fullTitle}" aria-label="${fullTitle}"><span class="taiji-session-kind" data-kind="${kindCode}">${kindLabel}</span>${badge}<span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time></span></button><span class="taiji-session-action-separator" aria-hidden="true"></span><button class="taiji-session-move${session.project_id?' has-project':''}" type="button" data-taiji-session-move data-session-id="${sid}" title="${moveLabel}" aria-label="${moveLabel}">${folderIcon}</button><button class="taiji-session-delete" type="button" data-taiji-session-delete data-session-id="${sid}" title="${deleteLabel}" aria-label="${deleteLabel}">${typeof li==='function'?li('trash-2',15):'×'}</button></div>`;
+        const moreLabel=escapeHtml(`更多操作：${taijiSessionFullTitle(session)}`);
+        const moreIcon='<span class="taiji-session-more-dots" aria-hidden="true">...</span>';
+        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" title="${fullTitle}" aria-label="${fullTitle}"><span class="taiji-session-kind" data-kind="${kindCode}">${kindLabel}</span>${badge}<span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time></span></button><button class="taiji-session-more" type="button" data-taiji-session-more data-session-id="${sid}" title="${moreLabel}" aria-label="${moreLabel}" aria-haspopup="menu" aria-expanded="false">${moreIcon}</button></div>`;
       }).join('');
       return `<section class="taiji-session-group" aria-label="${group}"><header><span>${group}</span><span aria-hidden="true">⌃</span></header><div class="taiji-session-card">${rows}</div></section>`;
     }).join('');
@@ -759,14 +898,9 @@
     if(groups&&!groups.__taijiBound){
       groups.__taijiBound=true;
       groups.addEventListener('click',event=>{
-        const moveBtn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-move]'):null;
-        if(moveBtn&&groups.contains(moveBtn)){
-          window.taijiHomeMoveSession(moveBtn.dataset.sessionId,event);
-          return;
-        }
-        const deleteBtn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-delete]'):null;
-        if(deleteBtn&&groups.contains(deleteBtn)){
-          window.taijiHomeDeleteSession(deleteBtn.dataset.sessionId,event);
+        const moreBtn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-more]'):null;
+        if(moreBtn&&groups.contains(moreBtn)){
+          showSessionActionMenu(moreBtn.dataset.sessionId,moreBtn,event);
           return;
         }
         const openBtn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-open]'):null;
@@ -886,6 +1020,8 @@
     const loadSessionFn=globalFn('loadSession');
     const switchPanelFn=globalFn('switchPanel');
     if(!sid) return;
+    closeSessionActionMenu();
+    closeProjectMenu();
     if(openChatSessionFn){
       await openChatSessionFn(sid);
     }else if(loadSessionFn){

@@ -282,7 +282,7 @@ def test_taiji_recent_session_running_state_is_separated_from_time_column():
     assert '<span class="taiji-session-live">运行</span>' in home_js
 
     row_start = home_js.index('class="taiji-session-row')
-    row_template = home_js[row_start : home_js.index("taiji-session-move", row_start)]
+    row_template = home_js[row_start : home_js.index("</div>`", row_start)]
     meta_start = row_template.index('taiji-session-meta')
     meta_end = row_template.index("</span>", meta_start)
     meta_template = row_template[meta_start:meta_end]
@@ -293,6 +293,8 @@ def test_taiji_recent_session_running_state_is_separated_from_time_column():
     assert row_template.index('taiji-session-kind') < row_template.index('taiji-session-title')
     assert row_template.index('${badge}') < row_template.index('taiji-session-title')
     assert row_template.index('taiji-session-title') < row_template.index('taiji-session-meta')
+    assert 'taiji-session-more' in row_template
+    assert row_template.index('taiji-session-meta') < row_template.index('taiji-session-more')
     assert 'taiji-session-live' not in meta_template
     assert '<time>' not in row_template
     assert '<time class="taiji-session-time">' in row_template
@@ -300,12 +302,12 @@ def test_taiji_recent_session_running_state_is_separated_from_time_column():
     row_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-row{')
     row_rule = STYLE_CSS[row_rule_start : STYLE_CSS.index("}", row_rule_start)]
     assert "display:grid!important" in row_rule
-    assert "grid-template-columns:minmax(0,1fr) 1px 28px 28px!important" in row_rule
+    assert "grid-template-columns:minmax(0,1fr) 30px!important" in row_rule
 
     base_row_rule_start = STYLE_CSS.index('  .taiji-session-card .taiji-session-row{')
     base_row_rule = STYLE_CSS[base_row_rule_start : STYLE_CSS.index("}", base_row_rule_start)]
     assert "display:grid" in base_row_rule
-    assert "grid-template-columns:minmax(0,1fr) 1px 28px 28px" in base_row_rule
+    assert "grid-template-columns:minmax(0,1fr) 30px" in base_row_rule
 
     meta_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-meta{')
     meta_rule = STYLE_CSS[meta_rule_start : STYLE_CSS.index("}", meta_rule_start)]
