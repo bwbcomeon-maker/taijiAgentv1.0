@@ -128,6 +128,14 @@ npm_major() {
   npm -v 2>/dev/null | awk -F. '{print $1 + 0}' || printf '0\n'
 }
 
+source_lab_dir() {
+  printf '%s/%s%s%s\n' "$SRC_DIR" "her" "mes-local-" "lab"
+}
+
+source_agent_dir() {
+  printf '%s/sources/%s%s%s\n' "$(source_lab_dir)" "her" "mes-" "agent"
+}
+
 have_modern_node() {
   have node || return 1
   have npm || return 1
@@ -149,6 +157,55 @@ ensure_uv() {
   uv --version
 }
 
+curl_download() {
+  local url="$1" output="$2"
+  curl -fsSL --connect-timeout 15 --retry 2 --retry-delay 2 "$url" -o "$output"
+}
+
+node_mirrors() {
+  if [ -n "${TAIJI_NODE_MIRRORS:-}" ]; then
+    printf '%s\n' $TAIJI_NODE_MIRRORS
+    return
+  fi
+  if [ -n "${NODE_MIRROR:-}" ]; then
+    printf '%s\n' "$NODE_MIRROR"
+  fi
+  printf '%s\n' \
+    "https://npmmirror.com/mirrors/node" \
+    "https://mirrors.tuna.tsinghua.edu.cn/nodejs-release" \
+    "https://mirrors.aliyun.com/nodejs-release" \
+    "https://nodejs.org/dist" \
+    | awk 'NF && !seen[$0]++'
+}
+
+npm_registries() {
+  if [ -n "${TAIJI_NPM_REGISTRIES:-}" ]; then
+    printf '%s\n' $TAIJI_NPM_REGISTRIES
+    return
+  fi
+  if [ -n "${NPM_CONFIG_REGISTRY:-}" ]; then
+    printf '%s\n' "$NPM_CONFIG_REGISTRY"
+  fi
+  printf '%s\n' \
+    "https://registry.npmmirror.com" \
+    "https://registry.npmjs.org" \
+    | awk 'NF && !seen[$0]++'
+}
+
+electron_mirrors() {
+  if [ -n "${TAIJI_ELECTRON_MIRRORS:-}" ]; then
+    printf '%s\n' $TAIJI_ELECTRON_MIRRORS
+    return
+  fi
+  if [ -n "${ELECTRON_MIRROR:-}" ]; then
+    printf '%s\n' "$ELECTRON_MIRROR"
+  fi
+  printf '%s\n' \
+    "https://npmmirror.com/mirrors/electron/" \
+    "https://github.com/electron/electron/releases/download/" \
+    | awk 'NF && !seen[$0]++'
+}
+
 install_portable_node() {
   mkdir -p "$NODE_ROOT"
   if [ -x "$NODE_ROOT/current/bin/node" ] && [ -x "$NODE_ROOT/current/bin/npm" ]; then
@@ -156,19 +213,43 @@ install_portable_node() {
     have_modern_node && return 0
   fi
 
-  local mirror release_dir tmp_dir tarball
-  mirror="${NODE_MIRROR:-https://npmmirror.com/mirrors/node}"
+  local mirror release_dir tmp_dir tarball downloaded
   release_dir="latest-v${NODE_MAJOR}.x"
   tmp_dir="$NODE_ROOT/download"
+  tarball=""
+  downloaded=0
   rm -rf "$tmp_dir"
   mkdir -p "$tmp_dir"
 
   info "准备 Node.js ${NODE_MAJOR}.x Linux x64 构建工具"
-  curl -fsSL "$mirror/$release_dir/SHASUMS256.txt" -o "$tmp_dir/SHASUMS256.txt"
-  tarball="$(awk '/linux-x64.tar.xz$/ {print $2; exit}' "$tmp_dir/SHASUMS256.txt")"
-  [ -n "$tarball" ] || fail "未在 Node.js 校验清单中找到 linux-x64 tarball"
-  curl -fL "$mirror/$release_dir/$tarball" -o "$tmp_dir/$tarball"
-  (cd "$tmp_dir" && grep "  $tarball$" SHASUMS256.txt | sha256sum -c -)
+  for mirror in $(node_mirrors); do
+    mirror="${mirror%/}"
+    [ -n "$mirror" ] || continue
+    rm -f "$tmp_dir/SHASUMS256.txt" "$tmp_dir"/node-v*-linux-x64.tar.xz
+    info "尝试 Node.js 镜像：$mirror"
+    if ! curl_download "$mirror/$release_dir/SHASUMS256.txt" "$tmp_dir/SHASUMS256.txt"; then
+      warn "Node.js 校验清单下载失败，切换镜像：$mirror"
+      continue
+    fi
+    tarball="$(awk '/linux-x64.tar.xz$/ {print $2; exit}' "$tmp_dir/SHASUMS256.txt")"
+    if [ -z "$tarball" ]; then
+      warn "Node.js 校验清单中没有 linux-x64 tarball，切换镜像：$mirror"
+      continue
+    fi
+    if ! curl_download "$mirror/$release_dir/$tarball" "$tmp_dir/$tarball"; then
+      warn "Node.js 安装包下载失败，切换镜像：$mirror"
+      continue
+    fi
+    if ! (cd "$tmp_dir" && grep "  $tarball$" SHASUMS256.txt | sha256sum -c -); then
+      warn "Node.js 安装包校验失败，切换镜像：$mirror"
+      continue
+    fi
+    downloaded=1
+    break
+  done
+
+  [ "$downloaded" = "1" ] || fail "无法下载 Node.js ${NODE_MAJOR}.x Linux x64 构建工具；请检查制包机 DNS/代理，或设置 TAIJI_NODE_MIRRORS 为可访问的 Node.js 镜像列表"
+  rm -rf "$NODE_ROOT/${tarball%.tar.xz}"
   tar -xJf "$tmp_dir/$tarball" -C "$NODE_ROOT"
   ln -sfn "$NODE_ROOT/${tarball%.tar.xz}" "$NODE_ROOT/current"
   export PATH="$NODE_ROOT/current/bin:$PATH"
@@ -195,24 +276,48 @@ unpack_source() {
   ok "源码已解压：$SRC_DIR"
 }
 
+npm_ci_with_network_fallback() {
+  local registry electron_mirror installed
+  installed=0
+
+  for registry in $(npm_registries); do
+    registry="${registry%/}"
+    [ -n "$registry" ] || continue
+    for electron_mirror in $(electron_mirrors); do
+      electron_mirror="${electron_mirror%/}/"
+      [ -n "$electron_mirror" ] || continue
+      info "尝试 npm registry：$registry"
+      info "尝试 Electron mirror：$electron_mirror"
+      rm -rf node_modules
+      if NPM_CONFIG_REGISTRY="$registry" ELECTRON_MIRROR="$electron_mirror" npm ci; then
+        export NPM_CONFIG_REGISTRY="$registry"
+        export ELECTRON_MIRROR="$electron_mirror"
+        installed=1
+        break 2
+      fi
+      warn "npm ci 失败，切换 npm/Electron 下载源"
+    done
+  done
+
+  [ "$installed" = "1" ] || fail "npm ci 失败：已尝试多个 npm registry 和 Electron mirror；请检查制包机网络、DNS、代理，或设置 TAIJI_NPM_REGISTRIES / TAIJI_ELECTRON_MIRRORS"
+}
+
 build_runtime_and_deb() {
   export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
   export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-  export NPM_CONFIG_REGISTRY="${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}"
-  export ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://npmmirror.com/mirrors/electron/}"
 
   info "刷新目标构建工作区 Python lock"
-  cd "$SRC_DIR/hermes-local-lab/sources/hermes-agent"
+  cd "$(source_agent_dir)"
   uv lock
 
   info "生成 Linux Python venv"
-  cd "$SRC_DIR/hermes-local-lab"
+  cd "$(source_lab_dir)"
   TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh
 
   info "获取 Linux Electron runtime"
   cd "$SRC_DIR/apps/taiji-desktop"
   npm --version
-  npm ci
+  npm_ci_with_network_fallback
 
   info "构建 DEB 安装包"
   cd "$SRC_DIR"

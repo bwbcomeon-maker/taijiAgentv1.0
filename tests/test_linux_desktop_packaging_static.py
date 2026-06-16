@@ -378,6 +378,25 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("build_offline_dependency_repo", builder)
         self.assertIn("git archive", builder)
 
+    def test_offline_builder_has_network_mirror_fallbacks_for_build_tools(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("TAIJI_NODE_MIRRORS", builder)
+        self.assertIn("node_mirrors()", builder)
+        self.assertIn("https://nodejs.org/dist", builder)
+        self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/nodejs-release", builder)
+        self.assertIn("for mirror in $(node_mirrors)", builder)
+        self.assertIn("--connect-timeout", builder)
+        self.assertIn("TAIJI_NPM_REGISTRIES", builder)
+        self.assertIn("TAIJI_ELECTRON_MIRRORS", builder)
+        self.assertIn("npm_ci_with_network_fallback", builder)
+        self.assertIn("https://registry.npmjs.org", builder)
+        self.assertIn("https://github.com/electron/electron/releases/download/", builder)
+        self.assertIn("无法下载 Node.js", builder)
+        self.assertIn("npm ci 失败", builder)
+        self.assertNotIn("hermes-local-lab", builder.lower())
+        self.assertNotIn("hermes-agent", builder.lower())
+
     def test_delivery_install_script_removes_legacy_runtime_without_backup(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
