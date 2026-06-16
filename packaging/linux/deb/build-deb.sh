@@ -184,6 +184,25 @@ remove_editable_install_metadata() {
   find "$AGENT_RUNTIME/venv/bin" -maxdepth 1 -iname '*hermes*' -exec rm -f {} + 2>/dev/null || true
 }
 
+repair_packaged_venv_paths() {
+  local source_venv installed_venv source_agent installed_agent file
+  source_venv="$SOURCE_AGENT_DIR/venv"
+  installed_venv="/opt/taiji-agent/runtime/agent/venv"
+  source_agent="$SOURCE_AGENT_DIR"
+  installed_agent="/opt/taiji-agent/runtime/agent"
+
+  while IFS= read -r -d '' file; do
+    SOURCE_VENV="$source_venv" \
+    INSTALLED_VENV="$installed_venv" \
+    SOURCE_AGENT="$source_agent" \
+    INSTALLED_AGENT="$installed_agent" \
+      perl -pi -e 's/\Q$ENV{SOURCE_VENV}\E/$ENV{INSTALLED_VENV}/g; s/\Q$ENV{SOURCE_AGENT}\E/$ENV{INSTALLED_AGENT}/g' "$file"
+  done < <(
+    find "$AGENT_RUNTIME/venv/bin" -maxdepth 1 -type f -print0 2>/dev/null || true
+    [ -f "$AGENT_RUNTIME/venv/pyvenv.cfg" ] && printf '%s\0' "$AGENT_RUNTIME/venv/pyvenv.cfg"
+  )
+}
+
 rename_internal_agent_modules() {
   if [ -d "$AGENT_RUNTIME/hermes_cli" ]; then
     mv "$AGENT_RUNTIME/hermes_cli" "$AGENT_RUNTIME/taiji_cli"
@@ -238,6 +257,14 @@ stage_python_runtime() {
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     --exclude '.env' \
+    --exclude '.env.example' \
+    --exclude '*.example' \
+    --exclude '.envrc' \
+    --exclude '.dockerignore' \
+    --exclude '.gitattributes' \
+    --exclude '.gitignore' \
+    --exclude '.hadolint.yaml' \
+    --exclude '.mailmap' \
     --exclude 'license.jwt' \
     --exclude '*.jwt' \
     --exclude '.pytest_cache' \
@@ -259,6 +286,10 @@ stage_python_runtime() {
     --exclude 'ui-tui' \
     --exclude 'web' \
     --exclude 'venv' \
+    --exclude 'Dockerfile' \
+    --exclude 'docker-compose*' \
+    --exclude 'LICENSE' \
+    --exclude '*.md' \
     "$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/
 
   rename_internal_agent_modules
@@ -272,6 +303,7 @@ stage_python_runtime() {
     --exclude '*.pyc' \
     "$SOURCE_AGENT_DIR/venv"/ "$AGENT_RUNTIME/venv"/
   remove_editable_install_metadata
+  repair_packaged_venv_paths
 
   rsync -a \
     --exclude '.git' \
@@ -280,6 +312,11 @@ stage_python_runtime() {
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     --exclude '.env' \
+    --exclude '.env.example' \
+    --exclude '.env.docker.example' \
+    --exclude '*.example' \
+    --exclude '.dockerignore' \
+    --exclude '.gitignore' \
     --exclude 'license.jwt' \
     --exclude '*.jwt' \
     --exclude '.pytest_cache' \
@@ -287,6 +324,9 @@ stage_python_runtime() {
     --exclude 'docs' \
     --exclude 'reports' \
     --exclude 'scripts' \
+    --exclude 'ctl.sh' \
+    --exclude 'start.sh' \
+    --exclude 'docker_init.bash' \
     --exclude 'docker*' \
     --exclude '*compose*' \
     --exclude 'start.ps1' \
@@ -296,6 +336,7 @@ stage_python_runtime() {
     --exclude 'tests' \
     --exclude 'node_modules' \
     --exclude 'Dockerfile' \
+    --exclude 'LICENSE' \
     --exclude '*.md' \
     "$SOURCE_WEB_DIR"/ "$WEB_RUNTIME"/
 
@@ -307,22 +348,29 @@ stage_python_runtime() {
 
 scan_product_privacy() {
   local name_hits text_hits
-  name_hits="$(find "$INSTALL_ROOT" -iname '*hermes*' ! -path "$INSTALL_ROOT/licenses/*" -print)"
+  name_hits="$(find "$INSTALL_ROOT" \
+    -path "$INSTALL_ROOT/licenses" -prune -o \
+    -path "$INSTALL_ROOT/licenses/*" -prune -o \
+    -path "$AGENT_RUNTIME/venv/lib*" -prune -o \
+    -iname '*hermes*' -print)"
   if [ -n "$name_hits" ]; then
     echo "Package tree contains legacy product names in visible paths; refusing release." >&2
     printf '%s\n' "$name_hits" >&2
     exit 1
   fi
 
-  text_hits="$(grep -R -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' "$INSTALL_ROOT" \
-    --exclude-dir licenses \
-    --exclude '*.pyc' \
-    --exclude '*.so' \
-    --exclude '*.png' \
-    --exclude '*.jpg' \
-    --exclude '*.jpeg' \
-    --exclude '*.gif' \
-    2>/dev/null || true)"
+  text_hits="$(find "$INSTALL_ROOT" \
+    -path "$INSTALL_ROOT/licenses" -prune -o \
+    -path "$INSTALL_ROOT/licenses/*" -prune -o \
+    -path "$AGENT_RUNTIME/venv/lib*" -prune -o \
+    -type f \
+    ! -name '*.pyc' \
+    ! -name '*.so' \
+    ! -name '*.png' \
+    ! -name '*.jpg' \
+    ! -name '*.jpeg' \
+    ! -name '*.gif' \
+    -print0 | xargs -0 -r grep -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' 2>/dev/null || true)"
   if [ -n "$text_hits" ]; then
     echo "Package tree contains legacy product names in text files; refusing release." >&2
     printf '%s\n' "$text_hits" >&2

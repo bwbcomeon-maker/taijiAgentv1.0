@@ -233,6 +233,30 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("scan_product_privacy", build)
         self.assertNotIn("scripts/hermes-gateway", build)
 
+    def test_packaged_runtime_excludes_dev_templates_and_repairs_venv_paths(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        for expected in (
+            "--exclude '.env.example'",
+            "--exclude '.env.docker.example'",
+            "--exclude '*.example'",
+            "--exclude '.dockerignore'",
+            "--exclude '.gitignore'",
+            "--exclude 'Dockerfile'",
+            "--exclude 'docker-compose*'",
+            "--exclude 'ctl.sh'",
+            "--exclude 'start.sh'",
+            "--exclude 'LICENSE'",
+        ):
+            self.assertIn(expected, build)
+
+        self.assertIn("repair_packaged_venv_paths", build)
+        self.assertIn("SOURCE_VENV", build)
+        self.assertIn("/opt/taiji-agent/runtime/agent/venv", build)
+        self.assertIn('"$AGENT_RUNTIME/venv/bin"', build)
+        self.assertIn('"$AGENT_RUNTIME/venv/pyvenv.cfg"', build)
+        self.assertIn("-path \"$AGENT_RUNTIME/venv/lib*\" -prune", build)
+
     def test_packaged_launch_surface_has_no_hermes_visible_tokens(self):
         paths = [
             "hermes-local-lab/scripts/runtime-env.sh",
