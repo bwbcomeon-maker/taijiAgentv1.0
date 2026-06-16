@@ -302,7 +302,7 @@ class TestAdapterInit:
         adapter = APIServerAdapter(config)
         assert adapter._port == 8642
 
-    def test_create_agent_forwards_config_reasoning_effort(self, monkeypatch):
+    def test_create_agent_forwards_config_reasoning_max_effort(self, monkeypatch):
         captured = {}
 
         class FakeAgent:
@@ -321,11 +321,11 @@ class TestAdapterInit:
         monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
         monkeypatch.setattr(
             "gateway.run._load_gateway_config",
-            lambda: {"agent": {"reasoning_effort": "xhigh"}},
+            lambda: {"agent": {"reasoning_effort": "max"}},
         )
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._load_reasoning_config",
-            staticmethod(lambda: {"enabled": True, "effort": "xhigh"}),
+            staticmethod(lambda: {"enabled": True, "effort": "max"}),
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
@@ -336,7 +336,7 @@ class TestAdapterInit:
         agent = adapter._create_agent(session_id="api-session")
 
         assert isinstance(agent, FakeAgent)
-        assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
+        assert captured["reasoning_config"] == {"enabled": True, "effort": "max"}
 
 
 # ---------------------------------------------------------------------------

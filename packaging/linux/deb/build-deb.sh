@@ -278,7 +278,9 @@ stage_python_runtime() {
     --exclude 'docker' \
     --exclude 'nix' \
     --exclude 'packaging' \
-    --exclude 'plugins' \
+    --exclude 'plugins/hermes-achievements' \
+    --exclude 'plugins/kanban/systemd' \
+    --exclude 'plugins/security-guidance' \
     --exclude 'skills' \
     --exclude 'scripts' \
     --exclude 'optional-skills' \

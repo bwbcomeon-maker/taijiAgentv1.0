@@ -53,6 +53,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("desktop smoke test", verify)
         self.assertIn("-m taiji_runtime.main --help", verify)
         self.assertIn("Taiji runtime module entrypoint works", verify)
+        self.assertIn("verify_agent_runtime_imports", verify)
+        self.assertIn("plugins.memory", verify)
+        self.assertIn("plugins.context_engine", verify)
+        self.assertIn("Agent runtime plugin modules are importable", verify)
         self.assertIn("verify_packaged_config", verify)
         self.assertIn("/api/model-config", verify)
         self.assertIn("/api/settings", verify)
@@ -230,6 +234,18 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("compile_sourceless_python", build)
         self.assertIn("scan_product_privacy", build)
         self.assertNotIn('"$LAB_DIR"/ "$INSTALL_ROOT"/', build)
+
+    def test_packaged_agent_runtime_keeps_importable_plugin_package(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        stage_start = build.index("stage_python_runtime()")
+        stage = build[stage_start:build.index("rename_internal_agent_modules", stage_start)]
+        agent_copy = stage[:stage.index('"$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/')]
+
+        self.assertNotIn("--exclude 'plugins'", agent_copy)
+        self.assertIn("--exclude 'plugins/hermes-achievements'", agent_copy)
+        self.assertIn("--exclude 'plugins/kanban/systemd'", agent_copy)
+        self.assertIn("--exclude 'plugins/security-guidance'", agent_copy)
+        self.assertIn("scan_product_privacy", build)
 
     def test_packaged_agent_runtime_excludes_upstream_helper_scripts(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

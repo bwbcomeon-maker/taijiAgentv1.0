@@ -128,6 +128,26 @@ print(f"api model={main.get('provider')}/{main.get('model')} providers={len(prov
 PY
 }
 
+verify_agent_runtime_imports() {
+  local py
+  py="$(python_bin)"
+  [ -n "$py" ] || return 1
+  (cd "$AGENT_DIR" && "$py" - <<'PY'
+import importlib
+
+required_modules = (
+    "taiji_runtime.main",
+    "plugins",
+    "plugins.memory",
+    "plugins.context_engine",
+)
+for module_name in required_modules:
+    importlib.import_module(module_name)
+print("agent runtime imports ok: " + ", ".join(required_modules))
+PY
+  )
+}
+
 echo "Taiji Agent native verification"
 echo "Install root: $LAB_DIR"
 echo "Config file : $TAIJI_ENV_FILE"
@@ -169,6 +189,11 @@ if [ -x "$AGENT_DIR/venv/bin/python" ]; then
     ok "Taiji runtime module entrypoint works"
   else
     runtime_issue "Taiji runtime module entrypoint failed"
+  fi
+  if verify_agent_runtime_imports; then
+    ok "Agent runtime plugin modules are importable"
+  else
+    runtime_issue "Agent runtime plugin modules are not importable"
   fi
 else
   runtime_issue "Bundled Agent Python runtime not found; run setup-local.sh in source mode or rebuild Linux package with venv included"
