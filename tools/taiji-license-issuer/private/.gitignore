@@ -1,3 +1,4 @@
 *
 !.gitignore
 !signing-private.pem.example
+!signing-public.pem

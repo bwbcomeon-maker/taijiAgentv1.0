@@ -1,6 +1,7 @@
 import json
 import os
 import plistlib
+import re
 import stat
 import subprocess
 import tempfile
@@ -346,6 +347,16 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(verifier.stdout.strip(), "valid")
+
+    def test_product_default_public_key_matches_tracked_issuer_public_key(self):
+        product_source = (AGENT_DIR / "taiji_license.py").read_text(encoding="utf-8")
+        match = re.search(r'DEFAULT_PUBLIC_KEY_PEM = """(.*?)"""', product_source, re.S)
+        self.assertIsNotNone(match)
+        product_key = match.group(1).strip()
+        issuer_key = (ROOT / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem").read_text(
+            encoding="utf-8"
+        ).strip()
+        self.assertEqual(product_key, issuer_key)
 
     def test_gui_exposes_signing_key_initialization_action(self):
         index_html = (ROOT / "tools" / "taiji-license-issuer" / "index.html").read_text(encoding="utf-8")
