@@ -14,6 +14,14 @@ def test_writeflow_status_without_state_file(tmp_path):
     assert data["projects"] == []
     assert data["runs"] == []
     assert data["teams"][0]["id"] == "content-creator-team"
+    assert data["teams"][0]["description"] == (
+        "面向国网业务部门日常办公材料编制，支持通知通报、工作汇报、会议纪要、宣传稿、"
+        "方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。"
+    )
+    assert data["teams"][0]["tags"] == ["工作汇报", "通知通报", "会议纪要", "总结计划", "宣传稿件", "方案说明"]
+    assert [example["label"] for example in data["teams"][0]["examples"]] == ["工作汇报", "会议纪要"]
+    assert "迎峰度夏保供电重点工作推进情况" in data["teams"][0]["examples"][0]["prompt"]
+    assert "优化供电服务质效提升措施" in data["teams"][0]["examples"][1]["prompt"]
     assert data["state_path"].endswith("articles/.writeflow/state.json")
 
 

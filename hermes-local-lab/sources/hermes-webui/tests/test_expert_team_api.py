@@ -16,6 +16,27 @@ def test_expert_team_catalog_only_exposes_public_content_and_research_teams():
     assert "Hermes" not in public_json
 
 
+def test_content_creator_catalog_uses_sgcc_daily_office_copy():
+    from api import expert_teams
+
+    data = expert_teams.expert_team_catalog()
+    team = next(item for item in data["teams"] if item["id"] == "content-creator-team")
+
+    assert team["description"] == (
+        "面向国网业务部门日常办公材料编制，支持通知通报、工作汇报、会议纪要、宣传稿、"
+        "方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。"
+    )
+    assert team["tags"] == ["工作汇报", "通知通报", "会议纪要", "总结计划", "宣传稿件", "方案说明"]
+    assert [example["label"] for example in team["examples"]] == ["工作汇报", "会议纪要"]
+    assert "迎峰度夏保供电重点工作推进情况" in team["examples"][0]["prompt"]
+    assert "优化供电服务质效提升措施" in team["examples"][1]["prompt"]
+    assert [question["title"] for question in team["questions"]] == [
+        "这次要编制哪类办公材料，主题是什么？",
+        "材料面向哪些对象，使用场景是什么？",
+        "有哪些已知素材、口径要求、篇幅或表述边界？",
+    ]
+
+
 def test_deep_research_expert_team_start_persists_structured_run(tmp_path):
     from api import expert_teams
 

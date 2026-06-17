@@ -103,23 +103,23 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
         "id": "content-creator-team",
         "title": "内容创作专家团",
         "category": "内容创作",
-        "description": "公众号长文从需求确认、正文初稿、打磨发布到交付确认的结构化协作。",
+        "description": "面向国网业务部门日常办公材料编制，支持通知通报、工作汇报、会议纪要、宣传稿、方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。",
         "estimated": "预计 3 个阶段",
         "status_label": "本地技能已接入",
         "default_mode": "A",
         "default_action": "start",
-        "tags": ["公众号长文", "观点文章", "产品配图"],
+        "tags": ["工作汇报", "通知通报", "会议纪要", "总结计划", "宣传稿件", "方案说明"],
         "image": "static/assets/writeflow/team-content-creator.png",
         "examples": [
             {
-                "id": "wechat-saas-workbench",
-                "label": "公众号长文",
-                "prompt": "帮我写一篇公众号长文，主题是「本地 AI Agent 如何把写作流程变成可控工作台」。目标读者是独立开发者和企业技术负责人。请先澄清需求并给出文章定位、读者痛点、核心观点和一级大纲。语气专业、清晰、偏实战。",
+                "id": "monthly-work-report",
+                "label": "工作汇报",
+                "prompt": "帮我起草一篇部门月度工作汇报，主题是“迎峰度夏保供电重点工作推进情况”。面向公司分管领导，内容包括已完成工作、存在问题、下一步安排，要求条理清晰、语气正式。",
             },
             {
-                "id": "product-launch",
-                "label": "产品发布文",
-                "prompt": "帮我写一篇产品发布文章，介绍一个本地优先的 AI Agent 工作台。目标是让技术负责人理解它如何降低试错成本、沉淀知识和管理产物。先给定位和大纲。",
+                "id": "service-quality-meeting-minutes",
+                "label": "会议纪要",
+                "prompt": "帮我整理一份专题会议纪要，主题是“优化供电服务质效提升措施”。请按会议背景、主要议题、形成意见、责任分工和后续跟踪事项来组织，语气规范、便于内部流转。",
             },
         ],
         "members": [
@@ -129,9 +129,9 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
             {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "status": "待命"},
         ],
         "questions": [
-            {"id": "topic", "title": "这篇内容的主题是什么？", "type": "text", "required": True, "options": []},
-            {"id": "audience", "title": "目标读者是谁？", "type": "text", "required": True, "options": []},
-            {"id": "boundary", "title": "有哪些素材、篇幅或表达边界？", "type": "text", "required": False, "options": []},
+            {"id": "topic", "title": "这次要编制哪类办公材料，主题是什么？", "type": "text", "required": True, "options": []},
+            {"id": "audience", "title": "材料面向哪些对象，使用场景是什么？", "type": "text", "required": True, "options": []},
+            {"id": "boundary", "title": "有哪些已知素材、口径要求、篇幅或表述边界？", "type": "text", "required": False, "options": []},
         ],
         "tasks": [
             {
