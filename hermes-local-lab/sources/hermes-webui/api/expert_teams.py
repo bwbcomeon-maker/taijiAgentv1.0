@@ -28,9 +28,11 @@ STATUS_LABELS = {
     "waiting_user": "等待确认",
 }
 EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume", "cancelled"}
+PUBLIC_EXPERT_TEAM_IDS = ("content-creator-team", "deep-research-team")
 EXPERT_TEAM_PHASES = {
     "ai-content-creator-brand-moodboard": ["需求确认", "创意策划", "方向确认", "图像生成", "交付"],
     "content-creator-team": ["需求确认", "生成初稿", "打磨发布", "交付"],
+    "deep-research-team": ["需求确认", "资料调研", "结构提纲", "正文初稿", "审稿交付"],
 }
 
 
@@ -101,6 +103,23 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
         "category": "内容创作",
         "description": "公众号长文从需求确认、正文初稿到配图和发布检查的结构化协作。",
         "estimated": "预计 2 个阶段",
+        "status_label": "本地技能已接入",
+        "default_mode": "A",
+        "default_action": "start",
+        "tags": ["公众号长文", "观点文章", "产品配图"],
+        "image": "static/assets/writeflow/team-content-creator.png",
+        "examples": [
+            {
+                "id": "wechat-saas-workbench",
+                "label": "公众号长文",
+                "prompt": "帮我写一篇公众号长文，主题是「本地 AI Agent 如何把写作流程变成可控工作台」。目标读者是独立开发者和企业技术负责人。请先澄清需求并给出文章定位、读者痛点、核心观点和一级大纲。语气专业、清晰、偏实战。",
+            },
+            {
+                "id": "product-launch",
+                "label": "产品发布文",
+                "prompt": "帮我写一篇产品发布文章，介绍一个本地优先的 AI Agent 工作台。目标是让技术负责人理解它如何降低试错成本、沉淀知识和管理产物。先给定位和大纲。",
+            },
+        ],
         "members": [
             {"id": "workflow-producer", "name": "写作总导演", "role": "流程编排", "status": "待命"},
             {"id": "writing-executor", "name": "文案创作专家", "role": "正文写作", "status": "待命"},
@@ -128,6 +147,102 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
                 "worker_name": "配图专家",
                 "phase": "打磨发布",
                 "description": "封面图、文中配图；图片能力不可用时产出可复用配图 prompt。",
+            },
+        ],
+    },
+    "deep-research-team": {
+        "id": "deep-research-team",
+        "title": "深度文章研究团",
+        "category": "深度研究",
+        "description": "适合需要资料检索、案例调研、观点归纳和结构化提纲的深度文章。",
+        "estimated": "预计 5 个阶段",
+        "status_label": "本地技能已接入",
+        "default_mode": "B",
+        "default_action": "start",
+        "tags": ["资料调研", "案例分析", "结构提纲"],
+        "image": "static/assets/writeflow/team-research.png",
+        "examples": [
+            {
+                "id": "market-research",
+                "label": "深度调研",
+                "prompt": "围绕「企业为什么需要本地 AI Agent 工作台」做一篇深度文章。请先列出研究问题、资料范围、案例方向和文章大纲，不要直接写全文。",
+            },
+            {
+                "id": "case-library",
+                "label": "案例素材",
+                "prompt": "帮我整理一篇关于 AI Agent 在内容生产、研发协作、资料管理里的落地案例文章。先输出案例筛选标准和文章结构。",
+            },
+        ],
+        "members": [
+            {"id": "workflow-producer", "name": "研究总导演", "role": "研究编排", "status": "待命"},
+            {"id": "research-expert", "name": "资料研究员", "role": "案例调研", "status": "待命"},
+            {"id": "outline-architect", "name": "结构架构师", "role": "文章结构", "status": "待命"},
+            {"id": "writing-executor", "name": "撰稿专家", "role": "正文初稿", "status": "待命"},
+            {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "status": "待命"},
+        ],
+        "questions": [
+            {
+                "id": "research_topic",
+                "title": "这篇深度文章要研究的主题或核心问题是什么？",
+                "type": "text",
+                "required": True,
+                "options": [],
+            },
+            {
+                "id": "audience_goal",
+                "title": "目标读者和使用场景是什么？",
+                "type": "text",
+                "required": True,
+                "options": [],
+            },
+            {
+                "id": "source_boundary",
+                "title": "资料范围、案例偏好或需要避开的边界是什么？",
+                "type": "text",
+                "required": True,
+                "options": [],
+            },
+        ],
+        "tasks": [
+            {
+                "id": "direction",
+                "title": "确定研究方向",
+                "worker_id": "workflow-producer",
+                "worker_name": "研究总导演",
+                "phase": "资料调研",
+                "description": "明确研究问题、目标读者、资料范围和论证边界。",
+            },
+            {
+                "id": "research",
+                "title": "补充案例素材",
+                "worker_id": "research-expert",
+                "worker_name": "资料研究员",
+                "phase": "资料调研",
+                "description": "整理事实、案例、论据和素材线索，标注待人工确认项。",
+            },
+            {
+                "id": "outline",
+                "title": "生成文章大纲",
+                "worker_id": "outline-architect",
+                "worker_name": "结构架构师",
+                "phase": "结构提纲",
+                "description": "把研究材料组织成可写作的大纲、段落顺序和关键观点。",
+            },
+            {
+                "id": "draft",
+                "title": "撰写正文初稿",
+                "worker_id": "writing-executor",
+                "worker_name": "撰稿专家",
+                "phase": "正文初稿",
+                "description": "根据研究框架和大纲撰写正文初稿、标题方案和配图建议。",
+            },
+            {
+                "id": "review",
+                "title": "审稿润色和发布版",
+                "worker_id": "editor-review",
+                "worker_name": "审稿专家",
+                "phase": "审稿交付",
+                "description": "检查事实、逻辑、表达和发布风险，形成发布版建议。",
             },
         ],
     },
@@ -195,7 +310,7 @@ def _write_json(path: Path, payload: dict) -> None:
 def _team_template(team_id: str | None) -> dict:
     key = str(team_id or "").strip() or "content-creator-team"
     if key not in EXPERT_TEAM_TEMPLATES:
-        key = "content-creator-team"
+        raise ValueError(f"Unknown expert team: {key}")
     return deepcopy(EXPERT_TEAM_TEMPLATES[key])
 
 
@@ -353,7 +468,8 @@ def expert_team_run_view(run: dict) -> dict:
 
 def expert_team_catalog() -> dict:
     teams = []
-    for template in EXPERT_TEAM_TEMPLATES.values():
+    for team_id in PUBLIC_EXPERT_TEAM_IDS:
+        template = EXPERT_TEAM_TEMPLATES[team_id]
         teams.append(
             {
                 "id": template["id"],
@@ -361,6 +477,12 @@ def expert_team_catalog() -> dict:
                 "category": template["category"],
                 "description": template["description"],
                 "estimated": template.get("estimated", ""),
+                "status_label": template.get("status_label", ""),
+                "default_mode": template.get("default_mode", "A"),
+                "default_action": template.get("default_action", "start"),
+                "tags": deepcopy(template.get("tags") or []),
+                "image": template.get("image", ""),
+                "examples": deepcopy(template.get("examples") or []),
                 "members": deepcopy(template.get("members") or []),
                 "questions": deepcopy(template.get("questions") or []),
                 "tasks": deepcopy(template.get("tasks") or []),
@@ -453,7 +575,7 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
     return write_expert_team_run(Path(workspace), run)
 
 
-def mark_content_expert_team_execution_complete(workspace: Path, run_id: str, *, delivery: dict | None = None) -> dict:
+def mark_expert_team_execution_complete(workspace: Path, run_id: str, *, delivery: dict | None = None) -> dict:
     run = read_expert_team_run(Path(workspace), run_id)
     now = _now()
     delivery = delivery if isinstance(delivery, dict) else None
@@ -524,6 +646,10 @@ def mark_content_expert_team_execution_complete(workspace: Path, run_id: str, *,
     if not _has_event(run, "run_done"):
         _append_event(run, "run_done", "专家团任务已完成")
     return write_expert_team_run(Path(workspace), run)
+
+
+def mark_content_expert_team_execution_complete(workspace: Path, run_id: str, *, delivery: dict | None = None) -> dict:
+    return mark_expert_team_execution_complete(workspace, run_id, delivery=delivery)
 
 
 def _set_member_status(run: dict, member_id: str, status: str) -> None:
@@ -763,7 +889,10 @@ def cancel_expert_team(workspace: Path, run_id: str) -> dict:
 
 def expert_team_from_writeflow_run(run: dict) -> dict:
     run = dict(run or {})
-    template = _team_template(run.get("team_id") or "content-creator-team")
+    try:
+        template = _team_template(run.get("team_id") or "content-creator-team")
+    except ValueError:
+        template = _team_template("content-creator-team")
     adapted = {
         "run_id": str(run.get("run_id") or f"wr-{uuid.uuid4().hex[:8]}"),
         "source": "writeflow",

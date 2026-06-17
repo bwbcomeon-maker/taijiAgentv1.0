@@ -575,6 +575,7 @@ const STATUS_CARD_WRITEFLOW_PHASES=['确定方向','生成初稿','打磨发布'
 const STATUS_CARD_EXPERT_TEAM_PHASES={
   'ai-content-creator-brand-moodboard':['需求确认','创意策划','方向确认','图像生成','交付'],
   'content-creator-team':['需求确认','生成初稿','打磨发布','交付'],
+  'deep-research-team':['需求确认','资料调研','结构提纲','正文初稿','审稿交付'],
 };
 
 function _writeflowStatusCardFromRun(run,data){

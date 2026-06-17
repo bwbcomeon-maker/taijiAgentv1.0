@@ -64,7 +64,11 @@ def test_writing_expert_center_is_wired_to_rail_and_loader():
     assert "确定方向" in PANELS_JS
     assert "生成初稿" in PANELS_JS
     assert "打磨发布" in PANELS_JS
-    assert "_writeflowApplyServerTeams(data.teams)" in PANELS_JS
+    fn_start = PANELS_JS.index("async function loadWriteflow")
+    fn_body = PANELS_JS[fn_start : PANELS_JS.index("function _writeflowInputPayload", fn_start)]
+    assert "api('/api/expert-teams/catalog')" in fn_body
+    assert "_writeflowApplyServerTeams(expertCatalog && expertCatalog.teams)" in fn_body
+    assert "_writeflowApplyServerTeams(data.teams)" not in fn_body
     assert "const WRITEFLOW_FALLBACK_TEAM" in PANELS_JS
     assert "if (nextPanel === 'writing') await loadWriteflow();" in PANELS_JS
     assert "writing-center-mode" in PANELS_JS

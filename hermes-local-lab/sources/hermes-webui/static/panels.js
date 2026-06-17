@@ -3561,7 +3561,7 @@ const WRITEFLOW_FALLBACK_TEAM = {
   title: '内容创作专家团',
   category: '内容创作',
   statusLabel: '等待后端模板',
-  description: '专家团模板由 /api/writeflow/status 返回。',
+  description: '专家团模板由 /api/expert-teams/catalog 返回。',
   tags: [],
   image: 'static/assets/writeflow/team-content-creator.png',
   defaultMode: 'A',
@@ -3698,14 +3698,17 @@ async function loadWriteflow(force) {
   }
   if (statusEl) statusEl.textContent = '正在加载专家团...';
   try {
-    const data = await api(_writeflowStatusUrl());
-    _writeflowApplyServerTeams(data.teams);
-    try {
-      const expertCatalog = await api('/api/expert-teams/catalog');
-      _writeflowApplyServerTeams(expertCatalog && expertCatalog.teams);
-    } catch (_) {}
-    _writeflowData = data;
-    renderWriteflow(data);
+    const expertCatalog = await api('/api/expert-teams/catalog');
+    WRITEFLOW_TEAMS = [];
+    _writeflowApplyServerTeams(expertCatalog && expertCatalog.teams);
+    _writeflowData = {
+      ok: true,
+      active_project: null,
+      projects: [],
+      runs: [],
+      teams: (expertCatalog && expertCatalog.teams) || [],
+    };
+    renderWriteflow(_writeflowData);
   } catch (e) {
     if (statusEl) statusEl.textContent = '专家团暂时不可用：' + (e.message || e);
     grid.innerHTML = '';

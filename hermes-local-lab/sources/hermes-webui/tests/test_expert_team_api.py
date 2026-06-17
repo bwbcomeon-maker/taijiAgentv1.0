@@ -3,17 +3,51 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 
-def test_expert_team_catalog_includes_brand_moodboard_template():
+def test_expert_team_catalog_only_exposes_public_content_and_research_teams():
     from api import expert_teams
 
     data = expert_teams.expert_team_catalog()
 
-    team = next(item for item in data["teams"] if item["id"] == "ai-content-creator-brand-moodboard")
-    assert team["title"] == "品牌视觉策划与情绪板"
-    assert [member["name"] for member in team["members"]] == ["司远", "策凌", "珀西"]
-    assert [question["id"] for question in team["questions"]] == ["product_type", "audience", "brand_feeling"]
-    assert "WorkBuddy" not in json.dumps(team, ensure_ascii=False)
-    assert "Hermes" not in json.dumps(team, ensure_ascii=False)
+    assert [team["id"] for team in data["teams"]] == ["content-creator-team", "deep-research-team"]
+    public_json = json.dumps(data, ensure_ascii=False)
+    for removed in ("style-modeler", "web-article-extractor", "ai-content-creator-brand-moodboard", "风格", "网页", "情绪板"):
+        assert removed not in public_json
+    assert "WorkBuddy" not in public_json
+    assert "Hermes" not in public_json
+
+
+def test_deep_research_expert_team_start_persists_structured_run(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-deep",
+            "team_id": "deep-research-team",
+            "prompt": "研究本地优先 AI 助理的企业落地趋势",
+        },
+    )
+
+    assert run["team_id"] == "deep-research-team"
+    assert run["team_title"] == "深度文章研究团"
+    assert run["status"] == "awaiting_user"
+    assert run["phase"] == "需求确认"
+    assert [member["name"] for member in run["members"]] == ["研究总导演", "资料研究员", "结构架构师", "撰稿专家", "审稿专家"]
+    assert [question["id"] for question in run["questions"]] == ["research_topic", "audience_goal", "source_boundary"]
+    assert [task["id"] for task in run["tasks"]] == ["direction", "research", "outline", "draft", "review"]
+    assert [task["phase"] for task in run["tasks"]] == ["资料调研", "资料调研", "结构提纲", "正文初稿", "审稿交付"]
+    assert run["view"]["phase_progress"] == {"done": 0, "total": 5, "current": "需求确认"}
+
+
+def test_expert_team_start_rejects_unknown_non_empty_team_id(tmp_path):
+    from api import expert_teams
+
+    try:
+        expert_teams.start_expert_team(tmp_path, {"session_id": "sid-bad", "team_id": "style-modeler"})
+    except ValueError as exc:
+        assert "Unknown expert team" in str(exc)
+    else:
+        raise AssertionError("unknown team_id should not fallback to content creator")
 
 
 def test_expert_team_start_persists_awaiting_questions(tmp_path):
@@ -283,6 +317,93 @@ def test_content_expert_team_answer_starts_real_stream_without_exposing_internal
     assert response["run"]["view"]["health"]["active_stream_id"] == "stream-real-1"
     assert response["run"]["view"]["health"]["needs_resume"] is False
     assert response["run"]["view"]["phase_progress"]["total"] == 4
+    assert response["run"]["view"]["pending_questions"] == []
+
+
+def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-deep-stream",
+            "team_id": "deep-research-team",
+            "prompt": "研究本地优先 AI 助理的企业落地趋势",
+        },
+    )
+    sent = {}
+    calls = {}
+    session = SimpleNamespace(
+        session_id="sid-deep-stream",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+
+    def fake_j(_handler, payload, status=200, **_kwargs):
+        sent["payload"] = payload
+        sent["status"] = status
+        return payload
+
+    def fake_start_stream(s, **kwargs):
+        calls["session"] = s
+        calls.update(kwargs)
+        return {
+            "stream_id": "stream-deep-real-1",
+            "session_id": s.session_id,
+            "pending_started_at": 1781346300.0,
+            "title": "深度文章研究团任务",
+        }
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start_stream)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "sid-deep-stream",
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "本地优先 AI 助理如何在企业落地",
+                "audience_goal": "企业管理者，用于内部决策参考",
+                "source_boundary": "优先真实案例，不写泛泛趋势",
+            },
+        },
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/answer"))
+
+    assert response["stream_id"] == "stream-deep-real-1"
+    assert response["run"]["team_id"] == "deep-research-team"
+    assert response["run"]["execution_stream_id"] == "stream-deep-real-1"
+    assert response["run"]["execution_status"] == "running"
+    assert calls["session"] is session
+    assert calls["workspace"] == str(tmp_path)
+    assert calls["display_msg"].startswith("专家团开始生成：")
+    assert "深度文章研究团" in calls["msg"]
+    assert "本地优先 AI 助理如何在企业落地" in calls["msg"]
+    assert "企业管理者，用于内部决策参考" in calls["msg"]
+    assert "优先真实案例，不写泛泛趋势" in calls["msg"]
+    assert calls["msg"] != calls["display_msg"]
+    assert response["run"]["view"]["actions"]["can_cancel"] is True
+    assert response["run"]["view"]["phase_progress"]["total"] == 5
     assert response["run"]["view"]["pending_questions"] == []
 
 

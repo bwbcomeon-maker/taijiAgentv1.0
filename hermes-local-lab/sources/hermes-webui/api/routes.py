@@ -1012,6 +1012,9 @@ def _expert_team_answers_by_id(run: dict) -> dict[str, str]:
     return answers
 
 
+_EXPERT_TEAM_STREAM_TEAM_IDS = {"content-creator-team", "deep-research-team"}
+
+
 def _content_expert_team_execution_prompt(run: dict) -> str:
     answers = _expert_team_answers_by_id(run)
     topic = answers.get("topic") or run.get("title") or "本次内容主题"
@@ -1029,6 +1032,36 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         "4. 发布检查：列出发布前需要人工确认的事实、口径和风险。\n\n"
         "不要夸大产品能力；不确定的信息必须标注需要人工确认。"
     )
+
+
+def _deep_research_expert_team_execution_prompt(run: dict) -> str:
+    answers = _expert_team_answers_by_id(run)
+    topic = answers.get("research_topic") or run.get("title") or "本次研究主题"
+    audience_goal = answers.get("audience_goal") or "目标读者和使用场景待确认"
+    source_boundary = answers.get("source_boundary") or "没有额外资料边界"
+    return (
+        "你现在作为深度文章研究团执行本次任务。请基于已确认需求完成可直接写入当前对话的深度文章研究与写作交付。\n\n"
+        f"研究主题或核心问题：{topic}\n"
+        f"目标读者与用途：{audience_goal}\n"
+        f"资料范围、案例偏好或避坑边界：{source_boundary}\n\n"
+        "团队分工请体现在输出质量里：研究总导演先收敛研究问题，资料研究员补充案例和论据，结构架构师搭建文章大纲，撰稿专家形成正文初稿，审稿专家检查事实、逻辑和发布风险。\n\n"
+        "请用中文输出，结构必须包含：\n"
+        "1. 研究方向：明确核心问题、论证主线、适用读者和不展开的边界。\n"
+        "2. 资料调研：列出可用事实、案例线索、论据类型和需要人工确认的信息。\n"
+        "3. 结构提纲：给出一级/二级标题、每节观点和材料安排。\n"
+        "4. 正文初稿：按提纲写出可继续打磨的深度文章初稿。\n"
+        "5. 审稿交付：列出事实核对项、表达风险、发布前建议和下一步可选操作。\n\n"
+        "没有来源或不确定的信息必须标注需要人工确认；不要编造案例、数据或出处。"
+    )
+
+
+def _expert_team_execution_prompt(run: dict) -> str:
+    team_id = str(run.get("team_id") or "")
+    if team_id == "deep-research-team":
+        return _deep_research_expert_team_execution_prompt(run)
+    if team_id == "content-creator-team":
+        return _content_expert_team_execution_prompt(run)
+    raise ValueError(f"Expert team cannot start chat stream: {team_id or 'missing team_id'}")
 
 
 def _expert_team_execution_display_message(run: dict) -> str:
@@ -1129,7 +1162,7 @@ def _expert_team_run_has_ready_result(run: dict) -> bool:
 
 
 def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> dict | None:
-    if not run or str(run.get("team_id") or "") != "content-creator-team":
+    if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
         return run
     if _expert_team_has_pending_required_questions(run):
         return run
@@ -1149,7 +1182,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
             ):
                 from api import expert_teams
 
-                return expert_teams.mark_content_expert_team_execution_complete(
+                return expert_teams.mark_expert_team_execution_complete(
                     workspace,
                     str(run.get("run_id") or ""),
                     delivery={
@@ -1190,7 +1223,7 @@ def _start_expert_team_execution(workspace: Path, run: dict, body: dict) -> tupl
     display_msg = _expert_team_execution_display_message(run)
     response = _start_chat_stream_for_session(
         session,
-        msg=_content_expert_team_execution_prompt(run),
+        msg=_expert_team_execution_prompt(run),
         display_msg=display_msg,
         attachments=[],
         workspace=str(workspace),
@@ -10212,7 +10245,7 @@ def handle_post(handler, parsed) -> bool:
             run = expert_teams.answer_expert_team(workspace, body)
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
             if (
-                str(run.get("team_id") or "") == "content-creator-team"
+                str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
                 and str(run.get("status") or "") == "running"
                 and not _expert_team_has_pending_required_questions(run)
                 and not str(run.get("execution_stream_id") or "")

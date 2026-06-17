@@ -33,6 +33,20 @@ def test_writeflow_summon_routes_through_expert_team_runtime():
     assert "请先填写本次写作需求。" not in fn_body
 
 
+def test_expert_team_center_loads_only_expert_team_catalog():
+    fn_start = PANELS_JS.index("async function loadWriteflow")
+    fn_body = PANELS_JS[fn_start : PANELS_JS.index("function _writeflowInputPayload", fn_start)]
+
+    assert "api('/api/expert-teams/catalog')" in fn_body
+    assert "_writeflowApplyServerTeams(expertCatalog && expertCatalog.teams)" in fn_body
+    assert "_writeflowApplyServerTeams(data.teams)" not in fn_body
+    assert "api(_writeflowStatusUrl())" not in fn_body
+
+
+def test_deep_research_team_has_expert_team_status_phases():
+    assert "'deep-research-team':['需求确认','资料调研','结构提纲','正文初稿','审稿交付']" in UI_JS
+
+
 def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks():
     assert "function _expertTeamStatusCardFromRun" in UI_JS
     assert "function _isExpertTeamStatusCard" in UI_JS
