@@ -4373,10 +4373,11 @@ from api.helpers import (
 from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     brand_safe_reply,
-    is_brand_probe,
+    classify_brand_safety_prompt,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
     scrub_messages,
+    scrub_public_export_payload,
     scrub_public_session_payload,
 )
 from api.agent_health import build_agent_health_payload
@@ -11424,7 +11425,7 @@ def _handle_session_export(handler, parsed):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    safe = redact_session_data(s.__dict__)
+    safe = scrub_public_export_payload(redact_session_data(s.__dict__))
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -13997,6 +13998,7 @@ def _start_brand_privacy_safe_stream_for_session(
         s.workspace = workspace
         s.model = model
         s.model_provider = model_provider
+        s.brand_privacy_tainted = True
         s.active_stream_id = None
         s.pending_user_message = None
         s.pending_attachments = []
@@ -14531,7 +14533,10 @@ def _handle_chat_start(handler, body, diag=None):
             status = int(response.pop("_status", 200) or 200)
             diag.stage("response_write") if diag else None
             return j(handler, response, status=status)
-        if is_brand_probe(msg):
+        if classify_brand_safety_prompt(
+            msg,
+            session_tainted=bool(getattr(s, "brand_privacy_tainted", False)),
+        ).action == "safe_reply":
             response = _start_brand_privacy_safe_stream_for_session(
                 s,
                 msg=msg,
@@ -14679,10 +14684,14 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
-        if is_brand_probe(msg):
+        if classify_brand_safety_prompt(
+            msg,
+            session_tainted=bool(getattr(s, "brand_privacy_tainted", False)),
+        ).action == "safe_reply":
             reply = brand_safe_reply(msg)
             now = int(time.time())
             turn_started_at = getattr(s, "pending_started_at", None) or now
+            s.brand_privacy_tainted = True
             s.messages = list(getattr(s, "messages", None) or []) + [
                 {"role": "user", "content": msg, "timestamp": now},
                 {"role": "assistant", "content": reply, "timestamp": now},

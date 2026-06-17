@@ -771,6 +771,21 @@ def handle_function_call(
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
+        try:
+            from agent.brand_safety import block_reason_for_tool
+
+            public_block = block_reason_for_tool(function_name, function_args)
+            if public_block:
+                return json.dumps(
+                    {
+                        "error": public_block,
+                        "status": "blocked",
+                    },
+                    ensure_ascii=False,
+                )
+        except Exception as _brand_guard_err:
+            logger.debug("public chat brand guard error: %s", _brand_guard_err)
+
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to
         # avoid double-firing the hook).

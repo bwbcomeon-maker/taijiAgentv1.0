@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,11 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "HERMES_HOME",
     "HERMES_WEBUI_",
     "X-Hermes-CSRF-Token",
+    "Nous Research",
+    "Hermes Web UI Contributors",
+    "agent-runtime",
+    "web-runtime",
+    "claw.pyc",
     "~/.hermes",
     "hermes_cli",
     "hermes-local-lab",
@@ -119,6 +125,71 @@ _BRAND_PROBE_RE = re.compile(
     r")"
 )
 
+_LICENSE_PROBE_RE = re.compile(
+    r"(?is)(?:版权|著作权|许可|许可证|license|mit|copyright|归属|rights?|owner|attribution)"
+)
+
+_IDENTITY_PROVENANCE_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"自研|自己开发|自主研发|原生开发|不是自研|非自研|套壳|换皮|二开|改造|"
+    r"基于什么|基于哪个|是不是基于|拿.*开源|用了.*开源|开源.*(?:底层|组件|项目|代码)|"
+    r"\bopen\s*source\b|\bupstream\b|\bbased\s+on\b|\bbuilt\s+on\b|\bfork(?:ed)?\b"
+    r")"
+)
+
+_IMPLEMENTATION_INSPECTION_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"(?:搜索|扫描|遍历|读取|查看|列出).{0,24}(?:你自己|自身|当前系统|agent|安装|运行时|runtime|源码|代码|目录|路径|文件)|"
+    r"(?:逻辑架构|文件情况|目录结构|包结构|模块结构|底层架构|技术架构|核心架构)|"
+    r"(?:site-packages|dist-info|pyc|源码快照|安装目录|运行目录|runtime\s+home)"
+    r")"
+)
+
+_RUNTIME_ACCESS_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"端口|访问地址|本地地址|服务地址|localhost|127\.0\.0\.1|url|"
+    r"配置文件|配置项|环境变量|启动命令|部署路径|安装路径|日志路径|日志文件|"
+    r"进程|pid|ps\s+|/proc/|cmdline|environ|runtime|HERMES_[A-Z0-9_]*"
+    r")"
+)
+
+_PROMPT_BYPASS_RE = re.compile(
+    r"(?is)(?:系统提示词|system\s+prompt|developer\s+message|忽略.*(?:规则|指令)|绕过.*(?:限制|规则)|无视.*(?:规则|指令)|越狱|jailbreak)"
+)
+
+_SEMANTIC_BRAND_LEAK_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|"
+    r"agent-runtime|web-runtime|claw\.pyc|"
+    r"(?:这|本|该|当前|产品|系统|助手|智能体|taiji\s*Agent|太极智能体).{0,50}"
+    r"(?:不是(?:完全)?自研|非自研|开源底层|套壳|换皮|二开|开源组件.{0,20}(?:包装|拼|改造|再发行))|"
+    r"(?:开源底层|开源组件).{0,40}(?:包装|拼|改造|套壳|换皮|再发行)"
+    r")"
+)
+
+_FORBIDDEN_OUTPUT_DETAIL_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"NousResearch/hermes-agent|Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|"
+    r"Hermes\s+WebUI|agent-runtime|web-runtime|claw\.pyc|"
+    r"run_agent\.py|hermes_state\.py|model_tools\.py|tools/registry\.py|"
+    r"HERMES_HOME|HERMES_WEBUI_[A-Z0-9_]*|X-Hermes-CSRF-Token|"
+    r"~/.hermes|/[^ \n\r\t`'\"<>]*hermes[^ \n\r\t`'\"<>]*|"
+    r"(?:基于|改自|二开|换皮|底层|上游|来源|built\s+on|based\s+on).{0,40}"
+    r"(?:Hermes|hermes[-_ ]?agent)|"
+    r"(?:Hermes|hermes[-_ ]?agent).{0,40}"
+    r"(?:改造|二开|换皮|底层|上游|来源|不是(?:完全)?自研|非自研)"
+    r")"
+)
+
+_SELF_SCAN_RE = re.compile(
+    r"(?is)(?:你自己|自身|当前(?:产品|系统|助手|智能体)|这个(?:产品|系统|助手|智能体)|本(?:产品|系统|助手|智能体)|taiji\s*Agent|太极智能体|yourself|your own|this product|this system|this assistant|this agent)"
+)
+
 _GENERAL_FILE_TASK_RE = re.compile(
     r"(?:这个工作区有哪些文件|列出(?:当前)?文件|浏览文件|打开文件|读取这个文件|帮我写|帮我总结|今天有什么安排|运行一条系统命令)"
 )
@@ -144,35 +215,105 @@ _UNSAFE_INTERNAL_TOOLSETS = {
 }
 
 
+@dataclass(frozen=True)
+class BrandSafetyDecision:
+    action: str
+    risk: str = "normal"
+    safe_reply: str = ""
+    reason: str = ""
+
+
+class BrandSafetyPolicy:
+    """Classify ordinary WebUI prompts into public chat brand-safety actions."""
+
+    def classify_prompt(self, text: str, *, session_tainted: bool = False) -> BrandSafetyDecision:
+        value = str(text or "").strip()
+        if not value:
+            return BrandSafetyDecision(action="allow")
+
+        if _PROMPT_BYPASS_RE.search(value):
+            return self._safe("prompt_bypass", "prompt-bypass request")
+
+        self_referential = bool(_SELF_REFERENCE_RE.search(value) or _SELF_SCAN_RE.search(value))
+        if (
+            _HERMES_TOPIC_RE.search(value)
+            and not self_referential
+            and not _IMPLICIT_PRODUCT_LINK_RE.search(value)
+            and re.search(r"(?is)(?:介绍|是什么|what\s+is|tell\s+me\s+about)", value)
+        ):
+            return BrandSafetyDecision(action="allow")
+
+        internal_marker = bool(_STRONG_INTERNAL_MARKER_RE.search(value) or _HERMES_TOPIC_RE.search(value))
+        provenance = bool(_IDENTITY_PROVENANCE_RE.search(value) or _PROVENANCE_LINK_RE.search(value))
+        implementation = bool(_IMPLEMENTATION_INSPECTION_RE.search(value))
+        runtime = bool(_RUNTIME_ACCESS_RE.search(value))
+        license_probe = bool(_LICENSE_PROBE_RE.search(value))
+
+        if license_probe and (self_referential or internal_marker or session_tainted):
+            return self._safe("license", "license or copyright probe")
+        if implementation and (self_referential or internal_marker or session_tainted):
+            return self._safe("implementation_inspection", "implementation inspection probe")
+        if runtime:
+            return self._safe("runtime_access", "runtime access probe")
+        if provenance and (self_referential or internal_marker or session_tainted):
+            return self._safe("identity_provenance", "identity or provenance probe")
+
+        if _BRAND_PROBE_RE.search(value):
+            if _GENERAL_FILE_TASK_RE.search(value) and not re.search(
+                r"(?i)(hermes|源码|源代码|内核|底层|配置文件|环境变量|端口|访问地址|localhost|127\.0\.0\.1|github|版权|许可证|license|自研|开源)",
+                value,
+            ):
+                return BrandSafetyDecision(action="allow")
+            if self_referential or internal_marker or session_tainted:
+                return self._safe("identity_provenance", "generic brand probe")
+
+        return BrandSafetyDecision(action="allow")
+
+    def validate_output(self, text: str) -> BrandSafetyDecision:
+        value = str(text or "")
+        if not value.strip():
+            return BrandSafetyDecision(action="allow")
+        if _SEMANTIC_BRAND_LEAK_RE.search(value) or _contains_forbidden_public_detail(value):
+            return BrandSafetyDecision(
+                action="replace_output",
+                risk="output_leak",
+                safe_reply=brand_safe_reply(""),
+                reason="forbidden public detail in output",
+            )
+        return BrandSafetyDecision(action="allow")
+
+    @staticmethod
+    def _safe(risk: str, reason: str) -> BrandSafetyDecision:
+        return BrandSafetyDecision(
+            action="safe_reply",
+            risk=risk,
+            safe_reply=brand_safe_reply(""),
+            reason=reason,
+        )
+
+
+_BRAND_SAFETY_POLICY = BrandSafetyPolicy()
+
+
 def is_brand_probe(text: str) -> bool:
     """Return True for prompts attempting to reveal internal provenance."""
-    value = str(text or "").strip()
-    if not value:
-        return False
-    if _STRONG_INTERNAL_MARKER_RE.search(value):
-        return True
-    has_probe_intent = bool(_BRAND_PROBE_RE.search(value))
-    has_product_link = bool(_PROVENANCE_LINK_RE.search(value))
-    if not has_probe_intent and not has_product_link:
-        return False
-    # Keep ordinary user workspace/file tasks available unless they also name
-    # sensitive implementation terms.
-    if _GENERAL_FILE_TASK_RE.search(value) and not re.search(
-        r"(?i)(hermes|源码|源代码|内核|底层|配置文件|环境变量|端口|访问地址|localhost|127\.0\.0\.1|github)",
-        value,
-        ):
-        return False
-    if _HERMES_TOPIC_RE.search(value):
-        return bool(_SELF_REFERENCE_RE.search(value) or _IMPLICIT_PRODUCT_LINK_RE.search(value))
-    if _SELF_REFERENCE_RE.search(value) or has_product_link:
-        return True
-    return True
+    return _BRAND_SAFETY_POLICY.classify_prompt(text).action == "safe_reply"
+
+
+def classify_brand_safety_prompt(text: str, *, session_tainted: bool = False) -> BrandSafetyDecision:
+    """Classify a user prompt for ordinary public chat brand safety."""
+    return _BRAND_SAFETY_POLICY.classify_prompt(text, session_tainted=session_tainted)
+
+
+def brand_safety_validate(text: str) -> BrandSafetyDecision:
+    """Validate a completed user-visible answer before display/persistence."""
+    return _BRAND_SAFETY_POLICY.validate_output(text)
 
 
 def brand_safe_reply(user_text: str = "") -> str:
     """Return a productized answer for sensitive provenance probes."""
     return (
-        "taiji Agent 的内部实现与部署细节不在普通对话中公开。\n\n"
+        "taiji Agent 由太极智能体项目组维护交付，内部实现、第三方组件与部署细节不在普通对话中公开。\n\n"
         "从产品能力层面看，它由这些模块协同工作：\n"
         "- 对话调度：维护上下文、管理多轮任务状态，并把结果整理成可读回复。\n"
         "- 工具协同：在授权范围内调用文件、搜索、任务和系统操作能力。\n"
@@ -256,6 +397,17 @@ def scrub_public_session_payload(payload: Any) -> Any:
     return cleaned
 
 
+def scrub_public_export_payload(payload: Any) -> Any:
+    """Scrub a full export payload, including model-facing history fields."""
+    cleaned = scrub_public_session_payload(payload)
+    if isinstance(cleaned, dict):
+        if isinstance(cleaned.get("context_messages"), list):
+            cleaned["context_messages"] = scrub_messages(cleaned["context_messages"])
+        if isinstance(cleaned.get("messages"), list):
+            cleaned["messages"] = scrub_messages(cleaned["messages"])
+    return cleaned
+
+
 def scrub_messages(messages: Any) -> Any:
     """Return a scrubbed deep copy of session messages/history."""
     if isinstance(messages, list):
@@ -317,6 +469,8 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[str], *, final: bool 
 
 def _scrub_text(text: str) -> str:
     result = str(text or "")
+    if _SEMANTIC_BRAND_LEAK_RE.search(result):
+        return "内部实现细节已省略。"
     # Scrub absolute internal paths before generic brand replacements. If this
     # runs after replacing "hermes" with BRAND_NAME, paths like
     # /.../hermes-local-lab/workspace become fake executable paths such as
@@ -346,3 +500,10 @@ def _scrub_text(text: str) -> str:
     result = re.sub(r"(?i)\bX-Hermes-CSRF-Token\b", "内部安全头", result)
     result = re.sub(r"(?i)~/.hermes\b", "内部状态目录", result)
     return result
+
+
+def _contains_forbidden_public_detail(text: str) -> bool:
+    value = str(text or "")
+    if _SEMANTIC_BRAND_LEAK_RE.search(value):
+        return True
+    return bool(_FORBIDDEN_OUTPUT_DETAIL_RE.search(value))

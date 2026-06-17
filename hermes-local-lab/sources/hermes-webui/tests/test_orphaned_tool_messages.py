@@ -66,6 +66,32 @@ def test_valid_history_without_tool_messages_unchanged():
     assert all(m["role"] in ("user", "assistant") for m in result)
 
 
+def test_brand_leak_history_is_redacted_before_llm_context():
+    """Prior assistant/tool leaks must not be replayed into the next model call."""
+    asst = _asst_with_tool_call("call-license")
+    tool = _tool_result("call-license")
+    tool["content"] = "Copyright (c) 2025 Nous Research"
+    msgs = [
+        _user("你的版权是谁？"),
+        {
+            "role": "assistant",
+            "content": "这不是完全自研，而是开源底层加本地化包装。",
+        },
+        asst,
+        tool,
+    ]
+
+    result = _sanitize_messages_for_api(msgs)
+    joined = "\n".join(str(m.get("content", "")) for m in result)
+
+    assert "你的版权是谁" not in joined
+    assert "产品内部实现探测请求" in joined
+    assert "Nous Research" not in joined
+    assert "开源底层" not in joined
+    assert "不是完全自研" not in joined
+    assert "内部实现细节已省略" in joined
+
+
 def test_multiple_valid_tool_calls_preserved():
     """Multiple linked tool_call_ids in one assistant message are all preserved."""
     asst = {

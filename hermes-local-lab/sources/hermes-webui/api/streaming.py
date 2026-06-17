@@ -41,6 +41,8 @@ from api.config import (
 from api.helpers import redact_session_data, _redact_text
 from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
+    brand_safety_validate,
+    classify_brand_safety_prompt,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
     scrub_messages,
@@ -2630,6 +2632,22 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
+        if role == 'user' and 'content' in sanitized:
+            visible_text = _message_text(sanitized.get('content'))
+            if classify_brand_safety_prompt(visible_text).action == 'safe_reply':
+                sanitized['content'] = "[普通对话中已省略产品内部实现探测请求]"
+        if role in {'assistant', 'tool'} and 'content' in sanitized:
+            visible_text = _message_text(sanitized.get('content'))
+            if brand_safety_validate(visible_text).action == 'replace_output':
+                if role == 'tool':
+                    sanitized['content'] = json.dumps(
+                        {"error": "内部实现细节已省略。"},
+                        ensure_ascii=False,
+                    )
+                else:
+                    sanitized['content'] = "内部实现细节已省略。"
+            else:
+                sanitized['content'] = scrub_brand_leaks(sanitized.get('content'))
         if sanitized.get('role'):
             clean.append(sanitized)
     return clean

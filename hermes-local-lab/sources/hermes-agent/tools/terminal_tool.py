@@ -1639,6 +1639,20 @@ def terminal_tool(
                 "status": "error",
             }, ensure_ascii=False)
 
+        try:
+            from agent.brand_safety import block_reason_for_terminal
+
+            public_block = block_reason_for_terminal(command, workdir=workdir)
+            if public_block:
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": public_block,
+                    "status": "blocked",
+                }, ensure_ascii=False)
+        except Exception:
+            pass
+
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]

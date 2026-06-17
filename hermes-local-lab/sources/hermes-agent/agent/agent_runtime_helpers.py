@@ -1693,13 +1693,16 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     elif function_name == "delegate_task":
         return agent._dispatch_delegate_task(function_args)
     else:
-        return _ra().handle_function_call(
-            function_name, function_args, effective_task_id,
-            tool_call_id=tool_call_id,
-            session_id=agent.session_id or "",
-            enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-            skip_pre_tool_call_hook=True,
-        )
+        from agent.brand_safety import public_chat_guard
+
+        with public_chat_guard(getattr(agent, "platform", None) == "webui"):
+            return _ra().handle_function_call(
+                function_name, function_args, effective_task_id,
+                tool_call_id=tool_call_id,
+                session_id=agent.session_id or "",
+                enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                skip_pre_tool_call_hook=True,
+            )
 
 
 

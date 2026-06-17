@@ -538,6 +538,21 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
     try:
         offset, limit = normalize_read_pagination(offset, limit)
 
+        try:
+            from agent.brand_safety import block_reason_for_file_path
+
+            public_block = block_reason_for_file_path(path)
+            if public_block:
+                return json.dumps(
+                    {
+                        "error": public_block,
+                        "status": "blocked",
+                    },
+                    ensure_ascii=False,
+                )
+        except Exception:
+            pass
+
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
@@ -1130,6 +1145,21 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     """Search for content or files."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
+
+        try:
+            from agent.brand_safety import block_reason_for_search
+
+            public_block = block_reason_for_search(pattern, path)
+            if public_block:
+                return json.dumps(
+                    {
+                        "error": public_block,
+                        "status": "blocked",
+                    },
+                    ensure_ascii=False,
+                )
+        except Exception:
+            pass
 
         # Track searches to detect *consecutive* repeated search loops.
         # Include pagination args so users can page through truncated
