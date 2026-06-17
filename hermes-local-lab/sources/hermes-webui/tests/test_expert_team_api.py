@@ -637,6 +637,8 @@ def test_expert_team_start_returns_view_contract_for_pending_questions(tmp_path)
         "can_cancel": False,
         "can_retry": False,
         "can_open_artifact": False,
+        "can_approve_stage": False,
+        "can_request_revision": False,
     }
     assert view["health"] == {
         "needs_resume": False,
@@ -680,7 +682,7 @@ def test_content_expert_team_completion_requires_real_delivery_evidence(tmp_path
     assert updated["view"]["health"]["last_error"] == "未检测到可交付结果"
 
 
-def test_content_expert_team_completion_marks_done_when_chat_delivery_exists(tmp_path):
+def test_content_expert_team_stage_completion_waits_for_user_review(tmp_path):
     from api import expert_teams
 
     run = expert_teams.start_expert_team(
@@ -710,12 +712,294 @@ def test_content_expert_team_completion_marks_done_when_chat_delivery_exists(tmp
         delivery={"kind": "chat", "label": "专家团生成结果", "exists": True},
     )
 
-    assert updated["status"] == "done"
+    assert updated["status"] == "awaiting_user"
     assert updated["execution_status"] == "done"
-    assert [task["status"] for task in updated["tasks"]] == ["done", "done"]
-    assert updated["artifacts"][0]["kind"] == "chat"
-    assert updated["artifacts"][0]["openable"] is False
-    assert updated["view"]["actions"]["can_open_artifact"] is False
+    assert updated["phase"] == "生成初稿"
+    assert [task["status"] for task in updated["tasks"]] == ["waiting_user", "pending", "pending"]
+    assert updated["current_stage"]["task_id"] == "draft"
+    assert updated["current_stage"]["status"] == "awaiting_review"
+    assert updated["stage_outputs"][0]["task_id"] == "draft"
+    assert updated["stage_outputs"][0]["status"] == "awaiting_review"
+    assert updated["stage_outputs"][0]["revision_count"] == 0
+    assert updated["view"]["actions"]["can_approve_stage"] is True
+    assert updated["view"]["actions"]["can_request_revision"] is True
+    assert updated["view"]["stage_review"]["status"] == "awaiting_review"
+
+
+def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-approve", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-draft", "session_id": "sid-approve"},
+    )
+    reviewed = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={"kind": "chat", "label": "初稿阶段结果", "exists": True},
+    )
+
+    next_run = expert_teams.approve_expert_team_stage(tmp_path, reviewed["run_id"])
+
+    assert next_run["status"] == "running"
+    assert next_run["phase"] == "打磨发布"
+    assert next_run["current_stage"]["task_id"] == "illustrations"
+    assert [task["status"] for task in next_run["tasks"]] == ["done", "running", "pending"]
+    assert next_run["stage_outputs"][0]["status"] == "approved"
+    assert next_run["view"]["actions"]["can_approve_stage"] is False
+
+    second_started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        next_run["run_id"],
+        {"stream_id": "stream-polish", "session_id": "sid-approve"},
+    )
+    second_reviewed = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        second_started["run_id"],
+        delivery={"kind": "chat", "label": "打磨阶段结果", "exists": True},
+    )
+    delivery_run = expert_teams.approve_expert_team_stage(tmp_path, second_reviewed["run_id"])
+
+    assert delivery_run["status"] == "running"
+    assert delivery_run["phase"] == "交付"
+    assert delivery_run["current_stage"]["task_id"] == "delivery"
+    assert [task["status"] for task in delivery_run["tasks"]] == ["done", "done", "running"]
+
+    final_started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        delivery_run["run_id"],
+        {"stream_id": "stream-delivery", "session_id": "sid-approve"},
+    )
+    final_reviewed = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        final_started["run_id"],
+        delivery={"kind": "chat", "label": "交付确认阶段结果", "exists": True},
+    )
+    done = expert_teams.approve_expert_team_stage(tmp_path, final_reviewed["run_id"])
+
+    assert done["status"] == "done"
+    assert done["phase"] == "交付"
+    assert done["execution_status"] == "done"
+    assert [task["status"] for task in done["tasks"]] == ["done", "done", "done"]
+    assert all(output["status"] == "approved" for output in done["stage_outputs"])
+    assert done["artifacts"][0]["kind"] == "chat"
+    assert done["view"]["actions"]["can_approve_stage"] is False
+
+
+def test_expert_team_stage_revise_restarts_same_stage_with_feedback(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-revise", "team_id": "deep-research-team", "prompt": "研究本地优先 AI 助理"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "本地优先 AI 助理如何在企业落地",
+                "audience_goal": "企业管理者，用于内部决策参考",
+                "source_boundary": "优先真实案例，不写泛泛趋势",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-direction", "session_id": "sid-revise"},
+    )
+    reviewed = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={"kind": "chat", "label": "研究方向阶段结果", "exists": True},
+    )
+
+    revised = expert_teams.request_expert_team_stage_revision(
+        tmp_path,
+        reviewed["run_id"],
+        "研究问题还太宽，请收窄到企业内网知识库场景。",
+    )
+
+    assert revised["status"] == "running"
+    assert revised["phase"] == "资料调研"
+    assert revised["current_stage"]["task_id"] == "direction"
+    assert revised["current_stage"]["status"] == "revision_running"
+    assert revised["current_stage"]["revision_count"] == 1
+    assert revised["tasks"][0]["status"] == "running"
+    assert revised["stage_outputs"][0]["status"] == "revision_running"
+    assert revised["stage_outputs"][0]["revision_count"] == 1
+    assert revised["stage_outputs"][0]["feedback_history"][-1]["feedback"] == "研究问题还太宽，请收窄到企业内网知识库场景。"
+
+
+def test_expert_team_stage_approve_route_starts_next_stage_stream(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-stage-route", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-stage-route-1", "session_id": "sid-stage-route"},
+    )
+    reviewed = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={"kind": "chat", "label": "初稿阶段结果", "exists": True},
+    )
+    session = SimpleNamespace(
+        session_id="sid-stage-route",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+    calls = {}
+
+    def fake_start_stream(s, **kwargs):
+        calls.update(kwargs)
+        return {"stream_id": "stream-stage-route-2", "session_id": s.session_id}
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start_stream)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": "sid-stage-route", "run_id": reviewed["run_id"]},
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/stage/approve"))
+
+    assert response["stream_id"] == "stream-stage-route-2"
+    assert response["run"]["phase"] == "打磨发布"
+    assert response["run"]["current_stage"]["task_id"] == "illustrations"
+    assert response["run"]["execution_stream_id"] == "stream-stage-route-2"
+    assert "打磨发布" in calls["msg"]
+    assert "已确认的前置阶段产物" in calls["msg"]
+
+
+def test_expert_team_stage_revise_route_starts_same_stage_stream_with_feedback(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-revise-route", "team_id": "deep-research-team", "prompt": "研究本地优先 AI 助理"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "本地优先 AI 助理如何在企业落地",
+                "audience_goal": "企业管理者，用于内部决策参考",
+                "source_boundary": "优先真实案例，不写泛泛趋势",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-revise-route-1", "session_id": "sid-revise-route"},
+    )
+    reviewed = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={"kind": "chat", "label": "研究方向阶段结果", "exists": True},
+    )
+    session = SimpleNamespace(
+        session_id="sid-revise-route",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+    calls = {}
+
+    def fake_start_stream(s, **kwargs):
+        calls.update(kwargs)
+        return {"stream_id": "stream-revise-route-2", "session_id": s.session_id}
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start_stream)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "sid-revise-route",
+            "run_id": reviewed["run_id"],
+            "feedback": "研究问题还太宽，请收窄到企业内网知识库场景。",
+        },
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/stage/revise"))
+
+    assert response["stream_id"] == "stream-revise-route-2"
+    assert response["run"]["current_stage"]["task_id"] == "direction"
+    assert response["run"]["current_stage"]["revision_count"] == 1
+    assert response["run"]["execution_stream_id"] == "stream-revise-route-2"
+    assert "研究问题还太宽，请收窄到企业内网知识库场景。" in calls["msg"]
+    assert "请只重做当前阶段" in calls["msg"]
 
 
 def test_expert_team_cancel_signals_active_execution_stream(monkeypatch, tmp_path):

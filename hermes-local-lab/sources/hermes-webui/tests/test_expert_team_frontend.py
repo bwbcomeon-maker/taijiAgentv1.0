@@ -357,6 +357,29 @@ def test_expert_team_workspace_shows_resume_action_for_stale_running_runs():
     assert "window.cancelExpertTeamRun=cancelExpertTeamRun" in UI_JS
 
 
+def test_expert_team_workspace_exposes_stage_review_actions():
+    assert "function approveExpertTeamStage" in UI_JS
+    assert "function reviseExpertTeamStage" in UI_JS
+    assert "/api/expert-teams/stage/approve" in UI_JS
+    assert "/api/expert-teams/stage/revise" in UI_JS
+    assert "card.stageReview=view.stage_review||{}" in UI_JS
+    assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[]" in UI_JS
+    assert "expert-team-stage-review" in UI_JS
+    assert "expert-team-stage-output" in UI_JS
+    assert "data-expert-team-stage-feedback" in UI_JS
+    assert "确认进入下一阶段" in UI_JS
+    assert "提出修改意见" in UI_JS
+    assert "当前阶段产物待确认" in UI_JS
+    assert "actions.can_approve_stage" in UI_JS
+    assert "actions.can_request_revision" in UI_JS
+    assert "window.approveExpertTeamStage=approveExpertTeamStage" in UI_JS
+    assert "window.reviseExpertTeamStage=reviseExpertTeamStage" in UI_JS
+
+    assert ".expert-team-stage-review" in STYLE_CSS
+    assert ".expert-team-stage-output" in STYLE_CSS
+    assert ".expert-team-stage-actions" in STYLE_CSS
+
+
 def test_expert_team_session_refresh_does_not_require_loaded_message_array():
     hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
     hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]

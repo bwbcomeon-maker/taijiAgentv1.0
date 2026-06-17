@@ -1015,21 +1015,96 @@ def _expert_team_answers_by_id(run: dict) -> dict[str, str]:
 _EXPERT_TEAM_STREAM_TEAM_IDS = {"content-creator-team", "deep-research-team"}
 
 
+def _expert_team_current_task(run: dict) -> dict:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    task_id = str(current.get("task_id") or "")
+    for task in run.get("tasks") or []:
+        if isinstance(task, dict) and str(task.get("id") or "") == task_id:
+            return task
+    for task in run.get("tasks") or []:
+        if isinstance(task, dict) and str(task.get("status") or "") in {"running", "waiting_user", "error"}:
+            return task
+    for task in run.get("tasks") or []:
+        if isinstance(task, dict) and str(task.get("status") or "") == "pending":
+            return task
+    tasks = run.get("tasks") or []
+    return tasks[-1] if tasks else {}
+
+
+def _expert_team_approved_stage_summary(run: dict) -> str:
+    rows = []
+    for output in run.get("stage_outputs") or []:
+        if not isinstance(output, dict) or str(output.get("status") or "") != "approved":
+            continue
+        title = str(output.get("title") or output.get("label") or output.get("task_id") or "已确认阶段")
+        phase = str(output.get("phase") or "")
+        content = str(output.get("content") or output.get("note") or "结果已写入当前对话")
+        rows.append(f"- {phase} / {title}：{content}")
+    return "\n".join(rows) if rows else "暂无，当前是第一个执行阶段。"
+
+
+def _expert_team_revision_feedback(run: dict) -> str:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    feedback = str(current.get("feedback") or "").strip()
+    if feedback:
+        return feedback
+    task_id = str(current.get("task_id") or "")
+    for output in run.get("stage_outputs") or []:
+        if not isinstance(output, dict) or str(output.get("task_id") or "") != task_id:
+            continue
+        history = output.get("feedback_history") if isinstance(output.get("feedback_history"), list) else []
+        if history:
+            return str((history[-1] or {}).get("feedback") or "").strip()
+    return ""
+
+
+def _expert_team_prompt_header(run: dict, task: dict) -> str:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    feedback = _expert_team_revision_feedback(run)
+    return (
+        f"团队：{run.get('team_title') or '专家团'}\n"
+        f"当前阶段：{task.get('phase') or current.get('phase') or run.get('phase') or '当前阶段'}\n"
+        f"当前任务：{task.get('title') or current.get('title') or '阶段任务'}\n"
+        f"负责专家：{task.get('worker_name') or current.get('worker_name') or '专家团'}\n\n"
+        "已确认的前置阶段产物：\n"
+        f"{_expert_team_approved_stage_summary(run)}\n\n"
+        "本轮用户修订意见：\n"
+        f"{feedback or '无，本轮为首次生成当前阶段。'}\n\n"
+        "重要规则：请只重做当前阶段，不要替用户跳到后续阶段，也不要宣布整个专家团已完成。"
+        "输出结尾必须列出“需要用户确认的点”，等待用户确认后才进入下一阶段。\n\n"
+    )
+
+
 def _content_expert_team_execution_prompt(run: dict) -> str:
     answers = _expert_team_answers_by_id(run)
     topic = answers.get("topic") or run.get("title") or "本次内容主题"
     audience = answers.get("audience") or "目标读者"
     boundary = answers.get("boundary") or "没有额外限制"
+    task = _expert_team_current_task(run)
+    task_id = str(task.get("id") or "")
+    if task_id == "illustrations":
+        stage_instruction = (
+            "当前只执行“打磨发布”阶段：基于已确认初稿，完成表达润色、封面/文中配图建议、发布前检查和可执行修改清单。"
+            "不要重写完整初稿，除非用户修订意见明确要求。"
+        )
+    elif task_id == "delivery":
+        stage_instruction = (
+            "当前只执行“交付确认”阶段：基于已确认初稿和打磨发布方案，形成最终发布版、事实核对项、发布风险和交付说明。"
+            "不要新增未确认的大方向；如仍有风险，明确列为发布前人工确认项。"
+        )
+    else:
+        stage_instruction = (
+            "当前只执行“生成初稿”阶段：输出文章定位、标题方案、一级结构和可供用户确认的正文初稿。"
+            "配图和发布检查只给必要提示，不展开成最终交付。"
+        )
     return (
-        "你现在作为内容创作专家团执行本次任务。请基于已确认需求完成可直接交付的公众号长文协作结果。\n\n"
+        "你现在作为内容创作专家团执行阶段性任务。\n\n"
+        f"{_expert_team_prompt_header(run, task)}"
         f"主题：{topic}\n"
         f"目标读者：{audience}\n"
         f"素材、篇幅或表达边界：{boundary}\n\n"
-        "请用中文输出，结构必须包含：\n"
-        "1. 标题方案：给出 3 个可选标题，并说明推荐标题。\n"
-        "2. 公众号长文初稿：有清晰导语、分节标题、正文和结尾行动建议。\n"
-        "3. 配图建议：给出封面图和 2-3 张文中配图的画面描述或可复用提示词。\n"
-        "4. 发布检查：列出发布前需要人工确认的事实、口径和风险。\n\n"
+        f"{stage_instruction}\n\n"
+        "请用中文输出，结构必须包含：阶段目标、阶段产物、需要用户确认的点、下一阶段建议。\n\n"
         "不要夸大产品能力；不确定的信息必须标注需要人工确认。"
     )
 
@@ -1039,18 +1114,23 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
     topic = answers.get("research_topic") or run.get("title") or "本次研究主题"
     audience_goal = answers.get("audience_goal") or "目标读者和使用场景待确认"
     source_boundary = answers.get("source_boundary") or "没有额外资料边界"
+    task = _expert_team_current_task(run)
+    task_id = str(task.get("id") or "")
+    stage_instructions = {
+        "direction": "当前只执行“确定研究方向”阶段：收敛核心问题、论证主线、目标读者、资料边界和不展开的范围。",
+        "research": "当前只执行“补充案例素材”阶段：整理事实、案例线索、论据类型、可验证来源方向和待人工确认项。",
+        "outline": "当前只执行“结构提纲”阶段：把已确认研究材料组织成一级/二级标题、段落顺序和关键观点。",
+        "draft": "当前只执行“正文初稿”阶段：按已确认大纲撰写正文初稿，保留事实待核项，不做最终审稿结论。",
+        "review": "当前只执行“审稿交付”阶段：检查事实、逻辑、表达、发布风险，并形成发布版建议。",
+    }
     return (
-        "你现在作为深度文章研究团执行本次任务。请基于已确认需求完成可直接写入当前对话的深度文章研究与写作交付。\n\n"
+        "你现在作为深度文章研究团执行阶段性任务。\n\n"
+        f"{_expert_team_prompt_header(run, task)}"
         f"研究主题或核心问题：{topic}\n"
         f"目标读者与用途：{audience_goal}\n"
         f"资料范围、案例偏好或避坑边界：{source_boundary}\n\n"
-        "团队分工请体现在输出质量里：研究总导演先收敛研究问题，资料研究员补充案例和论据，结构架构师搭建文章大纲，撰稿专家形成正文初稿，审稿专家检查事实、逻辑和发布风险。\n\n"
-        "请用中文输出，结构必须包含：\n"
-        "1. 研究方向：明确核心问题、论证主线、适用读者和不展开的边界。\n"
-        "2. 资料调研：列出可用事实、案例线索、论据类型和需要人工确认的信息。\n"
-        "3. 结构提纲：给出一级/二级标题、每节观点和材料安排。\n"
-        "4. 正文初稿：按提纲写出可继续打磨的深度文章初稿。\n"
-        "5. 审稿交付：列出事实核对项、表达风险、发布前建议和下一步可选操作。\n\n"
+        f"{stage_instructions.get(task_id) or '当前只执行当前阶段，输出可供用户确认的阶段产物。'}\n\n"
+        "请用中文输出，结构必须包含：阶段目标、阶段产物、需要用户确认的点、下一阶段建议。\n\n"
         "没有来源或不确定的信息必须标注需要人工确认；不要编造案例、数据或出处。"
     )
 
@@ -1066,7 +1146,10 @@ def _expert_team_execution_prompt(run: dict) -> str:
 
 def _expert_team_execution_display_message(run: dict) -> str:
     title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
-    return f"专家团开始生成：{title[:80]}"
+    task = _expert_team_current_task(run)
+    phase = str(task.get("phase") or run.get("phase") or "").strip()
+    prefix = f"{phase} · " if phase else ""
+    return f"专家团开始生成：{prefix}{title[:80]}"
 
 
 def _append_expert_team_session_entry(run: dict) -> None:
@@ -1150,6 +1233,11 @@ def _expert_team_run_as_needs_resume(run: dict) -> dict:
 def _expert_team_run_has_ready_result(run: dict) -> bool:
     if str(run.get("status") or "") in {"done", "error", "cancelled"}:
         return True
+    current_stage = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    if str(current_stage.get("status") or "") == "awaiting_review":
+        return True
+    if str(run.get("status") or "") == "running":
+        return False
     if any(
         isinstance(item, dict) and not item.get("placeholder") and item.get("exists") is not False
         for item in run.get("artifacts") or []
@@ -10259,6 +10347,50 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "expert team run not found", 404)
         except Exception as exc:
             return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/stage/approve":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(run.get("session_id") or "") != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+            run = expert_teams.approve_expert_team_stage(workspace, str(run.get("run_id") or ""))
+            payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+            if str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS and str(run.get("status") or "") == "running":
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+                payload.update(stream_payload)
+                payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+                return j(handler, payload, status=status)
+            return j(handler, payload)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Failed to approve expert team stage: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/stage/revise":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(run.get("session_id") or "") != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+            run = expert_teams.request_expert_team_stage_revision(
+                workspace,
+                str(run.get("run_id") or ""),
+                str(body.get("feedback") or ""),
+            )
+            stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return j(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Failed to revise expert team stage: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/expert-teams/resume":
         from api import expert_teams

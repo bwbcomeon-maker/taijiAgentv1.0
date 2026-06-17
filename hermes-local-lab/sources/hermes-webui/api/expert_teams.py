@@ -18,6 +18,7 @@ from pathlib import Path
 
 RUN_STATUSES = {"awaiting_user", "running", "done", "error", "cancelled"}
 TASK_STATUSES = {"pending", "running", "waiting_user", "done", "error", "cancelled"}
+STAGE_STATUSES = {"pending", "running", "awaiting_review", "approved", "revision_running", "done", "error", "cancelled"}
 STATUS_LABELS = {
     "awaiting_user": "等待确认",
     "running": "执行中",
@@ -29,6 +30,7 @@ STATUS_LABELS = {
 }
 EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume", "cancelled"}
 PUBLIC_EXPERT_TEAM_IDS = ("content-creator-team", "deep-research-team")
+STAGE_GATED_TEAM_IDS = set(PUBLIC_EXPERT_TEAM_IDS)
 EXPERT_TEAM_PHASES = {
     "ai-content-creator-brand-moodboard": ["需求确认", "创意策划", "方向确认", "图像生成", "交付"],
     "content-creator-team": ["需求确认", "生成初稿", "打磨发布", "交付"],
@@ -101,8 +103,8 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
         "id": "content-creator-team",
         "title": "内容创作专家团",
         "category": "内容创作",
-        "description": "公众号长文从需求确认、正文初稿到配图和发布检查的结构化协作。",
-        "estimated": "预计 2 个阶段",
+        "description": "公众号长文从需求确认、正文初稿、打磨发布到交付确认的结构化协作。",
+        "estimated": "预计 3 个阶段",
         "status_label": "本地技能已接入",
         "default_mode": "A",
         "default_action": "start",
@@ -142,11 +144,19 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
             },
             {
                 "id": "illustrations",
-                "title": "生成封面和文中配图",
+                "title": "打磨发布方案",
                 "worker_id": "article-illustrator",
                 "worker_name": "配图专家",
                 "phase": "打磨发布",
-                "description": "封面图、文中配图；图片能力不可用时产出可复用配图 prompt。",
+                "description": "表达润色、封面和文中配图建议；图片能力不可用时产出可复用配图 prompt。",
+            },
+            {
+                "id": "delivery",
+                "title": "交付确认",
+                "worker_id": "editor-review",
+                "worker_name": "审稿专家",
+                "phase": "交付",
+                "description": "最终发布版、事实核对项、发布风险和交付说明。",
             },
         ],
     },
@@ -336,6 +346,151 @@ def _task_rows(template: dict) -> list[dict]:
     return rows
 
 
+def _is_stage_gated_run(run: dict) -> bool:
+    return str((run or {}).get("team_id") or "") in STAGE_GATED_TEAM_IDS
+
+
+def _task_index(run: dict, task_id: str | None) -> int:
+    tid = str(task_id or "")
+    if not tid:
+        return -1
+    for idx, task in enumerate(run.get("tasks") or []):
+        if isinstance(task, dict) and str(task.get("id") or "") == tid:
+            return idx
+    return -1
+
+
+def _task_by_id(run: dict, task_id: str | None) -> dict | None:
+    idx = _task_index(run, task_id)
+    if idx < 0:
+        return None
+    return (run.get("tasks") or [])[idx]
+
+
+def _current_stage_task(run: dict) -> dict | None:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    task = _task_by_id(run, current.get("task_id"))
+    if task:
+        return task
+    for status in ("running", "waiting_user", "error"):
+        for task in run.get("tasks") or []:
+            if isinstance(task, dict) and str(task.get("status") or "") == status:
+                return task
+    for task in run.get("tasks") or []:
+        if isinstance(task, dict) and str(task.get("status") or "") == "pending":
+            return task
+    tasks = run.get("tasks") or []
+    return tasks[-1] if tasks else None
+
+
+def _stage_output_for_task(run: dict, task_id: str | None) -> dict | None:
+    tid = str(task_id or "")
+    if not tid:
+        return None
+    for output in run.get("stage_outputs") or []:
+        if isinstance(output, dict) and str(output.get("task_id") or "") == tid:
+            return output
+    return None
+
+
+def _ensure_stage_output(run: dict, task: dict) -> dict:
+    task_id = str(task.get("id") or "")
+    output = _stage_output_for_task(run, task_id)
+    if output is not None:
+        return output
+    output = {
+        "id": f"stage-{task_id or uuid.uuid4().hex[:8]}",
+        "task_id": task_id,
+        "phase": str(task.get("phase") or run.get("phase") or ""),
+        "title": str(task.get("title") or task_id or "阶段产物"),
+        "worker_id": str(task.get("worker_id") or ""),
+        "worker_name": str(task.get("worker_name") or ""),
+        "status": "pending",
+        "label": str(task.get("title") or task_id or "阶段产物"),
+        "kind": "chat",
+        "content": "",
+        "note": "",
+        "revision_count": 0,
+        "feedback_history": [],
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    run.setdefault("stage_outputs", []).append(output)
+    return output
+
+
+def _set_current_stage(run: dict, task: dict, status: str, *, stream_id: str = "", feedback: str = "") -> dict:
+    output = _stage_output_for_task(run, task.get("id")) or {}
+    revision_count = int(output.get("revision_count") or 0)
+    stage = {
+        "task_id": str(task.get("id") or ""),
+        "phase": str(task.get("phase") or run.get("phase") or ""),
+        "title": str(task.get("title") or task.get("id") or "阶段任务"),
+        "worker_id": str(task.get("worker_id") or ""),
+        "worker_name": str(task.get("worker_name") or ""),
+        "status": status if status in STAGE_STATUSES else "running",
+        "revision_count": revision_count,
+        "stream_id": str(stream_id or ""),
+        "feedback": str(feedback or ""),
+        "updated_at": _now(),
+    }
+    run["current_stage"] = stage
+    run["phase"] = stage["phase"] or run.get("phase") or "生成初稿"
+    return stage
+
+
+def _delivery_phase(run: dict) -> str:
+    phases = EXPERT_TEAM_PHASES.get(str(run.get("team_id") or ""), EXPERT_TEAM_PHASES["content-creator-team"])
+    return "交付" if "交付" in phases else (phases[-1] if phases else "交付")
+
+
+def _activate_stage_task(run: dict, task: dict, *, status: str = "running", stream_id: str = "", feedback: str = "") -> None:
+    _set_task_status(run, str(task.get("id") or ""), "running")
+    _set_current_stage(run, task, status, stream_id=stream_id, feedback=feedback)
+    worker_id = str(task.get("worker_id") or "")
+    for idx, member in enumerate(run.get("members") or []):
+        if not isinstance(member, dict):
+            continue
+        if str(member.get("id") or "") == worker_id:
+            member["status"] = "执行中"
+        elif idx == 0 and str(member.get("status") or "") != "已完成":
+            member["status"] = "监督中"
+        elif str(member.get("status") or "") not in {"已完成", "执行异常"}:
+            member["status"] = "待命"
+
+
+def _stage_review_for_view(run: dict) -> dict:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    output = _stage_output_for_task(run, current.get("task_id")) if current else None
+    output_view = {}
+    if isinstance(output, dict):
+        output_view = {
+            "id": str(output.get("id") or ""),
+            "task_id": str(output.get("task_id") or ""),
+            "phase": str(output.get("phase") or ""),
+            "title": str(output.get("title") or output.get("label") or "阶段产物"),
+            "label": str(output.get("label") or output.get("title") or "阶段产物"),
+            "kind": str(output.get("kind") or "chat"),
+            "status": str(output.get("status") or ""),
+            "content": str(output.get("content") or ""),
+            "note": str(output.get("note") or ""),
+            "revision_count": int(output.get("revision_count") or 0),
+            "updated_at": str(output.get("updated_at") or ""),
+        }
+    return {
+        "task_id": str(current.get("task_id") or ""),
+        "phase": str(current.get("phase") or run.get("phase") or ""),
+        "title": str(current.get("title") or ""),
+        "worker_id": str(current.get("worker_id") or ""),
+        "worker_name": str(current.get("worker_name") or ""),
+        "status": str(current.get("status") or ""),
+        "revision_count": int(current.get("revision_count") or 0),
+        "feedback": str(current.get("feedback") or ""),
+        "output": output_view,
+        "feedback_history": list((output or {}).get("feedback_history") or []) if isinstance(output, dict) else [],
+    }
+
+
 def _normalize_run(run: dict) -> dict:
     run = dict(run or {})
     now = _now()
@@ -353,6 +508,21 @@ def _normalize_run(run: dict) -> dict:
     run["tasks"] = run.get("tasks") if isinstance(run.get("tasks"), list) else []
     run["events"] = run.get("events") if isinstance(run.get("events"), list) else []
     run["artifacts"] = run.get("artifacts") if isinstance(run.get("artifacts"), list) else []
+    run["stage_outputs"] = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
+    for output in run["stage_outputs"]:
+        if not isinstance(output, dict):
+            continue
+        output["status"] = str(output.get("status") or "pending")
+        if output["status"] not in STAGE_STATUSES:
+            output["status"] = "pending"
+        output["revision_count"] = int(output.get("revision_count") or 0)
+        output["feedback_history"] = output.get("feedback_history") if isinstance(output.get("feedback_history"), list) else []
+    run["current_stage"] = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    if run["current_stage"]:
+        run["current_stage"]["status"] = str(run["current_stage"].get("status") or "")
+        if run["current_stage"]["status"] and run["current_stage"]["status"] not in STAGE_STATUSES:
+            run["current_stage"]["status"] = "running"
+        run["current_stage"]["revision_count"] = int(run["current_stage"].get("revision_count") or 0)
     run["execution_stream_id"] = str(run.get("execution_stream_id") or "")
     run["execution_session_id"] = str(run.get("execution_session_id") or run.get("session_id") or "")
     run["execution_started_at"] = str(run.get("execution_started_at") or "")
@@ -425,6 +595,14 @@ def expert_team_run_view(run: dict) -> dict:
     status = str(run.get("status") or "awaiting_user")
     execution_status = str(run.get("execution_status") or "idle")
     needs_resume = bool(run.get("needs_resume") or execution_status == "needs_resume")
+    stage_review = _stage_review_for_view(run)
+    can_review_stage = bool(
+        _is_stage_gated_run(run)
+        and not pending
+        and status == "awaiting_user"
+        and stage_review.get("status") == "awaiting_review"
+        and stage_review.get("task_id")
+    )
     artifacts = []
     for item in run.get("artifacts") or []:
         if not isinstance(item, dict):
@@ -457,7 +635,10 @@ def expert_team_run_view(run: dict) -> dict:
             "can_cancel": can_cancel,
             "can_retry": can_retry,
             "can_open_artifact": any(item["openable"] for item in artifacts),
+            "can_approve_stage": can_review_stage,
+            "can_request_revision": can_review_stage,
         },
+        "stage_review": stage_review,
         "health": {
             "needs_resume": needs_resume,
             "active_stream_id": str(run.get("execution_stream_id") or "") if can_cancel else "",
@@ -541,6 +722,8 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "tasks": _task_rows(template),
         "events": [],
         "artifacts": [],
+        "stage_outputs": [],
+        "current_stage": {},
         "created_at": now,
         "started_at": now,
         "updated_at": now,
@@ -557,21 +740,28 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
     if not stream_id:
         raise ValueError("stream_id is required")
     run["status"] = "running"
-    run["phase"] = run.get("phase") or "生成初稿"
     run["execution_stream_id"] = stream_id
     run["execution_session_id"] = session_id
     run["execution_started_at"] = now
     run["execution_status"] = "running"
     run["last_execution_error"] = ""
-    for task in run.get("tasks") or []:
-        if task.get("status") in {"waiting_user", "error", "pending", "running"}:
-            task["status"] = "running"
-            task["status_label"] = STATUS_LABELS["running"]
+    if _is_stage_gated_run(run):
+        task = _current_stage_task(run)
+        if task:
+            previous_stage = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+            stage_status = "revision_running" if previous_stage.get("status") == "revision_running" else "running"
+            _activate_stage_task(run, task, status=stage_status, stream_id=stream_id, feedback=previous_stage.get("feedback") or "")
             task["result_summary"] = ""
-            break
+    else:
+        run["phase"] = run.get("phase") or "生成初稿"
+        for task in run.get("tasks") or []:
+            if task.get("status") in {"waiting_user", "error", "pending", "running"}:
+                task["status"] = "running"
+                task["status_label"] = STATUS_LABELS["running"]
+                task["result_summary"] = ""
+                break
     run["updated_at"] = now
-    if not _has_event(run, "execution_started"):
-        _append_event(run, "execution_started", "专家团开始生成内容")
+    _append_event(run, "execution_started", f"专家团开始生成 {run.get('phase') or '当前阶段'}")
     return write_expert_team_run(Path(workspace), run)
 
 
@@ -579,6 +769,8 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, *, deliver
     run = read_expert_team_run(Path(workspace), run_id)
     now = _now()
     delivery = delivery if isinstance(delivery, dict) else None
+    if _is_stage_gated_run(run):
+        return _mark_stage_execution_complete(Path(workspace), run, delivery=delivery, now=now)
     has_delivery = bool(
         delivery
         or any(isinstance(item, dict) and not item.get("placeholder") and item.get("exists") is not False for item in run.get("artifacts") or [])
@@ -667,6 +859,165 @@ def _set_task_status(run: dict, task_id: str, status: str, *, result_summary: st
                 task["result_summary"] = result_summary
 
 
+def _mark_stage_execution_complete(workspace: Path, run: dict, *, delivery: dict | None, now: str) -> dict:
+    task = _current_stage_task(run)
+    has_delivery = bool(delivery)
+    if not task:
+        run["status"] = "error"
+        run["execution_status"] = "error"
+        run["last_execution_error"] = "未找到当前阶段任务"
+        run["updated_at"] = now
+        return write_expert_team_run(Path(workspace), run)
+    if not has_delivery:
+        run["status"] = "error"
+        run["execution_status"] = "error"
+        run["execution_stream_id"] = ""
+        run["last_execution_error"] = "未检测到可交付结果"
+        run["updated_at"] = now
+        _set_task_status(run, str(task.get("id") or ""), "error", result_summary="本轮生成没有返回可交付结果。")
+        current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+        current.update({"status": "error", "updated_at": now})
+        run["current_stage"] = current
+        for member in run.get("members") or []:
+            if isinstance(member, dict) and str(member.get("status") or "") == "执行中":
+                member["status"] = "执行异常"
+        _append_event(run, "execution_empty", "本轮生成没有返回可交付结果")
+        return write_expert_team_run(Path(workspace), run)
+
+    output = _ensure_stage_output(run, task)
+    output["status"] = "awaiting_review"
+    output["label"] = str(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物")
+    output["kind"] = str(delivery.get("kind") or output.get("kind") or "chat")
+    output["content"] = str(
+        delivery.get("content")
+        or delivery.get("note")
+        or output.get("content")
+        or "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。"
+    )
+    output["note"] = str(delivery.get("note") or "已写入当前对话")
+    output["updated_at"] = now
+    revision_count = int(output.get("revision_count") or 0)
+    run["status"] = "awaiting_user"
+    run["phase"] = str(task.get("phase") or run.get("phase") or "生成初稿")
+    run["execution_status"] = "done"
+    run["execution_stream_id"] = ""
+    run["last_execution_error"] = ""
+    _set_task_status(
+        run,
+        str(task.get("id") or ""),
+        "waiting_user",
+        result_summary="阶段结果已写入当前对话，等待你确认或提出修改意见。",
+    )
+    run["current_stage"] = {
+        "task_id": str(task.get("id") or ""),
+        "phase": str(task.get("phase") or run.get("phase") or ""),
+        "title": str(task.get("title") or task.get("id") or "阶段任务"),
+        "worker_id": str(task.get("worker_id") or ""),
+        "worker_name": str(task.get("worker_name") or ""),
+        "status": "awaiting_review",
+        "revision_count": revision_count,
+        "stream_id": "",
+        "feedback": "",
+        "updated_at": now,
+    }
+    for member in run.get("members") or []:
+        if isinstance(member, dict) and str(member.get("id") or "") == str(task.get("worker_id") or ""):
+            member["status"] = "等待确认"
+    _append_event(run, "stage_output_ready", f"{task.get('title') or '阶段产物'}等待确认")
+    run["updated_at"] = now
+    return write_expert_team_run(Path(workspace), run)
+
+
+def approve_expert_team_stage(workspace: Path, run_id: str) -> dict:
+    run = read_expert_team_run(Path(workspace), run_id)
+    if not _is_stage_gated_run(run):
+        raise ValueError("Expert team does not support staged approval")
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    if current.get("status") != "awaiting_review":
+        raise ValueError("Current expert team stage is not awaiting review")
+    task = _task_by_id(run, current.get("task_id"))
+    if not task:
+        raise ValueError("Current expert team stage task not found")
+    now = _now()
+    output = _ensure_stage_output(run, task)
+    output["status"] = "approved"
+    output["approved_at"] = now
+    output["updated_at"] = now
+    _set_task_status(run, str(task.get("id") or ""), "done", result_summary="阶段成果已确认。")
+    _set_member_status(run, str(task.get("worker_id") or ""), "已完成")
+    current_idx = _task_index(run, task.get("id"))
+    next_task = None
+    for candidate in (run.get("tasks") or [])[current_idx + 1 :]:
+        if isinstance(candidate, dict) and str(candidate.get("status") or "") != "done":
+            next_task = candidate
+            break
+    run["execution_stream_id"] = ""
+    run["last_execution_error"] = ""
+    if next_task:
+        run["status"] = "running"
+        run["execution_status"] = "idle"
+        _activate_stage_task(run, next_task, status="running")
+        _append_event(run, "stage_approved", f"{task.get('title') or '当前阶段'}已确认，进入下一阶段")
+    else:
+        run["status"] = "done"
+        run["phase"] = _delivery_phase(run)
+        run["execution_status"] = "done"
+        run["completed_at"] = now
+        run["current_stage"] = {**current, "status": "done", "updated_at": now}
+        for member in run.get("members") or []:
+            if isinstance(member, dict) and str(member.get("status") or "") in {"待命", "监督中", "执行中", "等待确认"}:
+                member["status"] = "已完成"
+        if not run.get("artifacts"):
+            run["artifacts"] = [
+                {
+                    "id": "expert-team-chat-delivery",
+                    "label": "专家团生成结果",
+                    "kind": "chat",
+                    "path": "",
+                    "status": "ready",
+                    "placeholder": False,
+                    "exists": True,
+                    "note": "已写入当前对话",
+                }
+            ]
+        _append_event(run, "run_done", "专家团任务已完成")
+    run["updated_at"] = now
+    return write_expert_team_run(Path(workspace), run)
+
+
+def request_expert_team_stage_revision(workspace: Path, run_id: str, feedback: str) -> dict:
+    feedback = str(feedback or "").strip()
+    if not feedback:
+        raise ValueError("feedback is required")
+    run = read_expert_team_run(Path(workspace), run_id)
+    if not _is_stage_gated_run(run):
+        raise ValueError("Expert team does not support staged revision")
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    if current.get("status") != "awaiting_review":
+        raise ValueError("Current expert team stage is not awaiting review")
+    task = _task_by_id(run, current.get("task_id"))
+    if not task:
+        raise ValueError("Current expert team stage task not found")
+    now = _now()
+    output = _ensure_stage_output(run, task)
+    revision_count = int(output.get("revision_count") or 0) + 1
+    output["revision_count"] = revision_count
+    output["status"] = "revision_running"
+    output["updated_at"] = now
+    output.setdefault("feedback_history", []).append({"feedback": feedback, "created_at": now})
+    run["status"] = "running"
+    run["phase"] = str(task.get("phase") or run.get("phase") or "生成初稿")
+    run["execution_status"] = "idle"
+    run["execution_stream_id"] = ""
+    run["last_execution_error"] = ""
+    _set_task_status(run, str(task.get("id") or ""), "running", result_summary="正在根据你的修改意见重做当前阶段。")
+    _activate_stage_task(run, task, status="revision_running", feedback=feedback)
+    run["current_stage"]["revision_count"] = revision_count
+    _append_event(run, "stage_revision_requested", f"{task.get('title') or '当前阶段'}收到修改意见")
+    run["updated_at"] = now
+    return write_expert_team_run(Path(workspace), run)
+
+
 def _pending_required_questions(run: dict) -> list[dict]:
     return [
         question
@@ -714,10 +1065,13 @@ def _start_first_task(run: dict) -> None:
         run["phase"] = str(first_task.get("phase") or "生成初稿")
         if first_task.get("id"):
             _set_task_status(run, first_task["id"], "running")
-        if run.get("members"):
-            run["members"][0]["status"] = "监督中"
-        if len(run.get("members") or []) > 1:
-            run["members"][1]["status"] = "执行中"
+            if _is_stage_gated_run(run):
+                _activate_stage_task(run, first_task, status="running")
+        if not _is_stage_gated_run(run):
+            if run.get("members"):
+                run["members"][0]["status"] = "监督中"
+            if len(run.get("members") or []) > 1:
+                run["members"][1]["status"] = "执行中"
         if not _has_event(run, "questions_answered"):
             _append_event(run, "questions_answered", "需求问答已确认")
         if not _has_event(run, "team_created"):
