@@ -1564,6 +1564,17 @@ function renderExpertTeamWorkspacePanel(card){
   return syncExpertTeamBottomDockState(card);
 }
 
+function shouldPreserveExpertTeamDraftDock(sessionId){
+  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
+  if(!dock||dock.hidden)return false;
+  const sourceSid=String(dock.dataset.writeflowSourceSessionId||'');
+  const targetSid=String(sessionId||'');
+  if(targetSid&&sourceSid&&sourceSid!==targetSid)return false;
+  const active=typeof document!=='undefined'?document.activeElement:null;
+  const inputs=Array.from(dock.querySelectorAll('.status-card-expert-question.pending [data-expert-team-answer-input]'));
+  return inputs.some(input=>input===active||String(input.value||'').trim());
+}
+
 function clearExpertTeamWorkspacePanel(){
   _removeExpertTeamWorkspacePanelElement();
   _setExpertTeamWorkspaceActive(false);
@@ -1618,6 +1629,7 @@ if(typeof window!=='undefined'){
   window.hideExpertTeamWorkspacePanel=hideExpertTeamWorkspacePanel;
   window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel;
   window.syncExpertTeamBottomDockState=syncExpertTeamBottomDockState;
+  window.shouldPreserveExpertTeamDraftDock=shouldPreserveExpertTeamDraftDock;
 }
 
 function toggleWriteflowStatusCard(btn){

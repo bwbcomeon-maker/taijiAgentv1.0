@@ -4846,9 +4846,9 @@ main.main > #mainPlugin{display:none;}
 .expert-team-panel-collapse-icon{display:inline-flex;align-items:center;justify-content:center;}
 .expert-team-panel-collapse-icon.is-expand{display:none;}
 .expert-team-panel-eyebrow{color:var(--accent-text);font-size:11px;font-weight:760;line-height:1.2;}
-.expert-team-panel-overview{display:grid;grid-template-columns:minmax(0,1fr) minmax(104px,150px);gap:14px;align-items:center;}
+.expert-team-panel-overview{display:grid;grid-template-columns:minmax(0,1fr) minmax(92px,128px);gap:10px;align-items:center;}
 .expert-team-panel-copy{min-width:0;display:flex;flex-direction:column;gap:5px;}
-.expert-team-panel-title{display:-webkit-box;min-width:0;color:var(--text);font-size:15px;line-height:1.18;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:normal;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.expert-team-panel-title{display:-webkit-box;min-width:0;color:var(--text);font-size:13px;line-height:1.22;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:normal;overflow-wrap:anywhere;word-break:break-word;-webkit-line-clamp:3;-webkit-box-orient:vertical;}
 .expert-team-panel-summary{color:var(--muted);font-size:11px;line-height:1.28;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .expert-team-panel-progress-summary{min-width:0;display:grid;grid-template-columns:1fr;gap:4px;align-content:center;border-left:1px solid var(--taiji-ui-line,var(--border-subtle));padding-left:14px;}
 .expert-team-panel-progress-summary b{color:var(--text);font-size:24px;line-height:1;font-family:var(--font-mono);font-weight:820;}

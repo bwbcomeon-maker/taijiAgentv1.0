@@ -1030,6 +1030,7 @@ async function _hydrateWriteflowStatusCardForSession(sid,options={}){
     return false;
   }
   if(await _hydrateExpertTeamStatusCardForSession(sid))return true;
+  if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;
   if(!Array.isArray(S.messages)){
     if(!options.silent)_stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();

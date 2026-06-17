@@ -223,7 +223,8 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert ".slice(0,4)" in rows_body
 
     assert ".expert-team-panel-title" in STYLE_CSS
-    assert "-webkit-line-clamp:2" in STYLE_CSS
+    assert "-webkit-line-clamp:3" in STYLE_CSS
+    assert "overflow-wrap:anywhere" in STYLE_CSS
     assert ".expert-team-panel-collapse-toggle" in STYLE_CSS
     assert ".expert-team-panel-priority-grid" in STYLE_CSS
     assert ".expert-team-panel-execution" in STYLE_CSS
@@ -235,6 +236,37 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert ".expert-team-panel-artifact-open:not(:disabled)" in STYLE_CSS
     assert ".status-card-writeflow.is-collapsed .status-card-expert-bottom-body" in STYLE_CSS
     assert ".expert-team-panel-head strong{color:var(--text);font-size:16px;line-height:1.25;font-weight:820;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" not in STYLE_CSS
+
+
+def test_expert_team_title_uses_available_header_space_for_long_prompts():
+    overview_start = STYLE_CSS.index(".expert-team-panel-overview")
+    overview_block = STYLE_CSS[overview_start : STYLE_CSS.index("}", overview_start)]
+    title_start = STYLE_CSS.index(".expert-team-panel-title")
+    title_block = STYLE_CSS[title_start : STYLE_CSS.index("}", title_start)]
+
+    assert "grid-template-columns:minmax(0,1fr) minmax(92px,128px)" in overview_block
+    assert "gap:10px" in overview_block
+    assert "font-size:13px" in title_block
+    assert "line-height:1.22" in title_block
+    assert "-webkit-line-clamp:3" in title_block
+    assert "overflow-wrap:anywhere" in title_block
+    assert "word-break:break-word" in title_block
+
+
+def test_expert_team_pending_question_draft_survives_silent_status_refresh_miss():
+    assert "function shouldPreserveExpertTeamDraftDock" in UI_JS
+    assert "window.shouldPreserveExpertTeamDraftDock=shouldPreserveExpertTeamDraftDock" in UI_JS
+
+    helper_start = UI_JS.index("function shouldPreserveExpertTeamDraftDock")
+    helper_body = UI_JS[helper_start : UI_JS.index("function renderWriteflowStatusDock", helper_start)]
+    assert "dock.dataset.writeflowSourceSessionId" in helper_body
+    assert ".status-card-expert-question.pending [data-expert-team-answer-input]" in helper_body
+    assert "document.activeElement" in helper_body
+    assert "String(input.value||'').trim()" in helper_body
+
+    hydrate_start = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession")
+    hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("function _removeWriteflowStatusCardsFromMessages", hydrate_start)]
+    assert "if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;" in hydrate_body
 
 
 def test_expert_team_workspace_uses_bottom_dock_without_top_panel_squeeze():
