@@ -4374,6 +4374,7 @@ from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     brand_safe_reply,
     classify_brand_safety_prompt,
+    public_egress_scrub,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
     scrub_messages,
@@ -14019,7 +14020,7 @@ def _start_brand_privacy_safe_stream_for_session(
             {"role": "assistant", "content": reply},
         ]
         s.messages = scrub_messages(s.messages)
-        s.context_messages = copy.deepcopy(s.context_messages)
+        s.context_messages = scrub_messages(s.context_messages)
         if s.title in ("Untitled", "New Chat", "") or not s.title:
             s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
         s.save()
@@ -14035,7 +14036,10 @@ def _start_brand_privacy_safe_stream_for_session(
     def _emit_safe_reply():
         try:
             stream.put_nowait(("token", {"text": reply}))
-            raw_session = scrub_public_session_payload(s.compact() | {"messages": s.messages, "tool_calls": []})
+            raw_session = public_egress_scrub(
+                scrub_public_session_payload(s.compact() | {"messages": s.messages, "tool_calls": []}),
+                surface="stream_brand_privacy_done",
+            )
             stream.put_nowait((
                 "done",
                 {
@@ -14130,7 +14134,7 @@ def _record_license_blocked_turn_for_session(
             {"role": "assistant", "content": reply},
         ]
         s.messages = scrub_messages(s.messages)
-        s.context_messages = copy.deepcopy(s.context_messages)
+        s.context_messages = scrub_messages(s.context_messages)
         if s.title in ("Untitled", "New Chat", "") or not s.title:
             s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
         s.save()
@@ -14139,11 +14143,14 @@ def _record_license_blocked_turn_for_session(
     else:
         publish_session_list_changed("session_update")
 
-    raw_session = scrub_public_session_payload(
-        s.compact() | {
-            "messages": s.messages,
-            "tool_calls": getattr(s, "tool_calls", []) or [],
-        }
+    raw_session = public_egress_scrub(
+        scrub_public_session_payload(
+            s.compact() | {
+                "messages": s.messages,
+                "tool_calls": getattr(s, "tool_calls", []) or [],
+            }
+        ),
+        surface="license_blocked_done",
     )
     response = {
         "license_blocked": True,
@@ -14157,7 +14164,7 @@ def _record_license_blocked_turn_for_session(
         response["effective_model"] = model
     if model_provider:
         response["effective_model_provider"] = model_provider
-    return response
+    return public_egress_scrub(response, surface="license_blocked_response")
 
 
 def _start_chat_stream_for_session(
@@ -14709,16 +14716,20 @@ def _handle_chat_sync(handler, body):
                 {"role": "assistant", "content": reply},
             ]
             s.messages = scrub_messages(s.messages)
-            s.context_messages = copy.deepcopy(s.context_messages)
+            s.context_messages = scrub_messages(s.context_messages)
             if s.title == "Untitled" or not s.title:
                 s.title = scrub_brand_leaks(title_from(s.messages, s.title))
             s.save()
+            safe_session = public_egress_scrub(
+                scrub_public_session_payload(s.compact() | {"messages": s.messages}),
+                surface="chat_sync_brand_privacy",
+            )
             return j(
                 handler,
                 {
-                    "answer": reply,
+                    "answer": public_egress_scrub(reply, surface="chat_sync_brand_privacy"),
                     "status": "done",
-                    "session": s.compact() | {"messages": s.messages},
+                    "session": safe_session,
                     "result": {"brand_privacy": True},
                 },
             )
@@ -14848,7 +14859,7 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _next_context_messages,
         )
-        s.context_messages = copy.deepcopy(_next_context_messages)
+        s.context_messages = scrub_messages(_next_context_messages)
         s.messages = scrub_messages(_merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
@@ -14884,10 +14895,16 @@ def _handle_chat_sync(handler, body):
     return j(
         handler,
         {
-            "answer": scrub_brand_leaks(result.get("final_response") or ""),
+            "answer": public_egress_scrub(result.get("final_response") or "", surface="chat_sync_answer"),
             "status": "done" if result.get("completed", True) else "partial",
-            "session": scrub_public_session_payload(s.compact() | {"messages": s.messages}),
-            "result": scrub_brand_leaks({k: v for k, v in result.items() if k != "messages"}),
+            "session": public_egress_scrub(
+                scrub_public_session_payload(s.compact() | {"messages": s.messages}),
+                surface="chat_sync_session",
+            ),
+            "result": public_egress_scrub(
+                scrub_brand_leaks({k: v for k, v in result.items() if k != "messages"}),
+                surface="chat_sync_result",
+            ),
         },
     )
 

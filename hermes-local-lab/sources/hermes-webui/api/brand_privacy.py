@@ -9,6 +9,7 @@ APIs, headers, environment variables, or filesystem layout.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,10 +22,16 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "Hermes",
     "Hermes Agent",
     "Hermes WebUI",
+    "Web UI",
     "hermes-agent",
     "hermes-webui",
     "NousResearch/hermes-agent",
     "run_agent.py",
+    "cli.py",
+    "conversation_loop.py",
+    "prompt_builder.py",
+    "gateway/run.py",
+    "AIAgent",
     "hermes_state.py",
     "model_tools.py",
     "tools/registry.py",
@@ -37,7 +44,11 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "Hermes Web UI Contributors",
     "agent-runtime",
     "web-runtime",
+    "OpenClaw",
+    "claw",
+    "hermes claw",
     "claw.pyc",
+    "API 网关",
     "~/.hermes",
     "hermes_cli",
     "hermes-local-lab",
@@ -84,6 +95,8 @@ _HERMES_TOPIC_RE = re.compile(
     r"(?i)(?:\bhermes\b|herm[eè]s|Hermes\s+Agent|hermes[-_ ]?agent)"
 )
 
+_CLAW_TOPIC_RE = re.compile(r"(?i)(?:\bclaw\b|openclaw|hermes\s+claw)")
+
 _SELF_REFERENCE_RE = re.compile(
     r"(?is)"
     r"(?:"
@@ -98,7 +111,8 @@ _PROVENANCE_LINK_RE = re.compile(
     r"(?is)"
     r"(?:"
     r"是不是基于|基于.*(?:hermes|Hermes)|用了.*(?:hermes|Hermes)|"
-    r"(?:hermes|Hermes).*(?:开发|底层|上游|来源|框架|实现|源码)|"
+    r"(?:hermes|Hermes|claw|OpenClaw).*(?:开发|底层|上游|来源|框架|实现|源码)|"
+    r"(?:用了|使用|依赖).{0,20}(?:claw|OpenClaw)|"
     r"\bbased\s+on\b|\bbuilt\s+on\b|\buse[sd]?\b.*(?:hermes|Hermes)|"
     r"(?:hermes|Hermes).*(?:upstream|source|implementation|framework|underlying)"
     r")"
@@ -144,7 +158,8 @@ _IMPLEMENTATION_INSPECTION_RE = re.compile(
     r"(?is)"
     r"(?:"
     r"(?:搜索|扫描|遍历|读取|查看|列出).{0,24}(?:你自己|自身|当前系统|agent|安装|运行时|runtime|源码|代码|目录|路径|文件)|"
-    r"(?:逻辑架构|文件情况|目录结构|包结构|模块结构|底层架构|技术架构|核心架构)|"
+    r"(?:逻辑架构|文件情况|目录结构|包结构|模块结构|底层架构|技术架构|核心架构|完整架构|架构信息|架构|原理)|"
+    r"(?:怎么(?:开发|实现|运行)|如何(?:开发|实现|运行)|开发出来|实现原理|底层原理|工作原理|你的原理|框架吗|用.*框架)|"
     r"(?:site-packages|dist-info|pyc|源码快照|安装目录|运行目录|runtime\s+home)"
     r")"
 )
@@ -154,6 +169,7 @@ _RUNTIME_ACCESS_RE = re.compile(
     r"(?:"
     r"端口|监听|访问地址|本地地址|服务地址|服务入口|本机服务|桌面服务|"
     r"浏览器.{0,24}(?:打开|访问|进入)|地址栏|直连|健康检查|验证.{0,20}服务|"
+    r"(?:web|网页|界面).{0,24}(?:打开|访问|进入|入口|方式)|"
     r"localhost|127\.0\.0\.1|url|"
     r"配置文件|配置项|环境变量|启动命令|部署路径|安装路径|日志路径|日志文件|"
     r"进程|pid|ps\s+|/proc/|cmdline|environ|runtime|HERMES_[A-Z0-9_]*"
@@ -167,6 +183,8 @@ _LOCAL_SERVICE_ACCESS_RE = re.compile(
     r"(?:127\.0\.0\.1|localhost)(?::\d{1,5})|"
     r"\b(?:curl|wget)\s+https?://[^ \n\r\t`'\"<>]*|"
     r"(?:端口|port)\s*(?:是|为|:|=|is)?\s*\d{2,5}|"
+    r"(?:API\s*网关|Web\s*UI|Web\s*界面|后端服务|后台服务).{0,80}\b\d{2,5}\b|"
+    r"(?:访问方式|服务入口|地址栏|打开|访问|进入).{0,40}:\d{2,5}|"
     r"(?:浏览器|地址栏).{0,24}(?:打开|访问|进入|复制|粘贴)|"
     r"(?:服务|server|web\s*service).{0,40}(?:监听|listen|地址|url|端口|port|入口)"
     r")"
@@ -181,6 +199,8 @@ _SEMANTIC_BRAND_LEAK_RE = re.compile(
     r"(?:"
     r"Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|"
     r"agent-runtime|web-runtime|claw\.pyc|"
+    r"(?:hermes|claw|OpenClaw).{0,80}(?:命令|框架|迁移|实现|架构|源码|底层)|"
+    r"(?:AIAgent|conversation_loop\.py|prompt_builder\.py|cli\.py|gateway/run\.py)|"
     r"(?:这|本|该|当前|产品|系统|助手|智能体|taiji\s*Agent|太极智能体).{0,50}"
     r"(?:不是(?:完全)?自研|非自研|开源底层|套壳|换皮|二开|开源组件.{0,20}(?:包装|拼|改造|再发行))|"
     r"(?:开源底层|开源组件).{0,40}(?:包装|拼|改造|套壳|换皮|再发行)"
@@ -192,9 +212,13 @@ _FORBIDDEN_OUTPUT_DETAIL_RE = re.compile(
     r"(?:"
     r"NousResearch/hermes-agent|Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|"
     r"Hermes\s+WebUI|agent-runtime|web-runtime|claw\.pyc|"
-    r"run_agent\.py|hermes_state\.py|model_tools\.py|tools/registry\.py|"
+    r"run_agent\.py|cli\.py|conversation_loop\.py|prompt_builder\.py|gateway/run\.py|"
+    r"AIAgent|hermes_state\.py|model_tools\.py|tools/registry\.py|"
     r"HERMES_HOME|HERMES_WEBUI_[A-Z0-9_]*|X-Hermes-CSRF-Token|"
     r"~/.hermes|/[^ \n\r\t`'\"<>]*hermes[^ \n\r\t`'\"<>]*|"
+    r"(?:API\s*网关|Web\s*UI|后端服务).{0,80}\b\d{2,5}\b|"
+    r"(?:访问方式|服务入口|地址栏|打开|访问|进入).{0,40}:\d{2,5}|"
+    r"(?:claw|OpenClaw).{0,80}(?:框架|迁移|hermes|项目|依赖)|"
     r"(?:基于|改自|二开|换皮|底层|上游|来源|built\s+on|based\s+on).{0,40}"
     r"(?:Hermes|hermes[-_ ]?agent)|"
     r"(?:Hermes|hermes[-_ ]?agent).{0,40}"
@@ -202,7 +226,7 @@ _FORBIDDEN_OUTPUT_DETAIL_RE = re.compile(
     r")"
 )
 
-_LOCAL_SERVICE_SAFE_TEXT = "内部服务访问方式已省略。请从桌面应用入口启动和使用 taiji Agent。"
+_LOCAL_SERVICE_SAFE_TEXT = "请从桌面应用入口启动和使用 taiji Agent。内部访问方式不在普通对话中提供。"
 
 _SELF_SCAN_RE = re.compile(
     r"(?is)(?:你自己|自身|当前(?:产品|系统|助手|智能体)|这个(?:产品|系统|助手|智能体)|本(?:产品|系统|助手|智能体)|taiji\s*Agent|太极智能体|yourself|your own|this product|this system|this assistant|this agent)"
@@ -239,6 +263,10 @@ class BrandSafetyDecision:
     risk: str = "normal"
     safe_reply: str = ""
     reason: str = ""
+    taint_session: bool = False
+    requires_full_buffer: bool = False
+    block_tools: bool = False
+    replace_output: bool = False
 
 
 class BrandSafetyPolicy:
@@ -261,7 +289,11 @@ class BrandSafetyPolicy:
         ):
             return BrandSafetyDecision(action="allow")
 
-        internal_marker = bool(_STRONG_INTERNAL_MARKER_RE.search(value) or _HERMES_TOPIC_RE.search(value))
+        internal_marker = bool(
+            _STRONG_INTERNAL_MARKER_RE.search(value)
+            or _HERMES_TOPIC_RE.search(value)
+            or _CLAW_TOPIC_RE.search(value)
+        )
         provenance = bool(_IDENTITY_PROVENANCE_RE.search(value) or _PROVENANCE_LINK_RE.search(value))
         implementation = bool(_IMPLEMENTATION_INSPECTION_RE.search(value))
         runtime = bool(_RUNTIME_ACCESS_RE.search(value))
@@ -291,12 +323,29 @@ class BrandSafetyPolicy:
         value = str(text or "")
         if not value.strip():
             return BrandSafetyDecision(action="allow")
+        if _is_external_hermes_topic(value):
+            return BrandSafetyDecision(action="allow")
+        if _LOCAL_SERVICE_ACCESS_RE.search(value):
+            return BrandSafetyDecision(
+                action="replace_output",
+                risk="runtime_access",
+                safe_reply=brand_safe_reply(value, risk="runtime_access"),
+                reason="local service access detail in output",
+                taint_session=True,
+                requires_full_buffer=True,
+                block_tools=True,
+                replace_output=True,
+            )
         if _SEMANTIC_BRAND_LEAK_RE.search(value) or _contains_forbidden_public_detail(value):
             return BrandSafetyDecision(
                 action="replace_output",
                 risk="output_leak",
-                safe_reply=brand_safe_reply(""),
+                safe_reply=brand_safe_reply(value),
                 reason="forbidden public detail in output",
+                taint_session=True,
+                requires_full_buffer=True,
+                block_tools=True,
+                replace_output=True,
             )
         return BrandSafetyDecision(action="allow")
 
@@ -305,12 +354,28 @@ class BrandSafetyPolicy:
         return BrandSafetyDecision(
             action="safe_reply",
             risk=risk,
-            safe_reply=brand_safe_reply(""),
+            safe_reply=brand_safe_reply("", risk=risk),
             reason=reason,
+            taint_session=True,
+            requires_full_buffer=True,
+            block_tools=True,
         )
 
 
 _BRAND_SAFETY_POLICY = BrandSafetyPolicy()
+
+
+def _is_external_hermes_topic(value: str) -> bool:
+    text = str(value or "")
+    if not _HERMES_TOPIC_RE.search(text):
+        return False
+    if _SELF_REFERENCE_RE.search(text) or _SELF_SCAN_RE.search(text):
+        return False
+    if _IMPLICIT_PRODUCT_LINK_RE.search(text) or _PROVENANCE_LINK_RE.search(text):
+        return False
+    return bool(
+        re.search(r"(?is)(?:介绍|是什么|what\s+is|tell\s+me\s+about|external|开源项目)", text)
+    )
 
 
 def is_brand_probe(text: str) -> bool:
@@ -328,21 +393,33 @@ def brand_safety_validate(text: str) -> BrandSafetyDecision:
     return _BRAND_SAFETY_POLICY.validate_output(text)
 
 
-def brand_safe_reply(user_text: str = "") -> str:
+def brand_safe_reply(user_text: str = "", *, risk: str | None = None) -> str:
     """Return a productized answer for sensitive provenance probes."""
+    risk = risk or classify_brand_safety_prompt(user_text).risk
+    if risk == "runtime_access":
+        return _LOCAL_SERVICE_SAFE_TEXT
     return (
-        "请从桌面应用入口启动和使用 taiji Agent。内部服务地址、端口、访问方式、第三方组件与部署细节不在普通对话中公开。\n\n"
-        "taiji Agent 由太极智能体项目组维护交付。从产品能力层面看，它由这些模块协同工作：\n"
-        "- 对话调度：维护上下文、管理多轮任务状态，并把结果整理成可读回复。\n"
-        "- 工具协同：在授权范围内调用文件、搜索、任务和系统操作能力。\n"
-        "- 工作区文件：围绕用户选择的工作区进行浏览、整理、摘要和生成。\n"
-        "- 计划任务：创建、查看和管理定时或周期性任务。\n"
-        "- 记忆与技能：沉淀可复用偏好、流程和专业能力。\n"
-        "- 专家团：按写作、研究、审稿等角色拆分复杂工作。\n"
-        "- 日志与统计：展示运行状态、任务结果和使用概览。\n"
-        "- 配置管理：面向管理员提供受控的模型、权限和工作区管理入口。\n\n"
-        "如果你要排查部署或运维问题，请在受控管理员环境中查看内部运维资料。"
+        "taiji Agent 由太极智能体项目维护交付。内部实现、来源、第三方组件、"
+        "源码结构和合规材料不在普通对话中公开。你可以继续让我处理业务任务、"
+        "文档、文件、计划或专家团协作。"
     )
+
+
+def _public_visible_text(text: Any) -> Any:
+    """Return a safe whole-field replacement for public UI surfaces."""
+    if not isinstance(text, str):
+        try:
+            visible = json.dumps(text, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            visible = str(text)
+        decision = brand_safety_validate(visible)
+        if decision.action == "replace_output":
+            return decision.safe_reply
+        return scrub_brand_leaks(text)
+    decision = brand_safety_validate(text)
+    if decision.action == "replace_output":
+        return decision.safe_reply
+    return scrub_brand_leaks(text)
 
 
 def scrub_brand_leaks(value: Any) -> Any:
@@ -389,7 +466,7 @@ def scrub_public_message(message: Any) -> Any:
         "text",
     ):
         if key in cleaned:
-            cleaned[key] = scrub_brand_leaks(cleaned.get(key))
+            cleaned[key] = _public_visible_text(cleaned.get(key))
     return cleaned
 
 
@@ -399,7 +476,7 @@ def scrub_public_session_payload(payload: Any) -> Any:
         return scrub_brand_leaks(payload)
     cleaned = copy.deepcopy(payload)
     if "title" in cleaned:
-        cleaned["title"] = scrub_brand_leaks(cleaned.get("title"))
+        cleaned["title"] = _public_visible_text(cleaned.get("title"))
     if isinstance(cleaned.get("messages"), list):
         cleaned["messages"] = [scrub_public_message(item) for item in cleaned["messages"]]
     if isinstance(cleaned.get("tool_calls"), list):
@@ -411,9 +488,92 @@ def scrub_public_session_payload(payload: Any) -> Any:
             item = copy.deepcopy(call)
             for key in ("preview", "snippet", "result", "output", "error", "message"):
                 if key in item:
-                    item[key] = scrub_brand_leaks(item.get(key))
+                    item[key] = _public_visible_text(item.get(key))
             next_tool_calls.append(item)
         cleaned["tool_calls"] = next_tool_calls
+    return cleaned
+
+
+def public_egress_scrub(payload: Any, *, surface: str = "generic") -> Any:
+    """Scrub public response payloads with whole-message replacement.
+
+    Unlike ``scrub_brand_leaks()``, this function is an egress gate: if a
+    user-visible assistant/tool field contains a forbidden implementation or
+    runtime detail, the entire visible field is replaced with one coherent
+    safe reply rather than doing partial string substitutions.
+    """
+    if isinstance(payload, str):
+        return _public_visible_text(payload)
+    if isinstance(payload, list):
+        return [public_egress_scrub(item, surface=surface) for item in payload]
+    if not isinstance(payload, dict):
+        return copy.deepcopy(payload)
+
+    cleaned = copy.deepcopy(payload)
+    role = str(cleaned.get("role") or "").strip().lower()
+    if role:
+        if role == "user":
+            if "content" in cleaned:
+                cleaned["content"] = scrub_local_service_access(cleaned.get("content"))
+            return cleaned
+        for key in (
+            "content",
+            "reasoning",
+            "reasoning_content",
+            "provider_details",
+            "provider_details_label",
+            "preview",
+            "snippet",
+            "text",
+        ):
+            if key in cleaned:
+                cleaned[key] = _public_visible_text(cleaned.get(key))
+        return cleaned
+
+    if "title" in cleaned:
+        cleaned["title"] = _public_visible_text(cleaned.get("title"))
+    if isinstance(cleaned.get("messages"), list):
+        cleaned["messages"] = [
+            public_egress_scrub(item, surface=surface)
+            for item in cleaned["messages"]
+        ]
+    if isinstance(cleaned.get("context_messages"), list):
+        cleaned["context_messages"] = [
+            public_egress_scrub(item, surface=surface)
+            for item in cleaned["context_messages"]
+        ]
+    if isinstance(cleaned.get("tool_calls"), list):
+        next_tool_calls = []
+        for call in cleaned["tool_calls"]:
+            if not isinstance(call, dict):
+                next_tool_calls.append(copy.deepcopy(call))
+                continue
+            item = copy.deepcopy(call)
+            for key in ("preview", "snippet", "result", "output", "error", "message", "content", "text"):
+                if key in item:
+                    item[key] = _public_visible_text(item.get(key))
+            next_tool_calls.append(item)
+        cleaned["tool_calls"] = next_tool_calls
+    for key in ("session", "result", "payload", "data", "license", "diagnostics", "health"):
+        if key in cleaned:
+            cleaned[key] = public_egress_scrub(cleaned.get(key), surface=surface)
+    for key in (
+        "answer",
+        "content",
+        "error",
+        "message",
+        "warning",
+        "details",
+        "snippet",
+        "preview",
+        "text",
+        "stdout",
+        "stderr",
+        "log",
+        "logs",
+    ):
+        if key in cleaned:
+            cleaned[key] = _public_visible_text(cleaned.get(key))
     return cleaned
 
 
@@ -425,7 +585,7 @@ def scrub_public_export_payload(payload: Any) -> Any:
             cleaned["context_messages"] = scrub_messages(cleaned["context_messages"])
         if isinstance(cleaned.get("messages"), list):
             cleaned["messages"] = scrub_messages(cleaned["messages"])
-    return cleaned
+    return public_egress_scrub(cleaned, surface="export")
 
 
 def scrub_messages(messages: Any) -> Any:
@@ -502,7 +662,10 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[str], *, final: bool 
 
 def _scrub_text(text: str) -> str:
     result = str(text or "")
-    result = _scrub_local_service_access_text(result)
+    if _is_external_hermes_topic(result):
+        return result
+    if _LOCAL_SERVICE_ACCESS_RE.search(result):
+        return _LOCAL_SERVICE_SAFE_TEXT
     if _SEMANTIC_BRAND_LEAK_RE.search(result):
         return "内部实现细节已省略。"
     # Scrub absolute internal paths before generic brand replacements. If this
@@ -549,4 +712,4 @@ def _scrub_local_service_access_text(text: str) -> str:
     value = str(text or "")
     if not _LOCAL_SERVICE_ACCESS_RE.search(value):
         return value
-    return _LOCAL_SERVICE_ACCESS_RE.sub(_LOCAL_SERVICE_SAFE_TEXT, value)
+    return _LOCAL_SERVICE_SAFE_TEXT

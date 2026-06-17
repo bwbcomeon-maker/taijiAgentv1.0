@@ -43,6 +43,7 @@ from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     brand_safety_validate,
     classify_brand_safety_prompt,
+    public_egress_scrub,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
     scrub_messages,
@@ -4590,7 +4591,7 @@ def _run_agent_streaming(
                 nonlocal _reasoning_text
                 if text is None:
                     return
-                reasoning_delta = scrub_brand_leaks(str(text))
+                reasoning_delta = public_egress_scrub(str(text), surface="stream_reasoning")
                 # Some runtimes mirror user-visible progress text through the
                 # reasoning channel after it already streamed as normal assistant
                 # output. Treat that as an echo, otherwise the UI renders the
@@ -4610,7 +4611,7 @@ def _run_agent_streaming(
             def on_interim_assistant(text, **cb_kwargs):
                 if text is None:
                     return
-                visible = scrub_brand_leaks(str(text)).strip()
+                visible = str(public_egress_scrub(str(text), surface="stream_interim")).strip()
                 if not visible:
                     return
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
@@ -4686,7 +4687,7 @@ def _run_agent_streaming(
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
-                        reason_delta = scrub_brand_leaks(str(reason_text))
+                        reason_delta = public_egress_scrub(str(reason_text), surface="stream_tool_reasoning")
                         # Older tool-progress paths can mirror the same visible
                         # progress text already emitted through stream_delta_callback.
                         # Suppress those echoes like the dedicated reasoning callback.
@@ -4725,8 +4726,8 @@ def _run_agent_streaming(
                         })
                     put('tool', {
                         'event_type': event_type or 'tool.started',
-                        'name': scrub_brand_leaks(name),
-                        'preview': scrub_brand_leaks(preview),
+                        'name': public_egress_scrub(name, surface="stream_tool_name"),
+                        'preview': public_egress_scrub(preview, surface="stream_tool_preview"),
                         'args': args_snap,
                     })
                     _tool_stats = meter().get_stats()
@@ -4773,8 +4774,8 @@ def _run_agent_streaming(
                     _checkpoint_activity[0] += 1
                     put('tool_complete', {
                         'event_type': event_type,
-                        'name': scrub_brand_leaks(name),
-                        'preview': scrub_brand_leaks(preview),
+                        'name': public_egress_scrub(name, surface="stream_tool_name"),
+                        'preview': public_egress_scrub(preview, surface="stream_tool_preview"),
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
@@ -4805,7 +4806,7 @@ def _run_agent_streaming(
                             })
                         put('tool', {
                             'event_type': 'tool.started',
-                            'name': scrub_brand_leaks(name),
+                            'name': public_egress_scrub(name, surface="stream_tool_name"),
                             'preview': None,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
@@ -4822,7 +4823,10 @@ def _run_agent_streaming(
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
-                        result_snippet = scrub_brand_leaks(_tool_result_snippet(function_result))
+                        result_snippet = public_egress_scrub(
+                            _tool_result_snippet(function_result),
+                            surface="stream_tool_result",
+                        )
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
@@ -4841,7 +4845,7 @@ def _run_agent_streaming(
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
                             'event_type': 'tool.completed',
-                            'name': scrub_brand_leaks(name),
+                            'name': public_egress_scrub(name, surface="stream_tool_name"),
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
@@ -5451,15 +5455,15 @@ def _run_agent_streaming(
                 _answer = ''
                 for _m in reversed(result.get('messages') or []):
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
-                        _answer = scrub_brand_leaks(str(_m.get('content', '')))
+                        _answer = public_egress_scrub(str(_m.get('content', '')), surface="stream_ephemeral_answer")
                         break
                 _flush_brand_token_tail()
-                put('done', {
+                put('done', public_egress_scrub({
                     'session': {'session_id': session_id, 'messages': scrub_messages(result.get('messages', []))},
                     'usage': {'input_tokens': 0, 'output_tokens': 0},
                     'ephemeral': True,
                     'answer': _answer,
-                })
+                }, surface="stream_ephemeral_done"))
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
@@ -5530,7 +5534,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
-                s.context_messages = copy.deepcopy(_deduplicate_context_messages(_next_context_messages))
+                s.context_messages = scrub_messages(_deduplicate_context_messages(_next_context_messages))
                 s.messages = scrub_messages(_merge_display_messages_after_agent_result(
                     _previous_messages,
                     _previous_context_messages,
@@ -5677,7 +5681,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = copy.deepcopy(_deduplicate_context_messages(_next_context_messages))
+                                s.context_messages = scrub_messages(_deduplicate_context_messages(_next_context_messages))
                                 s.messages = scrub_messages(_merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -6006,7 +6010,10 @@ def _run_agent_streaming(
                     s.messages,
                     live_tool_calls=_live_tool_calls,
                 )
-                tool_calls = scrub_public_session_payload({"tool_calls": tool_calls}).get("tool_calls", [])
+                tool_calls = public_egress_scrub(
+                    scrub_public_session_payload({"tool_calls": tool_calls}),
+                    surface="stream_tool_calls",
+                ).get("tool_calls", [])
                 s.tool_calls = tool_calls
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -6479,7 +6486,7 @@ def _run_agent_streaming(
                 if _leftover:
                     put('pending_steer_leftover', {
                         'session_id': session_id,
-                        'text': scrub_brand_leaks(str(_leftover)),
+                        'text': public_egress_scrub(str(_leftover), surface="stream_pending_steer"),
                     })
             except Exception:
                 logger.debug("Failed to drain pending steer for session %s", session_id)
@@ -6552,7 +6559,10 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             _flush_brand_token_tail()
-            raw_session = scrub_public_session_payload(s.compact() | {'messages': s.messages, 'tool_calls': tool_calls})
+            raw_session = public_egress_scrub(
+                scrub_public_session_payload(s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}),
+                surface="stream_done",
+            )
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
@@ -6729,7 +6739,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = copy.deepcopy(_deduplicate_context_messages(_next_context_messages))
+                                s.context_messages = scrub_messages(_deduplicate_context_messages(_next_context_messages))
                                 s.messages = scrub_messages(_merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -6759,7 +6769,14 @@ def _run_agent_streaming(
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
 
-        _error_payload = _provider_error_payload(scrub_brand_leaks(err_str), _exc_type, scrub_brand_leaks(_exc_hint))
+        _error_payload = public_egress_scrub(
+            _provider_error_payload(
+                public_egress_scrub(err_str, surface="stream_error"),
+                _exc_type,
+                public_egress_scrub(_exc_hint, surface="stream_error_hint"),
+            ),
+            surface="stream_error_payload",
+        )
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()

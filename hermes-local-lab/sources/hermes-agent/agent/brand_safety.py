@@ -125,14 +125,55 @@ def block_reason_for_tool(tool_name: str, args: dict[str, Any] | None) -> str | 
     if not public_chat_guard_enabled():
         return None
     args = args or {}
-    name = str(tool_name or "")
-    if name == "read_file":
-        return block_reason_for_file_path(args.get("path"))
-    if name == "search_files":
-        return block_reason_for_search(args.get("pattern"), args.get("path", "."))
-    if name == "terminal":
-        return block_reason_for_terminal(args.get("command"), workdir=args.get("workdir"))
+    raw_name = str(tool_name or "")
+    name = re.sub(r"[^a-z0-9]+", "_", raw_name.lower()).strip("_")
+
+    path_value = _first_arg(args, "path", "file", "file_path", "filepath", "directory", "dir", "root")
+    workdir_value = _first_arg(args, "workdir", "cwd", "working_directory")
+    command_value = _first_arg(args, "command", "cmd", "shell", "script", "code")
+    query_value = _first_arg(args, "pattern", "query", "search", "text", "needle")
+
+    if name in {"read_file", "read_file_tool"} or ("read" in name and ("file" in name or "filesystem" in name)):
+        return block_reason_for_file_path(path_value)
+    if (
+        name in {"list_directory", "list_files", "directory_list", "tree"}
+        or ("list" in name and ("dir" in name or "file" in name or "workspace" in name))
+    ):
+        return block_reason_for_file_path(path_value)
+    if (
+        name in {"search_files", "search", "grep", "find"}
+        or "search" in name
+        or "grep" in name
+        or name.startswith("find_")
+    ):
+        return block_reason_for_search(query_value, path_value or workdir_value or ".")
+    if (
+        name in {"terminal", "execute_command", "run_command", "shell", "bash", "execute_code"}
+        or "command" in name
+        or "terminal" in name
+        or "shell" in name
+        or "execute" in name
+    ):
+        return block_reason_for_terminal(command_value, workdir=workdir_value)
+
+    combined = _args_to_text(args)
+    if _SENSITIVE_PATH_RE.search(combined) or _SENSITIVE_TEXT_RE.search(combined):
+        return _PUBLIC_BLOCK_MESSAGE
     return None
+
+
+def _first_arg(args: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in args and args.get(key) not in (None, ""):
+            return args.get(key)
+    return None
+
+
+def _args_to_text(args: dict[str, Any]) -> str:
+    try:
+        return json.dumps(args, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(args)
 
 
 def _normalize_path_text(path: Any) -> str:

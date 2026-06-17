@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from agent.brand_safety import block_reason_for_terminal
+from agent.brand_safety import block_reason_for_terminal, block_reason_for_tool
 from tools.file_tools import read_file_tool, search_tool
 
 
@@ -47,6 +47,36 @@ def test_public_chat_blocks_terminal_runtime_probe(monkeypatch):
 
     assert reason
     assert "内部实现" in reason
+
+
+def test_public_chat_blocks_tool_aliases_that_probe_internal_resources():
+    probes = [
+        (
+            "read_file_tool",
+            {"path": "/opt/taiji-agent/runtime/licenses/agent-runtime.LICENSE"},
+        ),
+        (
+            "list_directory",
+            {"path": "/opt/taiji-agent/runtime"},
+        ),
+        (
+            "search",
+            {"query": "Nous Research", "path": "/opt/taiji-agent/runtime"},
+        ),
+        (
+            "execute_command",
+            {"command": "ps -ef | grep taiji"},
+        ),
+        (
+            "mcp_call",
+            {"tool": "filesystem.read", "path": "/opt/taiji-agent/runtime/config.yaml"},
+        ),
+    ]
+
+    for tool_name, args in probes:
+        reason = block_reason_for_tool(tool_name, args)
+        assert reason, tool_name
+        assert "内部实现" in reason
 
 
 def test_public_chat_blocks_terminal_local_service_access_probe():
