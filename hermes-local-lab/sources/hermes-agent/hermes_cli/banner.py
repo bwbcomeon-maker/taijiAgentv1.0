@@ -6,8 +6,10 @@ Pure display functions with no HermesCLI state dependency.
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -39,6 +41,13 @@ def cprint(text: str):
     _pt_print(_PT_ANSI(text))
 
 
+def _display_skill_name(skill_name: str) -> str:
+    """Normalize legacy/internal skill identifiers for product-facing display."""
+    if not skill_name:
+        return skill_name
+    return PRODUCT_SKILL_ALIASES.get(skill_name, skill_name)
+
+
 # =========================================================================
 # Skin-aware color helpers
 # =========================================================================
@@ -67,28 +76,29 @@ def _skin_branding(key: str, fallback: str) -> str:
 
 from hermes_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
 
-HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
+PRODUCT_NAME = "Taiji Agent"
+PRODUCT_SUBTITLE = "太极智能体"
+PRODUCT_RUNTIME_LABEL = "Intelligent Agent Runtime"
+PRODUCT_SKILL_ALIASES = {
+    "hermes-agent": "taiji-agent",
+}
 
-HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#CD7F32]⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⣇⠸⣿⣿⠇⣸⣿⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀[/]
-[#FFBF00]⠀⢀⣠⣴⣶⠿⠋⣩⡿⣿⡿⠻⣿⡇⢠⡄⢸⣿⠟⢿⣿⢿⣍⠙⠿⣶⣦⣄⡀⠀[/]
-[#FFBF00]⠀⠀⠉⠉⠁⠶⠟⠋⠀⠉⠀⢀⣈⣁⡈⢁⣈⣁⡀⠀⠉⠀⠙⠻⠶⠈⠉⠉⠀⠀[/]
-[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⡿⠛⢁⡈⠛⢿⣿⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠿⣿⣦⣤⣈⠁⢠⣴⣿⠿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠻⢿⣿⣦⡉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⢷⣦⣈⠛⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣴⠦⠈⠙⠿⣦⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⣿⣤⡈⠁⢤⣿⠇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠷⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠑⢶⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⠁⢰⡆⠈⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠳⠈⣡⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
+TAIJI_AGENT_LOGO = """[bold #FFD700]Taiji Agent[/]
+[#FFBF00]太极智能体[/]
+[dim #B8860B]Intelligent Agent Runtime[/]"""
+
+TAIJI_DOT_MATRIX = """[#CD7F32]  ● ● ● ● ● ● ● ● ● ●  [/]
+[#CD7F32]● ● ● ● ● ● ● ● [#FFF8DC]● ●[/] ●[/]
+[#CD7F32]● ● ● ● ● [#FFF8DC]● ● ● ● ●[/] ●[/]
+[#CD7F32]● ● ● ● [#FFF8DC]● ● ● ● ● ●[/] ●[/]
+[#CD7F32]● ● ● [#FFF8DC]● ● ● ● ● ● ●[/] ●[/]
+[#CD7F32]● ● ● ● [#FFF8DC]● ● ● ● ● ●[/] ●[/]
+[#CD7F32]● ● ● ● ● [#FFF8DC]● ● ● ● ●[/] ●[/]
+[#CD7F32]  ● ● ● ● ● ● ● ● ● ●  [/]"""
+
+# Backwards-compatible internal constant names used by older skins/imports.
+HERMES_AGENT_LOGO = TAIJI_AGENT_LOGO
+HERMES_CADUCEUS = TAIJI_DOT_MATRIX
 
 
 
@@ -112,7 +122,7 @@ def get_available_skills() -> Dict[str, List[str]]:
     skills_by_category: Dict[str, List[str]] = {}
     for skill in all_skills:
         category = skill.get("category") or "general"
-        skills_by_category.setdefault(category, []).append(skill["name"])
+        skills_by_category.setdefault(category, []).append(_display_skill_name(skill["name"]))
     return skills_by_category
 
 
@@ -403,7 +413,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
 def format_banner_version_label() -> str:
     """Return the version label shown in the startup banner title."""
-    base = f"Hermes Agent v{VERSION} ({RELEASE_DATE})"
+    base = f"{PRODUCT_NAME} v{VERSION} ({RELEASE_DATE})"
     state = get_git_banner_state()
     if not state:
         return base
@@ -525,7 +535,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     text = _skin_color("banner_text", "#FFF8DC")
     session_color = _skin_color("session_border", "#8B8682")
 
-    # Use skin's custom caduceus art if provided
+    # Use skin's custom hero art if provided
     try:
         from hermes_cli.skin_engine import get_active_skin
         _bskin = get_active_skin()
@@ -533,23 +543,43 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     except Exception:
         _bskin = None
         _hero = HERMES_CADUCEUS
-    left_lines = ["", _hero, ""]
-    model_short = model.split("/")[-1] if "/" in model else model
-    if model_short.endswith(".gguf"):
-        model_short = model_short[:-5]
-    if len(model_short) > 28:
-        model_short = model_short[:25] + "..."
-    ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
-    left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]Nous Research[/]")
-
+    agent_name = (
+        _bskin.get_branding("agent_name", PRODUCT_NAME)
+        if _bskin else PRODUCT_NAME
+    )
+    subtitle = (
+        _bskin.get_branding("subtitle", PRODUCT_SUBTITLE)
+        if _bskin else PRODUCT_SUBTITLE
+    )
+    runtime_label = (
+        _bskin.get_branding("runtime_label", PRODUCT_RUNTIME_LABEL)
+        if _bskin else PRODUCT_RUNTIME_LABEL
+    )
+    left_lines = [
+        f"[bold {accent}]{agent_name}[/]",
+        f"[{accent}]{subtitle}[/]",
+        f"[dim {text}]v{VERSION} {runtime_label}[/]",
+        "",
+        _hero,
+        f"[dim {dim}]{'─' * 26}[/]",
+    ]
     if os.getenv("HERMES_YOLO_MODE"):
         left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
-    left_lines.append(f"[dim {dim}]{cwd}[/]")
+    ctx_str = f" · {_format_context_length(context_length)} context" if context_length else ""
     if session_id:
-        left_lines.append(f"[dim {session_color}]Session: {session_id}[/]")
+        left_lines.append(f"[{accent}]›[/] [{text}]Session[/] [dim {session_color}]{session_id}[/]")
+    else:
+        left_lines.append(f"[{accent}]›[/] [{text}]Session[/] [dim {session_color}]new[/]")
+    left_lines.append(f"[{accent}]›[/] [{text}]Mode[/] [dim {session_color}]interactive[/]")
+    left_lines.append(
+        f"[{accent}]›[/] [{text}]Runtime[/] [dim {session_color}]python "
+        f"{sys.version_info.major}.{sys.version_info.minor}{ctx_str}[/]"
+    )
+    platform_label = f"{platform.system().lower()} {platform.machine()}".strip()
+    left_lines.append(f"[{accent}]›[/] [{text}]Platform[/] [dim {session_color}]{platform_label}[/]")
     left_content = "\n".join(left_lines)
 
-    right_lines = [f"[bold {accent}]Available Tools[/]"]
+    right_lines = [f"[bold {accent}]▧ AVAILABLE TOOLS[/] [dim {dim}]{'─' * 28}[/]"]
     toolsets_dict: Dict[str, list] = {}
 
     for tool in tools:
@@ -617,7 +647,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
 
     if mcp_status:
         right_lines.append("")
-        right_lines.append(f"[bold {accent}]MCP Servers[/]")
+        right_lines.append(f"[bold {accent}]MCP SERVERS[/]")
         for srv in mcp_status:
             if srv["connected"]:
                 right_lines.append(
@@ -631,7 +661,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
                 )
 
     right_lines.append("")
-    right_lines.append(f"[bold {accent}]Available Skills[/]")
+    right_lines.append(f"[bold {accent}]▧ AVAILABLE SKILLS[/] [dim {dim}]{'─' * 27}[/]")
     skills_by_category = get_available_skills()
     total_skills = sum(len(s) for s in skills_by_category.values())
 
@@ -639,10 +669,10 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         for category in sorted(skills_by_category.keys()):
             skill_names = sorted(skills_by_category[category])
             if len(skill_names) > 8:
-                display_names = skill_names[:8]
+                display_names = [_display_skill_name(name) for name in skill_names[:8]]
                 skills_str = ", ".join(display_names) + f" +{len(skill_names) - 8} more"
             else:
-                skills_str = ", ".join(skill_names)
+                skills_str = ", ".join(_display_skill_name(name) for name in skill_names)
             if len(skills_str) > 50:
                 skills_str = skills_str[:47] + "..."
             right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")

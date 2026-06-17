@@ -99,7 +99,7 @@ def test_build_welcome_banner_title_is_hyperlinked_to_release():
 
     raw = buf.getvalue()
     # The existing version label must still be present in the title
-    assert "Hermes Agent v" in raw, "Version label missing from title"
+    assert "Taiji Agent v" in raw, "Version label missing from title"
     # OSC-8 hyperlink escape sequence present with the release URL
     assert "\x1b]8;" in raw, "OSC-8 hyperlink not emitted"
     assert "releases/tag/v2026.4.23" in raw, "Release URL missing from banner output"
@@ -131,5 +131,37 @@ def test_build_welcome_banner_title_falls_back_when_no_tag():
         )
 
     raw = buf.getvalue()
-    assert "Hermes Agent v" in raw, "Version label missing from title"
+    assert "Taiji Agent v" in raw, "Version label missing from title"
     assert "\x1b]8;" not in raw, "OSC-8 hyperlink should not be emitted without a tag"
+
+
+def test_build_welcome_banner_uses_taiji_product_branding_and_skill_alias():
+    """Startup banner should expose Taiji Agent branding without legacy product marks."""
+    import hermes_cli.banner as _banner
+    import model_tools as _mt
+    import tools.mcp_tool as _mcp
+
+    with (
+        patch.object(_mt, "check_tool_availability", return_value=(["browser"], [])),
+        patch.object(_banner, "get_available_skills", return_value={"agents": ["hermes-agent"]}),
+        patch.object(_banner, "get_update_result", return_value=None),
+        patch.object(_mcp, "get_mcp_status", return_value=[]),
+        patch.object(_banner, "get_latest_release_tag", return_value=None),
+    ):
+        console = Console(record=True, force_terminal=False, color_system=None, width=160)
+        _banner.build_welcome_banner(
+            console=console,
+            model="deepseek-v4-pro",
+            cwd="/tmp/taiji-agent",
+            session_id="20260617_111613",
+            tools=[{"function": {"name": "browser_click"}}],
+            get_toolset_for_tool=lambda n: "browser",
+        )
+
+    output = console.export_text()
+    assert "Taiji Agent" in output
+    assert "太极智能体" in output
+    assert "taiji-agent" in output
+    assert "hermes-agent" not in output
+    assert "Hermes Agent" not in output
+    assert "Nous Research" not in output

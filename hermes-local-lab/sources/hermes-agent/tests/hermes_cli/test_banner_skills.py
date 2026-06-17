@@ -24,6 +24,16 @@ def test_get_available_skills_delegates_to_find_all_skills():
     assert result["creative"] == ["skill-c"]
 
 
+def test_get_available_skills_aliases_legacy_product_skill_for_display():
+    """Internal skill ids stay intact, but the startup banner should show Taiji naming."""
+    skills = [{"name": "hermes-agent", "description": "Agent skill", "category": "agents"}]
+    with patch("tools.skills_tool._find_all_skills", return_value=skills):
+        from hermes_cli.banner import get_available_skills
+        result = get_available_skills()
+
+    assert result["agents"] == ["taiji-agent"]
+
+
 def test_get_available_skills_excludes_disabled():
     """Disabled skills should not appear in the banner count."""
     # _find_all_skills already filters disabled skills, so if we give it
