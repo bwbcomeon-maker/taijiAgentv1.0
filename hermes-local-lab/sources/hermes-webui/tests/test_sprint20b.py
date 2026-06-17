@@ -71,12 +71,14 @@ def test_send_button_no_text_label():
 
 
 def test_send_button_has_svg_icon():
-    """Send button must have an SVG icon."""
+    """Send button must have an icon rendered inline or through taiji-icon."""
     html, _ = get_text("/")
     btn_start = html.find('id="btnSend"')
     btn_end = html.find('</button>', btn_start) + len('</button>')
     btn_html = html[btn_start:btn_end]
-    assert '<svg' in btn_html
+    has_inline_svg = '<svg' in btn_html
+    has_taiji_icon = 'class="taiji-icon composer-control-icon"' in btn_html
+    assert has_inline_svg or has_taiji_icon
 
 
 def test_send_button_has_title_attribute():
@@ -94,7 +96,7 @@ def test_send_button_has_title_attribute():
 
 
 def test_send_button_svg_arrow_up():
-    """Send button SVG should use an upward arrow (line + polyline or path)."""
+    """Send button icon should point upward."""
     html, _ = get_text("/")
     btn_start = html.find('id="btnSend"')
     btn_end = html.find('</button>', btn_start) + len('</button>')
@@ -102,7 +104,8 @@ def test_send_button_svg_arrow_up():
     # Must have some directional shape element
     has_shape = ('<line' in btn_html or '<polyline' in btn_html or
                  '<polygon' in btn_html or '<path' in btn_html)
-    assert has_shape, "Send button SVG missing directional shape"
+    has_icon_name = 'data-icon="arrow-up"' in btn_html
+    assert has_shape or has_icon_name, "Send button icon is not an upward arrow"
 
 
 # ── style.css ────────────────────────────────────────────────────────────

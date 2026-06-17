@@ -4825,6 +4825,21 @@ function _syncMobileCtxDisplay(state){
   _setCtxCompressButton(compressBtn,state.compressText||'');
 }
 
+function _setCtxIndicatorSlotVisible(wrap,visible){
+  if(!wrap)return;
+  wrap.style.display='';
+  wrap.style.visibility=visible?'visible':'hidden';
+  wrap.style.pointerEvents=visible?'auto':'none';
+  wrap.dataset.ctxVisible=visible?'1':'0';
+  if(!visible){
+    const tooltip=$('ctxTooltip');
+    if(tooltip){
+      tooltip.classList.remove('ctx-tooltip-active');
+      tooltip.setAttribute('aria-hidden','true');
+    }
+  }
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
@@ -4846,11 +4861,11 @@ function _syncCtxIndicator(usage){
   const cost=usage.estimated_cost;
   // Show indicator whenever we have any usage data (tokens or cost)
   if(!promptTok&&!totalTok&&!cost&&!cacheReadTok&&!cacheWriteTok){
-    if(wrap) wrap.style.display='none';
+    _setCtxIndicatorSlotVisible(wrap,false);
     _syncMobileCtxDisplay({visible:false});
     return;
   }
-  if(wrap) wrap.style.display='';
+  _setCtxIndicatorSlotVisible(wrap,true);
   const hasPromptTok=!!promptTok;
   const rawPct=hasPromptTok?Math.round((promptTok/ctxWindow)*100):0;
   const pct=Math.min(100,rawPct);

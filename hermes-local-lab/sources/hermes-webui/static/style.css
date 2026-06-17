@@ -2304,7 +2304,8 @@
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
   /* Context usage indicator */
-  .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:34px;min-width:34px;height:34px;visibility:hidden;pointer-events:none;}
+  .ctx-indicator-wrap[data-ctx-visible="1"]{visibility:visible;pointer-events:auto;}
   .ctx-indicator{width:34px;height:34px;padding:0;border:none;background:none;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s,transform .15s;}
   .ctx-indicator:hover{opacity:.88;transform:translateY(-1px);}
   .ctx-ring{position:relative;display:flex;width:24px;height:24px;align-items:center;justify-content:center;}
@@ -9593,6 +9594,16 @@ main.main.showing-logs > #mainLogs{display:flex;}
     align-items:center!important;
     min-width:0!important;
     gap:10px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #ctxIndicatorWrap{
+    box-sizing:border-box!important;
+    display:inline-flex!important;
+    align-items:center!important;
+    justify-content:center!important;
+    width:46px!important;
+    min-width:46px!important;
+    height:46px!important;
+    flex:0 0 46px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left{
     flex:1 1 auto!important;
