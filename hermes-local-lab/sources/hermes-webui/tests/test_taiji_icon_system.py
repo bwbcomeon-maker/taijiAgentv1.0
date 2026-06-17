@@ -69,18 +69,21 @@ def test_taiji_icon_source_sheets_are_preserved_for_design_review():
 
 def test_taiji_home_uses_lucide_svg_icon_slots_for_nav_and_quick_cards():
     for icon in (
-        "message-square",
-        "calendar",
-        "layers",
-        "pencil",
-        "zap",
-        "brain",
-        "folder",
-        "user",
-        "list-todo",
-        "cpu",
-        "terminal",
+        "messages-square",
+        "clipboard-check",
+        "kanban",
+        "users-round",
+        "blocks",
+        "brain-circuit",
+        "folder-open",
+        "user-round-cog",
+        "list-checks",
+        "chart-column",
+        "scroll-text",
         "settings",
+        "calendar-check-2",
+        "workflow",
+        "terminal",
     ):
         assert f'data-icon="{icon}"' in INDEX_HTML
 
@@ -115,7 +118,8 @@ def test_taiji_composer_uses_svg_controls_instead_of_png_pseudo_icons():
     assert "#composerWrap #btnMic::after" not in STYLE_CSS
     assert "background-image:var(--taiji-action-attach)" not in STYLE_CSS
     assert "background-image:var(--taiji-action-voice)" not in STYLE_CSS
-    assert "static/style.css?v=__WEBUI_VERSION__-taiji-shell-32" in INDEX_HTML
+    assert "static/icons.js?v=__WEBUI_VERSION__-taiji-shell-33" in INDEX_HTML
+    assert "static/style.css?v=__WEBUI_VERSION__-taiji-shell-33" in INDEX_HTML
 
 
 def test_taiji_composer_layout_does_not_clip_or_force_optional_toolsets():
@@ -218,20 +222,29 @@ def test_taiji_secondary_collapse_expands_workspace_in_final_override():
 
 def test_lucide_registry_contains_all_taiji_shell_icons():
     for icon in (
-        "message-square",
-        "calendar",
-        "layers",
-        "pencil",
-        "zap",
-        "brain",
-        "folder",
-        "user",
-        "list-todo",
-        "cpu",
+        "messages-square",
+        "clipboard-check",
+        "kanban",
+        "users-round",
+        "blocks",
+        "brain-circuit",
+        "folder-open",
+        "user-round-cog",
+        "list-checks",
+        "chart-column",
+        "scroll-text",
+        "calendar-check-2",
+        "workflow",
         "terminal",
         "settings",
         "paperclip",
+        "mic",
         "audio-lines",
+        "bot",
+        "gauge",
+        "wrench",
+        "sliders-horizontal",
+        "arrow-up",
         "globe",
     ):
         assert f"'{icon}':" in ICONS_JS
@@ -241,7 +254,8 @@ def test_taiji_user_avatar_cache_bust_and_asset_source_are_locked():
     assert "taiji-shell-21" not in INDEX_HTML
     assert "taiji-shell-22" not in INDEX_HTML
     assert "taiji-shell-23" not in INDEX_HTML
-    assert "taiji-shell-32" in INDEX_HTML
+    assert "taiji-shell-32" not in INDEX_HTML
+    assert "taiji-shell-33" in INDEX_HTML
 
     user_avatar_start = STYLE_CSS.rindex('.taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{')
     user_avatar = STYLE_CSS[user_avatar_start : STYLE_CSS.index("}", user_avatar_start)]

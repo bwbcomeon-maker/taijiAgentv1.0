@@ -218,8 +218,9 @@ class TestIndexHtmlIntegration:
     def test_taiji_shell_assets_share_cache_bust_suffix(self):
         src = INDEX.read_text(encoding="utf-8")
         sw = SW.read_text(encoding="utf-8")
-        expected = "__WEBUI_VERSION__-taiji-shell-32"
+        expected = "__WEBUI_VERSION__-taiji-shell-33"
         for asset in (
+            "static/icons.js",
             "static/style.css",
             "static/ui.js",
             "static/panels.js",
@@ -232,12 +233,12 @@ class TestIndexHtmlIntegration:
 
         shell_versions = set(
             re.findall(
-                r"(?:static/(?:style\.css|ui\.js|panels\.js|boot\.js|taiji-home\.js)|sw\.js)"
+                r"(?:static/(?:icons\.js|style\.css|ui\.js|panels\.js|boot\.js|taiji-home\.js)|sw\.js)"
                 r"\?v=__WEBUI_VERSION__-taiji-shell-(\d+)",
                 src,
             )
         )
-        assert shell_versions == {"32"}
+        assert shell_versions == {"33"}
 
     def test_index_versions_stylesheet(self):
         """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST

@@ -71,7 +71,7 @@
     };
   }
 })()</script>
-<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__-taiji-shell-32">
+<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__-taiji-shell-33">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -100,7 +100,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__-taiji-shell-32').catch(function(err) {
+        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__-taiji-shell-33').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
         });
       });
@@ -130,37 +130,37 @@
     </div>
     <nav class="taiji-brand-nav" aria-label="太极智能体功能导航">
       <button class="taiji-nav-item is-active" type="button" data-taiji-panel="chat" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="message-square" aria-hidden="true"></span><span>聊天</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="messages-square" aria-hidden="true"></span><span>聊天</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="tasks" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="calendar" aria-hidden="true"></span><span>任务</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="clipboard-check" aria-hidden="true"></span><span>任务</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="kanban" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="layers" aria-hidden="true"></span><span>看板</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="kanban" aria-hidden="true"></span><span>看板</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="writing" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="pencil" aria-hidden="true"></span><span>专家团</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="users-round" aria-hidden="true"></span><span>专家团</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="skills" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="zap" aria-hidden="true"></span><span>技能</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="blocks" aria-hidden="true"></span><span>技能</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="memory" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="brain" aria-hidden="true"></span><span>记忆</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="brain-circuit" aria-hidden="true"></span><span>记忆</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="workspaces" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="folder" aria-hidden="true"></span><span>工作区</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="folder-open" aria-hidden="true"></span><span>工作区</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="profiles" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="user" aria-hidden="true"></span><span>配置</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="user-round-cog" aria-hidden="true"></span><span>配置</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="todos" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="list-todo" aria-hidden="true"></span><span>待办</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="list-checks" aria-hidden="true"></span><span>待办</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="insights" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="cpu" aria-hidden="true"></span><span>统计</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="chart-column" aria-hidden="true"></span><span>统计</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="logs" onclick="taijiHomeSelectNav(this)">
-        <span class="taiji-icon taiji-nav-icon" data-icon="terminal" aria-hidden="true"></span><span>日志</span>
+        <span class="taiji-icon taiji-nav-icon" data-icon="scroll-text" aria-hidden="true"></span><span>日志</span>
       </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="settings" onclick="taijiHomeSelectNav(this)">
         <span class="taiji-icon taiji-nav-icon" data-icon="settings" aria-hidden="true"></span><span>设置</span>
@@ -208,12 +208,12 @@
       <p>随时提问，运行命令，浏览文件或管理定时任务。</p>
       <div class="taiji-quick-list">
         <button class="taiji-quick-card" type="button" data-taiji-quick-feature="workspace_files" onclick="taijiHomeSetPrompt('这个工作区有哪些文件？')">
-          <span class="taiji-icon taiji-quick-icon" data-icon="folder" aria-hidden="true"></span>
+          <span class="taiji-icon taiji-quick-icon" data-icon="folder-open" aria-hidden="true"></span>
           <span>这个工作区有哪些文件？</span>
           <span class="taiji-quick-arrow" aria-hidden="true">›</span>
         </button>
         <button class="taiji-quick-card" type="button" onclick="taijiHomeSetPrompt('今天有什么安排？')">
-          <span class="taiji-icon taiji-quick-icon" data-icon="calendar" aria-hidden="true"></span>
+          <span class="taiji-icon taiji-quick-icon" data-icon="calendar-check-2" aria-hidden="true"></span>
           <span>今天有什么安排？</span>
           <span class="taiji-quick-arrow" aria-hidden="true">›</span>
         </button>
@@ -682,7 +682,7 @@
             </button>
             <div id="profileChipWrap" class="composer-profile-wrap">
               <button class="composer-profile-chip profile-chip composer-control" id="profileChip" type="button" onclick="toggleProfileDropdown()" title="切换配置档">
-                <span class="taiji-icon composer-profile-icon composer-control-icon" data-icon="user" aria-hidden="true"></span>
+                <span class="taiji-icon composer-profile-icon composer-control-icon" data-icon="user-round-cog" aria-hidden="true"></span>
                 <span class="composer-profile-label composer-control-label" id="profileChipLabel">默认</span>
                 <span class="composer-profile-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
@@ -690,7 +690,7 @@
             <div class="composer-ws-wrap">
               <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group" aria-label="工作区控件">
                 <button class="composer-workspace-files-btn composer-control composer-icon-control has-tooltip" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="工作区文件" data-tooltip="工作区文件" aria-pressed="false" aria-label="打开工作区文件面板">
-                  <span class="taiji-icon composer-workspace-icon composer-control-icon" data-icon="folder" aria-hidden="true"></span>
+                  <span class="taiji-icon composer-workspace-icon composer-control-icon" data-icon="folder-open" aria-hidden="true"></span>
                 </button>
                 <button class="composer-workspace-chip composer-control" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="切换工作区" aria-label="切换工作区" aria-haspopup="listbox" aria-expanded="false" aria-controls="composerWsDropdown" disabled>
                   <span class="composer-workspace-label composer-control-label" id="composerWorkspaceLabel">工作区</span>
@@ -699,12 +699,12 @@
               </div>
             </div>
             <button class="icon-btn composer-mobile-config-btn composer-control composer-icon-control" id="composerMobileConfigBtn" type="button" onclick="toggleMobileComposerConfig()" title="工作区、模型、推理和上下文设置" aria-label="工作区、模型、推理和上下文设置" aria-haspopup="true" aria-expanded="false" aria-controls="composerMobileConfigPanel">
-              <span class="taiji-icon composer-control-icon" data-icon="settings" aria-hidden="true"></span>
+              <span class="taiji-icon composer-control-icon" data-icon="sliders-horizontal" aria-hidden="true"></span>
               <span class="composer-mobile-ctx-badge" id="composerMobileCtxBadge" aria-hidden="true" style="display:none">0</span>
             </button>
             <div class="composer-model-wrap">
               <button class="composer-model-chip composer-control" id="composerModelChip" type="button" onclick="toggleModelDropdown()" title="对话模型">
-                <span class="taiji-icon composer-model-icon composer-control-icon" data-icon="cpu" aria-hidden="true"></span>
+                <span class="taiji-icon composer-model-icon composer-control-icon" data-icon="bot" aria-hidden="true"></span>
                 <span class="composer-model-label composer-control-label" id="composerModelLabel">模型</span>
                 <span class="composer-model-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
@@ -736,14 +736,14 @@
             </button>
             <div class="composer-reasoning-wrap" id="composerReasoningWrap" style="display:none">
               <button class="composer-reasoning-chip composer-control" id="composerReasoningChip" type="button" onclick="toggleReasoningDropdown()" title="推理强度">
-                <span class="taiji-icon composer-reasoning-icon composer-control-icon" data-icon="zap" aria-hidden="true"></span>
+                <span class="taiji-icon composer-reasoning-icon composer-control-icon" data-icon="gauge" aria-hidden="true"></span>
                 <span class="composer-reasoning-label composer-control-label" id="composerReasoningLabel">推理</span>
                 <span class="composer-reasoning-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
             </div>
             <div class="composer-toolsets-wrap" id="composerToolsetsWrap">
               <button class="composer-toolsets-chip composer-control" id="composerToolsetsChip" type="button" onclick="toggleToolsetsDropdown()" title="会话工具集">
-                <span class="taiji-icon composer-toolsets-icon composer-control-icon" data-icon="globe" aria-hidden="true"></span>
+                <span class="taiji-icon composer-toolsets-icon composer-control-icon" data-icon="wrench" aria-hidden="true"></span>
                 <span class="composer-toolsets-label composer-control-label" id="composerToolsetsLabel">全局</span>
                 <span class="composer-toolsets-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
@@ -779,15 +779,15 @@
           </div>
           <div class="composer-mobile-config-panel" id="composerMobileConfigPanel" aria-label="工作区、模型、推理和上下文设置">
             <button class="composer-mobile-config-action" id="composerMobileWorkspaceAction" type="button" onclick="toggleComposerWsDropdown()" title="切换工作区">
-              <span class="taiji-icon composer-workspace-icon composer-control-icon" data-icon="folder" aria-hidden="true"></span>
+              <span class="taiji-icon composer-workspace-icon composer-control-icon" data-icon="folder-open" aria-hidden="true"></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_workspace">Workspace</span><span class="composer-mobile-config-value" id="composerMobileWorkspaceLabel"></span></span>
             </button>
             <button class="composer-mobile-config-action" id="composerMobileModelAction" type="button" onclick="toggleModelDropdown()" title="对话模型">
-              <span class="taiji-icon composer-model-icon composer-control-icon" data-icon="cpu" aria-hidden="true"></span>
+              <span class="taiji-icon composer-model-icon composer-control-icon" data-icon="bot" aria-hidden="true"></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_model">Model</span><span class="composer-mobile-config-value" id="composerMobileModelLabel"></span></span>
             </button>
             <button class="composer-mobile-config-action" id="composerMobileReasoningAction" type="button" onclick="toggleReasoningDropdown()" title="推理强度" style="display:none">
-              <span class="taiji-icon composer-reasoning-icon composer-control-icon" data-icon="zap" aria-hidden="true"></span>
+              <span class="taiji-icon composer-reasoning-icon composer-control-icon" data-icon="gauge" aria-hidden="true"></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_reasoning">Reasoning</span><span class="composer-mobile-config-value" id="composerMobileReasoningLabel"></span></span>
             </button>
             <div class="composer-mobile-config-action composer-mobile-context-action" id="composerMobileContextAction" role="group" aria-label="上下文窗口" style="display:none">
@@ -1773,17 +1773,17 @@
 </div>
 <div class="toast" id="toast"></div>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/ui.js?v=__WEBUI_VERSION__-taiji-shell-32" defer></script>
+<script src="static/icons.js?v=__WEBUI_VERSION__-taiji-shell-33" defer></script>
+<script src="static/ui.js?v=__WEBUI_VERSION__-taiji-shell-33" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/panels.js?v=__WEBUI_VERSION__-taiji-shell-32" defer></script>
+<script src="static/panels.js?v=__WEBUI_VERSION__-taiji-shell-33" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/boot.js?v=__WEBUI_VERSION__-taiji-shell-32" defer></script>
-<script src="static/taiji-home.js?v=__WEBUI_VERSION__-taiji-shell-32" defer></script>
+<script src="static/boot.js?v=__WEBUI_VERSION__-taiji-shell-33" defer></script>
+<script src="static/taiji-home.js?v=__WEBUI_VERSION__-taiji-shell-33" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">
