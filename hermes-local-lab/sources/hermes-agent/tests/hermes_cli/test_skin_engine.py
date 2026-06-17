@@ -290,7 +290,7 @@ class TestCliBrandingHelpers:
     def test_active_prompt_symbol_default(self):
         from hermes_cli.skin_engine import get_active_prompt_symbol
 
-        assert get_active_prompt_symbol() == "❯ "
+        assert get_active_prompt_symbol() == "taiji-agent> "
 
     def test_active_prompt_symbol_ares(self):
         from hermes_cli.skin_engine import set_active_skin, get_active_prompt_symbol

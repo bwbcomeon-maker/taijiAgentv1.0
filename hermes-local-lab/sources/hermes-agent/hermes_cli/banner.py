@@ -17,7 +17,7 @@ from hermes_constants import get_hermes_home
 from typing import Dict, List, Optional
 
 from rich.console import Console
-from rich.panel import Panel
+from rich.cells import set_cell_size
 from rich.table import Table
 
 from prompt_toolkit import print_formatted_text as _pt_print
@@ -87,14 +87,17 @@ TAIJI_AGENT_LOGO = """[bold #FFD700]Taiji Agent[/]
 [#FFBF00]太极智能体[/]
 [dim #B8860B]Intelligent Agent Runtime[/]"""
 
-TAIJI_DOT_MATRIX = """[#CD7F32]  ● ● ● ● ● ● ● ● ● ●  [/]
-[#CD7F32]● ● ● ● ● ● ● ● [#FFF8DC]● ●[/] ●[/]
-[#CD7F32]● ● ● ● ● [#FFF8DC]● ● ● ● ●[/] ●[/]
-[#CD7F32]● ● ● ● [#FFF8DC]● ● ● ● ● ●[/] ●[/]
-[#CD7F32]● ● ● [#FFF8DC]● ● ● ● ● ● ●[/] ●[/]
-[#CD7F32]● ● ● ● [#FFF8DC]● ● ● ● ● ●[/] ●[/]
-[#CD7F32]● ● ● ● ● [#FFF8DC]● ● ● ● ●[/] ●[/]
-[#CD7F32]  ● ● ● ● ● ● ● ● ● ●  [/]"""
+TAIJI_DOT_MATRIX_LINES = [
+    "[#CD7F32]···············[/][dim #8B8682]···············[/]",
+    "[#CD7F32]············[/][#FFF8DC]·····[/][dim #8B8682]·············[/]",
+    "[#CD7F32]··········[/][#FFF8DC]········[/][dim #8B8682]···········[/]",
+    "[#CD7F32]········[/][#FFF8DC]····[/]  [#FFF8DC]··[/][dim #8B8682]··········[/]",
+    "[#CD7F32]······[/]      [#FFF8DC]······[/][dim #8B8682]··········[/]",
+    "[#CD7F32]········[/]    [#FFF8DC]····[/][dim #8B8682]············[/]",
+    "[#CD7F32]··········[/]  [#FFF8DC]··[/][dim #8B8682]··············[/]",
+    "[#CD7F32]···············[/][dim #8B8682]···············[/]",
+]
+TAIJI_DOT_MATRIX = "\n".join(TAIJI_DOT_MATRIX_LINES)
 
 # Backwards-compatible internal constant names used by older skins/imports.
 HERMES_AGENT_LOGO = TAIJI_AGENT_LOGO
@@ -485,6 +488,63 @@ def _display_toolset_name(toolset_name: str) -> str:
     )
 
 
+def _cell(text: str, width: int) -> str:
+    """Fit plain text to a terminal cell width without breaking CJK alignment."""
+    return set_cell_size(str(text), width)
+
+
+def _styled_cell(text: str, width: int, style: str, *, bold: bool = False) -> str:
+    tag = f"bold {style}" if bold else style
+    return f"[{tag}]{_cell(text, width)}[/]"
+
+
+def _section_heading(icon: str, label: str, width: int, accent: str, dim: str) -> str:
+    title = f"{icon} {label}"
+    rule_width = max(0, width - len(title) - 3)
+    return f"[bold {accent}]{title}[/] [dim {dim}]{'─' * rule_width}[/]"
+
+
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _column_rows(
+    names: List[str],
+    *,
+    rows: int,
+    widths: tuple[int, int, int],
+    text_style: str,
+    dim_style: str,
+    name_style_for=None,
+) -> List[str]:
+    columns = [names[index * rows:(index + 1) * rows] for index in range(3)]
+    rendered = []
+    for row_index in range(rows):
+        cells = []
+        for col_index, width in enumerate(widths):
+            value = columns[col_index][row_index] if row_index < len(columns[col_index]) else ""
+            style = name_style_for(value) if name_style_for and value else text_style
+            cells.append(_styled_cell(value, width, style))
+        rendered.append(
+            f"  {cells[0]} [dim {dim_style}]┊[/] {cells[1]} [dim {dim_style}]┊[/] {cells[2]}"
+        )
+    return rendered
+
+
+def _flatten_skills_for_banner(skills_by_category: Dict[str, List[str]]) -> List[str]:
+    skills: List[str] = []
+    for skill_names in skills_by_category.values():
+        skills.extend(_display_skill_name(name) for name in skill_names)
+    return _dedupe_preserve_order(skills)
+
+
 def build_welcome_banner(console: Console, model: str, cwd: str,
                          tools: List[dict] = None,
                          enabled_toolsets: List[str] = None,
@@ -525,10 +585,6 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         else:
             disabled_tools.update(tools_in_ts)
 
-    layout_table = Table.grid(padding=(0, 2))
-    layout_table.add_column("left", justify="center")
-    layout_table.add_column("right", justify="left")
-
     # Resolve skin colors once for the entire banner
     accent = _skin_color("banner_accent", "#FFBF00")
     dim = _skin_color("banner_dim", "#B8860B")
@@ -555,37 +611,46 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         _bskin.get_branding("runtime_label", PRODUCT_RUNTIME_LABEL)
         if _bskin else PRODUCT_RUNTIME_LABEL
     )
+    hero_lines = _hero.splitlines() if _hero else []
+
+    release_info = get_latest_release_tag()
+    version_plain = f"v{VERSION} {runtime_label}"
+    if release_info:
+        _tag, _url = release_info
+        version_markup = f"[dim {text}][link={_url}]{version_plain}[/link][/]"
+    else:
+        version_markup = f"[dim {text}]{version_plain}[/]"
+
+    ctx_str = f" · {_format_context_length(context_length)} context" if context_length else ""
+    session_value = session_id or "new"
+    platform_label = f"{platform.system().lower()} {platform.machine()}".strip()
+
     left_lines = [
         f"[bold {accent}]{agent_name}[/]",
         f"[{accent}]{subtitle}[/]",
-        f"[dim {text}]v{VERSION} {runtime_label}[/]",
         "",
-        _hero,
-        f"[dim {dim}]{'─' * 26}[/]",
+        version_markup,
+        *hero_lines,
+        f"[dim {dim}]{'─' * 33}[/]",
     ]
     if os.getenv("HERMES_YOLO_MODE"):
-        left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
-    ctx_str = f" · {_format_context_length(context_length)} context" if context_length else ""
-    if session_id:
-        left_lines.append(f"[{accent}]›[/] [{text}]Session[/] [dim {session_color}]{session_id}[/]")
-    else:
-        left_lines.append(f"[{accent}]›[/] [{text}]Session[/] [dim {session_color}]new[/]")
+        left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— approval prompts bypassed[/]")
+    left_lines.append(f"[{accent}]›[/] [{text}]Session[/] [dim {session_color}]{session_value}[/]")
     left_lines.append(f"[{accent}]›[/] [{text}]Mode[/] [dim {session_color}]interactive[/]")
     left_lines.append(
         f"[{accent}]›[/] [{text}]Runtime[/] [dim {session_color}]python "
         f"{sys.version_info.major}.{sys.version_info.minor}{ctx_str}[/]"
     )
-    platform_label = f"{platform.system().lower()} {platform.machine()}".strip()
     left_lines.append(f"[{accent}]›[/] [{text}]Platform[/] [dim {session_color}]{platform_label}[/]")
-    left_content = "\n".join(left_lines)
 
-    right_lines = [f"[bold {accent}]▧ AVAILABLE TOOLS[/] [dim {dim}]{'─' * 28}[/]"]
     toolsets_dict: Dict[str, list] = {}
+    tool_names_for_columns: List[str] = []
 
     for tool in tools:
         tool_name = tool["function"]["name"]
         toolset = _display_toolset_name(get_toolset_for_tool(tool_name) or "other")
         toolsets_dict.setdefault(toolset, []).append(tool_name)
+        tool_names_for_columns.append(tool_name)
 
     for item in unavailable_toolsets:
         toolset_id = item.get("id", item.get("name", "unknown"))
@@ -595,48 +660,10 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         for tool_name in item.get("tools", []):
             if tool_name not in toolsets_dict[display_name]:
                 toolsets_dict[display_name].append(tool_name)
+            tool_names_for_columns.append(tool_name)
 
     sorted_toolsets = sorted(toolsets_dict.keys())
-    display_toolsets = sorted_toolsets[:8]
-    remaining_toolsets = len(sorted_toolsets) - 8
-
-    for toolset in display_toolsets:
-        tool_names = toolsets_dict[toolset]
-        colored_names = []
-        for name in sorted(tool_names):
-            if name in disabled_tools:
-                colored_names.append(f"[red]{name}[/]")
-            elif name in lazy_tools:
-                colored_names.append(f"[yellow]{name}[/]")
-            else:
-                colored_names.append(f"[{text}]{name}[/]")
-
-        tools_str = ", ".join(colored_names)
-        if len(", ".join(sorted(tool_names))) > 45:
-            short_names = []
-            length = 0
-            for name in sorted(tool_names):
-                if length + len(name) + 2 > 42:
-                    short_names.append("...")
-                    break
-                short_names.append(name)
-                length += len(name) + 2
-            colored_names = []
-            for name in short_names:
-                if name == "...":
-                    colored_names.append("[dim]...[/]")
-                elif name in disabled_tools:
-                    colored_names.append(f"[red]{name}[/]")
-                elif name in lazy_tools:
-                    colored_names.append(f"[yellow]{name}[/]")
-                else:
-                    colored_names.append(f"[{text}]{name}[/]")
-            tools_str = ", ".join(colored_names)
-
-        right_lines.append(f"[dim {dim}]{toolset}:[/] {tools_str}")
-
-    if remaining_toolsets > 0:
-        right_lines.append(f"[dim {dim}](and {remaining_toolsets} more toolsets...)[/]")
+    remaining_toolsets = max(0, len(sorted_toolsets) - 8)
 
     # MCP Servers section (only if configured)
     try:
@@ -645,46 +672,64 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     except Exception:
         mcp_status = []
 
-    if mcp_status:
-        right_lines.append("")
-        right_lines.append(f"[bold {accent}]MCP SERVERS[/]")
-        for srv in mcp_status:
-            if srv["connected"]:
-                right_lines.append(
-                    f"[dim {dim}]{srv['name']}[/] [{text}]({srv['transport']})[/] "
-                    f"[dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
-                )
-            else:
-                right_lines.append(
-                    f"[red]{srv['name']}[/] [dim]({srv['transport']})[/] "
-                    f"[red]— failed[/]"
-                )
-
-    right_lines.append("")
-    right_lines.append(f"[bold {accent}]▧ AVAILABLE SKILLS[/] [dim {dim}]{'─' * 27}[/]")
     skills_by_category = get_available_skills()
-    total_skills = sum(len(s) for s in skills_by_category.values())
+    skills_for_columns = _flatten_skills_for_banner(skills_by_category)
 
-    if skills_by_category:
-        for category in sorted(skills_by_category.keys()):
-            skill_names = sorted(skills_by_category[category])
-            if len(skill_names) > 8:
-                display_names = [_display_skill_name(name) for name in skill_names[:8]]
-                skills_str = ", ".join(display_names) + f" +{len(skill_names) - 8} more"
-            else:
-                skills_str = ", ".join(_display_skill_name(name) for name in skill_names)
-            if len(skills_str) > 50:
-                skills_str = skills_str[:47] + "..."
-            right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
+    def _tool_style(name: str) -> str:
+        if name in disabled_tools:
+            return "red"
+        if name in lazy_tools:
+            return "yellow"
+        return text
+
+    right_width = 86
+    right_lines = [
+        _section_heading("◇", "AVAILABLE TOOLS", right_width, accent, dim),
+        "",
+    ]
+    visible_tools = _dedupe_preserve_order(tool_names_for_columns)[:11]
+    right_lines.extend(
+        _column_rows(
+            visible_tools,
+            rows=5,
+            widths=(22, 22, 26),
+            text_style=text,
+            dim_style=dim,
+            name_style_for=_tool_style,
+        )
+    )
+    if remaining_toolsets:
+        right_lines.append(
+            f"  {_styled_cell('', 22, text)} [dim {dim}]┊[/] "
+            f"{_styled_cell('', 22, text)} [dim {dim}]┊[/] "
+            f"[{accent}]... and {remaining_toolsets} more toolsets[/]"
+        )
+
+    right_lines.extend([
+        "",
+        f"[dim {dim}]{'─' * right_width}[/]",
+        _section_heading("▱", "AVAILABLE SKILLS", right_width, accent, dim),
+        "",
+    ])
+    if skills_for_columns:
+        right_lines.extend(
+            _column_rows(
+                skills_for_columns[:15],
+                rows=5,
+                widths=(24, 24, 30),
+                text_style=text,
+                dim_style=dim,
+            )
+        )
     else:
-        right_lines.append(f"[dim {dim}]No skills installed[/]")
+        right_lines.append(f"  [dim {dim}]No skills installed[/]")
 
-    right_lines.append("")
-    mcp_connected = sum(1 for s in mcp_status if s["connected"]) if mcp_status else 0
-    summary_parts = [f"{len(tools)} tools", f"{total_skills} skills"]
-    if mcp_connected:
-        summary_parts.append(f"{mcp_connected} MCP servers")
-    summary_parts.append("/help for commands")
+    if remaining_toolsets:
+        right_lines.append("")
+        right_lines.append(
+            f"{_styled_cell('', 38, text)}[{accent}]... and {remaining_toolsets} more toolsets[/]"
+        )
+
     # Indicate when the codex_app_server runtime is active so users
     # understand why tool counts may not match what's actually reachable
     # (codex builds its own tool list inside the spawned subprocess).
@@ -707,54 +752,16 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     except Exception:
         pass  # Never break the banner over a profiles.py bug
 
-    right_lines.append(f"[dim {dim}]{' · '.join(summary_parts)}[/]")
+    max_lines = max(len(left_lines), len(right_lines))
+    left_lines.extend([""] * (max_lines - len(left_lines)))
+    right_lines.extend([""] * (max_lines - len(right_lines)))
+    separator = "\n".join(f"[dim {dim}]│[/]" for _ in range(max_lines))
 
-    # Update check — use prefetched result if available
-    try:
-        behind = get_update_result(timeout=0.5)
-        if behind is not None and behind != 0:
-            from hermes_cli.config import get_managed_update_command, recommended_update_command
-            if behind > 0:
-                commits_word = "commit" if behind == 1 else "commits"
-                right_lines.append(
-                    f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
-                    f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
-                )
-            else:
-                # UPDATE_AVAILABLE_NO_COUNT: nix-built hermes; we know an update
-                # exists but not by how much, and we don't know how the user
-                # installed it (nix run, profile, system flake, home-manager).
-                managed_cmd = get_managed_update_command()
-                line = "[bold yellow]⚠ update available[/]"
-                if managed_cmd:
-                    line += f"[dim yellow] — run [bold]{managed_cmd}[/bold][/]"
-                right_lines.append(line)
-    except Exception:
-        pass  # Never break the banner over an update check
-
-    right_content = "\n".join(right_lines)
-    layout_table.add_row(left_content, right_content)
-
-    title_color = _skin_color("banner_title", "#FFD700")
-    border_color = _skin_color("banner_border", "#CD7F32")
-    version_label = format_banner_version_label()
-    release_info = get_latest_release_tag()
-    if release_info:
-        _tag, _url = release_info
-        title_markup = f"[bold {title_color}][link={_url}]{version_label}[/link][/]"
-    else:
-        title_markup = f"[bold {title_color}]{version_label}[/]"
-    outer_panel = Panel(
-        layout_table,
-        title=title_markup,
-        border_style=border_color,
-        padding=(0, 2),
-    )
+    layout_table = Table.grid(padding=(0, 2), expand=False)
+    layout_table.add_column("left", width=38, no_wrap=True)
+    layout_table.add_column("separator", width=1, no_wrap=True)
+    layout_table.add_column("right", width=right_width, no_wrap=True)
+    layout_table.add_row("\n".join(left_lines), separator, "\n".join(right_lines))
 
     console.print()
-    term_width = shutil.get_terminal_size().columns
-    if term_width >= 95:
-        _logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else HERMES_AGENT_LOGO
-        console.print(_logo)
-        console.print()
-    console.print(outer_panel)
+    console.print(layout_table)

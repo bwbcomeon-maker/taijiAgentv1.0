@@ -47,7 +47,7 @@ describe('DEFAULT_THEME', () => {
     expect(DEFAULT_THEME.brand.icon).toBe('')
     expect(DEFAULT_THEME.brand.welcome).toContain('Taiji Agent')
     expect(DEFAULT_THEME.brand.goodbye).toContain('Taiji Agent')
-    expect(DEFAULT_THEME.brand.prompt).toBe('❯')
+    expect(DEFAULT_THEME.brand.prompt).toBe('taiji-agent>')
     expect(DEFAULT_THEME.brand.tool).toBe('┊')
   })
 

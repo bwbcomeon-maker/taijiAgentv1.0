@@ -12289,11 +12289,11 @@ class HermesCLI:
         """
         try:
             from hermes_cli.skin_engine import get_active_prompt_symbol
-            symbol = get_active_prompt_symbol("❯ ")
+            symbol = get_active_prompt_symbol("taiji-agent> ")
         except Exception:
-            symbol = "❯ "
+            symbol = "taiji-agent> "
 
-        symbol = (symbol or "❯ ").rstrip() + " "
+        symbol = (symbol or "taiji-agent> ").rstrip() + " "
 
         # Prepend profile name when not default
         try:
@@ -12305,7 +12305,7 @@ class HermesCLI:
             pass
         stripped = symbol.rstrip()
         if not stripped:
-            return "❯ ", "❯ "
+            return "taiji-agent> ", "taiji-agent> "
 
         parts = stripped.split()
         candidate = parts[-1] if parts else ""

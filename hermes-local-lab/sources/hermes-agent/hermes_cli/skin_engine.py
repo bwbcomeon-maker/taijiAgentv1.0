@@ -70,7 +70,7 @@ All fields are optional. Missing values inherit from the ``default`` skin.
       welcome: "Welcome message"          # Shown at CLI startup
       goodbye: "Taiji Agent session closed."  # Shown on exit
       response_label: " Taiji Agent "     # Response box header label
-      prompt_symbol: "❯"                 # Input prompt symbol (bare token; renderers add trailing space)
+      prompt_symbol: "taiji-agent>"      # Input prompt symbol (bare token; renderers add trailing space)
       help_header: "(^_^)? Commands"      # /help header text
 
     # Tool prefix: character for tool output lines (default: ┊)
@@ -194,7 +194,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "welcome": "Welcome to Taiji Agent. Type your message or /help for commands.",
             "goodbye": "Taiji Agent session closed.",
             "response_label": " Taiji Agent ",
-            "prompt_symbol": "❯",
+            "prompt_symbol": "taiji-agent>",
             "help_header": "(^_^)? Available Commands",
         },
         "tool_prefix": "┊",
@@ -818,7 +818,7 @@ def init_skin_from_config(config: dict) -> None:
 # =============================================================================
 
 
-def get_active_prompt_symbol(fallback: str = "❯") -> str:
+def get_active_prompt_symbol(fallback: str = "taiji-agent>") -> str:
     """Return the interactive prompt symbol with a single trailing space.
 
     Skins store ``prompt_symbol`` as a bare token (no spaces). The trailing

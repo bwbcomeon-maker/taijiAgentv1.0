@@ -239,7 +239,7 @@ function normalizeAnsiForeground(color: string): string {
 const BRAND: ThemeBrand = {
   name: 'Taiji Agent',
   icon: '',
-  prompt: '❯',
+  prompt: 'taiji-agent>',
   welcome: 'Welcome to Taiji Agent. Type your message or /help for commands.',
   goodbye: 'Taiji Agent session closed.',
   tool: '┊',
