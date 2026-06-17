@@ -78,6 +78,20 @@ def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -
     return raw.rstrip("/") or "http://127.0.0.1:8642"
 
 
+def gateway_chat_probe_base_url(config_data=None, environ: dict[str, str] | None = None) -> str | None:
+    """Return the explicitly configured gateway chat base URL for health probes."""
+    if not webui_gateway_chat_enabled(config_data, environ):
+        return None
+    source = os.environ if environ is None else environ
+    cfg = config_data if isinstance(config_data, dict) else {}
+    raw = str(
+        source.get(_WEBUI_GATEWAY_BASE_URL_ENV)
+        or cfg.get("webui_gateway_base_url")
+        or ""
+    ).strip()
+    return raw.rstrip("/") if raw else None
+
+
 def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
     return str(

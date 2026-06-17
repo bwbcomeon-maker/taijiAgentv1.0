@@ -80,6 +80,28 @@ def test_falls_back_to_local_when_no_env(monkeypatch):
     assert payload["details"]["reason"] == "gateway_status_unavailable"
 
 
+def test_remote_gateway_uses_configured_webui_gateway_base_url(monkeypatch):
+    monkeypatch.delenv("HERMES_API_URL", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://127.0.0.1:18642")
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        return _FakeResp(200)
+
+    def boom(name):
+        raise ModuleNotFoundError(name)
+
+    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen), \
+         mock.patch.object(agent_health.importlib, "import_module", boom):
+        payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert payload["details"]["reason"] == "remote_gateway"
+    assert calls and calls[0] == "http://127.0.0.1:18642/health"
+
+
 def test_remote_probe_result_cached_for_5s(monkeypatch):
     monkeypatch.setenv("HERMES_API_URL", "http://gateway:8080")
     call_count = {"n": 0}

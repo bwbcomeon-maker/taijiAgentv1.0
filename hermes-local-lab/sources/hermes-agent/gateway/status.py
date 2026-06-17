@@ -35,6 +35,16 @@ _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 _GATEWAY_LOCK_FILENAME = "gateway.lock"
 _gateway_lock_handle = None
+_GATEWAY_PROCESS_PATTERNS = (
+    "hermes_cli.main gateway",
+    "hermes_cli/main.py gateway",
+    "hermes gateway",
+    "hermes-gateway",
+    "taiji_runtime.main gateway",
+    "taiji_runtime/main.py gateway",
+    "taiji gateway",
+    "gateway/run.py",
+)
 # Windows byte-range locks are mandatory for other readers. Lock a byte well
 # past the JSON payload so runtime status / PID readers can still read the file
 # while another process holds the mutual-exclusion lock.
@@ -170,14 +180,8 @@ def _looks_like_gateway_process(pid: int) -> bool:
     if not cmdline:
         return False
 
-    patterns = (
-        "hermes_cli.main gateway",
-        "hermes_cli/main.py gateway",
-        "hermes gateway",
-        "hermes-gateway",
-        "gateway/run.py",
-    )
-    return any(pattern in cmdline for pattern in patterns)
+    cmdline = cmdline.replace("\\", "/")
+    return any(pattern in cmdline for pattern in _GATEWAY_PROCESS_PATTERNS)
 
 
 def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
@@ -191,13 +195,7 @@ def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
 
     # Normalize Windows backslashes so patterns match cross-platform.
     cmdline = " ".join(str(part) for part in argv).replace("\\", "/")
-    patterns = (
-        "hermes_cli.main gateway",
-        "hermes_cli/main.py gateway",
-        "hermes gateway",
-        "gateway/run.py",
-    )
-    return any(pattern in cmdline for pattern in patterns)
+    return any(pattern in cmdline for pattern in _GATEWAY_PROCESS_PATTERNS)
 
 
 def _build_pid_record() -> dict:

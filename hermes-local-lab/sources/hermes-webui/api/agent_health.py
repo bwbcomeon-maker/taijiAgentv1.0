@@ -314,12 +314,16 @@ _remote_probe_cache: dict[str, Any] = {"url": None, "expires_at": 0.0, "result":
 
 def _remote_gateway_base_url() -> str | None:
     raw = os.environ.get("HERMES_API_URL")
-    if not isinstance(raw, str):
+    if isinstance(raw, str):
+        url = raw.strip()
+        if url:
+            return url.rstrip("/")
+
+    try:
+        from api.gateway_chat import gateway_chat_probe_base_url
+        return gateway_chat_probe_base_url()
+    except Exception:
         return None
-    url = raw.strip()
-    if not url:
-        return None
-    return url.rstrip("/")
 
 
 def _http_probe(url: str, timeout_s: float) -> tuple[bool, int | None, str | None]:

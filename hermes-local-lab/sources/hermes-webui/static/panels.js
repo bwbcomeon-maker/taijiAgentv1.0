@@ -440,20 +440,19 @@ function _cronDiagnostics(job) {
 function _cronGatewayNoticeHtml(status) {
   if (!status || (status.configured && status.running)) return '';
   const notConfigured = !status.configured;
+  const health = status.health || {};
+  const unknown = !notConfigured && (health.alive == null || health.state === 'unknown');
   const title = notConfigured
-    ? 'Gateway not configured'
-    : 'Gateway not running';
+    ? '本地任务服务未启用'
+    : (unknown ? '本地任务服务状态暂不可确认' : '本地任务服务未运行');
   const body = notConfigured
-    ? 'In taiji Agent, scheduled jobs require the gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or the gateway command running outside the WebUI.'
-    : 'In taiji Agent, scheduled jobs require the gateway daemon to be running. Start the gateway container or gateway command before relying on offline scheduled runs.';
-  const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
-  const helpLink = notConfigured
-    ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
-    : '';
+    ? '计划任务可以创建和手动运行，但自动定时执行需要本地任务服务可用。请重启太极智能体，或导出诊断信息交给管理员排查。'
+    : (unknown
+      ? '计划任务自动执行依赖本地任务服务。当前暂未确认服务状态，请刷新或重启太极智能体后再检查。'
+      : '计划任务自动执行依赖本地任务服务。当前服务未运行，计划任务仍可管理和手动运行；请重启太极智能体，或导出诊断信息交给管理员排查。');
   return `
     <div class="detail-alert-title">${esc(title)}</div>
     <p>${esc(body)}</p>
-    ${helpLink}
   `;
 }
 
@@ -9588,12 +9587,16 @@ function loadGatewayStatus(){
   if(!card) return;
   api('/api/gateway/status').then(r=>{
     if(!r) return;
+    const health=r.health||{};
+    const unknown=!!r.configured&&(health.alive==null||health.state==='unknown');
     if(!r.configured){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>Gateway not configured</div>`;
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>本地任务服务未启用</div>`;
       return;
     }
     if(!r.running){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
+      const label=unknown?'本地任务服务状态暂不可确认':'本地任务服务未运行';
+      const color=unknown?'#f59e0b':'#ef4444';
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>${esc(label)}</div>`;
       return;
     }
     const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
@@ -9604,10 +9607,10 @@ function loadGatewayStatus(){
         return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
       }).join(' ');
     }
-    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">Last active: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
-    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} session${r.session_count!==1?'s':''}</span>`:'';
-    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">Running</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
-  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">Failed to load gateway status</div>`});
+    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">最近活动：${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} 个会话</span>`:'';
+    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">本地任务服务运行中</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
+  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">本地任务服务状态加载失败</div>`});
 }
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;

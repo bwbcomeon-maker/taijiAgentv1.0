@@ -18272,6 +18272,14 @@ def _run_planned_stop_watcher(
         stop_event.wait(poll_interval)
 
 
+def _refresh_cron_ticker_runtime_status() -> None:
+    try:
+        from gateway.status import write_runtime_status
+        write_runtime_status(gateway_state="running")
+    except Exception as e:
+        logger.debug("Cron ticker runtime heartbeat error: %s", e)
+
+
 def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
     """
     Background thread that ticks the cron scheduler at a regular interval.
@@ -18302,6 +18310,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             cron_tick(verbose=False, adapters=adapters, loop=loop)
         except Exception as e:
             logger.debug("Cron tick error: %s", e)
+        _refresh_cron_ticker_runtime_status()
 
         tick_count += 1
 

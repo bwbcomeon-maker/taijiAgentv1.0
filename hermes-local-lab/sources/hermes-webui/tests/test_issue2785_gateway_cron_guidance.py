@@ -22,9 +22,15 @@ def test_cron_panel_loads_gateway_status_for_scheduling_guidance():
     assert "function _cronGatewayNoticeHtml" in panels
     assert "function loadCronGatewayNotice" in panels
     assert "api('/api/gateway/status')" in panels
-    assert "Gateway not configured" in panels
-    assert "Gateway not running" in panels
-    assert "scheduled jobs require the Hermes gateway daemon" in panels
+    assert "本地任务服务未启用" in panels
+    assert "本地任务服务未运行" in panels
+    assert "本地任务服务状态暂不可确认" in panels
+    assert "计划任务自动执行依赖本地任务服务" in panels
+    assert "Gateway not configured" not in panels
+    assert "Gateway not running" not in panels
+    assert "scheduled jobs require the Hermes gateway daemon" not in panels
+    assert "Docker install" not in panels
+    assert "github.com/nesquena/hermes-webui" not in panels
     assert "loadCronGatewayNotice()" in panels
 
 

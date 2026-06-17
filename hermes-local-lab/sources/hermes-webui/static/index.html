@@ -547,10 +547,10 @@
     </div>
     <div class="agent-health-banner" id="agentHealthBanner" role="alert" aria-live="assertive" hidden>
       <div class="agent-health-copy">
-        <strong id="agentHealthTitle">taiji Agent 无响应</strong>
-        <span id="agentHealthDetails">网关心跳失败。在恢复之前，消息可能无法送达。</span>
+        <strong id="agentHealthTitle">太极智能体本地服务无响应</strong>
+        <span id="agentHealthDetails">本地任务与对话服务心跳异常。恢复前，消息投递和计划任务自动执行可能受影响。</span>
       </div>
-      <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="关闭 taiji Agent 心跳告警">关闭</button>
+      <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="关闭本地服务心跳告警">关闭</button>
     </div>
     <div class="composer-wrap" id="composerWrap">
       <div class="composer-flyout">
@@ -1603,8 +1603,8 @@
             </div>
             <!-- Gateway Status Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
-              <label>Gateway 状态</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">taiji Agent gateway 状态（Telegram、Discord、Slack 等）。</div>
+              <label>本地任务服务状态</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">本地任务服务状态（Telegram、Discord、Slack 等通道）。</div>
               <div id="gatewayStatusCard"><span style="color:var(--muted);font-size:12px">加载中…</span></div>
             </div>
             <!-- MCP Servers Section -->

@@ -196,6 +196,13 @@ def test_agent_health_frontend_polls_only_visible_and_distinguishes_states():
     assert "_hideAgentHealthAlert()" in UI_JS
 
 
+def test_agent_health_banner_copy_is_product_safe():
+    assert "太极智能体本地服务无响应" in INDEX_HTML
+    assert "本地任务与对话服务心跳异常" in UI_JS
+    assert "Gateway heartbeat failed" not in UI_JS
+    assert "State:" not in UI_JS
+
+
 def test_agent_health_dismiss_persists_until_recovery():
     assert "const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed'" in UI_JS
     assert "localStorage.setItem(AGENT_HEALTH_DISMISSED_KEY,'1')" in UI_JS

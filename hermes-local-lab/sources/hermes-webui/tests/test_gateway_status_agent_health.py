@@ -48,7 +48,7 @@ class _FakeHandler:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None):
+def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None, details=None):
     """Invoke handle_get for /api/gateway/status and return the parsed JSON.
 
     monkeypatches build_agent_health_payload to return the given `alive` value
@@ -62,7 +62,7 @@ def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None):
         lambda: {
             "alive": agent_health_alive,
             "checked_at": "2026-05-06T12:00:00+00:00",
-            "details": {},
+            "details": details or {},
         },
     )
 
@@ -87,6 +87,24 @@ def test_gateway_status_running_true_when_agent_health_alive_and_no_sessions(mon
     assert result["running"] is True
     assert result["configured"] is True
     assert result["platforms"] == []
+
+
+def test_gateway_status_includes_health_summary_without_breaking_existing_fields(monkeypatch):
+    result = _call_gateway_status(
+        monkeypatch,
+        agent_health_alive=True,
+        identity_map={},
+        details={"state": "alive", "reason": "remote_gateway", "gateway_state": "running"},
+    )
+
+    assert result["running"] is True
+    assert result["configured"] is True
+    assert result["health"] == {
+        "alive": True,
+        "state": "alive",
+        "reason": "remote_gateway",
+        "checked_at": "2026-05-06T12:00:00+00:00",
+    }
 
 
 def test_gateway_status_running_false_when_agent_health_alive_false_and_no_sessions(monkeypatch):
