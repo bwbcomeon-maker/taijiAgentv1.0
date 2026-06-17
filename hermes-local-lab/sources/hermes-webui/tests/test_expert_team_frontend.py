@@ -202,7 +202,7 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     rows_start = UI_JS.index("function _expertTeamExecutionRows")
     rows_body = UI_JS[rows_start : UI_JS.index("function _expertTeamQuestionHtml", rows_start)]
     panel_return = panel_body[panel_body.index("return `<div") :]
-    assert "const taskTitle=card.subtitle||team.title||'专家团任务';" in panel_body
+    assert "const taskTitle=card.promptSummary||card.subtitle||team.title||'专家团任务';" in panel_body
     assert "const expertTeamMemberCount=members.length;" in panel_body
     assert "const phaseProgress=_expertTeamPhaseProgress(card,{phaseList,phaseIdx,readyArtifacts,pending,stateClass});" in panel_body
     assert "const artifactSectionHtml=" in panel_body
@@ -251,6 +251,16 @@ def test_expert_team_title_uses_available_header_space_for_long_prompts():
     assert "-webkit-line-clamp:3" in title_block
     assert "overflow-wrap:anywhere" in title_block
     assert "word-break:break-word" in title_block
+
+
+def test_expert_team_panel_title_prefers_full_prompt_summary_over_short_project_title():
+    card_start = UI_JS.index("function _writeflowStatusCardFromRun")
+    card_body = UI_JS[card_start : UI_JS.index("function _expertTeamStatusCardFromRun", card_start)]
+    assert "promptSummary:run.prompt_summary||''" in card_body
+
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    assert "const taskTitle=card.promptSummary||card.subtitle||team.title||'专家团任务';" in panel_body
 
 
 def test_expert_team_pending_question_draft_survives_silent_status_refresh_miss():

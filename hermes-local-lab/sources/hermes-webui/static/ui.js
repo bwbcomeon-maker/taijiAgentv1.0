@@ -651,6 +651,7 @@ function _writeflowStatusCardFromRun(run,data){
     type:'writeflow',
     title:'专家团运行',
     subtitle:run.title||run.project_slug||data.project_name||'写作任务',
+    promptSummary:run.prompt_summary||'',
     sessionId:run.run_id,
     runId:run.run_id,
     sourceSessionId:run.session_id||'',
@@ -1248,7 +1249,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const phase=phaseList.includes(card.phase)?card.phase:(card.phase||phaseList[0]||'需求确认');
   const phaseIdx=Math.max(0,phaseList.indexOf(phase));
   const runId=card.runId||card.sessionId||'';
-  const taskTitle=card.subtitle||team.title||'专家团任务';
+  const taskTitle=card.promptSummary||card.subtitle||team.title||'专家团任务';
   const stateClass=_statusCardStateClass(card.statusLabel||card.status);
   const phaseProgress=_expertTeamPhaseProgress(card,{phaseList,phaseIdx,readyArtifacts,pending,stateClass});
   const summary=_expertTeamDockSummary(card);
