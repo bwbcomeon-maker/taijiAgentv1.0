@@ -97,7 +97,7 @@ function statusHtml(title, lines, details = "") {
 <body>
   <main>
     <h1>${htmlEscape(title)}</h1>
-    <p>本地服务启动完成后会自动进入对话界面。</p>
+    <p>应用准备完成后会自动进入对话界面。</p>
     <ul>${rendered}</ul>
     ${detailBlock}
   </main>
@@ -158,7 +158,7 @@ function waitForHttp(url, timeoutMs) {
 
     const retry = () => {
       if (Date.now() - startedAt > timeoutMs) {
-        reject(new Error(`Timed out waiting for ${url}`));
+        reject(new Error("Timed out waiting for Taiji Agent to become ready"));
         return;
       }
       setTimeout(tick, 500);
@@ -327,6 +327,7 @@ function runScript(scriptName, env, logFile) {
 function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  const desktopAccessToken = crypto.randomBytes(32).toString("hex");
   env.TAIJI_AGENT_ROOT = labDir;
   env.TAIJI_AGENT_USE_USER_DIRS = "1";
   env.TAIJI_RUNTIME_HOME = process.env.TAIJI_RUNTIME_HOME || path.join(userDataDir(), "runtime-home");
@@ -340,6 +341,8 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.WEBUI_PORT = String(webuiPort);
   env.TAIJI_WEBUI_HOST = "127.0.0.1";
   env.TAIJI_WEBUI_PORT = String(webuiPort);
+  env.TAIJI_DESKTOP_ONLY = "1";
+  env.TAIJI_DESKTOP_ACCESS_TOKEN = desktopAccessToken;
   env.API_SERVER_KEY = crypto.randomBytes(32).toString("hex");
   env.TAIJI_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
   const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
@@ -377,7 +380,7 @@ async function startRuntime() {
 
   loadStatus("正在启动太极 Agent", [
     "正在准备本机运行环境",
-    "正在检查服务状态",
+    "正在检查应用状态",
     "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
 
@@ -387,7 +390,7 @@ async function startRuntime() {
   runtimeEnv = createRuntimeEnv(labDir, agentPort, webuiPort, logDir);
 
   loadStatus("正在启动太极 Agent", [
-    "正在启动本地对话服务",
+    "正在启动对话能力",
     "正在准备工作台界面",
     "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
@@ -395,7 +398,7 @@ async function startRuntime() {
   await waitForHttp(`http://127.0.0.1:${agentPort}/health`, 30000);
 
   loadStatus("正在启动太极 Agent", [
-    "本地对话服务已就绪",
+    "对话能力已就绪",
     "正在打开工作台界面",
     "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
@@ -404,7 +407,8 @@ async function startRuntime() {
 
   const target = new URL(`http://127.0.0.1:${webuiPort}`);
   target.searchParams.set("taiji_desktop", "1");
-  appendDesktopLog(desktopLog, `loading ${target.toString()}`);
+  target.searchParams.set("taiji_desktop_token", runtimeEnv.TAIJI_DESKTOP_ACCESS_TOKEN || "");
+  appendDesktopLog(desktopLog, "loading desktop workspace");
   if (iconPath) {
     mainWindow.setIcon(iconPath);
   }
@@ -499,7 +503,7 @@ async function createWindow() {
   } catch (error) {
     const message = error && error.stack ? error.stack : String(error);
     loadStatus("启动失败", [
-      "本地服务未能启动",
+      "应用未能启动",
       "请运行 taiji-agent-diagnose 导出技术诊断信息"
     ], message);
     if (SMOKE_TEST) {

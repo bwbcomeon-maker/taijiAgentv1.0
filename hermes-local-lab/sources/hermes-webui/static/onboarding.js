@@ -266,8 +266,6 @@ function _renderOnboardingBody(){
         <p><strong>${t('onboarding_credentials_status')}</strong> ${system.env_exists?t('onboarding_credentials_status_saved'):t('onboarding_credentials_status_pending')}</p>
         <p><strong>${t('onboarding_provider_status')}</strong> ${esc(system.provider_note||t('onboarding_check_provider_pending'))}</p>
         ${system.current_provider?`<p><strong>${t('onboarding_current_provider')}</strong> ${esc(system.current_provider)}${system.current_model?` — ${esc(system.current_model)}`:''}</p>`:''}
-        ${system.current_base_url?`<p><strong>${t('onboarding_base_url_label')}</strong> ${esc(system.current_base_url)}</p>`:''}
-        ${system.missing_modules&&system.missing_modules.length?`<p><strong>${t('onboarding_missing_imports')}</strong> ${esc(system.missing_modules.join(', '))}</p>`:''}
       </div>`;
     return;
   }

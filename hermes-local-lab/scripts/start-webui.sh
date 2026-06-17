@@ -64,15 +64,14 @@ mkdir -p "$TAIJI_RUNTIME_HOME/logs" "$TAIJI_WEBUI_STATE_DIR" "$TAIJI_WORKSPACE"
 if [ -f "$PID_FILE" ]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "Taiji web service already running with PID $old_pid"
+    echo "Taiji web service already running"
     exit 0
   fi
   rm -f "$PID_FILE"
 fi
 
 if lsof -nP -iTCP:"$TAIJI_WEBUI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Port $TAIJI_WEBUI_PORT is already in use. Set WEBUI_PORT/TAIJI_WEBUI_PORT in $TAIJI_ENV_FILE." >&2
-  lsof -nP -iTCP:"$TAIJI_WEBUI_PORT" -sTCP:LISTEN >&2 || true
+  echo "Taiji web service could not start because the local service slot is already in use." >&2
   exit 1
 fi
 
@@ -124,22 +123,18 @@ health_url="http://$TAIJI_WEBUI_HOST:$TAIJI_WEBUI_PORT/health"
 deadline=$(( $(date +%s) + START_TIMEOUT_SECONDS ))
 while [ "$(date +%s)" -le "$deadline" ]; do
   if curl -fsS "$health_url" >/dev/null 2>&1; then
-    echo "Taiji web service ready at http://$TAIJI_WEBUI_HOST:$TAIJI_WEBUI_PORT"
-    echo "PID: $pid"
-    echo "Log: $LOG_FILE"
+    echo "Taiji web service ready"
     exit 0
   fi
   if ! kill -0 "$pid" 2>/dev/null; then
-    echo "Taiji web service exited before becoming healthy. Log: $LOG_FILE" >&2
-    tail_recent_log >&2 || true
+    echo "Taiji web service exited before becoming healthy. Run taiji-agent-diagnose for details." >&2
     rm -f "$PID_FILE"
     exit 1
   fi
   sleep "$START_POLL_INTERVAL"
 done
 
-echo "Taiji web service did not become healthy at $health_url within ${START_TIMEOUT_SECONDS}s. Log: $LOG_FILE" >&2
-tail_recent_log >&2 || true
+echo "Taiji web service did not become healthy within ${START_TIMEOUT_SECONDS}s. Run taiji-agent-diagnose for details." >&2
 kill "$pid" 2>/dev/null || true
 rm -f "$PID_FILE"
 exit 1

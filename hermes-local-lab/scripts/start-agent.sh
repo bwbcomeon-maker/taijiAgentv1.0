@@ -65,15 +65,14 @@ mkdir -p "$TAIJI_RUNTIME_HOME/logs" "$TAIJI_RUNTIME_HOME/cron" "$TAIJI_RUNTIME_H
 if [ -f "$PID_FILE" ]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "Taiji Agent already running with PID $old_pid"
+    echo "Taiji Agent service already running"
     exit 0
   fi
   rm -f "$PID_FILE"
 fi
 
 if lsof -nP -iTCP:"$API_SERVER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Port $API_SERVER_PORT is already in use. Set AGENT_API_PORT/API_SERVER_PORT in $TAIJI_ENV_FILE." >&2
-  lsof -nP -iTCP:"$API_SERVER_PORT" -sTCP:LISTEN >&2 || true
+  echo "Taiji Agent service could not start because the local service slot is already in use." >&2
   exit 1
 fi
 
@@ -114,22 +113,18 @@ health_url="http://$API_SERVER_HOST:$API_SERVER_PORT/health"
 deadline=$(( $(date +%s) + START_TIMEOUT_SECONDS ))
 while [ "$(date +%s)" -le "$deadline" ]; do
   if curl -fsS "$health_url" >/dev/null 2>&1; then
-    echo "Taiji Agent API service ready at http://$API_SERVER_HOST:$API_SERVER_PORT"
-    echo "PID: $pid"
-    echo "Log: $LOG_FILE"
+    echo "Taiji Agent API service ready"
     exit 0
   fi
   if ! kill -0 "$pid" 2>/dev/null; then
-    echo "Taiji Agent exited before becoming healthy. Log: $LOG_FILE" >&2
-    tail_recent_log >&2 || true
+    echo "Taiji Agent exited before becoming healthy. Run taiji-agent-diagnose for details." >&2
     rm -f "$PID_FILE"
     exit 1
   fi
   sleep "$START_POLL_INTERVAL"
 done
 
-echo "Taiji Agent did not become healthy at $health_url within ${START_TIMEOUT_SECONDS}s. Log: $LOG_FILE" >&2
-tail_recent_log >&2 || true
+echo "Taiji Agent did not become healthy within ${START_TIMEOUT_SECONDS}s. Run taiji-agent-diagnose for details." >&2
 kill "$pid" 2>/dev/null || true
 rm -f "$PID_FILE"
 exit 1

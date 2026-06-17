@@ -31,6 +31,8 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "HERMES_HOME",
     "HERMES_WEBUI_",
     "X-Hermes-CSRF-Token",
+    "127.0.0.1",
+    "localhost",
     "Nous Research",
     "Hermes Web UI Contributors",
     "agent-runtime",
@@ -150,9 +152,23 @@ _IMPLEMENTATION_INSPECTION_RE = re.compile(
 _RUNTIME_ACCESS_RE = re.compile(
     r"(?is)"
     r"(?:"
-    r"端口|访问地址|本地地址|服务地址|localhost|127\.0\.0\.1|url|"
+    r"端口|监听|访问地址|本地地址|服务地址|服务入口|本机服务|桌面服务|"
+    r"浏览器.{0,24}(?:打开|访问|进入)|地址栏|直连|健康检查|验证.{0,20}服务|"
+    r"localhost|127\.0\.0\.1|url|"
     r"配置文件|配置项|环境变量|启动命令|部署路径|安装路径|日志路径|日志文件|"
     r"进程|pid|ps\s+|/proc/|cmdline|environ|runtime|HERMES_[A-Z0-9_]*"
+    r")"
+)
+
+_LOCAL_SERVICE_ACCESS_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"https?://(?:127\.0\.0\.1|localhost|\[?::1\]?)(?::\d{1,5})?[^ \n\r\t`'\"<>]*|"
+    r"(?:127\.0\.0\.1|localhost)(?::\d{1,5})|"
+    r"\b(?:curl|wget)\s+https?://[^ \n\r\t`'\"<>]*|"
+    r"(?:端口|port)\s*(?:是|为|:|=|is)?\s*\d{2,5}|"
+    r"(?:浏览器|地址栏).{0,24}(?:打开|访问|进入|复制|粘贴)|"
+    r"(?:服务|server|web\s*service).{0,40}(?:监听|listen|地址|url|端口|port|入口)"
     r")"
 )
 
@@ -185,6 +201,8 @@ _FORBIDDEN_OUTPUT_DETAIL_RE = re.compile(
     r"(?:改造|二开|换皮|底层|上游|来源|不是(?:完全)?自研|非自研)"
     r")"
 )
+
+_LOCAL_SERVICE_SAFE_TEXT = "内部服务访问方式已省略。请从桌面应用入口启动和使用 taiji Agent。"
 
 _SELF_SCAN_RE = re.compile(
     r"(?is)(?:你自己|自身|当前(?:产品|系统|助手|智能体)|这个(?:产品|系统|助手|智能体)|本(?:产品|系统|助手|智能体)|taiji\s*Agent|太极智能体|yourself|your own|this product|this system|this assistant|this agent)"
@@ -313,8 +331,8 @@ def brand_safety_validate(text: str) -> BrandSafetyDecision:
 def brand_safe_reply(user_text: str = "") -> str:
     """Return a productized answer for sensitive provenance probes."""
     return (
-        "taiji Agent 由太极智能体项目组维护交付，内部实现、第三方组件与部署细节不在普通对话中公开。\n\n"
-        "从产品能力层面看，它由这些模块协同工作：\n"
+        "请从桌面应用入口启动和使用 taiji Agent。内部服务地址、端口、访问方式、第三方组件与部署细节不在普通对话中公开。\n\n"
+        "taiji Agent 由太极智能体项目组维护交付。从产品能力层面看，它由这些模块协同工作：\n"
         "- 对话调度：维护上下文、管理多轮任务状态，并把结果整理成可读回复。\n"
         "- 工具协同：在授权范围内调用文件、搜索、任务和系统操作能力。\n"
         "- 工作区文件：围绕用户选择的工作区进行浏览、整理、摘要和生成。\n"
@@ -357,6 +375,8 @@ def scrub_public_message(message: Any) -> Any:
     cleaned = copy.deepcopy(message)
     role = str(cleaned.get("role") or "").strip().lower()
     if role == "user":
+        if "content" in cleaned:
+            cleaned["content"] = scrub_local_service_access(cleaned.get("content"))
         return cleaned
     for key in (
         "content",
@@ -415,6 +435,19 @@ def scrub_messages(messages: Any) -> Any:
     return scrub_public_message(messages)
 
 
+def scrub_local_service_access(value: Any) -> Any:
+    """Scrub local service URLs, ports, and direct browser access hints."""
+    if isinstance(value, str):
+        return _scrub_local_service_access_text(value)
+    if isinstance(value, list):
+        return [scrub_local_service_access(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(scrub_local_service_access(item) for item in value)
+    if isinstance(value, dict):
+        return {key: scrub_local_service_access(item) for key, item in value.items()}
+    return value
+
+
 
 def is_internal_workspace(path: str | Path | None) -> bool:
     """Return True for source/runtime directories that ordinary chat should not inspect."""
@@ -469,6 +502,7 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[str], *, final: bool 
 
 def _scrub_text(text: str) -> str:
     result = str(text or "")
+    result = _scrub_local_service_access_text(result)
     if _SEMANTIC_BRAND_LEAK_RE.search(result):
         return "内部实现细节已省略。"
     # Scrub absolute internal paths before generic brand replacements. If this
@@ -504,6 +538,15 @@ def _scrub_text(text: str) -> str:
 
 def _contains_forbidden_public_detail(text: str) -> bool:
     value = str(text or "")
+    if _LOCAL_SERVICE_ACCESS_RE.search(value):
+        return True
     if _SEMANTIC_BRAND_LEAK_RE.search(value):
         return True
     return bool(_FORBIDDEN_OUTPUT_DETAIL_RE.search(value))
+
+
+def _scrub_local_service_access_text(text: str) -> str:
+    value = str(text or "")
+    if not _LOCAL_SERVICE_ACCESS_RE.search(value):
+        return value
+    return _LOCAL_SERVICE_ACCESS_RE.sub(_LOCAL_SERVICE_SAFE_TEXT, value)

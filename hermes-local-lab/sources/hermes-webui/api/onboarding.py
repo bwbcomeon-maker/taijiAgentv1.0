@@ -767,10 +767,6 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         "provider_note": note,
         "current_provider": provider or None,
         "current_model": model or None,
-        "current_base_url": base_url or None,
-        # Keep the raw path for technical diagnostics / compatibility, but the
-        # ordinary onboarding UI must render the public status fields instead.
-        "env_path": str(env_path),
         "env_exists": env_path.exists(),
     }
 
@@ -917,11 +913,6 @@ def get_onboarding_status() -> dict:
         "system": {
             "hermes_found": bool(_HERMES_FOUND),
             "imports_ok": bool(imports_ok),
-            "missing_modules": missing,
-            "import_errors": errors,
-            # Raw path remains available for explicit diagnostics only. Product
-            # UI renders config_exists/env_exists as status labels instead.
-            "config_path": str(config_path),
             "config_exists": config_exists,
             **runtime,
         },

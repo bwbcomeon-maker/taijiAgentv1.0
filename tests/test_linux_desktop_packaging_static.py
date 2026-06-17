@@ -154,6 +154,17 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("within ${START_TIMEOUT_SECONDS}s", start_webui)
         self.assertNotIn("for _ in $(seq 1 50)", start_webui)
 
+    def test_runtime_start_output_does_not_print_internal_access_addresses(self):
+        start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
+        start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
+
+        for script in (start_agent, start_webui):
+            self.assertNotIn("ready at http://", script)
+            self.assertNotIn("did not become healthy at $health_url", script)
+            self.assertNotIn("Log: $LOG_FILE", script)
+            self.assertIn("service ready", script)
+            self.assertIn("did not become healthy within", script)
+
     def test_linux_desktop_hides_application_menu_bar(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
 
@@ -161,6 +172,22 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Menu.setApplicationMenu(null)", main_js)
         self.assertIn("autoHideMenuBar", main_js)
         self.assertIn("taiji-agent-diagnose", main_js)
+
+    def test_desktop_web_access_uses_private_token_and_sanitized_logs(self):
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+        server_py = read_text("hermes-local-lab/sources/hermes-webui/server.py")
+
+        self.assertIn("TAIJI_DESKTOP_ONLY", main_js)
+        self.assertIn("TAIJI_DESKTOP_ACCESS_TOKEN", main_js)
+        self.assertIn("taiji_desktop_token", main_js)
+        self.assertIn('appendDesktopLog(desktopLog, "loading desktop workspace")', main_js)
+        self.assertNotIn("loading ${target.toString()}", main_js)
+
+        self.assertIn("def _desktop_access_required", server_py)
+        self.assertIn("def _request_has_desktop_access", server_py)
+        self.assertIn("请从桌面应用启动太极 Agent", server_py)
+        self.assertNotIn("Then open:", server_py)
+        self.assertNotIn("Remote access:", server_py)
 
     def test_desktop_menu_preserves_standard_edit_roles_for_paste(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
@@ -587,6 +614,25 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "Hermes home",
         ):
             self.assertNotIn(forbidden, texts)
+
+    def test_delivery_docs_do_not_expose_browser_access_or_ports(self):
+        docs = "\n".join(
+            read_text(path)
+            for path in (
+                "docs/taiji-desktop-uos-packaging.md",
+                "packages/麒麟操作系统安装包/README.md",
+            )
+        )
+
+        for forbidden in (
+            "浏览器版",
+            "浏览器 WebUI",
+            "浏览器访问",
+            "端口",
+            "WebUI 和本地端口链路",
+            "18642/18787",
+        ):
+            self.assertNotIn(forbidden, docs)
 
 
 if __name__ == "__main__":

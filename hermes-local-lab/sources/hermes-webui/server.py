@@ -1,4 +1,5 @@
 """Taiji Agent web service entrypoint."""
+import hmac
 import logging
 import os
 import re
@@ -108,7 +109,7 @@ try:
     import resource
 except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,116 @@ from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
+
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _desktop_access_required() -> bool:
+    return _truthy_env("TAIJI_DESKTOP_ONLY")
+
+
+def _desktop_access_token() -> str:
+    return os.getenv("TAIJI_DESKTOP_ACCESS_TOKEN", "").strip()
+
+
+def _cookie_value(cookie_header, name: str) -> str:
+    if not cookie_header:
+        return ""
+    for part in str(cookie_header).split(";"):
+        key, sep, value = part.strip().partition("=")
+        if sep and key == name:
+            return value.strip()
+    return ""
+
+
+def _request_has_desktop_access(handler, parsed) -> bool:
+    expected = _desktop_access_token()
+    if not expected:
+        return False
+
+    candidates = []
+    try:
+        candidates.extend(parse_qs(parsed.query).get("taiji_desktop_token", []))
+    except Exception:
+        pass
+    try:
+        header_token = handler.headers.get("X-Taiji-Desktop-Token")
+        if header_token:
+            candidates.append(header_token)
+    except Exception:
+        pass
+    try:
+        cookie_token = _cookie_value(handler.headers.get("Cookie"), "taiji_desktop_token")
+        if cookie_token:
+            candidates.append(cookie_token)
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if candidate and hmac.compare_digest(str(candidate), expected):
+            handler._taiji_desktop_access_granted = True
+            return True
+    return False
+
+
+def _desktop_access_exempt_path(path: str) -> bool:
+    return path == "/health"
+
+
+def _send_desktop_launch_only(handler, parsed) -> None:
+    message = "请从桌面应用启动太极 Agent"
+    if parsed.path.startswith("/api/"):
+        return j(handler, {"error": message}, status=403)
+
+    body = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>太极 Agent</title>
+  <style>
+    :root {{ color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f9fc; color: #172033; }}
+    main {{ width: min(560px, calc(100vw - 48px)); text-align: center; }}
+    h1 {{ margin: 0 0 12px; font-size: 26px; font-weight: 650; letter-spacing: 0; }}
+    p {{ margin: 0; color: #4d5a6d; line-height: 1.7; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{message}</h1>
+    <p>当前入口仅用于应用内部通信。请关闭此页面，从系统桌面入口打开并使用。</p>
+  </main>
+</body>
+</html>""".encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _enforce_desktop_access(handler, parsed) -> bool:
+    if not _desktop_access_required():
+        return True
+    if _desktop_access_exempt_path(parsed.path):
+        return True
+    if _request_has_desktop_access(handler, parsed):
+        return True
+    _send_desktop_launch_only(handler, parsed)
+    return False
+
+
+def _safe_request_path(raw_path) -> str:
+    try:
+        return urlparse(str(raw_path or "-")).path or "/"
+    except Exception:
+        return "-"
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -299,6 +410,13 @@ class Handler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy())
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        if _desktop_access_required() and getattr(self, "_taiji_desktop_access_granted", False):
+            token = _desktop_access_token()
+            if token:
+                self.send_header(
+                    "Set-Cookie",
+                    f"taiji_desktop_token={token}; Path=/; SameSite=Strict; HttpOnly",
+                )
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -322,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
             'method': getattr(self, 'command', None) or '-',
-            'path': getattr(self, 'path', None) or '-',
+            'path': _safe_request_path(getattr(self, 'path', None)),
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
@@ -339,6 +457,7 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            if not _enforce_desktop_access(self, parsed): return
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
@@ -349,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            print(f'[webui] ERROR {self.command} {_safe_request_path(self.path)}\n' + traceback.format_exc(), flush=True)
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -370,6 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            if not _enforce_desktop_access(self, parsed): return
             # Stage-346 Opus SHOULD-FIX defense-in-depth: scope the CSP-report
             # auth carve-out to POST only. The endpoint is intentionally
             # unauthenticated (browsers omit cookies on CSP reports), but the
@@ -388,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            print(f'[webui] ERROR {self.command} {_safe_request_path(self.path)}\n' + traceback.format_exc(), flush=True)
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -512,7 +632,10 @@ def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
-    print_startup_config()
+    if _truthy_env("TAIJI_VERBOSE_STARTUP"):
+        print_startup_config()
+    else:
+        print("  Taiji application runtime starting", flush=True)
 
     fd_limit = _raise_fd_soft_limit()
     if fd_limit.get("status") == "raised":
@@ -621,10 +744,10 @@ def main() -> None:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
             scheme = 'http'
 
-    print(f'  Taiji Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
-    if HOST in ('127.0.0.1', '::1') or within_container:
-        print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
-    print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
+    if _desktop_access_required():
+        print("  Taiji desktop workspace ready", flush=True)
+    else:
+        print('  Taiji application runtime ready', flush=True)
     print('', flush=True)
     try:
         httpd.serve_forever()

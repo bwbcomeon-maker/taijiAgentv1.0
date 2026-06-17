@@ -22,6 +22,11 @@ _SENSITIVE_PATH_RE = re.compile(
     r"(?i)"
     r"(?:"
     r"/opt/taiji-agent(?:/|$)|"
+    r"(?:^|/)\.local/state/taiji-agent/logs(?:/|$)|"
+    r"(?:^|/)taiji-agent/logs(?:/|$)|"
+    r"(?:taiji-desktop|agent|web)\.log|"
+    r"(?:runtime-env|start-agent|start-webui|health-check|taiji-native-verify|taiji-agent-diagnose)\.sh|"
+    r"(?:^|/)(?:config\.yaml|\.env|license\.jwt)(?:$|[ \n\r\t`'\"<>])|"
     r"hermes-local-lab|hermes-agent|hermes-webui|hermes-home|\.hermes(?:/|$)|"
     r"agent-runtime\.license|web-runtime\.license|claw\.pyc|"
     r"(?:runtime|site-packages|dist-info|licenses?)[^ \n\r\t`'\"<>]{0,80}"
@@ -30,16 +35,24 @@ _SENSITIVE_PATH_RE = re.compile(
 )
 
 _SENSITIVE_TEXT_RE = re.compile(
-    r"(?i)(?:Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|agent-runtime|web-runtime|claw\.pyc|HERMES_HOME|HERMES_WEBUI_|X-Hermes-CSRF-Token)"
+    r"(?i)(?:"
+    r"Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|agent-runtime|web-runtime|"
+    r"claw\.pyc|HERMES_HOME|HERMES_WEBUI_|X-Hermes-CSRF-Token|"
+    r"TAIJI_WEBUI_PORT|WEBUI_PORT|AGENT_API_PORT|API_SERVER_PORT|"
+    r"127\.0\.0\.1|localhost|listen|listening|端口|访问地址|服务地址|浏览器"
+    r")"
 )
 
 _SENSITIVE_COMMAND_RE = re.compile(
     r"(?is)"
     r"(?:"
     r"(?:find|rg|grep|cat|head|tail|ls|tree|python|python3|sed|awk).{0,120}"
-    r"(?:/opt/taiji-agent|hermes-local-lab|hermes-agent|hermes-webui|\.hermes|license|dist-info|site-packages|runtime)|"
+    r"(?:/opt/taiji-agent|taiji-agent/logs|hermes-local-lab|hermes-agent|hermes-webui|\.hermes|"
+    r"license|dist-info|site-packages|runtime|config\.yaml|\.env|web\.log|agent\.log|taiji-desktop\.log)|"
     r"(?:lsof|netstat|ss\s+-|ps\s+(?:aux|ef|-ef)|printenv|env\s*$|/proc/|cmdline|environ)|"
-    r"(?:localhost|127\.0\.0\.1).{0,80}(?:port|端口|url|访问地址)"
+    r"(?:curl|wget).{0,40}(?:localhost|127\.0\.0\.1|/health)|"
+    r"(?:localhost|127\.0\.0\.1).{0,80}(?:port|端口|url|访问地址|health)|"
+    r"(?:端口|监听|服务地址|访问地址|浏览器|地址栏).{0,80}(?:taiji|agent|web|服务|server|port|listen|health)"
     r")"
 )
 
