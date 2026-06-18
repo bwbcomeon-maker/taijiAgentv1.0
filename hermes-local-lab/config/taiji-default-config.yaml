@@ -29,7 +29,7 @@ webui:
       kanban: false
       writing: true
       skills: false
-      memory: true
+      memory: false
       workspaces: false
       profiles: true
       todos: false
