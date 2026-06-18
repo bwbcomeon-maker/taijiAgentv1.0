@@ -1366,7 +1366,7 @@ function _expertTeamWorkspacePanelHtml(card){
     <div class="expert-team-panel-section-title"><span>参考材料</span><small>${referenceArtifacts.length} 个</small></div>
     <div class="expert-team-panel-artifacts">${referenceArtifacts.slice(0,4).map(item=>artifactItemHtml(item,true)).join('')}</div>
   </section>`:'';
-  return `<div class="expert-team-panel-inner" data-expert-team-run-id="${esc(runId)}">
+  return `<div class="expert-team-panel-inner" data-expert-team-run-id="${esc(runId)}" onclick="handleExpertTeamPanelBlankCollapse(event)">
     <header class="expert-team-panel-head">
       <div class="expert-team-panel-topbar">
         <span class="expert-team-panel-eyebrow">专家团计划</span>
@@ -1548,6 +1548,41 @@ function _setExpertTeamBottomDockExpanded(expanded,trigger){
   return true;
 }
 
+const EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR=[
+  'button',
+  'input',
+  'textarea',
+  'select',
+  'a',
+  '[role="button"]',
+  '[contenteditable="true"]',
+  '.expert-team-panel-section',
+  '.expert-team-panel-priority-card',
+  '.expert-team-panel-phase',
+  '.expert-team-panel-execution-row',
+  '.status-card-expert-question',
+  '.expert-team-panel-artifact',
+  '.expert-team-panel-actions',
+  '.expert-team-member-strip',
+].join(',');
+
+function handleExpertTeamPanelBlankCollapse(event){
+  const target=event&&event.target;
+  if(!(target&&target.closest))return false;
+  const dock=target.closest('#writeflowStatusDock');
+  if(!(dock&&dock.querySelector))return false;
+  const card=target.closest('.status-card-writeflow')||dock.querySelector('.status-card-writeflow');
+  if(!(card&&card.classList&&card.classList.contains('is-expanded')))return false;
+  if(!card.querySelector('.status-card-expert-dock-summary'))return false;
+  if(target.closest(EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR))return false;
+  const blankRoot=target.closest('.expert-team-panel-inner,.status-card-expert-bottom-body,.status-card-writeflow,#writeflowStatusDock');
+  if(!blankRoot)return false;
+  const collapsed=_setExpertTeamBottomDockExpanded(false,target);
+  if(collapsed)_syncExpertTeamWorkspacePanelVisibility();
+  if(collapsed&&event&&event.stopPropagation)event.stopPropagation();
+  return collapsed;
+}
+
 function hideExpertTeamWorkspacePanel(btn){
   const collapsed=_setExpertTeamBottomDockExpanded(false,btn);
   _syncExpertTeamWorkspacePanelVisibility();
@@ -1629,6 +1664,7 @@ if(typeof window!=='undefined'){
   window._syncExpertTeamWorkspacePanelVisibility=_syncExpertTeamWorkspacePanelVisibility;
   window.hideExpertTeamWorkspacePanel=hideExpertTeamWorkspacePanel;
   window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel;
+  window.handleExpertTeamPanelBlankCollapse=handleExpertTeamPanelBlankCollapse;
   window.syncExpertTeamBottomDockState=syncExpertTeamBottomDockState;
   window.shouldPreserveExpertTeamDraftDock=shouldPreserveExpertTeamDraftDock;
 }
@@ -2232,6 +2268,7 @@ function renderWriteflowStatusDock(card){
     }
   }
   dock.hidden=false;
+  dock.onclick=isExpertTeam?handleExpertTeamPanelBlankCollapse:null;
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
   if(isExpertTeam)syncExpertTeamBottomDockState(card);
@@ -2247,6 +2284,7 @@ function clearWriteflowStatusDock(){
   }
   dock.innerHTML='';
   dock.hidden=true;
+  dock.onclick=null;
   delete dock.dataset.writeflowRunId;
   delete dock.dataset.writeflowSourceSessionId;
   delete dock.dataset.expertTeamRenderKey;

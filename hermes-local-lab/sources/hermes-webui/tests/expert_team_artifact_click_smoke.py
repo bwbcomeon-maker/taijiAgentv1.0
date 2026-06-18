@@ -354,6 +354,24 @@ def _dock_scroll_state(page):
     )
 
 
+def _dispatch_click(page, selector):
+    return page.evaluate(
+        """
+        (selector) => {
+          const node = document.querySelector(selector);
+          if (!node) return false;
+          node.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }));
+          return true;
+        }
+        """,
+        selector,
+    )
+
+
 def _dock_a11y_state(page):
     return page.evaluate(
         """
@@ -664,6 +682,28 @@ def main():
                     failures.append(f"{width}x{height}: dock should use one outer scrollbar {scroll_state!r}")
                 pending_screenshot = output_dir / f"expert-team-dock-pending-expanded-{width}x{height}.png"
                 page.screenshot(path=str(pending_screenshot), full_page=True)
+                page.click("#writeflowStatusDock .status-card-expert-question.pending textarea")
+                textarea_click_state = _question_state(page)
+                if not textarea_click_state["expanded"]:
+                    failures.append(f"{width}x{height}: textarea click should not collapse expert dock {textarea_click_state!r}")
+                page.click("#writeflowStatusDock .expert-team-panel-execution-row")
+                row_click_state = _dock_geometry(page)
+                if not row_click_state["expanded"]:
+                    failures.append(f"{width}x{height}: execution row click should not collapse expert dock {row_click_state!r}")
+                if not _dispatch_click(page, "#writeflowStatusDock .expert-team-panel-inner"):
+                    failures.append(f"{width}x{height}: blank inner click target missing")
+                inner_blank_state = _dock_geometry(page)
+                if not inner_blank_state["collapsed"]:
+                    failures.append(f"{width}x{height}: inner blank click did not return to compact dock {inner_blank_state!r}")
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending textarea", timeout=10000)
+                if not _dispatch_click(page, "#writeflowStatusDock"):
+                    failures.append(f"{width}x{height}: outer dock blank click target missing")
+                outer_blank_state = _dock_geometry(page)
+                if not outer_blank_state["collapsed"]:
+                    failures.append(f"{width}x{height}: outer blank click did not return to compact dock {outer_blank_state!r}")
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending textarea", timeout=10000)
                 page.click(".expert-team-panel-hide")
                 collapsed_state = _dock_geometry(page)
                 if not collapsed_state["collapsed"]:

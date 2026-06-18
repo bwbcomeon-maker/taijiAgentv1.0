@@ -184,6 +184,42 @@ def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
     assert ".expert-team-panel-hide" in STYLE_CSS
 
 
+def test_expert_team_blank_area_click_collapses_without_intercepting_controls():
+    assert "function handleExpertTeamPanelBlankCollapse" in UI_JS
+    assert "window.handleExpertTeamPanelBlankCollapse=handleExpertTeamPanelBlankCollapse" in UI_JS
+
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    assert 'onclick="handleExpertTeamPanelBlankCollapse(event)"' in panel_body
+
+    handler_start = UI_JS.index("const EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR")
+    handler_body = UI_JS[handler_start : UI_JS.index("function hideExpertTeamWorkspacePanel", handler_start)]
+    assert "card.classList.contains('is-expanded')" in handler_body
+    assert "_setExpertTeamBottomDockExpanded(false,target)" in handler_body
+    assert "_syncExpertTeamWorkspacePanelVisibility()" in handler_body
+    for protected_selector in (
+        "button",
+        "input",
+        "textarea",
+        "select",
+        "a",
+        "[role=\"button\"]",
+        ".expert-team-panel-section",
+        ".expert-team-panel-priority-card",
+        ".expert-team-panel-phase",
+        ".expert-team-panel-execution-row",
+    ):
+        assert protected_selector in handler_body
+
+    render_start = UI_JS.index("function renderWriteflowStatusDock")
+    render_body = UI_JS[render_start : UI_JS.index("function clearWriteflowStatusDock", render_start)]
+    assert "dock.onclick=isExpertTeam?handleExpertTeamPanelBlankCollapse:null;" in render_body
+
+    clear_start = UI_JS.index("function clearWriteflowStatusDock")
+    clear_body = UI_JS[clear_start : UI_JS.index("if(typeof window!=='undefined')", clear_start)]
+    assert "dock.onclick=null;" in clear_body
+
+
 def test_expert_team_workspace_visibility_syncs_on_panel_switches():
     switch_start = PANELS_JS.index("async function switchPanel")
     switch_body = PANELS_JS[switch_start : PANELS_JS.index("// ── Cron panel ──", switch_start)]
