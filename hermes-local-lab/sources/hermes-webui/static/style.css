@@ -6581,10 +6581,20 @@ main.main.showing-logs > #mainLogs{display:flex;}
   }
   .taiji-filter-row{
     display:grid;
-    grid-template-columns:auto auto 1fr auto;
+    grid-template-columns:auto auto minmax(0,1fr) auto;
+    grid-template-areas:
+      "all ungrouped spacer add"
+      "projects projects projects projects";
     align-items:center;
     gap:8px;
+    row-gap:10px;
     margin-top:clamp(16px,1.12vw,23px);
+  }
+  .taiji-filter-row > [data-taiji-session-filter="all"]{
+    grid-area:all;
+  }
+  .taiji-filter-row > [data-taiji-session-filter="ungrouped"]{
+    grid-area:ungrouped;
   }
   .taiji-filter,
   .taiji-filter-add{
@@ -6607,14 +6617,22 @@ main.main.showing-logs > #mainLogs{display:flex;}
     box-shadow:0 8px 16px rgba(0,164,190,.2);
   }
   .taiji-project-filters{
-    grid-column:3;
+    grid-area:projects;
+    grid-column:1 / -1;
+    grid-row:2;
     display:flex;
     align-items:center;
     gap:8px;
     min-width:0;
+    width:100%;
+    max-width:100%;
     overflow-x:auto;
-    padding:2px 0;
+    padding:2px 0 4px;
+    scroll-padding-inline:2px;
     scrollbar-width:none;
+  }
+  .taiji-project-filters:empty{
+    display:none;
   }
   .taiji-project-filters::-webkit-scrollbar{
     display:none;
@@ -6640,7 +6658,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
     box-shadow:0 0 0 2px rgba(255,255,255,.82);
   }
   .taiji-filter-add{
-    grid-column:4;
+    grid-area:add;
+    justify-self:end;
     width:clamp(34px,2.18vw,44px);
     font-size:clamp(20px,1.22vw,25px);
     line-height:1;
@@ -8023,9 +8042,12 @@ main.main.showing-logs > #mainLogs{display:flex;}
     scrollbar-width:none;
   }
   .taiji-home-shell #composerWrap .composer-right{
-    width:clamp(40px,2.65vw,52px);
-    min-width:clamp(40px,2.65vw,52px);
-    height:clamp(40px,2.65vw,52px);
+    flex:0 0 auto;
+    width:auto;
+    min-width:max-content;
+    height:auto;
+    justify-content:flex-end;
+    overflow:visible;
   }
   .taiji-home-shell #composerWrap #btnAttach,
   .taiji-home-shell #composerWrap #btnMic,
@@ -9594,6 +9616,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
     align-items:center!important;
     min-width:0!important;
     gap:10px!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-right{
+    flex:0 0 auto!important;
+    width:auto!important;
+    min-width:max-content!important;
+    height:auto!important;
+    justify-content:flex-end!important;
+    overflow:visible!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #ctxIndicatorWrap{
     box-sizing:border-box!important;

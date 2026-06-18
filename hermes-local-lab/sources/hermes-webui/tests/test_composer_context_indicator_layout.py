@@ -25,6 +25,15 @@ def _rule_body(css, selector):
     raise AssertionError(f"Missing CSS rule for {selector}")
 
 
+def _rule_bodies(css, selector):
+    bodies = []
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", _strip_css_comments(css)):
+        selectors = {part.strip() for part in match.group(1).split(",")}
+        if selector in selectors:
+            bodies.append(match.group(2))
+    return bodies
+
+
 def _declarations(rule_body):
     declarations = {}
     for item in rule_body.split(";"):
@@ -71,6 +80,31 @@ def test_taiji_context_indicator_slot_matches_send_button_width():
     assert wrap.get("width") == "46px!important"
     assert wrap.get("min-width") == "46px!important"
     assert wrap.get("height") == "46px!important"
+
+
+def test_taiji_composer_right_uses_content_sized_control_cluster():
+    """The Taiji shell right controls must fit status, badges, ring, and send."""
+    generic_bodies = _rule_bodies(CSS, ".taiji-home-shell #composerWrap .composer-right")
+    assert generic_bodies, "Missing Taiji composer-right override"
+    for body in generic_bodies:
+        assert "width:clamp(40px,2.65vw,52px)" not in body.replace(" ", "")
+        assert "min-width:clamp(40px,2.65vw,52px)" not in body.replace(" ", "")
+        assert "height:clamp(40px,2.65vw,52px)" not in body.replace(" ", "")
+
+    selector = (
+        ':root[data-skin="taiji-light-glass"] .taiji-home-shell '
+        "#composerWrap .composer-right"
+    )
+    skin_bodies = _rule_bodies(CSS, selector)
+    assert skin_bodies, "Missing taiji-light-glass composer-right rule"
+    right = _declarations(skin_bodies[-1])
+
+    assert right.get("flex") == "0 0 auto!important"
+    assert right.get("width") == "auto!important"
+    assert right.get("min-width") == "max-content!important"
+    assert right.get("height") == "auto!important"
+    assert right.get("justify-content") == "flex-end!important"
+    assert right.get("overflow") == "visible!important"
 
 
 def test_context_indicator_visibility_does_not_collapse_send_slot():

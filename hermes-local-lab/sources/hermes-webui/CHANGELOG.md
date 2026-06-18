@@ -34,6 +34,10 @@
 - Writing expert-team summons now stay in the current window: choosing a team creates and selects a new chat task, then shows the live team board above the composer instead of opening a separate task window.
 - Taiji chat can now hide internal Activity/tool/thinking details behind `webui.feature_visibility.chat.activity_details=false`, showing only safe public progress text and elapsed task duration.
 
+### Fixed
+
+- Taiji desktop homepage group filters now keep `全部`, `未分组`, and `+` fixed while dynamic group chips scroll on their own row, and the composer send controls now size to the actual status/ring/badge/send cluster instead of drifting outside the input box.
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed

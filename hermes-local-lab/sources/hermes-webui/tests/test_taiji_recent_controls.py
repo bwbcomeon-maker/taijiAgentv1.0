@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -8,6 +9,37 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def _strip_css_comments(css):
+    return re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+
+
+def _rule_body(css, selector):
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", _strip_css_comments(css)):
+        selectors = {part.strip() for part in match.group(1).split(",")}
+        if selector in selectors:
+            return match.group(2)
+    raise AssertionError(f"Missing CSS rule for {selector}")
+
+
+def _rule_bodies(css, selector):
+    bodies = []
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", _strip_css_comments(css)):
+        selectors = {part.strip() for part in match.group(1).split(",")}
+        if selector in selectors:
+            bodies.append(match.group(2))
+    return bodies
+
+
+def _declarations(rule_body):
+    declarations = {}
+    for item in rule_body.split(";"):
+        if ":" not in item:
+            continue
+        prop, value = item.split(":", 1)
+        declarations[prop.strip()] = re.sub(r"\s+", " ", value.strip())
+    return declarations
+
+
 def test_taiji_project_filters_are_rendered_from_projects():
     assert 'id="taijiProjectFilters"' in INDEX_HTML
     assert "function renderProjectFilters()" in HOME_JS
@@ -16,6 +48,31 @@ def test_taiji_project_filters_are_rendered_from_projects():
     assert "session.project_id!==projectId" in HOME_JS
     assert "state.sessionFilter=`project:${res.project.project_id}`" in HOME_JS
     assert ".taiji-project-filters" in STYLE_CSS
+
+
+def test_taiji_project_filters_use_stable_second_row_scroll_lane():
+    filter_row = _declarations(_rule_body(STYLE_CSS, ".taiji-filter-row"))
+    project_filters = _declarations(_rule_body(STYLE_CSS, ".taiji-project-filters"))
+    add_button = _declarations(_rule_bodies(STYLE_CSS, ".taiji-filter-add")[-1])
+    empty_project_filters = _declarations(_rule_body(STYLE_CSS, ".taiji-project-filters:empty"))
+
+    assert filter_row.get("display") == "grid"
+    assert filter_row.get("grid-template-columns") == "auto auto minmax(0,1fr) auto"
+    assert filter_row.get("grid-template-areas") == (
+        '"all ungrouped spacer add" "projects projects projects projects"'
+    )
+
+    assert add_button.get("grid-area") == "add"
+    assert add_button.get("justify-self") == "end"
+
+    assert project_filters.get("grid-area") == "projects"
+    assert project_filters.get("grid-column") == "1 / -1"
+    assert project_filters.get("grid-row") == "2"
+    assert project_filters.get("width") == "100%"
+    assert project_filters.get("max-width") == "100%"
+    assert project_filters.get("overflow-x") == "auto"
+    assert project_filters.get("scrollbar-width") == "none"
+    assert empty_project_filters.get("display") == "none"
 
 
 def test_taiji_recent_sessions_collect_crud_actions_in_more_menu():
