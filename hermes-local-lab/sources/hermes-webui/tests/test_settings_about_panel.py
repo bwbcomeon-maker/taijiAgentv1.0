@@ -19,11 +19,12 @@ def test_about_copy_is_developer_source_and_not_runtime_settings():
     payload = get_about_payload()
 
     assert set(payload) == {"description"}
-    assert "太极智能体 桌面版" in payload["description"]
+    assert payload["description"] == "乾元版 v0.1.7743 © 太极计算机股份有限公司，版权所有。"
     assert "乾元版 v0.1.7743" in payload["description"]
+    assert "太极智能体 桌面版" not in payload["description"]
     assert "太极 Agent" not in payload["description"]
     assert "版权所有" in payload["description"]
-    assert "授权范围" in payload["description"]
+    assert "授权范围" not in payload["description"]
 
     about_source = read("api/about.py")
     assert "ABOUT_DESCRIPTION" in about_source
@@ -53,7 +54,7 @@ def test_about_endpoint_returns_developer_source_payload():
     payload = captured["data"]
     assert captured["status"] == 200
     assert set(payload) == {"description"}
-    assert "太极智能体 桌面版" in payload["description"]
+    assert payload["description"] == "乾元版 v0.1.7743 © 太极计算机股份有限公司，版权所有。"
     assert "乾元版 v0.1.7743" in payload["description"]
 
 
