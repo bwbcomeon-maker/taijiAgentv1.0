@@ -218,7 +218,7 @@ class TestIndexHtmlIntegration:
     def test_taiji_shell_assets_share_cache_bust_suffix(self):
         src = INDEX.read_text(encoding="utf-8")
         sw = SW.read_text(encoding="utf-8")
-        expected = "__WEBUI_VERSION__-taiji-shell-33"
+        expected = "__WEBUI_VERSION__-taiji-shell-34"
         for asset in (
             "static/icons.js",
             "static/style.css",
@@ -238,7 +238,7 @@ class TestIndexHtmlIntegration:
                 src,
             )
         )
-        assert shell_versions == {"33"}
+        assert shell_versions == {"34"}
 
     def test_index_versions_stylesheet(self):
         """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
@@ -318,9 +318,9 @@ class TestIndexHtmlIntegration:
         are present on first paint.
         """
         src = INDEX.read_text(encoding="utf-8")
-        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__"')
-        script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__"')
-        ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__')
+        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__-taiji-shell-34"')
+        script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__-taiji-shell-34"')
+        ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__-taiji-shell-34')
         assert preload_pos != -1, "index.html must preload the PWA startup helper"
         assert script_pos != -1, "index.html must load the PWA startup helper"
         assert ui_pos != -1, "index.html must load the main UI bundle"

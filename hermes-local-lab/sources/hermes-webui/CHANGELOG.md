@@ -37,6 +37,7 @@
 ### Fixed
 
 - Taiji desktop homepage group filters now use a compact `分组 N` dropdown management panel with search, select, rename, delete, and create actions, while the composer send controls size to the actual status/ring/badge/send cluster instead of drifting outside the input box.
+- Taiji desktop homepage now shows an inline current-group filter strip with the active group name, visible conversation count, and one-click clear action, so selecting a group remains visible above the recent conversation list.
 
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 

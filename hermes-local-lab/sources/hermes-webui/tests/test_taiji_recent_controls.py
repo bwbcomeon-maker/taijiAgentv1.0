@@ -42,13 +42,17 @@ def _declarations(rule_body):
 
 def test_taiji_project_filters_are_rendered_from_projects():
     assert 'id="taijiProjectFilters"' in INDEX_HTML
+    assert 'id="taijiFilterStatus"' in INDEX_HTML
     assert "function renderProjectFilters()" in HOME_JS
+    assert "function renderFilterStatus(" in HOME_JS
     assert "taijiProjectFilters" in HOME_JS
     assert "taijiProjectFilterLabel" in HOME_JS
     assert "taijiProjectPanel" in HOME_JS
+    assert "taijiFilterStatus" in HOME_JS
     assert "session.project_id!==projectId" in HOME_JS
     assert "state.sessionFilter=`project:${res.project.project_id}`" in HOME_JS
     assert ".taiji-project-filters" in STYLE_CSS
+    assert ".taiji-filter-status" in STYLE_CSS
 
 
 def test_taiji_project_filters_use_compact_dropdown_management_surface():
@@ -105,6 +109,41 @@ def test_taiji_project_dropdown_exposes_crud_actions():
     assert "删除分组" in HOME_JS
     assert ".taiji-project-panel-row" in STYLE_CSS
     assert ".taiji-project-panel-action.is-danger" in STYLE_CSS
+
+
+def test_taiji_project_filter_status_explains_active_scope_and_clear_action():
+    status_start = HOME_JS.index("function activeFilterLabel(")
+    status_body = HOME_JS[
+        status_start : HOME_JS.index("function renderRecentSessions", status_start)
+    ]
+
+    assert "当前分组：" in status_body
+    assert "未分组" in status_body
+    assert "visibleCount" in status_body
+    assert "个会话" in status_body
+    assert "data-taiji-clear-session-filter" in status_body
+    assert "state.sessionFilter=SESSION_FILTERS.all" in HOME_JS
+    assert "renderFilterStatus(sessions.length)" in HOME_JS
+
+
+def test_taiji_project_filter_status_uses_lightweight_strip_layout():
+    status = _declarations(_rule_body(STYLE_CSS, ".taiji-filter-status"))
+    status_hidden = _declarations(_rule_body(STYLE_CSS, ".taiji-filter-status[hidden]"))
+    count = _declarations(_rule_body(STYLE_CSS, ".taiji-filter-status-count"))
+    clear = _declarations(_rule_body(STYLE_CSS, ".taiji-filter-status-clear"))
+
+    assert status.get("display") == "flex"
+    assert status.get("align-items") == "center"
+    assert status.get("min-height") == "32px"
+    assert status.get("margin-top") == "10px"
+    assert status_hidden.get("display") == "none"
+
+    assert count.get("margin-left") == "auto"
+    assert count.get("white-space") == "nowrap"
+
+    assert clear.get("border") == "0"
+    assert clear.get("background") == "transparent"
+    assert clear.get("white-space") == "nowrap"
 
 
 def test_taiji_recent_sessions_collect_crud_actions_in_more_menu():

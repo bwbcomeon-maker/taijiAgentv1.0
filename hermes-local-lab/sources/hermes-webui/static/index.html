@@ -28,9 +28,9 @@
 <script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''},t=sg('theme','light')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#F4F7FD';if((sg('skin','taiji-light-glass')||'taiji-light-glass')==='taiji-light-glass')c='#F4F7FD';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''};document.documentElement.dataset.workspacePanel=sg('webui-workspace-panel','')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{var sg=window.__taijiStoreGet||function(k,d){return d||''};if(sg('webui-sidebar-collapsed','')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
-<link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
-<script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
-<script src="static/brand.js?v=__WEBUI_VERSION__"></script>
+<link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__-taiji-shell-34" as="script">
+<script src="static/pwa-startup.js?v=__WEBUI_VERSION__-taiji-shell-34"></script>
+<script src="static/brand.js?v=__WEBUI_VERSION__-taiji-shell-34"></script>
 <script>window.__TAIJI_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
 <script>(function(){
   var cfg=window.__TAIJI_CONFIG__||{},token=cfg.csrfToken||'';
@@ -71,7 +71,7 @@
     };
   }
 })()</script>
-<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__-taiji-shell-34">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -100,7 +100,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
+        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__-taiji-shell-34').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
         });
       });
@@ -186,6 +186,7 @@
         <div class="taiji-project-filters" id="taijiProjectFilters" aria-label="分组筛选"></div>
         <button class="taiji-filter-add" type="button" aria-label="新增分组" onclick="taijiHomeCreateProject()">+</button>
       </div>
+      <div class="taiji-filter-status" id="taijiFilterStatus" aria-live="polite" hidden></div>
       <div class="taiji-session-groups" id="taijiSessionGroups" aria-live="polite"></div>
       <button class="taiji-view-all" type="button" onclick="taijiHomeToggleAllSessions()">查看全部会话 <span aria-hidden="true">›</span></button>
     </section>
@@ -1768,18 +1769,18 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
-<script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/taiji-home.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/i18n.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/icons.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/ui.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/workspace.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/terminal.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/sessions.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/commands.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/messages.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/panels.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/onboarding.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/boot.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
+<script src="static/taiji-home.js?v=__WEBUI_VERSION__-taiji-shell-34" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">

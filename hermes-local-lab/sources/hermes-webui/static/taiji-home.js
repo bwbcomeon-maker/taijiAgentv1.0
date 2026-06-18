@@ -992,6 +992,27 @@
     btn.setAttribute('aria-label',label);
   }
 
+  function activeFilterLabel(){
+    if(state.sessionFilter===SESSION_FILTERS.ungrouped) return '未分组';
+    const projectName=activeProjectName();
+    return projectName||'';
+  }
+
+  function renderFilterStatus(visibleCount=0){
+    const status=$('taijiFilterStatus');
+    if(!status) return;
+    const label=activeFilterLabel();
+    if(!label){
+      status.hidden=true;
+      status.innerHTML='';
+      return;
+    }
+    const count=Math.max(0,Number(visibleCount)||0);
+    const safeLabel=escapeHtml(label);
+    status.hidden=false;
+    status.innerHTML=`<span class="taiji-filter-status-dot" aria-hidden="true"></span><span class="taiji-filter-status-label">当前分组：<strong>${safeLabel}</strong></span><span class="taiji-filter-status-count">${count} 个会话</span><button class="taiji-filter-status-clear" type="button" data-taiji-clear-session-filter aria-label="清除当前分组筛选">清除</button>`;
+  }
+
   function normalizeProjectFilter(){
     if(!state.sessionFilter||!state.sessionFilter.startsWith('project:')) return;
     const projectId=state.sessionFilter.slice('project:'.length);
@@ -1026,6 +1047,7 @@
     syncSessionFilterButtons();
     syncViewAllButton();
     const sessions=filteredSessions();
+    renderFilterStatus(sessions.length);
     const groups=['今天','昨天','本周','更早'];
     const s=appState();
     const activeSid=s&&s.session&&s.session.session_id;
@@ -1112,6 +1134,18 @@
         if(openBtn&&groups.contains(openBtn)){
           window.taijiHomeLoadSession(openBtn.dataset.sessionId);
         }
+      });
+    }
+    const filterStatus=$('taijiFilterStatus');
+    if(filterStatus&&!filterStatus.__taijiBound){
+      filterStatus.__taijiBound=true;
+      filterStatus.addEventListener('click',event=>{
+        const btn=event.target&&event.target.closest?event.target.closest('[data-taiji-clear-session-filter]'):null;
+        if(!btn||!filterStatus.contains(btn)) return;
+        event.preventDefault();
+        closeProjectPanel(false);
+        state.sessionFilter=SESSION_FILTERS.all;
+        renderRecentSessions();
       });
     }
     const filterRow=document.querySelector('.taiji-filter-row');

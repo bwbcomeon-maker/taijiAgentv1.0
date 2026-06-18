@@ -244,7 +244,7 @@ async function main() {
       hasChatDeliveryHandler: typeof openExpertTeamChatDelivery === "function",
     }));
     assertState(shellState.desktop === "1", "Electron shell did not load desktop mode", shellState);
-    assertState(shellState.uiScript.includes("taiji-shell-33"), "Electron shell loaded stale ui.js cache token", shellState);
+    assertState(shellState.uiScript.includes("taiji-shell-34"), "Electron shell loaded stale ui.js cache token", shellState);
     assertState(shellState.hasChatDeliveryHandler, "Electron shell did not load chat delivery handler", shellState);
 
     await prepareSession(page, workspace);

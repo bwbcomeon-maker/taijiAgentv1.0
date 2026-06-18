@@ -6842,6 +6842,67 @@ main.main.showing-logs > #mainLogs{display:flex;}
     line-height:1;
     color:#24456a;
   }
+  .taiji-filter-status{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    min-height:32px;
+    margin-top:10px;
+    padding:0 10px;
+    border:1px solid rgba(8,153,180,.22);
+    border-radius:10px;
+    color:#25466b;
+    background:rgba(232,249,252,.54);
+    font-size:12px;
+    font-weight:650;
+  }
+  .taiji-filter-status[hidden]{
+    display:none;
+  }
+  .taiji-filter-status-dot{
+    flex:0 0 auto;
+    width:7px;
+    height:7px;
+    border-radius:999px;
+    background:#12b2c6;
+    box-shadow:0 0 0 2px rgba(255,255,255,.82);
+  }
+  .taiji-filter-status-label{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .taiji-filter-status-label strong{
+    color:#0e315c;
+    font-weight:760;
+  }
+  .taiji-filter-status-count{
+    flex:0 0 auto;
+    margin-left:auto;
+    color:#5f7794;
+    white-space:nowrap;
+  }
+  .taiji-filter-status-clear{
+    flex:0 0 auto;
+    border:0;
+    background:transparent;
+    color:#0b6f86;
+    font:inherit;
+    font-weight:720;
+    white-space:nowrap;
+    cursor:pointer;
+  }
+  .taiji-filter-status-clear:hover,
+  .taiji-filter-status-clear:focus-visible{
+    color:#064f65;
+    outline:0;
+    text-decoration:underline;
+    text-underline-offset:3px;
+  }
+  .taiji-filter-status:not([hidden]) + .taiji-session-groups{
+    margin-top:clamp(12px,.9vw,18px);
+  }
   .taiji-session-groups{
     flex:1 1 auto;
     min-height:0;
