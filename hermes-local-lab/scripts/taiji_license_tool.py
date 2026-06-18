@@ -17,7 +17,7 @@ import jwt
 
 PRODUCT = "taiji-agent"
 PRIVATE_KEY_ENV = "TAIJI_LICENSE_PRIVATE_KEY_FILE"
-MACHINE_BINDING_TYPE = "machine_fingerprint_v1"
+MACHINE_BINDING_TYPE = "machine_fingerprint_v2"
 MACHINE_CODE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file"
 

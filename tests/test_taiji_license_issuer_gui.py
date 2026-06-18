@@ -51,7 +51,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const machineRequest = {{
                   request_type: 'taiji_machine_license_request',
                   product: 'taiji-agent',
-                  binding_type: 'machine_fingerprint_v1',
+                  binding_type: 'machine_fingerprint_v2',
                   machine_code: {json.dumps(TEST_MACHINE_CODE)},
                   machine_code_short: 'cccccccccccc',
                   machine_label: '一号终端'
@@ -92,7 +92,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             self.assertEqual(payload["not_before"], "2026-06-11T00:00:00Z")
             self.assertEqual(payload["expires_at"], "2026-07-11T00:00:00Z")
             self.assertEqual(payload["max_version"], "1.2.3")
-            self.assertEqual(payload["binding_type"], "machine_fingerprint_v1")
+            self.assertEqual(payload["binding_type"], "machine_fingerprint_v2")
             self.assertEqual(payload["machine_code"], TEST_MACHINE_CODE)
             self.assertEqual(payload["machine_label"], "一号终端")
             self.assertEqual(payload["activation_mode"], "offline_machine_file")
@@ -122,7 +122,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     now=1781179200,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
                     machine_fingerprint={{
-                        'binding_type': 'machine_fingerprint_v1',
+                        'binding_type': 'machine_fingerprint_v2',
                         'machine_code': {json.dumps(TEST_MACHINE_CODE)},
                         'machine_code_short': 'cccccccccccc',
                     }},
@@ -206,7 +206,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     {
                         "request_type": "taiji_machine_license_request",
                         "product": "taiji-agent",
-                        "binding_type": "machine_fingerprint_v1",
+                        "binding_type": "machine_fingerprint_v2",
                         "machine_code": TEST_MACHINE_CODE,
                         "machine_code_short": "cccccccccccc",
                         "machine_label": "CLI 终端",
@@ -251,7 +251,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     now=1781222400,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
                     machine_fingerprint={{
-                        'binding_type': 'machine_fingerprint_v1',
+                        'binding_type': 'machine_fingerprint_v2',
                         'machine_code': {json.dumps(TEST_MACHINE_CODE)},
                         'machine_code_short': 'cccccccccccc',
                     }},
@@ -284,7 +284,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const machineRequest = {{
                   request_type: 'taiji_machine_license_request',
                   product: 'taiji-agent',
-                  binding_type: 'machine_fingerprint_v1',
+                  binding_type: 'machine_fingerprint_v2',
                   machine_code: {json.dumps(TEST_MACHINE_CODE)},
                   machine_code_short: 'cccccccccccc',
                   machine_label: '桌面终端'
@@ -329,7 +329,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     now=1781222400,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
                     machine_fingerprint={{
-                        'binding_type': 'machine_fingerprint_v1',
+                        'binding_type': 'machine_fingerprint_v2',
                         'machine_code': {json.dumps(TEST_MACHINE_CODE)},
                         'machine_code_short': 'cccccccccccc',
                     }},
@@ -402,7 +402,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     {{
                       request_type: 'taiji_machine_license_request',
                       product: 'taiji-agent',
-                      binding_type: 'machine_fingerprint_v1',
+                      binding_type: 'machine_fingerprint_v2',
                       machine_code: {json.dumps(TEST_MACHINE_CODE)},
                       machine_code_short: 'cccccccccccc',
                       machine_label: '一号终端'
@@ -410,7 +410,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     {{
                       request_type: 'taiji_machine_license_request',
                       product: 'taiji-agent',
-                      binding_type: 'machine_fingerprint_v1',
+                      binding_type: 'machine_fingerprint_v2',
                       machine_code: {json.dumps(OTHER_MACHINE_CODE)},
                       machine_code_short: 'dddddddddddd',
                       machine_label: '二号终端'

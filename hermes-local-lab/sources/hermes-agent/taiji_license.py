@@ -36,9 +36,11 @@ VERSION_ENV = "TAIJI_AGENT_VERSION"
 LICENSE_STATE_SCHEMA_VERSION = 1
 LICENSE_CLOCK_ROLLBACK_TOLERANCE_SECONDS = 300
 LICENSE_STATE_WRITE_THROTTLE_SECONDS = 60
-MACHINE_BINDING_TYPE = "machine_fingerprint_v1"
-MACHINE_FINGERPRINT_SCHEMA_VERSION = 1
-MACHINE_REQUEST_SCHEMA_VERSION = 1
+LEGACY_MACHINE_BINDING_TYPE_V1 = "machine_fingerprint_v1"
+MACHINE_BINDING_TYPE = "machine_fingerprint_v2"
+SUPPORTED_MACHINE_BINDING_TYPES = {LEGACY_MACHINE_BINDING_TYPE_V1, MACHINE_BINDING_TYPE}
+MACHINE_FINGERPRINT_SCHEMA_VERSION = 2
+MACHINE_REQUEST_SCHEMA_VERSION = 2
 MACHINE_REQUEST_TYPE = "taiji_machine_license_request"
 ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file"
 ACTIVATION_MODE_ONLINE_CODE = "online_code"
@@ -297,7 +299,30 @@ def _valid_machine_code(machine_code: Any) -> bool:
     return bool(text and re.fullmatch(r"sha256:[0-9a-f]{64}", text))
 
 
-def _collect_machine_components() -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+def _machine_code_for_binding(
+    machine_fingerprint: Mapping[str, Any],
+    binding_type: Optional[str],
+) -> Optional[str]:
+    if not binding_type:
+        return _optional_str(machine_fingerprint.get("machine_code"))
+    if _optional_str(machine_fingerprint.get("binding_type")) == binding_type:
+        machine_code = _optional_str(machine_fingerprint.get("machine_code"))
+        if _valid_machine_code(machine_code):
+            return machine_code
+    alternates = machine_fingerprint.get("alternate_machine_codes")
+    if isinstance(alternates, list):
+        for item in alternates:
+            if not isinstance(item, Mapping):
+                continue
+            if _optional_str(item.get("binding_type")) != binding_type:
+                continue
+            machine_code = _optional_str(item.get("machine_code"))
+            if _valid_machine_code(machine_code):
+                return machine_code
+    return None
+
+
+def _collect_machine_components() -> tuple[list[tuple[str, str]], list[dict[str, Any]], list[str]]:
     components: list[tuple[str, str]] = []
     signals: list[dict[str, Any]] = []
 
@@ -326,8 +351,23 @@ def _collect_machine_components() -> tuple[list[tuple[str, str]], list[dict[str,
     if not macs and not components and not Path("/sys/class/net").exists():
         macs = _collect_uuid_node_mac()
     signals.append({"name": "physical_mac", "available": bool(macs), "count": len(macs)})
-    components.extend(("physical_mac", mac) for mac in macs)
-    return sorted(components), signals
+    return sorted(components), signals, sorted(set(macs))
+
+
+def _machine_code_from_components(*, binding_type: str, components: list[tuple[str, str]]) -> Optional[str]:
+    if not components:
+        return None
+    material = json.dumps(
+        {
+            "product": PRODUCT,
+            "binding_type": binding_type,
+            "components": sorted(components),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _fingerprint_from_components(
@@ -337,19 +377,10 @@ def _fingerprint_from_components(
     now_ts: float,
 ) -> dict[str, Any]:
     hostname = socket.gethostname() or ""
-    machine_code: Optional[str] = None
-    if components:
-        material = json.dumps(
-            {
-                "product": PRODUCT,
-                "binding_type": MACHINE_BINDING_TYPE,
-                "components": components,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        machine_code = "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+    machine_code = _machine_code_from_components(
+        binding_type=MACHINE_BINDING_TYPE,
+        components=components,
+    )
     return {
         "binding_type": MACHINE_BINDING_TYPE,
         "collection_version": MACHINE_FINGERPRINT_SCHEMA_VERSION,
@@ -367,6 +398,26 @@ def _coerce_machine_fingerprint(machine_fingerprint: Optional[Mapping[str, Any]]
     machine_code = _optional_str(machine_fingerprint.get("machine_code"))
     if machine_code and not _valid_machine_code(machine_code):
         machine_code = None
+    alternate_machine_codes: list[dict[str, Any]] = []
+    alternates = machine_fingerprint.get("alternate_machine_codes")
+    if isinstance(alternates, list):
+        for item in alternates:
+            if not isinstance(item, Mapping):
+                continue
+            alternate_binding_type = _optional_str(item.get("binding_type"))
+            alternate_machine_code = _optional_str(item.get("machine_code"))
+            if alternate_binding_type not in SUPPORTED_MACHINE_BINDING_TYPES:
+                continue
+            if not _valid_machine_code(alternate_machine_code):
+                continue
+            alternate_machine_codes.append(
+                {
+                    "binding_type": alternate_binding_type,
+                    "machine_code": alternate_machine_code,
+                    "machine_code_short": _optional_str(item.get("machine_code_short"))
+                    or _machine_code_short(alternate_machine_code),
+                }
+            )
     return {
         "binding_type": _optional_str(machine_fingerprint.get("binding_type")) or MACHINE_BINDING_TYPE,
         "collection_version": machine_fingerprint.get("collection_version") or MACHINE_FINGERPRINT_SCHEMA_VERSION,
@@ -376,6 +427,7 @@ def _coerce_machine_fingerprint(machine_fingerprint: Optional[Mapping[str, Any]]
         "machine_code_short": _optional_str(machine_fingerprint.get("machine_code_short"))
         or _machine_code_short(machine_code),
         "signals": machine_fingerprint.get("signals") if isinstance(machine_fingerprint.get("signals"), list) else [],
+        "alternate_machine_codes": alternate_machine_codes,
     }
 
 
@@ -388,8 +440,22 @@ def get_machine_fingerprint(
     if use_cache and now is None and _MACHINE_FINGERPRINT_CACHE is not None:
         return dict(_MACHINE_FINGERPRINT_CACHE)
     now_ts = time.time() if now is None else float(now)
-    components, signals = _collect_machine_components()
+    components, signals, macs = _collect_machine_components()
     fingerprint = _fingerprint_from_components(components=components, signals=signals, now_ts=now_ts)
+    legacy_components = sorted([*components, *(("physical_mac", mac) for mac in macs)])
+    legacy_machine_code = _machine_code_from_components(
+        binding_type=LEGACY_MACHINE_BINDING_TYPE_V1,
+        components=legacy_components,
+    )
+    fingerprint["alternate_machine_codes"] = []
+    if _valid_machine_code(legacy_machine_code):
+        fingerprint["alternate_machine_codes"].append(
+            {
+                "binding_type": LEGACY_MACHINE_BINDING_TYPE_V1,
+                "machine_code": legacy_machine_code,
+                "machine_code_short": _machine_code_short(legacy_machine_code),
+            }
+        )
     if use_cache and now is None:
         _MACHINE_FINGERPRINT_CACHE = dict(fingerprint)
     return fingerprint
@@ -488,9 +554,14 @@ def _status(
         remaining_days = max(0, int(math.ceil((exp_ts - now_ts) / 86400)))
     local_machine_code = None
     local_machine_code_short = None
+    bound_binding_type = _optional_str(payload.get("binding_type"))
     if machine_fingerprint:
-        local_machine_code = _optional_str(machine_fingerprint.get("machine_code"))
-        local_machine_code_short = _optional_str(machine_fingerprint.get("machine_code_short")) or _machine_code_short(local_machine_code)
+        local_machine_code = _machine_code_for_binding(machine_fingerprint, bound_binding_type) or _optional_str(
+            machine_fingerprint.get("machine_code")
+        )
+        local_machine_code_short = _machine_code_short(local_machine_code) or _optional_str(
+            machine_fingerprint.get("machine_code_short")
+        )
     bound_machine_code = _optional_str(payload.get("machine_code"))
     bound_machine_code_short = _machine_code_short(bound_machine_code)
     machine_bound = bool(bound_machine_code)
@@ -686,7 +757,7 @@ def _check_machine_binding(
     binding_type = _optional_str(payload.get("binding_type"))
     bound_machine_code = _optional_str(payload.get("machine_code"))
     has_binding_claim = bool(binding_type or bound_machine_code)
-    has_complete_binding = binding_type == MACHINE_BINDING_TYPE and _valid_machine_code(bound_machine_code)
+    has_complete_binding = binding_type in SUPPORTED_MACHINE_BINDING_TYPES and _valid_machine_code(bound_machine_code)
 
     if machine_binding_required and not has_complete_binding:
         return _status(
@@ -717,7 +788,7 @@ def _check_machine_binding(
             machine_matched=False,
         )
 
-    local_machine_code = _optional_str(machine_fingerprint.get("machine_code"))
+    local_machine_code = _machine_code_for_binding(machine_fingerprint, binding_type)
     if not _valid_machine_code(local_machine_code):
         return _status(
             "invalid",

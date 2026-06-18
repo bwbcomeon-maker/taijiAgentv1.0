@@ -13,6 +13,15 @@ import taiji_license
 TEST_MACHINE_CODE = "sha256:" + "a" * 64
 OTHER_MACHINE_CODE = "sha256:" + "b" * 64
 TEST_MACHINE_FINGERPRINT = {
+    "binding_type": "machine_fingerprint_v2",
+    "machine_code": TEST_MACHINE_CODE,
+    "machine_code_short": "aaaaaaaaaaaa",
+    "hostname": "test-host",
+    "generated_at": "2026-06-12T00:00:00Z",
+    "collection_version": 2,
+    "signals": [{"name": "machine_id", "available": True}],
+}
+LEGACY_MACHINE_FINGERPRINT = {
     "binding_type": "machine_fingerprint_v1",
     "machine_code": TEST_MACHINE_CODE,
     "machine_code_short": "aaaaaaaaaaaa",
@@ -22,12 +31,12 @@ TEST_MACHINE_FINGERPRINT = {
     "signals": [{"name": "machine_id", "available": True}],
 }
 UNAVAILABLE_MACHINE_FINGERPRINT = {
-    "binding_type": "machine_fingerprint_v1",
+    "binding_type": "machine_fingerprint_v2",
     "machine_code": None,
     "machine_code_short": None,
     "hostname": "test-host",
     "generated_at": "2026-06-12T00:00:00Z",
-    "collection_version": 1,
+    "collection_version": 2,
     "signals": [{"name": "machine_id", "available": False}],
 }
 
@@ -54,7 +63,7 @@ def _write_token(path, private_pem, **overrides):
         "customer": "测试客户",
         "product": "taiji-agent",
         "aud": "taiji-agent",
-        "binding_type": "machine_fingerprint_v1",
+        "binding_type": "machine_fingerprint_v2",
         "machine_code": TEST_MACHINE_CODE,
         "machine_label": "测试终端",
         "activation_mode": "offline_machine_file",
@@ -153,6 +162,41 @@ def test_macos_machine_fingerprint_uses_stable_platform_uuid(monkeypatch):
     assert any(
         signal["name"] == "macos_platform_uuid" and signal["available"]
         for signal in first["signals"]
+    )
+
+
+def test_machine_fingerprint_v2_ignores_physical_mac_changes(monkeypatch):
+    mac_sets = iter(
+        [
+            ["00:11:22:33:44:55"],
+            ["66:77:88:99:aa:bb"],
+            [],
+        ]
+    )
+
+    def fake_read_machine_file(path):
+        lookup = {
+            "/sys/class/dmi/id/product_uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "/sys/class/dmi/id/board_serial": "board-serial-1",
+            "/etc/machine-id": "machine-id-1",
+            "/var/lib/dbus/machine-id": None,
+        }
+        return lookup.get(str(path))
+
+    monkeypatch.setattr(taiji_license, "_read_machine_file", fake_read_machine_file)
+    monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: next(mac_sets))
+    monkeypatch.setattr(taiji_license, "_collect_macos_platform_uuid", lambda: None)
+
+    wireless = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_000)
+    wired = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_001)
+    disconnected = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_002)
+
+    assert wireless["binding_type"] == "machine_fingerprint_v2"
+    assert wireless["collection_version"] == 2
+    assert wireless["machine_code"] == wired["machine_code"] == disconnected["machine_code"]
+    assert any(
+        signal["name"] == "physical_mac" and signal["count"] == 1
+        for signal in wireless["signals"]
     )
 
 
@@ -546,6 +590,23 @@ def test_machine_bound_license_requires_local_fingerprint(tmp_path, signing_keys
     assert "机器码" in status.message
 
 
+def test_legacy_v1_machine_bound_license_is_still_accepted(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    path = tmp_path / "legacy-v1.jwt"
+    _write_token(path, private_pem, binding_type="machine_fingerprint_v1")
+
+    status = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=LEGACY_MACHINE_FINGERPRINT,
+    )
+
+    assert status.status == "valid"
+    assert status.machine_bound is True
+    assert status.machine_matched is True
+
+
 def test_unbound_license_can_be_read_when_machine_binding_is_explicitly_disabled(tmp_path, signing_keys):
     private_pem, public_pem = signing_keys
     path = tmp_path / "legacy.jwt"
@@ -575,7 +636,8 @@ def test_machine_request_is_redacted_and_contains_short_fingerprint():
     assert request["product"] == "taiji-agent"
     assert request["customer"] == "测试客户"
     assert request["machine_label"] == "一号终端"
-    assert request["binding_type"] == "machine_fingerprint_v1"
+    assert request["binding_type"] == "machine_fingerprint_v2"
+    assert request["collection_version"] == 2
     assert request["machine_code"] == TEST_MACHINE_CODE
     assert request["machine_code_short"] == "aaaaaaaaaaaa"
     raw = json.dumps(request, ensure_ascii=False)
