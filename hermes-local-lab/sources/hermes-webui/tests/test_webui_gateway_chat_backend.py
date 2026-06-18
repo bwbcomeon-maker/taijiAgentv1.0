@@ -24,6 +24,9 @@ from api.gateway_chat import (
 )
 
 
+WEBUI_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _assert_no_public_hermes(value):
     serialized = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
     assert "hermes" not in serialized.lower()
@@ -199,7 +202,7 @@ def test_gateway_sse_error_event_sanitizes_model_configuration_errors():
 
 
 def test_frontend_renders_gateway_auth_error_with_specific_label():
-    src = Path("static/messages.js").read_text(encoding="utf-8")
+    src = (WEBUI_ROOT / "static/messages.js").read_text(encoding="utf-8")
     start = src.find("source.addEventListener('apperror'")
     end = src.find("source.addEventListener('warning'", start)
     assert start != -1 and end != -1, "apperror handler not found"
@@ -215,7 +218,7 @@ def test_frontend_renders_gateway_auth_error_with_specific_label():
 
 
 def test_gateway_auth_label_i18n_key_exists_for_every_locale():
-    src = Path("static/i18n.js").read_text(encoding="utf-8")
+    src = (WEBUI_ROOT / "static/i18n.js").read_text(encoding="utf-8")
     locale_names = [
         match.group("quoted") or match.group("plain")
         for match in re.finditer(
@@ -233,8 +236,8 @@ def test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only()
     # niche self-hosted feature). The contract — that gateway_chat is documented
     # as an operator-only diagnostic, not a user-facing banner — now lives there.
     # CHANGELOG keeps its release-note entry. (Contract test moved with content.)
-    advanced = Path("docs/advanced-chat-setup.md").read_text(encoding="utf-8")
-    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    advanced = (WEBUI_ROOT / "docs/advanced-chat-setup.md").read_text(encoding="utf-8")
+    changelog = (WEBUI_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     for text in (advanced, changelog):
         assert "gateway_chat" in text
         assert "operator diagnostic" in text

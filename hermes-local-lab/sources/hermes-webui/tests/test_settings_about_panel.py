@@ -19,7 +19,9 @@ def test_about_copy_is_developer_source_and_not_runtime_settings():
     payload = get_about_payload()
 
     assert set(payload) == {"description"}
-    assert "太极 Agent" in payload["description"]
+    assert "太极智能体 桌面版" in payload["description"]
+    assert "乾元版 v0.1.7743" in payload["description"]
+    assert "太极 Agent" not in payload["description"]
     assert "版权所有" in payload["description"]
     assert "授权范围" in payload["description"]
 
@@ -51,7 +53,8 @@ def test_about_endpoint_returns_developer_source_payload():
     payload = captured["data"]
     assert captured["status"] == 200
     assert set(payload) == {"description"}
-    assert "太极 Agent" in payload["description"]
+    assert "太极智能体 桌面版" in payload["description"]
+    assert "乾元版 v0.1.7743" in payload["description"]
 
 
 def test_settings_menu_and_main_area_expose_about_panel():
@@ -97,8 +100,8 @@ def test_about_panel_uses_native_product_sheet_structure():
         'class="settings-about-mark"',
         'class="settings-about-note"',
         'static/assets/taiji/logo/logo-mark.png',
-        "太极 Agent",
-        "企业级本地智能助理",
+        "太极智能体 桌面版",
+        "乾元版 v0.1.7743",
         "此关于信息由开发人员在发行前维护，打包后随产品版本固定。",
     ):
         assert expected in about_html
