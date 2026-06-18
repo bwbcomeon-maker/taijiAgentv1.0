@@ -44,35 +44,67 @@ def test_taiji_project_filters_are_rendered_from_projects():
     assert 'id="taijiProjectFilters"' in INDEX_HTML
     assert "function renderProjectFilters()" in HOME_JS
     assert "taijiProjectFilters" in HOME_JS
-    assert 'data-taiji-session-filter="project:' in HOME_JS
+    assert "taijiProjectFilterLabel" in HOME_JS
+    assert "taijiProjectPanel" in HOME_JS
     assert "session.project_id!==projectId" in HOME_JS
     assert "state.sessionFilter=`project:${res.project.project_id}`" in HOME_JS
     assert ".taiji-project-filters" in STYLE_CSS
 
 
-def test_taiji_project_filters_use_stable_second_row_scroll_lane():
+def test_taiji_project_filters_use_compact_dropdown_management_surface():
     filter_row = _declarations(_rule_body(STYLE_CSS, ".taiji-filter-row"))
     project_filters = _declarations(_rule_body(STYLE_CSS, ".taiji-project-filters"))
     add_button = _declarations(_rule_bodies(STYLE_CSS, ".taiji-filter-add")[-1])
-    empty_project_filters = _declarations(_rule_body(STYLE_CSS, ".taiji-project-filters:empty"))
+    trigger = _declarations(_rule_body(STYLE_CSS, ".taiji-project-filter-trigger"))
+    panel = _declarations(_rule_body(STYLE_CSS, ".taiji-project-panel"))
+    list_rule = _declarations(_rule_body(STYLE_CSS, ".taiji-project-panel-list"))
 
     assert filter_row.get("display") == "grid"
-    assert filter_row.get("grid-template-columns") == "auto auto minmax(0,1fr) auto"
+    assert filter_row.get("grid-template-columns") == "auto auto minmax(0,1fr) auto auto"
     assert filter_row.get("grid-template-areas") == (
-        '"all ungrouped spacer add" "projects projects projects projects"'
+        '"all ungrouped spacer projects add"'
     )
 
     assert add_button.get("grid-area") == "add"
     assert add_button.get("justify-self") == "end"
 
     assert project_filters.get("grid-area") == "projects"
-    assert project_filters.get("grid-column") == "1 / -1"
-    assert project_filters.get("grid-row") == "2"
-    assert project_filters.get("width") == "100%"
-    assert project_filters.get("max-width") == "100%"
-    assert project_filters.get("overflow-x") == "auto"
-    assert project_filters.get("scrollbar-width") == "none"
-    assert empty_project_filters.get("display") == "none"
+    assert project_filters.get("position") == "relative"
+    assert project_filters.get("justify-self") == "end"
+
+    assert trigger.get("display") == "inline-flex"
+    assert trigger.get("min-width") == "88px"
+    assert trigger.get("max-width") == "132px"
+
+    assert panel.get("position") == "absolute"
+    assert panel.get("right") == "0"
+    assert panel.get("top") == "calc(100% + 8px)"
+    assert panel.get("z-index") == "30"
+
+    assert list_rule.get("overflow-y") == "auto"
+    assert list_rule.get("max-height") == "210px"
+
+
+def test_taiji_project_dropdown_exposes_crud_actions():
+    assert "function toggleProjectPanel" in HOME_JS
+    assert "function renderProjectPanel" in HOME_JS
+    assert "function renameProjectFromHome" in HOME_JS
+    assert "function deleteProjectFromHome" in HOME_JS
+    assert "function filterProjectsForPanel" in HOME_JS
+    assert "'/api/projects/rename'" in HOME_JS
+    assert "'/api/projects/delete'" in HOME_JS
+    assert "showConfirmDialog" in HOME_JS
+    assert 'data-taiji-project-action="select"' in HOME_JS
+    assert 'data-taiji-project-action="rename"' in HOME_JS
+    assert 'data-taiji-project-action="delete"' in HOME_JS
+    assert 'data-taiji-project-action="create"' in HOME_JS
+    assert 'aria-haspopup="dialog"' in HOME_JS
+    assert 'placeholder="搜索分组"' in HOME_JS
+    assert "新建分组" in HOME_JS
+    assert "重命名分组" in HOME_JS
+    assert "删除分组" in HOME_JS
+    assert ".taiji-project-panel-row" in STYLE_CSS
+    assert ".taiji-project-panel-action.is-danger" in STYLE_CSS
 
 
 def test_taiji_recent_sessions_collect_crud_actions_in_more_menu():

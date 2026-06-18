@@ -1,4 +1,4 @@
-/* global S, api, switchPanel, renderSessionList, loadSession, newSession, send, autoResize, updateSendBtn, showPromptDialog, showToast, deleteSession */
+/* global S, api, switchPanel, renderSessionList, loadSession, newSession, send, autoResize, updateSendBtn, showConfirmDialog, showPromptDialog, showToast, deleteSession */
 (function(){
   'use strict';
 
@@ -38,6 +38,8 @@
     sessions:[],
     projects:[],
     sessionFilter:'all',
+    projectPanelOpen:false,
+    projectSearch:'',
     showAllSessions:false,
     search:'',
     secondaryCollapsed:false,
@@ -49,6 +51,8 @@
   };
   let projectMenuClickClose=null;
   let projectMenuKeyClose=null;
+  let projectPanelClickClose=null;
+  let projectPanelKeyClose=null;
   let sessionActionMenuAnchor=null;
   let sessionActionMenuClickClose=null;
   let sessionActionMenuKeyClose=null;
@@ -281,6 +285,7 @@
     if(name==='send'&&typeof send==='function') return send;
     if(name==='autoResize'&&typeof autoResize==='function') return autoResize;
     if(name==='updateSendBtn'&&typeof updateSendBtn==='function') return updateSendBtn;
+    if(name==='showConfirmDialog'&&typeof showConfirmDialog==='function') return showConfirmDialog;
     if(name==='showPromptDialog'&&typeof showPromptDialog==='function') return showPromptDialog;
     if(name==='showToast'&&typeof showToast==='function') return showToast;
     return typeof window[name]==='function'?window[name]:null;
@@ -486,6 +491,63 @@
     }
   }
 
+  function unbindProjectPanelClose(){
+    if(projectPanelClickClose){
+      document.removeEventListener('click',projectPanelClickClose);
+      projectPanelClickClose=null;
+    }
+    if(projectPanelKeyClose){
+      document.removeEventListener('keydown',projectPanelKeyClose);
+      projectPanelKeyClose=null;
+    }
+  }
+
+  function bindProjectPanelClose(){
+    unbindProjectPanelClose();
+    projectPanelClickClose=event=>{
+      const host=$('taijiProjectFilters');
+      if(host&&host.contains(event.target)) return;
+      closeProjectPanel(true);
+    };
+    projectPanelKeyClose=event=>{
+      if(event.key==='Escape') closeProjectPanel(true);
+    };
+    setTimeout(()=>{
+      document.addEventListener('click',projectPanelClickClose);
+      document.addEventListener('keydown',projectPanelKeyClose);
+    },0);
+  }
+
+  function closeProjectPanel(render=false){
+    state.projectPanelOpen=false;
+    unbindProjectPanelClose();
+    if(render) renderProjectFilters();
+  }
+
+  function openProjectPanel(){
+    state.projectPanelOpen=true;
+    closeSessionActionMenu();
+    closeProjectMenu();
+    renderProjectFilters();
+    bindProjectPanelClose();
+    setTimeout(()=>{
+      const input=$('taijiProjectSearch');
+      if(input) input.focus();
+    },0);
+  }
+
+  function toggleProjectPanel(event){
+    if(event){
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if(state.projectPanelOpen){
+      closeProjectPanel(true);
+    }else{
+      openProjectPanel();
+    }
+  }
+
   function closeSessionActionMenu(){
     document.querySelectorAll('.taiji-session-action-menu').forEach(menu=>menu.remove());
     if(sessionActionMenuAnchor){
@@ -501,6 +563,58 @@
       document.removeEventListener('keydown',sessionActionMenuKeyClose);
       sessionActionMenuKeyClose=null;
     }
+  }
+
+  function projectSessionCount(projectId){
+    return state.sessions.filter(session=>session&&session.project_id===projectId).length;
+  }
+
+  function filterProjectsForPanel(){
+    const q=state.projectSearch.trim().toLowerCase();
+    if(!q) return state.projects.slice();
+    return state.projects.filter(project=>[
+      project&&project.name,
+      project&&project.project_id
+    ].filter(Boolean).join(' ').toLowerCase().includes(q));
+  }
+
+  function activeProjectName(){
+    const projectId=activeProjectId();
+    return projectId?projectNameById(projectId):'';
+  }
+
+  function renderProjectPanel(){
+    const panel=$('taijiProjectPanel');
+    if(!panel) return;
+    const list=panel.querySelector('[data-taiji-project-list]');
+    const count=panel.querySelector('[data-taiji-project-count]');
+    if(count) count.textContent=`${state.projects.length} 个分组`;
+    if(!list) return;
+    const activeId=activeProjectId();
+    const projects=filterProjectsForPanel();
+    if(!projects.length){
+      list.innerHTML=`<div class="taiji-project-panel-empty">${state.projectSearch?'没有匹配分组':'暂无分组'}</div>`;
+      return;
+    }
+    list.innerHTML=projects.map(project=>{
+      if(!project||!project.project_id) return '';
+      const projectId=escapeHtml(project.project_id);
+      const name=escapeHtml(project.name||'未命名分组');
+      const color=taijiSafeProjectColor(project);
+      const countLabel=projectSessionCount(project.project_id);
+      const active=project.project_id===activeId?' is-active':'';
+      const selected=project.project_id===activeId?'true':'false';
+      const dot=color?`<span class="taiji-project-dot" style="background:${color}"></span>`:'<span class="taiji-project-dot"></span>';
+      const editIcon=typeof li==='function'?li('pencil',14):'';
+      const trashIcon=typeof li==='function'?li('trash-2',14):'';
+      return `<div class="taiji-project-panel-row${active}" role="option" tabindex="0" aria-selected="${selected}" data-taiji-project-action="select" data-project-id="${projectId}" title="${name}">
+        <span class="taiji-project-panel-main">${dot}<span class="taiji-project-panel-name">${name}</span><span class="taiji-project-panel-count">${countLabel}</span></span>
+        <span class="taiji-project-panel-actions" aria-label="分组操作">
+          <button class="taiji-project-panel-action" type="button" data-taiji-project-action="rename" data-project-id="${projectId}" aria-label="重命名分组：${name}" title="重命名分组">${editIcon}<span>重命名分组</span></button>
+          <button class="taiji-project-panel-action is-danger" type="button" data-taiji-project-action="delete" data-project-id="${projectId}" aria-label="删除分组：${name}" title="删除分组">${trashIcon}<span>删除分组</span></button>
+        </span>
+      </div>`;
+    }).join('');
   }
 
   function buildProjectMenuButton(label,{active=false,color='',create=false}={},onClick){
@@ -579,6 +693,85 @@
       if(toastFn) toastFn('分组创建失败：'+(error&&error.message||error),3000,'error');
       return false;
     }
+  }
+
+  async function renameProjectFromHome(projectId){
+    const project=projectById(projectId);
+    const promptFn=globalFn('showPromptDialog');
+    const apiFn=globalFn('api');
+    const toastFn=globalFn('showToast');
+    if(!project||!project.project_id) return false;
+    if(!promptFn||!apiFn){
+      if(toastFn) toastFn('重命名分组功能暂不可用',2500,'error');
+      return false;
+    }
+    const next=await promptFn({
+      title:'重命名分组',
+      message:'输入新的分组名称',
+      value:project.name||'未命名分组',
+      placeholder:'分组名称',
+      confirmLabel:'保存',
+      selectAll:true
+    });
+    const name=String(next||'').trim();
+    if(!name) return false;
+    try{
+      const res=await apiFn('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:project.project_id,name})});
+      const nextProject=res&&res.project?res.project:{...project,name};
+      state.projects=state.projects.map(item=>item&&item.project_id===project.project_id?{...item,...nextProject}:item);
+      renderProjectFilters();
+      renderRecentSessions();
+      if(toastFn) toastFn('分组已重命名');
+      return true;
+    }catch(error){
+      if(toastFn) toastFn('重命名分组失败：'+(error&&error.message||error),3000,'error');
+      return false;
+    }
+  }
+
+  async function deleteProjectFromHome(projectId){
+    const project=projectById(projectId);
+    const confirmFn=globalFn('showConfirmDialog');
+    const apiFn=globalFn('api');
+    const toastFn=globalFn('showToast');
+    const renderListFn=globalFn('renderSessionList');
+    if(!project||!project.project_id) return false;
+    if(!confirmFn||!apiFn){
+      if(toastFn) toastFn('删除分组功能暂不可用',2500,'error');
+      return false;
+    }
+    const ok=await confirmFn({
+      title:'删除分组',
+      message:`确定删除“${project.name||'未命名分组'}”吗？分组内会话会回到未分组。`,
+      confirmLabel:'删除',
+      cancelLabel:'取消',
+      danger:true,
+      focusCancel:true
+    });
+    if(!ok) return false;
+    try{
+      await apiFn('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:project.project_id})});
+      state.projects=state.projects.filter(item=>item&&item.project_id!==project.project_id);
+      state.sessions=state.sessions.map(session=>session&&session.project_id===project.project_id?{...session,project_id:null}:session);
+      if(state.sessionFilter===`project:${project.project_id}`) state.sessionFilter=SESSION_FILTERS.all;
+      if(renderListFn) await renderListFn();
+      await refreshSessions();
+      if(toastFn) toastFn('分组已删除');
+      return true;
+    }catch(error){
+      if(toastFn) toastFn('删除分组失败：'+(error&&error.message||error),3000,'error');
+      return false;
+    }
+  }
+
+  function selectProjectFromPanel(projectId){
+    if(projectId&&projectById(projectId)){
+      state.sessionFilter=`project:${projectId}`;
+    }else{
+      state.sessionFilter=SESSION_FILTERS.all;
+    }
+    closeProjectPanel(false);
+    renderRecentSessions();
   }
 
   function showProjectMenuForSession(sid,anchorEl,event){
@@ -704,6 +897,7 @@
     if(!session||!anchorEl) return;
     closeSessionActionMenu();
     closeProjectMenu();
+    closeProjectPanel(false);
     const sessionId=String(sid);
     const editIcon=typeof li==='function'?li('pencil',15):'';
     const folderIcon=typeof li==='function'?li('folder',15):'';
@@ -757,16 +951,27 @@
   function renderProjectFilters(){
     const container=$('taijiProjectFilters');
     if(!container) return;
-    const html=state.projects.map(project=>{
-      if(!project||!project.project_id) return '';
-      const projectId=escapeHtml(project.project_id);
-      const name=escapeHtml(project.name||'未命名分组');
-      const color=taijiSafeProjectColor(project);
-      const dot=color?`<span class="taiji-project-dot" style="background:${color}"></span>`:'';
-      const active=state.sessionFilter===`project:${project.project_id}`?' is-active':'';
-      return `<button class="taiji-filter taiji-project-filter${active}" type="button" data-taiji-session-filter="project:${projectId}" title="${name}">${dot}<span>${name}</span></button>`;
-    }).join('');
-    container.innerHTML=html;
+    const projectCount=state.projects.length;
+    const activeName=activeProjectName();
+    const active=activeName?' is-active':'';
+    const label=escapeHtml(`分组 ${projectCount}`);
+    const title=escapeHtml(activeName?`当前分组：${activeName}`:'会话分组');
+    const expanded=state.projectPanelOpen?'true':'false';
+    const hidden=state.projectPanelOpen?'':' hidden';
+    const searchValue=escapeHtml(state.projectSearch);
+    const chevron=typeof li==='function'?li(state.projectPanelOpen?'chevron-up':'chevron-down',14):'';
+    const searchIcon=typeof li==='function'?li('search',14):'';
+    const plusIcon=typeof li==='function'?li('plus',14):'';
+    container.innerHTML=`<button class="taiji-project-filter-trigger${active}" id="taijiProjectFilterTrigger" type="button" aria-haspopup="dialog" aria-expanded="${expanded}" aria-controls="taijiProjectPanel" data-taiji-project-action="toggle" title="${title}">
+      <span id="taijiProjectFilterLabel">${label}</span><span class="taiji-project-filter-trigger-icon" aria-hidden="true">${chevron}</span>
+    </button>
+    <div class="taiji-project-panel" id="taijiProjectPanel" role="dialog" aria-label="会话分组"${hidden}>
+      <div class="taiji-project-panel-head"><strong>会话分组</strong><span data-taiji-project-count>${projectCount} 个分组</span></div>
+      <label class="taiji-project-panel-search" aria-label="搜索分组"><span aria-hidden="true">${searchIcon}</span><input id="taijiProjectSearch" type="search" placeholder="搜索分组" value="${searchValue}" autocomplete="off"></label>
+      <div class="taiji-project-panel-list" role="listbox" aria-label="分组列表" data-taiji-project-list></div>
+      <button class="taiji-project-panel-create" type="button" data-taiji-project-action="create">${plusIcon}<span>新建分组</span></button>
+    </div>`;
+    renderProjectPanel();
   }
 
   function syncSessionFilterButtons(){
@@ -912,11 +1117,44 @@
     const filterRow=document.querySelector('.taiji-filter-row');
     if(filterRow&&!filterRow.__taijiBound){
       filterRow.__taijiBound=true;
-      filterRow.addEventListener('click',event=>{
+      filterRow.addEventListener('click',async event=>{
+        const projectAction=event.target&&event.target.closest?event.target.closest('[data-taiji-project-action]'):null;
+        if(projectAction&&filterRow.contains(projectAction)){
+          const action=projectAction.dataset.taijiProjectAction;
+          const projectId=projectAction.dataset.projectId||projectAction.closest('[data-project-id]')&&projectAction.closest('[data-project-id]').dataset.projectId||'';
+          event.preventDefault();
+          event.stopPropagation();
+          if(action==='toggle'){
+            toggleProjectPanel(event);
+          }else if(action==='select'){
+            selectProjectFromPanel(projectId);
+          }else if(action==='rename'){
+            await renameProjectFromHome(projectId);
+          }else if(action==='delete'){
+            await deleteProjectFromHome(projectId);
+          }else if(action==='create'){
+            await createProject();
+          }
+          return;
+        }
         const btn=event.target&&event.target.closest?event.target.closest('[data-taiji-session-filter]'):null;
         if(!btn||!filterRow.contains(btn)) return;
+        closeProjectPanel(false);
         state.sessionFilter=btn.dataset.taijiSessionFilter||SESSION_FILTERS.all;
         renderRecentSessions();
+      });
+      filterRow.addEventListener('input',event=>{
+        const input=event.target&&event.target.closest?event.target.closest('#taijiProjectSearch'):null;
+        if(!input||!filterRow.contains(input)) return;
+        state.projectSearch=input.value||'';
+        renderProjectPanel();
+      });
+      filterRow.addEventListener('keydown',event=>{
+        const row=event.target&&event.target.closest?event.target.closest('.taiji-project-panel-row[data-taiji-project-action="select"]'):null;
+        if(!row||!filterRow.contains(row)) return;
+        if(event.key!=='Enter'&&event.key!==' ') return;
+        event.preventDefault();
+        selectProjectFromPanel(row.dataset.projectId||'');
       });
     }
   }
@@ -966,6 +1204,7 @@
         state.projects=state.projects.filter(project=>project&&project.project_id!==res.project.project_id).concat(res.project);
         state.sessionFilter=`project:${res.project.project_id}`;
       }
+      closeProjectPanel(false);
       const renderListFn=globalFn('renderSessionList');
       if(renderListFn) await renderListFn();
       await refreshSessions();
@@ -1022,6 +1261,7 @@
     if(!sid) return;
     closeSessionActionMenu();
     closeProjectMenu();
+    closeProjectPanel(false);
     if(openChatSessionFn){
       await openChatSessionFn(sid);
     }else if(loadSessionFn){
@@ -1059,6 +1299,7 @@
     state.showAllSessions=!state.showAllSessions;
     renderRecentSessions();
   };
+  window.taijiHomeToggleProjectPanel=toggleProjectPanel;
   window.taijiHomeCreateProject=createProject;
   window.taijiHomeSend=function(){
     const sendFn=globalFn('send');

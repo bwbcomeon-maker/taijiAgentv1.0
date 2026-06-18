@@ -6581,13 +6581,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
   }
   .taiji-filter-row{
     display:grid;
-    grid-template-columns:auto auto minmax(0,1fr) auto;
-    grid-template-areas:
-      "all ungrouped spacer add"
-      "projects projects projects projects";
+    grid-template-columns:auto auto minmax(0,1fr) auto auto;
+    grid-template-areas:"all ungrouped spacer projects add";
     align-items:center;
     gap:8px;
-    row-gap:10px;
     margin-top:clamp(16px,1.12vw,23px);
   }
   .taiji-filter-row > [data-taiji-session-filter="all"]{
@@ -6618,37 +6615,220 @@ main.main.showing-logs > #mainLogs{display:flex;}
   }
   .taiji-project-filters{
     grid-area:projects;
-    grid-column:1 / -1;
-    grid-row:2;
+    position:relative;
+    display:flex;
+    align-items:center;
+    justify-self:end;
+    min-width:0;
+  }
+  .taiji-project-filter-trigger{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+    min-width:88px;
+    max-width:132px;
+    height:clamp(34px,2.18vw,44px);
+    padding:0 12px;
+    border:1px solid rgba(184,207,225,.62);
+    border-radius:10px;
+    color:#25466b;
+    background:rgba(255,255,255,.72);
+    box-shadow:0 6px 13px rgba(33,83,131,.08);
+    font-size:clamp(13px,.84vw,16px);
+    font-weight:650;
+    white-space:nowrap;
+  }
+  .taiji-project-filter-trigger.is-active,
+  .taiji-project-filter-trigger[aria-expanded="true"]{
+    color:#0d3b61;
+    border-color:rgba(8,176,197,.36);
+    background:rgba(214,244,250,.82);
+    box-shadow:0 8px 16px rgba(0,164,190,.1);
+  }
+  .taiji-project-filter-trigger span:first-child{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .taiji-project-filter-trigger-icon{
+    display:inline-flex;
+    flex:0 0 auto;
+    width:14px;
+    height:14px;
+  }
+  .taiji-project-panel{
+    position:absolute;
+    right:0;
+    top:calc(100% + 8px);
+    z-index:30;
+    width:min(252px,calc(100vw - 32px));
+    padding:12px;
+    border:1px solid rgba(184,207,225,.68);
+    border-radius:12px;
+    background:rgba(249,253,255,.96);
+    box-shadow:0 18px 42px rgba(32,82,128,.16),inset 0 1px 0 rgba(255,255,255,.82);
+    backdrop-filter:blur(18px);
+  }
+  .taiji-project-panel[hidden]{
+    display:none;
+  }
+  .taiji-project-panel-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    margin-bottom:10px;
+    color:#0e315c;
+  }
+  .taiji-project-panel-head strong{
+    font-size:14px;
+    line-height:1.2;
+  }
+  .taiji-project-panel-head span{
+    color:#7890a9;
+    font-size:12px;
+    font-weight:650;
+  }
+  .taiji-project-panel-search{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    height:34px;
+    margin-bottom:8px;
+    padding:0 10px;
+    border:1px solid rgba(184,207,225,.58);
+    border-radius:9px;
+    color:#7390ad;
+    background:rgba(255,255,255,.74);
+  }
+  .taiji-project-panel-search input{
+    min-width:0;
+    width:100%;
+    border:0;
+    outline:0;
+    color:#173659;
+    background:transparent;
+    font-size:13px;
+  }
+  .taiji-project-panel-list{
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    max-height:210px;
+    overflow-y:auto;
+    padding-right:2px;
+  }
+  .taiji-project-panel-row{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto;
+    align-items:center;
+    gap:8px;
+    min-height:38px;
+    padding:5px 6px 5px 9px;
+    border:1px solid transparent;
+    border-radius:9px;
+    color:#18395f;
+    cursor:pointer;
+  }
+  .taiji-project-panel-row:hover,
+  .taiji-project-panel-row:focus-visible,
+  .taiji-project-panel-row.is-active{
+    border-color:rgba(8,176,197,.26);
+    background:rgba(214,244,250,.56);
+    outline:0;
+  }
+  .taiji-project-panel-main{
+    min-width:0;
     display:flex;
     align-items:center;
     gap:8px;
-    min-width:0;
-    width:100%;
-    max-width:100%;
-    overflow-x:auto;
-    padding:2px 0 4px;
-    scroll-padding-inline:2px;
-    scrollbar-width:none;
   }
-  .taiji-project-filters:empty{
-    display:none;
-  }
-  .taiji-project-filters::-webkit-scrollbar{
-    display:none;
-  }
-  .taiji-project-filter{
-    display:inline-flex;
-    flex:0 0 auto;
-    align-items:center;
-    gap:7px;
-    max-width:min(150px,100%);
-  }
-  .taiji-project-filter span:last-child{
+  .taiji-project-panel-name{
     min-width:0;
     overflow:hidden;
     text-overflow:ellipsis;
     white-space:nowrap;
+    font-size:13px;
+    font-weight:680;
+  }
+  .taiji-project-panel-count{
+    flex:0 0 auto;
+    min-width:22px;
+    height:18px;
+    padding:0 6px;
+    border-radius:999px;
+    color:#52708e;
+    background:rgba(232,242,250,.78);
+    font-size:11px;
+    line-height:18px;
+    text-align:center;
+  }
+  .taiji-project-panel-actions{
+    display:flex;
+    align-items:center;
+    gap:2px;
+  }
+  .taiji-project-panel-action{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:26px;
+    height:26px;
+    border:1px solid transparent;
+    border-radius:8px;
+    color:#6b88a7;
+    background:transparent;
+  }
+  .taiji-project-panel-action span{
+    position:absolute;
+    width:1px;
+    height:1px;
+    overflow:hidden;
+    clip:rect(0 0 0 0);
+    white-space:nowrap;
+  }
+  .taiji-project-panel-action:hover,
+  .taiji-project-panel-action:focus-visible{
+    border-color:rgba(184,207,225,.58);
+    color:#0b6f86;
+    background:rgba(255,255,255,.72);
+    outline:0;
+  }
+  .taiji-project-panel-action.is-danger:hover,
+  .taiji-project-panel-action.is-danger:focus-visible{
+    border-color:rgba(239,68,68,.22);
+    color:#d64545;
+    background:rgba(255,241,241,.78);
+  }
+  .taiji-project-panel-create{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:7px;
+    width:100%;
+    height:34px;
+    margin-top:8px;
+    border:1px dashed rgba(8,153,180,.34);
+    border-radius:9px;
+    color:#0b6f86;
+    background:rgba(232,249,252,.48);
+    font-size:13px;
+    font-weight:700;
+  }
+  .taiji-project-panel-create:hover,
+  .taiji-project-panel-create:focus-visible{
+    border-style:solid;
+    background:rgba(214,244,250,.72);
+    outline:0;
+  }
+  .taiji-project-panel-empty{
+    display:flex;
+    align-items:center;
+    min-height:42px;
+    padding:0 8px;
+    color:#7890a9;
+    font-size:13px;
   }
   .taiji-project-dot{
     flex:0 0 auto;
@@ -9155,6 +9335,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-new-chat,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-filter,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-project-filter-trigger,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-filter-add,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-view-all{
     border:1px solid rgba(184,208,226,.48)!important;
@@ -9191,6 +9372,16 @@ main.main.showing-logs > #mainLogs{display:flex;}
     border-color:transparent!important;
     color:var(--taiji-ui-heading)!important;
     background:rgba(214,244,250,.82)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-project-filter-trigger.is-active,
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-project-filter-trigger[aria-expanded="true"]{
+    border-color:rgba(8,153,180,.26)!important;
+    background:rgba(214,244,250,.82)!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-project-panel{
+    border:1px solid rgba(184,208,226,.58)!important;
+    background:rgba(249,253,255,.96)!important;
+    box-shadow:0 18px 42px rgba(32,82,128,.14),inset 0 1px 0 rgba(255,255,255,.86)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-session-groups{
     gap:24px!important;
