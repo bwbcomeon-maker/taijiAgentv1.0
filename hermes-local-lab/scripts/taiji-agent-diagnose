@@ -39,6 +39,30 @@ python_bin() {
   fi
 }
 
+desktop_access_token() {
+  if [ -n "${TAIJI_DESKTOP_ACCESS_TOKEN:-}" ]; then
+    printf '%s\n' "$TAIJI_DESKTOP_ACCESS_TOKEN"
+    return 0
+  fi
+  if ! have pgrep || [ ! -d /proc ]; then
+    return 0
+  fi
+
+  local pid token
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    [ -r "/proc/$pid/environ" ] || continue
+    token="$(
+      tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+        | awk -F= '$1=="TAIJI_DESKTOP_ACCESS_TOKEN"{sub(/^[^=]*=/,""); print; exit}'
+    )"
+    if [ -n "$token" ]; then
+      printf '%s\n' "$token"
+      return 0
+    fi
+  done < <(pgrep -f "$WEBUI_DIR/server.py|$WEBUI_DIR/server.pyc|runtime/web/server.py|runtime/web/server.pyc" 2>/dev/null || true)
+}
+
 http_json_summary() {
   local url="$1" kind="$2" py
   py="$(python_bin)"
@@ -48,13 +72,19 @@ http_json_summary() {
   fi
   "$py" - "$url" "$kind" <<'PY' 2>&1 | redact_stream
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
 url, kind = sys.argv[1], sys.argv[2]
 try:
-    with urllib.request.urlopen(url, timeout=5) as response:
+    headers = {}
+    token = os.environ.get("TAIJI_DIAG_DESKTOP_ACCESS_TOKEN", "").strip()
+    if token:
+        headers["X-Taiji-Desktop-Token"] = token
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=5) as response:
         status = response.status
         body = response.read(1024 * 1024)
     print(f"{url} HTTP {status}")
@@ -84,6 +114,64 @@ elif kind == "model":
     print(f"image.model={image.get('model') or '-'}")
 else:
     print(json.dumps(data, ensure_ascii=False, indent=2)[:4000])
+PY
+}
+
+webui_static_asset_summary() {
+  local base_url="$1" py
+  py="$(python_bin)"
+  if [ -z "$py" ]; then
+    printf 'python unavailable; skipped WebUI static asset summary\n'
+    return 0
+  fi
+  "$py" - "$base_url" <<'PY' 2>&1 | redact_stream
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+base_url = sys.argv[1].rstrip("/") + "/"
+headers = {}
+token = os.environ.get("TAIJI_DIAG_DESKTOP_ACCESS_TOKEN", "").strip()
+if token:
+    headers["X-Taiji-Desktop-Token"] = token
+
+def fetch_text(url: str, limit: int = 1024 * 1024) -> str:
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = response.read(limit)
+        print(f"{url} HTTP {response.status}")
+    return body.decode("utf-8", errors="replace")
+
+try:
+    html = fetch_text(base_url)
+except Exception as exc:
+    print(f"webui.index failed: {exc}")
+    raise SystemExit(0)
+
+assets = {}
+for src, name, version in re.findall(r"""(static/(commands|panels)\.js\?v=([^"']+))""", html):
+    assets[name] = {"src": src, "version": version}
+
+commands_version = assets.get("commands", {}).get("version", "")
+panels_version = assets.get("panels", {}).get("version", "")
+print(f"asset.commands.version={commands_version or '-'}")
+print(f"asset.panels.version={panels_version or '-'}")
+
+versions = [item["version"] for item in assets.values() if item.get("version")]
+print(f"asset.version_consistent={str(bool(versions) and len(set(versions)) == 1).lower()}")
+print(f"asset.version_unknown={str(any((not v) or v == 'unknown' for v in versions) or len(versions) < 2).lower()}")
+
+commands = assets.get("commands", {})
+if commands.get("src"):
+    try:
+        commands_js = fetch_text(urllib.parse.urljoin(base_url, commands["src"]), limit=2 * 1024 * 1024)
+        print(f"asset.commands.contains_sendExpertTeamAction={str('sendExpertTeamAction' in commands_js).lower()}")
+    except Exception as exc:
+        print(f"asset.commands.fetch_failed={exc}")
+else:
+    print("asset.commands.contains_sendExpertTeamAction=false")
 PY
 }
 
@@ -330,10 +418,17 @@ attachment_capabilities
 
 section "HTTP Probes"
 if have curl; then
+  DESKTOP_ACCESS_TOKEN="$(desktop_access_token)"
+  export TAIJI_DIAG_DESKTOP_ACCESS_TOKEN="$DESKTOP_ACCESS_TOKEN"
+  printf 'desktop_access_token.available=%s\n' "$(if [ -n "$DESKTOP_ACCESS_TOKEN" ]; then printf true; else printf false; fi)"
   run curl -fsS "http://$AGENT_API_HOST:$AGENT_API_PORT/health"
   run curl -fsS "http://$WEBUI_HOST:$WEBUI_PORT/health"
   http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/settings" settings
   http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/model-config" model
+  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/crons" crons
+  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/expert-teams/catalog" expert_catalog
+  webui_static_asset_summary "http://$WEBUI_HOST:$WEBUI_PORT"
+  unset TAIJI_DIAG_DESKTOP_ACCESS_TOKEN
 fi
 
 section "Recent Logs"

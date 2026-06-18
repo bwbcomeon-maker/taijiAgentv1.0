@@ -10,6 +10,20 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+def _bootstrap_agent_import_path() -> None:
+    """Expose the packaged agent runtime to WebUI-only entrypoints."""
+    agent_dir = os.environ.get("TAIJI_WEBUI_AGENT_DIR", "").strip()
+    if not agent_dir:
+        return
+    agent_dir = os.path.abspath(agent_dir)
+    if not os.path.isdir(agent_dir):
+        return
+    if agent_dir not in sys.path:
+        sys.path.insert(0, agent_dir)
+
+
+_bootstrap_agent_import_path()
+
 # ── Test-mode network isolation ─────────────────────────────────────────────
 # When test network blocking is enabled in the environment, refuse
 # outbound socket connections to anything that is not loopback / RFC1918 /

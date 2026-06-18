@@ -979,14 +979,14 @@ async function sendExpertTeamAction(payload){
   delete body.open_new_session;
   if(S.busy&&!wantsNewSession){
     showToast('专家团任务正在执行。');
-    return;
+    return false;
   }
-  if(wantsNewSession||!S.session){
-    await newSession(wantsNewSession);
-    await renderSessionList();
-  }
-  body.session_id=S.session&&S.session.session_id;
   try{
+    if(wantsNewSession||!S.session){
+      await newSession(wantsNewSession);
+      await renderSessionList();
+    }
+    body.session_id=S.session&&S.session.session_id;
     const data=await api('/api/expert-teams/start',{method:'POST',body:JSON.stringify(body)});
     const run=data&&data.run;
     if(!run||!run.run_id)throw new Error('专家团启动失败');
@@ -1006,8 +1006,10 @@ async function sendExpertTeamAction(payload){
     if(typeof refreshWriteflowStatusDockForActiveSession==='function')refreshWriteflowStatusDockForActiveSession();
     await renderSessionList();
     showToast('专家团已创建，请先完成需求确认。');
+    return true;
   }catch(e){
     showToast('专家团启动失败：'+(e&&e.message||e));
+    return false;
   }
 }
 if(typeof window!=='undefined')window.sendExpertTeamAction=sendExpertTeamAction;

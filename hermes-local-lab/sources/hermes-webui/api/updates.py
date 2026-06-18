@@ -248,24 +248,45 @@ def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | No
     return out + _dirty_suffix(path, timeout=dirty_timeout)
 
 
+def _read_baked_webui_version(repo_root: Path) -> str | None:
+    """Read the packaged WebUI version written by Linux release builds."""
+    version_txt = repo_root / 'api' / '_version.txt'
+    try:
+        baked = version_txt.read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return baked or None
+
+
 def _detect_webui_version() -> str:
     """Detect the running WebUI version from git or a baked-in fallback file.
 
     Resolution order:
-      1. ``git describe --tags --always --dirty`` — works in any git checkout.
+      1. ``TAIJI_WEBUI_VERSION`` — explicit package/runtime override.
+      2. ``git describe --tags --always --dirty`` — works in any git checkout.
          Returns the exact tag on tagged commits (e.g. ``v0.50.124``), a
          post-tag descriptor between releases (e.g. ``v0.50.124-1-ge91325d``),
          or a bare SHA when no tags exist (shallow clones, fresh forks).
-      2. ``api/_version.py`` — a fallback written by the Docker / CI release
+      3. ``api/_version.txt`` — a sourceless package fallback written by the
+         Linux release build.  This survives ``compileall -b`` source pruning.
+      4. ``api/_version.py`` — a fallback written by the Docker / CI release
          workflow when ``.git`` is not present in the image.  Expected to define
          ``__version__ = 'vX.Y.Z'``.
-      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+      5. ``'unknown'`` — last resort; displayed as-is in the settings badge.
     """
+    explicit = os.environ.get('TAIJI_WEBUI_VERSION', '').strip()
+    if explicit:
+        return explicit
+
     # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
     # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
     out = _describe_git_version(REPO_ROOT)
     if out:
         return out
+
+    baked = _read_baked_webui_version(REPO_ROOT)
+    if baked:
+        return baked
 
     # Docker / baked-image fallback: api/_version.py written by CI at build time.
     # Parse with regex rather than exec() — the file holds exactly one assignment

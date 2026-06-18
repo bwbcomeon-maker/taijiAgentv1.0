@@ -586,7 +586,46 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("TAIJI_AGENT_USE_USER_DIRS", launcher)
         self.assertIn("redact_stream", diagnose)
         self.assertIn("/api/model-config", diagnose)
+        self.assertIn("TAIJI_DIAG_DESKTOP_ACCESS_TOKEN", diagnose)
+        self.assertIn("X-Taiji-Desktop-Token", diagnose)
+        self.assertIn("/api/crons", diagnose)
+        self.assertIn("/api/expert-teams/catalog", diagnose)
+        self.assertIn("sendExpertTeamAction", diagnose)
+        self.assertIn("asset.commands.version", diagnose)
         self.assertIn("诊断报告", delivery)
+
+    def test_packaged_webui_has_stable_version_and_agent_import_bootstrap(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        server = read_text("hermes-local-lab/sources/hermes-webui/server.py")
+        routes = read_text("hermes-local-lab/sources/hermes-webui/api/routes.py")
+        updates = read_text("hermes-local-lab/sources/hermes-webui/api/updates.py")
+        index = read_text("hermes-local-lab/sources/hermes-webui/static/index.html")
+        sw = read_text("hermes-local-lab/sources/hermes-webui/static/sw.js")
+
+        self.assertIn("write_packaged_webui_version", build)
+        self.assertIn('api/_version.txt', build)
+        self.assertIn("TAIJI_WEBUI_VERSION", build)
+        self.assertIn("sha256sum", build)
+
+        self.assertIn("def _bootstrap_agent_import_path", server)
+        self.assertIn("TAIJI_WEBUI_AGENT_DIR", server)
+        self.assertIn("sys.path.insert(0, agent_dir)", server)
+        self.assertLess(
+            server.index("_bootstrap_agent_import_path()"),
+            server.index("from api.auth import check_auth"),
+        )
+        self.assertIn("cron_component_unavailable", routes)
+        self.assertIn("计划任务组件未加载，请重启应用或导出诊断报告。", routes)
+        self.assertIn('logger.exception("Cron jobs component is unavailable")', routes)
+
+        self.assertIn("TAIJI_WEBUI_VERSION", updates)
+        self.assertIn("_version.txt", updates)
+        self.assertIn("return baked", updates)
+
+        self.assertNotIn("-taiji-shell-", index)
+        self.assertIn('static/commands.js?v=__WEBUI_VERSION__"', index)
+        self.assertIn('static/panels.js?v=__WEBUI_VERSION__"', index)
+        self.assertIn("const VQ = '?v=__WEBUI_VERSION__';", sw)
 
     def test_delivery_folder_does_not_include_chat_cleanup_utility(self):
         docs = read_text("taijiagent 打包交付/操作说明.md")

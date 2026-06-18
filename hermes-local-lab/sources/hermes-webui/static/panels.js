@@ -3860,8 +3860,16 @@ async function summonWriteflowTeam() {
   const projectInput = $('writeflowProject');
   const project = ((projectInput || {}).value || '').trim() || _writeflowProjectTitleFromPrompt(prompt, team);
   if (projectInput && !projectInput.value.trim()) projectInput.value = project;
-  closeWriteflowTeamModal();
-  await sendExpertTeamAction({
+  if(typeof window==='undefined'||typeof window.sendExpertTeamAction!=='function'){
+    showToast('页面资源版本不一致，正在刷新。');
+    if(typeof hardRefreshWebUIClient==='function'){
+      hardRefreshWebUIClient();
+    }else if(typeof window!=='undefined'&&window.location){
+      window.location.reload();
+    }
+    return;
+  }
+  const started=await window.sendExpertTeamAction({
     action: team.defaultAction || 'start',
     project,
     mode: (($('writeflowMode') || {}).value || '').trim() || team.defaultMode || '',
@@ -3872,6 +3880,7 @@ async function summonWriteflowTeam() {
     new_session: true,
     summon_only: false,
   });
+  if(started)closeWriteflowTeamModal();
 }
 
 function _writeflowModeLabel(mode) {

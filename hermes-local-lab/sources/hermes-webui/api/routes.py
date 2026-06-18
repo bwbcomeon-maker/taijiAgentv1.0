@@ -8809,8 +8809,19 @@ def handle_get(handler, parsed) -> bool:
     # os.environ (process-global) at call time. Wrap in cron_profile_context
     # so the TLS-active profile's jobs.json is read, not the process default.
     if parsed.path == "/api/crons":
-        from cron.jobs import list_jobs
-        from api.profiles import cron_profile_context
+        try:
+            from cron.jobs import list_jobs
+            from api.profiles import cron_profile_context
+        except ImportError:
+            logger.exception("Cron jobs component is unavailable")
+            return j(
+                handler,
+                {
+                    "error": "计划任务组件未加载，请重启应用或导出诊断报告。",
+                    "code": "cron_component_unavailable",
+                },
+                status=503,
+            )
 
         with cron_profile_context():
             return j(handler, {"jobs": _cron_jobs_for_api(list_jobs(include_disabled=True))})

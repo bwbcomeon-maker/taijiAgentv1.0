@@ -25,12 +25,29 @@ def test_writeflow_summon_routes_through_expert_team_runtime():
     fn_start = PANELS_JS.index("async function summonWriteflowTeam")
     fn_body = PANELS_JS[fn_start : PANELS_JS.index("function _writeflowModeLabel", fn_start)]
 
-    assert "sendExpertTeamAction({" in fn_body
+    assert "window.sendExpertTeamAction({" in fn_body
     assert "sendWriteflowAction({" not in fn_body
     assert "team_id: team.id" in fn_body
     assert "new_session: true" in fn_body
     assert "请先填写本次需求。" in fn_body
     assert "请先填写本次写作需求。" not in fn_body
+    assert "页面资源版本不一致，正在刷新。" in fn_body
+    assert "hardRefreshWebUIClient()" in fn_body
+    assert "const started=await window.sendExpertTeamAction" in fn_body
+    assert "if(started)closeWriteflowTeamModal();" in fn_body
+    assert fn_body.index("typeof window.sendExpertTeamAction!=='function'") < fn_body.index("const started=await window.sendExpertTeamAction")
+
+
+def test_expert_team_start_returns_boolean_for_modal_lifecycle():
+    fn_start = COMMANDS_JS.index("async function sendExpertTeamAction")
+    fn_body = COMMANDS_JS[fn_start : COMMANDS_JS.index("async function cmdPersonality", fn_start)]
+
+    assert "return false;" in fn_body
+    assert "return true;" in fn_body
+    assert "showToast('专家团已创建，请先完成需求确认。');" in fn_body
+    assert "showToast('专家团启动失败：'+(e&&e.message||e));" in fn_body
+    assert fn_body.index("try{") < fn_body.index("await newSession(wantsNewSession)")
+    assert fn_body.index("return true;") < fn_body.index("}catch(e){")
 
 
 def test_expert_team_center_loads_only_expert_team_catalog():

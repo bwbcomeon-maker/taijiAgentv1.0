@@ -246,6 +246,32 @@ rewrite_product_text_tokens() {
   \) -print0 | xargs -0 -r perl -pi -e 's/HERMES_/TAIJI_/g; s/HERMES/TAIJI/g; s/Hermes/Taiji/g; s/hermes/taiji/g'
 }
 
+write_packaged_webui_version() {
+  local base digest
+  base="${TAIJI_WEBUI_VERSION:-}"
+  if [ -z "$base" ] && command -v git >/dev/null 2>&1; then
+    base="$(git -C "$SOURCE_WEB_DIR" describe --tags --always 2>/dev/null || true)"
+    if [ -z "$base" ]; then
+      base="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "$base" ]; then
+    base="taiji-webui"
+  fi
+  digest="$(
+    find "$WEB_RUNTIME" -type f \
+      ! -name '_version.txt' \
+      ! -name '*.pyc' \
+      -print0 \
+      | sort -z \
+      | xargs -0 sha256sum \
+      | sha256sum \
+      | awk '{print substr($1,1,12)}'
+  )"
+  mkdir -p "$WEB_RUNTIME/api"
+  printf '%s-pkg.%s\n' "$base" "$digest" > "$WEB_RUNTIME/api/_version.txt"
+}
+
 stage_python_runtime() {
   mkdir -p "$AGENT_RUNTIME" "$WEB_RUNTIME"
 
@@ -349,6 +375,7 @@ stage_python_runtime() {
     "$SOURCE_WEB_DIR"/ "$WEB_RUNTIME"/
 
   rewrite_product_text_tokens "$WEB_RUNTIME"
+  write_packaged_webui_version
 
   compile_sourceless_python "$AGENT_RUNTIME" "$SOURCE_AGENT_PYTHON"
   compile_sourceless_python "$WEB_RUNTIME" "$SOURCE_AGENT_PYTHON"
