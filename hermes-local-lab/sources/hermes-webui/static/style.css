@@ -3951,9 +3951,6 @@ main.main > #mainPlugin{display:none;}
 .settings-about-product-name{margin-top:16px;color:#06284f;font-size:clamp(28px,3vw,34px);font-weight:850;line-height:1.12;letter-spacing:0;}
 .settings-about-subtitle{margin-top:8px;color:#61778f;font-size:14px;font-weight:750;line-height:1.4;}
 .settings-about-copy{margin:30px auto 0;max-width:540px;color:#15375f;font-size:18px;line-height:1.78;text-align:left;white-space:pre-line;}
-.settings-about-footer{display:flex;align-items:center;gap:28px;margin-top:26px;padding-top:16px;border-top:1px solid rgba(174,205,228,.75);text-align:left;}
-.settings-about-mark{flex:0 0 auto;color:#078ca6;font-size:12px;font-weight:900;letter-spacing:.18em;}
-.settings-about-note{color:#71889e;font-size:13px;font-weight:600;line-height:1.6;}
 
 /* Each logical form row is a card surface. Stack with comfortable gap. */
 #mainSettings .settings-field{margin-bottom:12px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);}

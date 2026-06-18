@@ -96,15 +96,19 @@ def test_about_panel_uses_native_product_sheet_structure():
         'class="settings-about-subtitle"',
         'class="settings-about-body"',
         'id="settingsAboutDescription"',
-        'class="settings-about-footer"',
-        'class="settings-about-mark"',
-        'class="settings-about-note"',
         'static/assets/taiji/logo/logo-mark.png',
         "太极智能体 桌面版",
         "乾元版 v0.1.7743",
-        "此关于信息由开发人员在发行前维护，打包后随产品版本固定。",
     ):
         assert expected in about_html
+
+    for removed in (
+        'class="settings-about-footer"',
+        'class="settings-about-mark"',
+        'class="settings-about-note"',
+        "此关于信息由开发人员在发行前维护，打包后随产品版本固定。",
+    ):
+        assert removed not in about_html
 
 
 def test_about_panel_visible_text_is_rendered_from_payload_contract():
@@ -175,10 +179,12 @@ def test_about_panel_uses_single_readable_description_layout():
         ".settings-about-product-name",
         ".settings-about-subtitle",
         ".settings-about-body",
-        ".settings-about-footer",
     ):
         assert expected in css
     assert ".settings-about-copy" in css
+    assert ".settings-about-footer" not in css
+    assert ".settings-about-mark" not in css
+    assert ".settings-about-note" not in css
     assert "white-space:pre-line" in css
     assert "#settingsAboutVersionBlock" not in css
     assert ".settings-about-list" not in css
