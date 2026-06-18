@@ -1566,21 +1566,37 @@ const EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR=[
   '.expert-team-member-strip',
 ].join(',');
 
+let _expertTeamBlankCollapseListenerAttached=false;
+
 function handleExpertTeamPanelBlankCollapse(event){
   const target=event&&event.target;
   if(!(target&&target.closest))return false;
-  const dock=target.closest('#writeflowStatusDock');
+  const dock=target.closest('#writeflowStatusDock')||document.getElementById('writeflowStatusDock');
   if(!(dock&&dock.querySelector))return false;
   const card=target.closest('.status-card-writeflow')||dock.querySelector('.status-card-writeflow');
   if(!(card&&card.classList&&card.classList.contains('is-expanded')))return false;
   if(!card.querySelector('.status-card-expert-dock-summary'))return false;
   if(target.closest(EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR))return false;
-  const blankRoot=target.closest('.expert-team-panel-inner,.status-card-expert-bottom-body,.status-card-writeflow,#writeflowStatusDock');
+  const blankRoot=target.closest('.expert-team-panel-inner,.status-card-expert-bottom-body,.status-card-writeflow,#writeflowStatusDock,.taiji-main-workspace,main.main,#mainChat,.messages-shell');
   if(!blankRoot)return false;
   const collapsed=_setExpertTeamBottomDockExpanded(false,target);
   if(collapsed)_syncExpertTeamWorkspacePanelVisibility();
   if(collapsed&&event&&event.stopPropagation)event.stopPropagation();
   return collapsed;
+}
+
+function _syncExpertTeamBlankCollapseListener(enabled){
+  if(typeof document==='undefined')return false;
+  const shouldEnable=!!enabled;
+  if(shouldEnable===_expertTeamBlankCollapseListenerAttached)return true;
+  if(shouldEnable){
+    document.addEventListener('click',handleExpertTeamPanelBlankCollapse);
+    _expertTeamBlankCollapseListenerAttached=true;
+    return true;
+  }
+  document.removeEventListener('click',handleExpertTeamPanelBlankCollapse);
+  _expertTeamBlankCollapseListenerAttached=false;
+  return true;
 }
 
 function hideExpertTeamWorkspacePanel(btn){
@@ -2269,6 +2285,7 @@ function renderWriteflowStatusDock(card){
   }
   dock.hidden=false;
   dock.onclick=isExpertTeam?handleExpertTeamPanelBlankCollapse:null;
+  _syncExpertTeamBlankCollapseListener(isExpertTeam);
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
   if(isExpertTeam)syncExpertTeamBottomDockState(card);
@@ -2285,6 +2302,7 @@ function clearWriteflowStatusDock(){
   dock.innerHTML='';
   dock.hidden=true;
   dock.onclick=null;
+  _syncExpertTeamBlankCollapseListener(false);
   delete dock.dataset.writeflowRunId;
   delete dock.dataset.writeflowSourceSessionId;
   delete dock.dataset.expertTeamRenderKey;

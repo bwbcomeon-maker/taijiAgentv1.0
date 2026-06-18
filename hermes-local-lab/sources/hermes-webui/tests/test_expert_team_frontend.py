@@ -186,6 +186,7 @@ def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
 
 def test_expert_team_blank_area_click_collapses_without_intercepting_controls():
     assert "function handleExpertTeamPanelBlankCollapse" in UI_JS
+    assert "function _syncExpertTeamBlankCollapseListener" in UI_JS
     assert "window.handleExpertTeamPanelBlankCollapse=handleExpertTeamPanelBlankCollapse" in UI_JS
 
     panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
@@ -196,6 +197,7 @@ def test_expert_team_blank_area_click_collapses_without_intercepting_controls():
     handler_body = UI_JS[handler_start : UI_JS.index("function hideExpertTeamWorkspacePanel", handler_start)]
     assert "card.classList.contains('is-expanded')" in handler_body
     assert "_setExpertTeamBottomDockExpanded(false,target)" in handler_body
+    assert "document.getElementById('writeflowStatusDock')" in handler_body
     assert "_syncExpertTeamWorkspacePanelVisibility()" in handler_body
     for protected_selector in (
         "button",
@@ -214,10 +216,12 @@ def test_expert_team_blank_area_click_collapses_without_intercepting_controls():
     render_start = UI_JS.index("function renderWriteflowStatusDock")
     render_body = UI_JS[render_start : UI_JS.index("function clearWriteflowStatusDock", render_start)]
     assert "dock.onclick=isExpertTeam?handleExpertTeamPanelBlankCollapse:null;" in render_body
+    assert "_syncExpertTeamBlankCollapseListener(isExpertTeam);" in render_body
 
     clear_start = UI_JS.index("function clearWriteflowStatusDock")
     clear_body = UI_JS[clear_start : UI_JS.index("if(typeof window!=='undefined')", clear_start)]
     assert "dock.onclick=null;" in clear_body
+    assert "_syncExpertTeamBlankCollapseListener(false);" in clear_body
 
 
 def test_expert_team_workspace_visibility_syncs_on_panel_switches():

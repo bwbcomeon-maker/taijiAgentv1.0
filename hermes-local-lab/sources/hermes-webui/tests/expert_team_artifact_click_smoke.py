@@ -704,6 +704,13 @@ def main():
                     failures.append(f"{width}x{height}: outer blank click did not return to compact dock {outer_blank_state!r}")
                 page.click("#writeflowStatusDock .status-card-expert-dock-summary")
                 page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending textarea", timeout=10000)
+                if not _dispatch_click(page, ".taiji-main-workspace"):
+                    failures.append(f"{width}x{height}: workspace blank click target missing")
+                workspace_blank_state = _dock_geometry(page)
+                if not workspace_blank_state["collapsed"]:
+                    failures.append(f"{width}x{height}: workspace blank click did not return to compact dock {workspace_blank_state!r}")
+                page.click("#writeflowStatusDock .status-card-expert-dock-summary")
+                page.wait_for_selector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending textarea", timeout=10000)
                 page.click(".expert-team-panel-hide")
                 collapsed_state = _dock_geometry(page)
                 if not collapsed_state["collapsed"]:
