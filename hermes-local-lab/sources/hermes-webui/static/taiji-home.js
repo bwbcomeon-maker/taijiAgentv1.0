@@ -32,6 +32,7 @@
   };
   const PANEL_BY_LABEL=Object.fromEntries(Object.entries(PANEL_LABELS).map(([k,v])=>[v,k]));
   const SESSION_FILTERS={all:'all',ungrouped:'ungrouped'};
+  const RECENT_SESSION_PREVIEW_LIMIT=18;
   const SECONDARY_COLLAPSED_KEY='hermes-webui-taiji-secondary-collapsed';
   const state={
     mounted:false,
@@ -980,16 +981,23 @@
     });
   }
 
-  function taijiViewAllLabel(){
-    return state.showAllSessions?'查看最近会话':'查看全部会话';
+  function taijiViewAllLabel(totalCount=0,recentCount=0){
+    return state.showAllSessions?`查看最近 ${recentCount} 个`:`查看全部 ${totalCount} 个会话`;
   }
 
-  function syncViewAllButton(){
+  function syncViewAllButton(totalCount=0,recentCount=0){
     const btn=document.querySelector('.taiji-view-all');
     if(!btn) return;
-    const label=taijiViewAllLabel();
+    const hasToggle=totalCount>recentCount;
+    const label=taijiViewAllLabel(totalCount,recentCount);
+    btn.hidden=!hasToggle;
+    btn.disabled=!hasToggle;
     btn.innerHTML=`${label} <span aria-hidden="true">›</span>`;
     btn.setAttribute('aria-label',label);
+    btn.setAttribute('aria-pressed',state.showAllSessions?'true':'false');
+    btn.setAttribute('aria-controls','taijiSessionGroups');
+    btn.setAttribute('aria-disabled',hasToggle?'false':'true');
+    btn.title=label;
   }
 
   function activeFilterLabel(){
@@ -1032,12 +1040,18 @@
       if(q){
         if(!taijiSessionSearchText(session).includes(q)) return false;
       }
-      if(!state.showAllSessions){
-        const s=appState();
-        return (session.message_count||0)>0||session.active_stream_id||session.pending_user_message||(s&&s.session&&s.session.session_id===session.session_id);
-      }
       return true;
     });
+  }
+
+  function sessionAppearsInRecentPreview(session){
+    if(!session) return false;
+    const s=appState();
+    return (session.message_count||0)>0||session.active_stream_id||session.pending_user_message||(s&&s.session&&s.session.session_id===session.session_id);
+  }
+
+  function recentPreviewSessions(sessions){
+    return sessions.filter(sessionAppearsInRecentPreview).slice(0,RECENT_SESSION_PREVIEW_LIMIT);
   }
 
   function renderRecentSessions(){
@@ -1045,21 +1059,23 @@
     if(!container) return;
     renderProjectFilters();
     syncSessionFilterButtons();
-    syncViewAllButton();
-    const sessions=filteredSessions();
-    renderFilterStatus(sessions.length);
+    const allSessions=filteredSessions();
+    const recentSessions=recentPreviewSessions(allSessions);
+    const visibleSessions=state.showAllSessions?allSessions:recentSessions;
+    syncViewAllButton(allSessions.length,recentSessions.length);
+    renderFilterStatus(allSessions.length);
     const groups=['今天','昨天','本周','更早'];
     const s=appState();
     const activeSid=s&&s.session&&s.session.session_id;
-    if(!sessions.length){
-      container.innerHTML='<div class="taiji-session-empty">暂无匹配会话</div>';
+    if(!visibleSessions.length){
+      container.innerHTML=allSessions.length&&!state.showAllSessions?'<div class="taiji-session-empty">暂无最近会话</div>':'<div class="taiji-session-empty">暂无匹配会话</div>';
       syncShellState();
       return;
     }
     const html=groups.map(group=>{
-      const items=sessions.filter(session=>groupNameForSession(session)===group);
+      const items=visibleSessions.filter(session=>groupNameForSession(session)===group);
       if(!items.length) return '';
-      const rows=(state.showAllSessions?items:items.slice(0,18)).map(session=>{
+      const rows=items.map(session=>{
         const title=escapeHtml(taijiSessionDisplayTitle(session));
         const fullTitle=escapeHtml(taijiSessionFullTitle(session));
         const sid=escapeHtml(session.session_id);
@@ -1330,8 +1346,10 @@
   };
   window.taijiHomeRefreshSessions=refreshSessions;
   window.taijiHomeToggleAllSessions=function(){
+    const container=$('taijiSessionGroups');
     state.showAllSessions=!state.showAllSessions;
     renderRecentSessions();
+    if(container) container.scrollTop=0;
   };
   window.taijiHomeToggleProjectPanel=toggleProjectPanel;
   window.taijiHomeCreateProject=createProject;

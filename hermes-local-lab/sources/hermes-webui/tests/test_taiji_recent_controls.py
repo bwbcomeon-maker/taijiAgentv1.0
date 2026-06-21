@@ -123,7 +123,7 @@ def test_taiji_project_filter_status_explains_active_scope_and_clear_action():
     assert "个会话" in status_body
     assert "data-taiji-clear-session-filter" in status_body
     assert "state.sessionFilter=SESSION_FILTERS.all" in HOME_JS
-    assert "renderFilterStatus(sessions.length)" in HOME_JS
+    assert "renderFilterStatus(allSessions.length)" in HOME_JS
 
 
 def test_taiji_project_filter_status_uses_lightweight_strip_layout():
@@ -198,8 +198,17 @@ def test_new_session_accepts_explicit_project_id_option():
 
 def test_taiji_view_all_toggles_recent_session_filter():
     assert 'onclick="taijiHomeToggleAllSessions()"' in INDEX_HTML
+    assert "const RECENT_SESSION_PREVIEW_LIMIT=18" in HOME_JS
     assert "showAllSessions:false" in HOME_JS
     assert "window.taijiHomeToggleAllSessions" in HOME_JS
-    assert "if(!state.showAllSessions)" in HOME_JS
+    assert "function recentPreviewSessions(sessions)" in HOME_JS
+    assert "const visibleSessions=state.showAllSessions?allSessions:recentSessions;" in HOME_JS
+    assert "items.slice(0,18)" not in HOME_JS
     assert "taijiViewAllLabel" in HOME_JS
-    assert "查看最近会话" in HOME_JS
+    assert "查看全部 ${totalCount} 个会话" in HOME_JS
+    assert "查看最近 ${recentCount} 个" in HOME_JS
+    assert "btn.hidden=!hasToggle;" in HOME_JS
+    assert "btn.disabled=!hasToggle;" in HOME_JS
+    assert "btn.setAttribute('aria-pressed',state.showAllSessions?'true':'false')" in HOME_JS
+    assert "btn.setAttribute('aria-controls','taijiSessionGroups')" in HOME_JS
+    assert "container.scrollTop=0;" in HOME_JS
