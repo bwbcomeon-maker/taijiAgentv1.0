@@ -30,6 +30,8 @@ def test_license_settings_panel_and_import_controls_are_present():
     assert "/api/license/status" in panels_js
     assert "/api/license/import" in panels_js
     assert "/api/license/machine-request" in panels_js
+    assert "suggested_filename" in panels_js
+    assert "taiji-machine-request.json" in panels_js
     assert "/api/license/activate" not in panels_js
     assert "/api/license/qr-request" not in panels_js
     assert "/api/license/qr-complete" not in panels_js
@@ -53,6 +55,7 @@ def test_backend_exposes_license_status_and_import_routes():
     assert 'path == "/api/license/status"' in routes_py
     assert 'path == "/api/license/import"' in routes_py
     assert 'path == "/api/license/machine-request"' in routes_py
+    assert "suggested_filename" in routes_py
     assert 'path == "/api/license/activate"' in routes_py
     assert 'path == "/api/license/qr-request"' in routes_py
     assert 'path == "/api/license/qr-complete"' in routes_py

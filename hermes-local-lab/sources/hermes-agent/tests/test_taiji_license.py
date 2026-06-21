@@ -12,7 +12,23 @@ import taiji_license
 
 TEST_MACHINE_CODE = "sha256:" + "a" * 64
 OTHER_MACHINE_CODE = "sha256:" + "b" * 64
+TEST_DEVICE_ID = "sha256:" + "1" * 64
 TEST_MACHINE_FINGERPRINT = {
+    "binding_type": "machine_fingerprint_v3",
+    "machine_code": TEST_MACHINE_CODE,
+    "machine_code_short": "aaaaaaaaaaaa",
+    "device_id": TEST_DEVICE_ID,
+    "device_id_short": "111111111111",
+    "hardware_code": "sha256:" + "9" * 64,
+    "hardware_code_short": "999999999999",
+    "fingerprint_quality": "strong",
+    "risk_flags": [],
+    "hostname": "test-host",
+    "generated_at": "2026-06-12T00:00:00Z",
+    "collection_version": 3,
+    "signals": [{"name": "machine_id", "available": True}],
+}
+LEGACY_V2_MACHINE_FINGERPRINT = {
     "binding_type": "machine_fingerprint_v2",
     "machine_code": TEST_MACHINE_CODE,
     "machine_code_short": "aaaaaaaaaaaa",
@@ -63,8 +79,9 @@ def _write_token(path, private_pem, **overrides):
         "customer": "测试客户",
         "product": "taiji-agent",
         "aud": "taiji-agent",
-        "binding_type": "machine_fingerprint_v2",
+        "binding_type": "machine_fingerprint_v3",
         "machine_code": TEST_MACHINE_CODE,
+        "device_id": TEST_DEVICE_ID,
         "machine_label": "测试终端",
         "activation_mode": "offline_machine_file",
         "activation_id": "act-test",
@@ -108,9 +125,12 @@ def test_valid_license_returns_public_status(tmp_path, signing_keys):
     assert public["activation_mode"] == "offline_machine_file"
     assert public["activation_id"] == "act-test"
     assert public["entitlement_id"] == "ent-test"
+    assert public["device_id_short"] == "111111111111"
+    assert public["fingerprint_quality"] == "strong"
     assert "token" not in public
     assert "path" not in public
     assert TEST_MACHINE_CODE not in json.dumps(public)
+    assert TEST_DEVICE_ID not in json.dumps(public)
 
 
 def test_missing_required_license_has_stable_code(tmp_path, signing_keys):
@@ -165,11 +185,12 @@ def test_macos_machine_fingerprint_uses_stable_platform_uuid(monkeypatch):
     )
 
 
-def test_machine_fingerprint_v2_ignores_physical_mac_changes(monkeypatch):
+def test_machine_fingerprint_v3_uses_device_secret_and_ignores_physical_mac_changes(monkeypatch, tmp_path):
     mac_sets = iter(
         [
             ["00:11:22:33:44:55"],
             ["66:77:88:99:aa:bb"],
+            [],
             [],
         ]
     )
@@ -187,13 +208,23 @@ def test_machine_fingerprint_v2_ignores_physical_mac_changes(monkeypatch):
     monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: next(mac_sets))
     monkeypatch.setattr(taiji_license, "_collect_macos_platform_uuid", lambda: None)
 
-    wireless = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_000)
-    wired = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_001)
-    disconnected = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_002)
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "config-a")}
+    wireless = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_000, environ=env)
+    wired = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_001, environ=env)
+    disconnected = taiji_license.get_machine_fingerprint(use_cache=False, now=1_000_002, environ=env)
+    same_hardware_other_secret = taiji_license.get_machine_fingerprint(
+        use_cache=False,
+        now=1_000_003,
+        environ={"XDG_CONFIG_HOME": str(tmp_path / "config-b")},
+    )
 
-    assert wireless["binding_type"] == "machine_fingerprint_v2"
-    assert wireless["collection_version"] == 2
+    assert wireless["binding_type"] == "machine_fingerprint_v3"
+    assert wireless["collection_version"] == 3
+    assert wireless["device_id"].startswith("sha256:")
+    assert wireless["hardware_code"] == same_hardware_other_secret["hardware_code"]
     assert wireless["machine_code"] == wired["machine_code"] == disconnected["machine_code"]
+    assert wireless["machine_code"] != same_hardware_other_secret["machine_code"]
+    assert wireless["fingerprint_quality"] == "strong"
     assert any(
         signal["name"] == "physical_mac" and signal["count"] == 1
         for signal in wireless["signals"]
@@ -595,10 +626,19 @@ def test_legacy_v1_machine_bound_license_is_still_accepted(tmp_path, signing_key
     path = tmp_path / "legacy-v1.jwt"
     _write_token(path, private_pem, binding_type="machine_fingerprint_v1")
 
-    status = taiji_license.load_license_status(
+    rejected = taiji_license.load_license_status(
         path=path,
         public_key=public_pem,
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=LEGACY_MACHINE_FINGERPRINT,
+    )
+    assert rejected.status == "invalid"
+    assert rejected.code == "license_legacy_machine_binding"
+
+    status = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1", "TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_BINDING": "1"},
         machine_fingerprint=LEGACY_MACHINE_FINGERPRINT,
     )
 
@@ -636,10 +676,40 @@ def test_machine_request_is_redacted_and_contains_short_fingerprint():
     assert request["product"] == "taiji-agent"
     assert request["customer"] == "测试客户"
     assert request["machine_label"] == "一号终端"
-    assert request["binding_type"] == "machine_fingerprint_v2"
-    assert request["collection_version"] == 2
+    assert request["binding_type"] == "machine_fingerprint_v3"
+    assert request["collection_version"] == 3
     assert request["machine_code"] == TEST_MACHINE_CODE
     assert request["machine_code_short"] == "aaaaaaaaaaaa"
+    assert request["device_id_short"] == "111111111111"
+    assert request["hardware_code_short"] == "999999999999"
+    assert request["fingerprint_quality"] == "strong"
+    assert request["risk_flags"] == []
+    assert request["suggested_filename"].startswith("taiji-machine-request-测试客户-一号终端-aaaaaaaaaaaa-20260611-120000Z")
+    assert request["suggested_filename"].endswith(".json")
     raw = json.dumps(request, ensure_ascii=False)
     assert "PRIVATE KEY" not in raw
     assert "00:11" not in raw
+    assert "device_secret" not in raw
+
+
+def test_legacy_v2_machine_bound_license_requires_explicit_compatibility(tmp_path, signing_keys):
+    private_pem, public_pem = signing_keys
+    path = tmp_path / "legacy-v2.jwt"
+    _write_token(path, private_pem, binding_type="machine_fingerprint_v2", device_id=None)
+
+    rejected = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1"},
+        machine_fingerprint=LEGACY_V2_MACHINE_FINGERPRINT,
+    )
+    assert rejected.status == "invalid"
+    assert rejected.code == "license_legacy_machine_binding"
+
+    accepted = taiji_license.load_license_status(
+        path=path,
+        public_key=public_pem,
+        environ={"TAIJI_LICENSE_REQUIRED": "1", "TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_BINDING": "1"},
+        machine_fingerprint=LEGACY_V2_MACHINE_FINGERPRINT,
+    )
+    assert accepted.status == "valid"

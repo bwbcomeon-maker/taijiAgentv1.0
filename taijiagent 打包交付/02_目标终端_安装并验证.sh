@@ -360,7 +360,7 @@ prepare_legacy_replacement() {
 }
 
 install_trial_license() {
-  local source="${TAIJI_LICENSE_SOURCE:-}"
+  local source="${TAIJI_LICENSE_SOURCE:-}" candidates=()
   if [ -n "$source" ] && [ ! -f "$source" ]; then
     fail "指定的授权文件不存在：$source"
   fi
@@ -368,7 +368,19 @@ install_trial_license() {
     source="$SCRIPT_DIR/license.jwt"
   fi
   if [ -z "$source" ]; then
-    warn "未发现预置授权文件 license.jwt；应用可安装，但试用授权状态会显示为缺失。"
+    shopt -s nullglob
+    candidates=("$SCRIPT_DIR"/taiji-license-*.jwt)
+    shopt -u nullglob
+    if [ "${#candidates[@]}" -eq 1 ]; then
+      source="${candidates[0]}"
+    elif [ "${#candidates[@]}" -gt 1 ]; then
+      printf '[FAIL] 检测到多个候选授权文件，请设置 TAIJI_LICENSE_SOURCE 指定其中一个：\n' >&2
+      printf '  %s\n' "${candidates[@]}" >&2
+      exit 1
+    fi
+  fi
+  if [ -z "$source" ]; then
+    warn "未发现预置授权文件 license.jwt 或 taiji-license-*.jwt；应用可安装，但试用授权状态会显示为缺失。"
     return 0
   fi
 
@@ -378,7 +390,7 @@ install_trial_license() {
   mkdir -p "$target_dir"
   chmod 0700 "$target_dir" || true
   install -m 0600 "$source" "$target"
-  ok "已安装试用授权：license.jwt"
+  ok "已安装试用授权：$(basename "$source") -> license.jwt"
 }
 
 offline_repo_available() {

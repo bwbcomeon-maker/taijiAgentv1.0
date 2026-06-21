@@ -9,10 +9,11 @@ const PRODUCT = "taiji-agent";
 const PRIVATE_KEY_ENV = "TAIJI_LICENSE_PRIVATE_KEY_FILE";
 const DEFAULT_PRIVATE_KEY_NAME = "signing-private.pem";
 const DEFAULT_PUBLIC_KEY_NAME = "signing-public.pem";
-const MACHINE_BINDING_TYPE = "machine_fingerprint_v2";
+const MACHINE_BINDING_TYPE = "machine_fingerprint_v3";
 const MACHINE_REQUEST_TYPE = "taiji_machine_license_request";
 const MACHINE_CODE_RE = /^sha256:[0-9a-f]{64}$/;
 const ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file";
+const BLOCKING_RISK_FLAGS = new Set(["no_device_secret", "device_secret_unavailable", "no_stable_hardware"]);
 
 function isoUtc(date) {
   return date.toISOString().replace(".000Z", "Z");
@@ -104,7 +105,53 @@ function sanitizeFilePart(value, fallback) {
     .replace(/[\\/:*?"<>|]+/g, "-")
     .replace(/\s+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return text || fallback;
+  return (text || fallback).slice(0, 72);
+}
+
+function compactTimestamp(value, fallback = new Date()) {
+  const date = value instanceof Date ? value : parseUtcDate(value, fallback);
+  return isoUtc(date).replace(/[-:]/g, "").replace("T", "-");
+}
+
+function licenseFileName({ customer, machineRequest, notBefore, days, now }) {
+  const nbf = parseUtcDate(notBefore, now || new Date());
+  const exp = new Date(nbf.getTime() + parseDays(days) * 86400 * 1000);
+  const customerPart = sanitizeFilePart(customer, "customer");
+  const machinePart = sanitizeFilePart(machineRequest.machineLabel || machineRequest.hostname, "terminal");
+  const shortCode = sanitizeFilePart(machineRequest.machineCodeShort || machineCodeShort(machineRequest.machineCode), "machine");
+  return [
+    "taiji-license",
+    customerPart,
+    machinePart,
+    shortCode,
+    compactTimestamp(nbf),
+    compactTimestamp(exp),
+  ].join("-") + ".jwt";
+}
+
+function batchZipFileName({ customer, count, now }) {
+  const customerPart = sanitizeFilePart(customer, "customer");
+  return `taiji-licenses-${customerPart}-${count}台-${compactTimestamp(now || new Date())}.zip`;
+}
+
+function isGenericOutputName(filePath, batch) {
+  const base = path.basename(String(filePath || "")).toLowerCase();
+  const generic = batch
+    ? new Set(["taiji-licenses.zip", "licenses.zip"])
+    : new Set(["license.jwt", "taiji-license.jwt"]);
+  return generic.has(base);
+}
+
+function resolveDescriptiveOutputPath(rawOutputPath, suggestedName, batch) {
+  const raw = String(rawOutputPath || "").trim();
+  if (!raw) {
+    throw new Error("输出路径不能为空");
+  }
+  const resolved = path.resolve(raw);
+  if (isGenericOutputName(resolved, batch)) {
+    return path.join(path.dirname(resolved), suggestedName);
+  }
+  return resolved;
 }
 
 function normalizeMachineRequest(value) {
@@ -117,19 +164,37 @@ function normalizeMachineRequest(value) {
   }
   const bindingType = String(value.binding_type || value.bindingType || "").trim();
   if (bindingType !== MACHINE_BINDING_TYPE) {
-    throw new Error("机器码文件绑定类型无效");
+    throw new Error("机器码文件不是新版机器码，请在客户机重新导出机器码文件");
   }
   const machineCode = String(value.machine_code || value.machineCode || "").trim().toLowerCase();
   if (!MACHINE_CODE_RE.test(machineCode)) {
     throw new Error("机器码文件无效");
   }
+  const deviceId = String(value.device_id || value.deviceId || "").trim().toLowerCase();
+  if (!MACHINE_CODE_RE.test(deviceId)) {
+    throw new Error("新版机器码缺少设备身份，请在客户机重新导出机器码文件");
+  }
+  const riskFlags = Array.isArray(value.risk_flags || value.riskFlags)
+    ? (value.risk_flags || value.riskFlags).map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const blockingRisk = riskFlags.find((item) => BLOCKING_RISK_FLAGS.has(item));
+  if (blockingRisk) {
+    throw new Error(`机器码质量不足，不能签发离线授权：${blockingRisk}`);
+  }
   const machineLabel = String(value.machine_label || value.machineLabel || value.terminal_note || value.hostname || "").trim();
   return {
+    schemaVersion: Number(value.schema_version || value.schemaVersion || 0),
+    requestId: String(value.request_id || value.requestId || "").trim(),
     requestType: String(value.request_type || value.requestType || MACHINE_REQUEST_TYPE).trim(),
     product,
     bindingType,
     machineCode,
     machineCodeShort: String(value.machine_code_short || value.machineCodeShort || machineCodeShort(machineCode)).trim() || machineCodeShort(machineCode),
+    deviceId,
+    deviceIdShort: String(value.device_id_short || value.deviceIdShort || machineCodeShort(deviceId)).trim() || machineCodeShort(deviceId),
+    hardwareCodeShort: String(value.hardware_code_short || value.hardwareCodeShort || "").trim(),
+    fingerprintQuality: String(value.fingerprint_quality || value.fingerprintQuality || "unknown").trim(),
+    riskFlags,
     machineLabel,
     hostname: String(value.hostname || "").trim(),
     generatedAt: String(value.generated_at || value.generatedAt || "").trim(),
@@ -236,6 +301,13 @@ function issueLicense(options) {
     activation_mode: ACTIVATION_MODE_OFFLINE_MACHINE_FILE,
     binding_type: MACHINE_BINDING_TYPE,
     machine_code: machineRequest.machineCode,
+    machine_code_short: machineRequest.machineCodeShort,
+    device_id: machineRequest.deviceId,
+    device_id_short: machineRequest.deviceIdShort,
+    machine_request_id: machineRequest.requestId || "",
+    machine_request_generated_at: machineRequest.generatedAt || "",
+    fingerprint_quality: machineRequest.fingerprintQuality || "unknown",
+    risk_flags: machineRequest.riskFlags || [],
   };
   if (machineRequest.machineLabel) {
     payload.machine_label = machineRequest.machineLabel;
@@ -319,6 +391,10 @@ function recordForIssue({ result, outputPath, now, machineRequest }) {
     activation_mode: result.payload.activation_mode || "",
     max_version: result.payload.max_version || "",
     machine_code_short: machineRequest.machineCodeShort,
+    device_id_short: machineRequest.deviceIdShort,
+    hardware_code_short: machineRequest.hardwareCodeShort || "",
+    fingerprint_quality: machineRequest.fingerprintQuality || "unknown",
+    risk_flags: machineRequest.riskFlags || [],
     machine_label: machineRequest.machineLabel || "",
     output_path: outputPath,
     jwt_hash: result.tokenHash,
@@ -330,11 +406,17 @@ function issueAndWriteLicense(options) {
   const privateKeyPem = readPrivateKey(privateKeyPath);
   const machineRequest = machineRequestFromOptions(options);
   const result = issueLicense({ ...options, privateKeyPem, machineRequest });
-  const rawOutputPath = String(options.outputPath || "").trim();
-  if (!rawOutputPath) {
-    throw new Error("输出路径不能为空");
-  }
-  const outputPath = path.resolve(rawOutputPath);
+  const outputPath = resolveDescriptiveOutputPath(
+    options.outputPath,
+    licenseFileName({
+      customer: options.customer,
+      machineRequest,
+      notBefore: options.notBefore,
+      days: options.days,
+      now: options.now ? new Date(options.now) : new Date(),
+    }),
+    false,
+  );
   writeFile0600(outputPath, `${result.token}\n`);
 
   const recordPath = options.recordPath || defaultRecordPath();
@@ -378,7 +460,7 @@ function createStoreZip(files, now = new Date()) {
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0x0800, 6);
     local.writeUInt16LE(0, 8);
     local.writeUInt16LE(timeValue, 10);
     local.writeUInt16LE(dateValue, 12);
@@ -393,7 +475,7 @@ function createStoreZip(files, now = new Date()) {
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0x0800, 8);
     central.writeUInt16LE(0, 10);
     central.writeUInt16LE(timeValue, 12);
     central.writeUInt16LE(dateValue, 14);
@@ -425,18 +507,25 @@ function createStoreZip(files, now = new Date()) {
 }
 
 function issueBatchZip(options) {
-  const privateKeyPath = options.privateKeyPath || resolvePrivateKeyPath();
-  const privateKeyPem = readPrivateKey(privateKeyPath);
   const machineRequests = (options.machineRequests || []).map((request) => normalizeMachineRequest(request));
   if (!machineRequests.length) {
     throw new Error("请先导入机器码文件");
   }
-  const rawOutputPath = String(options.outputPath || "").trim();
-  if (!rawOutputPath) {
-    throw new Error("输出路径不能为空");
+  const seenCodes = new Map();
+  for (const request of machineRequests) {
+    if (seenCodes.has(request.machineCode)) {
+      throw new Error(`检测到重复机器码：${request.machineCodeShort || machineCodeShort(request.machineCode)}`);
+    }
+    seenCodes.set(request.machineCode, request);
   }
-  const outputPath = path.resolve(rawOutputPath);
+  const privateKeyPath = options.privateKeyPath || resolvePrivateKeyPath();
+  const privateKeyPem = readPrivateKey(privateKeyPath);
   const now = options.now ? new Date(options.now) : new Date();
+  const outputPath = resolveDescriptiveOutputPath(
+    options.outputPath,
+    batchZipFileName({ customer: options.customer, count: machineRequests.length, now }),
+    true,
+  );
   const recordPath = options.recordPath || defaultRecordPath();
   const files = [];
   const records = [];
@@ -453,8 +542,13 @@ function issueBatchZip(options) {
       licenseId,
       now,
     });
-    const safePart = sanitizeFilePart(machineRequest.machineLabel, shortCode || String(index + 1));
-    const fileName = `license-${safePart}.jwt`;
+    const fileName = licenseFileName({
+      customer: options.customer,
+      machineRequest,
+      notBefore: options.notBefore,
+      days: options.days,
+      now,
+    });
     files.push({ name: fileName, content: `${result.token}\n`, payload: result.payload, tokenHash: result.tokenHash });
     records.push(
       recordForIssue({
@@ -495,6 +589,7 @@ module.exports = {
   issueBatchZip,
   issueAndWriteLicense,
   issueLicense,
+  licenseFileName,
   normalizeMachineRequest,
   parseFeatures,
   parseMachineRequest,

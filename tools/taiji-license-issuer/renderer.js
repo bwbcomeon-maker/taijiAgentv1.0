@@ -15,6 +15,7 @@ const resetBtn = document.getElementById("resetBtn");
 const summary = document.getElementById("summary");
 let machineRequests = [];
 let statusCache = {};
+let outputPathAuto = true;
 
 function value(id) {
   return document.getElementById(id).value.trim();
@@ -27,6 +28,19 @@ function setResult(text, mode) {
 
 function isoUtc(date) {
   return date.toISOString().replace(".000Z", "Z");
+}
+
+function sanitizeFilePart(value, fallback) {
+  const text = String(value || "")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return (text || fallback).slice(0, 72);
+}
+
+function compactTimestamp(date) {
+  return isoUtc(date).replace(/[-:]/g, "").replace("T", "-");
 }
 
 function parseNotBefore(input) {
@@ -61,6 +75,51 @@ function updateSummary() {
     row.append(term, detail);
     summary.append(row);
   }
+  refreshSuggestedOutputPath();
+}
+
+function outputDirectory() {
+  const current = outputPath.value || statusCache.suggestedOutputPath || "";
+  const normalized = current.replace(/\\/g, "/");
+  const index = normalized.lastIndexOf("/");
+  return index >= 0 ? current.slice(0, index) : "";
+}
+
+function joinPath(dir, name) {
+  return dir ? `${dir.replace(/[\\/]+$/, "")}/${name}` : name;
+}
+
+function suggestedOutputName() {
+  const customer = sanitizeFilePart(value("customer"), "customer");
+  const now = new Date();
+  if (machineRequests.length > 1) {
+    return `taiji-licenses-${customer}-${machineRequests.length}台-${compactTimestamp(now)}.zip`;
+  }
+  const machine = machineRequests[0];
+  if (!machine) {
+    return "";
+  }
+  const days = Number(value("days") || "0");
+  const nbf = parseNotBefore(value("notBefore"));
+  if (!Number.isFinite(days) || days <= 0 || Number.isNaN(nbf.getTime())) {
+    return "";
+  }
+  const exp = new Date(nbf.getTime() + days * 86400 * 1000);
+  return [
+    "taiji-license",
+    customer,
+    sanitizeFilePart(machine.machineLabel || machine.hostname, "terminal"),
+    sanitizeFilePart(machine.machineCodeShort, "machine"),
+    compactTimestamp(nbf),
+    compactTimestamp(exp),
+  ].join("-") + ".jwt";
+}
+
+function refreshSuggestedOutputPath() {
+  if (!outputPathAuto) return;
+  const name = suggestedOutputName();
+  if (!name) return;
+  outputPath.value = joinPath(outputDirectory(), name);
 }
 
 function readForm() {
@@ -81,6 +140,7 @@ async function loadStatus() {
   statusCache = status || {};
   if (!outputPath.value) {
     outputPath.value = status.suggestedOutputPath || "";
+    outputPathAuto = true;
   }
   keyPath.textContent = status.privateKeyPath || "-";
   publicKeyPath.textContent = status.publicKeyPath ? `公钥：${status.publicKeyPath}` : "-";
@@ -92,7 +152,7 @@ async function loadStatus() {
     keyStatus.textContent = "发证私钥未安装";
     keyStatus.className = "status-pill danger";
     initializeKey.disabled = false;
-    setResult("缺少签发私钥。点击“初始化签发密钥”后可导出 license.jwt。", "danger");
+    setResult("缺少签发私钥。点击“初始化签发密钥”后可导出授权文件。", "danger");
   }
   updateSummary();
 }
@@ -121,7 +181,12 @@ chooseOutput.addEventListener("click", async () => {
   const selected = await window.taijiLicenseIssuer.chooseOutput();
   if (!selected.canceled && selected.filePath) {
     outputPath.value = selected.filePath;
+    outputPathAuto = false;
   }
+});
+
+outputPath.addEventListener("input", () => {
+  outputPathAuto = false;
 });
 
 function applyMachineSelection(selected) {
@@ -135,9 +200,11 @@ function applyMachineSelection(selected) {
   }
   machineRequests = selected.requests || [];
   machineRequestPath.value = selected.filePath || selected.dirPath || "";
-  if (machineRequests.length > 1 && (!outputPath.value || outputPath.value.endsWith("license.jwt"))) {
-    outputPath.value = statusCache.suggestedBatchOutputPath || outputPath.value.replace(/license\.jwt$/, "taiji-licenses.zip");
+  const currentName = (outputPath.value || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
+  if (!outputPath.value || currentName === "license.jwt" || currentName === "taiji-licenses.zip" || currentName === "licenses.zip") {
+    outputPathAuto = true;
   }
+  refreshSuggestedOutputPath();
   setResult(
     machineRequests.length > 1
       ? `已导入 ${machineRequests.length} 台机器码，批量导出将生成 zip。`
@@ -165,6 +232,7 @@ resetBtn.addEventListener("click", () => {
   form.reset();
   machineRequests = [];
   machineRequestPath.value = "";
+  outputPathAuto = true;
   document.getElementById("days").value = "30";
   document.getElementById("features").value = "chat,writing";
   loadStatus().catch((err) => setResult(err.message || String(err), "danger"));

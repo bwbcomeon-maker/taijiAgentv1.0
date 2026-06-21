@@ -8487,12 +8487,12 @@ function _bindTaijiLicenseControls(){
  }
  if(machineBtn&&!machineBtn.dataset.bound){
   machineBtn.dataset.bound='1';
-  machineBtn.addEventListener('click',async()=>{
-   try{
-    const data=await api('/api/license/machine-request');
-    _downloadJsonFile('taiji-machine-request.json',data);
-    if(typeof showToast==='function') showToast('本机机器码文件已生成');
-   }catch(e){
+	 machineBtn.addEventListener('click',async()=>{
+	  try{
+	   const data=await api('/api/license/machine-request');
+	   _downloadJsonFile(data.suggested_filename||'taiji-machine-request.json',data);
+	   if(typeof showToast==='function') showToast('本机机器码文件已生成');
+	  }catch(e){
     if(typeof showToast==='function') showToast('本机机器码导出失败：'+(e.message||e),5000,'error');
    }
   });

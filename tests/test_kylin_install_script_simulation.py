@@ -401,6 +401,31 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
         self.assertIn("license.jwt", self.fake_log_text() + result.stdout + result.stderr)
 
+    def test_adjacent_descriptive_license_is_installed_to_user_config(self):
+        source = self.tmp_path / "taiji-license-测试客户-一号终端-aaaaaaaaaaaa-20260612-000000Z-20260712-000000Z.jwt"
+        source.write_text("signed-license-token\n", encoding="utf-8")
+
+        result = self.run_install_package()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        target = self.fake_home / ".config" / "taiji-agent" / "license.jwt"
+        self.assertEqual(target.read_text(encoding="utf-8"), "signed-license-token\n")
+        self.assertIn(source.name, self.fake_log_text() + result.stdout + result.stderr)
+
+    def test_multiple_adjacent_descriptive_licenses_require_explicit_source(self):
+        (self.tmp_path / "taiji-license-客户A-一号-aaaaaaaaaaaa-20260612-000000Z-20260712-000000Z.jwt").write_text(
+            "a\n",
+            encoding="utf-8",
+        )
+        (self.tmp_path / "taiji-license-客户B-二号-bbbbbbbbbbbb-20260612-000000Z-20260712-000000Z.jwt").write_text(
+            "b\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_install_package()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("检测到多个候选授权文件", result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

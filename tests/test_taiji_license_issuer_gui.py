@@ -17,6 +17,8 @@ AGENT_PYTHON = ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "venv" /
 AGENT_DIR = ROOT / "hermes-local-lab" / "sources" / "hermes-agent"
 TEST_MACHINE_CODE = "sha256:" + "c" * 64
 OTHER_MACHINE_CODE = "sha256:" + "d" * 64
+TEST_DEVICE_ID = "sha256:" + "1" * 64
+OTHER_DEVICE_ID = "sha256:" + "2" * 64
 
 
 def _node(script: str, *, env: dict | None = None) -> dict:
@@ -51,9 +53,14 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const machineRequest = {{
                   request_type: 'taiji_machine_license_request',
                   product: 'taiji-agent',
-                  binding_type: 'machine_fingerprint_v2',
+                  binding_type: 'machine_fingerprint_v3',
                   machine_code: {json.dumps(TEST_MACHINE_CODE)},
                   machine_code_short: 'cccccccccccc',
+                  device_id: {json.dumps(TEST_DEVICE_ID)},
+                  device_id_short: '111111111111',
+                  fingerprint_quality: 'strong',
+                  risk_flags: [],
+                  generated_at: '2026-06-11T08:00:00Z',
                   machine_label: '一号终端'
                 }};
                 fs.writeFileSync(privatePath, privatePem);
@@ -74,7 +81,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const record = fs.readFileSync(recordPath, 'utf8').trim();
                 console.log(JSON.stringify({{
                   payload: result.payload,
-                  tokenPath: outputPath,
+                  tokenPath: result.outputPath,
                   publicPath,
                   record,
                   token: result.token
@@ -92,16 +99,27 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             self.assertEqual(payload["not_before"], "2026-06-11T00:00:00Z")
             self.assertEqual(payload["expires_at"], "2026-07-11T00:00:00Z")
             self.assertEqual(payload["max_version"], "1.2.3")
-            self.assertEqual(payload["binding_type"], "machine_fingerprint_v2")
+            self.assertEqual(payload["binding_type"], "machine_fingerprint_v3")
             self.assertEqual(payload["machine_code"], TEST_MACHINE_CODE)
+            self.assertEqual(payload["device_id"], TEST_DEVICE_ID)
             self.assertEqual(payload["machine_label"], "一号终端")
+            self.assertEqual(payload["machine_request_generated_at"], "2026-06-11T08:00:00Z")
+            self.assertEqual(payload["fingerprint_quality"], "strong")
             self.assertEqual(payload["activation_mode"], "offline_machine_file")
+            self.assertNotEqual(Path(data["tokenPath"]).name, "license.jwt")
+            self.assertIn("测试客户", Path(data["tokenPath"]).name)
+            self.assertIn("一号终端", Path(data["tokenPath"]).name)
+            self.assertIn("cccccccccccc", Path(data["tokenPath"]).name)
+            self.assertIn("20260611", Path(data["tokenPath"]).name)
+            self.assertIn("20260711", Path(data["tokenPath"]).name)
 
             record = json.loads(data["record"])
             self.assertEqual(record["license_id"], "lic-gui-test")
             self.assertEqual(record["customer"], "测试客户")
             self.assertEqual(record["machine_code_short"], "cccccccccccc")
+            self.assertEqual(record["device_id_short"], "111111111111")
             self.assertEqual(record["machine_label"], "一号终端")
+            self.assertEqual(record["fingerprint_quality"], "strong")
             self.assertEqual(record["activation_mode"], "offline_machine_file")
             self.assertEqual(record["jwt_hash"][:7], "sha256:")
             self.assertNotIn(data["token"], data["record"])
@@ -122,9 +140,12 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     now=1781179200,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
                     machine_fingerprint={{
-                        'binding_type': 'machine_fingerprint_v2',
+                        'binding_type': 'machine_fingerprint_v3',
                         'machine_code': {json.dumps(TEST_MACHINE_CODE)},
                         'machine_code_short': 'cccccccccccc',
+                        'device_id': {json.dumps(TEST_DEVICE_ID)},
+                        'device_id_short': '111111111111',
+                        'fingerprint_quality': 'strong',
                     }},
                     check_state=False,
                 )
@@ -206,9 +227,13 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     {
                         "request_type": "taiji_machine_license_request",
                         "product": "taiji-agent",
-                        "binding_type": "machine_fingerprint_v2",
+                        "binding_type": "machine_fingerprint_v3",
                         "machine_code": TEST_MACHINE_CODE,
                         "machine_code_short": "cccccccccccc",
+                        "device_id": TEST_DEVICE_ID,
+                        "device_id_short": "111111111111",
+                        "fingerprint_quality": "strong",
+                        "risk_flags": [],
                         "machine_label": "CLI 终端",
                     },
                     ensure_ascii=False,
@@ -238,6 +263,9 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=True,
             )
+            self.assertFalse(output_path.exists())
+            issued = list(tmp.glob("taiji-license-CLI-客户-CLI-终端-cccccccccccc-*.jwt"))
+            self.assertEqual(len(issued), 1)
 
             verify_script = textwrap.dedent(
                 f"""
@@ -246,14 +274,17 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 sys.path.insert(0, {json.dumps(str(AGENT_DIR))})
                 import taiji_license
                 status = taiji_license.load_license_status(
-                    path=pathlib.Path({json.dumps(str(output_path))}),
+                    path=pathlib.Path({json.dumps(str(issued[0]))}),
                     public_key=pathlib.Path({json.dumps(str(tmp / "public.pem"))}).read_text(encoding='utf-8'),
                     now=1781222400,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
                     machine_fingerprint={{
-                        'binding_type': 'machine_fingerprint_v2',
+                        'binding_type': 'machine_fingerprint_v3',
                         'machine_code': {json.dumps(TEST_MACHINE_CODE)},
                         'machine_code_short': 'cccccccccccc',
+                        'device_id': {json.dumps(TEST_DEVICE_ID)},
+                        'device_id_short': '111111111111',
+                        'fingerprint_quality': 'strong',
                     }},
                     check_state=False,
                 )
@@ -284,9 +315,13 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 const machineRequest = {{
                   request_type: 'taiji_machine_license_request',
                   product: 'taiji-agent',
-                  binding_type: 'machine_fingerprint_v2',
+                  binding_type: 'machine_fingerprint_v3',
                   machine_code: {json.dumps(TEST_MACHINE_CODE)},
                   machine_code_short: 'cccccccccccc',
+                  device_id: {json.dumps(TEST_DEVICE_ID)},
+                  device_id_short: '111111111111',
+                  fingerprint_quality: 'strong',
+                  risk_flags: [],
                   machine_label: '桌面终端'
                 }};
                 const issued = core.issueAndWriteLicense({{
@@ -329,9 +364,12 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                     now=1781222400,
                     environ={{'TAIJI_LICENSE_REQUIRED': '1'}},
                     machine_fingerprint={{
-                        'binding_type': 'machine_fingerprint_v2',
+                        'binding_type': 'machine_fingerprint_v3',
                         'machine_code': {json.dumps(TEST_MACHINE_CODE)},
                         'machine_code_short': 'cccccccccccc',
+                        'device_id': {json.dumps(TEST_DEVICE_ID)},
+                        'device_id_short': '111111111111',
+                        'fingerprint_quality': 'strong',
                     }},
                     check_state=False,
                 )
@@ -400,21 +438,29 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                   now: new Date('2026-06-12T00:00:00Z'),
                   machineRequests: [
                     {{
-                      request_type: 'taiji_machine_license_request',
-                      product: 'taiji-agent',
-                      binding_type: 'machine_fingerprint_v2',
-                      machine_code: {json.dumps(TEST_MACHINE_CODE)},
-                      machine_code_short: 'cccccccccccc',
-                      machine_label: '一号终端'
-                    }},
-                    {{
-                      request_type: 'taiji_machine_license_request',
-                      product: 'taiji-agent',
-                      binding_type: 'machine_fingerprint_v2',
-                      machine_code: {json.dumps(OTHER_MACHINE_CODE)},
-                      machine_code_short: 'dddddddddddd',
-                      machine_label: '二号终端'
-                    }}
+	                      request_type: 'taiji_machine_license_request',
+	                      product: 'taiji-agent',
+	                      binding_type: 'machine_fingerprint_v3',
+	                      machine_code: {json.dumps(TEST_MACHINE_CODE)},
+	                      machine_code_short: 'cccccccccccc',
+	                      device_id: {json.dumps(TEST_DEVICE_ID)},
+	                      device_id_short: '111111111111',
+	                      fingerprint_quality: 'strong',
+	                      risk_flags: [],
+	                      machine_label: '一号终端'
+	                    }},
+	                    {{
+	                      request_type: 'taiji_machine_license_request',
+	                      product: 'taiji-agent',
+	                      binding_type: 'machine_fingerprint_v3',
+	                      machine_code: {json.dumps(OTHER_MACHINE_CODE)},
+	                      machine_code_short: 'dddddddddddd',
+	                      device_id: {json.dumps(OTHER_DEVICE_ID)},
+	                      device_id_short: '222222222222',
+	                      fingerprint_quality: 'strong',
+	                      risk_flags: [],
+	                      machine_label: '二号终端'
+	                    }}
                   ]
                 }});
                 console.log(JSON.stringify({{
@@ -428,6 +474,9 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
 
             self.assertEqual(len(data["files"]), 2)
             self.assertTrue(Path(data["outputPath"]).is_file())
+            self.assertNotEqual(Path(data["outputPath"]).name, "licenses.zip")
+            self.assertIn("批量客户", Path(data["outputPath"]).name)
+            self.assertIn("2台", Path(data["outputPath"]).name)
             self.assertEqual(len(data["records"]), 2)
             self.assertNotIn(TEST_MACHINE_CODE, "\n".join(data["records"]))
             self.assertNotIn(OTHER_MACHINE_CODE, "\n".join(data["records"]))
@@ -435,8 +484,54 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
                 names = sorted(archive.namelist())
                 self.assertEqual(len(names), 2)
                 self.assertTrue(all(name.endswith(".jwt") for name in names))
+                self.assertTrue(all("批量客户" in name for name in names))
+                self.assertTrue(any("一号终端" in name and "cccccccccccc" in name for name in names))
+                self.assertTrue(any("二号终端" in name and "dddddddddddd" in name for name in names))
                 tokens = [archive.read(name).decode("utf-8").strip() for name in names]
                 self.assertTrue(all(token.count(".") == 2 for token in tokens))
+
+    def test_issuer_rejects_legacy_or_duplicate_machine_requests(self):
+        script = textwrap.dedent(
+            f"""
+            const core = require({json.dumps(str(CORE_JS))});
+            const legacy = {{
+              request_type: 'taiji_machine_license_request',
+              product: 'taiji-agent',
+              binding_type: 'machine_fingerprint_v2',
+              machine_code: {json.dumps(TEST_MACHINE_CODE)},
+              machine_code_short: 'cccccccccccc',
+              machine_label: '旧版终端'
+            }};
+            const duplicateA = {{
+              request_type: 'taiji_machine_license_request',
+              product: 'taiji-agent',
+              binding_type: 'machine_fingerprint_v3',
+              machine_code: {json.dumps(TEST_MACHINE_CODE)},
+              machine_code_short: 'cccccccccccc',
+              device_id: {json.dumps(TEST_DEVICE_ID)},
+              device_id_short: '111111111111',
+              fingerprint_quality: 'strong',
+              risk_flags: [],
+              machine_label: '一号终端'
+            }};
+            const duplicateB = {{...duplicateA, machine_label: '复制出来的终端'}};
+            const messages = [];
+            try {{ core.normalizeMachineRequest(legacy); }} catch (err) {{ messages.push(err.message); }}
+            try {{ core.issueBatchZip({{
+              customer: '重复客户',
+              days: 30,
+              features: 'chat',
+              outputPath: '/tmp/licenses.zip',
+              privateKeyPem: 'not-used',
+              privateKeyPath: '/tmp/missing.pem',
+              machineRequests: [duplicateA, duplicateB]
+            }}); }} catch (err) {{ messages.push(err.message); }}
+            console.log(JSON.stringify({{messages}}));
+            """
+        )
+        data = _node(script)
+        self.assertIn("新版机器码", data["messages"][0])
+        self.assertIn("重复", data["messages"][1])
 
     def test_macos_app_bundle_double_click_launcher_is_structurally_valid(self):
         info_path = APP_BUNDLE / "Contents" / "Info.plist"

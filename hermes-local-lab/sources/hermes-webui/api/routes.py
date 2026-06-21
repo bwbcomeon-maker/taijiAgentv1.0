@@ -4581,6 +4581,8 @@ def _handle_license_machine_request(handler, parsed):
             customer=customer,
             machine_label=machine_label,
         )
+        if not payload.get("suggested_filename"):
+            payload["suggested_filename"] = "taiji-machine-request.json"
         return j(handler, payload)
     except Exception as exc:
         logger.exception("failed to build license machine request")
