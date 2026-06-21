@@ -4889,18 +4889,22 @@ main.main > #mainPlugin{display:none;}
 .expert-team-stage-output{display:flex;flex-direction:column;gap:5px;border:1px solid var(--border-subtle);border-radius:10px;background:rgba(255,255,255,.68);padding:9px 10px;}
 .expert-team-stage-output strong{color:var(--text);font-size:13px;line-height:1.25;font-weight:820;}
 .expert-team-stage-output p{margin:0;color:var(--muted);font-size:12px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;}
-.expert-team-stage-actions{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:end;margin-top:8px;}
-.expert-team-stage-actions .expert-team-panel-action{min-height:36px;border-radius:10px;}
-.expert-team-stage-approve{border-color:color-mix(in srgb,var(--success) 52%,var(--border-subtle))!important;background:color-mix(in srgb,var(--success) 10%,rgba(255,255,255,.86))!important;color:color-mix(in srgb,var(--success) 78%,var(--text))!important;}
+.expert-team-stage-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,auto);grid-template-areas:"revise approve" "feedback feedback";gap:8px;align-items:end;margin-top:8px;}
+.expert-team-stage-actions .expert-team-panel-action{min-height:38px;border-radius:10px;}
+.expert-team-stage-approve{grid-area:approve;justify-self:end;min-width:220px;border-color:color-mix(in srgb,var(--success) 70%,var(--border-subtle))!important;background:linear-gradient(180deg,color-mix(in srgb,var(--success) 86%,#fff),color-mix(in srgb,var(--success) 72%,var(--text)))!important;color:#fff!important;box-shadow:0 10px 22px rgba(48,137,79,.20),inset 0 1px 0 rgba(255,255,255,.25);}
+.expert-team-stage-approve:hover{border-color:color-mix(in srgb,var(--success) 86%,var(--border-subtle))!important;box-shadow:0 12px 26px rgba(48,137,79,.25),inset 0 1px 0 rgba(255,255,255,.32);}
+.expert-team-stage-revision-toggle{grid-area:revise;justify-self:start;border-color:color-mix(in srgb,var(--warning) 34%,var(--border-subtle))!important;background:rgba(255,255,255,.74)!important;color:color-mix(in srgb,var(--warning) 78%,var(--text))!important;}
 .expert-team-stage-revise{border-color:color-mix(in srgb,var(--warning) 45%,var(--border-subtle))!important;background:color-mix(in srgb,var(--warning) 10%,rgba(255,255,255,.86))!important;color:var(--warning)!important;}
-.expert-team-stage-feedback{min-width:0;display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:10px;font-weight:760;}
+.expert-team-stage-feedback{grid-area:feedback;min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end;color:var(--muted);font-size:10px;font-weight:760;}
+.expert-team-stage-feedback[hidden]{display:none!important;}
+.expert-team-stage-feedback label{min-width:0;display:flex;flex-direction:column;gap:4px;}
 .expert-team-stage-feedback textarea{min-width:0;min-height:62px;resize:vertical;border:1px solid var(--border-subtle);border-radius:10px;background:rgba(255,255,255,.82);color:var(--text);padding:8px 9px;font:inherit;font-size:12px;line-height:1.42;}
 .expert-team-stage-feedback textarea:focus{outline:2px solid color-mix(in srgb,var(--accent-bg-strong) 35%,transparent);border-color:var(--accent-bg-strong);}
 @media (max-width:1100px){
-  .expert-team-stage-actions{grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;}
-  .expert-team-stage-feedback{grid-column:1/-1;grid-row:1;}
-  .expert-team-stage-approve{grid-column:1;grid-row:2;}
-  .expert-team-stage-revise{grid-column:2;grid-row:2;}
+  .expert-team-stage-actions{grid-template-columns:1fr;grid-template-areas:"approve" "revise" "feedback";align-items:stretch;}
+  .expert-team-stage-approve{justify-self:stretch;min-width:0;}
+  .expert-team-stage-revision-toggle{justify-self:stretch;}
+  .expert-team-stage-feedback{grid-template-columns:1fr;}
   .expert-team-stage-actions .expert-team-panel-action{width:100%;}
 }
 .expert-team-panel-artifacts-section.is-priority{border-color:color-mix(in srgb,var(--success) 34%,var(--taiji-ui-line,var(--border-subtle)));background:linear-gradient(180deg,rgba(255,255,255,.8),color-mix(in srgb,var(--success) 8%,rgba(255,255,255,.64)));}

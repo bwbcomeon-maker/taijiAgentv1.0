@@ -172,6 +172,11 @@ def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
     assert "_setExpertTeamBottomDockExpanded(true,trigger)" in focus_body
     assert "focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});" in focus_body
     assert ".status-card-expert-question.pending textarea" in focus_body
+    assert ".expert-team-stage-approve:not(:disabled)" in focus_body
+    assert ".expert-team-stage-revision-toggle:not(:disabled)" in focus_body
+    assert ".expert-team-stage-feedback:not([hidden]) textarea" in focus_body
+    assert focus_body.index(".expert-team-stage-approve:not(:disabled)") < focus_body.index(".expert-team-stage-revision-toggle:not(:disabled)")
+    assert focus_body.index(".expert-team-stage-revision-toggle:not(:disabled)") < focus_body.index(".expert-team-stage-feedback:not([hidden]) textarea")
 
     expand_start = UI_JS.index("function _setExpertTeamBottomDockExpanded")
     expand_body = UI_JS[expand_start : UI_JS.index("function hideExpertTeamWorkspacePanel", expand_start)]
@@ -457,26 +462,37 @@ def test_expert_team_workspace_shows_resume_action_for_stale_running_runs():
 
 
 def test_expert_team_workspace_exposes_stage_review_actions():
+    stage_review_start = UI_JS.index("const stageReviewSectionHtml=")
+    stage_review_body = UI_JS[stage_review_start : UI_JS.index("const primaryArtifact=", stage_review_start)]
+
     assert "function approveExpertTeamStage" in UI_JS
     assert "function reviseExpertTeamStage" in UI_JS
+    assert "function toggleExpertTeamStageRevision" in UI_JS
     assert "/api/expert-teams/stage/approve" in UI_JS
     assert "/api/expert-teams/stage/revise" in UI_JS
     assert "card.stageReview=view.stage_review||{}" in UI_JS
     assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[]" in UI_JS
-    assert "expert-team-stage-review" in UI_JS
-    assert "expert-team-stage-output" in UI_JS
-    assert "data-expert-team-stage-feedback" in UI_JS
-    assert "确认进入下一阶段" in UI_JS
-    assert "提出修改意见" in UI_JS
-    assert "当前阶段产物待确认" in UI_JS
+    assert "expert-team-stage-review" in stage_review_body
+    assert "expert-team-stage-output" in stage_review_body
+    assert "data-expert-team-stage-feedback" in stage_review_body
+    assert "data-expert-team-stage-revision-toggle" in stage_review_body
+    assert 'class="expert-team-stage-feedback" hidden aria-hidden="true"' in stage_review_body
+    assert "请确认阶段成果" in stage_review_body
+    assert "无修改，进入下一阶段" in stage_review_body
+    assert "需要修改" in stage_review_body
+    assert "提交修改意见" in stage_review_body
+    assert "提出修改意见" not in stage_review_body
     assert "actions.can_approve_stage" in UI_JS
     assert "actions.can_request_revision" in UI_JS
     assert "window.approveExpertTeamStage=approveExpertTeamStage" in UI_JS
     assert "window.reviseExpertTeamStage=reviseExpertTeamStage" in UI_JS
+    assert "window.toggleExpertTeamStageRevision=toggleExpertTeamStageRevision" in UI_JS
 
     assert ".expert-team-stage-review" in STYLE_CSS
     assert ".expert-team-stage-output" in STYLE_CSS
     assert ".expert-team-stage-actions" in STYLE_CSS
+    assert ".expert-team-stage-revision-toggle" in STYLE_CSS
+    assert ".expert-team-stage-feedback[hidden]" in STYLE_CSS
 
 
 def test_expert_team_session_refresh_does_not_require_loaded_message_array():

@@ -1324,9 +1324,9 @@ function _expertTeamWorkspacePanelHtml(card){
     Number(stageReview.revision_count||stageOutput.revision_count||0)?`第 ${Number(stageReview.revision_count||stageOutput.revision_count||0)} 次修订`:'',
   ].filter(Boolean).join(' · ');
   const stageReviewContent=stageOutput.content||stageOutput.note||'阶段结果已写入当前对话，请检查后确认是否进入下一阶段。';
-  const stageReviewSectionHtml=(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${canApproveStage?'awaiting-review':'is-history'}" aria-label="当前阶段产物待确认">
+  const stageReviewSectionHtml=(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${canApproveStage?'awaiting-review':'is-history'}" aria-label="请确认阶段成果">
       <div class="expert-team-panel-section-title">
-        <span>当前阶段产物待确认</span>
+        <span>请确认阶段成果</span>
         <small>${esc(stageReviewMeta||'等待确认')}</small>
       </div>
       <div class="expert-team-stage-output">
@@ -1334,12 +1334,15 @@ function _expertTeamWorkspacePanelHtml(card){
         <p>${esc(stageReviewContent)}</p>
       </div>
       ${canApproveStage||canRequestRevision?`<div class="expert-team-stage-actions">
-        <button class="expert-team-panel-action expert-team-stage-approve" type="button" data-expert-team-stage-approve-run-id="${esc(runId)}" onclick="approveExpertTeamStage(this);event.stopPropagation()">确认进入下一阶段</button>
-        <label class="expert-team-stage-feedback">
-          <span>修改意见</span>
-          <textarea rows="3" data-expert-team-stage-feedback="1" aria-label="填写当前阶段修改意见" placeholder="说明你希望当前阶段如何调整"></textarea>
-        </label>
-        <button class="expert-team-panel-action expert-team-stage-revise" type="button" data-expert-team-stage-revise-run-id="${esc(runId)}" onclick="reviseExpertTeamStage(this);event.stopPropagation()">提出修改意见</button>
+        ${canApproveStage?`<button class="expert-team-panel-action expert-team-stage-approve" type="button" data-expert-team-stage-approve-run-id="${esc(runId)}" onclick="approveExpertTeamStage(this);event.stopPropagation()">无修改，进入下一阶段</button>`:''}
+        ${canRequestRevision?`<button class="expert-team-panel-action expert-team-stage-revision-toggle" type="button" data-expert-team-stage-revision-toggle="1" aria-expanded="false" onclick="toggleExpertTeamStageRevision(this);event.stopPropagation()">需要修改</button>
+        <div class="expert-team-stage-feedback" hidden aria-hidden="true">
+          <label>
+            <span>修改意见</span>
+            <textarea rows="3" data-expert-team-stage-feedback="1" aria-label="填写当前阶段修改意见" placeholder="说明你希望当前阶段如何调整"></textarea>
+          </label>
+          <button class="expert-team-panel-action expert-team-stage-revise" type="button" data-expert-team-stage-revise-run-id="${esc(runId)}" onclick="reviseExpertTeamStage(this);event.stopPropagation()">提交修改意见</button>
+        </div>`:''}
       </div>`:''}
     </section>`:'';
   const primaryArtifact=_expertTeamPrimaryArtifact(card);
@@ -1643,8 +1646,9 @@ function focusExpertTeamBottomDock(trigger){
   const focusSelectors=[
     '.status-card-expert-question.pending textarea',
     '.status-card-expert-question.pending [data-expert-team-question-id]',
-    '.expert-team-stage-review textarea',
     '.expert-team-stage-approve:not(:disabled)',
+    '.expert-team-stage-revision-toggle:not(:disabled)',
+    '.expert-team-stage-feedback:not([hidden]) textarea',
     '.expert-team-panel-artifact.ready button:not(:disabled)',
     '.expert-team-panel-artifact-open:not(:disabled)',
     '.status-card-writeflow-toggle',
@@ -1977,6 +1981,26 @@ function _expertTeamRunIdFromStageButton(btn,kind){
     ||'';
 }
 
+function toggleExpertTeamStageRevision(btn){
+  const section=btn&&btn.closest?btn.closest('.expert-team-stage-review'):null;
+  const feedback=section&&section.querySelector?section.querySelector('.expert-team-stage-feedback'):null;
+  if(!feedback)return false;
+  const willOpen=!!feedback.hidden;
+  feedback.hidden=!willOpen;
+  feedback.setAttribute('aria-hidden',willOpen?'false':'true');
+  if(btn){
+    btn.setAttribute('aria-expanded',willOpen?'true':'false');
+    btn.textContent=willOpen?'收起修改意见':'需要修改';
+  }
+  if(willOpen){
+    const input=feedback.querySelector('[data-expert-team-stage-feedback]');
+    if(input&&input.focus){
+      try{input.focus({preventScroll:true});}catch(_){input.focus();}
+    }
+  }
+  return willOpen;
+}
+
 async function approveExpertTeamStage(btn){
   const runId=_expertTeamRunIdFromStageButton(btn,'Approve');
   const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
@@ -2003,7 +2027,7 @@ async function approveExpertTeamStage(btn){
     if(btn){
       btn.disabled=false;
       try{btn.removeAttribute('aria-busy');}catch(_){}
-      btn.textContent='确认进入下一阶段';
+      btn.textContent='无修改，进入下一阶段';
     }
     showToast('确认阶段产物失败：'+(e&&e.message||e));
     return false;
@@ -2046,7 +2070,7 @@ async function reviseExpertTeamStage(btn){
     if(btn){
       btn.disabled=false;
       try{btn.removeAttribute('aria-busy');}catch(_){}
-      btn.textContent='提出修改意见';
+      btn.textContent='提交修改意见';
     }
     showToast('提交修改意见失败：'+(e&&e.message||e));
     return false;
@@ -2058,6 +2082,7 @@ if(typeof window!=='undefined'){
   window.cancelExpertTeamRun=cancelExpertTeamRun;
   window.approveExpertTeamStage=approveExpertTeamStage;
   window.reviseExpertTeamStage=reviseExpertTeamStage;
+  window.toggleExpertTeamStageRevision=toggleExpertTeamStageRevision;
 }
 
 function _statusCardWriteflowHtml(card,copyBtn){
