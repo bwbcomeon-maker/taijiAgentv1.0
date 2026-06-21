@@ -2596,7 +2596,7 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+function autoResize(){const el=$('msg');if(!el)return;el.style.height='auto';const cssMaxHeight=parseFloat(getComputedStyle(el).maxHeight);const maxHeight=Number.isFinite(cssMaxHeight)?cssMaxHeight:200;el.style.height=Math.min(el.scrollHeight,maxHeight)+'px';updateSendBtn();}
 
 
 // ── YOLO mode state ──

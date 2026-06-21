@@ -9830,7 +9830,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     overflow:visible!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-box{
-    padding:18px 18px 14px!important;
+    padding:16px 16px 12px!important;
     border:1px solid var(--taiji-ui-line-strong)!important;
     border-radius:15px!important;
     background:rgba(255,255,255,.88)!important;
@@ -9839,8 +9839,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
     -webkit-backdrop-filter:blur(18px) saturate(1.08)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap textarea#msg{
-    min-height:34px!important;
-    padding:0 4px 12px!important;
+    box-sizing:border-box!important;
+    min-height:96px!important;
+    max-height:176px!important;
+    padding:0 4px 10px!important;
     border:0!important;
     border-bottom:1px solid rgba(184,208,226,.62)!important;
     border-radius:0!important;
@@ -9850,6 +9852,9 @@ main.main.showing-logs > #mainLogs{display:flex;}
     font-size:17px!important;
     font-weight:500!important;
     line-height:1.6!important;
+    overflow-y:auto!important;
+    scrollbar-gutter:stable;
+    overscroll-behavior:contain;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap textarea#msg::placeholder{
     color:#7b8da4!important;
@@ -9859,16 +9864,16 @@ main.main.showing-logs > #mainLogs{display:flex;}
     container-name:composer-footer;
     display:flex!important;
     align-items:center!important;
-    gap:12px!important;
-    min-height:44px!important;
-    padding-top:12px!important;
+    gap:10px!important;
+    min-height:40px!important;
+    padding-top:10px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-right{
     display:flex!important;
     align-items:center!important;
     min-width:0!important;
-    gap:10px!important;
+    gap:8px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-right{
     flex:0 0 auto!important;
@@ -9883,10 +9888,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
     display:inline-flex!important;
     align-items:center!important;
     justify-content:center!important;
-    width:46px!important;
-    min-width:46px!important;
-    height:46px!important;
-    flex:0 0 46px!important;
+    width:40px!important;
+    min-width:40px!important;
+    height:40px!important;
+    flex:0 0 40px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-left{
     flex:1 1 auto!important;
@@ -9908,15 +9913,15 @@ main.main.showing-logs > #mainLogs{display:flex;}
     display:inline-flex!important;
     align-items:center!important;
     justify-content:center!important;
-    gap:9px!important;
-    height:44px!important;
-    min-height:44px!important;
+    gap:8px!important;
+    height:40px!important;
+    min-height:40px!important;
     border:1px solid rgba(184,208,226,.62)!important;
-    border-radius:12px!important;
+    border-radius:11px!important;
     color:var(--taiji-ui-heading)!important;
     background:rgba(249,253,255,.72)!important;
     box-shadow:inset 0 1px 0 rgba(255,255,255,.78)!important;
-    font-size:14px!important;
+    font-size:13.5px!important;
     font-weight:650!important;
     line-height:1!important;
     white-space:nowrap!important;
@@ -9935,30 +9940,30 @@ main.main.showing-logs > #mainLogs{display:flex;}
     display:none!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-icon-control{
-    width:44px!important;
-    min-width:44px!important;
+    width:40px!important;
+    min-width:40px!important;
     padding:0!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control-icon{
     display:inline-flex!important;
     align-items:center!important;
     justify-content:center!important;
-    width:22px!important;
-    height:22px!important;
-    flex:0 0 22px!important;
+    width:20px!important;
+    height:20px!important;
+    flex:0 0 20px!important;
     color:var(--taiji-ui-accent-strong)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control-icon svg{
-    width:22px!important;
-    height:22px!important;
+    width:20px!important;
+    height:20px!important;
     stroke-width:2.1!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{
     display:inline-flex!important;
     align-items:center!important;
-    gap:8px!important;
-    height:44px!important;
-    max-width:268px!important;
+    gap:6px!important;
+    height:40px!important;
+    max-width:246px!important;
     border:0!important;
     border-radius:0!important;
     background:transparent!important;
@@ -9966,19 +9971,19 @@ main.main.showing-logs > #mainLogs{display:flex;}
     overflow:visible!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-files-btn{
-    width:44px!important;
-    min-width:44px!important;
-    height:44px!important;
+    width:40px!important;
+    min-width:40px!important;
+    height:40px!important;
     border:1px solid rgba(184,208,226,.62)!important;
-    border-radius:12px!important;
+    border-radius:11px!important;
     background:rgba(249,253,255,.72)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-chip{
-    min-width:92px!important;
-    max-width:192px!important;
-    padding:0 12px!important;
+    min-width:86px!important;
+    max-width:178px!important;
+    padding:0 10px!important;
     border:1px solid rgba(184,208,226,.62)!important;
-    border-radius:12px!important;
+    border-radius:11px!important;
     background:rgba(249,253,255,.72)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-chip.active,
@@ -10002,26 +10007,26 @@ main.main.showing-logs > #mainLogs{display:flex;}
     border-radius:12px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chip{
-    min-width:186px!important;
-    max-width:260px!important;
-    padding:0 14px!important;
+    min-width:168px!important;
+    max-width:220px!important;
+    padding:0 12px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-toolsets-chip,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-reasoning-chip,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-profile-chip,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .provider-quota-chip{
-    max-width:180px!important;
-    padding:0 14px!important;
+    max-width:156px!important;
+    padding:0 12px!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn{
-    width:46px!important;
-    min-width:46px!important;
-    height:46px!important;
+    width:40px!important;
+    min-width:40px!important;
+    height:40px!important;
     border:1px solid rgba(8,153,180,.18)!important;
-    border-radius:13px!important;
+    border-radius:11px!important;
     background:linear-gradient(135deg,#58d4df,#0998b4)!important;
-    box-shadow:0 10px 24px rgba(8,153,180,.18)!important;
+    box-shadow:0 8px 18px rgba(8,153,180,.16)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend:disabled,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap button.send-btn:disabled{
@@ -10052,11 +10057,11 @@ main.main.showing-logs > #mainLogs{display:flex;}
       display:none!important;
     }
     :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chip{
-      min-width:154px!important;
-      max-width:198px!important;
+      min-width:142px!important;
+      max-width:184px!important;
     }
     :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{
-      max-width:198px!important;
+      max-width:184px!important;
     }
   }
   @container composer-footer (max-width: 520px){
@@ -10076,7 +10081,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     }
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{
-    gap:8px!important;
+    gap:6px!important;
     border:0!important;
     background:transparent!important;
     box-shadow:none!important;

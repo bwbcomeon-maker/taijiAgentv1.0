@@ -53,6 +53,12 @@ def _css_rule(selector: str) -> str:
     return STYLE_CSS[rule_start : STYLE_CSS.index("}", rule_start)]
 
 
+def _css_rule_after(selector: str, after: str) -> str:
+    anchor = STYLE_CSS.index(after)
+    rule_start = STYLE_CSS.index(selector, anchor)
+    return STYLE_CSS[rule_start : STYLE_CSS.index("}", rule_start)]
+
+
 def test_taiji_nav_and_action_icons_are_complete_256_alpha_pngs():
     for name in NAV_ICONS:
         width, height, color_type = _png_meta(ASSETS / "nav" / f"{name}.png")
@@ -134,6 +140,43 @@ def test_taiji_composer_layout_does_not_clip_or_force_optional_toolsets():
     assert "overflow-x:auto!important;" in STYLE_CSS
     assert "overflow-y:visible!important;" in STYLE_CSS
     assert ".taiji-home-shell #composerWrap .composer-toolsets-wrap{display:none!important;}" in STYLE_CSS
+
+
+def test_taiji_scheme_b_composer_textarea_uses_three_to_six_line_contract():
+    textarea_rule = _css_rule(':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap textarea#msg{')
+    assert "min-height:96px!important" in textarea_rule
+    assert "max-height:176px!important" in textarea_rule
+    assert "overflow-y:auto!important" in textarea_rule
+    assert "scrollbar-gutter:stable" in textarea_rule
+    assert "min-height:34px!important" not in textarea_rule
+
+
+def test_taiji_scheme_b_composer_toolbar_uses_compact_control_sizing():
+    footer_rule = _css_rule(':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-footer{')
+    control_rule = _css_rule(':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-control{')
+    icon_rule = _css_rule(':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-icon-control{')
+    send_rule = _css_rule(':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap #btnSend,')
+    model_rule = _css_rule_after(
+        ':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chip{',
+        ':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group:has(.composer-workspace-files-btn[data-ui-visibility-hidden="1"]) .composer-workspace-chip{',
+    )
+    optional_chip_rule = _css_rule_after(
+        ':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-toolsets-chip,',
+        ':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-model-chip{',
+    )
+
+    assert "min-height:40px!important" in footer_rule
+    assert "height:40px!important" in control_rule
+    assert "min-height:40px!important" in control_rule
+    assert "width:40px!important" in icon_rule
+    assert "min-width:40px!important" in icon_rule
+    assert "width:40px!important" in send_rule
+    assert "height:40px!important" in send_rule
+    assert "height:44px!important" not in control_rule
+    assert "width:44px!important" not in icon_rule
+    assert "width:46px!important" not in send_rule
+    assert "max-width:220px!important" in model_rule
+    assert "max-width:156px!important" in optional_chip_rule
 
 
 def test_taiji_redesign_tokens_and_reading_surface_are_present():

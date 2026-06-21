@@ -346,6 +346,16 @@ def test_auto_resize_calls_update_send_btn():
     assert 'updateSendBtn' in js
 
 
+def test_auto_resize_uses_css_max_height_contract():
+    """autoResize() must honor the skin-specific textarea max-height contract."""
+    js, status = get_text("/static/messages.js")
+    assert status == 200
+    assert "getComputedStyle(el).maxHeight" in js
+    assert "Number.isFinite(cssMaxHeight)?cssMaxHeight:200" in js
+    assert "Math.min(el.scrollHeight,maxHeight)" in js
+    assert "Math.min(el.scrollHeight,200)" not in js
+
+
 # ── Regression: existing behaviour unchanged ──────────────────────────────
 
 
