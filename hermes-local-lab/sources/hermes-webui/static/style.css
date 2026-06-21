@@ -10362,6 +10362,33 @@ main.main.showing-logs > #mainLogs{display:flex;}
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{
     left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important;
   }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"].taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
+    width:min(1020px,calc(100% - 96px))!important;
+    max-width:min(1020px,calc(100% - 96px))!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] #composerWrap{
+    width:min(1020px,calc(100% - 96px))!important;
+    max-width:min(1020px,calc(100% - 96px))!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"].taiji-chat-has-messages main.main.taiji-real-main #msgInner{
+    padding-left:0!important;
+    padding-right:0!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-turn{
+    width:min(860px,86%)!important;
+    max-width:min(860px,86%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-segment .msg-body,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-turn .msg-body{
+    max-width:min(800px,100%)!important;
+    padding:12px 15px!important;
+    font-size:14.5px!important;
+    font-weight:450!important;
+    line-height:1.58!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    max-width:clamp(280px,34vw,560px)!important;
+  }
 }
 
 @media (min-width:901px){

@@ -48,6 +48,11 @@ def _png_meta(path: Path) -> tuple[int, int, int]:
     return width, height, color_type
 
 
+def _css_rule(selector: str) -> str:
+    rule_start = STYLE_CSS.rindex(selector)
+    return STYLE_CSS[rule_start : STYLE_CSS.index("}", rule_start)]
+
+
 def test_taiji_nav_and_action_icons_are_complete_256_alpha_pngs():
     for name in NAV_ICONS:
         width, height, color_type = _png_meta(ASSETS / "nav" / f"{name}.png")
@@ -211,13 +216,27 @@ def test_taiji_chat_restores_avatars_and_uses_single_message_surface():
 
 
 def test_taiji_secondary_collapse_expands_workspace_in_final_override():
-    collapsed_start = STYLE_CSS.rindex(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"]{')
-    collapsed_rule = STYLE_CSS[collapsed_start : STYLE_CSS.index("}", collapsed_start)]
+    collapsed_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"]{')
     assert "grid-template-columns:var(--taiji-brand-w) minmax(0,1fr)!important" in collapsed_rule
 
-    toggle_start = STYLE_CSS.rindex(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{')
-    toggle_rule = STYLE_CSS[toggle_start : STYLE_CSS.index("}", toggle_start)]
+    toggle_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{')
     assert "left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important" in toggle_rule
+
+    expanded_messages_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{')
+    assert "width:min(860px,calc(100% - 72px))!important" in expanded_messages_rule
+    assert "max-width:min(860px,calc(100% - 72px))!important" in expanded_messages_rule
+
+    collapsed_messages_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"].taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{')
+    assert "width:min(1020px,calc(100% - 96px))!important" in collapsed_messages_rule
+    assert "max-width:min(1020px,calc(100% - 96px))!important" in collapsed_messages_rule
+
+    collapsed_composer_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] #composerWrap{')
+    assert "width:min(1020px,calc(100% - 96px))!important" in collapsed_composer_rule
+    assert "max-width:min(1020px,calc(100% - 96px))!important" in collapsed_composer_rule
+
+    collapsed_body_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-segment .msg-body,')
+    assert "font-size:14.5px!important" in collapsed_body_rule
+    assert "font-size:16px!important" not in collapsed_body_rule
 
 
 def test_lucide_registry_contains_all_taiji_shell_icons():
