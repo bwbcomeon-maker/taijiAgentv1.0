@@ -468,6 +468,103 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("build_offline_dependency_repo", builder)
         self.assertIn("git archive", builder)
 
+    def test_delivery_release_preflight_is_a_hard_gate(self):
+        preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
+        self.assertTrue(preflight_path.exists())
+
+        preflight = preflight_path.read_text(encoding="utf-8")
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        docs = read_text("taijiagent 打包交付/操作说明.md")
+        gitignore = read_text(".gitignore")
+
+        self.assertIn("run_release_preflight", builder)
+        self.assertIn("01_制包机_发布预检.sh", builder)
+        self.assertIn("01_制包机_发布预检.sh", docs)
+        self.assertIn("!/taijiagent 打包交付/01_制包机_发布预检.sh", gitignore)
+        self.assertIn('git -C "$REPO_ROOT" diff --quiet', preflight)
+        self.assertIn('git -C "$REPO_ROOT" diff --cached --quiet', preflight)
+        self.assertIn("taiji-agentv1.0-kylin-build-src-*.tar.gz", preflight)
+        self.assertIn("SHA256SUMS.txt", preflight)
+        self.assertIn("生成的安装包", preflight)
+        self.assertIn("离线依赖", preflight)
+        self.assertIn("Packages.gz", preflight)
+        self.assertIn("taiji-package-manifest.json", preflight)
+        self.assertIn("__MACOSX", preflight)
+        self.assertIn(".DS_Store", preflight)
+        self.assertIn("._*", preflight)
+        self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS", preflight)
+
+    def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+
+        self.assertIn("MANIFEST_FILE", builder)
+        self.assertIn("taiji-package-manifest.json", builder)
+        self.assertIn("write_release_manifest", builder)
+        self.assertIn("packages_gz_sha256", builder)
+        self.assertIn("build_glibc", builder)
+        self.assertIn("target_matrix", builder)
+        self.assertIn("support_boundary", builder)
+        self.assertIn("TAIJI_ALLOW_UV_LOCK_REFRESH", builder)
+        self.assertNotIn("\n  uv lock\n", builder)
+
+        self.assertIn("MANIFEST_PATH", install)
+        self.assertIn("validate_release_manifest", install)
+        self.assertIn("manifest", install)
+        self.assertIn("packages_gz_sha256", install)
+
+    def test_delivery_install_script_requires_offline_repo_unless_explicitly_online(self):
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+
+        self.assertIn('ONLINE_OK="${ONLINE_OK:-0}"', install)
+        self.assertIn("缺少离线依赖仓库", install)
+        self.assertIn("ONLINE_OK=1", install)
+        self.assertIn("完全离线发布包", install)
+
+    def test_build_script_audits_final_deb_payload_and_webui_offline_assets(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn("scan_webui_offline_assets", build)
+        self.assertIn("cdn.jsdelivr.net", build)
+        self.assertIn("vendor/xterm/5.3.0/xterm.css", build)
+        self.assertIn("vendor/prismjs/1.29.0/prism.min.js", build)
+        self.assertIn("audit_deb_payload", build)
+        self.assertIn("dpkg-deb -c", build)
+        for required in (
+            "./opt/taiji-agent/runtime/agent/venv/bin/python",
+            "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
+            "./opt/taiji-agent/runtime/web/server.pyc",
+            "./opt/taiji-agent/scripts/taiji-native-verify",
+            "./usr/share/applications/taiji-agent.desktop",
+            "./usr/bin/taiji",
+            "./usr/bin/taiji-agent",
+        ):
+            self.assertIn(required, build)
+
+    def test_webui_runtime_assets_are_local_for_offline_target(self):
+        static_root = ROOT / "hermes-local-lab/sources/hermes-webui/static"
+        checked = {
+            "index.html": read_text("hermes-local-lab/sources/hermes-webui/static/index.html"),
+            "boot.js": read_text("hermes-local-lab/sources/hermes-webui/static/boot.js"),
+            "sw.js": read_text("hermes-local-lab/sources/hermes-webui/static/sw.js"),
+        }
+
+        for path, text in checked.items():
+            self.assertNotIn("cdn.jsdelivr.net", text, path)
+            self.assertNotIn("-taiji-shell-", text, path)
+
+        index = checked["index.html"]
+        for local_asset in (
+            "static/vendor/xterm/5.3.0/xterm.css",
+            "static/vendor/xterm/5.3.0/xterm.js",
+            "static/vendor/xterm-addon-fit/0.8.0/xterm-addon-fit.js",
+            "static/vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js",
+            "static/vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css",
+            "static/vendor/prismjs/1.29.0/prism.min.js",
+        ):
+            self.assertIn(local_asset, index)
+            self.assertTrue((static_root / local_asset.removeprefix("static/")).exists(), local_asset)
+
     def test_offline_builder_normalizes_source_checksum_paths(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 

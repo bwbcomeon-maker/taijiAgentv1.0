@@ -8,8 +8,10 @@ LOG_DIR="$SCRIPT_DIR/构建日志"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DEB_PATH=""
 CHECKSUM_PATH=""
+MANIFEST_PATH=""
 OFFLINE_APT_REPO_MOUNT=""
 OFFLINE_APT_REPO_SOURCE=""
+ONLINE_OK="${ONLINE_OK:-0}"
 
 LEGACY_SERVICES=(
   "taiji-agent-webui.service"
@@ -58,6 +60,41 @@ marker_value() {
   awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$BUILD_MARKER"
 }
 
+json_string_value() {
+  local key="$1" path="$2"
+  sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$path" | head -1
+}
+
+validate_release_manifest() {
+  local deb_name checksum_name expected_sha manifest_name marker_packages_sha
+  local manifest_deb manifest_checksum manifest_deb_sha manifest_packages_sha actual_packages_sha
+  deb_name="$(marker_value deb)"
+  checksum_name="$(marker_value checksum)"
+  expected_sha="$(marker_value deb_sha256)"
+  manifest_name="$(marker_value manifest)"
+  marker_packages_sha="$(marker_value packages_gz_sha256)"
+
+  [ -n "$manifest_name" ] || fail "构建成功标记缺少 manifest 字段，请重新执行制包脚本"
+  [ -n "$marker_packages_sha" ] || fail "构建成功标记缺少 packages_gz_sha256 字段，请重新执行制包脚本"
+  MANIFEST_PATH="$OUTPUT_DIR/$manifest_name"
+  [ -f "$MANIFEST_PATH" ] || fail "构建成功标记指向的 manifest 不存在：$MANIFEST_PATH"
+
+  manifest_deb="$(json_string_value deb "$MANIFEST_PATH")"
+  manifest_checksum="$(json_string_value checksum "$MANIFEST_PATH")"
+  manifest_deb_sha="$(json_string_value deb_sha256 "$MANIFEST_PATH")"
+  manifest_packages_sha="$(json_string_value packages_gz_sha256 "$MANIFEST_PATH")"
+  [ "$manifest_deb" = "$deb_name" ] || fail "manifest 与构建标记的 DEB 名称不一致"
+  [ "$manifest_checksum" = "$checksum_name" ] || fail "manifest 与构建标记的校验文件名称不一致"
+  [ "$manifest_deb_sha" = "$expected_sha" ] || fail "manifest 与构建标记的 DEB SHA256 不一致"
+  [ "$manifest_packages_sha" = "$marker_packages_sha" ] || fail "manifest 与构建标记的 Packages.gz SHA256 不一致"
+
+  if offline_repo_available; then
+    actual_packages_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
+    [ "$actual_packages_sha" = "$manifest_packages_sha" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
+  fi
+  ok "发布 manifest 有效：$manifest_name"
+}
+
 validate_build_marker() {
   [ -f "$BUILD_MARKER" ] || fail "未找到构建成功标记，请先在制包机执行并确认成功：bash ./00_制包机_生成离线交付包.sh"
 
@@ -75,6 +112,7 @@ validate_build_marker() {
 
   actual_sha="$(sha256sum "$DEB_PATH" | awk '{print $1}')"
   [ "$actual_sha" = "$expected_sha" ] || fail "安装包与构建成功标记不匹配，请重新执行构建脚本"
+  validate_release_manifest
   ok "构建成功标记有效：$deb_name"
 }
 
@@ -347,6 +385,18 @@ offline_repo_available() {
   [ -d "$OFFLINE_REPO" ] && [ -f "$OFFLINE_REPO/Packages.gz" ]
 }
 
+validate_offline_repo_requirement() {
+  if offline_repo_available; then
+    ok "完全离线发布包依赖仓库有效：$OFFLINE_REPO/Packages.gz"
+    return 0
+  fi
+  if [ "$ONLINE_OK" = "1" ]; then
+    warn "ONLINE_OK=1：未检测到离线依赖仓库，将显式允许使用目标机系统已配置软件源安装。"
+    return 0
+  fi
+  fail "缺少离线依赖仓库：$OFFLINE_REPO/Packages.gz。完全离线发布包必须包含该文件；如明确允许目标机在线源，请设置 ONLINE_OK=1 后重试。"
+}
+
 prepare_offline_apt_repo_source_path() {
   local repo_path
   repo_path="$(cd "$OFFLINE_REPO" && pwd)"
@@ -379,7 +429,8 @@ install_taiji_package() {
     return
   fi
 
-  warn "未检测到离线依赖仓库，将使用系统已配置软件源安装。完全离线目标机请先在制包机生成离线依赖。"
+  [ "$ONLINE_OK" = "1" ] || fail "缺少离线依赖仓库：$OFFLINE_REPO/Packages.gz。完全离线发布包不能回退到目标机在线源。"
+  warn "ONLINE_OK=1：使用系统已配置软件源安装；这不是完全离线发布包验收路径。"
   sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
 }
 
@@ -388,6 +439,7 @@ install_package() {
 
   info "校验安装包"
   (cd "$OUTPUT_DIR" && sha256sum -c "$(basename "$CHECKSUM_PATH")")
+  validate_offline_repo_requirement
 
   prepare_legacy_replacement
 

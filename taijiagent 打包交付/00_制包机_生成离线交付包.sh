@@ -15,6 +15,7 @@ NODE_ROOT="$TOOL_ROOT/node"
 NODE_MAJOR="${TAIJI_NODE_MAJOR:-22}"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
+MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
 
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$OFFLINE_REPO"
 LOG_FILE="$LOG_DIR/00_offline_build_$(date +%Y%m%d_%H%M%S).log"
@@ -85,7 +86,7 @@ create_source_archive_from_git() {
   [ -d "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
   git -C "$repo_root" diff --quiet || fail "源码仓库存在未提交改动，请先提交后再生成发布源码包"
   git -C "$repo_root" diff --cached --quiet || fail "源码仓库存在已暂存未提交改动，请先提交后再生成发布源码包"
-  short="$(git -C "$repo_root" rev-parse --short HEAD)"
+  short="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
   archive_name="taiji-agentv1.0-kylin-build-src-$short.tar.gz"
   info "使用 git archive 生成源码包：$archive_name"
   git -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
@@ -124,9 +125,22 @@ resolve_source_archive() {
 }
 
 cleanup_delivery_metadata() {
-  info "清理交付文件夹中的拷贝元数据"
-  find "$SCRIPT_DIR" \( -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -print -delete
+  info "检查交付文件夹中的拷贝元数据"
+  local metadata
+  metadata="$(find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -print)"
+  [ -z "$metadata" ] || {
+    printf '%s\n' "$metadata" >&2
+    fail "交付目录含 macOS 元数据，请清理后重新发布"
+  }
   ok "拷贝元数据检查完成"
+}
+
+run_release_preflight() {
+  local preflight_script="$SCRIPT_DIR/01_制包机_发布预检.sh"
+  [ -x "$preflight_script" ] || fail "缺少发布预检脚本：$preflight_script"
+  TAIJI_RELEASE_REQUIRE_ARTIFACTS="${TAIJI_RELEASE_REQUIRE_ARTIFACTS:-0}" \
+    TAIJI_RELEASE_SKIP_GIT_CHECK="${TAIJI_RELEASE_SKIP_GIT_CHECK:-0}" \
+    "$preflight_script"
 }
 
 preflight() {
@@ -156,6 +170,7 @@ preflight() {
   else
     warn "未找到 SHA256SUMS.txt，跳过源码包传输校验"
   fi
+  run_release_preflight
 }
 
 install_build_dependencies() {
@@ -352,9 +367,11 @@ build_runtime_and_deb() {
   export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
   export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 
-  info "刷新目标构建工作区 Python lock"
-  cd "$(source_agent_dir)"
-  uv lock
+  if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
+    warn "TAIJI_ALLOW_UV_LOCK_REFRESH=1：将刷新目标构建工作区 Python lock；正式发布应使用已提交 lock。"
+    cd "$(source_agent_dir)"
+    uv lock
+  fi
 
   info "生成 Linux Python venv"
   cd "$(source_lab_dir)"
@@ -379,7 +396,7 @@ collect_artifacts() {
   [ -f "$deb" ] || fail "未找到 DEB：$deb"
   [ -f "$checksum" ] || fail "未找到 DEB 校验文件：$checksum"
 
-  rm -f "$OUTPUT_DIR"/taiji-agent_*_amd64.deb "$OUTPUT_DIR"/taiji-agent_*_amd64.deb.sha256 "$BUILD_MARKER"
+  rm -f "$OUTPUT_DIR"/taiji-agent_*_amd64.deb "$OUTPUT_DIR"/taiji-agent_*_amd64.deb.sha256 "$BUILD_MARKER" "$MANIFEST_FILE" "$BUILD_REPORT"
   cp -f "$deb" "$OUTPUT_DIR/"
   cp -f "$checksum" "$OUTPUT_DIR/"
   (cd "$OUTPUT_DIR" && sha256sum -c "taiji-agent_${VERSION}_amd64.deb.sha256")
@@ -448,9 +465,96 @@ build_offline_dependency_repo() {
   (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz)
   (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
   repo_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
+  PACKAGES_GZ_SHA256="$repo_sha"
   ok "离线依赖仓库已生成：$OFFLINE_REPO/Packages.gz"
   ok "主安装包已纳入离线仓库：$deb_name"
   ok "Packages.gz SHA256：$repo_sha"
+}
+
+build_glibc() {
+  getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>/dev/null | head -1 || printf 'unknown\n'
+}
+
+write_release_manifest() {
+  info "生成发布 manifest"
+  local src_name deb_name checksum_name source_sha deb_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
+  src_name="$(basename "$SRC_ARCHIVE")"
+  deb_name="taiji-agent_${VERSION}_amd64.deb"
+  checksum_name="$deb_name.sha256"
+  source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$src_name" | awk '{print $1}')"
+  deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
+  packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
+  build_os="$(. /etc/os-release 2>/dev/null && printf '%s %s' "${PRETTY_NAME:-Linux}" "${VERSION_ID:-}" || uname -a)"
+  build_glibc="$(build_glibc)"
+  build_arch="$(uname -m)"
+  dpkg_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  source_commit="$(printf '%s\n' "$src_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+
+  export TAIJI_MANIFEST_FILE="$MANIFEST_FILE"
+  export TAIJI_MANIFEST_VERSION="$VERSION"
+  export TAIJI_MANIFEST_SOURCE_ARCHIVE="$src_name"
+  export TAIJI_MANIFEST_SOURCE_SHA256="$source_sha"
+  export TAIJI_MANIFEST_SOURCE_COMMIT="$source_commit"
+  export TAIJI_MANIFEST_DEB="$deb_name"
+  export TAIJI_MANIFEST_DEB_SHA256="$deb_sha"
+  export TAIJI_MANIFEST_CHECKSUM="$checksum_name"
+  export TAIJI_MANIFEST_PACKAGES_GZ_SHA256="$packages_gz_sha"
+  export TAIJI_MANIFEST_BUILD_OS="$build_os"
+  export TAIJI_MANIFEST_BUILD_GLIBC="$build_glibc"
+  export TAIJI_MANIFEST_BUILD_ARCH="$build_arch"
+  export TAIJI_MANIFEST_DPKG_ARCH="$dpkg_arch"
+
+  python3 - <<'PY'
+import datetime
+import json
+import os
+from pathlib import Path
+
+manifest = {
+    "schema_version": 1,
+    "package": "taiji-agent",
+    "version": os.environ["TAIJI_MANIFEST_VERSION"],
+    "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "source_commit": os.environ["TAIJI_MANIFEST_SOURCE_COMMIT"],
+    "source_archive": os.environ["TAIJI_MANIFEST_SOURCE_ARCHIVE"],
+    "source_sha256": os.environ["TAIJI_MANIFEST_SOURCE_SHA256"],
+    "deb": os.environ["TAIJI_MANIFEST_DEB"],
+    "deb_sha256": os.environ["TAIJI_MANIFEST_DEB_SHA256"],
+    "checksum": os.environ["TAIJI_MANIFEST_CHECKSUM"],
+    "packages_gz_sha256": os.environ["TAIJI_MANIFEST_PACKAGES_GZ_SHA256"],
+    "build_os": os.environ["TAIJI_MANIFEST_BUILD_OS"],
+    "build_glibc": os.environ["TAIJI_MANIFEST_BUILD_GLIBC"],
+    "build_arch": os.environ["TAIJI_MANIFEST_BUILD_ARCH"],
+    "dpkg_arch": os.environ["TAIJI_MANIFEST_DPKG_ARCH"],
+    "target_matrix": [
+        "Debian-like x86_64/amd64 desktop Linux",
+        "Kylin V10 SP1 x86_64 desktop baseline",
+        "UOS/openKylin x86_64 desktop, apt/dpkg variant"
+    ],
+    "support_boundary": {
+        "supported": [
+            "x86_64/amd64",
+            "Debian-like package manager with apt-get and dpkg",
+            "Graphical desktop session for Electron startup",
+            "Complete delivery directory with generated DEB and local offline apt repository"
+        ],
+        "unsupported": [
+            "RPM-only terminals without dpkg/apt",
+            "ARM/aarch64 terminals",
+            "Headless or strongly sandboxed terminals without desktop session",
+            "Offline installations missing 离线依赖/Packages.gz"
+        ]
+    }
+}
+path = Path(os.environ["TAIJI_MANIFEST_FILE"])
+path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+  {
+    printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
+    printf 'packages_gz_sha256=%s\n' "$packages_gz_sha"
+  } >> "$BUILD_MARKER"
+  ok "发布 manifest 已生成：$MANIFEST_FILE"
 }
 
 write_build_report() {
@@ -470,6 +574,8 @@ write_build_report() {
     printf '源码包 SHA256：%s\n' "$source_line"
     printf 'DEB SHA256：%s\n' "$deb_line"
     printf 'Packages.gz SHA256：%s\n' "$repo_line"
+    printf '发布 manifest：%s\n' "$(basename "$MANIFEST_FILE")"
+    printf '支持边界：Debian-like x86_64/amd64 图形桌面，必须包含离线依赖/Packages.gz；RPM/.run 另行制包。\n'
     printf '目标机安装脚本：02_目标终端_安装并验证.sh\n'
     printf '目标机离线仓库：离线依赖/Packages.gz\n'
   } > "$BUILD_REPORT"
@@ -485,7 +591,9 @@ main() {
   build_runtime_and_deb
   collect_artifacts
   build_offline_dependency_repo
+  write_release_manifest
   write_build_report
+  TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight
   printf '\n[OK] 离线交付包生成完成。目标机断网后执行：\n'
   printf 'bash ./02_目标终端_安装并验证.sh\n'
   printf '\n日志：%s\n' "$LOG_FILE"

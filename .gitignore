@@ -50,6 +50,7 @@ hermes-local-lab/sources/hermes-agent/.playwright-mcp/
 /taijiagent 打包交付/*
 !/taijiagent 打包交付/
 !/taijiagent 打包交付/00_制包机_生成离线交付包.sh
+!/taijiagent 打包交付/01_制包机_发布预检.sh
 !/taijiagent 打包交付/02_目标终端_安装并验证.sh
 !/taijiagent 打包交付/03_目标终端_导出诊断报告.sh
 !/taijiagent 打包交付/操作说明.md

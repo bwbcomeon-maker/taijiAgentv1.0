@@ -2,8 +2,12 @@
 
 源码包：taiji-agentv1.0-kylin-build-src-<hash>.tar.gz
 源码 commit：以源码包文件名、SHA256SUMS.txt 和制包机构建报告为准
-目标系统：Kylin V10 SP1 / Debian-like / x86_64 amd64 / glibc 2.31
+目标系统：Kylin V10 SP1 / Debian-like / x86_64 amd64 / glibc 2.31 / 图形桌面
 交付形态：联网 Linux amd64 制包机生成 DEB 和离线依赖仓库，完全离线目标终端只安装验证
+发布预检：01_制包机_发布预检.sh 会检查 git 干净、单一源码包、SHA256SUMS.txt basename、旧包旧 zip 和 macOS 元数据；失败即停止发布。
+发布 manifest：生成的安装包/taiji-package-manifest.json 记录源码包、DEB、Packages.gz、构建机 OS/glibc、目标系统矩阵和支持/不支持条件；目标机安装脚本会校验 manifest 匹配。
+离线边界：完全离线安装必须包含 生成的安装包/ 和 离线依赖/Packages.gz；缺失时默认失败，只有显式 ONLINE_OK=1 才允许使用目标机在线源。
+不支持范围：RPM-only、ARM/aarch64、无 apt/dpkg、无图形桌面或强隔离环境不属于当前 DEB 一键安装范围；RPM 和 .run 需要后续单独制品。
 安装脚本：已支持同版本重装、apt 降级覆盖和 hold 包覆盖，不需要手动卸载旧 taiji-agent。
 旧版处理：安装前自动停止并禁用旧服务，清理旧进程，彻底删除旧浏览器 WebUI 版系统安装，不保留两个 Agent 并存运行。
 数据边界：旧 `/opt/taiji-agent`、旧配置、旧服务、旧入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不删除。

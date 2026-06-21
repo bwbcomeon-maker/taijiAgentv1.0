@@ -1585,11 +1585,10 @@ function _setResolvedTheme(isDark){
   const link=document.getElementById('prism-theme');
   if(!link){ _syncThemeColorMeta(); return; }
   const want=isDark
-    ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
-    :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
-  // No SRI integrity on theme CSS — jsdelivr edge nodes serve different
-  // digests for the same pinned version, causing intermittent blocking (#1100).
-  if(link.href!==want){ link.integrity=''; link.href=want; }
+    ?'static/vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css'
+    :'static/vendor/prismjs/1.29.0/themes/prism.min.css';
+  const wantHref=new URL(want,document.baseURI).href;
+  if(link.href!==wantHref){ link.integrity=''; link.href=want; }
   _syncThemeColorMeta();
 }
 

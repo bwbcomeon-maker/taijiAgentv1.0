@@ -604,7 +604,7 @@ function cancelEditMode(){
 }
 
 // Map file extensions to Prism.js language identifiers.
-// Prism autoloader fetches missing language components from CDN on demand.
+// Packaged builds use the local Prism bundle; unsupported languages fall back to plain text.
 const _PRISM_LANG_MAP={
   js:'javascript',mjs:'javascript',jsx:'jsx',ts:'typescript',tsx:'tsx',
   py:'python',pyw:'python',pyi:'python',

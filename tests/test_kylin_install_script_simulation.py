@@ -1,6 +1,7 @@
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -46,17 +47,48 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def _write_current_deb(self) -> None:
         output_dir = self.tmp_path / "生成的安装包"
         output_dir.mkdir(exist_ok=True)
+        repo_dir = self.tmp_path / "离线依赖"
+        repo_dir.mkdir(exist_ok=True)
+        packages_gz = repo_dir / "Packages.gz"
+        packages_gz.write_bytes(b"fake packages\n")
+        packages_sha = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
         deb = output_dir / "taiji-agent_0.1.0_amd64.deb"
         checksum = output_dir / "taiji-agent_0.1.0_amd64.deb.sha256"
+        manifest = output_dir / "taiji-package-manifest.json"
         deb.write_bytes(b"fake deb\n")
         sha = hashlib.sha256(deb.read_bytes()).hexdigest()
         checksum.write_text(f"{sha}  {deb.name}\n", encoding="utf-8")
+        manifest.write_text(
+            textwrap.dedent(
+                f"""
+                {{
+                  "schema_version": 1,
+                  "version": "0.1.0",
+                  "source_archive": "taiji-agentv1.0-kylin-build-src-test.tar.gz",
+                  "source_sha256": "{'0' * 64}",
+                  "deb": "{deb.name}",
+                  "deb_sha256": "{sha}",
+                  "checksum": "{checksum.name}",
+                  "packages_gz_sha256": "{packages_sha}",
+                  "target_matrix": ["Debian-like x86_64/amd64 desktop Linux"],
+                  "support_boundary": {{
+                    "supported": ["Debian-like x86_64/amd64 desktop Linux"],
+                    "unsupported": ["RPM-only Linux terminals"]
+                  }}
+                }}
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
         (output_dir / ".build-success").write_text(
             "\n".join(
                 [
                     f"deb={deb.name}",
                     f"checksum={checksum.name}",
                     f"deb_sha256={sha}",
+                    f"manifest={manifest.name}",
+                    f"packages_gz_sha256={packages_sha}",
                     "version=0.1.0",
                 ]
             )
@@ -212,6 +244,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         dpkg_persists: bool = False,
         lsof_mode: str = "none",
         pgrep_mode: str = "none",
+        online_ok: bool = False,
     ) -> subprocess.CompletedProcess:
         harness = self.tmp_path / "run.sh"
         harness.write_text(
@@ -227,6 +260,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
                 export FAKE_LSOF_MODE="{lsof_mode}"
                 export FAKE_PGREP_MODE="{pgrep_mode}"
+                export ONLINE_OK="{1 if online_ok else 0}"
                 source "{self.import_script}"
                 path_exists() {{
                   case "$1" in
@@ -278,10 +312,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertLess(log.index("sudo systemctl stop taiji-agent-webui.service"), log.index("sudo apt-mark unhold taiji-agent"))
         self.assertLess(log.index("sudo apt-mark unhold taiji-agent"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
         self.assertLess(log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"), log.index("sudo rm -rf -- /opt/taiji-agent"))
-        self.assertLess(log.index("sudo rm -rf -- /opt/taiji-agent"), log.index("sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages"))
+        self.assertLess(log.index("sudo rm -rf -- /opt/taiji-agent"), log.index(" install -y --reinstall --allow-downgrades --allow-change-held-packages"))
         self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
         self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertIn("sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages", log)
+        self.assertIn(" install -y --reinstall --allow-downgrades --allow-change-held-packages", log)
 
     def test_dpkg_purge_fallback_allows_install_when_apt_purge_fails(self):
         result = self.run_install_package(apt_purge_fails=True)
@@ -291,7 +325,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
         self.assertIn("sudo dpkg --remove --force-remove-reinstreq taiji-agent", log)
         self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
-        self.assertIn("sudo apt-get install -y --reinstall", log)
+        self.assertIn(" install -y --reinstall", log)
 
     def test_persistent_dpkg_state_stops_before_file_removal_and_install(self):
         result = self.run_install_package(apt_purge_fails=True, dpkg_persists=True)
@@ -300,7 +334,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         log = self.fake_log_text()
         self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
         self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertNotIn("sudo apt-get install -y --reinstall", log)
+        self.assertNotIn(" install -y --reinstall", log)
 
     def test_legacy_opt_process_is_killed_before_package_purge(self):
         result = self.run_install_package(pgrep_mode="legacy")
@@ -309,7 +343,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         log = self.fake_log_text()
         self.assertIn("sudo kill 9999", log)
         self.assertLess(log.index("sudo kill 9999"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
-        self.assertIn("sudo apt-get install -y --reinstall", log)
+        self.assertIn(" install -y --reinstall", log)
 
     def test_non_taiji_port_conflict_is_reported_without_blocking_install(self):
         result = self.run_install_package(lsof_mode="non_taiji")
@@ -319,11 +353,31 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertNotIn("sudo kill 43210", log)
         self.assertIn("apt-get purge -y taiji-agent", log)
         self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertIn("sudo apt-get install -y --reinstall", log)
+        self.assertIn(" install -y --reinstall", log)
+
+    def test_missing_offline_repo_blocks_default_install(self):
+        shutil.rmtree(self.tmp_path / "离线依赖")
+
+        result = self.run_install_package()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        output = result.stdout + result.stderr
+        self.assertIn("缺少离线依赖仓库", output)
+        self.assertNotIn(" install -y --reinstall", self.fake_log_text())
+
+    def test_online_ok_allows_explicit_fallback_without_offline_repo(self):
+        shutil.rmtree(self.tmp_path / "离线依赖")
+
+        result = self.run_install_package(online_ok=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        output = result.stdout + result.stderr
+        self.assertIn("ONLINE_OK=1", output)
+        self.assertIn(" install -y --reinstall", self.fake_log_text())
 
     def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
         repo = self.tmp_path / "离线依赖"
-        repo.mkdir()
+        repo.mkdir(exist_ok=True)
         (repo / "Packages.gz").write_bytes(b"fake packages\n")
 
         result = self.run_install_package()

@@ -413,6 +413,38 @@ scan_product_privacy() {
   fi
 }
 
+scan_webui_offline_assets() {
+  local static_dir required missing cdn_hits
+  static_dir="$SOURCE_WEB_DIR/static"
+  [ -d "$static_dir" ] || fail "Missing WebUI static directory: $static_dir"
+
+  cdn_hits="$(grep -RIn 'cdn.jsdelivr.net' "$static_dir" \
+    --include='*.html' \
+    --include='*.js' \
+    --include='*.css' 2>/dev/null || true)"
+  if [ -n "$cdn_hits" ]; then
+    printf '%s\n' "$cdn_hits" >&2
+    fail "WebUI static assets still depend on CDN; vendor them under static/vendor before building an offline package."
+  fi
+
+  for required in \
+    "vendor/xterm/5.3.0/xterm.css" \
+    "vendor/xterm/5.3.0/xterm.js" \
+    "vendor/xterm-addon-fit/0.8.0/xterm-addon-fit.js" \
+    "vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js" \
+    "vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css" \
+    "vendor/prismjs/1.29.0/themes/prism.min.css" \
+    "vendor/prismjs/1.29.0/prism.min.js"; do
+    if [ ! -f "$static_dir/$required" ]; then
+      missing="${missing:-}${static_dir}/${required}"$'\n'
+    fi
+  done
+  if [ -n "${missing:-}" ]; then
+    printf '%s' "$missing" >&2
+    fail "WebUI offline vendor assets are incomplete."
+  fi
+}
+
 scan_package_tree() {
   if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) | grep -q .; then
     echo "Package tree contains macOS/Python cache metadata; clean before release." >&2
@@ -434,6 +466,28 @@ scan_deb_release_artifact() {
       fail "DEB contains forbidden archive metadata marker: $pattern"
     fi
   done
+}
+
+audit_deb_payload() {
+  local contents required missing
+  contents="$BUILD_ROOT/deb-contents.txt"
+  dpkg-deb -c "$OUT_DEB" > "$contents"
+  for required in \
+    "./opt/taiji-agent/runtime/agent/venv/bin/python" \
+    "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" \
+    "./opt/taiji-agent/runtime/web/server.pyc" \
+    "./opt/taiji-agent/scripts/taiji-native-verify" \
+    "./usr/share/applications/taiji-agent.desktop" \
+    "./usr/bin/taiji" \
+    "./usr/bin/taiji-agent"; do
+    if ! grep -F "$required" "$contents" >/dev/null; then
+      missing="${missing:-}${required}"$'\n'
+    fi
+  done
+  if [ -n "${missing:-}" ]; then
+    printf '%s' "$missing" >&2
+    fail "DEB payload is missing required runtime paths."
+  fi
 }
 
 if [ "$(uname -s)" != "Linux" ]; then
@@ -470,6 +524,7 @@ fi
 verify_linux_electron_runtime
 validate_desktop_entry "$DESKTOP_FILE"
 validate_packaged_config_template
+scan_webui_offline_assets
 
 rm -rf "$BUILD_ROOT"
 mkdir -p \
@@ -552,6 +607,7 @@ scan_package_tree
 
 dpkg-deb --root-owner-group -Zxz --build "$PKG_ROOT" "$OUT_DEB"
 scan_deb_release_artifact
+audit_deb_payload
 sha256sum "$OUT_DEB" > "$OUT_DEB.sha256"
 
 echo "Built: $OUT_DEB"
