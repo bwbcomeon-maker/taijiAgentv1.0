@@ -234,9 +234,20 @@ def test_taiji_secondary_collapse_expands_workspace_in_final_override():
     assert "width:min(1020px,calc(100% - 96px))!important" in collapsed_composer_rule
     assert "max-width:min(1020px,calc(100% - 96px))!important" in collapsed_composer_rule
 
+    base_body_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .assistant-segment .msg-body,')
+    assert "max-width:min(620px,100%)!important" in base_body_rule
+    assert "padding:12px 15px!important" in base_body_rule
+    assert "font-size:14.5px!important" in base_body_rule
+    assert "font-weight:450!important" in base_body_rule
+    assert "line-height:1.58!important" in base_body_rule
+    assert "font-size:16px!important" not in base_body_rule
+
     collapsed_body_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-segment .msg-body,')
-    assert "font-size:14.5px!important" in collapsed_body_rule
-    assert "font-size:16px!important" not in collapsed_body_rule
+    assert "max-width:min(800px,100%)!important" in collapsed_body_rule
+    assert "padding:" not in collapsed_body_rule
+    assert "font-size:" not in collapsed_body_rule
+    assert "font-weight:" not in collapsed_body_rule
+    assert "line-height:" not in collapsed_body_rule
 
 
 def test_lucide_registry_contains_all_taiji_shell_icons():

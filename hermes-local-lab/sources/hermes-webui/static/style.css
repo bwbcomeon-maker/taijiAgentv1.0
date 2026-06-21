@@ -10309,15 +10309,15 @@ main.main.showing-logs > #mainLogs{display:flex;}
     width:fit-content!important;
     max-width:min(620px,100%)!important;
     margin:0!important;
-    padding:13px 17px!important;
+    padding:12px 15px!important;
     border:1px solid rgba(199,216,230,.7)!important;
     border-radius:11px!important;
     color:#102f58!important;
     background:rgba(255,255,255,.9)!important;
     box-shadow:0 8px 20px rgba(47,95,135,.12),inset 0 1px 0 rgba(255,255,255,.86)!important;
-    font-size:16px!important;
-    font-weight:500!important;
-    line-height:1.68!important;
+    font-size:14.5px!important;
+    font-weight:450!important;
+    line-height:1.58!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]{
     display:grid!important;
@@ -10381,10 +10381,6 @@ main.main.showing-logs > #mainLogs{display:flex;}
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-segment .msg-body,
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .assistant-turn .msg-body{
     max-width:min(800px,100%)!important;
-    padding:12px 15px!important;
-    font-size:14.5px!important;
-    font-weight:450!important;
-    line-height:1.58!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
     max-width:clamp(280px,34vw,560px)!important;
