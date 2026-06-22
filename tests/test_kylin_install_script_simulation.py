@@ -364,6 +364,12 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertIn("缺少离线依赖仓库", output)
         self.assertNotIn(" install -y --reinstall", self.fake_log_text())
+        diagnostics = sorted((self.tmp_path / "构建日志").glob("失败诊断-*.txt"))
+        self.assertTrue(diagnostics, output)
+        diagnostic = diagnostics[-1].read_text(encoding="utf-8")
+        self.assertIn("缺少离线依赖仓库", diagnostic)
+        self.assertIn("ONLINE_OK=0", diagnostic)
+        self.assertIn("next=完全离线安装必须包含 离线依赖/Packages.gz", diagnostic)
 
     def test_online_ok_allows_explicit_fallback_without_offline_repo(self):
         shutil.rmtree(self.tmp_path / "离线依赖")
@@ -425,6 +431,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         result = self.run_install_package()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("检测到多个候选授权文件", result.stdout + result.stderr)
+        diagnostics = sorted((self.tmp_path / "构建日志").glob("失败诊断-*.txt"))
+        self.assertTrue(diagnostics, result.stdout + result.stderr)
+        diagnostic = diagnostics[-1].read_text(encoding="utf-8")
+        self.assertIn("检测到多个候选授权文件", diagnostic)
 
 
 if __name__ == "__main__":

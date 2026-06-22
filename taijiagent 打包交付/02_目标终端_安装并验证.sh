@@ -38,12 +38,114 @@ CONFLICT_PORTS=(8787 18642 18787)
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/02_install_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
+FAILURE_REPORTED=0
+CURRENT_STAGE="初始化"
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+set_stage() { CURRENT_STAGE="$1"; info "阶段：$CURRENT_STAGE"; }
+
+safe_cmd_path() {
+  command -v "$1" 2>/dev/null || printf 'missing'
+}
+
+write_environment_snapshot() {
+  local out="$1" cmd
+  {
+    printf '## 环境\n'
+    printf 'script=%s\n' "$0"
+    printf 'stage=%s\n' "${CURRENT_STAGE:-unknown}"
+    printf 'cwd=%s\n' "$(pwd)"
+    printf 'uname=%s\n' "$(uname -a 2>/dev/null || true)"
+    if [ -f /etc/os-release ]; then
+      printf -- '-- /etc/os-release --\n'
+      sed -n '1,40p' /etc/os-release
+    fi
+    printf 'arch=%s\n' "$(uname -m 2>/dev/null || true)"
+    printf 'dpkg_arch=%s\n' "$(dpkg --print-architecture 2>/dev/null || true)"
+    for cmd in sudo apt-get dpkg dpkg-query apt-mark sha256sum mktemp systemctl pgrep ps lsof taiji taiji-agent; do
+      printf 'cmd.%s=%s\n' "$cmd" "$(safe_cmd_path "$cmd")"
+    done
+    printf 'ONLINE_OK=%s\n' "$ONLINE_OK"
+    printf 'DISPLAY=%s\n' "${DISPLAY:-}"
+    printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-}"
+    printf '\n## 交付产物\n'
+    find "$SCRIPT_DIR" -maxdepth 2 \( -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name 'taiji-agent_*_amd64.deb' -o -name 'taiji-agent_*_amd64.deb.sha256' -o -name 'Packages.gz' -o -name 'SHA256SUMS.txt' \) -print 2>/dev/null | sort
+    printf '\n## 包和服务状态\n'
+    dpkg-query -W -f='${db:Status-Abbrev} ${Package} ${Version}\n' taiji-agent 2>/dev/null || true
+    systemctl status taiji-agent-webui.service --no-pager 2>/dev/null | sed -n '1,60p' || true
+    systemctl status taiji-agent-gateway.service --no-pager 2>/dev/null | sed -n '1,60p' || true
+    printf '\n## 端口占用\n'
+    for port in "${CONFLICT_PORTS[@]}"; do
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+    done
+    printf '\n## 最新日志\n'
+    [ -f "$LOG_FILE" ] && tail -n 180 "$LOG_FILE"
+  } >> "$out" 2>&1 || true
+}
+
+failure_next_steps() {
+  local reason="${1:-}"
+  case "$reason" in
+    *"只能在 Linux"*|*"不是 x86_64/amd64"*|*"缺少 apt-get"*|*"缺少 dpkg"*)
+      printf 'next=当前目标机不在 DEB 支持矩阵内；需要 Linux x86_64/amd64 + apt/dpkg + 图形桌面，RPM/.run 需单独制品\n'
+      ;;
+    *"管理员权限"*|*"sudo"*)
+      printf 'next=先执行 sudo -v，确认当前用户具备管理员权限后重试安装脚本\n'
+      ;;
+    *"缺少离线依赖仓库"*)
+      printf 'next=完全离线安装必须包含 离线依赖/Packages.gz；若明确允许在线源，设置 ONLINE_OK=1 后重试但不能算离线验收\n'
+      ;;
+    *"构建成功标记"*|*"manifest"*|*"安装包与构建成功标记"*|*"Packages.gz"*)
+      printf 'next=回到制包机重新执行 bash ./00_制包机_生成离线交付包.sh，并完整拷贝 生成的安装包/ 与 离线依赖/\n'
+      ;;
+    *"旧版后台服务仍"*|*"旧包状态仍存在"*)
+      printf 'next=查看诊断中的 systemctl/dpkg 状态，先清理旧 taiji-agent 包状态后重试\n'
+      ;;
+    *"taiji-native-verify"*|*"taiji 命令"*|*"taiji-agent 桌面启动"*)
+      printf 'next=安装已进入运行态验证阶段，优先查看 /opt/taiji-agent 与诊断报告定位缺失运行时或入口\n'
+      ;;
+    *)
+      printf 'next=查看本诊断文件和主日志，按最后一个 [FAIL]/命令错误继续定位\n'
+      ;;
+  esac
+}
+
+write_failure_diagnostic() {
+  local code="${1:-1}" reason="${2:-unknown}" diag
+  [ "${FAILURE_REPORTED:-0}" = "1" ] && return 0
+  FAILURE_REPORTED=1
+  set +e
+  diag="$LOG_DIR/失败诊断-$(date +%Y%m%d_%H%M%S).txt"
+  {
+    printf '太极 Agent 目标机安装失败诊断\n'
+    printf 'time=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    printf 'exit_code=%s\n' "$code"
+    printf 'reason=%s\n' "$reason"
+    failure_next_steps "$reason"
+    printf '\n'
+  } > "$diag"
+  write_environment_snapshot "$diag"
+  printf '[FAIL] 已生成失败诊断：%s\n' "$diag" >&2
+  set -e
+}
+
+fail() {
+  local msg="$*"
+  printf '[FAIL] %s\n' "$msg" >&2
+  write_failure_diagnostic 1 "$msg"
+  exit 1
+}
+
+on_error() {
+  local code="$1" command_text="${2:-unknown}"
+  write_failure_diagnostic "$code" "命令失败：$command_text"
+  printf '\n[FAIL] 安装验证中断，请查看日志：%s\n' "$LOG_FILE" >&2
+  exit "$code"
+}
+
 require_cmd() { have "$1" || fail "缺少命令：$1"; }
 
 cleanup_offline_apt_repo_mount() {
@@ -53,6 +155,18 @@ cleanup_offline_apt_repo_mount() {
 }
 
 trap cleanup_offline_apt_repo_mount EXIT
+trap 'on_error "$?" "$BASH_COMMAND"' ERR
+
+require_admin_capability() {
+  require_cmd sudo
+  if sudo -n true >/dev/null 2>&1; then
+    ok "管理员权限预检通过：sudo 已可用"
+    return
+  fi
+  info "需要管理员权限预检。这里可能需要输入 sudo 密码。"
+  sudo -v || fail "管理员权限预检失败：当前用户不能执行 sudo，无法安装太极 Agent"
+  ok "管理员权限预检通过"
+}
 
 marker_value() {
   key="${1:-}"
@@ -131,6 +245,7 @@ preflight() {
   require_cmd pgrep
   require_cmd ps
   require_cmd lsof
+  require_admin_capability
 }
 
 dpkg_has_taiji_state() {
@@ -376,7 +491,7 @@ install_trial_license() {
     elif [ "${#candidates[@]}" -gt 1 ]; then
       printf '[FAIL] 检测到多个候选授权文件，请设置 TAIJI_LICENSE_SOURCE 指定其中一个：\n' >&2
       printf '  %s\n' "${candidates[@]}" >&2
-      exit 1
+      fail "检测到多个候选授权文件，请设置 TAIJI_LICENSE_SOURCE 指定其中一个"
     fi
   fi
   if [ -z "$source" ]; then
@@ -498,8 +613,11 @@ verify_installation() {
 }
 
 main() {
+  set_stage "目标机预检"
   preflight
+  set_stage "安装太极 Agent"
   install_package
+  set_stage "安装后验证"
   verify_installation
   printf '\n[OK] 安装验证命令已执行完毕。\n'
   printf '请从开始菜单搜索并打开：太极 Agent\n'

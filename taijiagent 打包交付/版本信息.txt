@@ -4,7 +4,9 @@
 源码 commit：以源码包文件名、SHA256SUMS.txt 和制包机构建报告为准
 目标系统：Kylin V10 SP1 / Debian-like / x86_64 amd64 / glibc 2.31 / 图形桌面
 交付形态：联网 Linux amd64 制包机生成 DEB 和离线依赖仓库，完全离线目标终端只安装验证
+本机输入包：99_本机_准备制包输入包.sh 会刷新当前 commit 的源码包和 SHA256SUMS.txt，并生成无 macOS 拷贝元数据的 taijiagent-制包机输入-<hash>.tar.gz。
 发布预检：01_制包机_发布预检.sh 会检查 git 干净、单一源码包、SHA256SUMS.txt basename、旧包旧 zip 和 macOS 元数据；macOS 拷贝元数据会自动清理，旧包旧 zip 仍失败并停止发布。
+失败诊断：制包失败会生成 构建日志/失败诊断-<时间>.txt；目标机安装失败会生成 构建日志/失败诊断-<时间>.txt，包含环境、阶段、包状态、服务状态和下一步建议。
 发布 manifest：生成的安装包/taiji-package-manifest.json 记录源码包、DEB、Packages.gz、构建机 OS/glibc、目标系统矩阵和支持/不支持条件；目标机安装脚本会校验 manifest 匹配。
 离线边界：完全离线安装必须包含 生成的安装包/ 和 离线依赖/Packages.gz；缺失时默认失败，只有显式 ONLINE_OK=1 才允许使用目标机在线源。
 不支持范围：RPM-only、ARM/aarch64、无 apt/dpkg、无图形桌面或强隔离环境不属于当前 DEB 一键安装范围；RPM 和 .run 需要后续单独制品。

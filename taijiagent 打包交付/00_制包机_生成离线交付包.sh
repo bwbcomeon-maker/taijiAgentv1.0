@@ -20,13 +20,107 @@ MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$OFFLINE_REPO"
 LOG_FILE="$LOG_DIR/00_offline_build_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
-trap 'code=$?; printf "\n[FAIL] 离线交付包生成中断，请查看日志：%s\n" "$LOG_FILE" >&2; exit "$code"' ERR
+FAILURE_REPORTED=0
+CURRENT_STAGE="初始化"
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+set_stage() { CURRENT_STAGE="$1"; info "阶段：$CURRENT_STAGE"; }
+
+safe_cmd_path() {
+  command -v "$1" 2>/dev/null || printf 'missing'
+}
+
+write_environment_snapshot() {
+  local out="$1" cmd
+  {
+    printf '## 环境\n'
+    printf 'script=%s\n' "$0"
+    printf 'stage=%s\n' "${CURRENT_STAGE:-unknown}"
+    printf 'cwd=%s\n' "$(pwd)"
+    printf 'uname=%s\n' "$(uname -a 2>/dev/null || true)"
+    if [ -f /etc/os-release ]; then
+      printf -- '-- /etc/os-release --\n'
+      sed -n '1,40p' /etc/os-release
+    fi
+    printf 'arch=%s\n' "$(uname -m 2>/dev/null || true)"
+    printf 'dpkg_arch=%s\n' "$(dpkg --print-architecture 2>/dev/null || true)"
+    printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+    for cmd in sudo apt-get apt-cache dpkg dpkg-deb dpkg-scanpackages sha256sum tar gzip git curl python3 node npm uv systemctl lsof; do
+      printf 'cmd.%s=%s\n' "$cmd" "$(safe_cmd_path "$cmd")"
+    done
+    printf 'TAIJI_NODE_MIRRORS=%s\n' "${TAIJI_NODE_MIRRORS:+set}"
+    printf 'TAIJI_NPM_REGISTRIES=%s\n' "${TAIJI_NPM_REGISTRIES:+set}"
+    printf 'TAIJI_ELECTRON_MIRRORS=%s\n' "${TAIJI_ELECTRON_MIRRORS:+set}"
+    printf 'UV_INDEX_URL=%s\n' "${UV_INDEX_URL:-}"
+    printf '\n## 交付目录\n'
+    find "$SCRIPT_DIR" -maxdepth 2 \( -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name '*.zip' -o -name '*.deb' -o -name 'Packages.gz' -o -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name '构建报告.txt' \) -print 2>/dev/null | sort
+    printf '\n## 最新日志\n'
+    [ -f "$LOG_FILE" ] && tail -n 160 "$LOG_FILE"
+  } >> "$out" 2>&1 || true
+}
+
+failure_next_steps() {
+  local reason="${1:-}"
+  case "$reason" in
+    *"最终 DEB 必须在 Linux amd64"*|*"不是 x86_64/amd64"*|*"dpkg 架构不是 amd64"*)
+      printf 'next=换到 Linux x86_64/amd64 + apt/dpkg 制包机后重新执行 bash ./00_制包机_生成离线交付包.sh\n'
+      ;;
+    *"管理员权限"*|*"sudo"*)
+      printf 'next=先在制包机终端执行 sudo -v，确认当前用户具备管理员权限后重试\n'
+      ;;
+    *"源码包"*|*"SHA256"*|*"commit"*)
+      printf 'next=在本地重新生成唯一源码包和 SHA256SUMS.txt，并重新拷贝整个交付目录\n'
+      ;;
+    *"Node.js"*|*"npm ci"*|*"Electron"*)
+      printf 'next=检查 DNS/代理/镜像，必要时设置 TAIJI_NODE_MIRRORS、TAIJI_NPM_REGISTRIES、TAIJI_ELECTRON_MIRRORS 后重试\n'
+      ;;
+    *"离线依赖"*|*"Packages.gz"*|*"apt-get download"*)
+      printf 'next=确认制包机 apt 源可访问目标机同发行版/架构依赖，重新生成离线依赖仓库\n'
+      ;;
+    *)
+      printf 'next=查看本诊断文件和主日志，按最后一个 [FAIL]/命令错误继续定位\n'
+      ;;
+  esac
+}
+
+write_failure_diagnostic() {
+  local code="${1:-1}" reason="${2:-unknown}" diag
+  [ "${FAILURE_REPORTED:-0}" = "1" ] && return 0
+  FAILURE_REPORTED=1
+  set +e
+  diag="$LOG_DIR/失败诊断-$(date +%Y%m%d_%H%M%S).txt"
+  {
+    printf '太极 Agent 制包失败诊断\n'
+    printf 'time=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    printf 'exit_code=%s\n' "$code"
+    printf 'reason=%s\n' "$reason"
+    failure_next_steps "$reason"
+    printf '\n'
+  } > "$diag"
+  write_environment_snapshot "$diag"
+  printf '[FAIL] 已生成失败诊断：%s\n' "$diag" >&2
+  set -e
+}
+
+fail() {
+  local msg="$*"
+  printf '[FAIL] %s\n' "$msg" >&2
+  write_failure_diagnostic 1 "$msg"
+  exit 1
+}
+
+on_error() {
+  local code="$1" command_text="${2:-unknown}"
+  write_failure_diagnostic "$code" "命令失败：$command_text"
+  printf '\n[FAIL] 离线交付包生成中断，请查看日志：%s\n' "$LOG_FILE" >&2
+  exit "$code"
+}
+
+trap 'on_error "$?" "$BASH_COMMAND"' ERR
+
 require_cmd() { have "$1" || fail "缺少命令：$1"; }
 
 checksum_source_archive_name() {
@@ -136,6 +230,17 @@ cleanup_delivery_metadata() {
   ok "拷贝元数据检查完成"
 }
 
+require_admin_capability() {
+  require_cmd sudo
+  if sudo -n true >/dev/null 2>&1; then
+    ok "管理员权限预检通过：sudo 已可用"
+    return
+  fi
+  info "需要管理员权限预检。这里可能需要输入 sudo 密码。"
+  sudo -v || fail "管理员权限预检失败：当前用户不能执行 sudo，无法安装制包依赖"
+  ok "管理员权限预检通过"
+}
+
 run_release_preflight() {
   local preflight_script="$SCRIPT_DIR/01_制包机_发布预检.sh"
   [ -x "$preflight_script" ] || fail "缺少发布预检脚本：$preflight_script"
@@ -161,6 +266,7 @@ preflight() {
   require_cmd tar
   require_cmd gzip
   require_cmd git
+  require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
   [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
   resolve_source_archive
@@ -571,6 +677,17 @@ write_build_report() {
     printf '源码包前缀：%s\n' "${commit:-unknown}"
     printf '制包机系统：%s\n' "$system_info"
     printf '制包机架构：%s / %s\n' "$(uname -m)" "$(dpkg --print-architecture 2>/dev/null || true)"
+    printf 'glibc：%s\n' "$(build_glibc)"
+    printf 'sudo：%s\n' "$(safe_cmd_path sudo)"
+    printf 'apt-get：%s\n' "$(safe_cmd_path apt-get)"
+    printf 'dpkg-deb：%s\n' "$(safe_cmd_path dpkg-deb)"
+    printf 'python3：%s\n' "$(python3 --version 2>/dev/null || true)"
+    printf 'uv：%s\n' "$(uv --version 2>/dev/null || true)"
+    printf 'node：%s\n' "$(node --version 2>/dev/null || true)"
+    printf 'npm：%s\n' "$(npm -v 2>/dev/null || true)"
+    printf 'Node 镜像覆盖：%s\n' "${TAIJI_NODE_MIRRORS:+已设置}"
+    printf 'npm 镜像覆盖：%s\n' "${TAIJI_NPM_REGISTRIES:+已设置}"
+    printf 'Electron 镜像覆盖：%s\n' "${TAIJI_ELECTRON_MIRRORS:+已设置}"
     printf '依赖源：%s\n' "$(grep -hE '^[[:space:]]*deb ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null | head -5 | tr '\n' '; ')"
     printf '源码包 SHA256：%s\n' "$source_line"
     printf 'DEB SHA256：%s\n' "$deb_line"
@@ -584,16 +701,25 @@ write_build_report() {
 }
 
 main() {
+  set_stage "制包机预检"
   preflight
+  set_stage "安装制包依赖"
   install_build_dependencies
+  set_stage "准备 Python/Node/Electron 构建工具"
   ensure_uv
   ensure_node
+  set_stage "解压源码"
   unpack_source
+  set_stage "构建运行时和 DEB"
   build_runtime_and_deb
+  set_stage "收集安装包产物"
   collect_artifacts
+  set_stage "生成离线依赖仓库"
   build_offline_dependency_repo
+  set_stage "生成 manifest 和报告"
   write_release_manifest
   write_build_report
+  set_stage "最终发布预检"
   TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight
   printf '\n[OK] 离线交付包生成完成。目标机断网后执行：\n'
   printf 'bash ./02_目标终端_安装并验证.sh\n'

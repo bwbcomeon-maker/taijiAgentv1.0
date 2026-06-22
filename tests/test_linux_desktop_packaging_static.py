@@ -481,6 +481,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("01_制包机_发布预检.sh", builder)
         self.assertIn("01_制包机_发布预检.sh", docs)
         self.assertIn("!/taijiagent 打包交付/01_制包机_发布预检.sh", gitignore)
+        self.assertIn("99_本机_准备制包输入包.sh", docs)
+        self.assertIn("!/taijiagent 打包交付/99_本机_准备制包输入包.sh", gitignore)
+        self.assertIn("/taijiagent-制包机输入-*.tar.gz", gitignore)
         self.assertIn('git -C "$REPO_ROOT" diff --quiet', preflight)
         self.assertIn('git -C "$REPO_ROOT" diff --cached --quiet', preflight)
         self.assertIn("taiji-agentv1.0-kylin-build-src-*.tar.gz", preflight)
@@ -495,6 +498,28 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("将自动清理", preflight)
         self.assertIn("rm -rf --", preflight)
         self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS", preflight)
+
+    def test_delivery_scripts_have_failure_diagnostics_and_admin_preflight(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+        prepare = read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh")
+        docs = read_text("taijiagent 打包交付/操作说明.md")
+
+        for script in (builder, install):
+            self.assertIn("write_failure_diagnostic", script)
+            self.assertIn("failure_next_steps", script)
+            self.assertIn("write_environment_snapshot", script)
+            self.assertIn("失败诊断-", script)
+            self.assertIn("CURRENT_STAGE", script)
+            self.assertIn("require_admin_capability", script)
+            self.assertIn("sudo -v", script)
+            self.assertIn("sudo -n true", script)
+
+        self.assertIn("taijiagent-制包机输入-", prepare)
+        self.assertIn("tarfile.USTAR_FORMAT", prepare)
+        self.assertIn("PaxHeaders", prepare)
+        self.assertIn("._", prepare)
+        self.assertIn("失败诊断", docs)
 
     def test_release_preflight_cleans_macos_copy_metadata(self):
         if not shutil.which("sha256sum"):
