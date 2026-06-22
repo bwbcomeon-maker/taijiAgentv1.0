@@ -600,9 +600,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         build = read_text("packaging/linux/deb/build-deb.sh")
 
         self.assertIn("scan_webui_offline_assets", build)
-        self.assertIn("cdn.jsdelivr.net", build)
+        self.assertIn(r"cdn\.jsdelivr\.net", build)
+        self.assertIn(r"unpkg\.com", build)
+        self.assertIn(r"cdnjs\.cloudflare\.com", build)
+        self.assertIn("--include='*.mjs'", build)
         self.assertIn("vendor/xterm/5.3.0/xterm.css", build)
         self.assertIn("vendor/prismjs/1.29.0/prism.min.js", build)
+        self.assertIn("vendor/pdfjs-dist/4.9.155/pdf.min.mjs", build)
+        self.assertIn("vendor/mermaid/10.9.3/mermaid.min.js", build)
         self.assertIn("audit_deb_payload", build)
         self.assertIn("dpkg-deb -c", build)
         for required in (
@@ -618,27 +623,43 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_webui_runtime_assets_are_local_for_offline_target(self):
         static_root = ROOT / "hermes-local-lab/sources/hermes-webui/static"
-        checked = {
-            "index.html": read_text("hermes-local-lab/sources/hermes-webui/static/index.html"),
-            "boot.js": read_text("hermes-local-lab/sources/hermes-webui/static/boot.js"),
-            "sw.js": read_text("hermes-local-lab/sources/hermes-webui/static/sw.js"),
-        }
+        checked = {}
+        for path in sorted(static_root.rglob("*")):
+            if path.suffix not in {".html", ".js", ".css", ".mjs"}:
+                continue
+            rel = path.relative_to(static_root).as_posix()
+            checked[rel] = path.read_text(encoding="utf-8")
 
         for path, text in checked.items():
-            self.assertNotIn("cdn.jsdelivr.net", text, path)
+            for forbidden in ("cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com"):
+                self.assertNotIn(forbidden, text, path)
             self.assertNotIn("-taiji-shell-", text, path)
 
         index = checked["index.html"]
-        for local_asset in (
+        ui = checked["ui.js"]
+        terminal = checked["terminal.js"]
+        index_assets = (
             "static/vendor/xterm/5.3.0/xterm.css",
             "static/vendor/xterm/5.3.0/xterm.js",
             "static/vendor/xterm-addon-fit/0.8.0/xterm-addon-fit.js",
             "static/vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js",
             "static/vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css",
             "static/vendor/prismjs/1.29.0/prism.min.js",
-        ):
+        )
+        for local_asset in index_assets:
             self.assertIn(local_asset, index)
+
+        for local_asset in (
+            *index_assets,
+            "static/vendor/pdfjs-dist/4.9.155/pdf.min.mjs",
+            "static/vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs",
+            "static/vendor/mermaid/10.9.3/mermaid.min.js",
+        ):
             self.assertTrue((static_root / local_asset.removeprefix("static/")).exists(), local_asset)
+        self.assertIn("static/vendor/pdfjs-dist/4.9.155/pdf.min.mjs", ui)
+        self.assertIn("static/vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs", ui)
+        self.assertIn("static/vendor/mermaid/10.9.3/mermaid.min.js", ui)
+        self.assertIn("本地静态资源", terminal)
 
     def test_offline_builder_normalizes_source_checksum_paths(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

@@ -418,10 +418,11 @@ scan_webui_offline_assets() {
   static_dir="$SOURCE_WEB_DIR/static"
   [ -d "$static_dir" ] || fail "Missing WebUI static directory: $static_dir"
 
-  cdn_hits="$(grep -RIn 'cdn.jsdelivr.net' "$static_dir" \
+  cdn_hits="$(grep -RInE 'cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com' "$static_dir" \
     --include='*.html' \
     --include='*.js' \
-    --include='*.css' 2>/dev/null || true)"
+    --include='*.css' \
+    --include='*.mjs' 2>/dev/null || true)"
   if [ -n "$cdn_hits" ]; then
     printf '%s\n' "$cdn_hits" >&2
     fail "WebUI static assets still depend on CDN; vendor them under static/vendor before building an offline package."
@@ -434,7 +435,10 @@ scan_webui_offline_assets() {
     "vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js" \
     "vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css" \
     "vendor/prismjs/1.29.0/themes/prism.min.css" \
-    "vendor/prismjs/1.29.0/prism.min.js"; do
+    "vendor/prismjs/1.29.0/prism.min.js" \
+    "vendor/pdfjs-dist/4.9.155/pdf.min.mjs" \
+    "vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs" \
+    "vendor/mermaid/10.9.3/mermaid.min.js"; do
     if [ ! -f "$static_dir/$required" ]; then
       missing="${missing:-}${static_dir}/${required}"$'\n'
     fi

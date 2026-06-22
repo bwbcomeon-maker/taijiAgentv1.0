@@ -6250,7 +6250,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     --taiji-brand-w:clamp(210px,13.45vw,276px);
     --taiji-recent-w:clamp(300px,20.5vw,420px);
     --taiji-gap:clamp(8px,.72vw,14px);
-    --taiji-shell-pad:clamp(8px,.72vw,14px);
+    --taiji-layout-pad:clamp(8px,.72vw,14px);
     box-sizing:border-box;
     position:relative;
     display:grid;
@@ -6258,7 +6258,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     gap:var(--taiji-gap);
     width:100vw;
     height:100vh;
-    padding:var(--taiji-shell-pad);
+    padding:var(--taiji-layout-pad);
     background:
       radial-gradient(circle at 24% 5%,rgba(60,177,221,.26),transparent 33%),
       linear-gradient(135deg,#ecf8ff 0%,#f8fcff 42%,#dff1ff 100%);
@@ -6418,7 +6418,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   .taiji-secondary-toggle{
     position:absolute;
     top:50%;
-    left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + var(--taiji-gap) + var(--taiji-recent-w) + (var(--taiji-gap) / 2));
+    left:calc(var(--taiji-layout-pad) + var(--taiji-brand-w) + var(--taiji-gap) + var(--taiji-recent-w) + (var(--taiji-gap) / 2));
     z-index:12;
     display:grid;
     place-items:center;
@@ -6464,7 +6464,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     display:none!important;
   }
   .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{
-    left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2));
+    left:calc(var(--taiji-layout-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2));
     min-height:64px;
     gap:2px;
     padding:7px 0;
@@ -7582,8 +7582,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
     --taiji-brand-w:204px;
     --taiji-recent-w:304px;
     --taiji-gap:8px;
-    --taiji-shell-pad:8px;
-    padding:var(--taiji-shell-pad);
+    --taiji-layout-pad:8px;
+    padding:var(--taiji-layout-pad);
   }
   .taiji-brand-sidebar{
     padding-top:14px;
@@ -10257,10 +10257,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
     --taiji-brand-w:clamp(236px,14vw,288px);
     --taiji-recent-w:clamp(320px,21vw,390px);
     --taiji-gap:16px;
-    --taiji-shell-pad:10px;
+    --taiji-layout-pad:10px;
     grid-template-columns:var(--taiji-brand-w) var(--taiji-recent-w) minmax(0,1fr)!important;
     gap:var(--taiji-gap)!important;
-    padding:var(--taiji-shell-pad)!important;
+    padding:var(--taiji-layout-pad)!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-sidebar,
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-secondary-panel{
@@ -10528,7 +10528,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     display:none!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{
-    left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important;
+    left:calc(var(--taiji-layout-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"].taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
     width:min(1020px,calc(100% - 96px))!important;

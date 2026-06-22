@@ -57,9 +57,9 @@ def _security_headers(handler):
     handler.send_header(
         'Content-Security-Policy',
         "default-src 'self' https://*.cloudflareaccess.com; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-        "img-src 'self' data: https: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
+        "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "img-src 'self' data: https: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; "
         "manifest-src 'self' https://*.cloudflareaccess.com; "
         "base-uri 'self'; form-action 'self'"
     )

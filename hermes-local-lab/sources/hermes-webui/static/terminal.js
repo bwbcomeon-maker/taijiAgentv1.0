@@ -127,7 +127,7 @@ function _ensureXterm(){
   if(!surface)return null;
   if(TERMINAL_UI.term)return TERMINAL_UI.term;
   if(!_xtermReady()){
-    surface.textContent='终端库加载失败。请检查到 cdn.jsdelivr.net 的网络访问。';
+    surface.textContent='终端库加载失败。请检查本地静态资源是否完整。';
     return null;
   }
   const term=new window.Terminal({

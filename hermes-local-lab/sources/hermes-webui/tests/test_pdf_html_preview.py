@@ -132,11 +132,13 @@ class TestLoadPdfInlineFunction:
         assert 'pdf_error' in body, 'Must show error fallback on failure'
         assert 'pdf_download' in body or 'download=' in body, 'Error fallback must include download link'
 
-    def test_lazy_loads_pdfjs_from_cdn(self):
+    def test_lazy_loads_pdfjs_from_vendored_assets(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 3000]
-        assert 'pdfjs' in body, 'Must lazy-load PDF.js from CDN'
+        assert 'static/vendor/pdfjs-dist/4.9.155/pdf.min.mjs' in body, 'Must lazy-load vendored PDF.js'
+        assert 'static/vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs' in body, 'Must use vendored PDF.js worker'
+        assert 'cdn.jsdelivr.net/npm/pdfjs-dist' not in body, 'PDF.js must not load from CDN'
 
     def test_pdfjs_state_variables(self):
         ui = _read_js('ui.js')
