@@ -683,11 +683,15 @@ function _expertTeamStatusCardFromRun(run,data){
   const visualQuestions=questions.map(question=>({
     id:question.id||'',
     title:question.title||question.id||'问题',
+    description:question.description||'',
     type:question.type||'text',
     options:Array.isArray(question.options)?question.options:[],
     answer:question.answer||'',
     status:question.status||'pending',
     required:question.required!==false,
+    sourceTaskId:question.source_task_id||question.sourceTaskId||'',
+    confirmationGroup:question.confirmation_group||question.confirmationGroup||'',
+    origin:question.origin||'',
   }));
   card.kind='expert_team';
   card.title='专家团运行';
@@ -771,8 +775,36 @@ function _isExpertTeamStatusCard(card){
 }
 
 function _expertTeamPendingQuestions(card){
-  const questions=Array.isArray(card&&card.questions)?card.questions:[];
+  const questions=_expertTeamActiveQuestionSet(card);
   return questions.filter(question=>String(question.status||'')!=='answered');
+}
+
+function _expertTeamQuestionGroupKey(question){
+  return String(question&&(
+    question.confirmationGroup||
+    question.confirmation_group||
+    question.sourceTaskId||
+    question.source_task_id||
+    ''
+  )||'');
+}
+
+function _expertTeamActiveQuestionSet(card){
+  card=card||{};
+  const runId=card.runId||card.sessionId||'';
+  const questions=Array.isArray(card.questions)?card.questions:[];
+  if(!questions.length)return [];
+  const pending=questions.filter(question=>String(question&&question.status||'')!=='answered');
+  let group=pending.length?_expertTeamQuestionGroupKey(pending[0]):'';
+  if(!group&&_expertTeamQuestionPopoverRunId===runId&&_expertTeamQuestionPopoverQuestionId){
+    const requested=questions.find(question=>String(question&&question.id||'')===String(_expertTeamQuestionPopoverQuestionId));
+    group=_expertTeamQuestionGroupKey(requested);
+  }
+  if(!group){
+    const stageQuestions=questions.filter(question=>String(question&&question.origin||'')==='stage_confirmation_points');
+    group=_expertTeamQuestionGroupKey(stageQuestions[stageQuestions.length-1]);
+  }
+  return group?questions.filter(question=>_expertTeamQuestionGroupKey(question)===group):questions;
 }
 
 function _expertTeamPendingConfirmations(card){
@@ -844,7 +876,7 @@ function _expertTeamPrimaryArtifact(card){
 }
 
 function _expertTeamAnsweredQuestionsSummary(card){
-  const questions=Array.isArray(card&&card.questions)?card.questions:[];
+  const questions=_expertTeamActiveQuestionSet(card);
   const answered=questions.filter(question=>String(question.status||'')==='answered');
   return {
     count:answered.length,
@@ -1334,7 +1366,8 @@ function syncExpertTeamChatConfirmationCard(card){
 function _expertTeamQuestionWizardState(card){
   card=card||{};
   const runId=card.runId||card.sessionId||'';
-  const questions=Array.isArray(card.questions)?card.questions:[];
+  const activeQuestions=_expertTeamActiveQuestionSet(card);
+  const questions=activeQuestions;
   const pending=questions.filter(question=>String(question&&question.status||'')!=='answered');
   const answered=questions.filter(question=>String(question&&question.status||'')==='answered');
   const total=questions.length||pending.length;
@@ -1544,6 +1577,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const artifacts=Array.isArray(card.artifacts)?card.artifacts:[];
   const referenceArtifacts=Array.isArray(card.referenceArtifacts)?card.referenceArtifacts:[];
   const questions=Array.isArray(card.questions)?card.questions:[];
+  const activeQuestions=_expertTeamActiveQuestionSet(card);
   const readyArtifacts=_expertTeamReadyArtifacts(card);
   const deliveredArtifacts=artifacts.filter(item=>_expertTeamArtifactDeliveredToChat(item));
   const pending=_expertTeamPendingQuestions(card);
@@ -1583,8 +1617,8 @@ function _expertTeamWorkspacePanelHtml(card){
     return `<span class="expert-team-panel-phase ${cls}"><i>${idx+1}</i><b>${esc(label)}</b></span>`;
   }).join('');
   const answeredSummary=_expertTeamAnsweredQuestionsSummary(card);
-  const totalQuestions=questions.length||pending.length||1;
-  const answeredCount=questions.filter(question=>String(question.status||'')==='answered').length;
+  const totalQuestions=activeQuestions.length||pending.length||1;
+  const answeredCount=activeQuestions.filter(question=>String(question.status||'')==='answered').length;
   const currentQuestionIndex=Math.min(totalQuestions,answeredCount+1);
   const questionSummaryHtml=pending.length
     ? `<div class="expert-team-question-summary">
@@ -1594,7 +1628,7 @@ function _expertTeamWorkspacePanelHtml(card){
         </span>
         <button type="button" onclick="openExpertTeamQuestionPopover(this);event.stopPropagation()">打开逐题确认</button>
       </div>`
-    : (questions.length?`<span class="expert-team-panel-answered-summary">
+    : (activeQuestions.length?`<span class="expert-team-panel-answered-summary">
         <strong>${esc(answeredSummary.title)}</strong>
         <small>${esc(answeredSummary.detail||'需求已确认，正在进入生成。')}</small>
       </span>`:'<span class="expert-team-panel-empty">暂无待确认问题</span>');
@@ -2210,7 +2244,7 @@ async function answerExpertTeamQuestion(btn){
     const pendingAfter=card&&_expertTeamPendingQuestions(card)||[];
     if(card&&_expertTeamQuestionPopoverOpen){
       _expertTeamQuestionPopoverRunId=card.runId||card.sessionId||'';
-      _expertTeamQuestionPopoverQuestionId=(pendingAfter[0]&&pendingAfter[0].id)||'';
+      _expertTeamQuestionPopoverQuestionId=(pendingAfter[0]&&pendingAfter[0].id)||qid||'';
       if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
       openExpertTeamQuestionPopover(null);
     }else if(card){

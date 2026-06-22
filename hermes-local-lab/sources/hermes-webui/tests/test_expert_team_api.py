@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -850,6 +851,174 @@ def test_expert_team_view_preserves_structured_clarification_without_text_parsin
     view = expert_teams.expert_team_run_view(answered)
 
     assert view["pending_confirmations"] == answered["pending_confirmations"]
+
+
+def test_stage_completion_extracts_numbered_confirmation_points_as_current_stage_questions(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-stage-questions", "team_id": "deep-research-team", "prompt": "研究企业 AI Agent"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "企业 AI Agent 投入产出",
+                "audience_goal": "企业技术决策者",
+                "source_boundary": "公开资料",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-stage-questions", "session_id": "sid-stage-questions"},
+    )
+
+    updated = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={
+            "kind": "chat",
+            "label": "研究方向阶段结果",
+            "exists": True,
+            "content": """
+阶段目标
+完成研究方向收敛。
+
+需要用户确认的点
+
+1. 核心问题定位是否以“企业 AI Agent 的投入产出比”为主线？
+2. 目标读者是否设定为 CTO/CIO/数字化负责人？
+3. 是否排除传统 RPA 和规则引擎？
+
+下一阶段建议
+确认后进入资料调研。
+""",
+        },
+    )
+
+    stage_questions = [question for question in updated["questions"] if question.get("source_task_id") == "direction"]
+    assert [question["id"] for question in stage_questions] == [
+        "stage_direction_confirm_1",
+        "stage_direction_confirm_2",
+        "stage_direction_confirm_3",
+    ]
+    assert [question["title"] for question in stage_questions] == [
+        "核心问题定位是否以“企业 AI Agent 的投入产出比”为主线？",
+        "目标读者是否设定为 CTO/CIO/数字化负责人？",
+        "是否排除传统 RPA 和规则引擎？",
+    ]
+    assert all(question["status"] == "pending" for question in stage_questions)
+    assert all(question["confirmation_group"] == "stage:direction" for question in stage_questions)
+    assert [item["kind"] for item in updated["view"]["pending_confirmations"]] == ["question", "question", "question"]
+    assert updated["view"]["actions"]["can_answer"] is True
+    assert updated["view"]["actions"]["can_approve_stage"] is False
+
+
+def test_answering_current_stage_questions_reveals_stage_review_without_restarting_stage(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-stage-question-answer", "team_id": "deep-research-team", "prompt": "研究企业 AI Agent"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "企业 AI Agent 投入产出",
+                "audience_goal": "企业技术决策者",
+                "source_boundary": "公开资料",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-stage-question-answer", "session_id": "sid-stage-question-answer"},
+    )
+    waiting = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={
+            "kind": "chat",
+            "label": "研究方向阶段结果",
+            "exists": True,
+            "content": "需要用户确认的点\n1. 是否确认研究主线？\n2. 是否确认目标读者？\n\n下一阶段建议\n继续。",
+        },
+    )
+
+    updated = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": waiting["run_id"],
+            "answers": {
+                "stage_direction_confirm_1": "确认",
+                "stage_direction_confirm_2": "确认",
+            },
+        },
+    )
+
+    direction_task = next(task for task in updated["tasks"] if task["id"] == "direction")
+    assert updated["status"] == "awaiting_user"
+    assert updated["current_stage"]["task_id"] == "direction"
+    assert updated["current_stage"]["status"] == "awaiting_review"
+    assert direction_task["status"] == "waiting_user"
+    assert [item["kind"] for item in updated["view"]["pending_confirmations"]] == ["stage_review"]
+    assert updated["view"]["actions"]["can_answer"] is False
+    assert updated["view"]["actions"]["can_approve_stage"] is True
+
+
+def test_run_truth_repairs_existing_generic_stage_output_from_latest_assistant(monkeypatch, tmp_path):
+    from api import expert_teams, routes
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-repair-stage-questions", "team_id": "deep-research-team", "prompt": "研究企业 AI Agent"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "企业 AI Agent 投入产出",
+                "audience_goal": "企业技术决策者",
+                "source_boundary": "公开资料",
+            },
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-repair-stage-questions", "session_id": "sid-repair-stage-questions"},
+    )
+    waiting = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={"kind": "chat", "label": "研究方向阶段结果", "exists": True, "content": "已写入当前对话"},
+    )
+    session = SimpleNamespace(
+        active_stream_id=None,
+        pending_user_message=None,
+        messages=[
+            {
+                "role": "assistant",
+                "timestamp": datetime.fromisoformat(started["execution_started_at"]).timestamp() + 10,
+                "content": "需要用户确认的点\n1. 是否确认研究主线？\n2. 是否确认目标读者？\n\n下一阶段建议\n继续。",
+            }
+        ],
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+
+    repaired = routes._expert_team_run_with_execution_truth(tmp_path, waiting)
+
+    stage_questions = [question for question in repaired["questions"] if question.get("source_task_id") == "direction"]
+    assert [question["title"] for question in stage_questions] == ["是否确认研究主线？", "是否确认目标读者？"]
+    assert [item["kind"] for item in repaired["view"]["pending_confirmations"]] == ["question", "question"]
 
 
 def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(tmp_path):

@@ -152,6 +152,10 @@ def test_expert_team_uses_unified_confirmation_entrypoints():
 
 def test_expert_team_question_confirmation_uses_dock_popover_flow():
     assert "function _expertTeamQuestionWizardState" in UI_JS
+    assert "function _expertTeamActiveQuestionSet" in UI_JS
+    assert "confirmationGroup:question.confirmation_group||question.confirmationGroup||''" in UI_JS
+    assert "sourceTaskId:question.source_task_id||question.sourceTaskId||''" in UI_JS
+    assert "const activeQuestions=_expertTeamActiveQuestionSet(card)" in UI_JS
     assert "function _expertTeamQuestionPopoverHtml" in UI_JS
     assert "function openExpertTeamQuestionPopover" in UI_JS
     assert "function closeExpertTeamQuestionPopover" in UI_JS

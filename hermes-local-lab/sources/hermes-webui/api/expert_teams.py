@@ -419,6 +419,94 @@ def _ensure_stage_output(run: dict, task: dict) -> dict:
     return output
 
 
+def _stage_confirmation_question_id(task_id: str, index: int) -> str:
+    safe_task_id = re.sub(r"[^0-9A-Za-z_]+", "_", str(task_id or "stage")).strip("_") or "stage"
+    return f"stage_{safe_task_id}_confirm_{index}"
+
+
+def _extract_stage_confirmation_points(content: str) -> list[str]:
+    text = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return []
+    lines = text.split("\n")
+    start_idx = -1
+    heading_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?需要(?:用户|你)?确认的点\s*[:：]?\s*$")
+    for idx, line in enumerate(lines):
+        if heading_re.match(line):
+            start_idx = idx + 1
+            break
+    if start_idx < 0:
+        return []
+    stop_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:下一阶段建议|下一步建议|阶段目标|阶段产物)\b")
+    item_re = re.compile(r"^\s*(?:[-*]\s*)?(?P<num>\d{1,2}|[一二三四五六七八九十]{1,3})[\.、．)]\s*(?P<body>.+?)\s*$")
+    points: list[str] = []
+    current: list[str] = []
+    for line in lines[start_idx:]:
+        stripped = line.strip()
+        if stop_re.match(stripped):
+            break
+        match = item_re.match(stripped)
+        if match:
+            if current:
+                points.append(" ".join(current).strip())
+            current = [match.group("body").strip()]
+            continue
+        if current and stripped and not re.match(r"^-{3,}$", stripped):
+            current.append(stripped.lstrip("-* ").strip())
+    if current:
+        points.append(" ".join(current).strip())
+    cleaned: list[str] = []
+    for point in points:
+        point = re.sub(r"\s+", " ", point).strip(" -；;")
+        if point and point not in cleaned:
+            cleaned.append(point[:240])
+        if len(cleaned) >= 8:
+            break
+    return cleaned
+
+
+def _replace_stage_confirmation_questions(run: dict, task: dict, content: str, now: str) -> list[dict]:
+    task_id = str(task.get("id") or "")
+    if not task_id:
+        return []
+    points = _extract_stage_confirmation_points(content)
+    group = f"stage:{task_id}"
+    run["questions"] = [
+        question
+        for question in run.get("questions") or []
+        if not (
+            isinstance(question, dict)
+            and str(question.get("origin") or "") == "stage_confirmation_points"
+            and str(question.get("confirmation_group") or "") == group
+        )
+    ]
+    if not points:
+        return []
+    rows = []
+    for idx, point in enumerate(points, start=1):
+        rows.append(
+            {
+                "id": _stage_confirmation_question_id(task_id, idx),
+                "title": point,
+                "description": "请逐条确认该点，确认完成后再处理阶段成果。",
+                "type": "textarea",
+                "options": [],
+                "required": True,
+                "status": "pending",
+                "answer": "",
+                "answered_at": "",
+                "source_task_id": task_id,
+                "confirmation_group": group,
+                "origin": "stage_confirmation_points",
+                "phase": str(task.get("phase") or run.get("phase") or ""),
+                "created_at": now,
+            }
+        )
+    run.setdefault("questions", []).extend(rows)
+    _append_event(run, "stage_confirmation_questions_created", f"{task.get('title') or '当前阶段'}需要确认 {len(rows)} 项")
+    return rows
+
+
 def _set_current_stage(run: dict, task: dict, status: str, *, stream_id: str = "", feedback: str = "") -> dict:
     output = _stage_output_for_task(run, task.get("id")) or {}
     revision_count = int(output.get("revision_count") or 0)
@@ -599,7 +687,7 @@ def _question_confirmation_for_view(question: dict) -> dict:
         "id": f"question:{qid}",
         "kind": "question",
         "title": str(question.get("title") or question.get("id") or ""),
-        "description": "请补充确认信息，专家团才会继续推进。",
+        "description": str(question.get("description") or "请补充确认信息，专家团才会继续推进。"),
         "fields": [
             {
                 "id": qid,
@@ -609,7 +697,7 @@ def _question_confirmation_for_view(question: dict) -> dict:
             }
         ],
         "actions": {"submit": "answer"},
-        "source_task_id": "",
+        "source_task_id": str(question.get("source_task_id") or ""),
         "status": str(question.get("status") or "pending"),
     }
 
@@ -980,17 +1068,19 @@ def _mark_stage_execution_complete(workspace: Path, run: dict, *, delivery: dict
         return write_expert_team_run(Path(workspace), run)
 
     output = _ensure_stage_output(run, task)
-    output["status"] = "awaiting_review"
-    output["label"] = str(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物")
-    output["kind"] = str(delivery.get("kind") or output.get("kind") or "chat")
-    output["content"] = str(
+    delivery_content = str(
         delivery.get("content")
         or delivery.get("note")
         or output.get("content")
         or "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。"
     )
+    output["status"] = "awaiting_review"
+    output["label"] = str(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物")
+    output["kind"] = str(delivery.get("kind") or output.get("kind") or "chat")
+    output["content"] = delivery_content
     output["note"] = str(delivery.get("note") or "已写入当前对话")
     output["updated_at"] = now
+    _replace_stage_confirmation_questions(run, task, delivery_content, now)
     revision_count = int(output.get("revision_count") or 0)
     run["status"] = "awaiting_user"
     run["phase"] = str(task.get("phase") or run.get("phase") or "生成初稿")
@@ -1291,6 +1381,13 @@ def answer_expert_team(workspace: Path, body: dict) -> dict:
     elif "visual_direction" in answered_ids:
         _start_direction_task(run)
         _complete_brand_moodboard(run)
+    elif (
+        run.get("status") == "awaiting_user"
+        and isinstance(run.get("current_stage"), dict)
+        and str((run.get("current_stage") or {}).get("status") or "") == "awaiting_review"
+    ):
+        run["execution_status"] = "done"
+        run["execution_stream_id"] = ""
     elif run.get("status") == "awaiting_user":
         _start_first_task(run)
         if run.get("team_id") == "ai-content-creator-brand-moodboard":

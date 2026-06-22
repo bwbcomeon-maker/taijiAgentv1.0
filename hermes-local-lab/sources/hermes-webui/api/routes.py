@@ -1186,7 +1186,7 @@ def _append_expert_team_session_entry(run: dict) -> None:
         logger.debug("Failed to persist expert team session entry", exc_info=True)
 
 
-def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
+def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
     started_at = 0.0
     raw_started = str(run.get("execution_started_at") or "")
     if raw_started:
@@ -1194,20 +1194,91 @@ def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bo
             started_at = datetime.fromisoformat(raw_started).timestamp()
         except Exception:
             started_at = 0.0
+    latest_content = ""
+    latest_ts = -1.0
     for msg in getattr(session, "messages", None) or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant" or msg.get("_error"):
             continue
-        if not str(msg.get("content") or "").strip():
+        content = str(msg.get("content") or "").strip()
+        if not content:
             continue
-        if not started_at:
-            return True
         try:
             msg_ts = float(msg.get("timestamp") or msg.get("_ts") or 0)
         except Exception:
             msg_ts = 0.0
-        if msg_ts >= started_at - 2:
-            return True
-    return False
+        if started_at and msg_ts < started_at - 2:
+            continue
+        if msg_ts >= latest_ts:
+            latest_content = content
+            latest_ts = msg_ts
+    return latest_content
+
+
+def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
+    return bool(_latest_expert_team_assistant_content_after_execution(session, run))
+
+
+def _expert_team_stage_needs_confirmation_repair(run: dict) -> bool:
+    if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
+        return False
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    task_id = str(current.get("task_id") or "")
+    if str(current.get("status") or "") != "awaiting_review" or not task_id:
+        return False
+    group = f"stage:{task_id}"
+    if any(
+        isinstance(question, dict)
+        and str(question.get("origin") or "") == "stage_confirmation_points"
+        and str(question.get("confirmation_group") or "") == group
+        for question in run.get("questions") or []
+    ):
+        return False
+    output = None
+    for item in run.get("stage_outputs") or []:
+        if isinstance(item, dict) and str(item.get("task_id") or "") == task_id:
+            output = item
+            break
+    output_content = str((output or {}).get("content") or "")
+    return not output_content.strip() or output_content.strip() in {
+        "已写入当前对话",
+        "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。",
+    }
+
+
+def _repair_expert_team_stage_confirmations_from_session(workspace: Path, run: dict | None) -> dict | None:
+    if not run or not _expert_team_stage_needs_confirmation_repair(run):
+        return run
+    try:
+        session = get_session(str(run.get("session_id") or ""))
+        content = _latest_expert_team_assistant_content_after_execution(session, run)
+    except Exception:
+        return run
+    if "需要用户确认的点" not in content and "需要你确认的点" not in content:
+        return run
+    try:
+        from api import expert_teams
+
+        current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+        output = {}
+        for item in run.get("stage_outputs") or []:
+            if isinstance(item, dict) and str(item.get("task_id") or "") == str(current.get("task_id") or ""):
+                output = item
+                break
+        return expert_teams.mark_expert_team_execution_complete(
+            workspace,
+            str(run.get("run_id") or ""),
+            delivery={
+                "id": str((output or {}).get("id") or "expert-team-chat-delivery"),
+                "label": str((output or {}).get("label") or (output or {}).get("title") or "专家团生成结果"),
+                "kind": str((output or {}).get("kind") or "chat"),
+                "exists": True,
+                "note": str((output or {}).get("note") or "已写入当前对话"),
+                "content": content,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to repair expert team stage confirmations from session", exc_info=True)
+        return run
 
 
 def _expert_team_run_as_needs_resume(run: dict) -> dict:
@@ -1252,6 +1323,7 @@ def _expert_team_run_has_ready_result(run: dict) -> bool:
 def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> dict | None:
     if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
         return run
+    run = _repair_expert_team_stage_confirmations_from_session(workspace, run)
     if _expert_team_has_pending_required_questions(run):
         return run
     stream_id = str(run.get("execution_stream_id") or "")
@@ -1270,6 +1342,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
             ):
                 from api import expert_teams
 
+                content = _latest_expert_team_assistant_content_after_execution(session, run)
                 return expert_teams.mark_expert_team_execution_complete(
                     workspace,
                     str(run.get("run_id") or ""),
@@ -1279,6 +1352,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                         "kind": "chat",
                         "exists": True,
                         "note": "已写入当前对话",
+                        "content": content or "已写入当前对话",
                     },
                 )
         except Exception:
