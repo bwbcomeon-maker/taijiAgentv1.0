@@ -59,7 +59,7 @@ write_environment_snapshot() {
     printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
     printf 'UV_INDEX_URL=%s\n' "${UV_INDEX_URL:-}"
     printf '\n## 交付目录\n'
-    find "$SCRIPT_DIR" -maxdepth 2 \( -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name '*.zip' -o -name '*.deb' -o -name 'Packages.gz' -o -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name '构建报告.txt' \) -print 2>/dev/null | sort
+    find "$SCRIPT_DIR" -maxdepth 2 \( -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name '*.zip' -o -name '*.deb' -o -name 'Packages' -o -name 'Packages.gz' -o -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name '构建报告.txt' \) -print 2>/dev/null | sort
     printf '\n## 最新日志\n'
     [ -f "$LOG_FILE" ] && tail -n 160 "$LOG_FILE"
   } >> "$out" 2>&1 || true
@@ -631,8 +631,9 @@ build_offline_dependency_repo() {
   done < "$OFFLINE_REPO/runtime-dependencies.txt"
 
   deb_name="$(basename "$deb")"
-  (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz)
-  (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
+  (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null > Packages)
+  (cd "$OFFLINE_REPO" && gzip -9c Packages > Packages.gz)
+  (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
   repo_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
   PACKAGES_GZ_SHA256="$repo_sha"
   ok "离线依赖仓库已生成：$OFFLINE_REPO/Packages.gz"

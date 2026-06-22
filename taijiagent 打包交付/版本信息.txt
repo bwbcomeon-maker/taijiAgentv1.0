@@ -8,7 +8,7 @@
 发布预检：01_制包机_发布预检.sh 会检查 git 干净、单一源码包、SHA256SUMS.txt basename、旧包旧 zip 和 macOS 元数据；macOS 拷贝元数据会自动清理，旧包旧 zip 仍失败并停止发布。
 失败诊断：制包失败会生成 构建日志/失败诊断-<时间>.txt；目标机安装失败会生成 构建日志/失败诊断-<时间>.txt，包含环境、阶段、包状态、服务状态和下一步建议。
 发布 manifest：生成的安装包/taiji-package-manifest.json 记录源码包、DEB、Packages.gz、构建机 OS/glibc、目标系统矩阵和支持/不支持条件；目标机安装脚本会校验 manifest 匹配。
-离线边界：完全离线安装必须包含 生成的安装包/ 和 离线依赖/Packages.gz；缺失时默认失败，只有显式 ONLINE_OK=1 才允许使用目标机在线源。
+离线边界：完全离线安装必须包含 生成的安装包/、离线依赖/Packages 和 离线依赖/Packages.gz；缺失时默认失败，只有显式 ONLINE_OK=1 才允许使用目标机在线源。
 不支持范围：RPM-only、ARM/aarch64、无 apt/dpkg、无图形桌面或强隔离环境不属于当前 DEB 一键安装范围；RPM 和 .run 需要后续单独制品。
 安装脚本：已支持同版本重装、apt 降级覆盖和 hold 包覆盖，不需要手动卸载旧 taiji-agent。
 旧版处理：安装前自动停止并禁用旧服务，清理旧进程，彻底删除旧浏览器 WebUI 版系统安装，不保留两个 Agent 并存运行。

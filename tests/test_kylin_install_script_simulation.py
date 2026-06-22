@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import os
 import re
 import shutil
@@ -50,7 +51,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         repo_dir = self.tmp_path / "离线依赖"
         repo_dir.mkdir(exist_ok=True)
         packages_gz = repo_dir / "Packages.gz"
-        packages_gz.write_bytes(b"fake packages\n")
+        packages_gz.write_bytes(gzip.compress(b"fake packages\n"))
         packages_sha = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
         deb = output_dir / "taiji-agent_0.1.0_amd64.deb"
         checksum = output_dir / "taiji-agent_0.1.0_amd64.deb.sha256"
@@ -287,6 +288,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                   esac
                 }}
                 install_package
+                if [ -n "${{OFFLINE_APT_REPO_SOURCE:-}}" ]; then
+                  [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && cp "$OFFLINE_APT_REPO_SOURCE/Packages" "$FAKE_STATE/offline_Packages"
+                  [ -f "$OFFLINE_APT_REPO_SOURCE/Packages.gz" ] && touch "$FAKE_STATE/offline_Packages_gz"
+                fi
                 """
             ).lstrip(),
             encoding="utf-8",
@@ -398,7 +403,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
         repo = self.tmp_path / "离线依赖"
         repo.mkdir(exist_ok=True)
-        (repo / "Packages.gz").write_bytes(b"fake packages\n")
+        (repo / "Packages.gz").write_bytes(gzip.compress(b"fake packages\n"))
 
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -409,6 +414,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         apt_uri = source.split("file:", 1)[1].split(" ", 1)[0]
         self.assertNotIn(" ", apt_uri)
         self.assertNotIn(str(repo), source)
+        self.assertEqual((self.fake_state / "offline_Packages").read_text(encoding="utf-8"), "fake packages\n")
+        self.assertTrue((self.fake_state / "offline_Packages_gz").is_file())
 
     def test_adjacent_license_is_installed_to_user_config_with_owner_only_mode(self):
         (self.tmp_path / "license.jwt").write_text("signed-license-token\n", encoding="utf-8")

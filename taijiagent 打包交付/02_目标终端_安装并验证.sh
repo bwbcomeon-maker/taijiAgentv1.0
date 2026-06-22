@@ -73,7 +73,7 @@ write_environment_snapshot() {
     printf 'DISPLAY=%s\n' "${DISPLAY:-}"
     printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-}"
     printf '\n## 交付产物\n'
-    find "$SCRIPT_DIR" -maxdepth 2 \( -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name 'taiji-agent_*_amd64.deb' -o -name 'taiji-agent_*_amd64.deb.sha256' -o -name 'Packages.gz' -o -name 'SHA256SUMS.txt' \) -print 2>/dev/null | sort
+    find "$SCRIPT_DIR" -maxdepth 2 \( -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name 'taiji-agent_*_amd64.deb' -o -name 'taiji-agent_*_amd64.deb.sha256' -o -name 'Packages' -o -name 'Packages.gz' -o -name 'SHA256SUMS.txt' \) -print 2>/dev/null | sort
     printf '\n## 包和服务状态\n'
     dpkg-query -W -f='${db:Status-Abbrev} ${Package} ${Version}\n' taiji-agent 2>/dev/null || true
     systemctl status taiji-agent-webui.service --no-pager 2>/dev/null | sed -n '1,60p' || true
@@ -92,6 +92,9 @@ failure_next_steps() {
   case "$reason" in
     *"只能在 Linux"*|*"不是 x86_64/amd64"*|*"缺少 apt-get"*|*"缺少 dpkg"*)
       printf 'next=当前目标机不在 DEB 支持矩阵内；需要 Linux x86_64/amd64 + apt/dpkg + 图形桌面，RPM/.run 需单独制品\n'
+      ;;
+    *"离线 apt 仓库索引"*|*"无法下载 file:"*|*"无法找到文件"*"Packages"*)
+      printf 'next=离线 apt 仓库索引不可读。新版安装脚本会在 /tmp ASCII 仓库同时准备 Packages 和 Packages.gz；请使用最新交付目录重试\n'
       ;;
     *"管理员权限"*|*"sudo"*)
       printf 'next=先执行 sudo -v，确认当前用户具备管理员权限后重试安装脚本\n'
@@ -263,6 +266,7 @@ preflight() {
   have apt-get || fail "缺少 apt-get"
   have dpkg || fail "缺少 dpkg"
   have sha256sum || fail "缺少 sha256sum"
+  have gzip || fail "缺少 gzip"
   require_cmd mktemp
   require_cmd sudo
   require_cmd systemctl
@@ -549,10 +553,20 @@ validate_offline_repo_requirement() {
 }
 
 prepare_offline_apt_repo_source_path() {
-  local repo_path
+  local repo_path file
   repo_path="$(cd "$OFFLINE_REPO" && pwd)"
   OFFLINE_APT_REPO_MOUNT="$(mktemp -d "/tmp/taiji-agent-offline-repo.XXXXXX")"
-  ln -s "$repo_path" "$OFFLINE_APT_REPO_MOUNT/repo"
+  mkdir -p "$OFFLINE_APT_REPO_MOUNT/repo"
+  chmod 0755 "$OFFLINE_APT_REPO_MOUNT" "$OFFLINE_APT_REPO_MOUNT/repo" 2>/dev/null || true
+  while IFS= read -r -d '' file; do
+    cp -f "$file" "$OFFLINE_APT_REPO_MOUNT/repo/$(basename "$file")"
+  done < <(find "$repo_path" -maxdepth 1 -type f -print0)
+  if [ ! -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages" ] && [ -f "$repo_path/Packages.gz" ]; then
+    gzip -dc "$repo_path/Packages.gz" > "$OFFLINE_APT_REPO_MOUNT/repo/Packages" || fail "离线 apt 仓库索引不可读：无法从 Packages.gz 生成 Packages"
+  fi
+  [ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages" ] || fail "离线 apt 仓库索引不可读：缺少 Packages"
+  [ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages.gz" ] || fail "离线 apt 仓库索引不可读：缺少 Packages.gz"
+  chmod a+r "$OFFLINE_APT_REPO_MOUNT/repo"/* 2>/dev/null || true
   OFFLINE_APT_REPO_SOURCE="$OFFLINE_APT_REPO_MOUNT/repo"
 }
 
@@ -575,7 +589,9 @@ install_taiji_package() {
       -o "Dir::State::Lists=$lists_dir"
     )
     # apt-get update is scoped to the local file: source through the options below.
-    sudo apt-get "${apt_opts[@]}" update
+    if ! sudo apt-get "${apt_opts[@]}" update; then
+      fail "离线 apt 仓库索引更新失败：apt-get update 无法读取本地 Packages/Packages.gz"
+    fi
     sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get \
       "${apt_opts[@]}" \
       install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"

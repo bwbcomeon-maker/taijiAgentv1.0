@@ -147,6 +147,7 @@ check_delivery_artifacts() {
   [ -f "$MANIFEST_FILE" ] || fail "缺少生成的安装包/taiji-package-manifest.json"
   [ -f "$BUILD_REPORT" ] || fail "缺少生成的安装包/构建报告.txt"
   [ -d "$OFFLINE_REPO" ] || fail "缺少离线依赖/"
+  [ -f "$OFFLINE_REPO/Packages" ] || fail "缺少离线依赖/Packages"
   [ -f "$OFFLINE_REPO/Packages.gz" ] || fail "缺少离线依赖/Packages.gz"
 
   local deb_count
