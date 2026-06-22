@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Installation/runtime verifier for Taiji Agent desktop packages.
+# This verifier aggregates warnings/failures itself. Do not inherit strict
+# shell options from an installer, otherwise a closed health port can abort
+# before the summary is printed.
+set +e
+set +o pipefail 2>/dev/null || true
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +38,12 @@ runtime_issue() {
 }
 
 http_code() {
-  curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)" || {
+    printf '000\n'
+    return 0
+  }
+  printf '%s\n' "${code:-000}"
 }
 
 python_bin() {

@@ -11,6 +11,7 @@ CHECKSUM_PATH=""
 MANIFEST_PATH=""
 OFFLINE_APT_REPO_MOUNT=""
 OFFLINE_APT_REPO_SOURCE=""
+OFFLINE_APT_LISTS_DIR=""
 ONLINE_OK="${ONLINE_OK:-0}"
 
 LEGACY_SERVICES=(
@@ -151,6 +152,9 @@ require_cmd() { have "$1" || fail "缺少命令：$1"; }
 cleanup_offline_apt_repo_mount() {
   if [ -n "${OFFLINE_APT_REPO_MOUNT:-}" ] && [ -d "$OFFLINE_APT_REPO_MOUNT" ]; then
     rm -rf -- "$OFFLINE_APT_REPO_MOUNT"
+  fi
+  if [ -n "${OFFLINE_APT_LISTS_DIR:-}" ] && [ -d "$OFFLINE_APT_LISTS_DIR" ]; then
+    sudo rm -rf -- "$OFFLINE_APT_LISTS_DIR" >/dev/null 2>&1 || rm -rf -- "$OFFLINE_APT_LISTS_DIR" >/dev/null 2>&1 || true
   fi
 }
 
@@ -537,9 +541,11 @@ install_taiji_package() {
     info "检测到离线依赖仓库：$OFFLINE_REPO"
     local source_file lists_dir
     source_file="$LOG_DIR/taiji-agent-offline.list"
-    lists_dir="$LOG_DIR/apt-lists"
+    lists_dir="$(mktemp -d "/tmp/taiji-agent-apt-lists.XXXXXX")"
+    OFFLINE_APT_LISTS_DIR="$lists_dir"
     prepare_offline_apt_repo_source_path
     mkdir -p "$lists_dir/partial"
+    chmod 0755 "$lists_dir" "$lists_dir/partial" 2>/dev/null || true
     # APT sources.list is whitespace separated; use a no-space /tmp symlink so copied folders may contain spaces.
     printf 'deb [trusted=yes] file:%s ./\n' "$OFFLINE_APT_REPO_SOURCE" > "$source_file"
     local apt_opts=(

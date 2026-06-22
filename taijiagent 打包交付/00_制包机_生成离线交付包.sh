@@ -694,7 +694,7 @@ write_build_report() {
     printf 'Node 镜像覆盖：%s\n' "${TAIJI_NODE_MIRRORS:+已设置}"
     printf 'npm 镜像覆盖：%s\n' "${TAIJI_NPM_REGISTRIES:+已设置}"
     printf 'Electron 镜像覆盖：%s\n' "${TAIJI_ELECTRON_MIRRORS:+已设置}"
-    printf '依赖源：%s\n' "$(grep -hE '^[[:space:]]*deb ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null | head -5 | tr '\n' '; ')"
+    printf '依赖源：%s\n' "$(apt_source_summary)"
     printf '源码包 SHA256：%s\n' "$source_line"
     printf 'DEB SHA256：%s\n' "$deb_line"
     printf 'Packages.gz SHA256：%s\n' "$repo_line"
@@ -704,6 +704,24 @@ write_build_report() {
     printf '目标机离线仓库：离线依赖/Packages.gz\n'
   } > "$BUILD_REPORT"
   ok "构建报告已生成：$BUILD_REPORT"
+}
+
+apt_source_summary() {
+  awk '
+    /^[[:space:]]*deb[[:space:]]/ {
+      out = out $0 "; "
+      count += 1
+      if (count >= 5) {
+        print out
+        exit
+      }
+    }
+    END {
+      if (count > 0 && count < 5) {
+        print out
+      }
+    }
+  ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
 }
 
 main() {

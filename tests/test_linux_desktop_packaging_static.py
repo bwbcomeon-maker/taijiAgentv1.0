@@ -1,4 +1,5 @@
 import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -51,6 +52,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_native_verify_checks_packaged_electron_runtime(self):
         verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
 
+        self.assertIn("set +e", verify)
+        self.assertIn("set +o pipefail", verify)
         self.assertIn("Electron runtime exists", verify)
         self.assertIn("ldd", verify)
         self.assertIn("not found", verify)
@@ -62,8 +65,35 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("plugins.context_engine", verify)
         self.assertIn("Agent runtime plugin modules are importable", verify)
         self.assertIn("verify_packaged_config", verify)
+        self.assertIn("printf '000\\n'", verify)
         self.assertIn("/api/model-config", verify)
         self.assertIn("/api/settings", verify)
+
+    def test_native_verify_closed_health_ports_do_not_abort_under_inherited_errexit(self):
+        env = os.environ.copy()
+        env.update(
+            {
+                "SHELLOPTS": "errexit:pipefail",
+                "AGENT_API_PORT": "9",
+                "WEBUI_PORT": "10",
+                "TAIJI_VERIFY_DESKTOP_SMOKE": "0",
+            }
+        )
+
+        result = subprocess.run(
+            ["bash", str(ROOT / "hermes-local-lab/scripts/taiji-native-verify")],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Agent health not reachable", output)
+        self.assertIn("WebUI health not reachable", output)
+        self.assertIn("Summary:", output)
 
     def test_desktop_runtime_does_not_depend_on_venv_console_script_shebang(self):
         start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
@@ -595,6 +625,20 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("缺少离线依赖仓库", install)
         self.assertIn("ONLINE_OK=1", install)
         self.assertIn("完全离线发布包", install)
+
+    def test_install_script_uses_tmp_apt_lists_for_offline_repo(self):
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+
+        self.assertIn("/tmp/taiji-agent-apt-lists.XXXXXX", install)
+        self.assertIn("OFFLINE_APT_LISTS_DIR", install)
+        self.assertIn("Dir::State::Lists=$lists_dir", install)
+        self.assertNotIn('lists_dir="$LOG_DIR/apt-lists"', install)
+
+    def test_build_report_avoids_tr_pipefail_for_apt_sources(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("apt_source_summary", builder)
+        self.assertNotIn("tr '\\n' '; '", builder)
 
     def test_build_script_audits_final_deb_payload_and_webui_offline_assets(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
