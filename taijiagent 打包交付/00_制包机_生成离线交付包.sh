@@ -4,7 +4,8 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
-BUILD_ROOT="$SCRIPT_DIR/构建工作区"
+DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-$(id -u 2>/dev/null || printf user)"
+BUILD_ROOT="${TAIJI_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"
 SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
@@ -54,6 +55,8 @@ write_environment_snapshot() {
     printf 'TAIJI_NODE_MIRRORS=%s\n' "${TAIJI_NODE_MIRRORS:+set}"
     printf 'TAIJI_NPM_REGISTRIES=%s\n' "${TAIJI_NPM_REGISTRIES:+set}"
     printf 'TAIJI_ELECTRON_MIRRORS=%s\n' "${TAIJI_ELECTRON_MIRRORS:+set}"
+    printf 'TAIJI_BUILD_ROOT=%s\n' "${TAIJI_BUILD_ROOT:-}"
+    printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
     printf 'UV_INDEX_URL=%s\n' "${UV_INDEX_URL:-}"
     printf '\n## 交付目录\n'
     find "$SCRIPT_DIR" -maxdepth 2 \( -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name '*.zip' -o -name '*.deb' -o -name 'Packages.gz' -o -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name '构建报告.txt' \) -print 2>/dev/null | sort
@@ -76,6 +79,9 @@ failure_next_steps() {
       ;;
     *"Node.js"*|*"npm ci"*|*"Electron"*)
       printf 'next=检查 DNS/代理/镜像，必要时设置 TAIJI_NODE_MIRRORS、TAIJI_NPM_REGISTRIES、TAIJI_ELECTRON_MIRRORS 后重试\n'
+      ;;
+    *"pyproject.toml"*|*"Permission denied"*|*"os error 13"*|*"源码权限不可读"*)
+      printf 'next=构建工作区源码权限不可读。新版脚本默认使用 /tmp/taiji-agent-build-<uid> 并在解压后修复权限；如仍失败，检查终端安全管控/ACL，或设置 TAIJI_BUILD_ROOT=/tmp/taiji-agent-build-test 后重试\n'
       ;;
     *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
       printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
@@ -441,12 +447,40 @@ ensure_node() {
   ok "Node.js 已准备：$(command -v node) ($(node --version), npm $(npm -v))"
 }
 
+reset_build_root() {
+  case "$BUILD_ROOT" in
+    ""|"/"|"/tmp"|"/home"|"$SCRIPT_DIR")
+      fail "拒绝清理危险构建目录：${BUILD_ROOT:-empty}"
+      ;;
+  esac
+  if [ -e "$BUILD_ROOT" ] && ! rm -rf "$BUILD_ROOT"; then
+    warn "构建工作区无法由当前用户清理，尝试使用 sudo 清理：$BUILD_ROOT"
+    sudo rm -rf "$BUILD_ROOT" || fail "无法清理构建工作区：$BUILD_ROOT"
+  fi
+  mkdir -p "$BUILD_ROOT"
+}
+
+repair_build_tree_permissions() {
+  local agent_dir lab_dir setup_script pyproject
+  lab_dir="$(source_lab_dir)"
+  agent_dir="$(source_agent_dir)"
+  setup_script="$lab_dir/scripts/setup-local.sh"
+  pyproject="$agent_dir/pyproject.toml"
+
+  chmod -R u+rwX,go+rX "$SRC_DIR" || fail "源码解压后权限修复失败：$SRC_DIR"
+  [ -f "$pyproject" ] || fail "源码解压后缺少 Python 项目文件：pyproject.toml"
+  [ -r "$pyproject" ] || fail "源码权限不可读：pyproject.toml"
+  [ -f "$setup_script" ] || fail "源码解压后缺少初始化脚本：scripts/setup-local.sh"
+  chmod +x "$setup_script" || fail "初始化脚本不可执行：scripts/setup-local.sh"
+}
+
 unpack_source() {
   info "解压源码到构建工作区"
-  rm -rf "$BUILD_ROOT"
-  mkdir -p "$BUILD_ROOT"
+  info "构建工作区：$BUILD_ROOT"
+  reset_build_root
   tar -xzf "$SRC_ARCHIVE" -C "$BUILD_ROOT"
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
+  repair_build_tree_permissions
   ok "源码已解压：$SRC_DIR"
 }
 
@@ -476,6 +510,23 @@ npm_ci_with_network_fallback() {
   [ "$installed" = "1" ] || fail "npm ci 失败：已尝试多个 npm registry 和 Electron mirror；请检查制包机网络、DNS、代理，或设置 TAIJI_NPM_REGISTRIES / TAIJI_ELECTRON_MIRRORS"
 }
 
+run_setup_local() {
+  local uv_lock_mode="$1" setup_log status
+  setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S).log"
+
+  set +e
+  TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
+  status="${PIPESTATUS[0]}"
+  set -e
+
+  if [ "$status" -ne 0 ]; then
+    if grep -qiE 'pyproject\.toml|Permission denied|os error 13' "$setup_log"; then
+      fail "Python venv 生成失败：构建工作区源码权限不可读（pyproject.toml Permission denied）"
+    fi
+    fail "Python venv 生成失败：setup-local.sh 返回 $status，详见 $setup_log"
+  fi
+}
+
 build_runtime_and_deb() {
   local uv_lock_mode
   export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
@@ -490,7 +541,7 @@ build_runtime_and_deb() {
 
   info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=$uv_lock_mode）"
   cd "$(source_lab_dir)"
-  TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh
+  run_setup_local "$uv_lock_mode"
 
   info "获取 Linux Electron runtime"
   cd "$SRC_DIR/apps/taiji-desktop"

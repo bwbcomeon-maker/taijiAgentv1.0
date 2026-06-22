@@ -653,6 +653,24 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("apt_source_summary", builder)
         self.assertNotIn("tr '\\n' '; '", builder)
 
+    def test_offline_builder_uses_ascii_tmp_build_root_and_repairs_source_permissions(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn('DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-$(id -u 2>/dev/null || printf user)"', builder)
+        self.assertIn('BUILD_ROOT="${TAIJI_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"', builder)
+        self.assertNotIn('BUILD_ROOT="$SCRIPT_DIR/构建工作区"', builder)
+        self.assertIn("reset_build_root", builder)
+        self.assertIn("repair_build_tree_permissions", builder)
+        self.assertIn("chmod -R u+rwX,go+rX", builder)
+        self.assertIn("pyproject.toml", builder)
+        self.assertIn("Permission denied", builder)
+        self.assertIn("run_setup_local", builder)
+        self.assertIn("setup-local-", builder)
+
+        unpack = builder[builder.index("unpack_source() {") : builder.index("npm_ci_with_network_fallback() {")]
+        self.assertLess(unpack.index("reset_build_root"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
+        self.assertLess(unpack.index('tar -xzf "$SRC_ARCHIVE"'), unpack.index("repair_build_tree_permissions"))
+
     def test_build_script_audits_final_deb_payload_and_webui_offline_assets(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
 
