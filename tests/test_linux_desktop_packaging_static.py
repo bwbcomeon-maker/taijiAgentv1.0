@@ -612,11 +612,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Python 依赖 lock 漂移", builder)
         self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
         self.assertNotIn("\n  uv lock\n", builder)
+        self.assertIn('printf \'%s  %s\\n\' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$checksum_name"', builder)
 
         self.assertIn("MANIFEST_PATH", install)
         self.assertIn("validate_release_manifest", install)
         self.assertIn("manifest", install)
         self.assertIn("packages_gz_sha256", install)
+        self.assertIn("verify_deb_checksum", install)
+        self.assertNotIn('sha256sum -c "$(basename "$CHECKSUM_PATH")"', install)
 
     def test_delivery_install_script_requires_offline_repo_unless_explicitly_online(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
@@ -664,6 +667,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "./usr/bin/taiji-agent",
         ):
             self.assertIn(required, build)
+        self.assertIn('out_deb_name="$(basename "$OUT_DEB")"', build)
+        self.assertIn('sha256sum "$out_deb_name" > "$out_deb_name.sha256"', build)
 
     def test_webui_runtime_assets_are_local_for_offline_target(self):
         static_root = ROOT / "hermes-local-lab/sources/hermes-webui/static"

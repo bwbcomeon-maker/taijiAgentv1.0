@@ -234,6 +234,26 @@ validate_build_marker() {
   ok "构建成功标记有效：$deb_name"
 }
 
+verify_deb_checksum() {
+  local actual_sha checksum_file_sha checksum_file_target
+  [ -n "${DEB_PATH:-}" ] || fail "内部错误：DEB_PATH 未设置"
+  [ -n "${expected_sha:-}" ] || fail "内部错误：expected_sha 未设置"
+  actual_sha="$(sha256sum "$DEB_PATH" | awk '{print $1}')"
+  [ "$actual_sha" = "$expected_sha" ] || fail "安装包 SHA256 不匹配：$(basename "$DEB_PATH")"
+
+  if [ -f "$CHECKSUM_PATH" ]; then
+    checksum_file_sha="$(awk 'NR == 1 { print $1; exit }' "$CHECKSUM_PATH")"
+    checksum_file_target="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$CHECKSUM_PATH")"
+    if [ -n "${checksum_file_sha:-}" ] && [ "$checksum_file_sha" != "$expected_sha" ]; then
+      fail "校验文件 SHA256 与构建成功标记不一致：$(basename "$CHECKSUM_PATH")"
+    fi
+    if [ -n "${checksum_file_target:-}" ] && [ "$(basename "$checksum_file_target")" != "$(basename "$DEB_PATH")" ]; then
+      fail "校验文件指向的安装包名称不一致：$checksum_file_target"
+    fi
+  fi
+  ok "安装包 SHA256 校验通过：$(basename "$DEB_PATH")"
+}
+
 preflight() {
   [ "$(uname -s)" = "Linux" ] || fail "只能在 Linux 目标终端安装，当前为：$(uname -s)"
   case "$(uname -m)" in
@@ -571,7 +591,7 @@ install_package() {
   validate_build_marker
 
   info "校验安装包"
-  (cd "$OUTPUT_DIR" && sha256sum -c "$(basename "$CHECKSUM_PATH")")
+  verify_deb_checksum
   validate_offline_repo_requirement
 
   prepare_legacy_replacement

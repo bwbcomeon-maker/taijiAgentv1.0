@@ -303,6 +303,20 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def fake_log_text(self) -> str:
         return self.fake_log.read_text(encoding="utf-8") if self.fake_log.exists() else ""
 
+    def test_cross_machine_absolute_deb_checksum_path_is_tolerated(self):
+        deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
+        checksum = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb.sha256"
+        sha = hashlib.sha256(deb.read_bytes()).hexdigest()
+        checksum.write_text(
+            f"{sha}  /home/user2/桌面/taijiagent 打包交付/构建工作区/taiji-agentv1.0/packages/麒麟操作系统安装包/{deb.name}\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_install_package()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("安装包 SHA256 校验通过", result.stdout + result.stderr)
+
     def test_clean_reinstall_removes_legacy_without_backup_before_installing(self):
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

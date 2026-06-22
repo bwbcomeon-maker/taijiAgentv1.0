@@ -510,11 +510,11 @@ collect_artifacts() {
 
   rm -f "$OUTPUT_DIR"/taiji-agent_*_amd64.deb "$OUTPUT_DIR"/taiji-agent_*_amd64.deb.sha256 "$BUILD_MARKER" "$MANIFEST_FILE" "$BUILD_REPORT"
   cp -f "$deb" "$OUTPUT_DIR/"
-  cp -f "$checksum" "$OUTPUT_DIR/"
-  (cd "$OUTPUT_DIR" && sha256sum -c "taiji-agent_${VERSION}_amd64.deb.sha256")
   deb_name="taiji-agent_${VERSION}_amd64.deb"
   checksum_name="$deb_name.sha256"
   deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
+  printf '%s  %s\n' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$checksum_name"
+  (cd "$OUTPUT_DIR" && sha256sum -c "$checksum_name")
   src_name="$(basename "$SRC_ARCHIVE")"
   src_sha="$(cd "$SCRIPT_DIR" && sha256sum "$src_name" | awk '{print $1}')"
   {

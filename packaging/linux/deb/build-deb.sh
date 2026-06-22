@@ -612,7 +612,8 @@ scan_package_tree
 dpkg-deb --root-owner-group -Zxz --build "$PKG_ROOT" "$OUT_DEB"
 scan_deb_release_artifact
 audit_deb_payload
-sha256sum "$OUT_DEB" > "$OUT_DEB.sha256"
+out_deb_name="$(basename "$OUT_DEB")"
+(cd "$OUT_DIR" && sha256sum "$out_deb_name" > "$out_deb_name.sha256")
 
 echo "Built: $OUT_DEB"
 echo "Checksum: $OUT_DEB.sha256"
