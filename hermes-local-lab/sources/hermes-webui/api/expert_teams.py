@@ -504,6 +504,9 @@ def _normalize_run(run: dict) -> dict:
     run["status_label"] = STATUS_LABELS.get(run["status"], run["status"])
     run["phase"] = str(run.get("phase") or "需求确认")
     run["questions"] = run.get("questions") if isinstance(run.get("questions"), list) else []
+    run["pending_confirmations"] = (
+        run.get("pending_confirmations") if isinstance(run.get("pending_confirmations"), list) else []
+    )
     run["members"] = run.get("members") if isinstance(run.get("members"), list) else []
     run["tasks"] = run.get("tasks") if isinstance(run.get("tasks"), list) else []
     run["events"] = run.get("events") if isinstance(run.get("events"), list) else []
@@ -590,15 +593,101 @@ def _pending_questions(run: dict) -> list[dict]:
     return rows
 
 
+def _question_confirmation_for_view(question: dict) -> dict:
+    qid = str(question.get("id") or "")
+    return {
+        "id": f"question:{qid}",
+        "kind": "question",
+        "title": str(question.get("title") or question.get("id") or ""),
+        "description": "请补充确认信息，专家团才会继续推进。",
+        "fields": [
+            {
+                "id": qid,
+                "type": str(question.get("type") or "text"),
+                "required": question.get("required") is not False,
+                "options": list(question.get("options") or []) if isinstance(question.get("options"), list) else [],
+            }
+        ],
+        "actions": {"submit": "answer"},
+        "source_task_id": "",
+        "status": str(question.get("status") or "pending"),
+    }
+
+
+def _structured_pending_confirmations(run: dict) -> list[dict]:
+    rows = []
+    terminal_statuses = {"answered", "done", "approved", "cancelled", "canceled", "dismissed"}
+    for item in run.get("pending_confirmations") or []:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "pending")
+        if status.lower() in terminal_statuses:
+            continue
+        kind = str(item.get("kind") or "clarification")
+        if kind not in {"question", "stage_review", "clarification"}:
+            kind = "clarification"
+        fields = item.get("fields") if isinstance(item.get("fields"), list) else []
+        actions = item.get("actions") if isinstance(item.get("actions"), dict) else {}
+        rows.append(
+            {
+                "id": str(item.get("id") or f"{kind}:{len(rows) + 1}"),
+                "kind": kind,
+                "title": str(item.get("title") or "待确认事项"),
+                "description": str(item.get("description") or "聊天中有待确认事项，请查看最新专家团回复。"),
+                "fields": deepcopy(fields),
+                "actions": deepcopy(actions),
+                "source_task_id": str(item.get("source_task_id") or ""),
+                "status": status,
+            }
+        )
+    return rows
+
+
+def _stage_review_confirmation_for_view(stage_review: dict) -> dict:
+    output = stage_review.get("output") if isinstance(stage_review.get("output"), dict) else {}
+    task_id = str(stage_review.get("task_id") or output.get("task_id") or "")
+    title = str(stage_review.get("title") or output.get("title") or output.get("label") or "阶段成果")
+    description = str(output.get("content") or output.get("note") or "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。")
+    return {
+        "id": f"stage:{task_id}",
+        "kind": "stage_review",
+        "title": title,
+        "description": description,
+        "fields": [],
+        "actions": {"approve": "stage/approve", "revise": "stage/revise"},
+        "source_task_id": task_id,
+        "status": str(stage_review.get("status") or "awaiting_review"),
+    }
+
+
+def _pending_confirmations_for_view(
+    run: dict,
+    stage_review: dict,
+    can_review_stage: bool,
+    structured_confirmations: list[dict] | None = None,
+) -> list[dict]:
+    rows = []
+    for question in run.get("questions") or []:
+        if not isinstance(question, dict) or str(question.get("status") or "").lower() == "answered":
+            continue
+        rows.append(_question_confirmation_for_view(question))
+    rows.extend(structured_confirmations if structured_confirmations is not None else _structured_pending_confirmations(run))
+    if can_review_stage:
+        rows.append(_stage_review_confirmation_for_view(stage_review))
+    return rows
+
+
 def expert_team_run_view(run: dict) -> dict:
     pending = _pending_questions(run)
     status = str(run.get("status") or "awaiting_user")
     execution_status = str(run.get("execution_status") or "idle")
     needs_resume = bool(run.get("needs_resume") or execution_status == "needs_resume")
     stage_review = _stage_review_for_view(run)
+    structured_confirmations = _structured_pending_confirmations(run)
     can_review_stage = bool(
         _is_stage_gated_run(run)
         and not pending
+        and not structured_confirmations
         and status == "awaiting_user"
         and stage_review.get("status") == "awaiting_review"
         and stage_review.get("task_id")
@@ -628,10 +717,16 @@ def expert_team_run_view(run: dict) -> dict:
         "execution_status": execution_status,
         "phase_progress": _phase_progress(run),
         "pending_questions": pending,
+        "pending_confirmations": _pending_confirmations_for_view(
+            run,
+            stage_review,
+            can_review_stage,
+            structured_confirmations,
+        ),
         "artifacts": artifacts,
         "actions": {
             "can_answer": bool(pending),
-            "can_resume": bool(needs_resume and not pending),
+            "can_resume": bool(needs_resume and not pending and not structured_confirmations),
             "can_cancel": can_cancel,
             "can_retry": can_retry,
             "can_open_artifact": any(item["openable"] for item in artifacts),

@@ -696,6 +696,16 @@ function _expertTeamStatusCardFromRun(run,data){
   card.actions=view.actions||{};
   card.health=view.health||{};
   card.stageReview=view.stage_review||{};
+  card.pendingConfirmations=Array.isArray(view.pending_confirmations)?view.pending_confirmations.map(item=>({
+    id:item&&item.id||'',
+    kind:item&&item.kind||'clarification',
+    title:item&&item.title||'待确认事项',
+    description:item&&item.description||'聊天中有待确认事项，请查看最新专家团回复。',
+    fields:Array.isArray(item&&item.fields)?item.fields:[],
+    actions:item&&item.actions||{},
+    sourceTaskId:item&&item.source_task_id||item&&item.sourceTaskId||'',
+    status:item&&item.status||'pending',
+  })):[];
   card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[];
   card.phaseProgress=view.phase_progress||run.phase_progress||card.phaseProgress||{};
   card.needsResume=!!(card.health.needs_resume||run.needs_resume||run.needsResume);
@@ -765,6 +775,28 @@ function _expertTeamPendingQuestions(card){
   return questions.filter(question=>String(question.status||'')!=='answered');
 }
 
+function _expertTeamPendingConfirmations(card){
+  const confirmations=Array.isArray(card&&card.pendingConfirmations)?card.pendingConfirmations:[];
+  const terminal=new Set(['answered','done','approved','cancelled','canceled','dismissed']);
+  return confirmations.filter(item=>!terminal.has(String(item&&item.status||'').toLowerCase()));
+}
+
+function _expertTeamConfirmationSummary(card){
+  const confirmations=_expertTeamPendingConfirmations(card);
+  const first=confirmations[0]||{};
+  const pendingQuestions=confirmations.filter(item=>String(item&&item.kind||'')==='question').length;
+  const hasStage=confirmations.some(item=>String(item&&item.kind||'')==='stage_review');
+  if(!confirmations.length)return {count:0,title:'暂无待确认事项',detail:'专家团暂无需要你处理的确认事项',action:'去确认'};
+  return {
+    count:confirmations.length,
+    title:`待你确认：${confirmations.length} 项`,
+    detail:pendingQuestions
+      ? `请先补充 ${pendingQuestions} 项确认信息，专家团再继续推进。`
+      : (hasStage?'请确认阶段成果，或提出修改意见。':(first.description||'聊天中有待确认事项，请查看最新专家团回复。')),
+    action:'去确认',
+  };
+}
+
 function _expertTeamArtifactIsOpenable(item){
   return !!(item&&String(item.path||'').trim()&&!item.placeholder&&item.exists!==false&&item.openable!==false);
 }
@@ -823,13 +855,22 @@ function _expertTeamAnsweredQuestionsSummary(card){
 }
 
 function _expertTeamDockSummary(card){
-  const pending=_expertTeamPendingQuestions(card);
+  const confirmations=_expertTeamPendingConfirmations(card);
   const readyArtifacts=_expertTeamReadyArtifacts(card);
   const artifacts=Array.isArray(card&&card.artifacts)?card.artifacts:[];
   const deliveredArtifacts=artifacts.filter(item=>_expertTeamArtifactDeliveredToChat(item));
   const stateClass=_statusCardStateClass(card&&card.statusLabel||card&&card.status);
   const actions=card&&card.actions||{};
   const phase=(card&&card.phase)||'当前阶段';
+  if(confirmations.length){
+    const confirmationSummary=_expertTeamConfirmationSummary(card);
+    return {
+      state:'waiting',
+      title:confirmationSummary.title,
+      detail:confirmationSummary.detail,
+      action:confirmationSummary.action,
+    };
+  }
   if(actions.can_retry){
     return {
       state:'issue',
@@ -844,14 +885,6 @@ function _expertTeamDockSummary(card){
       title:'需要继续生成',
       detail:`${phase} · 执行流未启动或已中断`,
       action:'继续生成',
-    };
-  }
-  if(pending.length){
-    return {
-      state:'waiting',
-      title:`等待 ${pending.length} 项需求确认`,
-      detail:`确认后进入“${phase}”`,
-      action:'去确认',
     };
   }
   if(actions.can_approve_stage||actions.can_request_revision){
@@ -1198,6 +1231,14 @@ function _expertTeamWorkspaceRenderKey(card){
       required:question&&question.required!==false,
       options:Array.isArray(question&&question.options)?question.options:[],
     })),
+    pendingConfirmations:(Array.isArray(card.pendingConfirmations)?card.pendingConfirmations:[]).map(item=>({
+      id:item&&item.id||'',
+      kind:item&&item.kind||'',
+      title:item&&item.title||'',
+      description:item&&item.description||'',
+      status:item&&item.status||'',
+      sourceTaskId:item&&item.sourceTaskId||item&&item.source_task_id||'',
+    })),
     members:(Array.isArray(card.members)?card.members:[]).map(compactItem),
     tasks:(Array.isArray(card.tasks)?card.tasks:[]).map(compactItem),
     artifacts:(Array.isArray(card.artifacts)?card.artifacts:[]).map(compactItem),
@@ -1231,6 +1272,60 @@ function _expertTeamDockMiniHtml(card){
   </button>`;
 }
 
+let _activeExpertTeamStatusCard=null;
+
+function _expertTeamChatConfirmationSignature(){
+  const card=_activeExpertTeamStatusCard;
+  const confirmations=_expertTeamPendingConfirmations(card);
+  if(!confirmations.length)return '';
+  try{
+    return JSON.stringify({
+      runId:card&&card.runId||card&&card.sessionId||'',
+      items:confirmations.map(item=>({
+        id:item&&item.id||'',
+        kind:item&&item.kind||'',
+        status:item&&item.status||'',
+        title:item&&item.title||'',
+      })),
+    });
+  }catch(_){
+    return confirmations.map(item=>`${item&&item.id||''}:${item&&item.status||''}`).join('|');
+  }
+}
+
+function _expertTeamChatConfirmationCardHtml(card){
+  const confirmations=_expertTeamPendingConfirmations(card);
+  if(!confirmations.length)return '';
+  const summary=_expertTeamConfirmationSummary(card);
+  const actionIcon=(typeof li==='function')?li('arrow-right',14):'›';
+  return `<div class="expert-team-chat-confirmation-card" data-expert-team-chat-confirmation="1" data-expert-team-run-id="${esc(card&&card.runId||card&&card.sessionId||'')}">
+    <span class="expert-team-chat-confirmation-copy">
+      <strong>${esc(summary.title)}</strong>
+      <small>${esc(summary.detail||'聊天中有待确认事项，请查看最新专家团回复。')}</small>
+    </span>
+    <button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">去确认 ${actionIcon}</button>
+  </div>`;
+}
+
+function syncExpertTeamChatConfirmationCard(card){
+  if(arguments.length)_activeExpertTeamStatusCard=card||null;
+  const inner=(typeof $==='function'&&$('msgInner'))||document.getElementById('msgInner');
+  if(!inner)return false;
+  inner.querySelectorAll('.expert-team-chat-confirmation-card').forEach(node=>node.remove());
+  const html=_expertTeamChatConfirmationCardHtml(_activeExpertTeamStatusCard);
+  if(!html)return false;
+  const wrap=document.createElement('div');
+  wrap.innerHTML=html;
+  const node=wrap.firstElementChild;
+  if(!node)return false;
+  const turns=inner.querySelectorAll('.assistant-turn');
+  const latestTurn=turns.length?turns[turns.length-1]:null;
+  const blocks=latestTurn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(latestTurn):null;
+  if(blocks)blocks.appendChild(node);
+  else inner.appendChild(node);
+  return true;
+}
+
 function _expertTeamWorkspacePanelHtml(card){
   card=card||{};
   const team=card.team||{};
@@ -1242,6 +1337,8 @@ function _expertTeamWorkspacePanelHtml(card){
   const readyArtifacts=_expertTeamReadyArtifacts(card);
   const deliveredArtifacts=artifacts.filter(item=>_expertTeamArtifactDeliveredToChat(item));
   const pending=_expertTeamPendingQuestions(card);
+  const confirmations=_expertTeamPendingConfirmations(card);
+  const confirmationSummary=_expertTeamConfirmationSummary(card);
   const progress=card.progress||{};
   const done=Math.max(0,Number(progress.done||0));
   const total=Math.max(0,Number(progress.total||tasks.length||0));
@@ -1313,10 +1410,7 @@ function _expertTeamWorkspacePanelHtml(card){
       <div class="expert-team-panel-section-title"><span>产物入口</span><small>${readyArtifacts.length?`${readyArtifacts.length} 个可打开`:(deliveredArtifacts.length?'已写入当前对话':'待生成')}</small></div>
       <div class="expert-team-panel-artifacts">${artifactHtml}</div>
     </section>`;
-  const questionSectionHtml=`<section class="expert-team-panel-section expert-team-panel-questions expert-team-confirmation-workspace">
-      <div class="expert-team-panel-section-title expert-team-confirmation-header"><span>${pending.length?`需要你确认 ${currentQuestionIndex}/${totalQuestions}`:'需求确认完成'}</span><small>${pending.length?`剩余 ${pending.length} 项，确认后自动进入下一项`:'需求已确认，正在进入生成'}</small></div>
-      <div class="expert-team-panel-question-list">${questionHtml}</div>
-    </section>`;
+  let confirmationSectionHtml='';
   const stageReviewTitle=stageReview.title||stageOutput.title||stageOutput.label||phase;
   const stageReviewMeta=[
     stageReview.phase||stageOutput.phase||phase,
@@ -1324,6 +1418,28 @@ function _expertTeamWorkspacePanelHtml(card){
     Number(stageReview.revision_count||stageOutput.revision_count||0)?`第 ${Number(stageReview.revision_count||stageOutput.revision_count||0)} 次修订`:'',
   ].filter(Boolean).join(' · ');
   const stageReviewContent=stageOutput.content||stageOutput.note||'阶段结果已写入当前对话，请检查后确认是否进入下一阶段。';
+  const stageConfirmation=confirmations.find(item=>String(item&&item.kind||'')==='stage_review');
+  const clarificationConfirmation=confirmations.find(item=>String(item&&item.kind||'')==='clarification');
+  const confirmationStageSummaryHtml=stageConfirmation?`<div class="expert-team-confirmation-stage-summary">
+      <span>
+        <strong>${esc(stageConfirmation.title||stageReviewTitle||'请确认阶段成果')}</strong>
+        <small>${esc(stageConfirmation.description||stageReviewContent)}</small>
+      </span>
+      <button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段成果</button>
+    </div>`:'';
+  const confirmationFallbackHtml=clarificationConfirmation?`<div class="expert-team-confirmation-fallback">
+      <span>
+        <strong>${esc(clarificationConfirmation.title||'聊天中有待确认事项')}</strong>
+        <small>${esc(clarificationConfirmation.description||'聊天中有待确认事项，请查看最新专家团回复。')}</small>
+      </span>
+      <button type="button" onclick="openExpertTeamChatDelivery(this);event.stopPropagation()">查看聊天回复</button>
+    </div>`:'';
+  if(confirmations.length){
+    confirmationSectionHtml=`<section class="expert-team-panel-section expert-team-panel-questions expert-team-confirmation-workspace">
+      <div class="expert-team-panel-section-title expert-team-confirmation-header"><span>${esc(confirmationSummary.title||`待你确认：${confirmations.length} 项`)}</span><small>${esc(confirmationSummary.detail||'请处理待确认事项后，专家团再继续推进。')}</small></div>
+      <div class="expert-team-panel-question-list">${pending.length?questionHtml:''}${confirmationStageSummaryHtml}${confirmationFallbackHtml}</div>
+    </section>`;
+  }
   const stageReviewSectionHtml=(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${canApproveStage?'awaiting-review':'is-history'}" aria-label="请确认阶段成果">
       <div class="expert-team-panel-section-title">
         <span>请确认阶段成果</span>
@@ -1352,9 +1468,9 @@ function _expertTeamWorkspacePanelHtml(card){
     : (deliveredArtifacts.length
       ? `<button class="expert-team-panel-artifact-open" type="button" data-expert-team-chat-delivery="1" onclick="openExpertTeamChatDelivery(this);event.stopPropagation()">${artifactActionLabel}</button>`
       : `<button class="expert-team-panel-artifact-open" type="button" disabled>暂无产物</button>`);
-  const pendingAction=pending.length?`${pending.length} 项待确认`:((canApproveStage||canRequestRevision)?'阶段产物待确认':(canRetry?'可重新尝试':(canCancel?'正在生成':(canResume?'需要继续生成':'无需补充'))));
-  const pendingDetail=pending.length?'请先补充确认信息，专家团再继续推进。':((canApproveStage||canRequestRevision)?'可以确认进入下一阶段，也可以提出修改意见。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成'))));
-  const pendingButton=pending.length
+  const pendingAction=confirmations.length?`${confirmations.length} 项待确认`:((canApproveStage||canRequestRevision)?'阶段产物待确认':(canRetry?'可重新尝试':(canCancel?'正在生成':(canResume?'需要继续生成':'无需补充'))));
+  const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?'可以确认进入下一阶段，也可以提出修改意见。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成'))));
+  const pendingButton=confirmations.length
     ? `<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">去确认</button>`
     : ((canApproveStage||canRequestRevision)?`<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段产物</button>`:(canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>'))));
   const executionHtml=executionRows.length?executionRows.map(row=>{
@@ -1389,7 +1505,7 @@ function _expertTeamWorkspacePanelHtml(card){
       ${actionHtml}
     </header>
     <div class="expert-team-panel-expanded-body">
-      ${pending.length?questionSectionHtml:''}
+      ${confirmationSectionHtml}
       ${stageReviewSectionHtml}
       <section class="expert-team-panel-phases" aria-label="专家团阶段">${phaseHtml}</section>
       <section class="expert-team-panel-priority-grid" aria-label="专家团重点信息">
@@ -1646,6 +1762,7 @@ function focusExpertTeamBottomDock(trigger){
   const focusSelectors=[
     '.status-card-expert-question.pending textarea',
     '.status-card-expert-question.pending [data-expert-team-question-id]',
+    '.expert-team-confirmation-fallback button:not(:disabled)',
     '.expert-team-stage-approve:not(:disabled)',
     '.expert-team-stage-revision-toggle:not(:disabled)',
     '.expert-team-stage-feedback:not([hidden]) textarea',
@@ -2313,8 +2430,13 @@ function renderWriteflowStatusDock(card){
   _syncExpertTeamBlankCollapseListener(isExpertTeam);
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
-  if(isExpertTeam)syncExpertTeamBottomDockState(card);
-  else clearExpertTeamWorkspacePanel();
+  if(isExpertTeam){
+    syncExpertTeamBottomDockState(card);
+    syncExpertTeamChatConfirmationCard(card);
+  }else{
+    clearExpertTeamWorkspacePanel();
+    syncExpertTeamChatConfirmationCard(null);
+  }
   return true;
 }
 
@@ -2332,12 +2454,14 @@ function clearWriteflowStatusDock(){
   delete dock.dataset.writeflowSourceSessionId;
   delete dock.dataset.expertTeamRenderKey;
   clearExpertTeamWorkspacePanel();
+  syncExpertTeamChatConfirmationCard(null);
   return true;
 }
 
 if(typeof window!=='undefined'){
   window.renderWriteflowStatusDock=renderWriteflowStatusDock;
   window.clearWriteflowStatusDock=clearWriteflowStatusDock;
+  window.syncExpertTeamChatConfirmationCard=syncExpertTeamChatConfirmationCard;
 }
 
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
@@ -8551,6 +8675,7 @@ function _messageRenderCacheSignature(){
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
   add(messages.length);
+  add(_expertTeamChatConfirmationSignature());
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
     add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
@@ -8754,6 +8879,7 @@ function renderMessages(options){
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
+      syncExpertTeamChatConfirmationCard();
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -9157,6 +9283,7 @@ function renderMessages(options){
     if(entry.rawIdx<firstRenderedRawIdx) continue;
     _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
   }
+  syncExpertTeamChatConfirmationCard();
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the

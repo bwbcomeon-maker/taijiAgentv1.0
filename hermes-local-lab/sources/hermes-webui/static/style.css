@@ -4823,6 +4823,12 @@ main.main > #mainPlugin{display:none;}
 .status-card-expert-dock-summary:hover .status-card-expert-dock-action{background:var(--accent-bg-strong);}
 .status-card-expert-dock-summary.waiting .status-card-expert-dock-action{color:var(--warning);border-color:color-mix(in srgb,var(--warning) 38%,var(--border-subtle));background:color-mix(in srgb,var(--warning) 9%,transparent);}
 .status-card-expert-dock-summary.done .status-card-expert-dock-action{color:var(--success);border-color:color-mix(in srgb,var(--success) 38%,var(--border-subtle));background:color-mix(in srgb,var(--success) 9%,transparent);}
+.expert-team-chat-confirmation-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;margin:8px 0 2px;border:1px solid color-mix(in srgb,var(--warning) 42%,var(--border-subtle));border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.92),color-mix(in srgb,var(--warning) 8%,rgba(255,255,255,.76)));padding:10px 12px;box-shadow:0 10px 24px rgba(178,122,36,.10),inset 0 1px 0 rgba(255,255,255,.78);}
+.expert-team-chat-confirmation-copy{min-width:0;display:flex;flex-direction:column;gap:3px;}
+.expert-team-chat-confirmation-copy strong{color:var(--text);font-size:13px;line-height:1.22;font-weight:820;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.expert-team-chat-confirmation-copy small{color:color-mix(in srgb,var(--warning) 56%,var(--muted));font-size:11px;line-height:1.35;font-weight:680;white-space:normal;overflow-wrap:anywhere;}
+.expert-team-chat-confirmation-card button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:34px;border:1px solid color-mix(in srgb,var(--warning) 50%,var(--border-subtle));border-radius:10px;background:rgba(255,255,255,.82);color:var(--warning);padding:0 14px;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;}
+.expert-team-chat-confirmation-card button:hover{background:color-mix(in srgb,var(--warning) 12%,rgba(255,255,255,.88));}
 .expert-team-workspace-panel{display:none;}
 .expert-team-workspace-panel[hidden]{display:none!important;}
 .taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel{display:none!important;}
@@ -4901,11 +4907,15 @@ main.main > #mainPlugin{display:none;}
 .expert-team-stage-feedback textarea{min-width:0;min-height:62px;resize:vertical;border:1px solid var(--border-subtle);border-radius:10px;background:rgba(255,255,255,.82);color:var(--text);padding:8px 9px;font:inherit;font-size:12px;line-height:1.42;}
 .expert-team-stage-feedback textarea:focus{outline:2px solid color-mix(in srgb,var(--accent-bg-strong) 35%,transparent);border-color:var(--accent-bg-strong);}
 @media (max-width:1100px){
+  .expert-team-chat-confirmation-card{grid-template-columns:1fr;align-items:stretch;}
+  .expert-team-chat-confirmation-card button{width:100%;}
   .expert-team-stage-actions{grid-template-columns:1fr;grid-template-areas:"approve" "revise" "feedback";align-items:stretch;}
   .expert-team-stage-approve{justify-self:stretch;min-width:0;}
   .expert-team-stage-revision-toggle{justify-self:stretch;}
   .expert-team-stage-feedback{grid-template-columns:1fr;}
   .expert-team-stage-actions .expert-team-panel-action{width:100%;}
+  .expert-team-confirmation-stage-summary,.expert-team-confirmation-fallback{grid-template-columns:1fr;align-items:stretch;}
+  .expert-team-confirmation-stage-summary button,.expert-team-confirmation-fallback button{width:100%;}
 }
 .expert-team-panel-artifacts-section.is-priority{border-color:color-mix(in srgb,var(--success) 34%,var(--taiji-ui-line,var(--border-subtle)));background:linear-gradient(180deg,rgba(255,255,255,.8),color-mix(in srgb,var(--success) 8%,rgba(255,255,255,.64)));}
 .expert-team-panel-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
@@ -4916,6 +4926,12 @@ main.main > #mainPlugin{display:none;}
 .expert-team-confirmation-header{align-items:flex-start;margin-bottom:10px;}
 .expert-team-confirmation-header span{font-size:15px;font-weight:860;color:var(--text);}
 .expert-team-confirmation-header small{max-width:52%;white-space:normal;text-align:right;line-height:1.35;color:color-mix(in srgb,var(--warning) 55%,var(--muted));font-weight:700;}
+.expert-team-confirmation-stage-summary,.expert-team-confirmation-fallback{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:center;border:1px solid color-mix(in srgb,var(--warning) 28%,var(--border-subtle));border-radius:10px;background:rgba(255,255,255,.76);padding:9px 10px;}
+.expert-team-confirmation-stage-summary span,.expert-team-confirmation-fallback span{min-width:0;}
+.expert-team-confirmation-stage-summary strong,.expert-team-confirmation-fallback strong{display:block;color:var(--text);font-size:12px;line-height:1.25;font-weight:820;}
+.expert-team-confirmation-stage-summary small,.expert-team-confirmation-fallback small{display:block;color:var(--muted);font-size:10px;line-height:1.35;white-space:normal;overflow-wrap:anywhere;margin-top:3px;}
+.expert-team-confirmation-stage-summary button,.expert-team-confirmation-fallback button{min-height:32px;border:1px solid color-mix(in srgb,var(--warning) 45%,var(--border-subtle));border-radius:9px;background:rgba(255,255,255,.82);color:var(--warning);font-size:11px;font-weight:800;cursor:pointer;padding:0 12px;white-space:nowrap;}
+.expert-team-confirmation-stage-summary button:hover,.expert-team-confirmation-fallback button:hover{background:color-mix(in srgb,var(--warning) 11%,rgba(255,255,255,.86));}
 .expert-team-panel-questions .status-card-expert-question{background:rgba(255,255,255,.76);}
 .expert-team-panel-questions .status-card-expert-question strong{white-space:normal;}
 .expert-team-panel-questions .status-card-expert-question small{white-space:normal;}

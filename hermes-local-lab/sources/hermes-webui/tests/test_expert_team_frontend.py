@@ -110,7 +110,7 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert "status-card-expert-question-input" in UI_JS
     assert "expert-team-confirmation-workspace" in UI_JS
     assert "expert-team-confirmation-header" in UI_JS
-    assert "需要你确认 ${currentQuestionIndex}/${totalQuestions}" in UI_JS
+    assert "待你确认：${confirmations.length} 项" in UI_JS
     assert "status-card-expert-question-submit" in UI_JS
     assert "data-expert-team-empty-label=\"请先填写\"" in UI_JS
     assert "data-expert-team-ready-label=\"确认此项并继续\"" in UI_JS
@@ -126,6 +126,28 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert ".status-card-expert-question.pending.is-current" in STYLE_CSS
     assert ".status-card-expert-question-submit" in STYLE_CSS
     assert ".status-card-expert-question-submit:disabled" in STYLE_CSS
+
+
+def test_expert_team_uses_unified_confirmation_entrypoints():
+    assert "card.pendingConfirmations" in UI_JS
+    assert "view.pending_confirmations" in UI_JS
+    assert "function _expertTeamPendingConfirmations" in UI_JS
+    assert "function _expertTeamConfirmationSummary" in UI_JS
+    assert "待你确认：${confirmations.length} 项" in UI_JS
+    assert "expert-team-confirmation-stage-summary" in UI_JS
+    assert "expert-team-confirmation-fallback" in UI_JS
+    assert "聊天中有待确认事项，请查看最新专家团回复。" in UI_JS
+    assert "function _expertTeamChatConfirmationCardHtml" in UI_JS
+    assert "function syncExpertTeamChatConfirmationCard" in UI_JS
+    assert "expert-team-chat-confirmation-card" in UI_JS
+    assert "data-expert-team-chat-confirmation" in UI_JS
+    assert "focusExpertTeamBottomDock(this)" in UI_JS
+    assert "window.syncExpertTeamChatConfirmationCard=syncExpertTeamChatConfirmationCard" in UI_JS
+    assert "add(_expertTeamChatConfirmationSignature())" in UI_JS
+
+    assert ".expert-team-chat-confirmation-card" in STYLE_CSS
+    assert ".expert-team-confirmation-stage-summary" in STYLE_CSS
+    assert ".expert-team-confirmation-fallback" in STYLE_CSS
 
 
 def test_expert_team_question_inputs_survive_status_refresh_rerender():
@@ -268,17 +290,17 @@ def test_expert_team_workspace_drawer_prioritizes_full_title_actions_and_artifac
     assert "const expertTeamMemberCount=members.length;" in panel_body
     assert "const phaseProgress=_expertTeamPhaseProgress(card,{phaseList,phaseIdx,readyArtifacts,pending,stateClass});" in panel_body
     assert "const artifactSectionHtml=" in panel_body
-    assert "const questionSectionHtml=" in panel_body
+    assert "let confirmationSectionHtml='';" in panel_body
     assert "const executionRows=_expertTeamExecutionRows(card,{phaseList,pending,readyArtifacts,done,total,stateClass});" in panel_body
     assert "${phaseProgress.done}/${phaseProgress.total}" in panel_body
     assert "${done}/${total||tasks.length||0}" not in panel_body
     assert "class=\"expert-team-panel-artifact-open\"" in panel_body
     assert "${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}" in panel_body
-    assert "${pending.length?questionSectionHtml:''}" in panel_body
+    assert "${confirmationSectionHtml}" in panel_body
     assert "成员简况" not in panel_body
-    assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-phases")
-    assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-priority-grid")
-    assert panel_return.find("${pending.length?questionSectionHtml:''}") < panel_return.find("expert-team-panel-execution")
+    assert panel_return.find("${confirmationSectionHtml}") < panel_return.find("expert-team-panel-phases")
+    assert panel_return.find("${confirmationSectionHtml}") < panel_return.find("expert-team-panel-priority-grid")
+    assert panel_return.find("${confirmationSectionHtml}") < panel_return.find("expert-team-panel-execution")
     assert panel_return.find("expert-team-panel-execution") < panel_return.find("${readyArtifacts.length||deliveredArtifacts.length?artifactSectionHtml:''}")
     assert "phaseList.map((label,idx)=>" in rows_body
     assert "members.length" in rows_body

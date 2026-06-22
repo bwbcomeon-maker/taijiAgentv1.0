@@ -669,6 +669,72 @@ def test_expert_team_start_returns_view_contract_for_pending_questions(tmp_path)
     assert all(item["openable"] is False for item in view["artifacts"])
 
 
+def test_expert_team_view_exposes_unified_pending_confirmations_for_questions(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-confirmations", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+
+    confirmations = run["view"]["pending_confirmations"]
+
+    assert [item["kind"] for item in confirmations] == ["question", "question", "question"]
+    assert confirmations[0] == {
+        "id": "question:topic",
+        "kind": "question",
+        "title": "这次要编制哪类办公材料，主题是什么？",
+        "description": "请补充确认信息，专家团才会继续推进。",
+        "fields": [{"id": "topic", "type": "text", "required": True, "options": []}],
+        "actions": {"submit": "answer"},
+        "source_task_id": "",
+        "status": "pending",
+    }
+
+
+def test_expert_team_pending_confirmations_are_ordered_by_action_priority():
+    from api import expert_teams
+
+    run = {
+        "questions": [
+            {
+                "id": "topic",
+                "title": "确认主题",
+                "type": "text",
+                "status": "pending",
+                "required": True,
+            }
+        ]
+    }
+    structured = [
+        {
+            "id": "clarify:path",
+            "kind": "clarification",
+            "title": "确认路径",
+            "description": "聊天中有待确认事项，请查看最新专家团回复。",
+            "fields": [],
+            "actions": {"open": "focus_chat"},
+            "source_task_id": "draft",
+            "status": "pending",
+        }
+    ]
+    stage_review = {
+        "status": "awaiting_review",
+        "task_id": "draft",
+        "output": {
+            "task_id": "draft",
+            "title": "阶段成果",
+            "content": "请确认是否进入下一阶段。",
+        },
+    }
+
+    confirmations = expert_teams._pending_confirmations_for_view(run, stage_review, True, structured)
+
+    assert len(confirmations) == 3
+    assert [item["kind"] for item in confirmations] == ["question", "clarification", "stage_review"]
+    assert [item["id"] for item in confirmations] == ["question:topic", "clarify:path", "stage:draft"]
+
+
 def test_content_expert_team_completion_requires_real_delivery_evidence(tmp_path):
     from api import expert_teams
 
@@ -745,6 +811,45 @@ def test_content_expert_team_stage_completion_waits_for_user_review(tmp_path):
     assert updated["view"]["actions"]["can_approve_stage"] is True
     assert updated["view"]["actions"]["can_request_revision"] is True
     assert updated["view"]["stage_review"]["status"] == "awaiting_review"
+    assert updated["view"]["pending_confirmations"][0]["kind"] == "stage_review"
+    assert updated["view"]["pending_confirmations"][0]["id"] == "stage:draft"
+    assert updated["view"]["pending_confirmations"][0]["actions"] == {"approve": "stage/approve", "revise": "stage/revise"}
+
+
+def test_expert_team_view_preserves_structured_clarification_without_text_parsing(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-clarify", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "本地优先 AI 助理",
+                "audience": "企业管理者",
+                "boundary": "不要夸大能力",
+            },
+        },
+    )
+    answered["pending_confirmations"] = [
+        {
+            "id": "clarify:publishing-path",
+            "kind": "clarification",
+            "title": "确认发布路径",
+            "description": "聊天中有待确认事项，请查看最新专家团回复。",
+            "fields": [],
+            "actions": {"open": "focus_chat"},
+            "source_task_id": "draft",
+            "status": "pending",
+        }
+    ]
+
+    view = expert_teams.expert_team_run_view(answered)
+
+    assert view["pending_confirmations"] == answered["pending_confirmations"]
 
 
 def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(tmp_path):
