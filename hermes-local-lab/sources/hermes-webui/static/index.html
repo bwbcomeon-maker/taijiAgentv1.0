@@ -1475,15 +1475,19 @@
                     <span><b>密钥状态</b><em id="imageGenConfigKeyState">—</em></span>
                   </div>
                   <p class="model-config-muted" id="imageGenConfigSummary">只有调用 image_generate 或需要实际生成图片时才会失败。</p>
-                  <div class="model-config-actions">
-                    <button class="sm-btn" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴并验证</button>
-                    <button class="btn-tiny" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">修改配置</button>
-                    <button class="btn-tiny" id="btnAddCustomImageProvider" type="button" onclick="openCustomImageProviderEditor()">添加外部图片模型</button>
-                    <button class="btn-tiny" id="btnManageCustomImageProviders" type="button" data-model-config-toggle="customImageProviderPanel" onclick="toggleModelConfigSection('customImageProviderPanel')">管理外部模型</button>
-                  </div>
-                  <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
-                    <label for="imageGenConfigProvider">Provider</label>
-                    <select id="imageGenConfigProvider"></select>
+	                  <div class="model-config-actions">
+	                    <button class="sm-btn" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴并验证</button>
+	                    <button class="btn-tiny" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">修改配置</button>
+	                    <button class="btn-tiny" id="btnAddCustomImageProvider" type="button" onclick="openCustomImageProviderEditor()">添加外部图片模型</button>
+	                    <button class="btn-tiny" id="btnManageCustomImageProviders" type="button" onclick="openImageProvidersPanel()">管理外部模型</button>
+	                    <button class="btn-tiny" id="btnGoImageProviders" type="button" onclick="openImageProvidersPanel()">去提供商配置</button>
+	                  </div>
+	                  <div class="model-config-template-row" aria-label="国产图片模型模板">
+	                    <span>通义万相</span><span>豆包 Seedream</span><span>百度千帆</span><span>腾讯混元</span><span>智谱 GLM-Image</span><span>MiniMax</span><span>讯飞 HiDream</span><span>可灵</span><span>自定义 HTTP</span>
+	                  </div>
+	                  <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
+	                    <label for="imageGenConfigProvider">Provider</label>
+	                    <select id="imageGenConfigProvider"></select>
                     <label for="imageGenConfigModel">模型 ID</label>
                     <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
                     <datalist id="imageGenConfigModelOptions"></datalist>
@@ -1494,69 +1498,11 @@
                         <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
                       </div>
                       <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
-                    </div>
-                    <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存图片生成配置</button>
-                  </div>
-                  <div class="model-config-collapsible custom-image-provider-panel" id="customImageProviderPanel" hidden>
-                    <div class="custom-image-provider-list" id="customImageProviderList"></div>
-                    <div class="custom-image-provider-grid">
-                      <input id="customImageProviderId" type="hidden" autocomplete="off">
-                      <div>
-                        <label for="customImageProviderName">名称</label>
-                        <input id="customImageProviderName" placeholder="例如：公司图片网关" autocomplete="off">
-                      </div>
-                      <div>
-                        <label for="customImageProviderBaseUrl">Base URL</label>
-                        <input id="customImageProviderBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
-                      </div>
-                      <div class="span-2">
-                        <label for="customImageProviderModels">模型 ID</label>
-                        <input id="customImageProviderModels" placeholder="多个模型用逗号分隔，首个作为默认模型" autocomplete="off">
-                      </div>
-                      <div>
-                        <label for="customImageProviderDefaultModel">默认模型</label>
-                        <input id="customImageProviderDefaultModel" placeholder="留空使用首个模型" autocomplete="off">
-                      </div>
-                      <div>
-                        <label for="customImageProviderApiKey">API 密钥</label>
-                        <div class="model-config-secret-row">
-                          <input id="customImageProviderApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
-                          <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('customImageProviderApiKey')">粘贴</button>
-                        </div>
-                      </div>
-                      <div>
-                        <label for="customImageProviderLandscapeSize">横图尺寸</label>
-                        <input id="customImageProviderLandscapeSize" placeholder="1536x1024" autocomplete="off">
-                      </div>
-                      <div>
-                        <label for="customImageProviderSquareSize">方图尺寸</label>
-                        <input id="customImageProviderSquareSize" placeholder="1024x1024" autocomplete="off">
-                      </div>
-                      <div>
-                        <label for="customImageProviderPortraitSize">竖图尺寸</label>
-                        <input id="customImageProviderPortraitSize" placeholder="1024x1536" autocomplete="off">
-                      </div>
-                      <div>
-                        <label for="customImageProviderResponseFormat">响应格式</label>
-                        <select id="customImageProviderResponseFormat">
-                          <option value="auto">自动</option>
-                          <option value="b64_json">b64_json</option>
-                          <option value="url">url</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label for="customImageProviderTimeout">超时秒数</label>
-                        <input id="customImageProviderTimeout" type="number" min="10" max="600" step="1" placeholder="180" autocomplete="off">
-                      </div>
-                    </div>
-                    <p class="model-config-muted">外部图片模型按 OpenAI Images 兼容接口调用，密钥只保存到本机凭据区。</p>
-                    <div class="model-config-actions">
-                      <button class="sm-btn" id="btnSaveCustomImageProvider" type="button" onclick="saveCustomImageProviderConfig()">保存外部图片模型</button>
-                      <button class="btn-tiny" type="button" onclick="openCustomImageProviderEditor()">新建</button>
-                    </div>
-                  </div>
-                </section>
-              </div>
+	                    </div>
+	                    <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存图片生成配置</button>
+	                  </div>
+	                </section>
+	              </div>
 
               <section class="model-config-panel model-config-aux-summary" id="modelConfigAuxSummary">
                 <div>
@@ -1585,20 +1531,139 @@
               </section>
             </div>
           </div>
-          <div class="settings-pane" id="settingsPaneProviders">
-            <div class="settings-section-head">
-              <div>
-                <div class="settings-section-title" data-i18n="providers_section_title">Providers</div>
-                <div class="settings-section-meta" data-i18n="providers_section_meta">Manage API keys for AI providers. Changes take effect immediately.</div>
-              </div>
-            </div>
-            <div id="providersList" style="display:flex;flex-direction:column;margin-top:4px">
-              <!-- Populated dynamically by loadProvidersPanel() -->
-            </div>
-            <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
-              No configurable providers found.
-            </div>
-          </div>
+	          <div class="settings-pane" id="settingsPaneProviders">
+	            <div class="settings-section-head">
+	              <div>
+	                <div class="settings-section-title" data-i18n="providers_section_title">Providers</div>
+	                <div class="settings-section-meta" data-i18n="providers_section_meta">Manage API keys for AI providers. Changes take effect immediately.</div>
+	              </div>
+	              <button class="btn-tiny" type="button" onclick="loadProvidersPanel()">刷新状态</button>
+	            </div>
+	            <div class="providers-page-layout">
+	              <section class="provider-overview-strip" aria-label="提供商状态总览">
+	                <span><b>产品授权</b><em id="providerLicenseOverview">跟随模型配置页</em></span>
+	                <span><b>本机状态</b><em>本机密钥区</em></span>
+	                <span><b>外部模型密钥</b><em id="providerImageGenOverview">正在读取</em></span>
+	                <div class="provider-overview-actions">
+	                  <button class="sm-btn" type="button" onclick="openCustomImageProviderEditor()">新增提供商</button>
+	                  <button class="btn-tiny" type="button" onclick="refreshProviderImageGenStatus()">批量验证</button>
+	                </div>
+	              </section>
+	              <section class="provider-management-card">
+	                <div class="provider-management-head">
+	                  <div>
+	                    <strong>模型服务密钥</strong>
+	                    <span>主模型、OAuth 和通用模型提供商仍在这里管理。</span>
+	                  </div>
+	                </div>
+	                <div id="providersList" style="display:flex;flex-direction:column;margin-top:4px">
+	                  <!-- Populated dynamically by loadProvidersPanel() -->
+	                </div>
+	                <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
+	                  No configurable providers found.
+	                </div>
+	              </section>
+	              <section class="provider-image-services">
+	                <div class="provider-management-head">
+	                  <div>
+	                    <strong>外部模型服务</strong>
+	                    <span>图片生成服务在这里保存密钥、刷新状态和进入模型配置。</span>
+	                  </div>
+	                  <button class="btn-tiny" type="button" onclick="openImageProvidersPanel()">定位图片生成</button>
+	                </div>
+	                <div class="provider-image-service-table" id="providerImageGenServices" aria-live="polite">
+	                  <div class="provider-image-service-empty">正在读取图片生成提供商。</div>
+	                </div>
+	              </section>
+	              <section class="provider-template-card">
+	                <div class="provider-management-head">
+	                  <div>
+	                    <strong>添加图片生成提供商</strong>
+	                    <span>优先选择国产模型模板；高级 HTTP 配置仅用于私有网关。</span>
+	                  </div>
+	                </div>
+	                <div class="provider-template-grid" id="providerImageGenTemplates">
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('dashscope')"><strong>通义万相</strong><span>DashScope</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('seedream')"><strong>豆包 Seedream</strong><span>火山方舟</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('qianfan')"><strong>百度千帆</strong><span>千帆大模型</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('hunyuan')"><strong>腾讯混元</strong><span>签名鉴权</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('glm-image')"><strong>智谱 GLM-Image</strong><span>OpenAI-like</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('minimax')"><strong>MiniMax</strong><span>API 接入</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('hidream')"><strong>讯飞 HiDream</strong><span>星火大模型</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('kling')"><strong>可灵</strong><span>可灵大模型</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('http')"><strong>自定义 HTTP</strong><span>高级配置</span></button>
+	                </div>
+	              </section>
+	              <section class="model-config-collapsible custom-image-provider-panel" id="customImageProviderPanel" hidden>
+	                <div class="provider-management-head">
+	                  <div>
+	                    <strong>外部图片模型配置</strong>
+	                    <span>密钥只保存到本机，不回显到页面或日志。</span>
+	                  </div>
+	                </div>
+	                <div class="custom-image-provider-list" id="customImageProviderList"></div>
+	                <div class="custom-image-provider-grid">
+	                  <input id="customImageProviderId" type="hidden" autocomplete="off">
+	                  <div>
+	                    <label for="customImageProviderName">名称</label>
+	                    <input id="customImageProviderName" placeholder="例如：公司图片网关" autocomplete="off">
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderBaseUrl">Base URL</label>
+	                    <input id="customImageProviderBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+	                  </div>
+	                  <div class="span-2">
+	                    <label for="customImageProviderModels">模型 ID</label>
+	                    <input id="customImageProviderModels" placeholder="多个模型用逗号分隔，首个作为默认模型" autocomplete="off">
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderDefaultModel">默认模型</label>
+	                    <input id="customImageProviderDefaultModel" placeholder="留空使用首个模型" autocomplete="off">
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderApiKey">API 密钥</label>
+	                    <div class="model-config-secret-row">
+	                      <input id="customImageProviderApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+	                      <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('customImageProviderApiKey')">粘贴</button>
+	                    </div>
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderLandscapeSize">横图尺寸</label>
+	                    <input id="customImageProviderLandscapeSize" placeholder="1536x1024" autocomplete="off">
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderSquareSize">方图尺寸</label>
+	                    <input id="customImageProviderSquareSize" placeholder="1024x1024" autocomplete="off">
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderPortraitSize">竖图尺寸</label>
+	                    <input id="customImageProviderPortraitSize" placeholder="1024x1536" autocomplete="off">
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderResponseFormat">响应格式</label>
+	                    <select id="customImageProviderResponseFormat">
+	                      <option value="auto">自动</option>
+	                      <option value="b64_json">b64_json</option>
+	                      <option value="url">url</option>
+	                    </select>
+	                  </div>
+	                  <div>
+	                    <label for="customImageProviderTimeout">超时秒数</label>
+	                    <input id="customImageProviderTimeout" type="number" min="10" max="600" step="1" placeholder="180" autocomplete="off">
+	                  </div>
+	                </div>
+	                <p class="model-config-muted">第一阶段按 OpenAI Images 兼容接口调用；通义万相、豆包、文心、混元等非兼容协议由后续 provider adapter 承载。</p>
+	                <div class="model-config-actions">
+	                  <button class="sm-btn" id="btnSaveCustomImageProvider" type="button" onclick="saveCustomImageProviderConfig()">保存外部图片模型</button>
+	                  <button class="btn-tiny" type="button" onclick="openCustomImageProviderEditor()">新建</button>
+	                </div>
+	              </section>
+	              <section class="provider-security-note">
+	                <strong>安全说明</strong>
+	                <span>API 密钥不回显，只保存到本机密钥区；删除密钥需要确认；验证失败不影响当前已生效模型。</span>
+	              </section>
+	            </div>
+	          </div>
           <div class="settings-pane" id="settingsPanePlugins">
             <div class="settings-section-head">
               <div>

@@ -103,15 +103,57 @@ def test_image_generation_custom_provider_management_has_visible_entry():
     for marker in (
         'id="btnAddCustomImageProvider"',
         'id="btnManageCustomImageProviders"',
+        'id="btnGoImageProviders"',
         'id="customImageProviderPanel"',
         'id="customImageProviderBaseUrl"',
         "添加外部图片模型",
         "管理外部模型",
+        "去提供商配置",
     ):
         assert marker in INDEX_HTML
     assert "saveCustomImageProviderConfig" in PANELS_JS
     assert "deleteCustomImageProviderConfig" in PANELS_JS
     assert "/api/image-gen/custom-providers" in PANELS_JS
+
+
+def test_settings_menu_does_not_add_auth_keys_section():
+    assert 'data-settings-section="authorization"' not in INDEX_HTML
+    assert 'data-settings-section="auth"' not in INDEX_HTML
+    assert 'data-settings-section="keys"' not in INDEX_HTML
+    assert "授权与密钥" not in INDEX_HTML
+
+
+def test_model_config_routes_image_generation_management_to_existing_providers_tab():
+    assert "switchSettingsSection('providers')" in PANELS_JS
+    assert "openImageProvidersPanel" in PANELS_JS
+    assert 'id="settingsPaneProviders"' in INDEX_HTML
+    assert 'data-settings-section="providers"' in INDEX_HTML
+
+
+def test_providers_panel_contains_image_generation_provider_management_surface():
+    for marker in (
+        'id="providerImageGenServices"',
+        'id="providerImageGenTemplates"',
+        "外部模型服务",
+        "添加图片生成提供商",
+        "通义万相",
+        "豆包 Seedream",
+        "百度千帆",
+        "腾讯混元",
+        "智谱 GLM-Image",
+        "讯飞 HiDream",
+        "自定义 HTTP",
+    ):
+        assert marker in INDEX_HTML
+    for marker in (
+        "_renderProviderImageGenSettings",
+        "_DOMESTIC_IMAGE_PROVIDER_TEMPLATES",
+        "providerImageGenServices",
+        "providerImageGenTemplates",
+    ):
+        assert marker in PANELS_JS
+    assert ".provider-image-services" in STYLE_CSS
+    assert ".provider-template-grid" in STYLE_CSS
 
 
 def test_image_generation_custom_provider_new_form_generates_id():
