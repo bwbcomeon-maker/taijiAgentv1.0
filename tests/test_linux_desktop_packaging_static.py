@@ -429,6 +429,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("离线优先", doc)
         self.assertIn("不内置模型", doc)
         self.assertIn("Node.js 10 / npm 6", doc)
+        self.assertIn("TAIJI_UV_LOCK_MODE=auto", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
 
     def test_delivery_install_script_replaces_legacy_webui_package_safely(self):
@@ -576,6 +577,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("target_matrix", builder)
         self.assertIn("support_boundary", builder)
         self.assertIn("TAIJI_ALLOW_UV_LOCK_REFRESH", builder)
+        self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"', builder)
+        self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh', builder)
+        self.assertIn("Python 依赖 lock 漂移", builder)
+        self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
         self.assertNotIn("\n  uv lock\n", builder)
 
         self.assertIn("MANIFEST_PATH", install)

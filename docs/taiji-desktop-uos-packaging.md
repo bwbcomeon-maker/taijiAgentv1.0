@@ -44,7 +44,7 @@ python3 --version 2>/dev/null || true
 
 最终 DEB 必须在 Linux x86_64/amd64 制包机生成，不允许在 macOS 上产最终包。构建策略保持离线优先：目标机完全离线时不执行构建、不联网下载依赖，只安装制包机提前生成的 DEB 和本地 apt 依赖仓库。
 
-完全离线交付优先使用根目录下的 `taijiagent 打包交付/00_制包机_生成离线交付包.sh`。该脚本在联网 Linux amd64 制包机上校验源码包、准备构建工具、生成 Linux Python venv、安装 Linux Electron runtime、执行 DEB 构建，并把 DEB 的直接和递归运行依赖收集到 `离线依赖/Packages.gz`。制包机脚本在系统 Node/npm 过旧时使用交付目录内的隔离 Node.js Linux x64 构建工具，避免 Kylin V10 源里的 Node.js 10 / npm 6 无法处理 lockfile v3；Python venv 生成阶段保持 `TAIJI_UV_LOCK_MODE=strict`。
+完全离线交付优先使用根目录下的 `taijiagent 打包交付/00_制包机_生成离线交付包.sh`。该脚本在联网 Linux amd64 制包机上校验源码包、准备构建工具、生成 Linux Python venv、安装 Linux Electron runtime、执行 DEB 构建，并把 DEB 的直接和递归运行依赖收集到 `离线依赖/Packages.gz`。制包机脚本在系统 Node/npm 过旧时使用交付目录内的隔离 Node.js Linux x64 构建工具，避免 Kylin V10 源里的 Node.js 10 / npm 6 无法处理 lockfile v3；Python venv 生成阶段默认使用 `TAIJI_UV_LOCK_MODE=auto`，先按 `uv.lock` 严格同步，遇到制包工作区 lock 漂移时自动重试非 locked 同步并把警告写入日志。如需发布门禁强制锁文件完全一致，可显式设置 `TAIJI_UV_LOCK_MODE=strict`。
 
 `01_目标终端_构建安装包.sh` 只保留给“目标机本身可联网构建”的兼容路径，本轮完全离线交付说明不使用它。
 

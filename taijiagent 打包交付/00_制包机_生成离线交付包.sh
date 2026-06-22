@@ -77,6 +77,9 @@ failure_next_steps() {
     *"Node.js"*|*"npm ci"*|*"Electron"*)
       printf 'next=检查 DNS/代理/镜像，必要时设置 TAIJI_NODE_MIRRORS、TAIJI_NPM_REGISTRIES、TAIJI_ELECTRON_MIRRORS 后重试\n'
       ;;
+    *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
+      printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
+      ;;
     *"离线依赖"*|*"Packages.gz"*|*"apt-get download"*)
       printf 'next=确认制包机 apt 源可访问目标机同发行版/架构依赖，重新生成离线依赖仓库\n'
       ;;
@@ -471,8 +474,10 @@ npm_ci_with_network_fallback() {
 }
 
 build_runtime_and_deb() {
+  local uv_lock_mode
   export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
   export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
 
   if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
     warn "TAIJI_ALLOW_UV_LOCK_REFRESH=1：将刷新目标构建工作区 Python lock；正式发布应使用已提交 lock。"
@@ -480,9 +485,9 @@ build_runtime_and_deb() {
     uv lock
   fi
 
-  info "生成 Linux Python venv"
+  info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=$uv_lock_mode）"
   cd "$(source_lab_dir)"
-  TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh
+  TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh
 
   info "获取 Linux Electron runtime"
   cd "$SRC_DIR/apps/taiji-desktop"
@@ -683,6 +688,7 @@ write_build_report() {
     printf 'dpkg-deb：%s\n' "$(safe_cmd_path dpkg-deb)"
     printf 'python3：%s\n' "$(python3 --version 2>/dev/null || true)"
     printf 'uv：%s\n' "$(uv --version 2>/dev/null || true)"
+    printf 'uv lock 模式：%s\n' "${TAIJI_UV_LOCK_MODE:-auto}"
     printf 'node：%s\n' "$(node --version 2>/dev/null || true)"
     printf 'npm：%s\n' "$(npm -v 2>/dev/null || true)"
     printf 'Node 镜像覆盖：%s\n' "${TAIJI_NODE_MIRRORS:+已设置}"
