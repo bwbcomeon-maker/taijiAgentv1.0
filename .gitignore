@@ -47,6 +47,7 @@ hermes-local-lab/sources/hermes-agent/.playwright-mcp/
 **/dist/
 /output/
 /outputs/
+/taijiagent 打包交付.zip
 /taijiagent 打包交付/*
 !/taijiagent 打包交付/
 !/taijiagent 打包交付/00_制包机_生成离线交付包.sh
