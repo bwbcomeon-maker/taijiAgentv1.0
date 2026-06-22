@@ -150,6 +150,40 @@ def test_expert_team_uses_unified_confirmation_entrypoints():
     assert ".expert-team-confirmation-fallback" in STYLE_CSS
 
 
+def test_expert_team_question_confirmation_uses_dock_popover_flow():
+    assert "function _expertTeamQuestionWizardState" in UI_JS
+    assert "function _expertTeamQuestionPopoverHtml" in UI_JS
+    assert "function openExpertTeamQuestionPopover" in UI_JS
+    assert "function closeExpertTeamQuestionPopover" in UI_JS
+    assert "function goExpertTeamQuestionStep" in UI_JS
+    assert "function submitExpertTeamQuestionStep" in UI_JS
+    assert "function editExpertTeamAnsweredQuestion" in UI_JS
+    assert "expert-team-question-popover" in UI_JS
+    assert "data-expert-team-question-popover" in UI_JS
+    assert "待确认问题" in UI_JS
+    assert "确认并下一题" in UI_JS
+    assert "保存草稿" in UI_JS
+    assert "已回答" in UI_JS
+    assert "openExpertTeamQuestionPopover(this)" in UI_JS
+    assert "focusExpertTeamBottomDock(this)" in UI_JS
+
+    chat_start = UI_JS.index("function _expertTeamChatConfirmationCardHtml")
+    chat_body = UI_JS[chat_start : UI_JS.index("function syncExpertTeamChatConfirmationCard", chat_start)]
+    assert "hasQuestion" in chat_body
+    assert "openExpertTeamQuestionPopover(this)" in chat_body
+    assert "focusExpertTeamBottomDock(this)" in chat_body
+    assert chat_body.index("openExpertTeamQuestionPopover(this)") < chat_body.index("focusExpertTeamBottomDock(this)")
+
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+    assert "打开逐题确认" in panel_body
+    assert "expert-team-question-summary" in panel_body
+
+    assert ".expert-team-question-popover" in STYLE_CSS
+    assert ".expert-team-question-progress" in STYLE_CSS
+    assert ".expert-team-question-review" in STYLE_CSS
+
+
 def test_expert_team_question_inputs_survive_status_refresh_rerender():
     assert "function _captureExpertTeamQuestionInputState" in UI_JS
     assert "function _restoreExpertTeamQuestionInputState" in UI_JS
@@ -193,10 +227,11 @@ def test_expert_team_workspace_visibility_is_chat_scoped_and_user_hideable():
     focus_body = UI_JS[focus_start : UI_JS.index("if(typeof window!=='undefined'){", focus_start)]
     assert "_setExpertTeamBottomDockExpanded(true,trigger)" in focus_body
     assert "focusTarget.scrollIntoView({block:'nearest',inline:'nearest'});" in focus_body
-    assert ".status-card-expert-question.pending textarea" in focus_body
+    assert ".expert-team-question-popover:not([hidden]) textarea:not(:disabled)" in focus_body
     assert ".expert-team-stage-approve:not(:disabled)" in focus_body
     assert ".expert-team-stage-revision-toggle:not(:disabled)" in focus_body
     assert ".expert-team-stage-feedback:not([hidden]) textarea" in focus_body
+    assert focus_body.index(".expert-team-question-popover:not([hidden]) textarea:not(:disabled)") < focus_body.index(".expert-team-stage-approve:not(:disabled)")
     assert focus_body.index(".expert-team-stage-approve:not(:disabled)") < focus_body.index(".expert-team-stage-revision-toggle:not(:disabled)")
     assert focus_body.index(".expert-team-stage-revision-toggle:not(:disabled)") < focus_body.index(".expert-team-stage-feedback:not([hidden]) textarea")
 

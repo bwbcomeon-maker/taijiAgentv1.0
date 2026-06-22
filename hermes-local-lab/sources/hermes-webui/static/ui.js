@@ -1273,6 +1273,9 @@ function _expertTeamDockMiniHtml(card){
 }
 
 let _activeExpertTeamStatusCard=null;
+let _expertTeamQuestionPopoverOpen=false;
+let _expertTeamQuestionPopoverRunId='';
+let _expertTeamQuestionPopoverQuestionId='';
 
 function _expertTeamChatConfirmationSignature(){
   const card=_activeExpertTeamStatusCard;
@@ -1298,12 +1301,14 @@ function _expertTeamChatConfirmationCardHtml(card){
   if(!confirmations.length)return '';
   const summary=_expertTeamConfirmationSummary(card);
   const actionIcon=(typeof li==='function')?li('arrow-right',14):'›';
+  const hasQuestion=confirmations.some(item=>String(item&&item.kind||'')==='question');
+  const actionHandler=hasQuestion?'openExpertTeamQuestionPopover(this)':'focusExpertTeamBottomDock(this)';
   return `<div class="expert-team-chat-confirmation-card" data-expert-team-chat-confirmation="1" data-expert-team-run-id="${esc(card&&card.runId||card&&card.sessionId||'')}">
     <span class="expert-team-chat-confirmation-copy">
       <strong>${esc(summary.title)}</strong>
       <small>${esc(summary.detail||'聊天中有待确认事项，请查看最新专家团回复。')}</small>
     </span>
-    <button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">去确认 ${actionIcon}</button>
+    <button type="button" onclick="${actionHandler};event.stopPropagation()">去确认 ${actionIcon}</button>
   </div>`;
 }
 
@@ -1324,6 +1329,211 @@ function syncExpertTeamChatConfirmationCard(card){
   if(blocks)blocks.appendChild(node);
   else inner.appendChild(node);
   return true;
+}
+
+function _expertTeamQuestionWizardState(card){
+  card=card||{};
+  const runId=card.runId||card.sessionId||'';
+  const questions=Array.isArray(card.questions)?card.questions:[];
+  const pending=questions.filter(question=>String(question&&question.status||'')!=='answered');
+  const answered=questions.filter(question=>String(question&&question.status||'')==='answered');
+  const total=questions.length||pending.length;
+  if(!total)return {runId,questions,pending,answered,total:0,answeredCount:0,currentIndex:0,currentQuestion:null,isComplete:false};
+  const requestedId=(_expertTeamQuestionPopoverRunId===runId&&_expertTeamQuestionPopoverQuestionId)?_expertTeamQuestionPopoverQuestionId:'';
+  let currentQuestion=requestedId?questions.find(question=>String(question&&question.id||'')===requestedId):null;
+  if(!currentQuestion)currentQuestion=pending[0]||questions[questions.length-1]||null;
+  const currentIndex=Math.max(0,questions.findIndex(question=>question===currentQuestion))+1;
+  return {
+    runId,
+    questions,
+    pending,
+    answered,
+    total,
+    answeredCount:answered.length,
+    currentIndex,
+    currentQuestion,
+    isComplete:!!(total&&!pending.length),
+  };
+}
+
+function _expertTeamQuestionPopoverProgressHtml(state){
+  const questions=state.questions||[];
+  const currentId=state.currentQuestion&&state.currentQuestion.id||'';
+  return `<span class="expert-team-question-progress" aria-label="需求确认进度">${questions.map((question,idx)=>{
+    const answered=String(question&&question.status||'')==='answered';
+    const current=String(question&&question.id||'')===String(currentId||'');
+    const cls=answered?'done':(current?'current':'todo');
+    const label=answered?'已完成':(current?'当前':'待确认');
+    return `<button type="button" class="${cls}" data-expert-team-question-id="${esc(question&&question.id||'')}" onclick="editExpertTeamAnsweredQuestion(this);event.stopPropagation()" aria-label="第 ${idx+1} 项，${label}">${idx+1}</button>`;
+  }).join('')}</span>`;
+}
+
+function _expertTeamQuestionPopoverReviewHtml(state){
+  const answered=state.answered||[];
+  if(!answered.length)return `<div class="expert-team-question-review empty">
+    <strong>已回答 0</strong>
+    <small>确认后会在这里保留摘要，可随时回顾。</small>
+  </div>`;
+  return `<div class="expert-team-question-review">
+    <div class="expert-team-question-review-head"><strong>已回答 ${answered.length}</strong><small>可回顾前面答案</small></div>
+    ${answered.map((question,idx)=>`<button type="button" data-expert-team-question-id="${esc(question&&question.id||'')}" onclick="editExpertTeamAnsweredQuestion(this);event.stopPropagation()">
+      <b>${idx+1}</b>
+      <span><strong>${esc(question&&question.title||question&&question.id||'问题')}</strong><small>${esc(question&&question.answer||'已确认')}</small></span>
+    </button>`).join('')}
+  </div>`;
+}
+
+function _expertTeamQuestionPopoverHtml(card){
+  const state=_expertTeamQuestionWizardState(card);
+  if(!state.total)return '';
+  const runId=state.runId;
+  const isOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId===runId);
+  const progressHtml=_expertTeamQuestionPopoverProgressHtml(state);
+  if(state.isComplete){
+    return `<section class="expert-team-question-popover is-complete" data-expert-team-question-popover="1" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认完成">
+      <div class="expert-team-question-popover-head">
+        <span><strong>需求确认完成</strong><small>已完成 ${state.answeredCount}/${state.total} 项，专家团将继续推进。</small></span>
+        <button type="button" class="expert-team-question-close" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()" aria-label="关闭需求确认窗口">×</button>
+      </div>
+      ${progressHtml}
+      <div class="expert-team-question-complete-message">全部确认信息已保存，你可以继续在当前对话中查看专家团执行进度。</div>
+    </section>`;
+  }
+  const question=state.currentQuestion||state.pending[0]||{};
+  const qid=question.id||'';
+  const options=Array.isArray(question.options)?question.options:[];
+  const qType=String(question.type||'text').toLowerCase();
+  const isTextQuestion=!options.length&&(qType==='text'||qType==='textarea'||qType==='long_text');
+  const required=question.required!==false;
+  const initialAnswer=String(question.answer||'');
+  const hasInitialAnswer=!!initialAnswer.trim()||!required;
+  const hasMoreAfter=state.pending.some(item=>String(item&&item.id||'')!==String(qid||''));
+  const readyLabel=hasMoreAfter?'确认并下一题':'完成确认';
+  const ariaLabel=_expertTeamQuestionAriaLabel(question,{index:state.currentIndex,total:state.total});
+  const optionHtml=options.length?`<div class="expert-team-question-options">${options.map(option=>`<button type="button" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}" data-expert-team-answer="${esc(option)}" data-expert-team-required="${required?'1':'0'}" onclick="submitExpertTeamQuestionStep(this);event.stopPropagation()">选择“${esc(option)}”</button>`).join('')}</div>`:'';
+  const inputHtml=isTextQuestion?`<label class="expert-team-question-input">
+      <span>你的确认意见</span>
+      <textarea rows="4" data-expert-team-answer-input="1" aria-label="${esc(ariaLabel)}" placeholder="${esc(required?'输入你的确认意见...':'可选补充，留空也可以确认')}" oninput="syncExpertTeamQuestionInputState(this)">${esc(initialAnswer)}</textarea>
+    </label>`:'';
+  return `<section class="expert-team-question-popover" data-expert-team-question-popover="1" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="待确认问题">
+    <div class="expert-team-question-popover-head">
+      <span><strong>待确认问题 ${state.currentIndex}/${state.total}</strong><small>已保存 ${state.answeredCount} 项，剩余 ${state.pending.length} 项</small></span>
+      <button type="button" class="expert-team-question-close" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()" aria-label="关闭需求确认窗口">×</button>
+    </div>
+    ${progressHtml}
+    <div class="expert-team-question-popover-body">
+      <article class="status-card-expert-question pending is-current ${hasInitialAnswer?'is-filled':'is-empty'}" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}">
+        <span class="status-card-expert-question-step"><b>第 ${state.currentIndex} 项</b><small>${state.pending.length>1?`还剩 ${state.pending.length} 项`:'最后一项'}</small></span>
+        <div class="expert-team-question-main">
+          <strong>${esc(question.title||qid||'待确认问题')}</strong>
+          <small>${esc(question.description||'请在这里完成确认，不需要回到聊天正文查找问题。')}</small>
+          ${optionHtml}
+          ${inputHtml}
+        </div>
+        <div class="expert-team-question-actions">
+          <button type="button" class="expert-team-question-secondary" onclick="goExpertTeamQuestionStep(this,-1);event.stopPropagation()" ${state.currentIndex<=1?'disabled':''}>上一题</button>
+          <button type="button" class="expert-team-question-secondary" onclick="saveExpertTeamQuestionDraft(this);event.stopPropagation()">保存草稿</button>
+          <button class="status-card-expert-question-submit expert-team-question-primary" type="button" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}" data-expert-team-required="${required?'1':'0'}" data-expert-team-empty-label="请先填写" data-expert-team-ready-label="${esc(readyLabel)}" data-expert-team-aria-base="${esc(ariaLabel)}" aria-label="${esc(`${ariaLabel}，${hasInitialAnswer?readyLabel:'请先填写'}`)}" ${hasInitialAnswer?'':'disabled'} onclick="submitExpertTeamQuestionStep(this);event.stopPropagation()">${hasInitialAnswer?readyLabel:'请先填写'}</button>
+        </div>
+      </article>
+      ${_expertTeamQuestionPopoverReviewHtml(state)}
+    </div>
+  </section>`;
+}
+
+function _expertTeamQuestionPopoverElement(trigger){
+  const root=(trigger&&trigger.closest&&(trigger.closest('#writeflowStatusDock')||trigger.closest('.status-card-writeflow')))||((typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'));
+  return root&&root.querySelector?root.querySelector('[data-expert-team-question-popover]'):null;
+}
+
+function _focusExpertTeamQuestionPopover(trigger){
+  const popover=_expertTeamQuestionPopoverElement(trigger);
+  if(!popover)return false;
+  const target=popover.querySelector('textarea:not(:disabled),.expert-team-question-primary:not(:disabled),button:not(:disabled)');
+  if(target&&target.scrollIntoView)target.scrollIntoView({block:'nearest',inline:'nearest'});
+  if(target&&target.focus){
+    try{target.focus({preventScroll:true});}catch(_){target.focus();}
+    return true;
+  }
+  return false;
+}
+
+function _syncExpertTeamQuestionPopover(card){
+  const state=_expertTeamQuestionWizardState(card);
+  if(!state.total||(_expertTeamQuestionPopoverRunId&&_expertTeamQuestionPopoverRunId!==state.runId)){
+    _expertTeamQuestionPopoverOpen=false;
+    _expertTeamQuestionPopoverQuestionId='';
+  }
+  const popover=_expertTeamQuestionPopoverElement(null);
+  if(popover)popover.hidden=!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId===state.runId);
+  if(popover&&!popover.hidden)syncExpertTeamQuestionInputState(popover);
+  return !!(popover&&!popover.hidden);
+}
+
+function _invalidateExpertTeamDockRenderKey(){
+  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||(typeof document!=='undefined'&&document.getElementById('writeflowStatusDock'));
+  if(dock&&dock.dataset)delete dock.dataset.expertTeamRenderKey;
+}
+
+function openExpertTeamQuestionPopover(trigger){
+  const card=_activeExpertTeamStatusCard;
+  const state=_expertTeamQuestionWizardState(card);
+  if(!state.total)return focusExpertTeamBottomDock(trigger);
+  _expertTeamQuestionPopoverOpen=true;
+  _expertTeamQuestionPopoverRunId=state.runId;
+  if(!_expertTeamQuestionPopoverQuestionId||!state.questions.some(question=>String(question&&question.id||'')===String(_expertTeamQuestionPopoverQuestionId))){
+    _expertTeamQuestionPopoverQuestionId=(state.pending[0]||state.questions[state.questions.length-1]||{}).id||'';
+  }
+  const popover=_expertTeamQuestionPopoverElement(trigger);
+  if(popover)popover.hidden=false;
+  try{popover&&popover.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+  syncExpertTeamQuestionInputState(popover||trigger);
+  _focusExpertTeamQuestionPopover(popover||trigger);
+  try{setTimeout(()=>_focusExpertTeamQuestionPopover(popover||trigger),40);}catch(_){}
+  return true;
+}
+
+function closeExpertTeamQuestionPopover(trigger){
+  _expertTeamQuestionPopoverOpen=false;
+  const popover=_expertTeamQuestionPopoverElement(trigger);
+  if(popover)popover.hidden=true;
+  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
+  const summary=dock&&dock.querySelector?dock.querySelector('.status-card-expert-dock-summary'):null;
+  if(summary&&summary.focus){
+    try{summary.focus({preventScroll:true});}catch(_){summary.focus();}
+  }
+  return true;
+}
+
+function goExpertTeamQuestionStep(trigger,delta){
+  const state=_expertTeamQuestionWizardState(_activeExpertTeamStatusCard);
+  if(!state.questions.length)return false;
+  const nextIndex=Math.max(0,Math.min(state.questions.length-1,(state.currentIndex-1)+Number(delta||0)));
+  _expertTeamQuestionPopoverQuestionId=state.questions[nextIndex]&&state.questions[nextIndex].id||'';
+  _invalidateExpertTeamDockRenderKey();
+  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(_activeExpertTeamStatusCard);
+  openExpertTeamQuestionPopover(trigger);
+  return true;
+}
+
+function saveExpertTeamQuestionDraft(trigger){
+  syncExpertTeamQuestionInputState(trigger);
+  if(typeof showToast==='function')showToast('草稿已保留在当前确认窗口。');
+  _focusExpertTeamQuestionPopover(trigger);
+  return true;
+}
+
+function submitExpertTeamQuestionStep(trigger){
+  return answerExpertTeamQuestion(trigger);
+}
+
+function editExpertTeamAnsweredQuestion(trigger){
+  const qid=trigger&&trigger.dataset?trigger.dataset.expertTeamQuestionId:'';
+  if(!qid)return false;
+  _expertTeamQuestionPopoverQuestionId=qid;
+  _invalidateExpertTeamDockRenderKey();
+  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(_activeExpertTeamStatusCard);
+  return openExpertTeamQuestionPopover(trigger);
 }
 
 function _expertTeamWorkspacePanelHtml(card){
@@ -1376,13 +1586,14 @@ function _expertTeamWorkspacePanelHtml(card){
   const totalQuestions=questions.length||pending.length||1;
   const answeredCount=questions.filter(question=>String(question.status||'')==='answered').length;
   const currentQuestionIndex=Math.min(totalQuestions,answeredCount+1);
-  const questionHtml=pending.length
-    ? pending.map((question,idx)=>_expertTeamQuestionHtml(question,runId,{
-        index:answeredCount+idx+1,
-        total:totalQuestions,
-        current:idx===0,
-        remaining:pending.length-idx,
-      })).join('')
+  const questionSummaryHtml=pending.length
+    ? `<div class="expert-team-question-summary">
+        <span>
+          <strong>待确认问题 ${currentQuestionIndex}/${totalQuestions}</strong>
+          <small>已回答 ${answeredCount} 项，剩余 ${pending.length} 项。请在逐题确认窗口中完成，不需要回看聊天正文。</small>
+        </span>
+        <button type="button" onclick="openExpertTeamQuestionPopover(this);event.stopPropagation()">打开逐题确认</button>
+      </div>`
     : (questions.length?`<span class="expert-team-panel-answered-summary">
         <strong>${esc(answeredSummary.title)}</strong>
         <small>${esc(answeredSummary.detail||'需求已确认，正在进入生成。')}</small>
@@ -1437,7 +1648,7 @@ function _expertTeamWorkspacePanelHtml(card){
   if(confirmations.length){
     confirmationSectionHtml=`<section class="expert-team-panel-section expert-team-panel-questions expert-team-confirmation-workspace">
       <div class="expert-team-panel-section-title expert-team-confirmation-header"><span>${esc(confirmationSummary.title||`待你确认：${confirmations.length} 项`)}</span><small>${esc(confirmationSummary.detail||'请处理待确认事项后，专家团再继续推进。')}</small></div>
-      <div class="expert-team-panel-question-list">${pending.length?questionHtml:''}${confirmationStageSummaryHtml}${confirmationFallbackHtml}</div>
+      <div class="expert-team-panel-question-list">${pending.length?questionSummaryHtml:''}${confirmationStageSummaryHtml}${confirmationFallbackHtml}</div>
     </section>`;
   }
   const stageReviewSectionHtml=(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${canApproveStage?'awaiting-review':'is-history'}" aria-label="请确认阶段成果">
@@ -1471,7 +1682,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const pendingAction=confirmations.length?`${confirmations.length} 项待确认`:((canApproveStage||canRequestRevision)?'阶段产物待确认':(canRetry?'可重新尝试':(canCancel?'正在生成':(canResume?'需要继续生成':'无需补充'))));
   const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?'可以确认进入下一阶段，也可以提出修改意见。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成'))));
   const pendingButton=confirmations.length
-    ? `<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">去确认</button>`
+    ? `<button type="button" onclick="${pending.length?'openExpertTeamQuestionPopover(this)':'focusExpertTeamBottomDock(this)'};event.stopPropagation()">去确认</button>`
     : ((canApproveStage||canRequestRevision)?`<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段产物</button>`:(canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>'))));
   const executionHtml=executionRows.length?executionRows.map(row=>{
     return `<span class="expert-team-panel-execution-row ${esc(row.state||'idle')}">
@@ -1760,7 +1971,8 @@ function focusExpertTeamBottomDock(trigger){
   _syncExpertTeamWorkspacePanelVisibility();
   try{dock.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
   const focusSelectors=[
-    '.status-card-expert-question.pending textarea',
+    '.expert-team-question-popover:not([hidden]) textarea:not(:disabled)',
+    '.expert-team-question-popover:not([hidden]) .expert-team-question-primary:not(:disabled)',
     '.status-card-expert-question.pending [data-expert-team-question-id]',
     '.expert-team-confirmation-fallback button:not(:disabled)',
     '.expert-team-stage-approve:not(:disabled)',
@@ -1938,6 +2150,10 @@ function downloadWriteflowArtifact(btn){
   }
 }
 async function handleExpertTeamDockAction(btn){
+  const state=_expertTeamQuestionWizardState(_activeExpertTeamStatusCard);
+  if(state.pending&&state.pending.length){
+    return openExpertTeamQuestionPopover(btn);
+  }
   const path=btn&&btn.dataset?btn.dataset.expertTeamPrimaryArtifactPath:'';
   if(path){
     const opened=await openExpertTeamArtifact(btn);
@@ -1991,9 +2207,16 @@ async function answerExpertTeamQuestion(btn){
     });
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
-    if(card&&typeof focusExpertTeamBottomDock==='function')focusExpertTeamBottomDock(null);
     const pendingAfter=card&&_expertTeamPendingQuestions(card)||[];
+    if(card&&_expertTeamQuestionPopoverOpen){
+      _expertTeamQuestionPopoverRunId=card.runId||card.sessionId||'';
+      _expertTeamQuestionPopoverQuestionId=(pendingAfter[0]&&pendingAfter[0].id)||'';
+      if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+      openExpertTeamQuestionPopover(null);
+    }else if(card){
+      if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+      if(typeof focusExpertTeamBottomDock==='function')focusExpertTeamBottomDock(null);
+    }
     if(card&&Array.isArray(card.questions)&&card.questions.length&&!pendingAfter.length&&typeof showToast==='function'){
       showToast('需求已确认，正在进入生成。');
     }
@@ -2010,6 +2233,12 @@ async function answerExpertTeamQuestion(btn){
 if(typeof window!=='undefined'){
   window.answerExpertTeamQuestion=answerExpertTeamQuestion;
   window.syncExpertTeamQuestionInputState=syncExpertTeamQuestionInputState;
+  window.openExpertTeamQuestionPopover=openExpertTeamQuestionPopover;
+  window.closeExpertTeamQuestionPopover=closeExpertTeamQuestionPopover;
+  window.goExpertTeamQuestionStep=goExpertTeamQuestionStep;
+  window.saveExpertTeamQuestionDraft=saveExpertTeamQuestionDraft;
+  window.submitExpertTeamQuestionStep=submitExpertTeamQuestionStep;
+  window.editExpertTeamAnsweredQuestion=editExpertTeamAnsweredQuestion;
 }
 
 function _applyExpertTeamStreamResponse(data){
@@ -2323,8 +2552,10 @@ function _statusCardWriteflowHtml(card,copyBtn){
     <div class="expert-team-process-tasks">${taskHtml}</div>
     <div class="expert-team-process-artifacts">${artifactHtml}</div>
   </div>`;
+  const expertQuestionPopoverHtml=isExpertTeam?_expertTeamQuestionPopoverHtml(card):'';
   const expertBodyHtml=isExpertTeam?_expertTeamWorkspacePanelHtml(card):'';
   return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}" data-expert-team-run-id="${esc(card.runId||card.sessionId||'')}">
+    ${expertQuestionPopoverHtml}
     ${miniHtml}
     ${isExpertTeam?'':`<div class="status-card-head status-card-writeflow-head">
       <div class="status-card-title-wrap">
@@ -2433,9 +2664,13 @@ function renderWriteflowStatusDock(card){
   if(isExpertTeam){
     syncExpertTeamBottomDockState(card);
     syncExpertTeamChatConfirmationCard(card);
+    _syncExpertTeamQuestionPopover(card);
   }else{
     clearExpertTeamWorkspacePanel();
     syncExpertTeamChatConfirmationCard(null);
+    _expertTeamQuestionPopoverOpen=false;
+    _expertTeamQuestionPopoverRunId='';
+    _expertTeamQuestionPopoverQuestionId='';
   }
   return true;
 }
@@ -2449,6 +2684,9 @@ function clearWriteflowStatusDock(){
   dock.innerHTML='';
   dock.hidden=true;
   dock.onclick=null;
+  _expertTeamQuestionPopoverOpen=false;
+  _expertTeamQuestionPopoverRunId='';
+  _expertTeamQuestionPopoverQuestionId='';
   _syncExpertTeamBlankCollapseListener(false);
   delete dock.dataset.writeflowRunId;
   delete dock.dataset.writeflowSourceSessionId;
