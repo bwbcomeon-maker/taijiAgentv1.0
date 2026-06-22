@@ -618,11 +618,26 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("support_boundary", builder)
         self.assertIn("TAIJI_ALLOW_UV_LOCK_REFRESH", builder)
         self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"', builder)
+        self.assertIn('run_setup_local "$uv_lock_mode"', builder)
         self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh', builder)
         self.assertIn("Python 依赖 lock 漂移", builder)
         self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
         self.assertNotIn("\n  uv lock\n", builder)
         self.assertIn('printf \'%s  %s\\n\' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$checksum_name"', builder)
+
+        manifest_body = builder[
+            builder.index("write_release_manifest() {"):
+            builder.index("write_build_report() {")
+        ]
+        self.assertIn("json_escape", builder)
+        self.assertIn("json_string", builder)
+        self.assertIn("Permission denied by kysec", builder)
+        self.assertLess(builder.index('*"kysec"*'), builder.index('*"源码包"*'))
+        self.assertNotIn('|*"commit"*)', builder)
+        self.assertNotIn("python3 - <<'PY'", manifest_body)
+        self.assertNotIn("Path(os.environ", manifest_body)
+        self.assertNotIn("write_text", manifest_body)
+        self.assertIn('} > "$MANIFEST_FILE"', manifest_body)
 
         self.assertIn("MANIFEST_PATH", install)
         self.assertIn("validate_release_manifest", install)

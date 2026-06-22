@@ -74,7 +74,10 @@ failure_next_steps() {
     *"管理员权限"*|*"sudo"*)
       printf 'next=先在制包机终端执行 sudo -v，确认当前用户具备管理员权限后重试\n'
       ;;
-    *"源码包"*|*"SHA256"*|*"commit"*)
+    *"kysec"*|*"Permission denied by kysec"*)
+      printf 'next=麒麟安全策略拦截了构建脚本中的解释器写文件。新版脚本已避免用 python 写 manifest/report；请使用最新制包输入包重新构建\n'
+      ;;
+    *"源码包"*|*"SHA256"*|*"当前 commit"*|*"未提交改动"*|*"已暂存未提交"*)
       printf 'next=在本地重新生成唯一源码包和 SHA256SUMS.txt，并重新拷贝整个交付目录\n'
       ;;
     *"Node.js"*|*"npm ci"*|*"Electron"*)
@@ -641,6 +644,20 @@ build_glibc() {
   getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>/dev/null | head -1 || printf 'unknown\n'
 }
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+json_string() {
+  printf '"%s"' "$(json_escape "$1")"
+}
+
 write_release_manifest() {
   info "生成发布 manifest"
   local src_name deb_name checksum_name source_sha deb_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
@@ -656,65 +673,44 @@ write_release_manifest() {
   dpkg_arch="$(dpkg --print-architecture 2>/dev/null || true)"
   source_commit="$(printf '%s\n' "$src_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
 
-  export TAIJI_MANIFEST_FILE="$MANIFEST_FILE"
-  export TAIJI_MANIFEST_VERSION="$VERSION"
-  export TAIJI_MANIFEST_SOURCE_ARCHIVE="$src_name"
-  export TAIJI_MANIFEST_SOURCE_SHA256="$source_sha"
-  export TAIJI_MANIFEST_SOURCE_COMMIT="$source_commit"
-  export TAIJI_MANIFEST_DEB="$deb_name"
-  export TAIJI_MANIFEST_DEB_SHA256="$deb_sha"
-  export TAIJI_MANIFEST_CHECKSUM="$checksum_name"
-  export TAIJI_MANIFEST_PACKAGES_GZ_SHA256="$packages_gz_sha"
-  export TAIJI_MANIFEST_BUILD_OS="$build_os"
-  export TAIJI_MANIFEST_BUILD_GLIBC="$build_glibc"
-  export TAIJI_MANIFEST_BUILD_ARCH="$build_arch"
-  export TAIJI_MANIFEST_DPKG_ARCH="$dpkg_arch"
-
-  python3 - <<'PY'
-import datetime
-import json
-import os
-from pathlib import Path
-
-manifest = {
-    "schema_version": 1,
-    "package": "taiji-agent",
-    "version": os.environ["TAIJI_MANIFEST_VERSION"],
-    "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    "source_commit": os.environ["TAIJI_MANIFEST_SOURCE_COMMIT"],
-    "source_archive": os.environ["TAIJI_MANIFEST_SOURCE_ARCHIVE"],
-    "source_sha256": os.environ["TAIJI_MANIFEST_SOURCE_SHA256"],
-    "deb": os.environ["TAIJI_MANIFEST_DEB"],
-    "deb_sha256": os.environ["TAIJI_MANIFEST_DEB_SHA256"],
-    "checksum": os.environ["TAIJI_MANIFEST_CHECKSUM"],
-    "packages_gz_sha256": os.environ["TAIJI_MANIFEST_PACKAGES_GZ_SHA256"],
-    "build_os": os.environ["TAIJI_MANIFEST_BUILD_OS"],
-    "build_glibc": os.environ["TAIJI_MANIFEST_BUILD_GLIBC"],
-    "build_arch": os.environ["TAIJI_MANIFEST_BUILD_ARCH"],
-    "dpkg_arch": os.environ["TAIJI_MANIFEST_DPKG_ARCH"],
-    "target_matrix": [
-        "Debian-like x86_64/amd64 desktop Linux",
-        "Kylin V10 SP1 x86_64 desktop baseline",
-        "UOS/openKylin x86_64 desktop, apt/dpkg variant"
-    ],
-    "support_boundary": {
-        "supported": [
-            "x86_64/amd64",
-            "Debian-like package manager with apt-get and dpkg",
-            "Graphical desktop session for Electron startup",
-            "Complete delivery directory with generated DEB and local offline apt repository"
-        ],
-        "unsupported": [
-            "RPM-only terminals without dpkg/apt",
-            "ARM/aarch64 terminals",
-            "Headless or strongly sandboxed terminals without desktop session",
-            "Offline installations missing 离线依赖/Packages.gz"
-        ]
-    }
-}
-path = Path(os.environ["TAIJI_MANIFEST_FILE"])
-path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+  {
+    printf '{\n'
+    printf '  "build_arch": %s,\n' "$(json_string "$build_arch")"
+    printf '  "build_glibc": %s,\n' "$(json_string "$build_glibc")"
+    printf '  "build_os": %s,\n' "$(json_string "$build_os")"
+    printf '  "built_at": %s,\n' "$(json_string "$(date -u '+%Y-%m-%dT%H:%M:%S%z')")"
+    printf '  "checksum": %s,\n' "$(json_string "$checksum_name")"
+    printf '  "deb": %s,\n' "$(json_string "$deb_name")"
+    printf '  "deb_sha256": %s,\n' "$(json_string "$deb_sha")"
+    printf '  "dpkg_arch": %s,\n' "$(json_string "$dpkg_arch")"
+    printf '  "package": "taiji-agent",\n'
+    printf '  "packages_gz_sha256": %s,\n' "$(json_string "$packages_gz_sha")"
+    printf '  "schema_version": 1,\n'
+    printf '  "source_archive": %s,\n' "$(json_string "$src_name")"
+    printf '  "source_commit": %s,\n' "$(json_string "$source_commit")"
+    printf '  "source_sha256": %s,\n' "$(json_string "$source_sha")"
+    printf '  "support_boundary": {\n'
+    printf '    "supported": [\n'
+    printf '      "x86_64/amd64",\n'
+    printf '      "Debian-like package manager with apt-get and dpkg",\n'
+    printf '      "Graphical desktop session for Electron startup",\n'
+    printf '      "Complete delivery directory with generated DEB and local offline apt repository"\n'
+    printf '    ],\n'
+    printf '    "unsupported": [\n'
+    printf '      "RPM-only terminals without dpkg/apt",\n'
+    printf '      "ARM/aarch64 terminals",\n'
+    printf '      "Headless or strongly sandboxed terminals without desktop session",\n'
+    printf '      "Offline installations missing 离线依赖/Packages.gz"\n'
+    printf '    ]\n'
+    printf '  },\n'
+    printf '  "target_matrix": [\n'
+    printf '    "Debian-like x86_64/amd64 desktop Linux",\n'
+    printf '    "Kylin V10 SP1 x86_64 desktop baseline",\n'
+    printf '    "UOS/openKylin x86_64 desktop, apt/dpkg variant"\n'
+    printf '  ],\n'
+    printf '  "version": %s\n' "$(json_string "$VERSION")"
+    printf '}\n'
+  } > "$MANIFEST_FILE"
 
   {
     printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
