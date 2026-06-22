@@ -7,6 +7,7 @@ ASSETS = ROOT / "static" / "assets" / "taiji"
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 ICONS_JS = (ROOT / "static" / "icons.js").read_text(encoding="utf-8")
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 NAV_ICONS = [
     "nav-chat",
@@ -177,6 +178,21 @@ def test_taiji_scheme_b_composer_toolbar_uses_compact_control_sizing():
     assert "width:46px!important" not in send_rule
     assert "max-width:220px!important" in model_rule
     assert "max-width:156px!important" in optional_chip_rule
+
+
+def test_taiji_messages_bottom_tracks_dynamic_composer_safe_area():
+    messages_shell = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{')
+    assert "bottom:var(--taiji-composer-safe-bottom,clamp(260px,24vh,330px))!important" in messages_shell
+    assert "bottom:clamp(168px,18vh,228px)!important" not in messages_shell
+
+
+def test_taiji_composer_safe_area_is_synced_after_auto_resize():
+    assert "function syncTaijiComposerSafeArea()" in MESSAGES_JS
+    assert "--taiji-composer-safe-bottom" in MESSAGES_JS
+    assert "ResizeObserver" in MESSAGES_JS
+    auto_resize_start = MESSAGES_JS.index("function autoResize()")
+    auto_resize = MESSAGES_JS[auto_resize_start : MESSAGES_JS.index("\n}", auto_resize_start) + 2]
+    assert "syncTaijiComposerSafeArea()" in auto_resize
 
 
 def test_taiji_redesign_tokens_and_reading_surface_are_present():

@@ -10122,7 +10122,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     top:32px!important;
     left:50%!important;
     right:auto!important;
-    bottom:clamp(246px,22vh,310px)!important;
+    bottom:var(--taiji-composer-safe-bottom,clamp(260px,24vh,330px))!important;
     width:min(760px,calc(100% - 56px))!important;
     max-width:min(760px,calc(100% - 56px))!important;
     min-height:220px!important;
@@ -10161,7 +10161,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     top:32px!important;
     left:50%!important;
     right:auto!important;
-    bottom:clamp(310px,34vh,380px)!important;
+    bottom:var(--taiji-composer-safe-bottom,clamp(260px,24vh,330px))!important;
     width:min(760px,calc(100% - 56px))!important;
     max-width:min(760px,calc(100% - 56px))!important;
     padding:28px 32px 30px!important;
@@ -10233,7 +10233,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     top:32px!important;
     left:50%!important;
     right:auto!important;
-    bottom:clamp(168px,18vh,228px)!important;
+    bottom:var(--taiji-composer-safe-bottom,clamp(260px,24vh,330px))!important;
     width:min(860px,calc(100% - 72px))!important;
     max-width:min(860px,calc(100% - 72px))!important;
     min-height:220px!important;
@@ -10248,7 +10248,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     overflow:visible!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow) main.main.taiji-real-main #mainChat .messages-shell{
-    bottom:clamp(238px,26vh,318px)!important;
+    bottom:calc(var(--taiji-composer-safe-bottom,clamp(260px,24vh,330px)) + 88px)!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #messages{
     padding:0!important;

@@ -2596,7 +2596,29 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');if(!el)return;el.style.height='auto';const cssMaxHeight=parseFloat(getComputedStyle(el).maxHeight);const maxHeight=Number.isFinite(cssMaxHeight)?cssMaxHeight:200;el.style.height=Math.min(el.scrollHeight,maxHeight)+'px';updateSendBtn();}
+let _taijiComposerSafeAreaObserver=null;
+function syncTaijiComposerSafeArea(){
+  const composer=$('composerWrap');
+  if(!composer){document.documentElement.style.removeProperty('--taiji-composer-safe-bottom');return;}
+  const rect=composer.getBoundingClientRect();
+  if(!rect.height){document.documentElement.style.removeProperty('--taiji-composer-safe-bottom');return;}
+  const viewportHeight=(window.visualViewport&&window.visualViewport.height)||window.innerHeight||document.documentElement.clientHeight||0;
+  const safeBottom=Math.max(0,Math.ceil(viewportHeight-rect.top+18));
+  document.documentElement.style.setProperty('--taiji-composer-safe-bottom',safeBottom+'px');
+}
+function initTaijiComposerSafeArea(){
+  const composer=$('composerWrap');
+  if(!composer)return;
+  if(!_taijiComposerSafeAreaObserver&&'ResizeObserver'in window){
+    _taijiComposerSafeAreaObserver=new ResizeObserver(()=>syncTaijiComposerSafeArea());
+    _taijiComposerSafeAreaObserver.observe(composer);
+  }
+  window.addEventListener('resize',syncTaijiComposerSafeArea,{passive:true});
+  if(window.visualViewport)window.visualViewport.addEventListener('resize',syncTaijiComposerSafeArea,{passive:true});
+  syncTaijiComposerSafeArea();
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initTaijiComposerSafeArea,{once:true});else initTaijiComposerSafeArea();
+function autoResize(){const el=$('msg');if(!el)return;el.style.height='auto';const cssMaxHeight=parseFloat(getComputedStyle(el).maxHeight);const maxHeight=Number.isFinite(cssMaxHeight)?cssMaxHeight:200;el.style.height=Math.min(el.scrollHeight,maxHeight)+'px';updateSendBtn();syncTaijiComposerSafeArea();}
 
 
 // ── YOLO mode state ──
