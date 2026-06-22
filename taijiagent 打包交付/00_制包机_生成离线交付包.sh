@@ -181,6 +181,7 @@ create_source_archive_from_git() {
   local repo_root short archive_name
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
   [ -d "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
+  require_cmd git
   git -C "$repo_root" diff --quiet || fail "源码仓库存在未提交改动，请先提交后再生成发布源码包"
   git -C "$repo_root" diff --cached --quiet || fail "源码仓库存在已暂存未提交改动，请先提交后再生成发布源码包"
   short="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
@@ -263,15 +264,17 @@ preflight() {
   require_cmd apt-get
   require_cmd apt-cache
   require_cmd dpkg
-  require_cmd dpkg-deb
-  require_cmd dpkg-scanpackages
   require_cmd sha256sum
-  require_cmd tar
-  require_cmd gzip
-  require_cmd git
   require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
   [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
+}
+
+prepare_source_release() {
+  info "准备并校验源码包"
+  require_cmd tar
+  require_cmd gzip
+  require_cmd sha256sum
   resolve_source_archive
   [ -f "$SRC_ARCHIVE" ] || fail "未找到源码包：$SRC_ARCHIVE"
   if [ -f "$CHECKSUM_FILE" ]; then
@@ -729,6 +732,8 @@ main() {
   preflight
   set_stage "安装制包依赖"
   install_build_dependencies
+  set_stage "源码包发布预检"
+  prepare_source_release
   set_stage "准备 Python/Node/Electron 构建工具"
   ensure_uv
   ensure_node

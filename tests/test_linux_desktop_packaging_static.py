@@ -510,6 +510,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("run_release_preflight", builder)
         self.assertIn("01_制包机_发布预检.sh", builder)
+        main_body = builder[builder.index("main() {") :]
+        self.assertLess(
+            main_body.index("install_build_dependencies"),
+            main_body.index("prepare_source_release"),
+        )
+        preflight_body = builder[
+            builder.index("preflight() {") : builder.index("prepare_source_release() {")
+        ]
+        self.assertNotIn("require_cmd git", preflight_body)
+        self.assertNotIn("require_cmd dpkg-scanpackages", preflight_body)
         self.assertIn("01_制包机_发布预检.sh", docs)
         self.assertIn("!/taijiagent 打包交付/01_制包机_发布预检.sh", gitignore)
         self.assertIn("99_本机_准备制包输入包.sh", docs)
