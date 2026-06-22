@@ -128,10 +128,11 @@ cleanup_delivery_metadata() {
   info "检查交付文件夹中的拷贝元数据"
   local metadata
   metadata="$(find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -print)"
-  [ -z "$metadata" ] || {
+  if [ -n "$metadata" ]; then
+    warn "发现 macOS 拷贝元数据，将自动清理"
     printf '%s\n' "$metadata" >&2
-    fail "交付目录含 macOS 元数据，请清理后重新发布"
-  }
+    find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -exec rm -rf -- {} +
+  fi
   ok "拷贝元数据检查完成"
 }
 

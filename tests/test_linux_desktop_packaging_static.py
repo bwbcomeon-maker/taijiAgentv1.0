@@ -492,7 +492,52 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("__MACOSX", preflight)
         self.assertIn(".DS_Store", preflight)
         self.assertIn("._*", preflight)
+        self.assertIn("将自动清理", preflight)
+        self.assertIn("rm -rf --", preflight)
         self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS", preflight)
+
+    def test_release_preflight_cleans_macos_copy_metadata(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            delivery = Path(tmp) / "taijiagent 打包交付"
+            delivery.mkdir()
+            script = delivery / "01_制包机_发布预检.sh"
+            shutil.copy2(source_script, script)
+
+            archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
+            archive.write_bytes(b"fake source archive\n")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (delivery / "SHA256SUMS.txt").write_text(
+                f"{digest}  {archive.name}\n",
+                encoding="utf-8",
+            )
+
+            (delivery / "._01_制包机_发布预检.sh").write_text("metadata", encoding="utf-8")
+            (delivery / ".DS_Store").write_text("metadata", encoding="utf-8")
+            apple_dir = delivery / "__MACOSX"
+            apple_dir.mkdir()
+            (apple_dir / "._payload").write_text("metadata", encoding="utf-8")
+
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=delivery,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            self.assertIn("将自动清理", result.stdout)
+            self.assertFalse((delivery / "._01_制包机_发布预检.sh").exists())
+            self.assertFalse((delivery / ".DS_Store").exists())
+            self.assertFalse(apple_dir.exists())
 
     def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

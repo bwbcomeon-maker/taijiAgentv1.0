@@ -119,10 +119,11 @@ check_source_checksum() {
 check_no_macos_metadata_or_stale_zip() {
   local metadata zips stale_debs
   metadata="$(find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -print)"
-  [ -z "$metadata" ] || {
+  if [ -n "$metadata" ]; then
+    info "发现 macOS 拷贝元数据，将自动清理"
     printf '%s\n' "$metadata" >&2
-    fail "交付目录含 macOS 元数据"
-  }
+    find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -exec rm -rf -- {} +
+  fi
 
   zips="$(find "$SCRIPT_DIR" -maxdepth 1 -type f -name '*.zip' -print)"
   [ -z "$zips" ] || {
