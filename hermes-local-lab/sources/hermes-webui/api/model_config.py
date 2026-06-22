@@ -143,17 +143,22 @@ def _ensure_image_gen_plugins_registered() -> None:
     from agent import image_gen_registry
 
     registered = {provider.name for provider in image_gen_registry.list_providers()}
-    if {"doubao", "fal", "openai", "openai-codex", "xai", "krea"}.issubset(registered):
-        return
-    ctx = _ImageGenRegisterContext()
-    for module_name in _BUILTIN_IMAGE_GEN_MODULES:
-        try:
-            module = importlib.import_module(module_name)
-            register = getattr(module, "register", None)
-            if callable(register):
-                register(ctx)
-        except Exception:
-            logger.debug("Failed to register image_gen plugin %s", module_name, exc_info=True)
+    if not {"doubao", "fal", "openai", "openai-codex", "xai", "krea"}.issubset(registered):
+        ctx = _ImageGenRegisterContext()
+        for module_name in _BUILTIN_IMAGE_GEN_MODULES:
+            try:
+                module = importlib.import_module(module_name)
+                register = getattr(module, "register", None)
+                if callable(register):
+                    register(ctx)
+            except Exception:
+                logger.debug("Failed to register image_gen plugin %s", module_name, exc_info=True)
+    try:
+        from agent.custom_image_providers import register_configured_custom_image_providers
+
+        register_configured_custom_image_providers()
+    except Exception:
+        logger.debug("Failed to register custom image providers", exc_info=True)
 
 
 def _public_image_gen_provider_id(provider_id: str) -> str:
@@ -211,6 +216,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
             available = bool(provider.is_available())
         except Exception:
             available = False
+        is_custom = pid.startswith("custom:")
 
         env_vars = []
         for item in schema.get("env_vars") or []:
@@ -230,6 +236,8 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
             badge = "授权"
         else:
             key_status = _key_status_for_env(env_var)
+            if is_custom and key_status.get("configured") and default_model:
+                available = True
             display_name = str(schema.get("name") or getattr(provider, "display_name", "") or pid)
             description = str(schema.get("tag") or "")
             badge = str(schema.get("badge") or "")
@@ -263,6 +271,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 ],
                 "default_model": default_model,
                 "oauth_managed": pid == "openai-codex",
+                "custom": is_custom,
             }
         )
 
@@ -327,7 +336,129 @@ def get_image_gen_config() -> dict[str, Any]:
             "use_gateway": bool(image_cfg.get("use_gateway")),
         },
         "providers": _image_gen_provider_rows(active_provider),
+        "custom_image_providers": get_custom_image_provider_configs().get("providers", []),
     }
+
+
+def get_custom_image_provider_configs() -> dict[str, Any]:
+    config_path = _get_config_path()
+    config_data = _load_yaml_config_file(config_path)
+    active_provider = ""
+    image_cfg = config_data.get("image_gen")
+    if isinstance(image_cfg, dict):
+        active_provider = str(image_cfg.get("provider") or "").strip()
+    try:
+        from agent.custom_image_providers import (
+            custom_image_provider_public_row,
+            load_custom_image_provider_entries,
+        )
+    except Exception:
+        return {"ok": True, "providers": []}
+    rows = [
+        custom_image_provider_public_row(entry, active_provider=active_provider)
+        for entry in load_custom_image_provider_entries(config_data)
+    ]
+    for row in rows:
+        key_status = _key_status_for_env((row.get("key_status") or {}).get("env_var"))
+        row["key_status"] = key_status
+        row["available"] = bool(key_status.get("configured") and row.get("base_url_configured") and row.get("default_model"))
+    return {"ok": True, "providers": rows}
+
+
+def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from agent.custom_image_providers import (
+            custom_image_provider_public_row,
+            normalize_custom_image_provider_entry,
+            normalize_custom_image_provider_id,
+        )
+    except Exception as exc:
+        raise RuntimeError("custom image provider support is unavailable") from exc
+
+    requested_id = normalize_custom_image_provider_id(body.get("id") or body.get("provider_id"))
+    config_path = _get_config_path()
+    api_key = body.get("api_key")
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        existing_entries = config_data.get("custom_image_providers")
+        if not isinstance(existing_entries, list):
+            existing_entries = []
+        existing = {}
+        for item in existing_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = normalize_custom_image_provider_id(item.get("id"))
+            except ValueError:
+                continue
+            if item_id == requested_id:
+                existing = item
+                break
+        merged = dict(existing)
+        for key, value in body.items():
+            if key != "api_key":
+                merged[key] = value
+        merged["id"] = requested_id
+        normalized = normalize_custom_image_provider_entry(merged)
+        if api_key is not None and str(api_key).strip():
+            _write_env_file(_get_hermes_home() / ".env", {normalized["api_key_env"]: str(api_key).strip()})
+
+        updated = []
+        for item in existing_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = normalize_custom_image_provider_id(item.get("id"))
+            except ValueError:
+                continue
+            if item_id != requested_id:
+                updated.append(item)
+        updated.append(normalized)
+        config_data["custom_image_providers"] = updated
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    invalidate_models_cache()
+    row = custom_image_provider_public_row(normalized)
+    return {"ok": True, "provider": row, "providers": get_custom_image_provider_configs().get("providers", [])}
+
+
+def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
+    try:
+        from agent.custom_image_providers import normalize_custom_image_provider_id, custom_image_provider_name
+    except Exception as exc:
+        raise RuntimeError("custom image provider support is unavailable") from exc
+
+    normalized_id = normalize_custom_image_provider_id(provider_id)
+    provider_name = custom_image_provider_name(normalized_id)
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        image_cfg = config_data.get("image_gen")
+        if isinstance(image_cfg, dict) and str(image_cfg.get("provider") or "").strip() == provider_name:
+            raise ValueError("该外部图片模型正在使用，请先切换到其他图片生成配置。")
+        existing_entries = config_data.get("custom_image_providers")
+        if not isinstance(existing_entries, list):
+            existing_entries = []
+        updated = []
+        removed = False
+        for item in existing_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = normalize_custom_image_provider_id(item.get("id"))
+            except ValueError:
+                continue
+            if item_id == normalized_id:
+                removed = True
+                continue
+            updated.append(item)
+        if not removed:
+            raise ValueError("外部图片模型不存在。")
+        config_data["custom_image_providers"] = updated
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    invalidate_models_cache()
+    return {"ok": True, "providers": get_custom_image_provider_configs().get("providers", [])}
 
 
 def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:

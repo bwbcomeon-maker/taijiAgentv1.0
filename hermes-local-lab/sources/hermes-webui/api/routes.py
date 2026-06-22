@@ -8004,6 +8004,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_image_gen_config())
 
+    if parsed.path == "/api/image-gen/custom-providers":
+        from api.model_config import get_custom_image_provider_configs
+
+        return j(handler, get_custom_image_provider_configs())
+
     # ── Auxiliary models (GET/POST) ──
     if parsed.path == "/api/model/auxiliary":
         from api.config import get_auxiliary_models
@@ -9654,6 +9659,16 @@ def handle_post(handler, parsed) -> bool:
 
         try:
             return j(handler, set_image_gen_config(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=500)
+
+    if parsed.path == "/api/image-gen/custom-providers":
+        from api.model_config import set_custom_image_provider_config
+
+        try:
+            return j(handler, set_custom_image_provider_config(body))
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
@@ -11473,6 +11488,17 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+
+    if parsed.path.startswith("/api/image-gen/custom-providers/"):
+        from api.model_config import delete_custom_image_provider_config
+
+        name = parsed.path[len("/api/image-gen/custom-providers/"):]
+        try:
+            return j(handler, delete_custom_image_provider_config(name))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=500)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 

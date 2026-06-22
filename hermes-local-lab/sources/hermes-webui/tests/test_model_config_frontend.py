@@ -99,6 +99,39 @@ def test_image_generation_auth_hint_is_taiji_branded():
     assert "Codex/ChatGPT OAuth" not in PANELS_JS
 
 
+def test_image_generation_custom_provider_management_has_visible_entry():
+    for marker in (
+        'id="btnAddCustomImageProvider"',
+        'id="btnManageCustomImageProviders"',
+        'id="customImageProviderPanel"',
+        'id="customImageProviderBaseUrl"',
+        "添加外部图片模型",
+        "管理外部模型",
+    ):
+        assert marker in INDEX_HTML
+    assert "saveCustomImageProviderConfig" in PANELS_JS
+    assert "deleteCustomImageProviderConfig" in PANELS_JS
+    assert "/api/image-gen/custom-providers" in PANELS_JS
+
+
+def test_image_generation_custom_provider_new_form_generates_id():
+    assert "_customImageProviderDraftId" in PANELS_JS
+    assert "customImageProviderId" in PANELS_JS
+    assert "||_customImageProviderDraftId(name,baseUrl)" in PANELS_JS
+
+
+def test_image_generation_save_forces_full_model_config_refresh():
+    assert "async function saveImageGenConfig" in PANELS_JS
+    assert "await loadModelConfigPanel(true)" in PANELS_JS
+    assert "image_gen:data.image_gen" not in PANELS_JS
+
+
+def test_image_generation_oauth_managed_provider_hides_key_paste_action():
+    assert "modelConfigImagePasteAction" in INDEX_HTML
+    assert "modelConfigImagePasteAction" in PANELS_JS
+    assert "pasteAction.style.display=managedAuth?'none':''" in PANELS_JS
+
+
 def test_model_config_license_layout_prioritizes_customer_and_compacts_actions():
     assert 'class="model-config-license-customer"' in INDEX_HTML
     assert 'id="taijiLicenseCustomer"' in INDEX_HTML

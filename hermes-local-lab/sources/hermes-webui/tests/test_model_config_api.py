@@ -191,6 +191,200 @@ def test_image_gen_config_writes_doubao_ark_key_without_echo(monkeypatch, tmp_pa
     os.environ.pop("ARK_API_KEY", None)
 
 
+def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda active: [])
+
+    result = model_config.set_custom_image_provider_config(
+        {
+            "id": "router",
+            "name": "Router Images",
+            "base_url": "https://images.example.com/v1/",
+            "models": ["gpt-image-custom"],
+            "default_model": "gpt-image-custom",
+            "api_key": "router-secret-key-123456",
+            "timeout_seconds": 45,
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    providers = cfg["custom_image_providers"]
+    assert providers == [
+        {
+            "id": "router",
+            "name": "Router Images",
+            "base_url": "https://images.example.com/v1",
+            "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+            "models": ["gpt-image-custom"],
+            "default_model": "gpt-image-custom",
+            "size_map": {
+                "landscape": "1536x1024",
+                "square": "1024x1024",
+                "portrait": "1024x1536",
+            },
+            "response_format": "auto",
+            "timeout_seconds": 45,
+        }
+    ]
+    assert "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=router-secret-key-123456" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert "router-secret-key-123456" not in dumped
+    assert result["provider"]["id"] == "custom:router"
+    assert result["provider"]["key_status"]["env_var"] == "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY"
+    assert result["provider"]["base_url"] == "https://images.example.com/v1"
+    assert result["provider"]["size_map"]["square"] == "1024x1024"
+    os.environ.pop("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", None)
+
+
+def test_custom_image_provider_appears_in_image_gen_config(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret")
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": True,
+            "reason_code": "ready",
+            "public_message": "图像生成已就绪。",
+        },
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {"provider": "custom:router", "model": "gpt-image-custom"},
+                "custom_image_providers": [
+                    {
+                        "id": "router",
+                        "name": "Router Images",
+                        "base_url": "https://images.example.com/v1",
+                        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                        "models": ["gpt-image-custom"],
+                        "default_model": "gpt-image-custom",
+                    }
+                ],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_image_gen_config()
+    row = next(item for item in result["providers"] if item["id"] == "custom:router")
+
+    assert result["image_gen"]["provider"] == "custom:router"
+    assert row["name"] == "Router Images"
+    assert row["active"] is True
+    assert row["available"] is True
+    assert row["oauth_managed"] is False
+    assert row["custom"] is True
+    assert row["key_status"]["configured"] is True
+    assert "secret" not in json.dumps(result, ensure_ascii=False)
+    os.environ.pop("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", None)
+
+
+def test_custom_image_provider_reads_key_status_from_env_file(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": True,
+            "reason_code": "ready",
+            "public_message": "图像生成已就绪。",
+        },
+    )
+    (tmp_path / ".env").write_text("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=secret-from-file\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {"provider": "custom:router", "model": "gpt-image-custom"},
+                "custom_image_providers": [
+                    {
+                        "id": "router",
+                        "name": "Router Images",
+                        "base_url": "https://images.example.com/v1",
+                        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                        "models": ["gpt-image-custom"],
+                        "default_model": "gpt-image-custom",
+                    }
+                ],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_custom_image_provider_configs()
+    row = result["providers"][0]
+
+    assert row["available"] is True
+    assert row["key_status"]["configured"] is True
+    assert row["key_status"]["source"] == "env_file"
+    assert "secret-from-file" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_custom_image_provider_delete_rejects_active_provider(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {"provider": "custom:router", "model": "gpt-image-custom"},
+                "custom_image_providers": [
+                    {
+                        "id": "router",
+                        "name": "Router Images",
+                        "base_url": "https://images.example.com/v1",
+                        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                        "models": ["gpt-image-custom"],
+                        "default_model": "gpt-image-custom",
+                    }
+                ],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        model_config.delete_custom_image_provider_config("router")
+    except ValueError as exc:
+        assert "正在使用" in str(exc)
+    else:
+        raise AssertionError("active custom image provider was deleted")
+
+
+def test_custom_image_provider_delete_removes_inactive_provider(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {"provider": "fal", "model": "fal-ai/flux-2-pro"},
+                "custom_image_providers": [
+                    {
+                        "id": "router",
+                        "name": "Router Images",
+                        "base_url": "https://images.example.com/v1",
+                        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                        "models": ["gpt-image-custom"],
+                        "default_model": "gpt-image-custom",
+                    }
+                ],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = model_config.delete_custom_image_provider_config("router")
+
+    assert result["ok"] is True
+    assert _read_config(tmp_path)["custom_image_providers"] == []
+
+
 def test_model_config_payload_hides_raw_config_path(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     config_path = tmp_path / "config.yaml"

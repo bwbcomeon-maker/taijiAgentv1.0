@@ -8174,6 +8174,28 @@ function _modelConfigImageProviderRow(providerId,data){
  return rows.find(p=>String(p&&p.id||'')===id)||null;
 }
 
+function _modelConfigCustomImageRows(data){
+ const rows=[];
+ const seen=new Set();
+ const configured=Array.isArray(data&&data.custom_image_providers)?data.custom_image_providers:[];
+ const providers=Array.isArray(data&&data.image_gen_providers)?data.image_gen_providers:[];
+ configured.concat(providers.filter(p=>p&&p.custom)).forEach(row=>{
+  const rawId=String(row&&row.id||'').trim();
+  const id=rawId.replace(/^custom:/,'');
+  if(!id||seen.has(id)) return;
+  seen.add(id);
+  rows.push(Object.assign({},row,{id,provider_id:'custom:'+id}));
+ });
+ return rows;
+}
+
+function _customImageProviderLabel(row){
+ if(!row) return '';
+ const name=String(row.name||row.display_name||'').trim();
+ const id=String(row.id||'').replace(/^custom:/,'').trim();
+ return name&&id&&name!==id?name+' · custom:'+id:(name||('custom:'+id));
+}
+
 function _formatModelConfigProvider(providerId,display){
  const id=String(providerId||'').trim();
  const label=String(display||'').trim();
@@ -8214,6 +8236,9 @@ function _renderModelConfigFocusSummary(data){
  const imageKeyStatus=imageRow.key_status||{};
  const imageKeyLabel=_modelConfigKeyLabel(imageKeyStatus);
  const imageReady=!!(imageProvider&&imageModel&&imageRow.available===true);
+ const managedAuth=!!(imageRow&&imageRow.oauth_managed);
+ const pasteAction=$('modelConfigImagePasteAction');
+ if(pasteAction) pasteAction.style.display=managedAuth?'none':'';
  _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(imageProvider,imageRow.name));
  _setModelConfigText('imageGenConfigModelSummary',imageModel||String(imageRow.default_model||''));
  _setModelConfigText('imageGenConfigKeyState',imageKeyLabel);
@@ -8224,10 +8249,10 @@ function _renderModelConfigFocusSummary(data){
   const icon=imageCard.querySelector('.model-config-warning-icon');
   if(icon) icon.textContent=imageReady?'✓':'!';
  }
- _setModelConfigText('imageGenConfigCardTitle',imageReady?'图片生成模型已配置':'待处理：图片生成密钥');
+ _setModelConfigText('imageGenConfigCardTitle',imageReady?'图片生成模型已配置':(managedAuth?'待处理：图片生成授权':'待处理：图片生成密钥'));
  _setModelConfigText('imageGenConfigSummary',imageReady
   ? '图片生成配置已可用于 image_generate；正文写作仍由主模型负责。'
-  : '只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。');
+  : (managedAuth?'只有调用 image_generate 或需要实际生成图片时才会失败。请完成授权后刷新状态。':'只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。'));
 }
 
 function toggleModelConfigSection(sectionId,forceOpen){
@@ -8239,6 +8264,7 @@ function toggleModelConfigSection(sectionId,forceOpen){
  const labels={
   modelConfigMainEdit:['修改主模型配置','收起主模型配置'],
   imageGenConfigEdit:['修改配置','收起配置'],
+  customImageProviderPanel:['管理外部模型','收起外部模型'],
   modelConfigAuxEdit:['展开辅助模型','收起辅助模型'],
  };
  document.querySelectorAll('[data-model-config-toggle="'+sectionId+'"]').forEach(btn=>{
@@ -8256,8 +8282,182 @@ function openModelConfigSecretEditor(sectionId,inputId){
 }
 
 async function openImageGenKeyEditor(){
+ const providerSel=$('imageGenConfigProvider');
+ const providerId=providerSel?providerSel.value:((_modelConfigData&&_modelConfigData.image_gen&&_modelConfigData.image_gen.provider)||'');
+ const provider=_modelConfigImageProviderRow(providerId,_modelConfigData);
+ if(provider&&provider.oauth_managed){
+  toggleModelConfigSection('imageGenConfigEdit',true);
+  if(typeof showToast==='function') showToast('此图片生成服务由太极智能体授权管理，请完成授权后刷新状态。',5000,'warn');
+  return;
+ }
  openModelConfigSecretEditor('imageGenConfigEdit','imageGenConfigApiKey');
  await pasteSecretToInput('imageGenConfigApiKey');
+}
+
+function _resetCustomImageProviderForm(){
+ const defaults={
+  customImageProviderId:'',
+  customImageProviderName:'',
+  customImageProviderBaseUrl:'',
+  customImageProviderModels:'',
+  customImageProviderDefaultModel:'',
+  customImageProviderApiKey:'',
+  customImageProviderLandscapeSize:'1536x1024',
+  customImageProviderSquareSize:'1024x1024',
+  customImageProviderPortraitSize:'1024x1536',
+  customImageProviderTimeout:'180',
+ };
+ Object.keys(defaults).forEach(id=>{
+  const el=$(id);
+  if(el) el.value=defaults[id];
+ });
+ const fmt=$('customImageProviderResponseFormat');
+ if(fmt) fmt.value='auto';
+}
+
+function openCustomImageProviderEditor(providerId){
+ const rows=_modelConfigCustomImageRows(_modelConfigData);
+ const normalized=String(providerId||'').replace(/^custom:/,'').trim();
+ const row=normalized?rows.find(item=>String(item.id||'')===normalized):null;
+ toggleModelConfigSection('customImageProviderPanel',true);
+ _resetCustomImageProviderForm();
+ if(row){
+  const sizeMap=row.size_map||{};
+  const models=Array.isArray(row.models)?row.models:[];
+  const values={
+   customImageProviderId:row.id||'',
+   customImageProviderName:row.name||row.display_name||'',
+   customImageProviderBaseUrl:row.base_url||'',
+   customImageProviderModels:models.join(', '),
+   customImageProviderDefaultModel:row.default_model||models[0]||'',
+   customImageProviderLandscapeSize:sizeMap.landscape||'1536x1024',
+   customImageProviderSquareSize:sizeMap.square||'1024x1024',
+   customImageProviderPortraitSize:sizeMap.portrait||'1024x1536',
+   customImageProviderTimeout:String(row.timeout_seconds||180),
+  };
+  Object.keys(values).forEach(id=>{
+   const el=$(id);
+   if(el) el.value=values[id];
+  });
+  const fmt=$('customImageProviderResponseFormat');
+  if(fmt) fmt.value=row.response_format||'auto';
+ }
+ const focus=$('customImageProviderName')||$('customImageProviderBaseUrl');
+ if(focus) setTimeout(()=>focus.focus(),0);
+}
+
+function _renderCustomImageProviderList(data){
+ const list=$('customImageProviderList');
+ if(!list) return;
+ const rows=_modelConfigCustomImageRows(data);
+ list.innerHTML='';
+ if(!rows.length){
+  const empty=document.createElement('div');
+  empty.className='custom-image-provider-empty';
+  empty.textContent='尚未添加外部图片模型。';
+  list.appendChild(empty);
+  return;
+ }
+ rows.forEach(row=>{
+  const item=document.createElement('div');
+  item.className='custom-image-provider-row';
+  const copy=document.createElement('div');
+  copy.className='custom-image-provider-copy';
+  const title=document.createElement('strong');
+  title.textContent=_customImageProviderLabel(row);
+  const meta=document.createElement('span');
+  const model=row.default_model||((row.models||[])[0])||'未配置模型';
+  const status=row.available?'可用':'待配置';
+  meta.textContent=model+' · '+status;
+  copy.appendChild(title);
+  copy.appendChild(meta);
+  const actions=document.createElement('div');
+  actions.className='custom-image-provider-actions';
+  const edit=document.createElement('button');
+  edit.className='btn-tiny';
+  edit.type='button';
+  edit.textContent='编辑';
+  edit.onclick=()=>openCustomImageProviderEditor(row.id);
+  const del=document.createElement('button');
+  del.className='btn-tiny';
+  del.type='button';
+  del.textContent='删除';
+  del.onclick=()=>deleteCustomImageProviderConfig(row.id);
+  actions.appendChild(edit);
+  actions.appendChild(del);
+  item.appendChild(copy);
+  item.appendChild(actions);
+  list.appendChild(item);
+ });
+}
+
+function _splitCustomImageProviderModels(value){
+ return String(value||'').split(/[\n,，]+/).map(v=>v.trim()).filter(Boolean);
+}
+
+function _customImageProviderDraftId(name,baseUrl){
+ const source=String(name||'').trim()||String(baseUrl||'').trim()||'image-provider';
+ let slug=source.toLowerCase().replace(/^https?:\/\//,'').replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'');
+ if(!slug||!/^[a-z0-9]/.test(slug)) slug='image-provider';
+ return slug.slice(0,63).replace(/-+$/,'')||'image-provider';
+}
+
+function _customImageProviderPayload(){
+ const name=(($('customImageProviderName')||{}).value||'').trim();
+ const baseUrl=(($('customImageProviderBaseUrl')||{}).value||'').trim();
+ const id=(($('customImageProviderId')||{}).value||'').trim()||_customImageProviderDraftId(name,baseUrl);
+ const models=_splitCustomImageProviderModels((($('customImageProviderModels')||{}).value||'').trim());
+ const defaultModel=(($('customImageProviderDefaultModel')||{}).value||'').trim()||models[0]||'';
+ const apiKey=(($('customImageProviderApiKey')||{}).value||'').trim();
+ const responseFormat=(($('customImageProviderResponseFormat')||{}).value||'auto').trim()||'auto';
+ const timeoutRaw=(($('customImageProviderTimeout')||{}).value||'').trim();
+ const payload={
+  id,
+  name,
+  base_url:baseUrl,
+  models,
+  default_model:defaultModel,
+  size_map:{
+   landscape:(($('customImageProviderLandscapeSize')||{}).value||'').trim()||'1536x1024',
+   square:(($('customImageProviderSquareSize')||{}).value||'').trim()||'1024x1024',
+   portrait:(($('customImageProviderPortraitSize')||{}).value||'').trim()||'1024x1536',
+  },
+  response_format:responseFormat,
+ };
+ if(timeoutRaw) payload.timeout_seconds=parseInt(timeoutRaw,10);
+ if(apiKey) payload.api_key=apiKey;
+ return payload;
+}
+
+async function saveCustomImageProviderConfig(){
+ const btn=$('btnSaveCustomImageProvider');
+ const payload=_customImageProviderPayload();
+ if(btn) btn.disabled=true;
+ try{
+  await api('/api/image-gen/custom-providers',{method:'POST',body:JSON.stringify(payload)});
+  const key=$('customImageProviderApiKey');
+  if(key) key.value='';
+  await loadModelConfigPanel(true);
+  if(typeof showToast==='function') showToast('外部图片模型已保存');
+ }catch(e){
+  if(typeof showToast==='function') showToast('保存外部图片模型失败：'+(e.message||e),5000,'error');
+ }finally{
+  if(btn) btn.disabled=false;
+ }
+}
+
+async function deleteCustomImageProviderConfig(providerId){
+ const normalized=String(providerId||'').replace(/^custom:/,'').trim();
+ if(!normalized) return;
+ const ok=await showConfirmDialog({title:'删除外部图片模型？',message:'删除后需要重新添加才能再次选择。',confirmLabel:'删除',danger:true,focusCancel:true});
+ if(!ok) return;
+ try{
+  await api('/api/image-gen/custom-providers/'+encodeURIComponent(normalized),{method:'DELETE'});
+  await loadModelConfigPanel(true);
+  if(typeof showToast==='function') showToast('外部图片模型已删除');
+ }catch(e){
+  if(typeof showToast==='function') showToast('删除外部图片模型失败：'+(e.message||e),5000,'error');
+ }
 }
 
 function _syncMainModelConfigControls(){
@@ -8368,6 +8568,7 @@ function _renderModelConfigPanel(data){
  const imageKeyInput=$('imageGenConfigApiKey');
  if(imageKeyInput) imageKeyInput.value='';
  _syncImageGenConfigControls();
+ _renderCustomImageProviderList(data);
 }
 
 let _taijiLicenseData=null;
@@ -8602,12 +8803,8 @@ async function saveImageGenConfig(){
  try{
   const payload={provider,model};
   if(apiKey) payload.api_key=apiKey;
-  const data=await api('/api/image-gen/config',{method:'POST',body:JSON.stringify(payload)});
-  _modelConfigData=Object.assign({},_modelConfigData||{},{
-   image_gen:data.image_gen,
-   image_gen_providers:data.providers,
-  });
-  _renderModelConfigPanel(_modelConfigData);
+  await api('/api/image-gen/config',{method:'POST',body:JSON.stringify(payload)});
+  await loadModelConfigPanel(true);
   toggleModelConfigSection('imageGenConfigEdit',false);
   if(typeof showToast==='function') showToast('图片生成配置已保存');
  }catch(e){

@@ -790,9 +790,11 @@ def _iter_image_generation_providers():
     """Return registered image generation providers, best-effort."""
     try:
         from agent.image_gen_registry import list_providers
+        from agent.custom_image_providers import register_configured_custom_image_providers
         from hermes_cli.plugins import _ensure_plugins_discovered
 
         _ensure_plugins_discovered()
+        register_configured_custom_image_providers()
         return list(list_providers())
     except Exception as exc:
         logger.debug("Could not list image generation providers: %s", exc)
@@ -1058,9 +1060,11 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         # Import locally so plugin discovery isn't triggered just by
         # importing this module (tests rely on that).
         from agent.image_gen_registry import get_provider
+        from agent.custom_image_providers import register_configured_custom_image_providers
         from hermes_cli.plugins import _ensure_plugins_discovered
 
         _ensure_plugins_discovered()
+        register_configured_custom_image_providers()
         provider = get_provider(configured)
     except Exception as exc:
         logger.debug("image_gen plugin dispatch skipped: %s", exc)

@@ -72,6 +72,14 @@ def get_provider(name: str) -> Optional[ImageGenProvider]:
         return _providers.get(name.strip())
 
 
+def unregister_provider(name: str) -> None:
+    """Remove a registered image generation provider if it exists."""
+    if not isinstance(name, str):
+        return
+    with _lock:
+        _providers.pop(name.strip(), None)
+
+
 def get_active_provider() -> Optional[ImageGenProvider]:
     """Resolve the currently-active provider.
 

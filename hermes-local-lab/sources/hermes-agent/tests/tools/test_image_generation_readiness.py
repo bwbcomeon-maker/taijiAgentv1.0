@@ -43,6 +43,45 @@ def test_readiness_reports_configured_but_unavailable_without_provider_auth(monk
     assert "Codex" not in status["public_message"]
 
 
+def test_readiness_supports_configured_custom_image_provider(monkeypatch):
+    from tools import image_generation_tool as image_tool
+    from agent.custom_image_providers import ConfigurableOpenAIImageProvider
+
+    entry = {
+        "id": "router",
+        "name": "Router Images",
+        "base_url": "https://images.example.com/v1",
+        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+        "models": ["gpt-image-custom"],
+        "default_model": "gpt-image-custom",
+    }
+    monkeypatch.setattr(
+        image_tool,
+        "_load_image_gen_config",
+        lambda: {"provider": "custom:router", "model": "gpt-image-custom"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        image_tool,
+        "_iter_image_generation_providers",
+        lambda: [ConfigurableOpenAIImageProvider(entry)],
+        raising=False,
+    )
+    monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)
+
+    unavailable = image_tool.get_image_generation_readiness()
+    assert unavailable["configured"] is True
+    assert unavailable["available"] is False
+    assert unavailable["reason_code"] == "authorization_required"
+
+    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret")
+    available = image_tool.get_image_generation_readiness()
+    assert available["configured"] is True
+    assert available["available"] is True
+    assert available["reason_code"] == "ready"
+    assert available["provider"] == "custom:router"
+
+
 def test_image_generate_schema_appears_only_when_provider_available(monkeypatch):
     from tools import image_generation_tool as image_tool
     from tools.registry import invalidate_check_fn_cache
