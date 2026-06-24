@@ -357,6 +357,153 @@ log_tail() {
   fi
 }
 
+path_status() {
+  local path="$1"
+  printf '%s exists=%s writable=%s executable=%s\n' \
+    "$path" \
+    "$(if [ -e "$path" ]; then printf true; else printf false; fi)" \
+    "$(if [ -w "$path" ]; then printf true; else printf false; fi)" \
+    "$(if [ -x "$path" ]; then printf true; else printf false; fi)"
+}
+
+print_security_report() {
+  section "Taiji Security Environment"
+  printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  printf 'TAIJI_SECURITY_MODE=%s\n' "${TAIJI_SECURITY_MODE:-restricted}"
+  printf 'TAIJI_ALLOW_TERMINAL=%s\n' "${TAIJI_ALLOW_TERMINAL:-0}"
+  printf 'TAIJI_ALLOW_EXECUTE_CODE=%s\n' "${TAIJI_ALLOW_EXECUTE_CODE:-0}"
+  printf 'TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS=%s\n' "${TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS:-0}"
+  printf 'TAIJI_ALLOW_DELEGATE_TASK=%s\n' "${TAIJI_ALLOW_DELEGATE_TASK:-0}"
+  printf 'install_root=%s\n' "$LAB_DIR"
+  printf 'agent_dir=%s\n' "$AGENT_DIR"
+  printf 'webui_dir=%s\n' "$WEBUI_DIR"
+  printf 'runtime_home=%s\n' "$TAIJI_RUNTIME_HOME"
+  printf 'workspace=%s\n' "$TAIJI_WORKSPACE"
+  printf 'state_dir=%s\n' "$TAIJI_STATE_DIR"
+  printf 'log_dir=%s\n' "$LOG_DIR"
+  printf 'TAIJI_AGENT_TMP_DIR=%s\n' "$TAIJI_AGENT_TMP_DIR"
+  printf 'TMPDIR=%s\n' "${TMPDIR:-}"
+  printf 'TMP=%s\n' "${TMP:-}"
+  printf 'TEMP=%s\n' "${TEMP:-}"
+  printf 'agent_api=%s:%s\n' "$AGENT_API_HOST" "$AGENT_API_PORT"
+  printf 'webui=%s:%s\n' "$WEBUI_HOST" "$WEBUI_PORT"
+
+  section "Path Checks"
+  for path in \
+    "$LAB_DIR" \
+    "$AGENT_DIR" \
+    "$WEBUI_DIR" \
+    "$TAIJI_RUNTIME_HOME" \
+    "$TAIJI_WORKSPACE" \
+    "$TAIJI_STATE_DIR" \
+    "$LOG_DIR" \
+    "$TAIJI_AGENT_TMP_DIR" \
+    "$TAIJI_RUNTIME_HOME/skills" \
+    "$TAIJI_RUNTIME_HOME/scripts"; do
+    path_status "$path"
+  done
+
+  section "Runtime Checks"
+  printf 'python_bin=%s\n' "$(python_bin)"
+  if py="$(python_bin)" && [ -n "$py" ]; then
+    "$py" - "$TAIJI_AGENT_TMP_DIR" "$TAIJI_WORKSPACE" <<'PY' 2>&1 | redact_stream
+from pathlib import Path
+import sys
+import tempfile
+import zipfile
+
+tmp = Path(sys.argv[1])
+workspace = Path(sys.argv[2])
+for label, path in (("tmp", tmp), ("workspace", workspace)):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".taiji-security-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        print(f"{label}.write=true")
+    except Exception as exc:
+        print(f"{label}.write=false reason={exc}")
+
+try:
+    with tempfile.TemporaryDirectory(dir=tmp) as td:
+        print(f"tmpdir.controlled={str(str(td).startswith(str(tmp))).lower()}")
+except Exception as exc:
+    print(f"tmpdir.controlled=false reason={exc}")
+
+try:
+    docx = tmp / "taiji-diagnose-probe.docx"
+    with zipfile.ZipFile(docx, "w") as zf:
+        zf.writestr("[Content_Types].xml", "")
+    docx.unlink()
+    print("docx.minimal_write=true")
+except Exception as exc:
+    print(f"docx.minimal_write=false reason={exc}")
+PY
+  fi
+}
+
+print_allowlist_report() {
+  section "Taiji Security Allowlist"
+  printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  printf 'note=%s\n' "Do not globally allow /bin/bash, python3, or /tmp. Review these Taiji-owned paths first."
+
+  section "Folder Allowlist"
+  printf '%s\n' "$LAB_DIR/"
+  printf '%s\n' "$TAIJI_RUNTIME_HOME/"
+  printf '%s\n' "$TAIJI_WORKSPACE/"
+  printf '%s\n' "$TAIJI_STATE_DIR/"
+  printf '%s\n' "$LOG_DIR/"
+  printf '%s\n' "$TAIJI_AGENT_TMP_DIR/"
+  printf '%s\n' "$TAIJI_RUNTIME_HOME/skills/"
+  printf '%s\n' "$TAIJI_RUNTIME_HOME/scripts/"
+  printf '%s\n' "$(dirname "$TAIJI_LICENSE_FILE")/"
+
+  section "Process Path Allowlist"
+  printf '%s\n' "/usr/bin/taiji"
+  printf '%s\n' "/usr/bin/taiji-agent"
+  printf '%s\n' "/usr/bin/taiji-agent-diagnose"
+  printf '%s\n' "/usr/share/applications/taiji-agent.desktop"
+  printf '%s\n' "$LAB_DIR/scripts/start-agent.sh"
+  printf '%s\n' "$LAB_DIR/scripts/start-webui.sh"
+  printf '%s\n' "$LAB_DIR/scripts/stop-all.sh"
+  printf '%s\n' "$(python_bin)"
+
+  section "Parent Child Process Chain"
+  printf '%s\n' "taiji-agent.desktop -> /usr/bin/taiji-agent -> $LAB_DIR/scripts/start-agent.sh -> $(python_bin) -m taiji_runtime.main gateway run"
+  printf '%s\n' "taiji-agent.desktop -> /usr/bin/taiji-agent -> $LAB_DIR/scripts/start-webui.sh -> $(python_bin) $WEBUI_DIR/server.py"
+  printf '%s\n' "restricted mode: terminal, execute_code, unapproved skill scripts, cron scripts, delegate_task are blocked by default."
+  printf '%s\n' "full mode: customer IT must approve bash/python/script child processes before enabling."
+
+  section "Local Ports"
+  printf 'agent_api=%s:%s\n' "$AGENT_API_HOST" "$AGENT_API_PORT"
+  printf 'webui=%s:%s\n' "$WEBUI_HOST" "$WEBUI_PORT"
+}
+
+print_usage() {
+  printf 'Usage: taiji-agent-diagnose [--security|--allowlist]\n'
+}
+
+case "${1:-}" in
+  --security)
+    print_security_report
+    exit 0
+    ;;
+  --allowlist)
+    print_allowlist_report
+    exit 0
+    ;;
+  -h|--help)
+    print_usage
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    print_usage >&2
+    exit 2
+    ;;
+esac
+
 section "Taiji Agent Diagnose"
 printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 printf 'user=%s\n' "$(id -un 2>/dev/null || true)"
@@ -415,6 +562,9 @@ license_summary
 
 section "Attachment Capabilities"
 attachment_capabilities
+
+print_security_report
+print_allowlist_report
 
 section "HTTP Probes"
 if have curl; then

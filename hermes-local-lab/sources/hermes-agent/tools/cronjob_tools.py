@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from hermes_constants import display_hermes_home
+from tools.taiji_security_mode import blocked_message, is_cron_script_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +352,12 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     """
     if not script or not script.strip():
         return None  # empty/None = clearing the field, always OK
+
+    if not is_cron_script_allowed():
+        return blocked_message(
+            "cron script execution",
+            "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
+        )
 
     from hermes_constants import get_hermes_home
 

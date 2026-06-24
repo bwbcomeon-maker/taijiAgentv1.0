@@ -875,6 +875,14 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         (success, output) — on failure *output* contains the error message so the
         LLM can report the problem to the user.
     """
+    from tools.taiji_security_mode import blocked_message, is_cron_script_allowed
+
+    if not is_cron_script_allowed():
+        return False, blocked_message(
+            "cron script execution",
+            "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
+        )
+
     scripts_dir = _get_hermes_home() / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()

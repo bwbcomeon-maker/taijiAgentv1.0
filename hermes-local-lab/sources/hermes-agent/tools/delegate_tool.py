@@ -37,6 +37,7 @@ from toolsets import TOOLSETS
 # Must match hermes_cli.runtime_provider.RUNTIME_PROVIDER_TYPE_CUSTOM.
 _RUNTIME_PROVIDER_CUSTOM = "custom"
 from tools import file_state
+from tools.taiji_security_mode import blocked_message, is_delegate_task_allowed
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import base_url_hostname, is_truthy_value
 
@@ -1940,6 +1941,18 @@ def delegate_task(
 
     Returns JSON with results array, one entry per task.
     """
+    if not is_delegate_task_allowed():
+        return json.dumps(
+            {
+                "success": False,
+                "error": blocked_message(
+                    "delegate_task sub-agent execution",
+                    "TAIJI_ALLOW_DELEGATE_TASK",
+                ),
+            },
+            ensure_ascii=False,
+        )
+
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
 

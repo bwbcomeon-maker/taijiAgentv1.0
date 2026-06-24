@@ -652,6 +652,69 @@ class ShellFileOperations(FileOperations):
             stdout=result.get("output", ""),
             exit_code=result.get("returncode", 0)
         )
+
+    def _native_local_io_enabled(self) -> bool:
+        try:
+            from tools.environments.local import LocalEnvironment
+        except Exception:  # noqa: BLE001
+            return False
+        return isinstance(self.env, LocalEnvironment)
+
+    def _expand_native_local_path(self, path: str) -> str:
+        expanded = Path(os.path.expanduser(path))
+        if expanded.is_absolute():
+            return str(expanded)
+        effective_cwd = getattr(self.env, "cwd", None) or self.cwd or os.getcwd()
+        return str(Path(effective_cwd) / expanded)
+
+    def _write_file_native_local(self, path: str, content: str) -> WriteResult:
+        path = self._expand_native_local_path(path)
+        if _is_write_denied(path):
+            return WriteResult(error=f"Write denied: '{path}' is a protected system/credential file.")
+
+        target = Path(path)
+        ext = target.suffix.lower()
+        pre_content: Optional[str] = None
+        want_pre = ext in LINTERS_INPROC or self._lsp_handles_extension(ext)
+        if want_pre and target.exists():
+            try:
+                pre_content = target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pre_content = None
+
+        original_ending = _detect_line_ending(pre_content or "")
+        if original_ending == "\r\n":
+            content = _normalize_line_endings(content, "\r\n")
+
+        self._snapshot_lsp_baseline(path)
+
+        parent = target.parent
+        dirs_created = False
+        if str(parent):
+            dirs_created = not parent.exists()
+            parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            target.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            return WriteResult(error=f"Failed to write file: {exc}")
+
+        bytes_written = len(content.encode("utf-8"))
+        lint_result = self._check_lint_delta(path, pre_content=pre_content, post_content=content)
+        lsp_diagnostics: Optional[str] = None
+        if lint_result.success or lint_result.skipped:
+            block = self._maybe_lsp_diagnostics(
+                path, pre_content=pre_content, post_content=content
+            )
+            if block:
+                lsp_diagnostics = block
+
+        return WriteResult(
+            bytes_written=bytes_written,
+            dirs_created=dirs_created,
+            lint=lint_result.to_dict() if lint_result else None,
+            lsp_diagnostics=lsp_diagnostics,
+        )
     
     def _has_command(self, cmd: str) -> bool:
         """Check if a command exists in the environment (cached)."""
@@ -1002,6 +1065,9 @@ class ShellFileOperations(FileOperations):
         Returns:
             WriteResult with bytes written, lint summary, or error.
         """
+        if self._native_local_io_enabled():
+            return self._write_file_native_local(path, content)
+
         # Expand ~ and other shell paths
         path = self._expand_path(path)
 

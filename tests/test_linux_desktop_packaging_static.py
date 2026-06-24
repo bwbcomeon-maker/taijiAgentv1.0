@@ -151,6 +151,31 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("env.TAIJI_RUNTIME_HOME", main_js)
         self.assertIn('path.join(userDataDir(), "runtime-home")', main_js)
 
+    def test_taiji_runtime_defaults_to_restricted_security_and_local_tmp(self):
+        runtime_env = read_text("hermes-local-lab/scripts/runtime-env.sh")
+        start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
+        start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
+        main_js = read_text("apps/taiji-desktop/src/main.js")
+
+        self.assertIn('TAIJI_SECURITY_MODE="${TAIJI_SECURITY_MODE:-restricted}"', runtime_env)
+        self.assertIn('"$TAIJI_RUNTIME_HOME/skills"', runtime_env)
+        self.assertIn('"$TAIJI_RUNTIME_HOME/scripts"', runtime_env)
+        for var in ("TMPDIR", "TMP", "TEMP"):
+            self.assertIn(f'export {var}="$TMP_DIR"', runtime_env)
+        self.assertIn("TAIJI_SECURITY_MODE", start_agent)
+        self.assertIn("TAIJI_SECURITY_MODE", start_webui)
+        self.assertIn('env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || "restricted"', main_js)
+
+    def test_taiji_diagnose_exports_security_and_allowlist_reports(self):
+        diagnose = read_text("hermes-local-lab/scripts/taiji-agent-diagnose")
+
+        self.assertIn("--security", diagnose)
+        self.assertIn("--allowlist", diagnose)
+        self.assertIn("print_security_report", diagnose)
+        self.assertIn("print_allowlist_report", diagnose)
+        self.assertIn("TAIJI_SECURITY_MODE", diagnose)
+        self.assertIn("TAIJI_AGENT_TMP_DIR", diagnose)
+
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
 

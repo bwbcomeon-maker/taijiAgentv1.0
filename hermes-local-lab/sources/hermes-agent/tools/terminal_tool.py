@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from utils import env_var_enabled
+from tools.taiji_security_mode import blocked_message, is_terminal_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -1636,6 +1637,14 @@ def terminal_tool(
                 "output": "",
                 "exit_code": -1,
                 "error": f"Invalid command: expected string, got {type(command).__name__}",
+                "status": "error",
+            }, ensure_ascii=False)
+
+        if not is_terminal_allowed():
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": blocked_message("terminal command execution", "TAIJI_ALLOW_TERMINAL"),
                 "status": "error",
             }, ensure_ascii=False)
 

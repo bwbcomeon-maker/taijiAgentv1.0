@@ -91,6 +91,19 @@ class TestJobScriptField:
 class TestRunJobScript:
     """Test the _run_job_script() function."""
 
+    def test_restricted_mode_blocks_existing_script(self, cron_env, monkeypatch):
+        from cron.scheduler import _run_job_script
+
+        monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+        monkeypatch.delenv("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS", raising=False)
+        script = cron_env / "scripts" / "test.py"
+        script.write_text('print("should not run")\n')
+
+        success, output = _run_job_script(str(script))
+
+        assert success is False
+        assert "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS=1" in output
+
     def test_successful_script(self, cron_env):
         from cron.scheduler import _run_job_script
 

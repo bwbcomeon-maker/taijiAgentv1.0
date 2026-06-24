@@ -333,6 +333,7 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_RUNTIME_HOME = process.env.TAIJI_RUNTIME_HOME || path.join(userDataDir(), "runtime-home");
   env.TAIJI_WORKSPACE = process.env.TAIJI_WORKSPACE || path.join(userDataDir(), "workspace");
   env.TAIJI_AGENT_LOG_DIR = logDir;
+  env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || "restricted";
   env.AGENT_API_HOST = "127.0.0.1";
   env.AGENT_API_PORT = String(agentPort);
   env.API_SERVER_HOST = "127.0.0.1";
@@ -347,11 +348,21 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
   const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const stateDir = process.env.TAIJI_STATE_DIR || userStateDir();
+  const tmpDir = process.env.TAIJI_AGENT_TMP_DIR || path.join(stateDir, "tmp");
   env.TAIJI_LICENSE_FILE = process.env.TAIJI_LICENSE_FILE || path.join(configHome, "taiji-agent", "license.jwt");
   env.TAIJI_STATE_DIR = stateDir;
+  env.TAIJI_AGENT_TMP_DIR = tmpDir;
+  env.TMPDIR = tmpDir;
+  env.TMP = tmpDir;
+  env.TEMP = tmpDir;
   env.TAIJI_LICENSE_STATE_FILE = process.env.TAIJI_LICENSE_STATE_FILE || path.join(stateDir, "license-state.json");
   env.TAIJI_LICENSE_REQUIRED = process.env.TAIJI_LICENSE_REQUIRED || "1";
   env.TAIJI_LICENSE_MACHINE_BINDING_REQUIRED = process.env.TAIJI_LICENSE_MACHINE_BINDING_REQUIRED || "1";
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  } catch (error) {
+    desktopBootLog(`failed to create tmp dir ${tmpDir}: ${error.message}`);
+  }
   return env;
 }
 

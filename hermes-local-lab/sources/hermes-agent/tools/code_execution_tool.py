@@ -46,6 +46,7 @@ import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
+from tools.taiji_security_mode import blocked_message, is_execute_code_allowed
 
 # Availability gate.  On Windows we fall back to loopback TCP for the
 # sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
@@ -357,7 +358,8 @@ _FILE_TRANSPORT_HEADER = '''\
 """Auto-generated Hermes tools RPC stubs (file-based transport)."""
 import json, os, shlex, tempfile, threading, time
 
-_RPC_DIR = os.environ.get("HERMES_RPC_DIR") or os.path.join(tempfile.gettempdir(), "hermes_rpc")
+_RPC_BASE = os.environ.get("TAIJI_AGENT_TMP_DIR") or tempfile.gettempdir()
+_RPC_DIR = os.environ.get("HERMES_RPC_DIR") or os.path.join(_RPC_BASE, "hermes_rpc")
 _seq = 0
 # `_seq += 1` is not atomic (read-modify-write), so concurrent _call()
 # invocations from multiple threads could allocate the same sequence number
@@ -666,6 +668,9 @@ def _ship_file_to_remote(env, remote_path: str, content: str) -> None:
 
 def _env_temp_dir(env: Any) -> str:
     """Return a writable temp dir for env-backed execute_code sandboxes."""
+    configured = os.environ.get("TAIJI_AGENT_TMP_DIR")
+    if configured and env.__class__.__name__ == "LocalEnvironment":
+        return configured.rstrip("/") or "/"
     get_temp_dir = getattr(env, "get_temp_dir", None)
     if callable(get_temp_dir):
         try:
@@ -678,6 +683,14 @@ def _env_temp_dir(env: Any) -> str:
     if isinstance(candidate, str) and candidate.startswith("/"):
         return candidate.rstrip("/") or "/"
     return "/tmp"
+
+
+def _local_taiji_temp_dir() -> str:
+    configured = os.environ.get("TAIJI_AGENT_TMP_DIR")
+    if configured:
+        os.makedirs(configured, exist_ok=True)
+        return configured
+    return tempfile.gettempdir()
 
 
 def _rpc_poll_loop(
@@ -1038,6 +1051,21 @@ def execute_code(
     Returns:
         JSON string with execution results.
     """
+    if not is_execute_code_allowed():
+        return json.dumps(
+            {
+                "status": "error",
+                "error": blocked_message(
+                    "execute_code sandbox",
+                    "TAIJI_ALLOW_EXECUTE_CODE",
+                ),
+                "output": "",
+                "tool_calls_made": 0,
+                "duration_seconds": 0,
+            },
+            ensure_ascii=False,
+        )
+
     if not SANDBOX_AVAILABLE:
         return json.dumps({
             "error": "execute_code sandbox is unavailable in this environment. "
@@ -1071,10 +1099,11 @@ def execute_code(
         sandbox_tools = SANDBOX_ALLOWED_TOOLS
 
     # --- Set up temp directory with hermes_tools.py and script.py ---
-    tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_")
-    # Use /tmp on macOS to avoid the long /var/folders/... path that pushes
-    # Unix domain socket paths past the 104-byte macOS AF_UNIX limit.
-    # On Linux, tempfile.gettempdir() already returns /tmp.
+    taiji_tmp_dir = _local_taiji_temp_dir()
+    tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_", dir=taiji_tmp_dir)
+    # Use the Taiji-controlled temp dir when configured. On macOS, long paths
+    # can exceed the AF_UNIX socket limit, so we fall back to loopback TCP for
+    # the RPC transport while keeping the generated script under taiji_tmp_dir.
     #
     # Windows: Python 3.9+ added partial AF_UNIX support but the file-backed
     # variant is flaky across Windows builds (requires Windows 10 1803+,
@@ -1083,13 +1112,14 @@ def execute_code(
     # same ephemeral port, same 1-connection listen queue, same serialized
     # request/response framing.  The generated client reads the transport
     # selector from HERMES_RPC_SOCKET (path vs. ``tcp://host:port``).
-    _sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
-    _use_tcp_rpc = _IS_WINDOWS
+    _sock_tmpdir = taiji_tmp_dir
+    _candidate_sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+    _use_tcp_rpc = _IS_WINDOWS or (sys.platform == "darwin" and len(_candidate_sock_path) >= 100)
     if _use_tcp_rpc:
         sock_path = None  # not used on Windows; TCP endpoint stored below
         rpc_endpoint = None  # set after bind()
     else:
-        sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+        sock_path = _candidate_sock_path
         rpc_endpoint = sock_path
 
     tool_call_log: list = []

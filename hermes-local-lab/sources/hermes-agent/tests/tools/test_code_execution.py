@@ -119,7 +119,8 @@ class TestHermesToolsGeneration(unittest.TestCase):
     def test_file_transport_uses_tempfile_fallback_for_rpc_dir(self):
         src = generate_hermes_tools_module(["terminal"], transport="file")
         self.assertIn("import json, os, shlex, tempfile, threading, time", src)
-        self.assertIn("os.path.join(tempfile.gettempdir(), \"hermes_rpc\")", src)
+        self.assertIn('os.environ.get("TAIJI_AGENT_TMP_DIR") or tempfile.gettempdir()', src)
+        self.assertIn('os.path.join(_RPC_BASE, "hermes_rpc")', src)
         self.assertNotIn('os.environ.get("HERMES_RPC_DIR", "/tmp/hermes_rpc")', src)
 
     def test_uds_transport_serializes_concurrent_calls(self):
@@ -140,6 +141,16 @@ class TestHermesToolsGeneration(unittest.TestCase):
 
 
 class TestExecuteCodeRemoteTempDir(unittest.TestCase):
+    def test_env_temp_dir_does_not_use_taiji_host_tmp_for_remote_env(self):
+        from tools.code_execution_tool import _env_temp_dir
+
+        class FakeEnv:
+            def get_temp_dir(self):
+                return "/remote/tmp"
+
+        with patch.dict(os.environ, {"TAIJI_AGENT_TMP_DIR": "/host/taiji/tmp"}):
+            self.assertEqual(_env_temp_dir(FakeEnv()), "/remote/tmp")
+
     def test_execute_remote_uses_backend_temp_dir_for_sandbox(self):
         class FakeEnv:
             def __init__(self):

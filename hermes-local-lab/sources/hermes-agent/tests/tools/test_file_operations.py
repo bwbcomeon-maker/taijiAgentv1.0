@@ -560,6 +560,20 @@ class TestSearchFilesFallbackHiddenPaths:
 
 
 class TestShellFileOpsWriteDenied:
+    def test_local_write_file_uses_native_python_io(self, tmp_path):
+        from tools.environments.local import LocalEnvironment
+
+        env = LocalEnvironment.__new__(LocalEnvironment)
+        env.cwd = str(tmp_path)
+        env.execute = MagicMock(side_effect=AssertionError("write_file must not shell out"))
+        ops = ShellFileOperations(env)
+
+        result = ops.write_file("nested/report.txt", "hello")
+
+        assert result.error is None
+        assert (tmp_path / "nested" / "report.txt").read_text(encoding="utf-8") == "hello"
+        env.execute.assert_not_called()
+
     def test_write_file_denied_path(self, file_ops):
         result = file_ops.write_file("~/.ssh/authorized_keys", "evil key")
         assert result.error is not None
