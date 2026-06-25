@@ -3468,6 +3468,23 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
+def _tool_result_metadata(raw) -> dict:
+    """Return safe structured metadata for special tool outcomes."""
+    try:
+        data = raw if isinstance(raw, dict) else json.loads(str(raw or ""))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if data.get("status") == "capability_blocked":
+        return {
+            "status": "capability_blocked",
+            "capability": str(data.get("capability") or ""),
+            "approval_applicable": bool(data.get("approval_applicable", False)),
+        }
+    return {}
+
+
 def _truncate_tool_args(args, limit: int = 6) -> dict:
     """Truncate tool args for compact session persistence."""
     out = {}
@@ -4751,13 +4768,15 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    result_metadata = _tool_result_metadata(preview)
+                    result_is_error = bool(cb_kwargs.get('is_error', False)) or result_metadata.get("status") == "capability_blocked"
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
                         if not name or live_tc.get('name') == name:
                             live_tc['done'] = True
                             live_tc['duration'] = cb_kwargs.get('duration')
-                            live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                            live_tc['is_error'] = result_is_error
                             break
                     # Mirror done state to shared dict (#1361 §B)
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
@@ -4767,19 +4786,21 @@ def _run_agent_streaming(
                             if not name or shared_tc.get('name') == name:
                                 shared_tc['done'] = True
                                 shared_tc['duration'] = cb_kwargs.get('duration')
-                                shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                shared_tc['is_error'] = result_is_error
                                 break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
-                    put('tool_complete', {
+                    event_payload = {
                         'event_type': event_type,
                         'name': public_egress_scrub(name, surface="stream_tool_name"),
                         'preview': public_egress_scrub(preview, surface="stream_tool_preview"),
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
-                        'is_error': bool(cb_kwargs.get('is_error', False)),
-                    })
+                        'is_error': result_is_error,
+                    }
+                    event_payload.update(result_metadata)
+                    put('tool_complete', event_payload)
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -4827,12 +4848,15 @@ def _run_agent_streaming(
                             _tool_result_snippet(function_result),
                             surface="stream_tool_result",
                         )
+                        result_metadata = _tool_result_metadata(function_result)
+                        result_is_error = result_metadata.get("status") == "capability_blocked"
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
                             if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
                                 live_tc['done'] = True
                                 live_tc['snippet'] = result_snippet
+                                live_tc['is_error'] = result_is_error
                                 break
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
@@ -4841,16 +4865,19 @@ def _run_agent_streaming(
                                 if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
                                     shared_tc['done'] = True
                                     shared_tc['snippet'] = result_snippet
+                                    shared_tc['is_error'] = result_is_error
                                     break
                         _checkpoint_activity[0] += 1
-                        put('tool_complete', {
+                        event_payload = {
                             'event_type': 'tool.completed',
                             'name': public_egress_scrub(name, surface="stream_tool_name"),
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
-                        })
+                            'is_error': result_is_error,
+                        }
+                        event_payload.update(result_metadata)
+                        put('tool_complete', event_payload)
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()

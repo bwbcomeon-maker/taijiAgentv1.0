@@ -677,6 +677,11 @@
               <span class="yolo-pill-icon" aria-hidden="true">⚡</span>
               <span class="yolo-pill-label" data-i18n="yolo_pill_label">YOLO</span>
             </button>
+            <button class="security-mode-chip unknown" id="securityModeChip" type="button" onclick="openSecuritySettings()" title="查看安全模式" aria-label="安全模式：检测中">
+              <span class="taiji-icon security-mode-icon" data-icon="lock" aria-hidden="true"></span>
+              <span class="security-mode-label" id="securityModeChipLabel">安全模式</span>
+              <span class="security-mode-detail" id="securityModeChipDetail">检测中</span>
+            </button>
             <div id="profileChipWrap" class="composer-profile-wrap">
               <button class="composer-profile-chip profile-chip composer-control" id="profileChip" type="button" onclick="toggleProfileDropdown()" title="切换配置档">
                 <span class="taiji-icon composer-profile-icon composer-control-icon" data-icon="user-round-cog" aria-hidden="true"></span>
@@ -1699,6 +1704,19 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <div class="settings-field security-profile-card" id="settingsSecurityProfile" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label for="settingsSecurityProfileSelect">安全模式</label>
+              <div class="settings-security-copy">strict 会关闭终端/代码等高风险能力；local_controlled 面向本机开发演示，危险命令仍保留审批。</div>
+              <div class="settings-security-row">
+                <select id="settingsSecurityProfileSelect" aria-label="选择安全模式">
+                  <option value="strict">strict：严格模式</option>
+                  <option value="local_controlled">local_controlled：本机可控</option>
+                </select>
+                <button class="sm-btn" id="settingsSecurityProfileSave" type="button" onclick="saveSecurityProfile()">保存安全模式</button>
+              </div>
+              <div class="security-capability-list" id="settingsSecurityCapabilities" aria-live="polite"></div>
+              <div id="settingsSecurityStatus" class="settings-autosave-status" aria-live="polite"></div>
+            </div>
             <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="settings_label_shutdown">Stop the taiji Agent server</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>

@@ -1754,6 +1754,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('tool_complete',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
+      if(d.status==='capability_blocked'){
+        const cap=d.capability||d.name||'tool';
+        const msg=`${cap} 当前未开启，所以不会弹审批框。请在安全模式中切换后重启。`;
+        if(typeof setComposerStatus==='function')setComposerStatus(msg);
+        if(typeof showToast==='function')showToast(msg,5000,'error');
+        if(typeof refreshSecurityStatus==='function')refreshSecurityStatus(true);
+      }
       const inflight=INFLIGHT[activeSid];
       if(!inflight) return;
       if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];

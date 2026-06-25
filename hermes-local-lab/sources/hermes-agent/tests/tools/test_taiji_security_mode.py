@@ -10,7 +10,9 @@ def test_restricted_mode_blocks_terminal(monkeypatch):
 
     result = json.loads(terminal_tool("echo should-not-run"))
 
-    assert result["status"] == "error"
+    assert result["status"] == "capability_blocked"
+    assert result["capability"] == "terminal"
+    assert result["approval_applicable"] is False
     assert result["exit_code"] == -1
     assert "TAIJI_ALLOW_TERMINAL=1" in result["error"]
 
@@ -23,8 +25,29 @@ def test_restricted_mode_blocks_execute_code(monkeypatch):
 
     result = json.loads(execute_code("print('should not run')"))
 
-    assert result["status"] == "error"
+    assert result["status"] == "capability_blocked"
+    assert result["capability"] == "execute_code"
+    assert result["approval_applicable"] is False
     assert "TAIJI_ALLOW_EXECUTE_CODE=1" in result["error"]
+
+
+def test_security_status_reports_local_controlled_profile(monkeypatch):
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+    monkeypatch.setenv("TAIJI_ALLOW_TERMINAL", "1")
+    monkeypatch.setenv("TAIJI_ALLOW_EXECUTE_CODE", "1")
+    monkeypatch.setenv("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS", "1")
+    monkeypatch.setenv("TAIJI_ALLOW_DELEGATE_TASK", "1")
+
+    from tools.taiji_security_mode import build_security_status
+
+    status = build_security_status()
+
+    assert status["profile"] == "local_controlled"
+    assert status["mode"] == "restricted"
+    assert status["capabilities"]["terminal"]["allowed"] is True
+    assert status["capabilities"]["execute_code"]["allowed"] is True
+    assert status["capabilities"]["document_read"]["allowed"] is True
+    assert status["capabilities"]["terminal"]["approval_applicable"] is True
 
 
 def test_restricted_mode_blocks_cron_scripts(monkeypatch):

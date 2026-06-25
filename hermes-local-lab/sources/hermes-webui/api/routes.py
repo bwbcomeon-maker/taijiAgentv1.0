@@ -6532,6 +6532,7 @@ from api.onboarding import (
     complete_onboarding,
     probe_provider_endpoint,
 )
+from api.security_status import build_security_status_payload, set_security_profile
 from api.oauth import (
     cancel_onboarding_oauth_flow,
     poll_onboarding_oauth_flow,
@@ -8054,6 +8055,10 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/system/health":
         j(handler, build_system_health_payload())
+        return True
+
+    if parsed.path == "/api/security/status":
+        j(handler, build_security_status_payload())
         return True
 
     if parsed.path == "/api/models":
@@ -10404,6 +10409,14 @@ def handle_post(handler, parsed) -> bool:
         else:
             disable_session_yolo(sid)
         return j(handler, {"ok": True, "yolo_enabled": enabled})
+
+    if parsed.path == "/api/security/profile":
+        try:
+            return j(handler, set_security_profile(body.get("profile", "")))
+        except PermissionError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
 
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)

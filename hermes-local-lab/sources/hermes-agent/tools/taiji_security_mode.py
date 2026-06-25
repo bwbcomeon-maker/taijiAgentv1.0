@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 
 _TRUTHY = {"1", "true", "yes", "on", "y"}
+_CONTROLLED_ALLOW_VARS = {
+    "terminal": "TAIJI_ALLOW_TERMINAL",
+    "execute_code": "TAIJI_ALLOW_EXECUTE_CODE",
+    "unapproved_skill_scripts": "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
+    "delegate_task": "TAIJI_ALLOW_DELEGATE_TASK",
+}
 
 
 def env_flag_enabled(name: str) -> bool:
@@ -45,9 +52,96 @@ def is_delegate_task_allowed() -> bool:
     return _allowed_in_mode("TAIJI_ALLOW_DELEGATE_TASK")
 
 
+def security_profile() -> str:
+    mode = security_mode()
+    if mode == "full":
+        return "full"
+    if all(env_flag_enabled(var) for var in _CONTROLLED_ALLOW_VARS.values()):
+        return "local_controlled"
+    if any(env_flag_enabled(var) for var in _CONTROLLED_ALLOW_VARS.values()):
+        return "custom_restricted"
+    return "strict"
+
+
+def _capability_entry(name: str, allow_var: str | None, allowed: bool, approval_applicable: bool) -> dict[str, Any]:
+    return {
+        "name": name,
+        "allowed": bool(allowed),
+        "allow_var": allow_var,
+        "approval_applicable": bool(approval_applicable and allowed),
+    }
+
+
+def build_security_status() -> dict[str, Any]:
+    terminal_allowed = is_terminal_allowed()
+    execute_code_allowed = is_execute_code_allowed()
+    cron_allowed = is_cron_script_allowed()
+    delegate_allowed = is_delegate_task_allowed()
+    return {
+        "mode": security_mode(),
+        "profile": security_profile(),
+        "approval_available": True,
+        "approval_applies_when": "capability_allowed_and_command_requires_confirmation",
+        "capabilities": {
+            "terminal": _capability_entry(
+                "terminal",
+                "TAIJI_ALLOW_TERMINAL",
+                terminal_allowed,
+                True,
+            ),
+            "execute_code": _capability_entry(
+                "execute_code",
+                "TAIJI_ALLOW_EXECUTE_CODE",
+                execute_code_allowed,
+                True,
+            ),
+            "unapproved_skill_scripts": _capability_entry(
+                "unapproved_skill_scripts",
+                "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
+                cron_allowed,
+                False,
+            ),
+            "delegate_task": _capability_entry(
+                "delegate_task",
+                "TAIJI_ALLOW_DELEGATE_TASK",
+                delegate_allowed,
+                False,
+            ),
+            "document_read": _capability_entry(
+                "document_read",
+                None,
+                True,
+                False,
+            ),
+        },
+    }
+
+
 def blocked_message(capability: str, allow_var: str) -> str:
     return (
         f"{capability} is disabled because TAIJI_SECURITY_MODE=restricted. "
         f"Switch to TAIJI_SECURITY_MODE=full only after customer IT approval, "
         f"or explicitly set {allow_var}=1 for this controlled deployment."
     )
+
+
+def capability_blocked_payload(
+    capability: str,
+    allow_var: str,
+    *,
+    output: str = "",
+    exit_code: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": "capability_blocked",
+        "capability": capability,
+        "approval_applicable": False,
+        "mode": security_mode(),
+        "profile": security_profile(),
+        "allow_var": allow_var,
+        "error": blocked_message(capability, allow_var),
+        "output": output,
+    }
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    return payload

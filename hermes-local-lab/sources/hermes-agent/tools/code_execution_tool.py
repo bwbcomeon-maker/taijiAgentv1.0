@@ -46,7 +46,7 @@ import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
-from tools.taiji_security_mode import blocked_message, is_execute_code_allowed
+from tools.taiji_security_mode import capability_blocked_payload, is_execute_code_allowed
 
 # Availability gate.  On Windows we fall back to loopback TCP for the
 # sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
@@ -1052,19 +1052,12 @@ def execute_code(
         JSON string with execution results.
     """
     if not is_execute_code_allowed():
-        return json.dumps(
-            {
-                "status": "error",
-                "error": blocked_message(
-                    "execute_code sandbox",
-                    "TAIJI_ALLOW_EXECUTE_CODE",
-                ),
-                "output": "",
-                "tool_calls_made": 0,
-                "duration_seconds": 0,
-            },
-            ensure_ascii=False,
+        payload = capability_blocked_payload(
+            "execute_code",
+            "TAIJI_ALLOW_EXECUTE_CODE",
         )
+        payload.update({"tool_calls_made": 0, "duration_seconds": 0})
+        return json.dumps(payload, ensure_ascii=False)
 
     if not SANDBOX_AVAILABLE:
         return json.dumps({

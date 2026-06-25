@@ -164,7 +164,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertIn(f'export {var}="$TMP_DIR"', runtime_env)
         self.assertIn("TAIJI_SECURITY_MODE", start_agent)
         self.assertIn("TAIJI_SECURITY_MODE", start_webui)
-        self.assertIn('env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || "restricted"', main_js)
+        self.assertIn("resolveSecurityProfile", main_js)
+        self.assertIn('profile.name === "local_controlled"', main_js)
+        self.assertIn('env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || profile.mode', main_js)
+        for var in (
+            "TAIJI_ALLOW_TERMINAL",
+            "TAIJI_ALLOW_EXECUTE_CODE",
+            "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
+            "TAIJI_ALLOW_DELEGATE_TASK",
+        ):
+            self.assertIn(var, main_js)
 
     def test_taiji_diagnose_exports_security_and_allowlist_reports(self):
         diagnose = read_text("hermes-local-lab/scripts/taiji-agent-diagnose")
@@ -174,7 +183,22 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("print_security_report", diagnose)
         self.assertIn("print_allowlist_report", diagnose)
         self.assertIn("TAIJI_SECURITY_MODE", diagnose)
+        self.assertIn("effective_security_profile=", diagnose)
+        self.assertIn("approval_applicable.terminal=", diagnose)
+        self.assertIn("document_read.native=", diagnose)
         self.assertIn("TAIJI_AGENT_TMP_DIR", diagnose)
+
+    def test_webui_exposes_security_status_and_profile_controls(self):
+        routes = read_text("hermes-local-lab/sources/hermes-webui/api/routes.py")
+        index = read_text("hermes-local-lab/sources/hermes-webui/static/index.html")
+        ui = read_text("hermes-local-lab/sources/hermes-webui/static/ui.js")
+
+        self.assertIn("/api/security/status", routes)
+        self.assertIn("/api/security/profile", routes)
+        self.assertIn("securityModeChip", index)
+        self.assertIn("settingsSecurityProfile", index)
+        self.assertIn("refreshSecurityStatus", ui)
+        self.assertIn("saveSecurityProfile", ui)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")

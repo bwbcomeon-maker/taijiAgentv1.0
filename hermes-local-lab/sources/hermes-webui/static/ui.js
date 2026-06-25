@@ -7512,6 +7512,135 @@ document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
 
+// ── Security profile/status chip ───────────────────────────────────────
+let _securityStatusCache=null;
+let _securityStatusTimer=null;
+function _securityProfileLabel(profile){
+  const map={strict:'严格',local_controlled:'本机可控',full:'Full',custom_restricted:'自定义'};
+  return map[profile]||'未知';
+}
+function _securityProfileClass(profile){
+  if(profile==='local_controlled')return 'controlled';
+  if(profile==='strict')return 'strict';
+  if(profile==='full')return 'full';
+  if(profile==='custom_restricted')return 'custom';
+  return 'unknown';
+}
+function _securityProfileDetail(payload){
+  const profile=payload&&payload.profile;
+  if(profile==='strict')return '高风险能力关闭';
+  if(profile==='local_controlled')return '危险命令审批';
+  if(profile==='full')return '管理员全量';
+  if(profile==='custom_restricted')return '部分能力开启';
+  return '检测中';
+}
+function _securityCapabilityLabel(name){
+  const map={
+    terminal:'Terminal',
+    execute_code:'代码执行',
+    unapproved_skill_scripts:'脚本任务',
+    delegate_task:'委派',
+    document_read:'文档读取'
+  };
+  return map[name]||name;
+}
+function renderSecurityStatus(payload){
+  _securityStatusCache=payload||_securityStatusCache;
+  const data=payload||_securityStatusCache;
+  const chip=$('securityModeChip');
+  const label=$('securityModeChipLabel');
+  const detail=$('securityModeChipDetail');
+  if(chip){
+    chip.classList.remove('strict','controlled','full','custom','unknown');
+    chip.classList.add(_securityProfileClass(data&&data.profile));
+    const title=data?`安全模式：${_securityProfileLabel(data.profile)} · ${_securityProfileDetail(data)}`:'安全模式：检测中';
+    chip.title=title;
+    chip.setAttribute('aria-label',title);
+  }
+  if(label)label.textContent=data?_securityProfileLabel(data.profile):'安全模式';
+  if(detail)detail.textContent=data?_securityProfileDetail(data):'检测中';
+  const select=$('settingsSecurityProfileSelect');
+  const save=$('settingsSecurityProfileSave');
+  const status=$('settingsSecurityStatus');
+  if(select&&data){
+    if(data.profile==='strict'||data.profile==='local_controlled')select.value=data.profile;
+    const writable=!!data.desktop_profile_write_enabled&&data.profile!=='full';
+    select.disabled=!writable;
+    if(save)save.disabled=!writable;
+    if(status)status.textContent=writable?'当前设置可在桌面端保存；变更后需要重启 Agent 完整生效。':'当前档位由管理员环境变量或非桌面运行态控制，设置页只读。';
+  }
+  const caps=$('settingsSecurityCapabilities');
+  if(caps&&data&&data.capabilities){
+    caps.textContent='';
+    ['terminal','execute_code','unapproved_skill_scripts','delegate_task','document_read'].forEach((key)=>{
+      const cap=data.capabilities[key];
+      if(!cap)return;
+      const pill=document.createElement('div');
+      pill.className='security-capability-pill '+(cap.allowed?'allowed':'blocked');
+      const name=document.createElement('span');
+      name.className='cap-name';
+      name.textContent=_securityCapabilityLabel(key);
+      const state=document.createElement('span');
+      state.className='cap-state';
+      state.textContent=cap.allowed?(cap.approval_applicable?'可用/需审批':'可用'):'未开启';
+      pill.append(name,state);
+      caps.appendChild(pill);
+    });
+  }
+}
+async function refreshSecurityStatus(force=false){
+  if(_securityStatusCache&&!force){
+    renderSecurityStatus(_securityStatusCache);
+    return _securityStatusCache;
+  }
+  if(typeof api!=='function'){
+    setTimeout(()=>{void refreshSecurityStatus(true);},0);
+    return null;
+  }
+  try{
+    const payload=await api('/api/security/status',{timeoutToast:false});
+    renderSecurityStatus(payload);
+    return payload;
+  }catch(_){
+    renderSecurityStatus(null);
+    return null;
+  }
+}
+function openSecuritySettings(){
+  if(typeof switchPanel==='function')switchPanel('settings');
+  if(typeof switchSettingsSection==='function')switchSettingsSection('system');
+  void refreshSecurityStatus(true);
+}
+async function saveSecurityProfile(){
+  const select=$('settingsSecurityProfileSelect');
+  const status=$('settingsSecurityStatus');
+  if(!select)return;
+  if(status)status.textContent='正在保存安全模式...';
+  try{
+    const result=await api('/api/security/profile',{method:'POST',body:JSON.stringify({profile:select.value})});
+    if(result&&result.status)renderSecurityStatus(result.status);
+    if(status)status.textContent=result&&result.restart_required?'已保存。请重启 taiji Agent，使 Agent 进程完整应用新档位。':'已保存。';
+    if(typeof showToast==='function')showToast('安全模式已保存，重启后完整生效。',3500);
+    await refreshSecurityStatus(true);
+  }catch(e){
+    if(status)status.textContent='保存失败：'+(e&&e.message?e.message:e);
+    if(typeof showToast==='function')showToast('安全模式保存失败：'+(e&&e.message?e.message:e),5000,'error');
+  }
+}
+function startSecurityStatusMonitor(){
+  void refreshSecurityStatus(true);
+  if(_securityStatusTimer)return;
+  _securityStatusTimer=setInterval(()=>{if(document.visibilityState==='visible')void refreshSecurityStatus(true);},30000);
+}
+if(typeof window!=='undefined'){
+  window.refreshSecurityStatus=refreshSecurityStatus;
+  window.renderSecurityStatus=renderSecurityStatus;
+  window.openSecuritySettings=openSecuritySettings;
+  window.saveSecurityProfile=saveSecurityProfile;
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSecurityStatusMonitor);
+else startSecurityStatusMonitor();
+
 // ── taiji Agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
 const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';

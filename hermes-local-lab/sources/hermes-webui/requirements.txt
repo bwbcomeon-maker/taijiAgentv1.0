@@ -8,4 +8,4 @@
 # you want server-side Microsoft neural voices:  pip install edge-tts
 pyyaml>=6.0
 cryptography>=42.0
-pypdf>=5.0
+pypdf==6.14.2

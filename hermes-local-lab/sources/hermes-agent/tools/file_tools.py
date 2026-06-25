@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import has_binary_extension
+from tools.document_extract import extract_document, is_supported_document
 from tools.file_operations import (
     ShellFileOperations,
     normalize_read_pagination,
@@ -584,17 +585,6 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         except Exception:
             pass
 
-        # ── Binary file guard ─────────────────────────────────────────
-        # Block binary files by extension (no I/O).
-        if has_binary_extension(str(_resolved)):
-            _ext = _resolved.suffix.lower()
-            return json.dumps({
-                "error": (
-                    f"Cannot read binary file '{path}' ({_ext}). "
-                    "Use vision_analyze for images, or terminal to inspect binary files."
-                ),
-            })
-
         # ── Hermes internal path guard ────────────────────────────────
         # Prevent prompt injection via catalog or hub metadata files,
         # and block credential stores under HERMES_HOME.  Pass the
@@ -605,6 +595,20 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         block_error = get_read_block_error(str(_resolved))
         if block_error:
             return json.dumps({"error": block_error})
+
+        is_document_read = is_supported_document(_resolved)
+
+        # ── Binary file guard ─────────────────────────────────────────
+        # Block binary files by extension (no I/O). Office/PDF documents are
+        # handled by the native read-only extractor below.
+        if has_binary_extension(str(_resolved)) and not is_document_read:
+            _ext = _resolved.suffix.lower()
+            return json.dumps({
+                "error": (
+                    f"Cannot read binary file '{path}' ({_ext}). "
+                    "Use vision_analyze for images, or terminal to inspect binary files."
+                ),
+            })
 
         # ── Dedup check ───────────────────────────────────────────────
         # If we already read this exact (path, offset, limit) and the
@@ -667,9 +671,41 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 pass  # stat failed — fall through to full read
 
         # ── Perform the read ──────────────────────────────────────────
-        file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
-        result_dict = result.to_dict()
+        if is_document_read:
+            try:
+                extraction = extract_document(_resolved)
+                selected_lines = extraction.lines[offset - 1:offset - 1 + limit]
+                content = "\n".join(
+                    f"{line_no:6d}|{line}"
+                    for line_no, line in enumerate(selected_lines, start=offset)
+                )
+                total_lines = len(extraction.lines)
+                result_dict = {
+                    "content": content,
+                    "total_lines": total_lines,
+                    "file_size": _resolved.stat().st_size,
+                    "truncated": (offset - 1 + limit) < total_lines,
+                    "document_type": extraction.document_type,
+                    "source_granularity": {
+                        "pdf": "Page N",
+                        "docx": "Paragraph N",
+                        "xlsx": "Sheet/Row",
+                        "pptx": "Slide N",
+                    }.get(extraction.document_type, "Line"),
+                }
+            except Exception as exc:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Document extraction failed: {exc}",
+                    "path": path,
+                    "document_type": _resolved.suffix.lower().lstrip("."),
+                }, ensure_ascii=False)
+            result_content = result_dict.get("content") or ""
+        else:
+            file_ops = _get_file_ops(task_id)
+            result = file_ops.read_file(path, offset, limit)
+            result_dict = result.to_dict()
+            result_content = result.content or ""
 
         # ── Character-count guard ─────────────────────────────────────
         # We're model-agnostic so we can't count tokens; characters are
@@ -678,7 +714,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # Note: we check the formatted content (with line-number prefixes),
         # not the raw file size, because that's what actually enters context.
         # Check BEFORE redaction to avoid expensive regex on huge content.
-        content_len = len(result.content or "")
+        content_len = len(result_content)
         file_size = result_dict.get("file_size", 0)
         max_chars = _get_max_read_chars()
         if content_len > max_chars:
@@ -696,9 +732,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             }, ensure_ascii=False)
 
         # ── Redact secrets (after guard check to skip oversized content) ──
-        if result.content:
-            result.content = redact_sensitive_text(result.content, code_file=True)
-            result_dict["content"] = result.content
+        if result_content:
+            result_dict["content"] = redact_sensitive_text(result_content, code_file=True)
 
         # Large-file hint: if the file is big and the caller didn't ask
         # for a narrow window, nudge toward targeted reads.
@@ -1281,7 +1316,7 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. NOTE: Cannot read images or binary files — use vision_analyze for images.",
+    "description": "Read a text file or supported document (PDF, Word .docx, Excel .xlsx, PowerPoint .pptx) with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Document reads include source markers such as Page N, Paragraph N, Sheet/Row, or Slide N. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. NOTE: Cannot read images or unsupported binary files — use vision_analyze for images.",
     "parameters": {
         "type": "object",
         "properties": {

@@ -1722,6 +1722,29 @@
   .yolo-pill:active{transform:translateY(0);}
   .yolo-pill-icon{font-size:12px;}
   .yolo-pill-label{font-size:10px;}
+  .security-mode-chip{display:inline-flex;align-items:center;gap:6px;min-height:32px;max-width:190px;padding:4px 10px;border-radius:999px;border:1px solid var(--border2);background:rgba(255,255,255,0.62);color:var(--text);font-size:11px;font-weight:700;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,transform .15s;white-space:nowrap;}
+  .security-mode-chip:hover{background:rgba(255,255,255,0.82);border-color:rgba(0,155,196,.35);transform:translateY(-1px);}
+  .security-mode-chip:active{transform:translateY(0);}
+  .security-mode-chip.strict{border-color:rgba(225,80,80,.35);color:#b91c1c;background:rgba(254,242,242,.86);}
+  .security-mode-chip.controlled{border-color:rgba(14,165,122,.36);color:#047857;background:rgba(236,253,245,.88);}
+  .security-mode-chip.full,.security-mode-chip.custom{border-color:rgba(217,119,6,.36);color:#b45309;background:rgba(255,251,235,.9);}
+  .security-mode-icon{width:14px;height:14px;flex:0 0 auto;}
+  .security-mode-label{overflow:hidden;text-overflow:ellipsis;}
+  .security-mode-detail{font-size:10px;font-weight:600;color:var(--muted);overflow:hidden;text-overflow:ellipsis;}
+  .settings-security-copy{font-size:11px;color:var(--muted);margin:4px 0 8px;line-height:1.5;}
+  .settings-security-row{display:flex;gap:8px;align-items:center;}
+  .settings-security-row select{flex:1;min-width:0;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;}
+  .security-capability-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-top:10px;}
+  .security-capability-pill{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--code-bg);font-size:12px;min-width:0;}
+  .security-capability-pill .cap-name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .security-capability-pill .cap-state{font-size:11px;font-weight:700;white-space:nowrap;}
+  .security-capability-pill.allowed .cap-state{color:#047857;}
+  .security-capability-pill.blocked .cap-state{color:#b91c1c;}
+  @media (max-width:720px){
+    .security-mode-chip{max-width:132px;padding-inline:8px;}
+    .security-mode-detail{display:none;}
+    .settings-security-row{flex-direction:column;align-items:stretch;}
+  }
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */
   .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
   .queue-card.visible{pointer-events:auto;}

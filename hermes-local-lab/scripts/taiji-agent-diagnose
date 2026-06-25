@@ -14,6 +14,59 @@ WEBUI_PORT="${WEBUI_PORT:-18787}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+taiji_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON|y|Y) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+taiji_security_mode() {
+  case "${TAIJI_SECURITY_MODE:-restricted}" in
+    full) printf 'full\n' ;;
+    *) printf 'restricted\n' ;;
+  esac
+}
+
+taiji_capability_allowed() {
+  local flag="$1"
+  if [ "$(taiji_security_mode)" = "full" ]; then
+    return 0
+  fi
+  taiji_truthy "${!flag:-}"
+}
+
+taiji_security_profile() {
+  if [ "$(taiji_security_mode)" = "full" ]; then
+    printf 'full\n'
+    return
+  fi
+  local enabled=0
+  for flag in TAIJI_ALLOW_TERMINAL TAIJI_ALLOW_EXECUTE_CODE TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS TAIJI_ALLOW_DELEGATE_TASK; do
+    if taiji_truthy "${!flag:-}"; then
+      enabled=$((enabled + 1))
+    fi
+  done
+  case "$enabled" in
+    0) printf 'strict\n' ;;
+    4) printf 'local_controlled\n' ;;
+    *) printf 'custom_restricted\n' ;;
+  esac
+}
+
+print_capability_state() {
+  # Output contract includes keys like approval_applicable.terminal= for static release gates.
+  local name="$1" flag="$2" approval="$3" allowed=false approval_applicable=false
+  if taiji_capability_allowed "$flag"; then
+    allowed=true
+  fi
+  if [ "$allowed" = "true" ] && [ "$approval" = "true" ] && [ "$(taiji_security_mode)" = "restricted" ]; then
+    approval_applicable=true
+  fi
+  printf 'capability.%s.allowed=%s\n' "$name" "$allowed"
+  printf 'approval_applicable.%s=%s\n' "$name" "$approval_applicable"
+}
+
 section() {
   printf '\n==== %s ====\n' "$*"
 }
@@ -374,6 +427,14 @@ print_security_report() {
   printf 'TAIJI_ALLOW_EXECUTE_CODE=%s\n' "${TAIJI_ALLOW_EXECUTE_CODE:-0}"
   printf 'TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS=%s\n' "${TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS:-0}"
   printf 'TAIJI_ALLOW_DELEGATE_TASK=%s\n' "${TAIJI_ALLOW_DELEGATE_TASK:-0}"
+  printf 'effective_security_profile=%s\n' "$(taiji_security_profile)"
+  print_capability_state terminal TAIJI_ALLOW_TERMINAL true
+  print_capability_state execute_code TAIJI_ALLOW_EXECUTE_CODE true
+  print_capability_state unapproved_skill_scripts TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS false
+  print_capability_state delegate_task TAIJI_ALLOW_DELEGATE_TASK false
+  printf 'capability.document_read.allowed=true\n'
+  printf 'approval_applicable.document_read=false\n'
+  printf 'document_read.native=true\n'
   printf 'install_root=%s\n' "$LAB_DIR"
   printf 'agent_dir=%s\n' "$AGENT_DIR"
   printf 'webui_dir=%s\n' "$WEBUI_DIR"

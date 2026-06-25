@@ -17,6 +17,49 @@ let mainWindow = null;
 let runtimeEnv = null;
 let stopped = false;
 
+const SECURITY_ALLOW_FLAGS = [
+  "TAIJI_ALLOW_TERMINAL",
+  "TAIJI_ALLOW_EXECUTE_CODE",
+  "TAIJI_ALLOW_DELEGATE_TASK",
+  "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS"
+];
+
+function hasExplicitEnv(name) {
+  return Object.prototype.hasOwnProperty.call(process.env, name);
+}
+
+function securityProfileDefaults(profileName) {
+  if (profileName === "full") {
+    return { name: "full", mode: "full", allow: true };
+  }
+  if (profileName === "local_controlled") {
+    return { name: "local_controlled", mode: "restricted", allow: true };
+  }
+  return { name: "strict", mode: "restricted", allow: false };
+}
+
+function resolveSecurityProfile() {
+  const explicit = String(process.env.TAIJI_SECURITY_PROFILE || "").trim();
+  if (["strict", "local_controlled", "full"].includes(explicit)) {
+    return securityProfileDefaults(explicit);
+  }
+  return securityProfileDefaults(app.isPackaged ? "strict" : "local_controlled");
+}
+
+function applySecurityProfile(env) {
+  const profile = resolveSecurityProfile();
+  env.TAIJI_SECURITY_PROFILE = process.env.TAIJI_SECURITY_PROFILE || profile.name;
+  env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || profile.mode;
+  if (profile.name === "local_controlled" || profile.name === "full") {
+    for (const flag of SECURITY_ALLOW_FLAGS) {
+      if (!hasExplicitEnv(flag)) {
+        env[flag] = "1";
+      }
+    }
+  }
+  return profile;
+}
+
 function configureDesktopUserDataDir() {
   const override = process.env.TAIJI_DESKTOP_USER_DATA_DIR;
   if (!override) return;
@@ -333,7 +376,7 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_RUNTIME_HOME = process.env.TAIJI_RUNTIME_HOME || path.join(userDataDir(), "runtime-home");
   env.TAIJI_WORKSPACE = process.env.TAIJI_WORKSPACE || path.join(userDataDir(), "workspace");
   env.TAIJI_AGENT_LOG_DIR = logDir;
-  env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || "restricted";
+  applySecurityProfile(env);
   env.AGENT_API_HOST = "127.0.0.1";
   env.AGENT_API_PORT = String(agentPort);
   env.API_SERVER_HOST = "127.0.0.1";
