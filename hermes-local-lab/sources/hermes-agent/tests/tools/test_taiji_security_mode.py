@@ -1,4 +1,7 @@
 import json
+import os
+import threading
+import time
 from pathlib import Path
 
 
@@ -29,6 +32,141 @@ def test_restricted_mode_blocks_execute_code(monkeypatch):
     assert result["capability"] == "execute_code"
     assert result["approval_applicable"] is False
     assert "TAIJI_ALLOW_EXECUTE_CODE=1" in result["error"]
+
+
+def _run_with_gateway_capability(monkeypatch, sid, target):
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+    monkeypatch.setenv("HERMES_SESSION_KEY", sid)
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webui")
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+    monkeypatch.delenv("TAIJI_ALLOW_EXECUTE_CODE", raising=False)
+
+    events = []
+    result = {}
+
+    from tools.approval import register_gateway_notify, unregister_gateway_notify
+
+    register_gateway_notify(sid, lambda data: events.append(data))
+
+    thread = threading.Thread(target=lambda: result.setdefault("value", target()))
+    thread.start()
+    deadline = time.time() + 5
+    while time.time() < deadline and not events:
+        time.sleep(0.01)
+    assert events, "restricted capability should request gateway approval"
+    return events, result, thread, lambda: unregister_gateway_notify(sid)
+
+
+def test_terminal_gateway_capability_once_allows_current_call(monkeypatch):
+    sid = "capability-once-terminal"
+
+    from tools.approval import resolve_gateway_approval
+    from tools.terminal_tool import terminal_tool
+
+    events, result, thread, cleanup = _run_with_gateway_capability(
+        monkeypatch,
+        sid,
+        lambda: json.loads(terminal_tool("printf taiji-capability-ok")),
+    )
+    try:
+        pending = events[0]
+        assert pending["approval_type"] == "capability_enable"
+        assert pending["capability"] == "terminal"
+        assert pending["allow_var"] == "TAIJI_ALLOW_TERMINAL"
+
+        assert resolve_gateway_approval(sid, "once") == 1
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert result["value"]["exit_code"] == 0
+        assert result["value"]["output"] == "taiji-capability-ok"
+        assert "TAIJI_ALLOW_TERMINAL" not in os.environ
+    finally:
+        cleanup()
+
+
+def test_capability_session_approval_is_remembered(monkeypatch):
+    sid = "capability-session-terminal"
+
+    from tools.approval import (
+        request_capability_approval,
+        resolve_gateway_approval,
+        unregister_gateway_notify,
+    )
+
+    events = []
+    from tools.approval import register_gateway_notify
+
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+    monkeypatch.setenv("HERMES_SESSION_KEY", sid)
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webui")
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+    register_gateway_notify(sid, lambda data: events.append(data))
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "first",
+            request_capability_approval("terminal", "TAIJI_ALLOW_TERMINAL"),
+        )
+    )
+    thread.start()
+    deadline = time.time() + 5
+    while time.time() < deadline and not events:
+        time.sleep(0.01)
+    assert events
+    try:
+        assert resolve_gateway_approval(sid, "session") == 1
+        thread.join(timeout=10)
+        assert result["first"]["approved"] is True
+        assert result["first"]["scope"] == "session"
+        second = request_capability_approval("terminal", "TAIJI_ALLOW_TERMINAL")
+        assert second["approved"] is True
+        assert second["scope"] == "session"
+        assert len(events) == 1
+    finally:
+        unregister_gateway_notify(sid)
+
+
+def test_capability_always_persists_only_current_allow_var(monkeypatch, tmp_path):
+    sid = "capability-always-terminal"
+    runtime_home = tmp_path / "runtime-home"
+
+    from tools.approval import request_capability_approval, resolve_gateway_approval
+    from tools.approval import register_gateway_notify, unregister_gateway_notify
+
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+    monkeypatch.setenv("HERMES_SESSION_KEY", sid)
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webui")
+    monkeypatch.setenv("TAIJI_DESKTOP_ONLY", "1")
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+    monkeypatch.delenv("TAIJI_ALLOW_EXECUTE_CODE", raising=False)
+
+    events = []
+    result = {}
+    register_gateway_notify(sid, lambda data: events.append(data))
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            request_capability_approval("terminal", "TAIJI_ALLOW_TERMINAL"),
+        )
+    )
+    thread.start()
+    deadline = time.time() + 5
+    while time.time() < deadline and not events:
+        time.sleep(0.01)
+    assert events
+    try:
+        assert resolve_gateway_approval(sid, "always") == 1
+        thread.join(timeout=10)
+        assert result["value"]["approved"] is True
+        assert result["value"]["scope"] == "always"
+        assert result["value"]["persisted"] is True
+        env_text = (runtime_home / ".env").read_text(encoding="utf-8")
+        assert "TAIJI_ALLOW_TERMINAL=1" in env_text
+        assert "TAIJI_ALLOW_EXECUTE_CODE=1" not in env_text
+        assert os.environ["TAIJI_ALLOW_TERMINAL"] == "1"
+    finally:
+        unregister_gateway_notify(sid)
 
 
 def test_security_status_reports_local_controlled_profile(monkeypatch):

@@ -16232,6 +16232,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    gateway_data = {}
     with _lock:
         queue = _pending.get(sid)
         if isinstance(queue, list):
@@ -16273,8 +16274,8 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 gw_entry = gw_queue[0]
                 # _gateway_queues stores _ApprovalEntry objects; their
                 # .data dict carries command, pattern_key, pattern_keys.
-                gw_data = getattr(gw_entry, 'data', None) or {}
-                gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
+                gateway_data = getattr(gw_entry, 'data', None) or {}
+                gateway_keys = gateway_data.get("pattern_keys") or [gateway_data.get("pattern_key", "")]
                 # Peek is not strict — a concurrent resolver may pop a
                 # different gateway entry before we reach
                 # resolve_gateway_approval below, but approve_session is
@@ -16295,14 +16296,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice in ("once", "session"):
-        for k in all_keys:
-            approve_session(sid, k)
-    elif choice == "always":
-        for k in all_keys:
-            approve_session(sid, k)
-            approve_permanent(k)
-        save_permanent_allowlist(_permanent_approved)
+    approval_payload = pending or gateway_data or {}
+    is_capability_approval = approval_payload.get("approval_type") == "capability_enable" or approval_payload.get("kind") == "capability_enable"
+    if not is_capability_approval:
+        if choice in ("once", "session"):
+            for k in all_keys:
+                approve_session(sid, k)
+        elif choice == "always":
+            for k in all_keys:
+                approve_session(sid, k)
+                approve_permanent(k)
+            save_permanent_allowlist(_permanent_approved)
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.

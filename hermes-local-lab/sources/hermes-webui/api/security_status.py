@@ -44,7 +44,7 @@ def _capability(name: str, allow_var: str | None, allowed: bool, approval_applic
         "name": name,
         "allow_var": allow_var,
         "allowed": bool(allowed),
-        "approval_applicable": bool(allowed and approval_applicable),
+        "approval_applicable": bool(approval_applicable),
     }
 
 
@@ -61,7 +61,7 @@ def build_security_status_payload() -> dict[str, Any]:
         "profile_choices": sorted(_PROFILE_CHOICES),
         "desktop_profile_write_enabled": os.environ.get("TAIJI_DESKTOP_ONLY") == "1",
         "approval_available": True,
-        "approval_applies_when": "capability_allowed_and_command_requires_confirmation",
+        "approval_applies_when": "capability_request_or_command_requires_confirmation",
         "capabilities": {
             "terminal": _capability("terminal", "TAIJI_ALLOW_TERMINAL", terminal_allowed, restricted),
             "execute_code": _capability("execute_code", "TAIJI_ALLOW_EXECUTE_CODE", execute_allowed, restricted),

@@ -1052,12 +1052,33 @@ def execute_code(
         JSON string with execution results.
     """
     if not is_execute_code_allowed():
-        payload = capability_blocked_payload(
-            "execute_code",
-            "TAIJI_ALLOW_EXECUTE_CODE",
-        )
-        payload.update({"tool_calls_made": 0, "duration_seconds": 0})
-        return json.dumps(payload, ensure_ascii=False)
+        try:
+            from tools.approval import request_capability_approval
+
+            capability_approval = request_capability_approval(
+                "execute_code",
+                "TAIJI_ALLOW_EXECUTE_CODE",
+            )
+        except Exception as exc:
+            capability_approval = {
+                "approved": False,
+                "approval_applicable": False,
+                "outcome": "error",
+                "message": str(exc),
+            }
+        if not capability_approval.get("approved"):
+            error = capability_approval.get("message")
+            if not capability_approval.get("approval_applicable"):
+                error = None
+            payload = capability_blocked_payload(
+                "execute_code",
+                "TAIJI_ALLOW_EXECUTE_CODE",
+                approval_applicable=bool(capability_approval.get("approval_applicable")),
+                approval_outcome=capability_approval.get("outcome"),
+                error=error,
+            )
+            payload.update({"tool_calls_made": 0, "duration_seconds": 0})
+            return json.dumps(payload, ensure_ascii=False)
 
     if not SANDBOX_AVAILABLE:
         return json.dumps({

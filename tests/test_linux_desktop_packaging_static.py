@@ -195,7 +195,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("/api/security/status", routes)
         self.assertIn("/api/security/profile", routes)
-        self.assertIn("securityModeChip", index)
+        self.assertNotIn("securityModeChip", index)
         self.assertIn("settingsSecurityProfile", index)
         self.assertIn("refreshSecurityStatus", ui)
         self.assertIn("saveSecurityProfile", ui)

@@ -7519,21 +7519,6 @@ function _securityProfileLabel(profile){
   const map={strict:'严格',local_controlled:'本机可控',full:'Full',custom_restricted:'自定义'};
   return map[profile]||'未知';
 }
-function _securityProfileClass(profile){
-  if(profile==='local_controlled')return 'controlled';
-  if(profile==='strict')return 'strict';
-  if(profile==='full')return 'full';
-  if(profile==='custom_restricted')return 'custom';
-  return 'unknown';
-}
-function _securityProfileDetail(payload){
-  const profile=payload&&payload.profile;
-  if(profile==='strict')return '高风险能力关闭';
-  if(profile==='local_controlled')return '危险命令审批';
-  if(profile==='full')return '管理员全量';
-  if(profile==='custom_restricted')return '部分能力开启';
-  return '检测中';
-}
 function _securityCapabilityLabel(name){
   const map={
     terminal:'Terminal',
@@ -7544,21 +7529,14 @@ function _securityCapabilityLabel(name){
   };
   return map[name]||name;
 }
+function _securityCapabilityStateLabel(cap){
+  if(!cap)return'';
+  if(cap.allowed)return cap.approval_applicable?'可用/需审批':'可用';
+  return cap.approval_applicable?'未开启/可审批':'未开启';
+}
 function renderSecurityStatus(payload){
   _securityStatusCache=payload||_securityStatusCache;
   const data=payload||_securityStatusCache;
-  const chip=$('securityModeChip');
-  const label=$('securityModeChipLabel');
-  const detail=$('securityModeChipDetail');
-  if(chip){
-    chip.classList.remove('strict','controlled','full','custom','unknown');
-    chip.classList.add(_securityProfileClass(data&&data.profile));
-    const title=data?`安全模式：${_securityProfileLabel(data.profile)} · ${_securityProfileDetail(data)}`:'安全模式：检测中';
-    chip.title=title;
-    chip.setAttribute('aria-label',title);
-  }
-  if(label)label.textContent=data?_securityProfileLabel(data.profile):'安全模式';
-  if(detail)detail.textContent=data?_securityProfileDetail(data):'检测中';
   const select=$('settingsSecurityProfileSelect');
   const save=$('settingsSecurityProfileSave');
   const status=$('settingsSecurityStatus');
@@ -7582,7 +7560,7 @@ function renderSecurityStatus(payload){
       name.textContent=_securityCapabilityLabel(key);
       const state=document.createElement('span');
       state.className='cap-state';
-      state.textContent=cap.allowed?(cap.approval_applicable?'可用/需审批':'可用'):'未开启';
+      state.textContent=_securityCapabilityStateLabel(cap);
       pill.append(name,state);
       caps.appendChild(pill);
     });

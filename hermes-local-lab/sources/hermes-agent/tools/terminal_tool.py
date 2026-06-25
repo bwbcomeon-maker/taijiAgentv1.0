@@ -1641,14 +1641,40 @@ def terminal_tool(
             }, ensure_ascii=False)
 
         if not is_terminal_allowed():
-            return json.dumps(
-                capability_blocked_payload(
+            try:
+                from tools.approval import request_capability_approval
+
+                capability_approval = request_capability_approval(
                     "terminal",
                     "TAIJI_ALLOW_TERMINAL",
-                    exit_code=-1,
-                ),
-                ensure_ascii=False,
-            )
+                )
+            except Exception as exc:
+                logger.warning("Terminal capability approval failed: %s", exc)
+                capability_approval = {
+                    "approved": False,
+                    "approval_applicable": False,
+                    "outcome": "error",
+                    "message": str(exc),
+                }
+            if capability_approval.get("approved"):
+                pass
+            else:
+                error = capability_approval.get("message")
+                if capability_approval.get("approval_applicable"):
+                    error = error or "BLOCKED: terminal capability was not approved."
+                else:
+                    error = None
+                return json.dumps(
+                    capability_blocked_payload(
+                        "terminal",
+                        "TAIJI_ALLOW_TERMINAL",
+                        exit_code=-1,
+                        approval_applicable=bool(capability_approval.get("approval_applicable")),
+                        approval_outcome=capability_approval.get("outcome"),
+                        error=error,
+                    ),
+                    ensure_ascii=False,
+                )
 
         try:
             from agent.brand_safety import block_reason_for_terminal

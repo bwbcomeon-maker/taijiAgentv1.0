@@ -1708,6 +1708,7 @@
   .approval-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;font-weight:600;color:var(--error);}
   .approval-desc{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5;}
   .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:"SF Mono",ui-monospace,monospace;font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:14px;max-height:120px;overflow-y:auto;}
+  .approval-card.capability-approval .approval-cmd{font-family:inherit;color:var(--text);word-break:normal;background:rgba(14,165,122,.08);border-color:rgba(14,165,122,.22);}
   .approval-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
   .approval-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid var(--border2);background:var(--hover-bg);color:var(--text);cursor:pointer;transition:all .15s;white-space:nowrap;}
   .approval-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2);}
@@ -1722,15 +1723,6 @@
   .yolo-pill:active{transform:translateY(0);}
   .yolo-pill-icon{font-size:12px;}
   .yolo-pill-label{font-size:10px;}
-  .security-mode-chip{display:inline-flex;align-items:center;gap:6px;min-height:32px;max-width:190px;padding:4px 10px;border-radius:999px;border:1px solid var(--border2);background:rgba(255,255,255,0.62);color:var(--text);font-size:11px;font-weight:700;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,transform .15s;white-space:nowrap;}
-  .security-mode-chip:hover{background:rgba(255,255,255,0.82);border-color:rgba(0,155,196,.35);transform:translateY(-1px);}
-  .security-mode-chip:active{transform:translateY(0);}
-  .security-mode-chip.strict{border-color:rgba(225,80,80,.35);color:#b91c1c;background:rgba(254,242,242,.86);}
-  .security-mode-chip.controlled{border-color:rgba(14,165,122,.36);color:#047857;background:rgba(236,253,245,.88);}
-  .security-mode-chip.full,.security-mode-chip.custom{border-color:rgba(217,119,6,.36);color:#b45309;background:rgba(255,251,235,.9);}
-  .security-mode-icon{width:14px;height:14px;flex:0 0 auto;}
-  .security-mode-label{overflow:hidden;text-overflow:ellipsis;}
-  .security-mode-detail{font-size:10px;font-weight:600;color:var(--muted);overflow:hidden;text-overflow:ellipsis;}
   .settings-security-copy{font-size:11px;color:var(--muted);margin:4px 0 8px;line-height:1.5;}
   .settings-security-row{display:flex;gap:8px;align-items:center;}
   .settings-security-row select{flex:1;min-width:0;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;}
@@ -1741,8 +1733,6 @@
   .security-capability-pill.allowed .cap-state{color:#047857;}
   .security-capability-pill.blocked .cap-state{color:#b91c1c;}
   @media (max-width:720px){
-    .security-mode-chip{max-width:132px;padding-inline:8px;}
-    .security-mode-detail{display:none;}
     .settings-security-row{flex-direction:column;align-items:stretch;}
   }
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */

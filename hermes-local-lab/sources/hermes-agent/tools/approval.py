@@ -493,6 +493,7 @@ def detect_dangerous_command(command: str) -> tuple:
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
+_capability_session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
 
@@ -613,6 +614,7 @@ def clear_session(session_key: str) -> None:
         return
     with _lock:
         _session_approved.pop(session_key, None)
+        _capability_session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
@@ -694,6 +696,208 @@ def save_permanent_allowlist(patterns: set):
         save_config(config)
     except Exception as e:
         logger.warning("Could not save allowlist: %s", e)
+
+
+# =========================================================================
+# Capability approval for Taiji restricted deployments
+# =========================================================================
+
+def _capability_approval_key(capability: str) -> str:
+    return f"capability:{capability}"
+
+
+def is_capability_session_approved(session_key: str, capability: str) -> bool:
+    if not session_key or not capability:
+        return False
+    with _lock:
+        return capability in _capability_session_approved.get(session_key, set())
+
+
+def approve_capability_session(session_key: str, capability: str) -> None:
+    if not session_key or not capability:
+        return
+    with _lock:
+        _capability_session_approved.setdefault(session_key, set()).add(capability)
+
+
+def _capability_description(capability: str, allow_var: str) -> str:
+    labels = {
+        "terminal": "终端执行能力",
+        "execute_code": "代码执行能力",
+    }
+    label = labels.get(capability, capability)
+    return (
+        f"{label}当前未开启。授权后仅放行 {capability}；"
+        f"危险命令仍会继续触发审批。对应变量：{allow_var}=1"
+    )
+
+
+def request_capability_approval(
+    capability: str,
+    allow_var: str,
+    *,
+    timeout_seconds: int | None = None,
+) -> dict:
+    """Ask the interactive gateway to enable a restricted capability.
+
+    Returns {"approved": True} only when the current call may continue.
+    Non-interactive callers fail closed with approval_applicable=False.
+    """
+    session_key = get_current_session_key(default="")
+    if is_capability_session_approved(session_key, capability):
+        return {"approved": True, "scope": "session"}
+
+    is_gateway = _is_gateway_approval_context()
+    is_ask = env_var_enabled("HERMES_EXEC_ASK")
+    if not (is_gateway or is_ask):
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "unavailable",
+            "message": (
+                f"BLOCKED: {capability} is disabled and no interactive "
+                "approval UI is available for this context."
+            ),
+        }
+
+    with _lock:
+        notify_cb = _gateway_notify_cbs.get(session_key)
+
+    if notify_cb is None:
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "unavailable",
+            "message": (
+                f"BLOCKED: {capability} is disabled and no approval listener "
+                "is registered for this session."
+            ),
+        }
+
+    if timeout_seconds is None:
+        timeout_seconds = _get_approval_config().get("gateway_timeout", 300)
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (ValueError, TypeError):
+        timeout_seconds = 300
+
+    description = _capability_description(capability, allow_var)
+    approval_data = {
+        "approval_type": "capability_enable",
+        "kind": "capability_enable",
+        "capability": capability,
+        "allow_var": allow_var,
+        "command": "",
+        "pattern_key": _capability_approval_key(capability),
+        "pattern_keys": [_capability_approval_key(capability)],
+        "description": description,
+        "title": "能力授权",
+    }
+    entry = _ApprovalEntry(approval_data)
+    with _lock:
+        _gateway_queues.setdefault(session_key, []).append(entry)
+
+    _fire_approval_hook(
+        "pre_approval_request",
+        command=f"enable capability: {capability}",
+        description=description,
+        pattern_key=approval_data["pattern_key"],
+        pattern_keys=list(approval_data["pattern_keys"]),
+        session_key=session_key,
+        surface="gateway",
+    )
+
+    try:
+        notify_cb(approval_data)
+    except Exception as exc:
+        logger.warning("Gateway capability approval notify failed: %s", exc)
+        with _lock:
+            queue = _gateway_queues.get(session_key, [])
+            if entry in queue:
+                queue.remove(entry)
+            if not queue:
+                _gateway_queues.pop(session_key, None)
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "notify_failed",
+            "message": "BLOCKED: Failed to send capability approval request to user.",
+        }
+
+    try:
+        from tools.environments.base import touch_activity_if_due
+    except Exception:  # pragma: no cover
+        touch_activity_if_due = None
+
+    now = time.monotonic()
+    deadline = now + max(timeout_seconds, 0)
+    activity_state = {"last_touch": now, "start": now}
+    resolved = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if entry.event.wait(timeout=min(1.0, remaining)):
+            resolved = True
+            break
+        if touch_activity_if_due is not None:
+            touch_activity_if_due(
+                activity_state, "waiting for capability approval"
+            )
+
+    with _lock:
+        queue = _gateway_queues.get(session_key, [])
+        if entry in queue:
+            queue.remove(entry)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+
+    choice = entry.result
+    outcome = "timeout" if not resolved else (choice if choice else "timeout")
+    _fire_approval_hook(
+        "post_approval_response",
+        command=f"enable capability: {capability}",
+        description=description,
+        pattern_key=approval_data["pattern_key"],
+        pattern_keys=list(approval_data["pattern_keys"]),
+        session_key=session_key,
+        surface="gateway",
+        choice=outcome,
+    )
+
+    if not resolved or choice is None or choice == "deny":
+        reason = "timed out without user response" if not resolved else "denied by user"
+        return {
+            "approved": False,
+            "approval_applicable": True,
+            "outcome": "timeout" if not resolved else "denied",
+            "message": (
+                f"BLOCKED: Capability {capability} was {reason}. "
+                "The current tool call did not continue."
+            ),
+        }
+
+    if choice in {"session", "always"}:
+        approve_capability_session(session_key, capability)
+
+    persisted = False
+    persist_error = None
+    if choice == "always":
+        try:
+            from tools.taiji_security_mode import enable_capability_env
+
+            persisted = bool(enable_capability_env(allow_var).get("persisted"))
+        except Exception as exc:
+            persist_error = str(exc)
+            logger.warning("Failed to persist capability approval: %s", exc)
+
+    return {
+        "approved": True,
+        "approval_applicable": True,
+        "scope": choice,
+        "persisted": persisted,
+        "persist_error": persist_error,
+    }
 
 
 # =========================================================================

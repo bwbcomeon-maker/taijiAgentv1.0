@@ -114,6 +114,20 @@ def test_approval_counter_element_exists():
         "index.html must contain an element with id='approvalCounter' for the '1 of N' display"
 
 
+def test_composer_security_chip_removed():
+    """Security mode should no longer be displayed in the composer footer."""
+    assert 'id="securityModeChip"' not in INDEX_HTML
+    assert "securityModeChip" not in MESSAGES_JS
+
+
+def test_capability_approval_card_branch_exists():
+    """Capability approvals must render with dedicated copy, not command copy."""
+    assert "capability_enable" in MESSAGES_JS
+    assert "_isCapabilityApproval" in MESSAGES_JS
+    assert "approvalSkipAll" in MESSAGES_JS and "isCapability ? \"none\"" in MESSAGES_JS
+    assert "能力授权" in MESSAGES_JS
+
+
 # ---------------------------------------------------------------------------
 # Functional: multiple entries behave correctly (via routes module directly)
 # ---------------------------------------------------------------------------
@@ -195,6 +209,36 @@ def test_stale_explicit_approval_id_does_not_pop_oldest_entry():
     sid = "test-stale-approval-id-sid"
     with r._lock:
         r._pending.pop(sid, None)
+
+
+def test_capability_approval_does_not_persist_command_allowlist():
+    """Always-allow for a capability must not write a command pattern allowlist entry."""
+    from api import routes as r
+    from tools.approval import _ApprovalEntry
+
+    sid = "test-capability-approval-route-sid"
+    entry = _ApprovalEntry({
+        "approval_type": "capability_enable",
+        "kind": "capability_enable",
+        "capability": "terminal",
+        "allow_var": "TAIJI_ALLOW_TERMINAL",
+        "pattern_key": "capability:terminal",
+        "pattern_keys": ["capability:terminal"],
+        "description": "terminal capability",
+    })
+    with r._lock:
+        r._pending.pop(sid, None)
+        r._gateway_queues[sid] = [entry]
+        r._permanent_approved.discard("capability:terminal")
+
+    accepted = r._resolve_approval_legacy(sid, "", "always")
+
+    assert accepted is True
+    assert entry.result == "always"
+    assert "capability:terminal" not in r._permanent_approved
+    with r._lock:
+        r._pending.pop(sid, None)
+        r._gateway_queues.pop(sid, None)
 
     r.submit_pending(sid, {"command": "cmd1", "pattern_key": "p1", "pattern_keys": ["p1"], "description": "d1"})
     r.submit_pending(sid, {"command": "cmd2", "pattern_key": "p2", "pattern_keys": ["p2"], "description": "d2"})

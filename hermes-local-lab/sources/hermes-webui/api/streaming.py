@@ -3481,6 +3481,7 @@ def _tool_result_metadata(raw) -> dict:
             "status": "capability_blocked",
             "capability": str(data.get("capability") or ""),
             "approval_applicable": bool(data.get("approval_applicable", False)),
+            "approval_outcome": str(data.get("approval_outcome") or ""),
         }
     return {}
 

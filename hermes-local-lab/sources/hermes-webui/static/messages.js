@@ -1756,7 +1756,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.name==='clarify') return;
       if(d.status==='capability_blocked'){
         const cap=d.capability||d.name||'tool';
-        const msg=`${cap} 当前未开启，所以不会弹审批框。请在安全模式中切换后重启。`;
+        const denied=d.approval_outcome==='denied'||d.approval_outcome==='timeout';
+        const msg=denied
+          ? `${cap} 能力未授权，当前任务未继续。`
+          : `${cap} 当前未开启，且当前运行上下文没有可用审批入口。请在设置页安全模式中开启。`;
         if(typeof setComposerStatus==='function')setComposerStatus(msg);
         if(typeof showToast==='function')showToast(msg,5000,'error');
         if(typeof refreshSecurityStatus==='function')refreshSecurityStatus(true);
@@ -1804,7 +1807,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed');
+      const isCapability=_isCapabilityApproval(d);
+      sendBrowserNotification(isCapability?'能力授权':'Approval required',d.description||'Tool approval needed');
     });
 
     source.addEventListener('clarify',e=>{
@@ -2713,6 +2717,8 @@ function hideApprovalCard(force=false) {
     }
   }
   _approvalSessionId = null;
+  _approvalCurrentType = null;
+  _approvalCurrentCapability = null;
   _resetApprovalCardState();
   card.classList.remove("visible");
   $("approvalCmd").textContent = "";
@@ -2722,6 +2728,8 @@ function hideApprovalCard(force=false) {
 // Track session_id of the active approval so respond goes to the right session
 let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
+let _approvalCurrentType = null;
+let _approvalCurrentCapability = null;
 let _approvalPendingBySession = new Map();
 
 function _promptActiveSessionId() {
@@ -2763,19 +2771,63 @@ function showApprovalForSession(sid, pending, pendingCount) {
   showApprovalCard(pending, pendingCount);
 }
 
+function _isCapabilityApproval(pending) {
+  return !!pending && (pending.approval_type === "capability_enable" || pending.kind === "capability_enable");
+}
+
+function _capabilityApprovalLabel(capability) {
+  const labels = {
+    terminal: "终端执行",
+    execute_code: "代码执行"
+  };
+  return labels[capability] || capability || "受限能力";
+}
+
+function _setApprovalButtonCopy(isCapability, capability) {
+  const capLabel = _capabilityApprovalLabel(capability);
+  const copy = isCapability ? {
+    approvalBtnOnce: ["允许一次", `仅本次工具调用允许${capLabel}`],
+    approvalBtnSession: ["本次允许", `本次会话期间允许${capLabel}`],
+    approvalBtnAlways: ["始终允许", `始终允许${capLabel}，只写入该单项能力变量`],
+    approvalBtnDeny: ["拒绝", `拒绝开启${capLabel}`]
+  } : {
+    approvalBtnOnce: [t("approval_btn_once"), t("approval_btn_once_title")],
+    approvalBtnSession: [t("approval_btn_session"), t("approval_btn_session_title")],
+    approvalBtnAlways: [t("approval_btn_always"), t("approval_btn_always_title")],
+    approvalBtnDeny: [t("approval_btn_deny"), t("approval_btn_deny_title")]
+  };
+  Object.entries(copy).forEach(([id, pair]) => {
+    const btn = $(id);
+    if (!btn) return;
+    const label = btn.querySelector(".approval-btn-label");
+    if (label) label.textContent = pair[0];
+    btn.title = pair[1];
+    btn.setAttribute("aria-label", pair[1]);
+  });
+  const skipAll = $("approvalSkipAll");
+  if (skipAll) skipAll.style.display = isCapability ? "none" : "";
+}
+
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
+  const isCapability = _isCapabilityApproval(pending);
+  const capability = pending.capability || "";
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
-  const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
-  const cmd = pending.command || "";
-  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
+  const desc = isCapability ? (pending.description || "当前能力未开启，授权后继续当前任务。") : ((pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : ""));
+  const cmd = isCapability
+    ? `能力：${_capabilityApprovalLabel(capability)}\n授权变量：${pending.allow_var || ""}\n范围：仅开启该能力；危险命令仍需审批`
+    : (pending.command || "");
+  const sig = JSON.stringify({type: isCapability ? "capability" : "command", desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
+  card.classList.toggle("capability-approval", isCapability);
   $("approvalDesc").textContent = desc;
   $("approvalCmd").textContent = cmd;
   _approvalSessionId = sid;
   _approvalCurrentId = pending.approval_id || null;
+  _approvalCurrentType = isCapability ? "capability_enable" : "command";
+  _approvalCurrentCapability = capability || null;
   _approvalSignature = sig;
   // Show "1 of N" counter when multiple approvals are queued
   const counter = $("approvalCounter");
@@ -2797,6 +2849,8 @@ function showApprovalCard(pending, pendingCount) {
   });
   card.classList.add("visible");
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
+  $("approvalHeading").textContent = isCapability ? (pending.title || "能力授权") : t("approval_heading");
+  _setApprovalButtonCopy(isCapability, capability);
   const onceBtn = $("approvalBtnOnce");
   if (onceBtn && document.activeElement !== $('msg')) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
@@ -2814,6 +2868,9 @@ async function respondApproval(choice) {
   });
   _approvalSessionId = null;
   _approvalCurrentId = null;
+  const approvalType = _approvalCurrentType;
+  _approvalCurrentType = null;
+  _approvalCurrentCapability = null;
   _clearApprovalPendingForSession(sid);
   hideApprovalCard(true);
   try {
@@ -2821,6 +2878,9 @@ async function respondApproval(choice) {
       method: "POST",
       body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
     });
+    if (approvalType === "capability_enable" && typeof refreshSecurityStatus === "function") {
+      setTimeout(()=>{ void refreshSecurityStatus(true); }, 500);
+    }
   } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
 }
 
