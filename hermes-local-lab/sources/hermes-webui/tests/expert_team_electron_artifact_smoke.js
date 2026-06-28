@@ -73,6 +73,10 @@ async function prepareSession(page, workspace) {
     if (typeof syncTopbar === "function") syncTopbar();
     if (typeof renderMessages === "function") renderMessages();
     if (typeof switchPanel === "function") await switchPanel("chat");
+    const onboarding = document.getElementById("onboardingOverlay");
+    if (onboarding) {
+      onboarding.remove();
+    }
     if (typeof loadDir === "function") {
       try { await loadDir("."); } catch (_) {}
     }
@@ -117,11 +121,14 @@ async function renderExpertCard(page, artifact) {
 function buildConfirmationRun(sessionId, answers) {
   const topicAnswer = answers.topic || "";
   const audienceAnswer = answers.audience || "";
-  const complete = Boolean(topicAnswer && audienceAnswer);
+  const boundaryAnswer = answers.boundary || "";
+  const optionalSkipped = answers.__skip_optional === true;
+  const requiredComplete = Boolean(topicAnswer && audienceAnswer);
+  const complete = Boolean(requiredComplete && (boundaryAnswer || optionalSkipped));
   const questions = [
     {
       id: "topic",
-      title: "这篇内容的主题是什么？",
+      title: "这次要编制哪类办公材料，主题是什么？",
       type: "text",
       status: topicAnswer ? "answered" : "pending",
       answer: topicAnswer,
@@ -129,23 +136,31 @@ function buildConfirmationRun(sessionId, answers) {
     },
     {
       id: "audience",
-      title: "目标读者是谁？",
+      title: "材料面向哪些对象，使用场景是什么？",
       type: "text",
       status: audienceAnswer ? "answered" : "pending",
       answer: audienceAnswer,
       required: true,
     },
+    {
+      id: "boundary",
+      title: "有哪些已知素材、口径要求、篇幅或表述边界？",
+      type: "text",
+      status: boundaryAnswer ? "answered" : (optionalSkipped ? "skipped" : "pending"),
+      answer: boundaryAnswer,
+      required: false,
+    },
   ];
-  const pendingQuestions = questions.filter((question) => question.status !== "answered");
+  const pendingQuestions = questions.filter((question) => !["answered", "skipped"].includes(question.status));
   const primaryQuestion = pendingQuestions[0] || null;
   const primaryConfirmation = primaryQuestion
     ? {
         id: `question:${primaryQuestion.id}`,
         kind: "question",
         title: primaryQuestion.title,
-        description: "请先补充必填需求，专家团再继续推进。",
-        fields: [{ id: primaryQuestion.id, type: "text", required: true, options: [] }],
-        actions: { submit: "answer" },
+        description: primaryQuestion.required === false ? "可选补充，补充后结果更准确；也可以跳过后开始生成。" : "请先补充必填需求，专家团再继续推进。",
+        fields: [{ id: primaryQuestion.id, type: "text", required: primaryQuestion.required !== false, options: [] }],
+        actions: primaryQuestion.required === false ? { submit: "answer", skip: "answer/skip_optional" } : { submit: "answer" },
         source_task_id: "",
         origin: "",
         status: "pending",
@@ -183,9 +198,9 @@ function buildConfirmationRun(sessionId, answers) {
       execution_status: complete ? "running" : "waiting_user",
       phase_progress: { current: complete ? "生成初稿" : "需求确认", done: complete ? 1 : 0, total: 4 },
       intake: {
-        required_pending: pendingQuestions.map((question) => question.id),
-        optional_pending: [],
-        optional_status: "answered",
+        required_pending: pendingQuestions.filter((question) => question.required !== false).map((question) => question.id),
+        optional_pending: pendingQuestions.filter((question) => question.required === false).map((question) => question.id),
+        optional_status: boundaryAnswer ? "answered" : (optionalSkipped ? "skipped" : "pending"),
       },
       pending_questions: pendingQuestions,
       pending_confirmations: primaryQuestion ? [primaryConfirmation] : [],
@@ -276,11 +291,17 @@ async function main() {
     await page.route("**/api/expert-teams/answer", async (route) => {
       const body = JSON.parse(route.request().postData() || "{}");
       Object.assign(confirmationAnswers, body.answers || {});
+      if (body.skip_optional === true) confirmationAnswers.__skip_optional = true;
       const run = buildConfirmationRun(sessionId, confirmationAnswers);
+      const responseBody = { ok: true, session_id: sessionId, run };
+      if (confirmationAnswers.__skip_optional === true) {
+        responseBody.stream_id = "electron-optional-stream";
+        responseBody.pending_started_at = Date.now() / 1000;
+      }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true, session_id: sessionId, run }),
+        body: JSON.stringify(responseBody),
       });
     });
     await renderConfirmationCard(page, buildConfirmationRun(sessionId, confirmationAnswers));
@@ -307,9 +328,9 @@ async function main() {
       };
     });
     assertState(confirmationState.workspaceText.includes("必填需求待确认"), "Confirmation workspace is not the first task", confirmationState);
-    assertState(confirmationState.popoverText.includes("需求确认 1/2"), "Question popover is not on the first item", confirmationState);
+    assertState(confirmationState.popoverText.includes("需求确认 1/3"), "Question popover is not on the first item", confirmationState);
     assertState(confirmationState.popoverText.includes("请先填写"), "Question popover does not show the empty required state", confirmationState);
-    assertState(confirmationState.inputAria.includes("这篇内容的主题是什么"), "Confirmation textarea lacks a precise accessible name", confirmationState);
+    assertState(confirmationState.inputAria.includes("这次要编制哪类办公材料"), "Confirmation textarea lacks a precise accessible name", confirmationState);
     assertState(confirmationState.inputUsable, "Confirmation textarea is not usable after opening popover", confirmationState);
     assertState(confirmationState.buttonText === "请先填写" && confirmationState.buttonDisabled, "Empty required confirmation is not disabled", confirmationState);
     assertState(confirmationState.beforePhases, "Confirmation workspace is not above progress content", confirmationState);
@@ -323,9 +344,9 @@ async function main() {
       const workspace = document.querySelector("#writeflowStatusDock .expert-team-confirmation-workspace");
       const popover = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden])");
       const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea");
-      return workspace && popover && popover.textContent.includes("需求确认 2/2") &&
+      return workspace && popover && popover.textContent.includes("需求确认 2/3") &&
         input && !input.disabled && input.offsetParent !== null &&
-        (input.getAttribute("aria-label") || "").includes("目标读者是谁");
+        (input.getAttribute("aria-label") || "").includes("材料面向哪些对象");
     }, { timeout: 10000 });
     await page.fill("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea", "企业管理者");
     await page.waitForFunction(() => {
@@ -335,12 +356,57 @@ async function main() {
     await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
     await page.waitForFunction(() => {
       const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
+      const text = document.querySelector("#writeflowStatusDock")?.textContent || "";
+      const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea");
+      const skip = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
+      return card && card.classList.contains("is-expanded") &&
+        text.includes("生成尚未开始") &&
+        input && !input.disabled && input.offsetParent !== null &&
+        (input.getAttribute("aria-label") || "").includes("已知素材") &&
+        skip && skip.textContent.includes("跳过并开始生成");
+    }, { timeout: 10000 });
+    await page.waitForTimeout(30000);
+    const notAutoStarted = await page.evaluate(() => {
+      const text = document.querySelector("#writeflowStatusDock")?.textContent || "";
+      return {
+        text: text.replace(/\s+/g, " ").trim(),
+        activeStream: Boolean(S && S.activeStreamId),
+      };
+    });
+    assertState(!notAutoStarted.activeStream, "Optional pending state started stream before explicit skip", notAutoStarted);
+    assertState(notAutoStarted.text.includes("生成尚未开始"), "Optional pending state did not keep the waiting copy", notAutoStarted);
+    await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
+    await page.waitForFunction(() => {
+      const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
       const toast = document.getElementById("toast");
       const panelText = document.querySelector("#writeflowStatusDock")?.textContent || "";
       return card && card.classList.contains("is-expanded") &&
         toast && (toast.dataset.toastMessage || "").includes("需求已确认，正在进入生成") &&
-        panelText.includes("生成初稿");
+        panelText.includes("生成初稿") &&
+        panelText.includes("已跳过");
     }, { timeout: 10000 });
+    for (const viewport of [
+      { width: 1024, height: 720 },
+      { width: 1280, height: 720 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.waitForTimeout(250);
+      const viewportState = await page.evaluate(() => {
+        const dock = document.querySelector("#writeflowStatusDock .status-card-writeflow");
+        const primary = document.querySelector("#writeflowStatusDock .expert-team-panel-priority-card button:not(:disabled), #writeflowStatusDock .expert-team-panel-retry, #writeflowStatusDock .expert-team-panel-resume");
+        const rect = primary && primary.getBoundingClientRect();
+        return {
+          expanded: Boolean(dock && dock.classList.contains("is-expanded")),
+          hasPrimary: Boolean(primary),
+          buttonText: primary ? primary.textContent.replace(/\s+/g, " ").trim() : "",
+          inViewport: Boolean(rect && rect.left >= 0 && rect.top >= 0 && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight),
+        };
+      });
+      assertState(viewportState.expanded, `Expert dock is not expanded at ${viewport.width}px`, viewportState);
+      assertState(viewportState.hasPrimary && viewportState.inViewport, `Primary expert-team control is not visible at ${viewport.width}px`, viewportState);
+      await page.screenshot({ path: path.join(outDir, `expert-team-electron-${viewport.width}.png`), fullPage: true });
+    }
     await page.screenshot({ path: path.join(outDir, "expert-team-electron-confirmation-workspace.png"), fullPage: true });
 
     await renderExpertCard(page, {

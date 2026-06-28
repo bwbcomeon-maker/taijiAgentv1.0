@@ -242,16 +242,16 @@ _WRITEFLOW_MODES = {
 _WRITEFLOW_ARTIFACT_LABELS = {
     "01_theme": "选题方向",
     "02_cases": "案例素材",
-    "03_outline": "文章提纲",
+    "03_outline": "结构提纲",
     "04_empathy_map": "读者画像",
     "05_concrete_library": "细节素材",
-    "draft_v1": "正文初稿",
-    "draft_v2": "精修正文",
+    "draft_v1": "材料初稿",
+    "draft_v2": "精修材料",
     "review_report": "审稿报告",
-    "pre_publish_report": "发布前检查",
+    "pre_publish_report": "流转前检查",
     "reader_test": "读者测试",
-    "draft_final": "最终稿",
-    "export": "发布版",
+    "draft_final": "定稿材料",
+    "export": "定稿材料",
     "illustration_prompts": "配图提示词",
     "image_cover": "封面图",
     "cover": "封面图",
@@ -282,41 +282,61 @@ _WRITEFLOW_TEAMS = {
                 "label": "会议纪要",
                 "prompt": "帮我整理一份专题会议纪要，主题是“优化供电服务质效提升措施”。请按会议背景、主要议题、形成意见、责任分工和后续跟踪事项来组织，语气规范、便于内部流转。",
             },
+            {
+                "id": "notice-brief",
+                "label": "通知通报",
+                "prompt": "帮我起草一份内部通知，主题是“近期安全生产专项检查安排”。请明确背景、检查范围、时间节点、责任分工和报送要求，语言简洁正式。",
+            },
+            {
+                "id": "implementation-plan",
+                "label": "方案说明",
+                "prompt": "帮我起草一份方案说明，主题是“提升营业厅服务质效专项行动”。请包含目标、现状问题、主要措施、进度安排和保障机制。",
+            },
+            {
+                "id": "work-summary-plan",
+                "label": "总结计划",
+                "prompt": "帮我起草一份阶段性工作总结和下一步计划，主题是“数字化办公推广应用”。请按完成情况、成效亮点、问题不足、下一步计划组织。",
+            },
+            {
+                "id": "material-polish",
+                "label": "材料润色",
+                "prompt": "帮我润色一份办公材料，要求保持原意，提升逻辑层次、正式表达和可读性，并列出需要人工核对的数据和表述。",
+            },
         ],
         "members": [
             {"id": "workflow-producer", "name": "写作总导演", "role": "流程编排", "skill": "workflow-producer", "responsibility": "拆解需求、推进三步流程、维护状态看板。"},
-            {"id": "writing-executor", "name": "文案创作专家", "role": "正文写作", "skill": "workflow-producer", "responsibility": "生成正文初稿、标题和关键段落。"},
+            {"id": "writing-executor", "name": "文案创作专家", "role": "材料起草", "skill": "workflow-producer", "responsibility": "生成材料初稿、标题和关键段落。"},
             {"id": "article-illustrator", "name": "配图专家", "role": "封面和文中配图", "skill": "baoyu-article-illustrator", "responsibility": "根据文章和配图建议生成图片；图片能力不可用时输出可复用配图 prompt。"},
-            {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "skill": "workflow-producer", "responsibility": "检查逻辑、表达、发布前风险和可读性。"},
+            {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "skill": "workflow-producer", "responsibility": "检查逻辑、表达、流转风险和可读性。"},
         ],
     },
     "deep-research-team": {
-        "title": "深度文章研究团",
+        "title": "深度材料研究团",
         "category": "深度研究",
         "status_label": "产物由系统托管",
-        "description": "适合需要资料检索、案例调研、观点归纳和结构化提纲的深度文章。",
+        "description": "适合需要资料检索、案例调研、观点归纳和结构化提纲的调研材料、专题报告和案例素材。",
         "default_mode": "B",
         "default_action": "start",
-        "tags": ["资料调研", "案例分析", "结构提纲"],
+        "tags": ["调研材料", "专题报告", "案例素材", "结构提纲"],
         "image": "static/assets/writeflow/team-research.png",
         "examples": [
             {
                 "id": "market-research",
                 "label": "深度调研",
-                "prompt": "围绕「企业为什么需要本地 AI Agent 工作台」做一篇深度文章。请先列出研究问题、资料范围、案例方向和文章大纲，不要直接写全文。",
+                "prompt": "围绕「企业为什么需要本地 AI Agent 工作台」起草一份专题调研材料。请先列出研究问题、资料范围、案例方向和结构提纲，不要直接写全文。",
             },
             {
                 "id": "case-library",
                 "label": "案例素材",
-                "prompt": "帮我整理一篇关于 AI Agent 在内容生产、研发协作、资料管理里的落地案例文章。先输出案例筛选标准和文章结构。",
+                "prompt": "帮我整理一份关于 AI Agent 在内容生产、研发协作、资料管理里的落地案例素材。先输出案例筛选标准和材料结构。",
             },
         ],
         "members": [
             {"id": "workflow-producer", "name": "研究总导演", "role": "研究编排", "skill": "workflow-producer", "responsibility": "确定研究边界、安排调研和写作步骤。"},
             {"id": "research-expert", "name": "资料研究员", "role": "案例调研", "skill": "workflow-producer", "responsibility": "收集案例、事实、论据和素材线索。"},
-            {"id": "outline-architect", "name": "结构架构师", "role": "文章结构", "skill": "workflow-producer", "responsibility": "把研究结果组织成可写作的大纲。"},
-            {"id": "writing-executor", "name": "撰稿专家", "role": "正文初稿", "skill": "workflow-producer", "responsibility": "根据研究框架和大纲撰写正文初稿。"},
-            {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "skill": "workflow-producer", "responsibility": "检查事实、逻辑、表达和发布前风险。"},
+            {"id": "outline-architect", "name": "结构架构师", "role": "材料结构", "skill": "workflow-producer", "responsibility": "把研究结果组织成可写作的结构提纲。"},
+            {"id": "writing-executor", "name": "材料起草专家", "role": "材料初稿", "skill": "workflow-producer", "responsibility": "根据研究框架和结构提纲起草材料初稿。"},
+            {"id": "editor-review", "name": "复核专家", "role": "材料复核", "skill": "workflow-producer", "responsibility": "检查事实、逻辑、表达和流转风险。"},
         ],
     },
     "style-modeler": {
@@ -391,9 +411,9 @@ _WRITEFLOW_COMMON_EVENT_RULES = {
         "markers": [
             "开始写初稿",
             "生成初稿",
-            "撰稿专家正在写初稿",
-            "撰稿专家开始",
-            "撰稿专家开始工作",
+            "材料起草专家正在写初稿",
+            "材料起草专家开始",
+            "材料起草专家开始工作",
             "正文作者开始",
             "初稿任务",
             "进入初稿撰写",
@@ -401,16 +421,16 @@ _WRITEFLOW_COMMON_EVENT_RULES = {
         ],
     },
     "draft_done": {
-        "regex": [r"(?:正文初稿|初稿).{0,24}(?:已完成|完成|已生成|生成完成|已交付|已保存|保存|就绪)"],
+        "regex": [r"(?:材料初稿|初稿).{0,24}(?:已完成|完成|已生成|生成完成|已交付|已保存|保存|就绪)"],
     },
     "review_started": {
-        "markers": ["审稿专家", "审稿专家接手", "加载审稿规范", "开始审稿", "审稿和配图", "发布前检查"],
+        "markers": ["审稿专家", "审稿专家接手", "加载审稿规范", "开始审稿", "审稿和配图", "流转前检查"],
     },
     "review_done": {
-        "markers": ["审稿报告", "审稿完成", "审稿已完成", "发布前检查完成"],
+        "markers": ["审稿报告", "审稿完成", "审稿已完成", "流转前检查完成"],
     },
     "publish_done": {
-        "markers": ["发布版", "最终稿", "终稿正文"],
+        "markers": ["定稿材料", "最终稿", "终稿正文"],
     },
 }
 
@@ -420,7 +440,7 @@ _WRITEFLOW_STATE_MACHINES = {
         "next_actions": {
             "running": ["继续", "调整方向", "查看产物"],
             "waiting_user": ["审稿", "配图", "直接看稿", "调整方向"],
-            "done": ["下载发布版", "继续优化", "新建任务"],
+            "done": ["下载定稿材料", "继续优化", "新建任务"],
         },
         "event_rules": {
             "image_prompt_done": {"markers": ["配图提示词", "配图prompt", "图片prompt", "封面提示词"]},
@@ -443,7 +463,7 @@ _WRITEFLOW_STATE_MACHINES = {
                 "id": "draft",
                 "title": "起草办公材料初稿",
                 "worker_id": "writing-executor",
-                "description": "材料定位、标题方案、正文初稿、版式建议和流转提示。",
+                "description": "材料定位、标题方案、材料初稿、版式建议和流转提示。",
                 "phase": "生成初稿",
                 "phase_on_done": "打磨发布",
                 "start_events": ["draft_started", "direction_done"],
@@ -457,9 +477,9 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             {
                 "id": "illustrations",
-                "title": "生成封面和文中配图",
+                "title": "生成版式和配图建议",
                 "worker_id": "article-illustrator",
-                "description": "生成封面图、文中配图；图片能力不可用时先产出配图提示词。",
+                "description": "生成版式结构和配图建议；图片能力不可用时先产出配图提示词。",
                 "phase": "打磨发布",
                 "start_events": ["image_prompt_done", "image_done", "draft_done"],
                 "done_events": ["image_done"],
@@ -475,9 +495,9 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             {
                 "id": "review",
-                "title": "审稿润色和发布版",
+                "title": "审稿润色和定稿材料",
                 "worker_id": "editor-review",
-                "description": "检查逻辑、表达、发布风险，形成审稿报告或发布版。",
+                "description": "检查逻辑、表达、流转风险，形成审稿报告或定稿建议。",
                 "phase": "打磨发布",
                 "start_events": ["review_started", "draft_done"],
                 "done_events": ["review_done", "publish_done"],
@@ -501,7 +521,7 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             "research_done": {"markers": ["资料研究员已完成", "素材已归集", "案例入库"]},
             "outline_started": {"markers": ["结构架构师", "整理成可写的大纲", "开始整理大纲"]},
-            "outline_done": {"markers": ["结构架构师完成大纲", "文章大纲已就位", "大纲已就位", "文章大纲"]},
+            "outline_done": {"markers": ["结构架构师完成提纲", "结构提纲已就位", "提纲已就位", "结构提纲"]},
         },
         "tasks": [
             {
@@ -533,7 +553,7 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             {
                 "id": "outline",
-                "title": "生成文章大纲",
+                "title": "生成结构提纲",
                 "worker_id": "outline-architect",
                 "description": "把研究结果组织成可写作的大纲。",
                 "phase": "确定方向",
@@ -549,9 +569,9 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             {
                 "id": "draft",
-                "title": "撰写正文初稿",
+                "title": "起草材料初稿",
                 "worker_id": "writing-executor",
-                "description": "根据研究材料和文章大纲撰写正文初稿。",
+                "description": "根据研究材料和结构提纲起草材料初稿。",
                 "phase": "生成初稿",
                 "phase_on_done": "打磨发布",
                 "start_events": ["draft_started"],
@@ -565,9 +585,9 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             {
                 "id": "review",
-                "title": "审稿润色和发布版",
+                "title": "复核润色和交付建议",
                 "worker_id": "editor-review",
-                "description": "检查事实、逻辑、表达和发布前风险，形成审稿报告或发布版。",
+                "description": "检查事实、逻辑、表达和流转风险，形成复核报告或交付建议。",
                 "phase": "打磨发布",
                 "start_events": ["review_started"],
                 "done_events": ["review_done", "publish_done"],
@@ -725,8 +745,8 @@ def _writeflow_public_team_lines(team_id: str) -> list[str]:
             "- 研究负责人先圈定问题和资料边界，避免一上来就堆材料。",
             "- 资料研究员补案例、事实和论据，让文章有可靠支撑。",
             "- 结构架构师把材料整理成可写的大纲，再推进正文。",
-            "- 撰稿专家把研究框架写成正文初稿。",
-            "- 审稿专家做事实、逻辑和发布前风险检查。",
+            "- 材料起草专家把研究框架写成材料初稿。",
+            "- 复核专家做事实、逻辑和流转风险检查。",
         ]
     if team_id == "style-modeler":
         return [
@@ -742,7 +762,7 @@ def _writeflow_public_team_lines(team_id: str) -> list[str]:
         "- 写作总导演先定方向，相当于主编先确认选题、读者和边界。",
         "- 文案创作专家负责把方向变成一版能读的初稿。",
         "- 配图专家准备封面和文中配图方案，让文章发布时更完整。",
-        "- 审稿专家最后检查逻辑、表达和发布风险。",
+        "- 审稿专家最后检查逻辑、表达和流转风险。",
     ]
 
 
@@ -751,9 +771,9 @@ def _writeflow_public_member_lines(team_id: str, team: dict) -> list[str]:
         return [
             "- 研究总导演（研究负责人）：先明确研究问题、资料范围和文章目标。",
             "- 资料研究员（案例调研）：补充事实、案例和论据，让观点有出处。",
-            "- 结构架构师（文章结构）：把材料整理成清晰大纲和写作顺序。",
-            "- 撰稿专家（正文初稿）：根据研究材料和文章大纲撰写正文。",
-            "- 审稿专家（审稿润色）：检查事实、逻辑、表达和发布前风险。",
+            "- 结构架构师（材料结构）：把材料整理成清晰提纲和写作顺序。",
+            "- 材料起草专家（材料初稿）：根据研究材料和结构提纲起草正文。",
+            "- 复核专家（材料复核）：检查事实、逻辑、表达和流转风险。",
         ]
     if team_id == "style-modeler":
         return [
@@ -768,9 +788,9 @@ def _writeflow_public_member_lines(team_id: str, team: dict) -> list[str]:
     if team_id == "content-creator-team":
         return [
             "- 写作总导演（主编）：梳理需求、确认方向，并推动每一步按顺序完成。",
-            "- 文案创作专家（撰稿）：负责标题、正文初稿和关键段落。",
+            "- 文案创作专家（撰稿）：负责标题、材料初稿和关键段落。",
             "- 配图专家（视觉策划）：准备封面和文中配图方案；暂时不能直接出图时，先给可复用的配图说明。",
-            "- 审稿专家（审稿）：检查逻辑、表达、发布风险和读者体验。",
+            "- 审稿专家（审稿）：检查逻辑、表达、流转风险和读者体验。",
         ]
     return [
         f"- {member['name']}（{member['role']}）：{member['responsibility']}"
@@ -780,22 +800,22 @@ def _writeflow_public_member_lines(team_id: str, team: dict) -> list[str]:
 
 def _writeflow_public_progress_line(team_id: str) -> str:
     if team_id == "deep-research-team":
-        return "- 对用户说进度时，用“主编正在定方向”“资料研究员正在补案例”“结构架构师正在搭大纲”“撰稿专家正在写初稿”“审稿专家正在做发布前检查”这类业务语言。"
+        return "- 对用户说进度时，用“主编正在定方向”“资料研究员正在补案例”“结构架构师正在搭提纲”“材料起草专家正在写初稿”“复核专家正在做流转前检查”这类业务语言。"
     if team_id == "style-modeler":
         return "- 对用户说进度时，用“风格建模师正在读样稿”“风格建模师正在提炼风格”“写作负责人正在套用风格”这类业务语言。"
     if team_id == "web-article-extractor":
         return "- 对用户说进度时，用“网页提取专家正在解析链接”“网页提取专家正在提取正文”“素材整理员正在整理素材”这类业务语言。"
-    return "- 对用户说进度时，用“主编正在定方向”“文案创作专家正在写初稿”“配图专家正在准备配图”“审稿专家正在做发布前检查”这类业务语言。"
+    return "- 对用户说进度时，用“主编正在定方向”“文案创作专家正在写初稿”“配图专家正在准备配图”“审稿专家正在做流转前检查”这类业务语言。"
 
 
 def _writeflow_public_artifact_requirement_lines(team_id: str) -> list[str]:
     if team_id == "deep-research-team":
         return [
             "- 主要通过聊天窗口和用户确认，不要让用户理解内部 10 阶段细节。",
-            "- 研究阶段要形成：研究问题、资料范围、案例方向、文章大纲。",
-            "- 初稿阶段要形成：标题方案、正文初稿、配图建议、发布建议。",
-            "- 打磨阶段需要审稿时形成审稿报告；发布前形成发布版。",
-            "- 没有实际生成的初稿、审稿报告、终稿或发布版，不要写成已完成。",
+            "- 研究阶段要形成：研究问题、资料范围、案例方向、结构提纲。",
+            "- 初稿阶段要形成：标题方案、材料初稿、配图建议、流转建议。",
+            "- 打磨阶段需要复核时形成复核报告；流转前形成定稿材料。",
+            "- 没有实际生成的初稿、复核报告、终稿或定稿材料，不要写成已完成。",
             "- 需要分工时，按成员职责推进，不要向用户暴露内部调度方式。",
             "- 每轮结束必须用中文返回：本轮结论、已产出的成果物类型、当前三步位置、下一步可选操作。",
         ]
@@ -803,7 +823,7 @@ def _writeflow_public_artifact_requirement_lines(team_id: str) -> list[str]:
         return [
             "- 主要通过聊天窗口和用户确认，不要让用户理解内部 10 阶段细节。",
             "- 风格建模阶段要形成：风格维度说明、风格模型、可复用写作规则。",
-            "- 如果只是完成风格分析，不要把后续文章改写或发布版写成已完成。",
+            "- 如果只是完成风格分析，不要把后续材料改写或定稿材料写成已完成。",
             "- 需要分工时，按成员职责推进，不要向用户暴露内部调度方式。",
             "- 每轮结束必须用中文返回：本轮结论、已产出的成果物类型、当前三步位置、下一步可选操作。",
         ]
@@ -819,7 +839,7 @@ def _writeflow_public_artifact_requirement_lines(team_id: str) -> list[str]:
     return [
         "- 主要通过聊天窗口和用户确认，不要让用户理解内部 10 阶段细节。",
         "- 第一版固定两项任务：`起草办公材料初稿` 与 `生成版式和配图建议`。",
-        "- 文稿阶段要形成：材料定位、标题方案、正文初稿、版式建议、流转提示；需要审稿时形成审稿报告；流转前形成定稿版。",
+        "- 文稿阶段要形成：材料定位、标题方案、材料初稿、版式建议、流转提示；需要审稿时形成审稿报告；流转前形成定稿材料。",
         "- 配图阶段优先生成封面和文中配图建议；如果图片生成能力不可用，必须输出可复用配图提示词，并保持图片任务为待生成。",
         "- 需要分工时，按成员职责推进，不要向用户暴露内部调度方式。",
         "- 每轮结束必须用中文返回：本轮结论、已产出的成果物类型、当前三步位置、下一步可选操作。",
@@ -1089,7 +1109,7 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
     task_id = str(task.get("id") or "")
     if task_id == "illustrations":
         stage_instruction = (
-            "当前只执行“打磨发布”阶段：基于已确认初稿，完成表达润色、封面/文中配图建议、发布前检查和可执行修改清单。"
+            "当前只执行“打磨发布”阶段：基于已确认初稿，完成表达润色、版式/配图建议、流转前检查和可执行修改清单。"
             "不要重写完整初稿，除非用户修订意见明确要求。"
         )
     elif task_id == "delivery":
@@ -1125,11 +1145,11 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         "direction": "当前只执行“确定研究方向”阶段：收敛核心问题、论证主线、目标读者、资料边界和不展开的范围。",
         "research": "当前只执行“补充案例素材”阶段：整理事实、案例线索、论据类型、可验证来源方向和待人工确认项。",
         "outline": "当前只执行“结构提纲”阶段：把已确认研究材料组织成一级/二级标题、段落顺序和关键观点。",
-        "draft": "当前只执行“正文初稿”阶段：按已确认大纲撰写正文初稿，保留事实待核项，不做最终审稿结论。",
-        "review": "当前只执行“审稿交付”阶段：检查事实、逻辑、表达、发布风险，并形成发布版建议。",
+        "draft": "当前只执行“材料初稿”阶段：按已确认结构提纲起草材料初稿，保留事实待核项，不做最终复核结论。",
+        "review": "当前只执行“复核交付”阶段：检查事实、逻辑、表达、流转风险，并形成交付建议。",
     }
     return (
-        "你现在作为深度文章研究团执行阶段性任务。\n\n"
+        "你现在作为深度材料研究团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
         f"研究主题或核心问题：{topic}\n"
         f"目标读者与用途：{audience_goal}\n"
@@ -2177,11 +2197,11 @@ def _writeflow_root_artifact_candidate(filename: str) -> tuple[str, str, str] | 
     if stem_lower in {"review_report", "pre_publish_report", "reader_test"}:
         return "review_report", "审稿报告", "review"
     if stem_lower in {"export", "publish", "published", "release"}:
-        return "export", "发布版", "review"
+        return "export", "定稿材料", "review"
     if stem_lower in {"draft_final", "final", "final_draft"}:
         return "draft_final", "最终稿", "review"
     if stem_lower in {"draft_v1", "draft", "article_draft"}:
-        return "draft_v1", "正文初稿", "draft"
+        return "draft_v1", "材料初稿", "draft"
     if stem_lower in {"draft_v2", "polished_draft"}:
         return "draft_v2", "精修正文", "review"
     if stem_lower in {"02_cases", "cases", "research_notes", "material_notes"}:
@@ -2196,12 +2216,12 @@ def _writeflow_root_artifact_candidate(filename: str) -> tuple[str, str, str] | 
         return stem_lower, "提取正文", "extract"
     if "审稿报告" in stem:
         return "review_report", "审稿报告", "review"
-    if "发布版" in stem or "导出版" in stem or "export" in stem.lower():
-        return "export", "发布版", "review"
+    if "发布版" in stem or "导出版" in stem or "export" in stem.lower() or "定稿" in stem:
+        return "export", "定稿材料", "review"
     if "最终版" in stem or "终稿" in stem:
         return "draft_final", "最终稿", "review"
     if "初稿" in stem or "draft" in stem.lower():
-        return "draft_v1", "正文初稿", "draft"
+        return "draft_v1", "材料初稿", "draft"
     if "素材" in stem or "案例" in stem:
         return "02_cases", "案例素材", "research"
     if "大纲" in stem or "提纲" in stem:
@@ -2825,7 +2845,7 @@ def _writeflow_display_tasks_for_run(run: dict) -> list[dict]:
 
     article_status, article_label = _writeflow_display_task_status(direction, draft, review)
     if str(review.get("status") or "") == "done":
-        article_label = "发布版已完成"
+        article_label = "定稿材料已完成"
     elif str(draft.get("status") or "") == "done":
         article_status = "waiting_user"
         article_label = "初稿已完成，待打磨发布"
@@ -2843,7 +2863,7 @@ def _writeflow_display_tasks_for_run(run: dict) -> list[dict]:
             "worker_name": "文案创作专家",
             "status": article_status,
             "status_label": article_label,
-            "description": "标题方案、正文初稿、审稿润色和发布建议。",
+            "description": "标题方案、材料初稿、审稿润色和流转建议。",
             "artifacts": _writeflow_task_paths(direction, draft, review),
         },
         {
@@ -3642,7 +3662,7 @@ def _writeflow_compose_message(body: dict) -> dict:
             "",
             "对用户呈现的流程只保留三步：",
             "1. 确定方向：确认主题、读者、目标、素材边界。",
-            "2. 生成初稿：产出正文初稿和必要结构。",
+            "2. 生成初稿：产出材料初稿和必要结构。",
             "3. 打磨发布：审稿、润色、最终稿、导出。",
             "",
             "对话要求：",
@@ -3655,7 +3675,7 @@ def _writeflow_compose_message(body: dict) -> dict:
             "- 生成文件时只声明成果物类型，不自行选择本地路径或文件夹；系统会保存、登记并提供打开和下载入口。",
             "- 回复里只说明业务进展和已产出的成果物类型，不输出本地路径、内部编号、工具字段或同步细节。",
             "- 你只负责内容产出和业务阶段判断；系统会把真实存在的成果物登记到看板，并用中文名称提供打开和下载入口。",
-            "- 汇报“已完成”前，先确认对应成果物内容已经实际生成；没有实际生成的终稿、发布版或图片，不要写成已完成。",
+            "- 汇报“已完成”前，先确认对应成果物内容已经实际生成；没有实际生成的终稿、定稿材料或图片，不要写成已完成。",
             "- 如果模板示例和本次需求冲突，必须以本次需求为准。",
             "",
             "产物要求：",

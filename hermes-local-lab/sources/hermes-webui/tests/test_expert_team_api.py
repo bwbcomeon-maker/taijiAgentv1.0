@@ -28,7 +28,7 @@ def test_content_creator_catalog_uses_sgcc_daily_office_copy():
         "方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。"
     )
     assert team["tags"] == ["工作汇报", "通知通报", "会议纪要", "总结计划", "宣传稿件", "方案说明"]
-    assert [example["label"] for example in team["examples"]] == ["工作汇报", "会议纪要"]
+    assert [example["label"] for example in team["examples"]] == ["工作汇报", "会议纪要", "通知通报", "方案说明", "总结计划", "材料润色"]
     assert "迎峰度夏保供电重点工作推进情况" in team["examples"][0]["prompt"]
     assert "优化供电服务质效提升措施" in team["examples"][1]["prompt"]
     assert [question["title"] for question in team["questions"]] == [
@@ -37,7 +37,23 @@ def test_content_creator_catalog_uses_sgcc_daily_office_copy():
         "有哪些已知素材、口径要求、篇幅或表述边界？",
     ]
     assert [task["title"] for task in team["tasks"]] == ["起草办公材料初稿", "打磨发布方案", "交付确认"]
-    assert "撰写" + "公众号长文" not in json.dumps(team, ensure_ascii=False)
+    public_json = json.dumps(team, ensure_ascii=False)
+    for forbidden in ("公众号长文", "发布前检查", "文章大纲", "发布版"):
+        assert forbidden not in public_json
+
+
+def test_deep_research_catalog_uses_office_material_research_copy():
+    from api import expert_teams
+
+    data = expert_teams.expert_team_catalog()
+    team = next(item for item in data["teams"] if item["id"] == "deep-research-team")
+
+    assert team["title"] == "深度材料研究团"
+    assert "专题报告" in team["description"]
+    assert "调研材料" in team["tags"]
+    public_json = json.dumps(team, ensure_ascii=False)
+    for forbidden in ("深度文章", "文章大纲", "发布前检查", "发布版"):
+        assert forbidden not in public_json
 
 
 def test_deep_research_expert_team_start_persists_structured_run(tmp_path):
@@ -53,13 +69,13 @@ def test_deep_research_expert_team_start_persists_structured_run(tmp_path):
     )
 
     assert run["team_id"] == "deep-research-team"
-    assert run["team_title"] == "深度文章研究团"
+    assert run["team_title"] == "深度材料研究团"
     assert run["status"] == "awaiting_user"
     assert run["phase"] == "需求确认"
-    assert [member["name"] for member in run["members"]] == ["研究总导演", "资料研究员", "结构架构师", "撰稿专家", "审稿专家"]
+    assert [member["name"] for member in run["members"]] == ["研究总导演", "资料研究员", "结构架构师", "材料起草专家", "复核专家"]
     assert [question["id"] for question in run["questions"]] == ["research_topic", "audience_goal", "source_boundary"]
     assert [task["id"] for task in run["tasks"]] == ["direction", "research", "outline", "draft", "review"]
-    assert [task["phase"] for task in run["tasks"]] == ["资料调研", "资料调研", "结构提纲", "正文初稿", "审稿交付"]
+    assert [task["phase"] for task in run["tasks"]] == ["资料调研", "资料调研", "结构提纲", "材料初稿", "复核交付"]
     assert run["view"]["phase_progress"] == {"done": 0, "total": 5, "current": "需求确认"}
 
 
@@ -451,6 +467,97 @@ def test_content_expert_team_skip_optional_intake_allows_stream(monkeypatch, tmp
     assert response["run"]["view"]["intake"]["optional_status"] == "skipped"
 
 
+def test_content_expert_team_empty_optional_without_skip_remains_pending(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-optional-empty",
+            "team_id": "content-creator-team",
+            "prompt": "帮我起草一篇部门月度工作汇报",
+        },
+    )
+
+    updated = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
+                "audience": "公司分管领导和部门负责人",
+                "boundary": "",
+            },
+            "skip_optional": False,
+        },
+    )
+
+    boundary = next(question for question in updated["questions"] if question["id"] == "boundary")
+    assert boundary["status"] == "pending"
+    assert updated["status"] == "awaiting_user"
+    assert updated["view"]["intake"]["optional_pending"] == ["boundary"]
+    assert updated["view"]["primary_confirmation"]["id"] == "question:boundary"
+
+
+def test_review_items_contract_is_non_blocking_and_stage_output_has_locator(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-review-items", "team_id": "content-creator-team", "prompt": "帮我起草办公材料"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报",
+                "audience": "公司分管领导",
+                "boundary": "",
+            },
+            "skip_optional": True,
+        },
+    )
+    complete = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        answered["run_id"],
+        delivery={
+            "id": "draft-chat",
+            "label": "办公材料初稿",
+            "kind": "chat",
+            "content": "办公材料初稿已生成。\n待人工补充事项：\n- 补充一季度经营数据\n- 核对会议时间",
+            "note": "已写入当前对话",
+        },
+    )
+
+    view = complete["view"]
+    assert view["actions"]["can_approve_stage"] is True
+    assert len(view["pending_confirmations"]) == 1
+    assert view["pending_confirmations"][0]["kind"] == "stage_review"
+    assert view["review_items"] == [
+        {
+            "id": "review:draft:1",
+            "kind": "review_item",
+            "title": "补充一季度经营数据",
+            "source_task_id": "draft",
+            "phase": "生成初稿",
+            "status": "pending",
+            "used_in_revision": False,
+        },
+        {
+            "id": "review:draft:2",
+            "kind": "review_item",
+            "title": "核对会议时间",
+            "source_task_id": "draft",
+            "phase": "生成初稿",
+            "status": "pending",
+            "used_in_revision": False,
+        },
+    ]
+    assert view["stage_review"]["output"]["locator"] == "chat"
+    assert view["stage_review"]["output"]["artifact_id"] == ""
+
+
 def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_path):
     import api.routes as routes
     from api import expert_teams
@@ -492,7 +599,7 @@ def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_pa
             "stream_id": "stream-deep-real-1",
             "session_id": s.session_id,
             "pending_started_at": 1781346300.0,
-            "title": "深度文章研究团任务",
+            "title": "深度材料研究团任务",
         }
 
     monkeypatch.setattr(routes, "j", fake_j)
@@ -528,7 +635,7 @@ def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_pa
     assert calls["session"] is session
     assert calls["workspace"] == str(tmp_path)
     assert calls["display_msg"].startswith("专家团开始生成：")
-    assert "深度文章研究团" in calls["msg"]
+    assert "深度材料研究团" in calls["msg"]
     assert "本地优先 AI 助理如何在企业落地" in calls["msg"]
     assert "企业管理者，用于内部决策参考" in calls["msg"]
     assert "优先真实案例，不写泛泛趋势" in calls["msg"]
@@ -767,6 +874,7 @@ def test_expert_team_start_returns_view_contract_for_pending_questions(tmp_path)
         "can_resume": False,
         "can_cancel": False,
         "can_retry": False,
+        "can_restart_stage": False,
         "can_open_artifact": False,
         "can_approve_stage": False,
         "can_request_revision": False,

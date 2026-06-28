@@ -81,6 +81,7 @@ def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks()
     assert "card.intake=view.intake||{}" in UI_JS
     assert "card.primaryConfirmation=view.primary_confirmation||{}" in UI_JS
     assert "card.reviewItems=Array.isArray(view.review_items)" in UI_JS
+    assert "usedInRevision:!!(item&&item.used_in_revision" in UI_JS
     assert "view.phase_progress||run.phase_progress" in UI_JS
     assert "taiji-expert-team-active" in UI_JS
     assert "syncExpertTeamBottomDockState(card)" in UI_JS
@@ -127,6 +128,7 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert "请填写补充内容，或点击跳过并开始生成。" in UI_JS
     assert "skip_optional:skipOptional" in UI_JS
     assert "需求已确认，正在进入生成。" in UI_JS
+    assert "已跳过" in UI_JS
     assert ".status-card-expert-question-input" in STYLE_CSS
     assert ".expert-team-confirmation-workspace" in STYLE_CSS
     assert ".status-card-expert-question.pending.is-current" in STYLE_CSS
@@ -545,16 +547,22 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert "function approveExpertTeamStage" in UI_JS
     assert "function reviseExpertTeamStage" in UI_JS
     assert "function toggleExpertTeamStageRevision" in UI_JS
+    assert "function locateExpertTeamStageOutput" in UI_JS
+    assert "function appendExpertTeamReviewItemToRevision" in UI_JS
+    assert "function markExpertTeamReviewItemRead" in UI_JS
     assert "/api/expert-teams/stage/approve" in UI_JS
     assert "/api/expert-teams/stage/revise" in UI_JS
     assert "card.stageReview=view.stage_review||{}" in UI_JS
     assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[]" in UI_JS
     assert "expert-team-stage-review" in stage_review_body
     assert "expert-team-stage-output" in stage_review_body
+    assert "查看初稿" in stage_review_body
     assert "data-expert-team-stage-feedback" in stage_review_body
+    assert "data-expert-team-stage-output-locator" in stage_review_body
     assert "data-expert-team-stage-revision-toggle" in stage_review_body
     assert 'class="expert-team-stage-feedback" hidden aria-hidden="true"' in stage_review_body
     assert "请确认阶段成果" in stage_review_body
+    assert stage_review_body.index("查看初稿") < stage_review_body.index("无修改，进入下一阶段")
     assert "无修改，进入下一阶段" in stage_review_body
     assert "需要修改" in stage_review_body
     assert "提交修改意见" in stage_review_body
@@ -564,12 +572,53 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert "window.approveExpertTeamStage=approveExpertTeamStage" in UI_JS
     assert "window.reviseExpertTeamStage=reviseExpertTeamStage" in UI_JS
     assert "window.toggleExpertTeamStageRevision=toggleExpertTeamStageRevision" in UI_JS
+    assert "window.locateExpertTeamStageOutput=locateExpertTeamStageOutput" in UI_JS
+    assert "window.appendExpertTeamReviewItemToRevision=appendExpertTeamReviewItemToRevision" in UI_JS
+    assert "window.markExpertTeamReviewItemRead=markExpertTeamReviewItemRead" in UI_JS
 
     assert ".expert-team-stage-review" in STYLE_CSS
     assert ".expert-team-stage-output" in STYLE_CSS
     assert ".expert-team-stage-actions" in STYLE_CSS
     assert ".expert-team-stage-revision-toggle" in STYLE_CSS
     assert ".expert-team-stage-feedback[hidden]" in STYLE_CSS
+
+
+def test_expert_team_review_items_are_actionable_without_blocking_stage_review():
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+
+    assert "待人工补充事项" in panel_body
+    assert "加入修改意见" in panel_body
+    assert "标记已阅" in panel_body
+    assert "data-expert-team-review-item-title" in panel_body
+    assert "data-expert-team-review-item-read" in panel_body
+    assert "usedInRevision" in panel_body
+    assert "appendExpertTeamReviewItemToRevision(this)" in panel_body
+    assert "markExpertTeamReviewItemRead(this)" in panel_body
+
+    append_start = UI_JS.index("function appendExpertTeamReviewItemToRevision")
+    append_body = UI_JS[append_start : UI_JS.index("function markExpertTeamReviewItemRead", append_start)]
+    assert "toggleExpertTeamStageRevision(toggle)" in append_body
+    assert "data-expert-team-stage-feedback" in append_body
+    assert "修改意见已加入" in append_body
+
+    mark_start = UI_JS.index("function markExpertTeamReviewItemRead")
+    mark_body = UI_JS[mark_start : UI_JS.index("async function approveExpertTeamStage", mark_start)]
+    assert "is-read" in mark_body
+    assert "已阅" in mark_body
+
+    assert ".expert-team-review-item-actions" in STYLE_CSS
+    assert ".expert-team-review-item.is-read" in STYLE_CSS
+
+
+def test_expert_team_center_exposes_six_office_material_templates():
+    assert "工作汇报" in PANELS_JS
+    assert "会议纪要" in PANELS_JS
+    assert "通知通报" in PANELS_JS
+    assert "方案说明" in PANELS_JS
+    assert "总结计划" in PANELS_JS
+    assert "材料润色" in PANELS_JS
+    assert 'placeholder="写清材料类型、主题、对象、素材、语气和边界；召唤后会进入新的聊天任务。"' in PANELS_JS
 
 
 def test_expert_team_session_refresh_does_not_require_loaded_message_array():

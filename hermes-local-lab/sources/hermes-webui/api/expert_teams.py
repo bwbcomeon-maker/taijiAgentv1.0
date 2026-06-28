@@ -35,7 +35,7 @@ STAGE_GATED_TEAM_IDS = set(PUBLIC_EXPERT_TEAM_IDS)
 EXPERT_TEAM_PHASES = {
     "ai-content-creator-brand-moodboard": ["需求确认", "创意策划", "方向确认", "图像生成", "交付"],
     "content-creator-team": ["需求确认", "生成初稿", "打磨发布", "交付"],
-    "deep-research-team": ["需求确认", "资料调研", "结构提纲", "正文初稿", "审稿交付"],
+    "deep-research-team": ["需求确认", "资料调研", "结构提纲", "材料初稿", "复核交付"],
 }
 
 
@@ -122,6 +122,26 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
                 "label": "会议纪要",
                 "prompt": "帮我整理一份专题会议纪要，主题是“优化供电服务质效提升措施”。请按会议背景、主要议题、形成意见、责任分工和后续跟踪事项来组织，语气规范、便于内部流转。",
             },
+            {
+                "id": "notice-brief",
+                "label": "通知通报",
+                "prompt": "帮我起草一份内部通知，主题是“近期安全生产专项检查安排”。请明确背景、检查范围、时间节点、责任分工和报送要求，语言简洁正式。",
+            },
+            {
+                "id": "implementation-plan",
+                "label": "方案说明",
+                "prompt": "帮我起草一份方案说明，主题是“提升营业厅服务质效专项行动”。请包含目标、现状问题、主要措施、进度安排和保障机制。",
+            },
+            {
+                "id": "work-summary-plan",
+                "label": "总结计划",
+                "prompt": "帮我起草一份阶段性工作总结和下一步计划，主题是“数字化办公推广应用”。请按完成情况、成效亮点、问题不足、下一步计划组织。",
+            },
+            {
+                "id": "material-polish",
+                "label": "材料润色",
+                "prompt": "帮我润色一份办公材料，要求保持原意，提升逻辑层次、正式表达和可读性，并列出需要人工核对的数据和表述。",
+            },
         ],
         "members": [
             {"id": "workflow-producer", "name": "写作总导演", "role": "流程编排", "status": "待命"},
@@ -141,7 +161,7 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
                 "worker_id": "writing-executor",
                 "worker_name": "文案创作专家",
                 "phase": "生成初稿",
-                "description": "材料定位、标题方案、正文初稿、版式建议和流转提示。",
+                "description": "材料定位、标题方案、材料初稿、版式建议和流转提示。",
             },
             {
                 "id": "illustrations",
@@ -149,7 +169,7 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
                 "worker_id": "article-illustrator",
                 "worker_name": "配图专家",
                 "phase": "打磨发布",
-                "description": "表达润色、封面和文中配图建议；图片能力不可用时产出可复用配图 prompt。",
+                "description": "表达润色、版式结构和配图建议；图片能力不可用时产出可复用配图 prompt。",
             },
             {
                 "id": "delivery",
@@ -157,44 +177,44 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
                 "worker_id": "editor-review",
                 "worker_name": "审稿专家",
                 "phase": "交付",
-                "description": "最终发布版、事实核对项、发布风险和交付说明。",
+                "description": "定稿建议、事实核对项、流转风险和交付说明。",
             },
         ],
     },
     "deep-research-team": {
         "id": "deep-research-team",
-        "title": "深度文章研究团",
+        "title": "深度材料研究团",
         "category": "深度研究",
-        "description": "适合需要资料检索、案例调研、观点归纳和结构化提纲的深度文章。",
+        "description": "适合需要资料检索、案例调研、观点归纳和结构化提纲的调研材料、专题报告和案例素材。",
         "estimated": "预计 5 个阶段",
         "status_label": "本地技能已接入",
         "default_mode": "B",
         "default_action": "start",
-        "tags": ["资料调研", "案例分析", "结构提纲"],
+        "tags": ["调研材料", "专题报告", "案例素材", "结构提纲"],
         "image": "static/assets/writeflow/team-research.png",
         "examples": [
             {
                 "id": "market-research",
                 "label": "深度调研",
-                "prompt": "围绕「企业为什么需要本地 AI Agent 工作台」做一篇深度文章。请先列出研究问题、资料范围、案例方向和文章大纲，不要直接写全文。",
+                "prompt": "围绕「企业为什么需要本地 AI Agent 工作台」起草一份专题调研材料。请先列出研究问题、资料范围、案例方向和结构提纲，不要直接写全文。",
             },
             {
                 "id": "case-library",
                 "label": "案例素材",
-                "prompt": "帮我整理一篇关于 AI Agent 在内容生产、研发协作、资料管理里的落地案例文章。先输出案例筛选标准和文章结构。",
+                "prompt": "帮我整理一份关于 AI Agent 在内容生产、研发协作、资料管理里的落地案例素材。先输出案例筛选标准和材料结构。",
             },
         ],
         "members": [
             {"id": "workflow-producer", "name": "研究总导演", "role": "研究编排", "status": "待命"},
             {"id": "research-expert", "name": "资料研究员", "role": "案例调研", "status": "待命"},
-            {"id": "outline-architect", "name": "结构架构师", "role": "文章结构", "status": "待命"},
-            {"id": "writing-executor", "name": "撰稿专家", "role": "正文初稿", "status": "待命"},
-            {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "status": "待命"},
+            {"id": "outline-architect", "name": "结构架构师", "role": "材料结构", "status": "待命"},
+            {"id": "writing-executor", "name": "材料起草专家", "role": "材料初稿", "status": "待命"},
+            {"id": "editor-review", "name": "复核专家", "role": "材料复核", "status": "待命"},
         ],
         "questions": [
             {
                 "id": "research_topic",
-                "title": "这篇深度文章要研究的主题或核心问题是什么？",
+                "title": "这份深度材料要研究的主题或核心问题是什么？",
                 "type": "text",
                 "required": True,
                 "options": [],
@@ -233,27 +253,27 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
             },
             {
                 "id": "outline",
-                "title": "生成文章大纲",
+                "title": "生成结构提纲",
                 "worker_id": "outline-architect",
                 "worker_name": "结构架构师",
                 "phase": "结构提纲",
-                "description": "把研究材料组织成可写作的大纲、段落顺序和关键观点。",
+                "description": "把研究材料组织成可写作的结构提纲、段落顺序和关键观点。",
             },
             {
                 "id": "draft",
-                "title": "撰写正文初稿",
+                "title": "起草材料初稿",
                 "worker_id": "writing-executor",
-                "worker_name": "撰稿专家",
-                "phase": "正文初稿",
-                "description": "根据研究框架和大纲撰写正文初稿、标题方案和配图建议。",
+                "worker_name": "材料起草专家",
+                "phase": "材料初稿",
+                "description": "根据研究框架和结构提纲起草材料初稿、标题方案和配图建议。",
             },
             {
                 "id": "review",
-                "title": "审稿润色和发布版",
+                "title": "复核润色和交付建议",
                 "worker_id": "editor-review",
-                "worker_name": "审稿专家",
-                "phase": "审稿交付",
-                "description": "检查事实、逻辑、表达和发布风险，形成发布版建议。",
+                "worker_name": "复核专家",
+                "phase": "复核交付",
+                "description": "检查事实、逻辑、表达和流转风险，形成交付建议。",
             },
         ],
     },
@@ -453,7 +473,7 @@ def _extract_stage_confirmation_points(content: str) -> list[str]:
     if start_idx < 0:
         return []
     stop_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:下一阶段建议|下一步建议|阶段目标|阶段产物)\b")
-    item_re = re.compile(r"^\s*(?:[-*]\s*)?(?P<num>\d{1,2}|[一二三四五六七八九十]{1,3})[\.、．)]\s*(?P<body>.+?)\s*$")
+    item_re = re.compile(r"^\s*(?:(?:[-*]\s*)?(?P<num>\d{1,2}|[一二三四五六七八九十]{1,3})[\.、．)]|[-*])\s*(?P<body>.+?)\s*$")
     points: list[str] = []
     current: list[str] = []
     for line in lines[start_idx:]:
@@ -545,16 +565,23 @@ def _stage_review_for_view(run: dict) -> dict:
     output = _stage_output_for_task(run, current.get("task_id")) if current else None
     output_view = {}
     if isinstance(output, dict):
+        output_kind = str(output.get("kind") or "chat")
+        artifact_id = str(output.get("artifact_id") or output.get("id") or "")
+        locator = str(output.get("locator") or "")
+        if not locator:
+            locator = "artifact" if output.get("path") or output.get("artifact_id") else ("inline" if output_kind == "inline" else "chat")
         output_view = {
             "id": str(output.get("id") or ""),
             "task_id": str(output.get("task_id") or ""),
             "phase": str(output.get("phase") or ""),
             "title": str(output.get("title") or output.get("label") or "阶段产物"),
             "label": str(output.get("label") or output.get("title") or "阶段产物"),
-            "kind": str(output.get("kind") or "chat"),
+            "kind": output_kind,
             "status": str(output.get("status") or ""),
             "content": str(output.get("content") or ""),
             "note": str(output.get("note") or ""),
+            "locator": locator,
+            "artifact_id": artifact_id if locator == "artifact" else "",
             "revision_count": int(output.get("revision_count") or 0),
             "updated_at": str(output.get("updated_at") or ""),
         }
@@ -839,6 +866,7 @@ def _review_items_for_view(run: dict) -> list[dict]:
                     "source_task_id": task_id,
                     "phase": str(output.get("phase") or ""),
                     "status": "pending",
+                    "used_in_revision": bool(output.get("used_in_revision") or False),
                 }
             )
             if len(rows) >= 12:
@@ -882,6 +910,7 @@ def expert_team_run_view(run: dict) -> dict:
         )
     can_cancel = status == "running" and execution_status == "running" and bool(run.get("execution_stream_id"))
     can_retry = status == "error" or execution_status == "error"
+    can_restart_stage = status == "cancelled" or execution_status == "cancelled"
     pending_confirmations = _pending_confirmations_for_view(
         run,
         stage_review,
@@ -901,9 +930,10 @@ def expert_team_run_view(run: dict) -> dict:
         "artifacts": artifacts,
         "actions": {
             "can_answer": bool(pending),
-            "can_resume": bool(needs_resume and not pending and not structured_confirmations),
+            "can_resume": bool((needs_resume or can_restart_stage) and not pending and not structured_confirmations),
             "can_cancel": can_cancel,
             "can_retry": can_retry,
+            "can_restart_stage": can_restart_stage,
             "can_open_artifact": any(item["openable"] for item in artifacts),
             "can_approve_stage": can_review_stage,
             "can_request_revision": can_review_stage,

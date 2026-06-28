@@ -709,6 +709,7 @@ function _expertTeamStatusCardFromRun(run,data){
     sourceTaskId:item&&item.source_task_id||item&&item.sourceTaskId||'',
     phase:item&&item.phase||'',
     status:item&&item.status||'pending',
+    usedInRevision:!!(item&&item.used_in_revision||item&&item.usedInRevision),
   })):[];
   card.pendingConfirmations=Array.isArray(view.pending_confirmations)?view.pending_confirmations.map(item=>({
     id:item&&item.id||'',
@@ -947,15 +948,23 @@ function _expertTeamDockSummary(card){
   if(actions.can_retry){
     return {
       state:'issue',
-      title:'生成未完成',
+      title:'未检测到结果',
       detail:`${phase} · 可重新尝试`,
       action:'重新尝试',
+    };
+  }
+  if(actions.can_restart_stage){
+    return {
+      state:'waiting',
+      title:'已取消',
+      detail:`${phase} · 可重新开始本阶段`,
+      action:'重新开始',
     };
   }
   if(card&&(actions.can_resume||card.needsResume||card.needs_resume)){
     return {
       state:'waiting',
-      title:'需要继续生成',
+      title:'生成中断',
       detail:`${phase} · 执行流未启动或已中断`,
       action:'继续生成',
     };
@@ -1650,7 +1659,8 @@ function _expertTeamWorkspacePanelHtml(card){
   const phaseProgress=_expertTeamPhaseProgress(card,{phaseList,phaseIdx,readyArtifacts,pending,stateClass});
   const summary=_expertTeamDockSummary(card);
   const needsResume=!!(card.needsResume||card.needs_resume);
-  const canResume=!!(needsResume||(card.actions&&card.actions.can_resume));
+  const canRestartStage=!!(card.actions&&card.actions.can_restart_stage);
+  const canResume=!!(!canRestartStage&&(needsResume||(card.actions&&card.actions.can_resume)));
   const canCancel=!!(card.actions&&card.actions.can_cancel);
   const canRetry=!!(card.actions&&card.actions.can_retry);
   const stageReview=card.stageReview||{};
@@ -1658,9 +1668,10 @@ function _expertTeamWorkspacePanelHtml(card){
   const canApproveStage=!!(card.actions&&card.actions.can_approve_stage);
   const canRequestRevision=!!(card.actions&&card.actions.can_request_revision);
   const resumeHtml=canResume?`<button class="expert-team-panel-action expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
+  const restartHtml=canRestartStage?`<button class="expert-team-panel-action expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新开始本阶段</button>`:'';
   const cancelHtml=canCancel?`<button class="expert-team-panel-action expert-team-panel-cancel" type="button" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:'';
   const retryHtml=canRetry?`<button class="expert-team-panel-action expert-team-panel-retry" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:'';
-  const actionHtml=(resumeHtml||cancelHtml||retryHtml)?`<span class="expert-team-panel-actions">${resumeHtml}${cancelHtml}${retryHtml}</span>`:'';
+  const actionHtml=(resumeHtml||restartHtml||cancelHtml||retryHtml)?`<span class="expert-team-panel-actions">${resumeHtml}${restartHtml}${cancelHtml}${retryHtml}</span>`:'';
   const collapseIcon=(typeof li==='function')?li('chevron-up',16):'⌃';
   const expandIcon=(typeof li==='function')?li('chevron-down',16):'⌄';
   const hideHtml=`<button class="expert-team-panel-hide expert-team-panel-collapse-toggle" type="button" data-expert-team-hide-run-id="${esc(runId)}" data-expert-team-show-run-id="${esc(runId)}" title="收起或展开任务区" aria-label="收起或展开专家团任务区" onclick="hideExpertTeamWorkspacePanel(this);event.stopPropagation()"><span class="expert-team-panel-collapse-icon is-collapse">${collapseIcon}</span><span class="expert-team-panel-collapse-icon is-expand">${expandIcon}</span></button>`;
@@ -1718,6 +1729,8 @@ function _expertTeamWorkspacePanelHtml(card){
     Number(stageReview.revision_count||stageOutput.revision_count||0)?`第 ${Number(stageReview.revision_count||stageOutput.revision_count||0)} 次修订`:'',
   ].filter(Boolean).join(' · ');
   const stageReviewContent=stageOutput.content||stageOutput.note||'阶段结果已写入当前对话，请检查后确认是否进入下一阶段。';
+  const stageOutputLocator=stageOutput.locator||'chat';
+  const stageOutputArtifactId=stageOutput.artifact_id||stageOutput.artifactId||'';
   const stageConfirmation=confirmations.find(item=>String(item&&item.kind||'')==='stage_review');
   const clarificationConfirmation=confirmations.find(item=>String(item&&item.kind||'')==='clarification');
   const confirmationStageSummaryHtml=stageConfirmation?`<div class="expert-team-confirmation-stage-summary">
@@ -1742,9 +1755,14 @@ function _expertTeamWorkspacePanelHtml(card){
   }
   const reviewItemsSectionHtml=reviewItems.length?`<section class="expert-team-panel-section expert-team-review-items" aria-label="待人工补充事项">
       <div class="expert-team-panel-section-title"><span>待人工补充事项</span><small>不阻塞流程，可用于复核和修改意见</small></div>
-      <div class="expert-team-review-items-list">${reviewItems.slice(0,6).map((item,idx)=>`<span class="expert-team-review-item">
+      <div class="expert-team-review-items-list">${reviewItems.slice(0,6).map((item,idx)=>`<span class="expert-team-review-item ${String(item&&item.status||'')==='read'?'is-read':''} ${item&&item.usedInRevision?'is-used':''}">
         <i>${idx+1}</i>
         <b>${esc(item&&item.title||'待人工补充事项')}</b>
+        <small>${esc(item&&item.phase||'复核清单')}</small>
+        <span class="expert-team-review-item-actions">
+          <button type="button" data-expert-team-review-item-title="${esc(item&&item.title||'待人工补充事项')}" onclick="appendExpertTeamReviewItemToRevision(this);event.stopPropagation()">加入修改意见</button>
+          <button type="button" data-expert-team-review-item-read="1" onclick="markExpertTeamReviewItemRead(this);event.stopPropagation()">${String(item&&item.status||'')==='read'?'已阅':'标记已阅'}</button>
+        </span>
       </span>`).join('')}</div>
     </section>`:'';
   const stageReviewSectionHtml=(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${canApproveStage?'awaiting-review':'is-history'}" aria-label="请确认阶段成果">
@@ -1757,6 +1775,7 @@ function _expertTeamWorkspacePanelHtml(card){
         <p>${esc(stageReviewContent)}</p>
       </div>
       ${canApproveStage||canRequestRevision?`<div class="expert-team-stage-actions">
+        <button class="expert-team-panel-action expert-team-stage-locate" type="button" data-expert-team-stage-output-locator="${esc(stageOutputLocator)}" data-expert-team-stage-output-artifact-id="${esc(stageOutputArtifactId)}" onclick="locateExpertTeamStageOutput(this);event.stopPropagation()">查看初稿</button>
         ${canApproveStage?`<button class="expert-team-panel-action expert-team-stage-approve" type="button" data-expert-team-stage-approve-run-id="${esc(runId)}" onclick="approveExpertTeamStage(this);event.stopPropagation()">无修改，进入下一阶段</button>`:''}
         ${canRequestRevision?`<button class="expert-team-panel-action expert-team-stage-revision-toggle" type="button" data-expert-team-stage-revision-toggle="1" aria-expanded="false" onclick="toggleExpertTeamStageRevision(this);event.stopPropagation()">需要修改</button>
         <div class="expert-team-stage-feedback" hidden aria-hidden="true">
@@ -1775,11 +1794,11 @@ function _expertTeamWorkspacePanelHtml(card){
     : (deliveredArtifacts.length
       ? `<button class="expert-team-panel-artifact-open" type="button" data-expert-team-chat-delivery="1" onclick="openExpertTeamChatDelivery(this);event.stopPropagation()">${artifactActionLabel}</button>`
       : `<button class="expert-team-panel-artifact-open" type="button" disabled>暂无产物</button>`);
-  const pendingAction=confirmations.length?(confirmationSummary.title||'1 项待确认'):((canApproveStage||canRequestRevision)?'阶段产物待确认':(canRetry?'可重新尝试':(canCancel?'正在生成':(canResume?'需要继续生成':'无需补充'))));
-  const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?'可以确认进入下一阶段，也可以提出修改意见。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成'))));
+  const pendingAction=confirmations.length?(confirmationSummary.title||'1 项待确认'):((canApproveStage||canRequestRevision)?'阶段产物待确认':(canRetry?'可重新尝试':(canRestartStage?'已取消':(canCancel?'生成中':(canResume?'生成中断':'无需补充')))));
+  const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?'可以确认进入下一阶段，也可以提出修改意见。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canRestartStage?'本阶段已取消，可重新开始本阶段。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成')))));
   const pendingButton=confirmations.length
     ? `<button type="button" onclick="${pending.length?'openExpertTeamQuestionPopover(this)':'focusExpertTeamBottomDock(this)'};event.stopPropagation()">去确认</button>`
-    : ((canApproveStage||canRequestRevision)?`<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段产物</button>`:(canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>'))));
+    : ((canApproveStage||canRequestRevision)?`<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段产物</button>`:(canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canRestartStage?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新开始本阶段</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>')))));
   const executionHtml=executionRows.length?executionRows.map(row=>{
     return `<span class="expert-team-panel-execution-row ${esc(row.state||'idle')}">
       <i>${esc(row.index)}</i>
@@ -2072,6 +2091,7 @@ function focusExpertTeamBottomDock(trigger){
     '.expert-team-question-popover:not([hidden]) .expert-team-question-primary:not(:disabled)',
     '.status-card-expert-question.pending [data-expert-team-question-id]',
     '.expert-team-confirmation-fallback button:not(:disabled)',
+    '.expert-team-stage-locate:not(:disabled)',
     '.expert-team-stage-approve:not(:disabled)',
     '.expert-team-stage-revision-toggle:not(:disabled)',
     '.expert-team-stage-feedback:not([hidden]) textarea',
@@ -2453,6 +2473,66 @@ function toggleExpertTeamStageRevision(btn){
   return willOpen;
 }
 
+function locateExpertTeamStageOutput(btn){
+  const data=btn&&btn.dataset?btn.dataset:{};
+  const locator=String(data.expertTeamStageOutputLocator||'chat');
+  const section=btn&&btn.closest?btn.closest('.expert-team-stage-review'):null;
+  if(locator==='artifact'){
+    const artifactId=String(data.expertTeamStageOutputArtifactId||'');
+    const root=btn&&btn.closest?(btn.closest('.status-card-writeflow')||btn.closest('#writeflowStatusDock')):null;
+    const artifactButton=root&&root.querySelector?root.querySelector(`[data-writeflow-artifact-path][data-artifact-id="${artifactId}"], [data-writeflow-artifact-path]`):null;
+    if(artifactButton&&typeof openExpertTeamArtifact==='function')return openExpertTeamArtifact(artifactButton);
+  }
+  if(locator==='inline'&&section){
+    section.classList.add('is-located');
+    try{section.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+    if(typeof showToast==='function')showToast('已展开初稿结果。');
+    return true;
+  }
+  if(typeof openExpertTeamChatDelivery==='function'){
+    openExpertTeamChatDelivery(btn);
+  }
+  if(typeof showToast==='function')showToast('已定位到初稿结果。');
+  return true;
+}
+
+function appendExpertTeamReviewItemToRevision(btn){
+  const title=String(btn&&btn.dataset&&btn.dataset.expertTeamReviewItemTitle||'').trim();
+  if(!title)return false;
+  const root=btn&&btn.closest?(btn.closest('.status-card-writeflow')||btn.closest('#writeflowStatusDock')):null;
+  const section=root&&root.querySelector?root.querySelector('.expert-team-stage-review'):null;
+  const toggle=section&&section.querySelector?section.querySelector('.expert-team-stage-revision-toggle'):null;
+  let feedback=section&&section.querySelector?section.querySelector('.expert-team-stage-feedback'):null;
+  if(feedback&&feedback.hidden&&toggle)toggleExpertTeamStageRevision(toggle);
+  feedback=section&&section.querySelector?section.querySelector('.expert-team-stage-feedback'):feedback;
+  const input=feedback&&feedback.querySelector?feedback.querySelector('[data-expert-team-stage-feedback]'):null;
+  if(!input){
+    if(typeof showToast==='function')showToast('当前阶段暂无可填写的修改意见。');
+    return false;
+  }
+  const line=`- ${title}`;
+  const current=String(input.value||'').trim();
+  if(!current.includes(line))input.value=current?`${current}\n${line}`:line;
+  const item=btn.closest?btn.closest('.expert-team-review-item'):null;
+  if(item)item.classList.add('is-used');
+  if(input.focus){
+    try{input.focus({preventScroll:true});}catch(_){input.focus();}
+  }
+  if(typeof showToast==='function')showToast('修改意见已加入。');
+  return true;
+}
+
+function markExpertTeamReviewItemRead(btn){
+  const item=btn&&btn.closest?btn.closest('.expert-team-review-item'):null;
+  if(item)item.classList.add('is-read');
+  if(btn){
+    btn.textContent='已阅';
+    try{btn.setAttribute('aria-pressed','true');}catch(_){}
+  }
+  if(typeof showToast==='function')showToast('已标记为已阅。');
+  return true;
+}
+
 async function approveExpertTeamStage(btn){
   const runId=_expertTeamRunIdFromStageButton(btn,'Approve');
   const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
@@ -2535,6 +2615,9 @@ if(typeof window!=='undefined'){
   window.approveExpertTeamStage=approveExpertTeamStage;
   window.reviseExpertTeamStage=reviseExpertTeamStage;
   window.toggleExpertTeamStageRevision=toggleExpertTeamStageRevision;
+  window.locateExpertTeamStageOutput=locateExpertTeamStageOutput;
+  window.appendExpertTeamReviewItemToRevision=appendExpertTeamReviewItemToRevision;
+  window.markExpertTeamReviewItemRead=markExpertTeamReviewItemRead;
 }
 
 function _statusCardWriteflowHtml(card,copyBtn){

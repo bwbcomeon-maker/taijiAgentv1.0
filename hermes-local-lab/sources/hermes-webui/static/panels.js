@@ -3547,14 +3547,14 @@ const WRITEFLOW_PHASES = ['确定方向', '生成初稿', '打磨发布'];
 const WRITEFLOW_ARTIFACT_LABELS = {
   '01_theme': '选题确认',
   '02_cases': '案例素材',
-  '03_outline': '文章提纲',
+  '03_outline': '结构提纲',
   '04_empathy_map': '读者画像',
   '05_concrete_library': '细节素材',
-  'draft_v1': '初稿',
+  'draft_v1': '材料初稿',
   'review_report': '审稿报告',
-  'pre_publish_report': '发布前检查',
+  'pre_publish_report': '流转前检查',
   'reader_test': '读者测试',
-  'draft_final': '最终稿',
+  'draft_final': '定稿材料',
 };
 const WRITEFLOW_FALLBACK_TEAM = {
   id: 'content-creator-team',
@@ -3567,7 +3567,14 @@ const WRITEFLOW_FALLBACK_TEAM = {
   defaultMode: 'A',
   defaultAction: 'start',
   members: [],
-  examples: [],
+  examples: [
+    { id: 'monthly-work-report', label: '工作汇报', prompt: '帮我起草一篇部门月度工作汇报，主题是“迎峰度夏保供电重点工作推进情况”。面向公司分管领导，内容包括已完成工作、存在问题、下一步安排，要求条理清晰、语气正式。' },
+    { id: 'service-quality-meeting-minutes', label: '会议纪要', prompt: '帮我整理一份专题会议纪要，主题是“优化供电服务质效提升措施”。请按会议背景、主要议题、形成意见、责任分工和后续跟踪事项来组织，语气规范、便于内部流转。' },
+    { id: 'notice-brief', label: '通知通报', prompt: '帮我起草一份内部通知，主题是“近期安全生产专项检查安排”。请明确背景、检查范围、时间节点、责任分工和报送要求，语言简洁正式。' },
+    { id: 'implementation-plan', label: '方案说明', prompt: '帮我起草一份方案说明，主题是“提升营业厅服务质效专项行动”。请包含目标、现状问题、主要措施、进度安排和保障机制。' },
+    { id: 'work-summary-plan', label: '总结计划', prompt: '帮我起草一份阶段性工作总结和下一步计划，主题是“数字化办公推广应用”。请按完成情况、成效亮点、问题不足、下一步计划组织。' },
+    { id: 'material-polish', label: '材料润色', prompt: '帮我润色一份办公材料，要求保持原意，提升逻辑层次、正式表达和可读性，并列出需要人工核对的数据和表述。' },
+  ],
 };
 let WRITEFLOW_TEAMS = [];
 const WRITEFLOW_MEMBER_IMAGES = {
@@ -3812,7 +3819,7 @@ function openWriteflowTeamModal(teamId) {
           </div>
           <div class="writeflow-modal-section writeflow-modal-prompt-card">
             <h4>本次需求</h4>
-            <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清主题、读者、素材、语气或文章链接；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
+            <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清材料类型、主题、对象、素材、语气和边界；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
             <p class="writeflow-modal-note">召唤后会新建一个聊天任务，运行状态、阶段确认和产物入口会显示在对话框上方。</p>
           </div>
         </div>
