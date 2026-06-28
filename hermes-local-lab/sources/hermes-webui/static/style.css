@@ -3246,14 +3246,15 @@ body.resizing .sidebar{transition:none!important;}
 .writeflow-examples{display:flex;flex-direction:column;gap:10px;}
 .writeflow-modal-template-list{max-height:372px;overflow:auto;padding-right:2px;}
 .writeflow-example{
-  position:relative;width:100%;min-height:96px;border:1px solid var(--border);border-radius:8px;
+  position:relative;width:100%;min-height:86px;border:1px solid var(--border);border-radius:8px;
   background:color-mix(in srgb,var(--surface) 78%,var(--bg));color:var(--text);
-  padding:13px 14px 13px 42px;text-align:left;cursor:pointer;box-shadow:0 10px 24px rgba(15,23,42,.05);
+  padding:12px 14px 12px 42px;text-align:left;cursor:pointer;box-shadow:0 10px 24px rgba(15,23,42,.05);
 }
 .writeflow-example::before{content:"“";position:absolute;left:14px;top:12px;color:var(--accent);font-size:30px;line-height:1;font-weight:800;}
 .writeflow-example:hover,.writeflow-example.selected{background:color-mix(in srgb,var(--accent-bg) 38%,var(--surface));border-color:color-mix(in srgb,var(--accent) 58%,var(--border));}
-.writeflow-example span{display:block;color:var(--muted);font-size:12px;line-height:1.2;margin-bottom:8px;}
-.writeflow-example strong{display:block;font-size:13px;line-height:1.55;font-weight:650;color:var(--text);}
+.writeflow-example-label{display:inline-flex!important;align-items:center;max-width:100%;color:var(--accent)!important;font-size:12px!important;line-height:1.2!important;margin:0 0 6px!important;font-weight:760;}
+.writeflow-example-summary{display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13px;line-height:1.45;font-weight:760;color:var(--text);}
+.writeflow-example-prompt-preview{display:block;margin-top:5px;color:var(--muted);font-style:normal;font-size:11px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .writeflow-modal-prompt-card{border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb,var(--surface) 80%,var(--bg));padding:12px;}
 .writeflow-modal-prompt-card h4{margin-bottom:9px;}
 .writeflow-modal textarea{

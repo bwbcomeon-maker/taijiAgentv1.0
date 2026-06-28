@@ -95,18 +95,18 @@ def _render_smoke_card(page, done=False):
             status: done ? 'done' : 'waiting_user',
             statusLabel: done ? '已完成' : '待确认',
             phase: done ? '交付' : '需求确认',
-            phases: ['需求确认', '生成初稿', '打磨发布', '交付'],
+            phases: ['需求确认', '生成初稿', '材料打磨', '交付'],
             progress: {done: done ? 4 : 0, total: 4},
             members: [
               {id: 'flow', name: '流程编排', status: done ? 'done' : 'waiting'},
               {id: 'writer', name: '文案创作专家', status: done ? 'done' : 'idle'},
-              {id: 'image', name: '配图专家', status: done ? 'done' : 'idle'},
+              {id: 'image', name: '版式整理专家', status: done ? 'done' : 'idle'},
               {id: 'review', name: '审稿润色', status: done ? 'done' : 'idle'},
             ],
             tasks: [
               {id: 'direction', title: '需求确认', worker_name: '流程编排', status: done ? 'done' : 'waiting', status_label: done ? '完成' : '待确认'},
               {id: 'draft', title: '起草办公材料初稿', worker_name: '文案创作专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
-              {id: 'image', title: '生成版式和配图建议', worker_name: '配图专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
+              {id: 'image', title: '材料打磨方案', worker_name: '版式整理专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
               {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
             ],
             artifacts: done ? [
@@ -162,18 +162,18 @@ def _render_multi_question_card(page, answered_first=False):
             status: 'waiting_user',
             statusLabel: '待确认',
             phase: '需求确认',
-            phases: ['需求确认', '生成初稿', '打磨发布', '交付'],
+            phases: ['需求确认', '生成初稿', '材料打磨', '交付'],
             progress: {done: answeredFirst ? 1 : 0, total: 4},
             members: [
               {id: 'flow', name: '流程编排', status: 'waiting'},
               {id: 'writer', name: '文案创作专家', status: 'idle'},
-              {id: 'image', name: '配图专家', status: 'idle'},
+              {id: 'image', name: '版式整理专家', status: 'idle'},
               {id: 'review', name: '审稿润色', status: 'idle'},
             ],
             tasks: [
               {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'waiting', status_label: '待确认'},
               {id: 'draft', title: '起草办公材料初稿', worker_name: '文案创作专家', status: 'idle', status_label: '待执行'},
-              {id: 'image', title: '生成版式和配图建议', worker_name: '配图专家', status: 'idle', status_label: '待执行'},
+              {id: 'image', title: '材料打磨方案', worker_name: '版式整理专家', status: 'idle', status_label: '待执行'},
               {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'idle', status_label: '待执行'},
             ],
             artifacts: [],
@@ -202,8 +202,8 @@ def _render_action_smoke_card(page, state):
             subtitle: '专家团动作入口验收',
             status: isError ? 'error' : 'running',
             statusLabel: isError ? '执行异常' : '执行中',
-            phase: isError ? '生成初稿' : '打磨发布',
-            phases: ['需求确认', '生成初稿', '打磨发布', '交付'],
+            phase: isError ? '生成初稿' : '材料打磨',
+            phases: ['需求确认', '生成初稿', '材料打磨', '交付'],
             progress: {done: isError ? 1 : 2, total: 4},
             actions: {
               can_answer: false,
@@ -220,13 +220,13 @@ def _render_action_smoke_card(page, state):
             members: [
               {id: 'flow', name: '流程编排', status: isError ? '执行异常' : '监督中'},
               {id: 'writer', name: '文案创作专家', status: isError ? '执行异常' : '执行中'},
-              {id: 'image', name: '配图专家', status: '待命'},
+              {id: 'image', name: '版式整理专家', status: '待命'},
               {id: 'review', name: '审稿润色', status: '待命'},
             ],
             tasks: [
               {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'done', status_label: '完成'},
               {id: 'draft', title: '起草办公材料初稿', worker_name: '文案创作专家', status: isError ? 'error' : 'running', status_label: isError ? '执行异常' : '执行中'},
-              {id: 'image', title: '生成版式和配图建议', worker_name: '配图专家', status: 'pending', status_label: '待执行'},
+              {id: 'image', title: '材料打磨方案', worker_name: '版式整理专家', status: 'pending', status_label: '待执行'},
               {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'pending', status_label: '待执行'},
             ],
             artifacts: [],
@@ -784,7 +784,7 @@ def main():
                 done_screenshot = output_dir / f"expert-team-dock-done-expanded-{width}x{height}.png"
                 page.screenshot(path=str(done_screenshot), full_page=True)
                 titles = _execution_row_titles(page)
-                expected_titles = ["需求确认", "起草办公材料初稿", "生成版式和配图建议", "交付整理"]
+                expected_titles = ["需求确认", "起草办公材料初稿", "材料打磨方案", "交付整理"]
                 if titles[:4] != expected_titles:
                     failures.append(
                         f"{width}x{height}: execution rows mismatch "

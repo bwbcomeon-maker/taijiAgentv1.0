@@ -1101,21 +1101,34 @@ def _expert_team_prompt_header(run: dict, task: dict) -> str:
 
 
 def _content_expert_team_execution_prompt(run: dict) -> str:
+    from api import expert_teams
+
     answers = _expert_team_answers_by_id(run)
     topic = answers.get("topic") or run.get("title") or "本次内容主题"
     audience = answers.get("audience") or "目标读者"
     boundary = answers.get("boundary") or "没有额外限制"
     task = _expert_team_current_task(run)
     task_id = str(task.get("id") or "")
+    business_context = expert_teams._business_context_for_view(run)
+    material_type = str(business_context.get("material_type") or "office_material")
+    forbidden_terms = business_context.get("forbidden_terms") if isinstance(business_context.get("forbidden_terms"), list) else []
+    style_rule = str(business_context.get("style_contract") or "默认采用企业内部正式办公材料口径。")
+    forbidden_rule = (
+        ""
+        if not forbidden_terms
+        else "默认不得使用以下公众号或文章化表达："
+        + "、".join(str(term) for term in forbidden_terms)
+        + "。除非用户明确要求公众号/文章发布场景，否则必须改为正式办公材料表达。\n"
+    )
     if task_id == "illustrations":
         stage_instruction = (
-            "当前只执行“打磨发布”阶段：基于已确认初稿，完成表达润色、版式/配图建议、流转前检查和可执行修改清单。"
+            "当前只执行“材料打磨”阶段：基于已确认初稿，完成表达润色、版式建议、流转前检查和可执行修改清单。"
             "不要重写完整初稿，除非用户修订意见明确要求。"
         )
         output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     elif task_id == "delivery":
         stage_instruction = (
-            "当前只执行“交付确认”阶段：基于已确认初稿和打磨发布方案，形成最终流转版、事实核对项、流转风险和交付说明。"
+            "当前只执行“交付确认”阶段：基于已确认初稿和材料打磨方案，形成最终流转版、事实核对项、流转风险和交付说明。"
             "不要新增未确认的大方向；如仍有风险，明确列为发布前人工确认项。"
         )
         output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作"
@@ -1124,13 +1137,25 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
             "当前只执行“生成初稿”阶段：输出材料定位、标题方案、一级结构和可供用户确认的办公材料初稿。"
             "版式和流转检查只给必要提示，不展开成最终交付。"
         )
-        output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
+        if material_type == "work_report":
+            output_sections = (
+                "阶段目标、阶段产物、正式工作汇报结构（标题、开头概述、一、工作开展情况、二、存在问题、三、下一步工作安排、"
+                "待补充数据或需人工确认事项）、待人工补充事项、下一阶段建议"
+            )
+        elif material_type == "meeting_minutes":
+            output_sections = "阶段目标、阶段产物（会议基本信息、主要议题、形成意见、责任分工、后续跟踪）、待人工补充事项、下一阶段建议"
+        elif material_type == "notice":
+            output_sections = "阶段目标、阶段产物（背景、事项安排、时间节点、责任分工、报送要求）、待人工补充事项、下一阶段建议"
+        else:
+            output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     return (
         "你现在作为内容创作专家团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
         f"主题：{topic}\n"
         f"目标读者：{audience}\n"
         f"素材、篇幅或表达边界：{boundary}\n\n"
+        f"业务口径：{style_rule}\n"
+        f"{forbidden_rule}"
         f"{stage_instruction}\n\n"
         f"请用中文输出，结构必须包含：{output_sections}。\n\n"
         "不要夸大产品能力；不确定的信息必须标注需要人工确认。"

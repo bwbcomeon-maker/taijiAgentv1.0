@@ -1010,27 +1010,28 @@ function _scheduleWriteflowStatusRefresh(sid,run){
 
 async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
   if(!sid||!_isWriteflowHydrationForActiveSession(sid)){
-    return false;
+    return {status:'missing'};
   }
-  if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;
+  if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return {status:'preserved'};
   let data;
   try{
     data=await api(`/api/expert-teams/run?session_id=${encodeURIComponent(sid)}`);
   }catch(_){
-    return false;
+    return {status:'missing'};
   }
-  if(!_isWriteflowHydrationForActiveSession(sid))return false;
+  if(!_isWriteflowHydrationForActiveSession(sid))return {status:'missing'};
   const run=(data&&data.run&&data.run.session_id===sid)?data.run:null;
-  if(!run||!run.run_id)return false;
+  if(!run||!run.run_id)return {status:'missing'};
   const card=typeof _expertTeamStatusCardFromRun==='function'
     ? _expertTeamStatusCardFromRun(run,data)
     : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);
-  if(!card)return false;
+  if(!card)return {status:'missing'};
   if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
   _scheduleWriteflowStatusRefresh(sid,run);
   _removeWriteflowStatusCardsFromMessages();
+  if(typeof syncExpertTeamChatConfirmationCard==='function')syncExpertTeamChatConfirmationCard(card);
   if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();
-  return true;
+  return {status:'handled'};
 }
 
 async function _hydrateWriteflowStatusCardForSession(sid,options={}){
@@ -1039,7 +1040,9 @@ async function _hydrateWriteflowStatusCardForSession(sid,options={}){
     if(_isWriteflowHydrationForActiveSession(sid)&&typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
-  if(await _hydrateExpertTeamStatusCardForSession(sid,options))return true;
+  const expertTeamHydration=await _hydrateExpertTeamStatusCardForSession(sid,options);
+  if(expertTeamHydration&&expertTeamHydration.status==='handled')return true;
+  if(expertTeamHydration&&expertTeamHydration.status==='preserved')return true;
   if(!Array.isArray(S.messages)){
     if(!options.silent)_stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();

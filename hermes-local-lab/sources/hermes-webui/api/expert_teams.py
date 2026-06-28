@@ -35,7 +35,7 @@ STAGE_GATED_TEAM_IDS = set(PUBLIC_EXPERT_TEAM_IDS)
 STAGE_OUTPUT_PREVIEW_LIMIT = 720
 EXPERT_TEAM_PHASES = {
     "ai-content-creator-brand-moodboard": ["需求确认", "创意策划", "方向确认", "图像生成", "交付"],
-    "content-creator-team": ["需求确认", "生成初稿", "打磨发布", "交付"],
+    "content-creator-team": ["需求确认", "生成初稿", "材料打磨", "交付"],
     "deep-research-team": ["需求确认", "资料调研", "结构提纲", "材料初稿", "复核交付"],
 }
 
@@ -105,7 +105,7 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
         "id": "content-creator-team",
         "title": "内容创作专家团",
         "category": "内容创作",
-        "description": "面向国网业务部门日常办公材料编制，支持通知通报、工作汇报、会议纪要、宣传稿、方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。",
+        "description": "面向国网业务部门日常办公材料编制，支持通知通报、工作汇报、会议纪要、宣传稿、方案说明、总结计划等内容，从需求确认、初稿撰写、材料打磨到交付确认分阶段协作。",
         "estimated": "预计 3 个阶段",
         "status_label": "本地技能已接入",
         "default_mode": "A",
@@ -147,7 +147,7 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
         "members": [
             {"id": "workflow-producer", "name": "写作总导演", "role": "流程编排", "status": "待命"},
             {"id": "writing-executor", "name": "文案创作专家", "role": "正文写作", "status": "待命"},
-            {"id": "article-illustrator", "name": "配图专家", "role": "封面和文中配图", "status": "待命"},
+            {"id": "article-illustrator", "name": "版式整理专家", "role": "版式结构和表达打磨", "status": "待命"},
             {"id": "editor-review", "name": "审稿专家", "role": "审稿润色", "status": "待命"},
         ],
         "questions": [
@@ -166,11 +166,11 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
             },
             {
                 "id": "illustrations",
-                "title": "打磨发布方案",
+                "title": "材料打磨方案",
                 "worker_id": "article-illustrator",
-                "worker_name": "配图专家",
-                "phase": "打磨发布",
-                "description": "表达润色、版式结构和配图建议；图片能力不可用时产出可复用配图 prompt。",
+                "worker_name": "版式整理专家",
+                "phase": "材料打磨",
+                "description": "表达润色、版式结构、流转建议和可执行修改清单。",
             },
             {
                 "id": "delivery",
@@ -266,7 +266,7 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
                 "worker_id": "writing-executor",
                 "worker_name": "材料起草专家",
                 "phase": "材料初稿",
-                "description": "根据研究框架和结构提纲起草材料初稿、标题方案和配图建议。",
+                "description": "根据研究框架和结构提纲起草材料初稿、标题方案和表达建议。",
             },
             {
                 "id": "review",
@@ -511,31 +511,115 @@ def _normalize_result_text(value: object) -> str:
     return str(value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n").strip()
 
 
+OFFICE_MATERIAL_FORBIDDEN_TERMS = [
+    "公众号长文",
+    "文章大纲",
+    "开篇",
+    "标题党",
+    "你有没有",
+    "读者",
+    "发布版",
+    "发布前检查",
+    "封面",
+    "配图",
+]
+
+
 def _explicit_public_article_context(run: dict) -> bool:
     text = " ".join(
         str(run.get(key) or "")
-        for key in ("prompt", "prompt_summary", "title", "project", "project_slug")
+        for key in ("prompt", "prompt_summary")
     )
     return any(marker in text for marker in ("公众号", "文章", "发布"))
+
+
+def _office_material_type(run: dict) -> str:
+    if str(run.get("team_id") or "") != "content-creator-team":
+        return ""
+    if _explicit_public_article_context(run):
+        return "public_account"
+    text = " ".join(
+        str(run.get(key) or "")
+        for key in ("prompt", "prompt_summary", "title")
+    )
+    answers = {}
+    for question in run.get("questions") or []:
+        if isinstance(question, dict):
+            answers[str(question.get("id") or "")] = str(question.get("answer") or "")
+    text = " ".join([text, answers.get("topic", ""), answers.get("boundary", "")])
+    if any(marker in text for marker in ("工作汇报", "情况汇报", "汇报")):
+        return "work_report"
+    if "会议纪要" in text or "纪要" in text:
+        return "meeting_minutes"
+    if any(marker in text for marker in ("通知", "通报")):
+        return "notice"
+    if any(marker in text for marker in ("方案说明", "方案")):
+        return "plan"
+    if any(marker in text for marker in ("总结计划", "工作总结", "下一步计划", "总结")):
+        return "summary_plan"
+    if "润色" in text or "修改" in text:
+        return "polish"
+    return "office_material"
+
+
+def _office_material_type_title(material_type: str) -> str:
+    return {
+        "work_report": "起草工作汇报初稿",
+        "meeting_minutes": "整理会议纪要初稿",
+        "notice": "起草通知通报初稿",
+        "plan": "起草方案说明初稿",
+        "summary_plan": "起草总结计划初稿",
+        "polish": "润色办公材料",
+        "office_material": "起草办公材料初稿",
+    }.get(material_type, "起草办公材料初稿")
 
 
 def _office_material_visible_title(value: object, run: dict, task_id: str | None = "") -> str:
     title = str(value or "").strip()
     if str(run.get("team_id") or "") != "content-creator-team":
         return title
-    if _explicit_public_article_context(run):
+    material_type = _office_material_type(run)
+    if material_type == "public_account":
         return title
     legacy_titles = {"公众号长文", "撰写公众号长文", "文章大纲", "发布版", "发布前检查"}
     if title not in legacy_titles and "公众号长文" not in title:
         return title
     task = str(task_id or "").strip()
     if task in {"draft", "writing", "article"}:
-        return "起草办公材料初稿"
+        return _office_material_type_title(material_type)
     if task in {"illustrations", "image", "layout"}:
-        return "生成版式和配图建议"
+        return "材料打磨与版式建议"
     if task in {"delivery", "review"}:
         return "交付整理"
-    return "起草办公材料初稿"
+    return _office_material_type_title(material_type)
+
+
+def _business_context_for_view(run: dict) -> dict:
+    material_type = _office_material_type(run)
+    if not material_type:
+        return {}
+    visible_title = "撰写公众号长文" if material_type == "public_account" else _office_material_type_title(material_type)
+    style_contract = (
+        "按用户明确指定的公众号或文章发布场景处理。"
+        if material_type == "public_account"
+        else "默认采用企业内部正式办公材料口径；工作汇报使用正式工作汇报结构，避免公众号化表达。"
+    )
+    return {
+        "material_type": material_type,
+        "style_contract": style_contract,
+        "visible_title": visible_title,
+        "forbidden_terms": [] if material_type == "public_account" else list(OFFICE_MATERIAL_FORBIDDEN_TERMS),
+    }
+
+
+def _office_material_output_violation(run: dict, content: str, title: str = "") -> str:
+    if str(run.get("team_id") or "") != "content-creator-team" or _office_material_type(run) == "public_account":
+        return ""
+    text = f"{title}\n{content}"
+    matched = [term for term in OFFICE_MATERIAL_FORBIDDEN_TERMS if term and term in text]
+    if matched:
+        return f"生成结果不符合办公材料口径，包含公众号化表达：{'、'.join(matched[:4])}"
+    return ""
 
 
 def _stage_output_text_meta(content: str) -> dict:
@@ -660,6 +744,7 @@ def _stage_review_for_view(run: dict) -> dict:
             "task_id": str(output.get("task_id") or ""),
             "phase": str(output.get("phase") or ""),
             "title": output_title,
+            "visible_title": output_title,
             "label": output_title,
             "kind": output_kind,
             "status": str(output.get("status") or ""),
@@ -991,7 +1076,11 @@ def expert_team_run_view(run: dict) -> dict:
         artifacts.append(
             {
                 "id": str(item.get("id") or ""),
-                "label": str(item.get("label") or item.get("path") or item.get("id") or "产物"),
+                "label": _office_material_visible_title(
+                    item.get("label") or item.get("path") or item.get("id") or "产物",
+                    run,
+                    item.get("task_id") or "",
+                ),
                 "kind": str(item.get("kind") or "file"),
                 "path": str(item.get("path") or ""),
                 "status": str(item.get("status") or ""),
@@ -1014,6 +1103,7 @@ def expert_team_run_view(run: dict) -> dict:
         "status_label": str(run.get("status_label") or STATUS_LABELS.get(status, status)),
         "execution_status": execution_status,
         "phase_progress": _phase_progress(run),
+        "business_context": _business_context_for_view(run),
         "intake": intake,
         "pending_questions": pending,
         "pending_confirmations": pending_confirmations,
@@ -1289,8 +1379,34 @@ def _mark_stage_execution_complete(workspace: Path, run: dict, *, delivery: dict
         or output.get("content")
         or default_delivery_content
     )
+    violation = _office_material_output_violation(
+        run,
+        delivery_content,
+        str(delivery.get("label") or output.get("label") or task.get("title") or ""),
+    )
+    if violation:
+        run["status"] = "error"
+        run["execution_status"] = "error"
+        run["execution_stream_id"] = ""
+        run["last_execution_error"] = f"{violation}，请重新生成。"
+        run["updated_at"] = now
+        output["status"] = "error"
+        output["label"] = _office_material_visible_title(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物", run, task.get("id"))
+        output["kind"] = str(delivery.get("kind") or output.get("kind") or "chat")
+        output["content"] = delivery_content
+        output["note"] = "生成结果不符合办公材料口径，已阻止进入阶段复核。"
+        output["updated_at"] = now
+        _set_task_status(run, str(task.get("id") or ""), "error", result_summary="生成结果不符合办公材料口径，需重新生成。")
+        current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+        current.update({"status": "error", "updated_at": now})
+        run["current_stage"] = current
+        for member in run.get("members") or []:
+            if isinstance(member, dict) and str(member.get("status") or "") == "执行中":
+                member["status"] = "执行异常"
+        _append_event(run, "execution_invalid_style", "生成结果不符合办公材料口径")
+        return write_expert_team_run(Path(workspace), run)
     output["status"] = "awaiting_review"
-    output["label"] = str(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物")
+    output["label"] = _office_material_visible_title(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物", run, task.get("id"))
     output["kind"] = str(delivery.get("kind") or output.get("kind") or "chat")
     output["content"] = delivery_content
     output["note"] = str(delivery.get("note") or "已写入当前对话")

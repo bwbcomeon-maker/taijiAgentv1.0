@@ -50,6 +50,15 @@ def test_expert_team_start_returns_boolean_for_modal_lifecycle():
     assert fn_body.index("return true;") < fn_body.index("}catch(e){")
 
 
+def test_expert_team_start_syncs_lifecycle_card_immediately():
+    fn_start = COMMANDS_JS.index("async function sendExpertTeamAction")
+    fn_body = COMMANDS_JS[fn_start : COMMANDS_JS.index("async function cmdPersonality", fn_start)]
+
+    assert "syncExpertTeamChatConfirmationCard(card)" in fn_body
+    assert "专家团已创建，等待需求确认" in UI_JS
+    assert "openExpertTeamQuestionPopover" not in UI_JS[UI_JS.index("function _expertTeamLifecycleCardHtml") : UI_JS.index("function syncExpertTeamChatConfirmationCard")]
+
+
 def test_expert_team_center_loads_only_expert_team_catalog():
     fn_start = PANELS_JS.index("async function loadWriteflow")
     fn_body = PANELS_JS[fn_start : PANELS_JS.index("function _writeflowInputPayload", fn_start)]
@@ -419,7 +428,7 @@ def test_expert_team_pending_question_draft_survives_silent_status_refresh_miss(
 
     hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
     hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]
-    assert "if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;" in hydrate_body
+    assert "if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return {status:'preserved'};" in hydrate_body
     assert hydrate_body.find("shouldPreserveExpertTeamDraftDock(sid)") < hydrate_body.find("api(`/api/expert-teams/run?session_id=")
 
     load_start = SESSIONS_JS.index("async function loadSession")
@@ -613,7 +622,8 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert "card.stageReview=view.stage_review||{}" in UI_JS
     assert "stageReview.actionable" in UI_JS
     assert "const stageReviewActionable=" in UI_JS
-    assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[]" in UI_JS
+    assert "const stageReviewOutput=(card.stageReview&&card.stageReview.output)||{}" in UI_JS
+    assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs.map" in UI_JS
     assert "expert-team-stage-review" in stage_review_body
     assert "expert-team-stage-output" in stage_review_body
     assert "const stageLocateLabel=isFinalStageReview?'查看成果':'查看初稿';" in UI_JS
@@ -696,6 +706,18 @@ def test_expert_team_center_exposes_six_office_material_templates():
     assert 'placeholder="写清材料类型、主题、对象、素材、语气和边界；召唤后会进入新的聊天任务。"' in PANELS_JS
 
 
+def test_expert_team_modal_examples_are_compact_templates_not_full_prompt_cards():
+    modal_start = PANELS_JS.index("function openWriteflowTeamModal")
+    modal_body = PANELS_JS[modal_start : PANELS_JS.index("function closeWriteflowTeamModal", modal_start)]
+
+    assert "writeflow-example-label" in modal_body
+    assert "writeflow-example-summary" in modal_body
+    assert "writeflow-example-prompt-preview" in modal_body
+    assert "<strong>${esc(example.prompt)}</strong>" not in modal_body
+    assert "-webkit-line-clamp:2" in STYLE_CSS
+    assert ".writeflow-modal-prompt-card" in STYLE_CSS
+
+
 def test_expert_team_session_refresh_does_not_require_loaded_message_array():
     hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
     hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]
@@ -708,5 +730,16 @@ def test_expert_team_hydrates_before_writeflow_fallback():
     assert "async function _hydrateExpertTeamStatusCardForSession" in SESSIONS_JS
     assert "/api/expert-teams/run?session_id=" in SESSIONS_JS
     hydrate = SESSIONS_JS[SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession") :]
-    assert "await _hydrateExpertTeamStatusCardForSession(sid,options)" in hydrate
-    assert hydrate.find("await _hydrateExpertTeamStatusCardForSession(sid,options)") < hydrate.find("/api/writeflow/run?session_id=")
+    assert "const expertTeamHydration=await _hydrateExpertTeamStatusCardForSession(sid,options)" in hydrate
+    assert "expertTeamHydration.status==='preserved'" in hydrate
+    assert "expertTeamHydration.status==='handled'" in hydrate
+    assert hydrate.find("const expertTeamHydration=await _hydrateExpertTeamStatusCardForSession(sid,options)") < hydrate.find("/api/writeflow/run?session_id=")
+
+
+def test_expert_team_silent_preserve_is_handled_without_writeflow_fallback():
+    expert_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    expert_body = SESSIONS_JS[expert_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", expert_start)]
+
+    assert "return {status:'preserved'}" in expert_body
+    assert "return {status:'handled'}" in expert_body
+    assert "return {status:'missing'}" in expert_body

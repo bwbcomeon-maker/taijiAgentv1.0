@@ -574,7 +574,7 @@ const STATUS_CARD_WRITEFLOW_TEAM_IMAGES={
 const STATUS_CARD_WRITEFLOW_PHASES=['确定方向','生成初稿','打磨发布'];
 const STATUS_CARD_EXPERT_TEAM_PHASES={
   'ai-content-creator-brand-moodboard':['需求确认','创意策划','方向确认','图像生成','交付'],
-  'content-creator-team':['需求确认','生成初稿','打磨发布','交付'],
+  'content-creator-team':['需求确认','生成初稿','材料打磨','交付'],
   'deep-research-team':['需求确认','资料调研','结构提纲','正文初稿','审稿交付'],
 };
 
@@ -582,10 +582,11 @@ function _writeflowStatusCardFromRun(run,data){
   if(!run||!run.run_id)return null;
   data=data||{};
   const view=run.view||{};
+  const businessContext=view.business_context||{};
   const internalTasks=Array.isArray(run.tasks)?run.tasks:[];
   const tasks=Array.isArray(run.display_tasks)&&run.display_tasks.length?run.display_tasks:internalTasks;
   const members=Array.isArray(run.members)?run.members:[];
-  const artifacts=Array.isArray(run.artifacts)?run.artifacts:[];
+  const artifacts=Array.isArray(view.artifacts)?view.artifacts:(Array.isArray(run.artifacts)?run.artifacts:[]);
   const referenceArtifacts=Array.isArray(run.reference_artifacts)?run.reference_artifacts:[];
   const fileChanges=Array.isArray(run.file_changes)?run.file_changes:[];
   const phaseProgress=view.phase_progress||run.phase_progress||{};
@@ -650,7 +651,7 @@ function _writeflowStatusCardFromRun(run,data){
   return {
     type:'writeflow',
     title:'专家团运行',
-    subtitle:run.title||run.project_slug||data.project_name||'写作任务',
+    subtitle:businessContext.visible_title||run.title||run.project_slug||data.project_name||'写作任务',
     promptSummary:run.prompt_summary||'',
     sessionId:run.run_id,
     runId:run.run_id,
@@ -721,7 +722,14 @@ function _expertTeamStatusCardFromRun(run,data){
     sourceTaskId:item&&item.source_task_id||item&&item.sourceTaskId||'',
     status:item&&item.status||'pending',
   })):[];
-  card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[];
+  const stageReviewOutput=(card.stageReview&&card.stageReview.output)||{};
+  card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs.map(item=>{
+    if(!item||!stageReviewOutput)return item;
+    const sameId=stageReviewOutput.id&&String(stageReviewOutput.id)===String(item.id||'');
+    const sameTask=stageReviewOutput.task_id&&String(stageReviewOutput.task_id)===String(item.task_id||'');
+    if(!sameId&&!sameTask)return item;
+    return {...item,title:stageReviewOutput.visible_title||stageReviewOutput.title||item.title,label:stageReviewOutput.visible_title||stageReviewOutput.label||item.label};
+  }):[];
   card.phaseProgress=view.phase_progress||run.phase_progress||card.phaseProgress||{};
   card.needsResume=!!(card.health.needs_resume||run.needs_resume||run.needsResume);
   card.executionStatus=view.execution_status||run.execution_status||'';

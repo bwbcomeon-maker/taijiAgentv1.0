@@ -25,7 +25,7 @@ def test_content_creator_catalog_uses_sgcc_daily_office_copy():
 
     assert team["description"] == (
         "面向国网业务部门日常办公材料编制，支持通知通报、工作汇报、会议纪要、宣传稿、"
-        "方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。"
+        "方案说明、总结计划等内容，从需求确认、初稿撰写、材料打磨到交付确认分阶段协作。"
     )
     assert team["tags"] == ["工作汇报", "通知通报", "会议纪要", "总结计划", "宣传稿件", "方案说明"]
     assert [example["label"] for example in team["examples"]] == ["工作汇报", "会议纪要", "通知通报", "方案说明", "总结计划", "材料润色"]
@@ -36,10 +36,26 @@ def test_content_creator_catalog_uses_sgcc_daily_office_copy():
         "材料面向哪些对象，使用场景是什么？",
         "有哪些已知素材、口径要求、篇幅或表述边界？",
     ]
-    assert [task["title"] for task in team["tasks"]] == ["起草办公材料初稿", "打磨发布方案", "交付确认"]
+    assert [task["title"] for task in team["tasks"]] == ["起草办公材料初稿", "材料打磨方案", "交付确认"]
     public_json = json.dumps(team, ensure_ascii=False)
     for forbidden in ("公众号长文", "发布前检查", "文章大纲", "发布版"):
         assert forbidden not in public_json
+
+
+def test_content_creator_work_report_view_exposes_office_material_business_context(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-business-context", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
+    )
+
+    context = run["view"]["business_context"]
+
+    assert context["material_type"] == "work_report"
+    assert context["visible_title"] == "起草工作汇报初稿"
+    assert "正式工作汇报" in context["style_contract"]
+    assert "公众号长文" in context["forbidden_terms"]
 
 
 def test_deep_research_catalog_uses_office_material_research_copy():
@@ -626,7 +642,83 @@ def test_legacy_writeflow_titles_are_normalized_for_office_materials():
         }
     )
 
-    assert adapted["tasks"][0]["title"] == "起草办公材料初稿"
+    assert adapted["tasks"][0]["title"] == "起草工作汇报初稿"
+    assert adapted["view"]["business_context"]["material_type"] == "work_report"
+    assert adapted["view"]["business_context"]["visible_title"] == "起草工作汇报初稿"
+
+
+def test_content_expert_team_prompt_enforces_formal_work_report_structure(tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-work-report-prompt", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
+                "audience": "公司分管领导",
+                "boundary": "条理清晰、语气正式",
+            },
+            "skip_optional": True,
+        },
+    )
+
+    prompt = routes._content_expert_team_execution_prompt(answered)
+
+    assert "正式工作汇报结构" in prompt
+    assert "一、工作开展情况" in prompt
+    assert "二、存在问题" in prompt
+    assert "三、下一步工作安排" in prompt
+    for forbidden in ("公众号长文", "文章大纲", "开篇", "标题党", "你有没有", "读者", "发布版", "发布前检查", "封面", "配图"):
+        assert forbidden in prompt
+    assert "小型内容工作室" not in prompt
+    assert "主编" not in prompt
+    assert "选题" not in prompt
+
+
+def test_office_material_public_account_tone_is_not_accepted_as_stage_output(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-bad-tone", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
+                "audience": "公司分管领导",
+                "boundary": "正式汇报口吻",
+            },
+            "skip_optional": True,
+        },
+    )
+    started = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-bad-tone", "session_id": "sid-bad-tone"},
+    )
+    checked = expert_teams.mark_content_expert_team_execution_complete(
+        tmp_path,
+        started["run_id"],
+        delivery={
+            "kind": "chat",
+            "label": "撰写公众号长文",
+            "content": "标题：你有没有遇到这些情况\n\n【开篇】这是一篇公众号长文，写给读者看的发布版。",
+        },
+    )
+
+    assert checked["status"] == "error"
+    assert checked["execution_status"] == "error"
+    assert checked["view"]["stage_review"]["actionable"] is False
+    assert "办公材料口径" in checked["last_execution_error"]
 
 
 def test_explicit_public_account_writeflow_title_is_preserved():
@@ -646,6 +738,7 @@ def test_explicit_public_account_writeflow_title_is_preserved():
     )
 
     assert adapted["tasks"][0]["title"] == "撰写公众号长文"
+    assert adapted["view"]["business_context"]["material_type"] == "public_account"
 
 
 def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_path):
@@ -1343,7 +1436,7 @@ def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(
     next_run = expert_teams.approve_expert_team_stage(tmp_path, reviewed["run_id"])
 
     assert next_run["status"] == "running"
-    assert next_run["phase"] == "打磨发布"
+    assert next_run["phase"] == "材料打磨"
     assert next_run["current_stage"]["task_id"] == "illustrations"
     assert [task["status"] for task in next_run["tasks"]] == ["done", "running", "pending"]
     assert next_run["stage_outputs"][0]["status"] == "approved"
@@ -1507,10 +1600,10 @@ def test_expert_team_stage_approve_route_starts_next_stage_stream(monkeypatch, t
     response = routes.handle_post(object(), urlparse("/api/expert-teams/stage/approve"))
 
     assert response["stream_id"] == "stream-stage-route-2"
-    assert response["run"]["phase"] == "打磨发布"
+    assert response["run"]["phase"] == "材料打磨"
     assert response["run"]["current_stage"]["task_id"] == "illustrations"
     assert response["run"]["execution_stream_id"] == "stream-stage-route-2"
-    assert "打磨发布" in calls["msg"]
+    assert "材料打磨" in calls["msg"]
     assert "已确认的前置阶段产物" in calls["msg"]
 
 

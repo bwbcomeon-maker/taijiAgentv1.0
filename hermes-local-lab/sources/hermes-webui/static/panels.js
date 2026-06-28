@@ -3781,11 +3781,16 @@ function openWriteflowTeamModal(teamId) {
       ${_writeflowAvatarHtml(member.image, member.name, 'writeflow-member-avatar')}
       <span><strong>${esc(member.name)}</strong><em>${esc(member.role)}</em></span>
     </div>`).join('');
-  const examples = team.examples.map((example, idx) => `
-    <button type="button" class="writeflow-example ${idx === 0 ? 'selected' : ''}" data-template-id="${esc(example.id)}" data-example-prompt="${esc(example.prompt)}">
-      <span>${esc(example.label)}</span>
-      <strong>${esc(example.prompt)}</strong>
-    </button>`).join('');
+  const examples = team.examples.map((example, idx) => {
+    const prompt = String(example.prompt || '').replace(/\s+/g, ' ').trim();
+    const summary = prompt.split(/[。；;.!?？]/).find(Boolean) || prompt;
+    return `
+    <button type="button" class="writeflow-example ${idx === 0 ? 'selected' : ''}" data-template-id="${esc(example.id)}" data-example-prompt="${esc(example.prompt)}" aria-label="选择${esc(example.label)}模板">
+      <span class="writeflow-example-label">${esc(example.label)}</span>
+      <strong class="writeflow-example-summary">${esc(summary)}</strong>
+      <em class="writeflow-example-prompt-preview">${esc(prompt)}</em>
+    </button>`;
+  }).join('');
   body.innerHTML = `
     <div class="writeflow-modal-shell">
       <div class="writeflow-modal-head">
