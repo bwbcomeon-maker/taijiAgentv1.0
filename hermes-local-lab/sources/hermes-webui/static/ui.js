@@ -1005,7 +1005,7 @@ function _expertTeamDockSummary(card){
     return {
       state:'running',
       title:'正在生成内容',
-      detail:`${phase} · 可展开查看或停止生成`,
+      detail:`${phase} · 可展开查看进度`,
       action:'查看详情',
     };
   }
@@ -1706,14 +1706,16 @@ function _expertTeamWorkspacePanelHtml(card){
   const canRetry=!!(card.actions&&card.actions.can_retry);
   const stageReview=card.stageReview||{};
   const stageOutput=stageReview.output||{};
+  const stageReviewDisplayState=String(stageReview.display_state||stageReview.displayState||'').toLowerCase();
+  const stageReviewActionable=!!stageReview.actionable;
   const isFinalStageReview=!!(stageReview.is_final_stage||stageReview.isFinalStage);
-  const canApproveStage=!!(card.actions&&card.actions.can_approve_stage);
-  const canRequestRevision=!!(card.actions&&card.actions.can_request_revision);
+  const canApproveStage=stageReviewActionable&&!!(card.actions&&card.actions.can_approve_stage);
+  const canRequestRevision=stageReviewActionable&&!!(card.actions&&card.actions.can_request_revision);
   const resumeHtml=canResume?`<button class="expert-team-panel-action expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
   const restartHtml=canRestartStage?`<button class="expert-team-panel-action expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新开始本阶段</button>`:'';
   const cancelHtml=canCancel?`<button class="expert-team-panel-action expert-team-panel-cancel" type="button" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:'';
   const retryHtml=canRetry?`<button class="expert-team-panel-action expert-team-panel-retry" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:'';
-  const actionHtml=(resumeHtml||restartHtml||cancelHtml||retryHtml)?`<span class="expert-team-panel-actions">${resumeHtml}${restartHtml}${cancelHtml}${retryHtml}</span>`:'';
+  const actionHtml='';
   const collapseIcon=(typeof li==='function')?li('chevron-up',16):'⌃';
   const expandIcon=(typeof li==='function')?li('chevron-down',16):'⌄';
   const hideHtml=`<button class="expert-team-panel-hide expert-team-panel-collapse-toggle" type="button" data-expert-team-hide-run-id="${esc(runId)}" data-expert-team-show-run-id="${esc(runId)}" title="收起或展开任务区" aria-label="收起或展开专家团任务区" onclick="hideExpertTeamWorkspacePanel(this);event.stopPropagation()"><span class="expert-team-panel-collapse-icon is-collapse">${collapseIcon}</span><span class="expert-team-panel-collapse-icon is-expand">${expandIcon}</span></button>`;
@@ -1811,9 +1813,9 @@ function _expertTeamWorkspacePanelHtml(card){
         </span>
       </span>`).join('')}</div>
     </section>`:'';
-  const stageReviewSectionHtml=(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${canApproveStage?'awaiting-review':'is-history'}" aria-label="请确认阶段成果">
+  const stageReviewSectionHtml=(stageReviewActionable||stageReviewDisplayState==='history')&&(stageReview.task_id||stageOutput.task_id)?`<section class="expert-team-panel-section expert-team-stage-review ${stageReviewActionable?'awaiting-review':'is-history'}" aria-label="${stageReviewActionable?'请确认阶段成果':'阶段成果摘要'}">
       <div class="expert-team-panel-section-title">
-        <span>请确认阶段成果</span>
+        <span>${stageReviewActionable?`请确认阶段成果`:`阶段成果摘要`}</span>
         <small>${esc(stageReviewMeta||'等待确认')}</small>
       </div>
       <div class="expert-team-stage-output">
@@ -2276,8 +2278,11 @@ function openExpertTeamChatDelivery(btn){
   if(typeof showToast==='function')showToast('专家团结果已写入当前对话。');
   return true;
 }
+function _expertTeamNormalizeResultText(text){
+  return String(text||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n').replace(/\\n/g,'\n').trim();
+}
 function _expertTeamPlainText(text){
-  return String(text||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim();
+  return _expertTeamNormalizeResultText(text);
 }
 function _expertTeamCompactSummary(text,limit=140){
   const raw=_expertTeamPlainText(text);
@@ -2295,7 +2300,7 @@ function _expertTeamResultFromCard(){
   const output=stageReview.output||{};
   const outputs=Array.isArray(card.stageOutputs)?card.stageOutputs:[];
   const latest=outputs.slice().reverse().find(item=>item&&String(item.content||'').trim())||{};
-  const content=String(output.content||latest.content||'').trim();
+  const content=_expertTeamNormalizeResultText(output.content||latest.content||'');
   if(!content)return null;
   let rawIdx='';
   if(typeof S!=='undefined'&&Array.isArray(S.messages)){
@@ -2431,8 +2436,8 @@ function openExpertTeamResultViewer(trigger){
 function locateExpertTeamDeliveryMessage(trigger){
   const rawIdx=trigger&&trigger.dataset?trigger.dataset.expertTeamResultRawIdx:'';
   if(rawIdx==='')return false;
-  const cssEscape=(typeof CSS!=='undefined'&&CSS&&CSS.escape)?CSS.escape(String(rawIdx)):String(rawIdx).replace(/"/g,'\\"');
-  const target=document.querySelector(`[data-msg-idx="${cssEscape}"]`);
+  const target=Array.from(document.querySelectorAll('[data-msg-idx]')).find(el=>el&&el.dataset&&String(el.dataset.msgIdx)===String(rawIdx))
+    ||document.querySelector(`.expert-team-result-card[data-expert-team-result-raw-idx="${String(rawIdx).replace(/"/g,'\\"')}"]`);
   if(!target)return false;
   closeExpertTeamResultViewer(trigger);
   try{target.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'});}catch(_){try{target.scrollIntoView();}catch(__){}}

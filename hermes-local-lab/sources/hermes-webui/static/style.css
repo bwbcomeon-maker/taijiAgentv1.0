@@ -10660,7 +10660,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     max-height:64px!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded{
-    max-height:min(72vh,620px)!important;
+    max-height:min(58vh,520px)!important;
     overflow:hidden auto!important;
     overscroll-behavior:contain!important;
   }
@@ -10698,7 +10698,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     overscroll-behavior:auto!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow.is-expanded) main.main.taiji-real-main #mainChat .messages-shell{
-    bottom:clamp(500px,74vh,660px)!important;
+    bottom:clamp(380px,62vh,540px)!important;
   }
 }
 

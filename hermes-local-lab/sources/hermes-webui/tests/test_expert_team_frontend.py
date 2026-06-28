@@ -417,10 +417,10 @@ def test_expert_team_pending_question_draft_survives_silent_status_refresh_miss(
     assert "String(input.value||'').trim()" in helper_body
     assert "_restoreExpertTeamDraftFocusIfNeeded(dock)" in helper_body
 
-    hydrate_start = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession")
-    hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("function _removeWriteflowStatusCardsFromMessages", hydrate_start)]
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]
     assert "if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;" in hydrate_body
-    assert hydrate_body.find("shouldPreserveExpertTeamDraftDock(sid)") < hydrate_body.find("await _hydrateExpertTeamStatusCardForSession(sid")
+    assert hydrate_body.find("shouldPreserveExpertTeamDraftDock(sid)") < hydrate_body.find("api(`/api/expert-teams/run?session_id=")
 
     load_start = SESSIONS_JS.index("async function loadSession")
     load_body = SESSIONS_JS[load_start : SESSIONS_JS.index("// Mark this session as the in-flight load", load_start)]
@@ -450,7 +450,7 @@ def test_expert_team_workspace_uses_bottom_dock_without_top_panel_squeeze():
     assert "max-width:100%!important;" in dock_block
     assert "display:block!important;" in dock_block
     assert "display:none!important;" not in dock_block
-    assert "max-height:min(72vh,620px)!important;" in expanded_block
+    assert "max-height:min(58vh,520px)!important;" in expanded_block
     assert "overflow:hidden auto!important;" in expanded_block
 
     inner_start = STYLE_CSS.index(".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-bottom-body .expert-team-panel-inner")
@@ -532,6 +532,8 @@ def test_expert_team_chat_delivery_uses_compact_result_viewer():
     assert "function _expertTeamDeliveryCardHtml" in UI_JS
     assert "function openExpertTeamResultViewer" in UI_JS
     assert "function locateExpertTeamDeliveryMessage" in UI_JS
+    assert "function _expertTeamNormalizeResultText" in UI_JS
+    assert ".replace(/\\\\n/g,'\\n')" in UI_JS
     assert "expert-team-result-card" in UI_JS
     assert "expert-team-result-viewer" in UI_JS
     assert "查看完整成果" in UI_JS
@@ -562,6 +564,18 @@ def test_expert_team_answer_response_attaches_real_stream_runtime():
     assert "saveInflightState(sid,{streamId:data.stream_id" in UI_JS
     assert "attachLiveStream(sid,data.stream_id" in UI_JS
     assert "_applyExpertTeamStreamResponse(data);" in UI_JS
+
+
+def test_expert_team_silent_hydrate_protects_draft_inside_expert_hydrate():
+    expert_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    expert_body = SESSIONS_JS[expert_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", expert_start)]
+    writeflow_start = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession")
+    writeflow_body = SESSIONS_JS[writeflow_start : SESSIONS_JS.index("async function refreshWriteflowStatusDockForActiveSession", writeflow_start)]
+
+    assert "options.silent" in expert_body
+    assert "shouldPreserveExpertTeamDraftDock" in expert_body
+    assert expert_body.index("shouldPreserveExpertTeamDraftDock") < expert_body.index("api(`/api/expert-teams/run?session_id=")
+    assert "shouldPreserveExpertTeamDraftDock" not in writeflow_body
 
 
 def test_expert_team_workspace_shows_resume_action_for_stale_running_runs():
@@ -597,6 +611,8 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert "/api/expert-teams/stage/approve" in UI_JS
     assert "/api/expert-teams/stage/revise" in UI_JS
     assert "card.stageReview=view.stage_review||{}" in UI_JS
+    assert "stageReview.actionable" in UI_JS
+    assert "const stageReviewActionable=" in UI_JS
     assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[]" in UI_JS
     assert "expert-team-stage-review" in stage_review_body
     assert "expert-team-stage-output" in stage_review_body
@@ -607,6 +623,7 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert "data-expert-team-stage-revision-toggle" in stage_review_body
     assert 'class="expert-team-stage-feedback" hidden aria-hidden="true"' in stage_review_body
     assert "请确认阶段成果" in stage_review_body
+    assert "stageReviewActionable" in stage_review_body
     assert "const stageApproveLabel=isFinalStageReview?'无修改，完成任务':'无修改，进入下一阶段';" in UI_JS
     assert "stageApproveLabel" in stage_review_body
     assert stage_review_body.index("stageLocateLabel") < stage_review_body.index("stageApproveLabel")
@@ -627,6 +644,18 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert ".expert-team-stage-actions" in STYLE_CSS
     assert ".expert-team-stage-revision-toggle" in STYLE_CSS
     assert ".expert-team-stage-feedback[hidden]" in STYLE_CSS
+
+
+def test_expert_team_running_state_does_not_render_actionable_stage_review():
+    panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
+    panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
+
+    assert "const stageReviewDisplayState=" in panel_body
+    assert "stageReviewActionable" in panel_body
+    assert "stageReviewActionable?`请确认阶段成果`" in panel_body
+    assert "stageReviewActionable||stageReviewDisplayState==='history'" in panel_body
+    assert "canApproveStage=stageReviewActionable" in panel_body
+    assert "canRequestRevision=stageReviewActionable" in panel_body
 
 
 def test_expert_team_review_items_are_actionable_without_blocking_stage_review():

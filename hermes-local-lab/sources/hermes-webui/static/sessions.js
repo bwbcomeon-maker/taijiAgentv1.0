@@ -1012,6 +1012,7 @@ async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
   if(!sid||!_isWriteflowHydrationForActiveSession(sid)){
     return false;
   }
+  if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;
   let data;
   try{
     data=await api(`/api/expert-teams/run?session_id=${encodeURIComponent(sid)}`);
@@ -1038,7 +1039,6 @@ async function _hydrateWriteflowStatusCardForSession(sid,options={}){
     if(_isWriteflowHydrationForActiveSession(sid)&&typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
-  if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;
   if(await _hydrateExpertTeamStatusCardForSession(sid,options))return true;
   if(!Array.isArray(S.messages)){
     if(!options.silent)_stopWriteflowStatusRefresh();

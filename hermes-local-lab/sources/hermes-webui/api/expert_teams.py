@@ -507,8 +507,39 @@ def _extract_stage_confirmation_points(content: str) -> list[str]:
     return cleaned
 
 
+def _normalize_result_text(value: object) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n").strip()
+
+
+def _explicit_public_article_context(run: dict) -> bool:
+    text = " ".join(
+        str(run.get(key) or "")
+        for key in ("prompt", "prompt_summary", "title", "project", "project_slug")
+    )
+    return any(marker in text for marker in ("公众号", "文章", "发布"))
+
+
+def _office_material_visible_title(value: object, run: dict, task_id: str | None = "") -> str:
+    title = str(value or "").strip()
+    if str(run.get("team_id") or "") != "content-creator-team":
+        return title
+    if _explicit_public_article_context(run):
+        return title
+    legacy_titles = {"公众号长文", "撰写公众号长文", "文章大纲", "发布版", "发布前检查"}
+    if title not in legacy_titles and "公众号长文" not in title:
+        return title
+    task = str(task_id or "").strip()
+    if task in {"draft", "writing", "article"}:
+        return "起草办公材料初稿"
+    if task in {"illustrations", "image", "layout"}:
+        return "生成版式和配图建议"
+    if task in {"delivery", "review"}:
+        return "交付整理"
+    return "起草办公材料初稿"
+
+
 def _stage_output_text_meta(content: str) -> dict:
-    text = str(content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = _normalize_result_text(content)
     compact = re.sub(r"\s+", " ", text).strip()
     summary = ""
     for line in text.split("\n"):
@@ -594,7 +625,25 @@ def _stage_review_for_view(run: dict) -> dict:
     output = _stage_output_for_task(run, current.get("task_id")) if current else None
     output_view = {}
     current_task_id = str(current.get("task_id") or "")
-    current_title = str(current.get("title") or "")
+    current_title = _office_material_visible_title(current.get("title") or "", run, current_task_id)
+    current_status = str(current.get("status") or "")
+    run_status = str(run.get("status") or "")
+    execution_status = str(run.get("execution_status") or "")
+    if not current_task_id:
+        display_state = "none"
+    elif current_status in {"running", "revision_running"} or run_status == "running" or execution_status == "running":
+        display_state = "running"
+    elif current_status == "awaiting_review" and run_status == "awaiting_user" and execution_status == "done":
+        display_state = "awaiting_review"
+    elif current_status == "error" or run_status == "error" or execution_status == "error":
+        display_state = "error"
+    elif current_status == "cancelled" or run_status == "cancelled" or execution_status == "cancelled":
+        display_state = "cancelled"
+    elif isinstance(output, dict):
+        display_state = "history"
+    else:
+        display_state = "none"
+    actionable = display_state == "awaiting_review"
     if current_task_id and _is_final_stage_task(run, current_task_id) and str(current.get("status") or "") == "awaiting_review":
         current_title = "最终成果待确认"
     if isinstance(output, dict):
@@ -603,14 +652,15 @@ def _stage_review_for_view(run: dict) -> dict:
         locator = str(output.get("locator") or "")
         if not locator:
             locator = "artifact" if output.get("path") or output.get("artifact_id") else ("inline" if output_kind == "inline" else "chat")
-        content = str(output.get("content") or "")
+        content = _normalize_result_text(output.get("content") or "")
         text_meta = _stage_output_text_meta(content)
+        output_title = _office_material_visible_title(output.get("title") or output.get("label") or "阶段产物", run, output.get("task_id") or current_task_id)
         output_view = {
             "id": str(output.get("id") or ""),
             "task_id": str(output.get("task_id") or ""),
             "phase": str(output.get("phase") or ""),
-            "title": str(output.get("title") or output.get("label") or "阶段产物"),
-            "label": str(output.get("label") or output.get("title") or "阶段产物"),
+            "title": output_title,
+            "label": output_title,
             "kind": output_kind,
             "status": str(output.get("status") or ""),
             "content": content,
@@ -628,6 +678,8 @@ def _stage_review_for_view(run: dict) -> dict:
         "worker_id": str(current.get("worker_id") or ""),
         "worker_name": str(current.get("worker_name") or ""),
         "status": str(current.get("status") or ""),
+        "display_state": display_state,
+        "actionable": actionable,
         "is_final_stage": _is_final_stage_task(run, current_task_id),
         "revision_count": int(current.get("revision_count") or 0),
         "feedback": str(current.get("feedback") or ""),
@@ -654,6 +706,10 @@ def _normalize_run(run: dict) -> dict:
     )
     run["members"] = run.get("members") if isinstance(run.get("members"), list) else []
     run["tasks"] = run.get("tasks") if isinstance(run.get("tasks"), list) else []
+    for task in run["tasks"]:
+        if isinstance(task, dict):
+            task_id = str(task.get("id") or "")
+            task["title"] = _office_material_visible_title(task.get("title") or task_id or "", run, task_id)
     run["events"] = run.get("events") if isinstance(run.get("events"), list) else []
     run["artifacts"] = run.get("artifacts") if isinstance(run.get("artifacts"), list) else []
     run["stage_outputs"] = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
@@ -924,8 +980,7 @@ def expert_team_run_view(run: dict) -> dict:
         _is_stage_gated_run(run)
         and not pending
         and not structured_confirmations
-        and status == "awaiting_user"
-        and stage_review.get("status") == "awaiting_review"
+        and stage_review.get("actionable") is True
         and stage_review.get("task_id")
     )
     artifacts = []
@@ -1638,6 +1693,8 @@ def expert_team_from_writeflow_run(run: dict) -> dict:
         "team_category": str(run.get("team_category") or template["category"]),
         "session_id": str(run.get("session_id") or ""),
         "title": str(run.get("title") or "专家团任务"),
+        "prompt": str(run.get("prompt") or ""),
+        "prompt_summary": str(run.get("prompt_summary") or run.get("prompt") or ""),
         "status": str(run.get("status") or "running"),
         "phase": str(run.get("phase") or "生成初稿"),
         "questions": [],

@@ -237,6 +237,30 @@ function buildConfirmationRun(sessionId, answers) {
       pending_confirmations: primaryQuestion ? [primaryConfirmation] : [],
       primary_confirmation: primaryConfirmation,
       review_items: [],
+      stage_review: complete
+        ? {
+            task_id: "draft",
+            phase: "生成初稿",
+            title: "撰写公众号长文",
+            status: "running",
+            display_state: "running",
+            actionable: false,
+            output: {
+              id: "draft-stale-output",
+              task_id: "draft",
+              phase: "生成初稿",
+              title: "撰写公众号长文",
+              label: "撰写公众号长文",
+              kind: "chat",
+              status: "awaiting_review",
+              content: "这是一段生成中不应要求用户确认的残留阶段结果。",
+              summary: "这是一段生成中不应要求用户确认的残留阶段结果。",
+              preview: "这是一段生成中不应要求用户确认的残留阶段结果。",
+              locator: "chat",
+              artifact_id: "",
+            },
+          }
+        : {},
       actions: {
         can_answer: !complete,
         can_resume: false,
@@ -438,13 +462,24 @@ async function main() {
 	    await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
     await page.waitForFunction(() => {
       const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
-      const toast = document.getElementById("toast");
       const panelText = document.querySelector("#writeflowStatusDock")?.textContent || "";
       return card && card.classList.contains("is-expanded") &&
-        toast && (toast.dataset.toastMessage || "").includes("需求已确认，正在进入生成") &&
         panelText.includes("生成初稿") &&
         panelText.includes("已跳过");
     }, { timeout: 10000 });
+    const runningState = await page.evaluate(() => {
+      const panelText = document.querySelector("#writeflowStatusDock")?.textContent || "";
+      const buttons = Array.from(document.querySelectorAll("#writeflowStatusDock button")).map((button) => button.textContent.replace(/\s+/g, " ").trim()).filter(Boolean);
+      const stopButtons = buttons.filter((text) => text.includes("停止生成")).length;
+      return {
+        panelText: panelText.replace(/\s+/g, " ").trim(),
+        buttons,
+        stopButtons,
+      };
+    });
+    assertState(!runningState.panelText.includes("请确认阶段成果"), "Running state still exposes actionable stage review", runningState);
+    assertState(!runningState.panelText.includes("撰写公众号长文"), "Running state still exposes legacy public-account title", runningState);
+    assertState(runningState.stopButtons === 1, "Running state does not expose exactly one stop action", runningState);
     for (const viewport of [
       { width: 1024, height: 720 },
       { width: 1280, height: 720 },

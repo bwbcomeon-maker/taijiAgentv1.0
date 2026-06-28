@@ -560,6 +560,92 @@ def test_review_items_contract_is_non_blocking_and_stage_output_has_locator(tmp_
     assert view["stage_review"]["output"]["preview"].startswith("办公材料初稿已生成。")
     assert view["stage_review"]["output"]["content_length"] == len(complete["stage_outputs"][0]["content"])
     assert view["stage_review"]["output"]["has_long_content"] is False
+    assert view["stage_review"]["display_state"] == "awaiting_review"
+    assert view["stage_review"]["actionable"] is True
+
+
+def test_running_stage_with_stale_output_is_not_actionable_review(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-running-output", "team_id": "content-creator-team", "prompt": "帮我起草部门月度工作汇报"},
+    )
+    answered = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报",
+                "audience": "公司分管领导",
+                "boundary": "",
+            },
+            "skip_optional": True,
+        },
+    )
+    running = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        answered["run_id"],
+        {"stream_id": "stream-running-output", "session_id": "sid-running-output"},
+    )
+    running["stage_outputs"] = [
+        {
+            "id": "draft-output",
+            "task_id": "draft",
+            "phase": "生成初稿",
+            "title": "办公材料初稿",
+            "label": "办公材料初稿",
+            "kind": "chat",
+            "status": "awaiting_review",
+            "content": "上一轮残留初稿内容",
+        }
+    ]
+
+    view = expert_teams.expert_team_run_view(running)
+
+    assert view["stage_review"]["task_id"] == "draft"
+    assert view["stage_review"]["display_state"] == "running"
+    assert view["stage_review"]["actionable"] is False
+    assert view["actions"]["can_approve_stage"] is False
+    assert "stage_review" not in [item["kind"] for item in view["pending_confirmations"]]
+
+
+def test_legacy_writeflow_titles_are_normalized_for_office_materials():
+    from api import expert_teams
+
+    adapted = expert_teams.expert_team_from_writeflow_run(
+        {
+            "run_id": "wr-legacy-office",
+            "session_id": "sid-legacy-office",
+            "team_id": "content-creator-team",
+            "title": "帮我起草部门月度工作汇报",
+            "prompt": "帮我起草部门月度工作汇报，主题是迎峰度夏保供电",
+            "display_tasks": [
+                {"id": "draft", "title": "撰写公众号长文", "status": "running", "status_label": "执行中"}
+            ],
+        }
+    )
+
+    assert adapted["tasks"][0]["title"] == "起草办公材料初稿"
+
+
+def test_explicit_public_account_writeflow_title_is_preserved():
+    from api import expert_teams
+
+    adapted = expert_teams.expert_team_from_writeflow_run(
+        {
+            "run_id": "wr-public-account",
+            "session_id": "sid-public-account",
+            "team_id": "content-creator-team",
+            "title": "写一篇公众号长文",
+            "prompt": "写一篇公众号长文并配图",
+            "display_tasks": [
+                {"id": "draft", "title": "撰写公众号长文", "status": "running", "status_label": "执行中"}
+            ],
+        }
+    )
+
+    assert adapted["tasks"][0]["title"] == "撰写公众号长文"
 
 
 def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_path):
