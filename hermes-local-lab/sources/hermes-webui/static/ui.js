@@ -7531,8 +7531,9 @@ function _securityCapabilityLabel(name){
 }
 function _securityCapabilityStateLabel(cap){
   if(!cap)return'';
-  if(cap.allowed)return cap.approval_applicable?'可用/需审批':'可用';
-  return cap.approval_applicable?'未开启/可审批':'未开启';
+  const enabled=cap.enabled!==undefined?!!cap.enabled:!!cap.allowed;
+  if(enabled)return cap.approval_required?'等待审批':'可用';
+  return cap.approval_required?'未开启/可申请审批':'未开启';
 }
 function renderSecurityStatus(payload){
   _securityStatusCache=payload||_securityStatusCache;

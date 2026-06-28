@@ -270,6 +270,28 @@ async def test_session_chat_stream_emits_lifecycle_events_and_keepalive_safe_sha
 
 
 @pytest.mark.asyncio
+async def test_session_chat_stream_sanitizes_internal_exceptions(adapter, session_db):
+    session_id = session_db.create_session("stream-error-session", "api_server")
+
+    async def fake_run(**_kwargs):
+        raise RuntimeError("boom: HERMES_HOME=/secret/path and sk-live-sensitive-token")
+
+    app = _create_session_app(adapter)
+    with patch.object(adapter, "_run_agent", side_effect=fake_run):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(f"/api/sessions/{session_id}/chat/stream", json={"message": "stream please"})
+            assert resp.status == 200
+            body = await resp.text()
+
+    assert "event: error" in body
+    assert "太极 Agent 处理本次会话时出现错误" in body
+    assert "HERMES_HOME" not in body
+    assert "sk-live-sensitive-token" not in body
+    assert "boom:" not in body
+    assert "event: done" in body
+
+
+@pytest.mark.asyncio
 async def test_session_endpoints_require_auth_when_key_configured(auth_adapter):
     app = _create_session_app(auth_adapter)
     async with TestClient(TestServer(app)) as cli:

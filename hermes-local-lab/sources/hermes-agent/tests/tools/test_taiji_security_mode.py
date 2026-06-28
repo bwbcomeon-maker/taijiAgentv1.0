@@ -5,6 +5,21 @@ import time
 from pathlib import Path
 
 
+def test_missing_or_invalid_security_mode_fails_closed(monkeypatch):
+    monkeypatch.delenv("TAIJI_SECURITY_MODE", raising=False)
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+
+    from tools.taiji_security_mode import is_terminal_allowed, security_mode
+
+    assert security_mode() == "restricted"
+    assert is_terminal_allowed() is False
+
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "unexpected")
+
+    assert security_mode() == "restricted"
+    assert is_terminal_allowed() is False
+
+
 def test_restricted_mode_blocks_terminal(monkeypatch):
     monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
     monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
@@ -183,9 +198,30 @@ def test_security_status_reports_local_controlled_profile(monkeypatch):
     assert status["profile"] == "local_controlled"
     assert status["mode"] == "restricted"
     assert status["capabilities"]["terminal"]["allowed"] is True
+    assert status["capabilities"]["terminal"]["enabled"] is True
+    assert status["capabilities"]["terminal"]["approval_required"] is False
     assert status["capabilities"]["execute_code"]["allowed"] is True
+    assert status["capabilities"]["execute_code"]["enabled"] is True
+    assert status["capabilities"]["execute_code"]["approval_required"] is False
     assert status["capabilities"]["document_read"]["allowed"] is True
-    assert status["capabilities"]["terminal"]["approval_applicable"] is True
+    assert status["capabilities"]["document_read"]["enabled"] is True
+
+
+def test_security_status_contract_reports_blocked_capability_reason(monkeypatch):
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+
+    from tools.taiji_security_mode import build_security_status
+
+    status = build_security_status()
+    terminal = status["capabilities"]["terminal"]
+
+    assert status["profile"] == "strict"
+    assert terminal["allowed"] is False
+    assert terminal["enabled"] is False
+    assert terminal["approval_required"] is True
+    assert terminal["restart_required"] is False
+    assert "TAIJI_ALLOW_TERMINAL" in terminal["reason"]
 
 
 def test_restricted_mode_blocks_cron_scripts(monkeypatch):

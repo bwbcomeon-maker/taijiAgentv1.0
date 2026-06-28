@@ -11,7 +11,8 @@
 #   * Env vars blanked (conftest.py also does this, but this
 #     is belt-and-suspenders for anyone running pytest outside our
 #     conftest path — e.g. on a single file)
-#   * Proper venv activation (probes .venv, venv, then ~/.hermes/...)
+#   * Proper venv activation (prefers complete repo venv, then .venv,
+#     then ~/.hermes/...; skips stale envs missing pytest/aiohttp)
 #
 # Usage:
 #   scripts/run_tests.sh                            # full suite
@@ -33,16 +34,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Activate venv ───────────────────────────────────────────────────────────
+is_usable_test_venv() {
+  local candidate="$1"
+  [ -x "$candidate/bin/python" ] || return 1
+  "$candidate/bin/python" - <<'PY' >/dev/null 2>&1
+import pytest
+import aiohttp
+PY
+}
+
 VENV=""
-for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
+for candidate in "$REPO_ROOT/venv" "$REPO_ROOT/.venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
-    VENV="$candidate"
-    break
+    if is_usable_test_venv "$candidate"; then
+      VENV="$candidate"
+      break
+    fi
+    echo "warning: skipping incomplete test virtualenv: $candidate" >&2
   fi
 done
 
 if [ -z "$VENV" ]; then
-  echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
+  echo "error: no usable virtualenv found in $REPO_ROOT/venv, $REPO_ROOT/.venv, or $HOME/.hermes/hermes-agent/venv" >&2
+  echo "       required test modules include pytest and aiohttp" >&2
   exit 1
 fi
 

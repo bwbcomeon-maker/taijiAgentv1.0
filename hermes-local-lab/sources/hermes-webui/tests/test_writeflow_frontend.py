@@ -228,6 +228,13 @@ def test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell():
     assert "@media (min-width:1024px)" not in STYLE_CSS[STYLE_CSS.index("/* Taiji desktop home shell"):]
     assert ".taiji-home-shell{" in STYLE_CSS
     assert ".taiji-home-shell{\n    display:none!important;\n  }" in STYLE_CSS
+    assert "const homeShellActive=()=>window.matchMedia&&window.matchMedia('(min-width:901px)').matches;" in TAIJI_HOME_JS
+    assert "if(!homeShellActive()){\n      unmountRealWorkspace();" in TAIJI_HOME_JS
+    assert "function unmountRealWorkspace()" in TAIJI_HOME_JS
+    assert "window.addEventListener('resize',scheduleSync);" in TAIJI_HOME_JS
+    assert "mountRealWorkspace();" not in TAIJI_HOME_JS[
+        TAIJI_HOME_JS.index("function init()") : TAIJI_HOME_JS.index("window.taijiHomeSelectNav")
+    ]
 
 
 def test_writeflow_status_card_is_visual_team_board():

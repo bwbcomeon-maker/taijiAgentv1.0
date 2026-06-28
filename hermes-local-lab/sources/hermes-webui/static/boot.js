@@ -1713,6 +1713,7 @@ function applyBotName(){
   // The saved assistant name applies to the default profile only.
   // Non-default profiles use their own profile names.
   const name=assistantDisplayName();
+  const composerName=/^taiji Agent$/i.test(String(name||'').trim())?'太极智能体':name;
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
@@ -1721,7 +1722,7 @@ function applyBotName(){
   const topbarTitle=$('topbarTitle');
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
-  if(msg) msg.placeholder='输入消息给 '+name+'\u2026';
+  if(msg) msg.placeholder='输入消息给 '+composerName+'\u2026';
 }
 
 (async()=>{

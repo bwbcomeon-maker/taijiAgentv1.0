@@ -48,7 +48,9 @@
     refreshTimer:0,
     syncTimer:0,
     wrapped:false,
-    panelPlaceholders:new Map()
+    panelPlaceholders:new Map(),
+    mainPlaceholder:null,
+    rightpanelPlaceholder:null
   };
   let projectMenuClickClose=null;
   let projectMenuKeyClose=null;
@@ -63,6 +65,7 @@
   const workspace=()=>document.querySelector('.taiji-main-workspace');
   const secondary=()=>document.querySelector('.taiji-secondary-panel');
   const secondaryHost=()=>document.getElementById('taijiPanelSecondaryHost');
+  const homeShellActive=()=>window.matchMedia&&window.matchMedia('(min-width:901px)').matches;
   const desktop=()=>window.matchMedia&&window.matchMedia('(min-width:1024px)').matches;
   const appState=()=>{
     if(typeof S!=='undefined'&&S) return S;
@@ -137,6 +140,12 @@
   function syncShellState(){
     const root=shell();
     if(!root) return;
+    if(!homeShellActive()){
+      unmountRealWorkspace();
+      returnHostedPanels();
+      return;
+    }
+    if(!state.mounted) mountRealWorkspace();
     const rawPanel=activePanel();
     const panel=visiblePanel(rawPanel);
     if(rawPanel!==panel&&typeof switchPanel==='function'){
@@ -235,16 +244,43 @@
     const root=shell();
     const target=workspace();
     const main=document.querySelector('main.main');
-    if(!root||!target||!main||state.mounted) return;
+    if(!root||!target||!main||state.mounted||!homeShellActive()) return;
     const rightpanel=document.querySelector('.rightpanel');
+    if(!state.mainPlaceholder&&main.parentNode){
+      state.mainPlaceholder=document.createComment('taiji-main-origin');
+      main.parentNode.insertBefore(state.mainPlaceholder,main);
+    }
     main.classList.add('taiji-real-main');
     target.appendChild(main);
     if(rightpanel){
+      if(!state.rightpanelPlaceholder&&rightpanel.parentNode){
+        state.rightpanelPlaceholder=document.createComment('taiji-rightpanel-origin');
+        rightpanel.parentNode.insertBefore(state.rightpanelPlaceholder,rightpanel);
+      }
       rightpanel.classList.add('taiji-workspace-drawer');
       target.appendChild(rightpanel);
     }
     state.mounted=true;
-    syncShellState();
+  }
+
+  function restoreAfterMarker(el,marker){
+    if(!el||!marker||!marker.parentNode) return;
+    marker.parentNode.insertBefore(el,marker.nextSibling);
+  }
+
+  function unmountRealWorkspace(){
+    if(!state.mounted) return;
+    const main=document.querySelector('main.main.taiji-real-main');
+    const rightpanel=document.querySelector('.rightpanel.taiji-workspace-drawer');
+    if(main){
+      main.classList.remove('taiji-real-main');
+      restoreAfterMarker(main,state.mainPlaceholder);
+    }
+    if(rightpanel){
+      rightpanel.classList.remove('taiji-workspace-drawer');
+      restoreAfterMarker(rightpanel,state.rightpanelPlaceholder);
+    }
+    state.mounted=false;
   }
 
   function wrapFunction(name){
@@ -1267,11 +1303,9 @@
   function init(){
     hydrateTaijiIcons();
     state.secondaryCollapsed=readSecondaryCollapsed();
-    mountRealWorkspace();
     wrapLegacyHooks();
     bindRecentControls();
     bindQuickActions();
-    renderSecondaryPanel(activePanel());
     scheduleSessionRefresh(0);
     scheduleSync();
   }
@@ -1376,5 +1410,5 @@
   }else{
     init();
   }
-  window.addEventListener('resize',()=>{ if(desktop()) scheduleSync(); });
+  window.addEventListener('resize',scheduleSync);
 })();

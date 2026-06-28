@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import sys
 
 import yaml
 
@@ -230,7 +231,7 @@ def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):
     )
 
     subprocess.run(
-        ["python3", str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+        [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
         check=True,
     )
     merged = yaml.safe_load(target.read_text(encoding="utf-8"))
@@ -250,7 +251,7 @@ def test_sync_packaged_config_copies_template_for_missing_target(tmp_path):
     target = tmp_path / "fresh" / "config.yaml"
 
     subprocess.run(
-        ["python3", str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+        [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
         check=True,
     )
 
@@ -277,7 +278,7 @@ def test_sync_packaged_config_fills_empty_model_without_overwriting_user_values(
     )
 
     subprocess.run(
-        ["python3", str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+        [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
         check=True,
     )
     merged = yaml.safe_load(target.read_text(encoding="utf-8"))

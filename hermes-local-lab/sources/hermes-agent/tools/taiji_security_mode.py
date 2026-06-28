@@ -22,9 +22,9 @@ def env_flag_enabled(name: str) -> bool:
 
 
 def security_mode() -> str:
-    mode = str(os.environ.get("TAIJI_SECURITY_MODE", "full")).strip().lower()
+    mode = str(os.environ.get("TAIJI_SECURITY_MODE", "restricted")).strip().lower()
     if mode not in {"restricted", "full"}:
-        return "full"
+        return "restricted"
     return mode
 
 
@@ -118,12 +118,27 @@ def enable_capability_env(allow_var: str) -> dict[str, Any]:
     return {"persisted": True, "env_file": str(env_path)}
 
 
+def _capability_reason(name: str, allow_var: str | None, allowed: bool, approval_applicable: bool) -> str:
+    if allowed:
+        return "capability enabled"
+    if allow_var:
+        if approval_applicable:
+            return f"{name} requires approval or {allow_var}=1 while TAIJI_SECURITY_MODE=restricted"
+        return f"{name} is disabled while TAIJI_SECURITY_MODE=restricted; set {allow_var}=1 to enable it"
+    return "capability unavailable"
+
+
 def _capability_entry(name: str, allow_var: str | None, allowed: bool, approval_applicable: bool) -> dict[str, Any]:
+    approval_required = bool(approval_applicable and not allowed)
     return {
         "name": name,
         "allowed": bool(allowed),
+        "enabled": bool(allowed),
         "allow_var": allow_var,
         "approval_applicable": bool(approval_applicable),
+        "approval_required": approval_required,
+        "reason": _capability_reason(name, allow_var, bool(allowed), bool(approval_applicable)),
+        "restart_required": False,
     }
 
 

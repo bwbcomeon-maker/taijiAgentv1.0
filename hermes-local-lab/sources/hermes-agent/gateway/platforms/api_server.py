@@ -70,6 +70,7 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+PUBLIC_SESSION_STREAM_ERROR_MESSAGE = "太极 Agent 处理本次会话时出现错误，请稍后重试或导出诊断报告。"
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -107,6 +108,14 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return default
+
+
+def _session_stream_error_payload() -> Dict[str, str]:
+    return {
+        "message": PUBLIC_SESSION_STREAM_ERROR_MESSAGE,
+        "code": "session_chat_stream_failed",
+        "finish_reason": "error",
+    }
 
 
 def _normalize_chat_content(
@@ -1736,7 +1745,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 }))
             except Exception as exc:
                 logger.exception("[api_server] session chat stream failed")
-                await queue.put(_event_payload("error", {"message": str(exc)}))
+                await queue.put(_event_payload("error", _session_stream_error_payload()))
             finally:
                 await queue.put(_event_payload("done", {}))
                 await queue.put(None)

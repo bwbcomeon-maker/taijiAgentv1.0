@@ -39,12 +39,27 @@ def _effective_profile() -> str:
     return "strict"
 
 
+def _capability_reason(name: str, allow_var: str | None, allowed: bool, approval_applicable: bool) -> str:
+    if allowed:
+        return "capability enabled"
+    if allow_var:
+        if approval_applicable:
+            return f"{name} requires approval or {allow_var}=1 while TAIJI_SECURITY_MODE=restricted"
+        return f"{name} is disabled while TAIJI_SECURITY_MODE=restricted; set {allow_var}=1 to enable it"
+    return "capability unavailable"
+
+
 def _capability(name: str, allow_var: str | None, allowed: bool, approval_applicable: bool) -> dict[str, Any]:
+    approval_required = bool(approval_applicable and not allowed)
     return {
         "name": name,
         "allow_var": allow_var,
         "allowed": bool(allowed),
+        "enabled": bool(allowed),
         "approval_applicable": bool(approval_applicable),
+        "approval_required": approval_required,
+        "reason": _capability_reason(name, allow_var, bool(allowed), bool(approval_applicable)),
+        "restart_required": False,
     }
 
 

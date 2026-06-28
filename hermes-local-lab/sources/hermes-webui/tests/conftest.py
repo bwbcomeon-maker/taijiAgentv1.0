@@ -503,6 +503,14 @@ def _wait_for_server(base, timeout=20):
     return False
 
 
+def server_log_tail(path, max_chars=4000):
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"<unable to read server log: {exc}>"
+    return text[-max_chars:] if text else "<server log is empty>"
+
+
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -627,36 +635,48 @@ def test_server():
     if HERMES_AGENT:
         env["HERMES_WEBUI_AGENT_DIR"] = str(HERMES_AGENT)
 
+    server_log_path = TEST_STATE_DIR / "server-test.log"
+    server_log = server_log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         [VENV_PYTHON, str(SERVER_SCRIPT)],
         cwd=WORKDIR,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=server_log,
+        stderr=subprocess.STDOUT,
     )
 
     if not _wait_for_server(TEST_BASE, timeout=20):
         proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        server_log.flush()
+        server_log.close()
         pytest.fail(
             f"Test server on port {TEST_PORT} did not start within 20s.\n"
             f"  server.py : {SERVER_SCRIPT}\n"
             f"  python    : {VENV_PYTHON}\n"
             f"  agent dir : {HERMES_AGENT}\n"
             f"  workdir   : {WORKDIR}\n"
+            f"  log       : {server_log_path}\n"
+            f"--- server log tail ---\n{server_log_tail(server_log_path)}"
         )
 
-    yield proc
-
-    proc.terminate()
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        yield proc
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        server_log.close()
 
-    try:
-        shutil.rmtree(TEST_STATE_DIR)
-    except Exception:
-        pass
+        try:
+            shutil.rmtree(TEST_STATE_DIR)
+        except Exception:
+            pass
 
 
 # ── Test base URL ─────────────────────────────────────────────────────────────

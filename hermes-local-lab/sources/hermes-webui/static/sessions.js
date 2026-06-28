@@ -5034,7 +5034,10 @@ function renderSessionListFromCache(){
 }
 
 async function _handleActiveSessionStorageEvent(e){
-  if(!e || e.key !== 'hermes-webui-session') return;
+  const activeKey=typeof window!=='undefined'&&typeof window.__taijiMapStorageKey==='function'
+    ? window.__taijiMapStorageKey('hermes-webui-session')
+    : 'taiji-webui-session';
+  if(!e || (e.key !== activeKey && e.key !== 'hermes-webui-session')) return;
   // Do not treat localStorage as a global active-session bus. Each tab owns its
   // active conversation via its URL (/session/<id>), so another tab switching
   // sessions must not force this tab to navigate away from an in-flight turn.

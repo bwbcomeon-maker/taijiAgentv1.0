@@ -192,6 +192,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         routes = read_text("hermes-local-lab/sources/hermes-webui/api/routes.py")
         index = read_text("hermes-local-lab/sources/hermes-webui/static/index.html")
         ui = read_text("hermes-local-lab/sources/hermes-webui/static/ui.js")
+        security_status = read_text("hermes-local-lab/sources/hermes-webui/api/security_status.py")
 
         self.assertIn("/api/security/status", routes)
         self.assertIn("/api/security/profile", routes)
@@ -199,6 +200,60 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("settingsSecurityProfile", index)
         self.assertIn("refreshSecurityStatus", ui)
         self.assertIn("saveSecurityProfile", ui)
+        for field in ("enabled", "approval_required", "reason", "restart_required"):
+            self.assertIn(field, security_status)
+        self.assertIn("cap.approval_required", ui)
+        self.assertNotIn("可用/需审批", ui)
+
+    def test_agent_security_mode_fails_closed_without_runtime_env(self):
+        security_mode = read_text("hermes-local-lab/sources/hermes-agent/tools/taiji_security_mode.py")
+
+        self.assertIn('os.environ.get("TAIJI_SECURITY_MODE", "restricted")', security_mode)
+        self.assertNotIn('os.environ.get("TAIJI_SECURITY_MODE", "full")', security_mode)
+        self.assertIn('return "restricted"', security_mode)
+
+    def test_agent_test_runner_skips_incomplete_stale_virtualenvs(self):
+        runner = read_text("hermes-local-lab/sources/hermes-agent/scripts/run_tests.sh")
+
+        self.assertIn("is_usable_test_venv", runner)
+        self.assertIn("import pytest", runner)
+        self.assertIn("import aiohttp", runner)
+        self.assertIn("skipping incomplete test virtualenv", runner)
+        self.assertLess(runner.index('"$REPO_ROOT/venv"'), runner.index('"$REPO_ROOT/.venv"'))
+
+    def test_webui_test_server_fixture_keeps_startup_logs_for_failures(self):
+        conftest = read_text("hermes-local-lab/sources/hermes-webui/tests/conftest.py")
+
+        self.assertIn("server-test.log", conftest)
+        self.assertIn("server_log_tail", conftest)
+        self.assertNotIn("stdout=subprocess.DEVNULL", conftest)
+        self.assertNotIn("stderr=subprocess.DEVNULL", conftest)
+
+    def test_webui_storage_adapter_migrates_legacy_keys_to_taiji_keys(self):
+        index = read_text("hermes-local-lab/sources/hermes-webui/static/index.html")
+        storage = read_text("hermes-local-lab/sources/hermes-webui/static/taiji-storage.js")
+
+        self.assertIn('src="static/taiji-storage.js', index)
+        self.assertLess(index.index("static/taiji-storage.js"), index.index("static/brand.js"))
+        self.assertIn("TAIJI_STORAGE_KEY_PREFIX", storage)
+        self.assertIn("mapStorageKey", storage)
+        self.assertIn("migrateLegacyStorage", storage)
+        self.assertIn("window.Storage.prototype", storage)
+        self.assertIn("proto.setItem", storage)
+        self.assertIn("proto.getItem", storage)
+
+    def test_root_release_check_gate_exists_and_requires_target_evidence(self):
+        release_check = read_text("scripts/taiji-release-check.sh")
+        docs = read_text("docs/taiji-sale-readiness.md")
+
+        self.assertIn("run_root_tests", release_check)
+        self.assertIn("run_agent_tests", release_check)
+        self.assertIn("run_webui_tests", release_check)
+        self.assertIn("check_delivery_artifacts", release_check)
+        self.assertIn("TAIJI_TARGET_VERIFICATION_DIR", release_check)
+        self.assertIn("target-verification.json", release_check)
+        self.assertIn("目标机已验证", docs)
+        self.assertIn("x86_64/amd64", docs)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
