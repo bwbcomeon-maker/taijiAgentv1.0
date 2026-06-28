@@ -1015,15 +1015,19 @@ def _active_stream_id_set() -> set[str]:
 
 def _expert_team_has_pending_intake_questions(run: dict) -> bool:
     return any(
-        str(question.get("origin") or "") != "stage_confirmation_points"
-        and str(question.get("status") or "").lower() not in {"answered", "skipped"}
+        str(question.get("status") or "").lower() not in {"answered", "skipped"}
         for question in run.get("questions") or []
         if isinstance(question, dict)
     )
 
 
 def _expert_team_has_pending_required_questions(run: dict) -> bool:
-    return _expert_team_has_pending_intake_questions(run)
+    return any(
+        bool(question.get("required"))
+        and str(question.get("status") or "").lower() not in {"answered", "skipped"}
+        for question in run.get("questions") or []
+        if isinstance(question, dict)
+    )
 
 
 def _expert_team_answers_by_id(run: dict) -> dict[str, str]:
@@ -1105,7 +1109,7 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
 
     answers = _expert_team_answers_by_id(run)
     topic = answers.get("topic") or run.get("title") or "本次内容主题"
-    audience = answers.get("audience") or "目标读者"
+    audience = answers.get("audience") or "使用对象"
     boundary = answers.get("boundary") or "没有额外限制"
     task = _expert_team_current_task(run)
     task_id = str(task.get("id") or "")
@@ -1120,16 +1124,16 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         + "、".join(str(term) for term in forbidden_terms)
         + "。除非用户明确要求公众号/文章发布场景，否则必须改为正式办公材料表达。\n"
     )
-    if task_id == "illustrations":
+    if task_id == "polish":
         stage_instruction = (
-            "当前只执行“材料打磨”阶段：基于已确认初稿，完成表达润色、版式建议、流转前检查和可执行修改清单。"
+            "当前只执行“材料打磨”阶段：基于已确认初稿，完成表达润色、版式建议、流转前核对和可执行修改清单。"
             "不要重写完整初稿，除非用户修订意见明确要求。"
         )
         output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     elif task_id == "delivery":
         stage_instruction = (
             "当前只执行“交付确认”阶段：基于已确认初稿和材料打磨方案，形成最终流转版、事实核对项、流转风险和交付说明。"
-            "不要新增未确认的大方向；如仍有风险，明确列为发布前人工确认项。"
+            "不要新增未确认的大方向；如仍有风险，明确列为交付前人工确认项。"
         )
         output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作"
     else:
@@ -1152,7 +1156,7 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         "你现在作为内容创作专家团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
         f"主题：{topic}\n"
-        f"目标读者：{audience}\n"
+        f"使用对象：{audience}\n"
         f"素材、篇幅或表达边界：{boundary}\n\n"
         f"业务口径：{style_rule}\n"
         f"{forbidden_rule}"
@@ -1272,90 +1276,6 @@ def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bo
     return bool(_latest_expert_team_assistant_content_after_execution(session, run))
 
 
-def _expert_team_stage_needs_confirmation_repair(run: dict) -> bool:
-    if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
-        return False
-    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
-    task_id = str(current.get("task_id") or "")
-    if str(current.get("status") or "") != "awaiting_review" or not task_id:
-        return False
-    group = f"stage:{task_id}"
-    if any(
-        isinstance(question, dict)
-        and str(question.get("origin") or "") == "stage_confirmation_points"
-        and str(question.get("confirmation_group") or "") == group
-        for question in run.get("questions") or []
-    ):
-        return False
-    output = None
-    for item in run.get("stage_outputs") or []:
-        if isinstance(item, dict) and str(item.get("task_id") or "") == task_id:
-            output = item
-            break
-    output_content = str((output or {}).get("content") or "")
-    return not output_content.strip() or output_content.strip() in {
-        "已写入当前对话",
-        "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。",
-    }
-
-
-def _repair_expert_team_stage_confirmations_from_session(workspace: Path, run: dict | None) -> dict | None:
-    if not run or not _expert_team_stage_needs_confirmation_repair(run):
-        return run
-    try:
-        session = get_session(str(run.get("session_id") or ""))
-        content = _latest_expert_team_assistant_content_after_execution(session, run)
-    except Exception:
-        return run
-    confirmation_headings = ("需要" + "用户确认的点", "需要" + "你确认的点", "待人工补充事项")
-    if not any(heading in content for heading in confirmation_headings):
-        return run
-    try:
-        from api import expert_teams
-
-        current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
-        output = {}
-        for item in run.get("stage_outputs") or []:
-            if isinstance(item, dict) and str(item.get("task_id") or "") == str(current.get("task_id") or ""):
-                output = item
-                break
-        return expert_teams.mark_expert_team_execution_complete(
-            workspace,
-            str(run.get("run_id") or ""),
-            delivery={
-                "id": str((output or {}).get("id") or "expert-team-chat-delivery"),
-                "label": str((output or {}).get("label") or (output or {}).get("title") or "专家团生成结果"),
-                "kind": str((output or {}).get("kind") or "chat"),
-                "exists": True,
-                "note": str((output or {}).get("note") or "已写入当前对话"),
-                "content": content,
-            },
-        )
-    except Exception:
-        logger.debug("Failed to repair expert team stage confirmations from session", exc_info=True)
-        return run
-
-
-def _expert_team_run_as_needs_resume(run: dict) -> dict:
-    from api import expert_teams
-
-    run = copy.deepcopy(run or {})
-    run["status"] = "awaiting_user"
-    run["status_label"] = "等待继续"
-    run["execution_status"] = "needs_resume"
-    run["needs_resume"] = True
-    run["last_execution_error"] = run.get("last_execution_error") or "执行流未启动或已中断"
-    for task in run.get("tasks") or []:
-        if isinstance(task, dict) and str(task.get("status") or "") == "running":
-            task["status"] = "waiting_user"
-            task["status_label"] = "等待继续"
-    for member in run.get("members") or []:
-        if isinstance(member, dict) and str(member.get("status") or "") == "执行中":
-            member["status"] = "等待继续"
-    run["view"] = expert_teams.expert_team_run_view(run)
-    return run
-
-
 def _expert_team_run_has_ready_result(run: dict) -> bool:
     if str(run.get("status") or "") in {"done", "error", "cancelled"}:
         return True
@@ -1378,14 +1298,17 @@ def _expert_team_run_has_ready_result(run: dict) -> bool:
 def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> dict | None:
     if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
         return run
-    run = _repair_expert_team_stage_confirmations_from_session(workspace, run)
     if _expert_team_has_pending_intake_questions(run):
         return run
     stream_id = str(run.get("execution_stream_id") or "")
     active_stream_ids = _active_stream_id_set()
     if stream_id and stream_id in active_stream_ids:
         run["execution_status"] = "running"
+        run["workflow_state"] = "generating"
         run["needs_resume"] = False
+        from api import expert_teams
+
+        run["view"] = expert_teams.expert_team_run_view(run)
         return run
     if stream_id and str(run.get("execution_status") or "") == "running":
         try:
@@ -1410,10 +1333,19 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                         "content": content or "已写入当前对话",
                     },
                 )
+            if not getattr(session, "active_stream_id", None) and not getattr(session, "pending_user_message", None):
+                from api import expert_teams
+
+                return expert_teams.fail_expert_team_execution(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    "本轮生成已结束，但没有检测到有效结果，请重新尝试。",
+                )
         except Exception:
             pass
-    if str(run.get("status") or "") == "running" and not _expert_team_run_has_ready_result(run):
-        return _expert_team_run_as_needs_resume(run)
+    from api import expert_teams
+
+    run["view"] = expert_teams.expert_team_run_view(run)
     return run
 
 
@@ -10527,7 +10459,7 @@ def handle_post(handler, parsed) -> bool:
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
-            run = expert_teams.approve_expert_team_stage(workspace, str(run.get("run_id") or ""))
+            run = expert_teams.approve_expert_team_stage(workspace, {"run_id": str(run.get("run_id") or "")})
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
             if str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS and str(run.get("status") or "") == "running":
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
@@ -10551,8 +10483,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "expert team run does not belong to this session", 404)
             run = expert_teams.request_expert_team_stage_revision(
                 workspace,
-                str(run.get("run_id") or ""),
-                str(body.get("feedback") or ""),
+                {"run_id": str(run.get("run_id") or ""), "feedback": str(body.get("feedback") or "")},
             )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
@@ -10572,17 +10503,7 @@ def handle_post(handler, parsed) -> bool:
             if session_id and str(run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
             display_run = _expert_team_run_with_execution_truth(workspace, run)
-            view_actions = ((display_run or {}).get("view") or {}).get("actions") or {}
-            can_start = bool(
-                display_run
-                and (
-                    display_run.get("needs_resume")
-                    or view_actions.get("can_resume")
-                    or view_actions.get("can_retry")
-                )
-            )
-            if not can_start:
-                return j(handler, {"ok": True, "run": display_run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            run = expert_teams.resume_expert_team(workspace, str((display_run or run).get("run_id") or ""))
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return j(handler, stream_payload, status=status)

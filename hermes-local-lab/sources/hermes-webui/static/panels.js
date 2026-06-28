@@ -3548,12 +3548,12 @@ const WRITEFLOW_ARTIFACT_LABELS = {
   '01_theme': '选题确认',
   '02_cases': '案例素材',
   '03_outline': '结构提纲',
-  '04_empathy_map': '读者画像',
+  '04_empathy_map': '对象画像',
   '05_concrete_library': '细节素材',
   'draft_v1': '材料初稿',
   'review_report': '审稿报告',
   'pre_publish_report': '流转前检查',
-  'reader_test': '读者测试',
+  'reader_test': '对象测试',
   'draft_final': '定稿材料',
 };
 const WRITEFLOW_FALLBACK_TEAM = {

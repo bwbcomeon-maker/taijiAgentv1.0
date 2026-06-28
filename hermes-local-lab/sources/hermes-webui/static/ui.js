@@ -676,74 +676,8 @@ function _writeflowStatusCardFromRun(run,data){
 }
 
 function _expertTeamStatusCardFromRun(run,data){
-  if(!run||!run.run_id)return null;
-  data=data||{};
-  const card=_writeflowStatusCardFromRun(run,data);
-  if(!card)return null;
-  const questions=Array.isArray(run.questions)?run.questions:[];
-  const visualQuestions=questions.map(question=>({
-    id:question.id||'',
-    title:question.title||question.id||'问题',
-    description:question.description||'',
-    type:question.type||'text',
-    options:Array.isArray(question.options)?question.options:[],
-    answer:question.answer||'',
-    status:question.status||'pending',
-    required:question.required!==false,
-    sourceTaskId:question.source_task_id||question.sourceTaskId||'',
-    confirmationGroup:question.confirmation_group||question.confirmationGroup||'',
-    origin:question.origin||'',
-  }));
-  card.kind='expert_team';
-  card.title='专家团运行';
-  card.questions=visualQuestions;
-  const view=run.view||{};
-  card.actions=view.actions||{};
-  card.health=view.health||{};
-  card.stageReview=view.stage_review||{};
-  card.intake=view.intake||{};
-  card.primaryConfirmation=view.primary_confirmation||{};
-  card.reviewItems=Array.isArray(view.review_items)?view.review_items.map(item=>({
-    id:item&&item.id||'',
-    kind:item&&item.kind||'review_item',
-    title:item&&item.title||'待人工补充事项',
-    sourceTaskId:item&&item.source_task_id||item&&item.sourceTaskId||'',
-    phase:item&&item.phase||'',
-    status:item&&item.status||'pending',
-    usedInRevision:!!(item&&item.used_in_revision||item&&item.usedInRevision),
-  })):[];
-  card.pendingConfirmations=Array.isArray(view.pending_confirmations)?view.pending_confirmations.map(item=>({
-    id:item&&item.id||'',
-    kind:item&&item.kind||'clarification',
-    title:item&&item.title||'待确认事项',
-    description:item&&item.description||'聊天中有待确认事项，请查看最新专家团回复。',
-    fields:Array.isArray(item&&item.fields)?item.fields:[],
-    actions:item&&item.actions||{},
-    sourceTaskId:item&&item.source_task_id||item&&item.sourceTaskId||'',
-    status:item&&item.status||'pending',
-  })):[];
-  const stageReviewOutput=(card.stageReview&&card.stageReview.output)||{};
-  card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs.map(item=>{
-    if(!item||!stageReviewOutput)return item;
-    const sameId=stageReviewOutput.id&&String(stageReviewOutput.id)===String(item.id||'');
-    const sameTask=stageReviewOutput.task_id&&String(stageReviewOutput.task_id)===String(item.task_id||'');
-    if(!sameId&&!sameTask)return item;
-    return {...item,title:stageReviewOutput.visible_title||stageReviewOutput.title||item.title,label:stageReviewOutput.visible_title||stageReviewOutput.label||item.label};
-  }):[];
-  card.phaseProgress=view.phase_progress||run.phase_progress||card.phaseProgress||{};
-  card.needsResume=!!(card.health.needs_resume||run.needs_resume||run.needsResume);
-  card.executionStatus=view.execution_status||run.execution_status||'';
-  card.phases=STATUS_CARD_EXPERT_TEAM_PHASES[run.team_id]||STATUS_CARD_EXPERT_TEAM_PHASES['content-creator-team'];
-  card.team.title=run.team_title||card.team.title;
-  card.team.category=run.team_category||card.team.category;
-  card.rows=[
-    {label:'团队',value:card.team.title},
-    {label:'阶段',value:run.phase||card.phase||'需求确认'},
-    {label:'进度',value:`${card.progress.done}/${card.progress.total||card.tasks.length||0} · ${card.statusLabel}`},
-    {label:'问答',value:visualQuestions.length?`${visualQuestions.filter(q=>q.status==='answered').length}/${visualQuestions.length} 已回复`:'无需确认'},
-    {label:'产物',value:card.artifacts.filter(item=>_expertTeamArtifactIsOpenable(item)).length?`${card.artifacts.filter(item=>_expertTeamArtifactIsOpenable(item)).length} 个可打开产物`:'等待文件产物生成'},
-  ];
-  return card;
+  if(typeof buildExpertTeamCardFromRun==='function')return buildExpertTeamCardFromRun(run);
+  return null;
 }
 if(typeof window!=='undefined')window._expertTeamStatusCardFromRun=_expertTeamStatusCardFromRun;
 
@@ -824,12 +758,12 @@ function _expertTeamActiveQuestionSet(card){
     const primaryGroup=_expertTeamQuestionGroupKey(primaryQuestion);
     if(primaryGroup)return questions.filter(question=>_expertTeamQuestionGroupKey(question)===primaryGroup);
     if(primaryQuestion&&!primaryQuestion.sourceTaskId&&!primaryQuestion.source_task_id){
-      const intakeQuestions=questions.filter(question=>question&&!question.sourceTaskId&&!question.source_task_id&&String(question.origin||'')!=='stage_confirmation_points');
+      const intakeQuestions=questions.filter(question=>question&&!question.sourceTaskId&&!question.source_task_id);
       if(intakeQuestions.length)return intakeQuestions;
     }
     if(primaryQuestion)return [primaryQuestion];
   }
-  const pending=questions.filter(question=>!_expertTeamQuestionIsTerminal(question)&&String(question&&question.origin||'')!=='stage_confirmation_points');
+  const pending=questions.filter(question=>!_expertTeamQuestionIsTerminal(question));
   let group=pending.length?_expertTeamQuestionGroupKey(pending[0]):'';
   if(!group&&_expertTeamQuestionPopoverRunId===runId&&_expertTeamQuestionPopoverQuestionId){
     const requested=questions.find(question=>String(question&&question.id||'')===String(_expertTeamQuestionPopoverQuestionId));
@@ -937,6 +871,9 @@ function _expertTeamAnsweredQuestionsSummary(card){
 }
 
 function _expertTeamDockSummary(card){
+  if(card&&card.presentation&&typeof expertTeamDockSummaryFromPresentation==='function'){
+    return expertTeamDockSummaryFromPresentation(card);
+  }
   const confirmations=_expertTeamPendingConfirmations(card);
   const readyArtifacts=_expertTeamReadyArtifacts(card);
   const artifacts=Array.isArray(card&&card.artifacts)?card.artifacts:[];
@@ -1396,6 +1333,7 @@ function _expertTeamWorkspaceRenderKey(card){
 }
 
 function _expertTeamDockMiniHtml(card){
+  if(typeof renderExpertTeamDockFromPresentation==='function')return renderExpertTeamDockFromPresentation(card||{});
   const summary=_expertTeamDockSummary(card||{});
   const runId=card&&card.runId||card&&card.sessionId||'';
   const primaryArtifact=_expertTeamPrimaryArtifact(card||{});
@@ -1431,23 +1369,12 @@ function _expertTeamLifecycleCardHtml(card){
   </div>`;
 }
 
-function syncExpertTeamChatConfirmationCard(card){
+function renderExpertTeamLifecycleNotice(card){
   if(arguments.length)_activeExpertTeamStatusCard=card||null;
   const inner=(typeof $==='function'&&$('msgInner'))||document.getElementById('msgInner');
   if(!inner)return false;
   inner.querySelectorAll('.expert-team-chat-confirmation-card,.expert-team-lifecycle-card').forEach(node=>node.remove());
-  const html=_expertTeamLifecycleCardHtml(_activeExpertTeamStatusCard);
-  if(!html)return false;
-  const wrap=document.createElement('div');
-  wrap.innerHTML=html;
-  const node=wrap.firstElementChild;
-  if(!node)return false;
-  const turns=inner.querySelectorAll('.assistant-turn');
-  const latestTurn=turns.length?turns[turns.length-1]:null;
-  const blocks=latestTurn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(latestTurn):null;
-  if(blocks)blocks.appendChild(node);
-  else inner.appendChild(node);
-  return true;
+  return false;
 }
 
 function _expertTeamQuestionWizardState(card){
@@ -1744,7 +1671,7 @@ function _expertTeamWorkspacePanelHtml(card){
           <strong>需求确认 ${currentQuestionIndex}/${totalQuestions}</strong>
           <small>已完成或跳过 ${answeredCount} 项，剩余 ${pending.length} 项。请在需求确认窗口中完成，不需要回看聊天正文。</small>
         </span>
-        <button type="button" onclick="openExpertTeamQuestionPopover(this);event.stopPropagation()">打开需求确认</button>
+        <button type="button" data-expert-team-action="answer_required" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()">打开需求确认</button>
       </div>`
     : (activeQuestions.length?`<span class="expert-team-panel-answered-summary">
         <strong>${esc(answeredSummary.title)}</strong>
@@ -1853,7 +1780,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const pendingAction=confirmations.length?(confirmationSummary.title||'1 项待确认'):((canApproveStage||canRequestRevision)?(isFinalStageReview?'最终成果待确认':'阶段产物待确认'):(canRetry?'可重新尝试':(canRestartStage?'已取消':(canCancel?'生成中':(canResume?'生成中断':'无需补充')))));
   const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?(isFinalStageReview?'可以确认完成任务，也可以提出修改意见。':'可以确认进入下一阶段，也可以提出修改意见。'):(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canRestartStage?'本阶段已取消，可重新开始本阶段。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成')))));
   const pendingButton=confirmations.length
-    ? `<button type="button" onclick="${pending.length?'openExpertTeamQuestionPopover(this)':'focusExpertTeamBottomDock(this)'};event.stopPropagation()">去确认</button>`
+    ? `<button type="button" data-expert-team-action="${pending.length?'answer_required':'review_stage'}" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()">去确认</button>`
     : ((canApproveStage||canRequestRevision)?`<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段产物</button>`:(canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canRestartStage?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新开始本阶段</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>')))));
   const executionHtml=executionRows.length?executionRows.map(row=>{
     return `<span class="expert-team-panel-execution-row ${esc(row.state||'idle')}">
@@ -2336,7 +2263,7 @@ function _expertTeamResultFromCard(){
     updatedAt:output.updated_at||latest.updated_at||'',
   };
 }
-function _expertTeamDeliveryMessageInfo(message,rawIdx){
+function legacyExpertDeliveryInfoDisabled(message,rawIdx){
   if(!message||message.role!=='assistant')return null;
   const content=_expertTeamPlainText(msgContent(message)||String(message.content||''));
   if(!content)return null;
@@ -2364,7 +2291,7 @@ function _expertTeamDeliveryMessageInfo(message,rawIdx){
 function _expertTeamLatestDeliveryMessageInfo(){
   if(typeof S==='undefined'||!Array.isArray(S.messages))return null;
   for(let idx=S.messages.length-1;idx>=0;idx--){
-    const info=_expertTeamDeliveryMessageInfo(S.messages[idx],idx);
+    const info=null;
     if(info)return info;
   }
   return null;
@@ -2393,7 +2320,7 @@ function _expertTeamResultFromTrigger(trigger){
   if(rawIdx!==''&&typeof S!=='undefined'&&Array.isArray(S.messages)){
     const idx=Number(rawIdx);
     const msg=Number.isFinite(idx)?S.messages[idx]:null;
-    const info=_expertTeamDeliveryMessageInfo(msg,idx);
+    const info=null;
     if(info)return info;
   }
   return _expertTeamResultFromCard()||_expertTeamLatestDeliveryMessageInfo();
@@ -2978,7 +2905,9 @@ function _statusCardWriteflowHtml(card,copyBtn){
     <div class="expert-team-process-artifacts">${artifactHtml}</div>
   </div>`;
   const expertQuestionPopoverHtml=isExpertTeam?_expertTeamQuestionPopoverHtml(card):'';
-  const expertBodyHtml=isExpertTeam?_expertTeamWorkspacePanelHtml(card):'';
+  const expertBodyHtml=isExpertTeam&&typeof renderExpertTeamWorkspaceFromPresentation==='function'
+    ? renderExpertTeamWorkspaceFromPresentation(card)
+    : (isExpertTeam?_expertTeamWorkspacePanelHtml(card):'');
   return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}" data-expert-team-run-id="${esc(card.runId||card.sessionId||'')}">
     ${expertQuestionPopoverHtml}
     ${miniHtml}
@@ -3087,12 +3016,14 @@ function renderWriteflowStatusDock(card){
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
   if(isExpertTeam){
+    _activeExpertTeamStatusCard=card;
+    if(typeof window!=='undefined')window._activeExpertTeamStatusCard=card;
     syncExpertTeamBottomDockState(card);
-    syncExpertTeamChatConfirmationCard(card);
     _syncExpertTeamQuestionPopover(card);
   }else{
+    _activeExpertTeamStatusCard=null;
+    if(typeof window!=='undefined')window._activeExpertTeamStatusCard=null;
     clearExpertTeamWorkspacePanel();
-    syncExpertTeamChatConfirmationCard(null);
     _expertTeamQuestionPopoverOpen=false;
     _expertTeamQuestionPopoverRunId='';
     _expertTeamQuestionPopoverQuestionId='';
@@ -3116,15 +3047,15 @@ function clearWriteflowStatusDock(){
   delete dock.dataset.writeflowRunId;
   delete dock.dataset.writeflowSourceSessionId;
   delete dock.dataset.expertTeamRenderKey;
+  _activeExpertTeamStatusCard=null;
+  if(typeof window!=='undefined')window._activeExpertTeamStatusCard=null;
   clearExpertTeamWorkspacePanel();
-  syncExpertTeamChatConfirmationCard(null);
   return true;
 }
 
 if(typeof window!=='undefined'){
   window.renderWriteflowStatusDock=renderWriteflowStatusDock;
   window.clearWriteflowStatusDock=clearWriteflowStatusDock;
-  window.syncExpertTeamChatConfirmationCard=syncExpertTeamChatConfirmationCard;
 }
 
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
@@ -9649,7 +9580,6 @@ function renderMessages(options){
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
-      syncExpertTeamChatConfirmationCard();
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -9879,7 +9809,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    const expertTeamDelivery=!isUser?_expertTeamDeliveryMessageInfo(m,rawIdx):null;
+    const expertTeamDelivery=null;
     let bodyHtml = expertTeamDelivery ? _expertTeamDeliveryCardHtml(expertTeamDelivery) : _getCachedRender(displayContent, isUser);
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
@@ -10054,7 +9984,6 @@ function renderMessages(options){
     if(entry.rawIdx<firstRenderedRawIdx) continue;
     _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
   }
-  syncExpertTeamChatConfirmationCard();
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the

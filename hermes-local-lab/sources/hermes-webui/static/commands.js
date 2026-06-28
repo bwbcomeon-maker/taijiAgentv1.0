@@ -996,7 +996,6 @@ async function sendExpertTeamAction(payload){
     if(!card)throw new Error('专家团状态不可用');
     if(typeof switchPanel==='function')await switchPanel('chat');
     if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
-    if(typeof syncExpertTeamChatConfirmationCard==='function')syncExpertTeamChatConfirmationCard(card);
     if(typeof window!=='undefined'){
       window._pendingWriteflowStatusCard={
         sessionId:S.session&&S.session.session_id||'',

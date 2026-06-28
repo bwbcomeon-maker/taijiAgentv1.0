@@ -1029,7 +1029,6 @@ async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
   if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
   _scheduleWriteflowStatusRefresh(sid,run);
   _removeWriteflowStatusCardsFromMessages();
-  if(typeof syncExpertTeamChatConfirmationCard==='function')syncExpertTeamChatConfirmationCard(card);
   if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();
   return {status:'handled'};
 }
@@ -1043,6 +1042,7 @@ async function _hydrateWriteflowStatusCardForSession(sid,options={}){
   const expertTeamHydration=await _hydrateExpertTeamStatusCardForSession(sid,options);
   if(expertTeamHydration&&expertTeamHydration.status==='handled')return true;
   if(expertTeamHydration&&expertTeamHydration.status==='preserved')return true;
+  if(!(expertTeamHydration&&expertTeamHydration.status==='missing'))return false;
   if(!Array.isArray(S.messages)){
     if(!options.silent)_stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
