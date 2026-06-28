@@ -1165,7 +1165,52 @@ function _syncExpertTeamQuestionInputs(root){
   return true;
 }
 
+let _expertTeamDraftFocusKey='';
+
+function _rememberExpertTeamDraftFocus(target){
+  if(typeof document==='undefined')return '';
+  const active=document.activeElement;
+  const input=(active&&active.matches&&active.matches('[data-expert-team-answer-input]'))
+    ? active
+    : (target&&target.matches&&target.matches('[data-expert-team-answer-input]')?target:null);
+  const questionEl=input&&input.closest?input.closest('.status-card-expert-question'):null;
+  const key=questionEl&&input?_expertTeamQuestionInputKey(questionEl,input):'';
+  if(key&&key!=='::')_expertTeamDraftFocusKey=key;
+  return _expertTeamDraftFocusKey;
+}
+
+function _restoreExpertTeamDraftFocusIfNeeded(dock){
+  if(typeof document==='undefined'||!dock||!dock.querySelector)return false;
+  const popover=dock.querySelector('.expert-team-question-popover:not([hidden])');
+  if(!popover)return false;
+  const active=document.activeElement;
+  if(active&&popover.contains&&popover.contains(active)&&active.matches&&active.matches('[data-expert-team-answer-input],[data-expert-team-stage-feedback],textarea,input'))return true;
+  const activeIsPopoverClose=!!(active&&active.classList&&active.classList.contains('expert-team-question-close'));
+  if(active&&popover.contains&&popover.contains(active)&&!activeIsPopoverClose)return true;
+  if(active&&active!==document.body&&active!==document.documentElement&&dock.contains&&!dock.contains(active))return false;
+  const inputs=Array.from(popover.querySelectorAll('[data-expert-team-answer-input]'));
+  if(!inputs.length)return false;
+  let target=null;
+  for(const input of inputs){
+    const questionEl=input.closest?input.closest('.status-card-expert-question'):null;
+    const key=questionEl?_expertTeamQuestionInputKey(questionEl,input):'';
+    if(key&&key===_expertTeamDraftFocusKey){
+      target=input;
+      break;
+    }
+  }
+  if(!target)target=inputs.find(input=>String(input.value||'').trim())||inputs[0];
+  if(!(target&&typeof target.focus==='function'))return false;
+  try{target.focus({preventScroll:true});}catch(_){target.focus();}
+  const end=String(target.value||'').length;
+  if(typeof target.setSelectionRange==='function'){
+    try{target.setSelectionRange(end,end);}catch(_){}
+  }
+  return true;
+}
+
 function syncExpertTeamQuestionInputState(target){
+  _rememberExpertTeamDraftFocus(target);
   return _syncExpertTeamQuestionInputs(target);
 }
 
@@ -1331,6 +1376,10 @@ function _expertTeamWorkspaceRenderKey(card){
       title:output&&output.title||output&&output.label||'',
       status:output&&output.status||'',
       content:output&&output.content||'',
+      summary:output&&output.summary||'',
+      preview:output&&output.preview||'',
+      contentLength:output&&output.content_length||output&&output.contentLength||0,
+      hasLongContent:!!(output&&output.has_long_content||output&&output.hasLongContent),
       note:output&&output.note||'',
       revisionCount:output&&output.revision_count||0,
     })),
@@ -1358,38 +1407,19 @@ let _expertTeamQuestionPopoverOpen=false;
 let _expertTeamQuestionPopoverRunId='';
 let _expertTeamQuestionPopoverQuestionId='';
 
-function _expertTeamChatConfirmationSignature(){
-  const card=_activeExpertTeamStatusCard;
+function _expertTeamLifecycleCardHtml(card){
+  if(!_isExpertTeamStatusCard(card))return '';
   const confirmations=_expertTeamPendingConfirmations(card);
-  if(!confirmations.length)return '';
-  try{
-    return JSON.stringify({
-      runId:card&&card.runId||card&&card.sessionId||'',
-      items:confirmations.map(item=>({
-        id:item&&item.id||'',
-        kind:item&&item.kind||'',
-        status:item&&item.status||'',
-        title:item&&item.title||'',
-      })),
-    });
-  }catch(_){
-    return confirmations.map(item=>`${item&&item.id||''}:${item&&item.status||''}`).join('|');
-  }
-}
-
-function _expertTeamChatConfirmationCardHtml(card){
-  const confirmations=_expertTeamPendingConfirmations(card);
-  if(!confirmations.length)return '';
-  const summary=_expertTeamConfirmationSummary(card);
-  const actionIcon=(typeof li==='function')?li('arrow-right',14):'›';
-  const hasQuestion=confirmations.some(item=>String(item&&item.kind||'')==='question');
-  const actionHandler=hasQuestion?'openExpertTeamQuestionPopover(this)':'focusExpertTeamBottomDock(this)';
-  return `<div class="expert-team-chat-confirmation-card" data-expert-team-chat-confirmation="1" data-expert-team-run-id="${esc(card&&card.runId||card&&card.sessionId||'')}">
-    <span class="expert-team-chat-confirmation-copy">
-      <strong>${esc(summary.title)}</strong>
-      <small>${esc(summary.detail||'聊天中有待确认事项，请查看最新专家团回复。')}</small>
+  const stateClass=_statusCardStateClass(card&&card.statusLabel||card&&card.status);
+  if(!confirmations.length&&stateClass!=='running')return '';
+  const title=confirmations.length?'专家团已创建，等待需求确认':'专家团正在生成';
+  const detail=confirmations.length?'请通过底部待办条完成需求确认，确认窗口会保留你的输入。':'后台正在生成阶段成果，完成后会在底部待办条提示复核。';
+  return `<div class="expert-team-lifecycle-card" data-expert-team-lifecycle="1" data-expert-team-run-id="${esc(card&&card.runId||card&&card.sessionId||'')}">
+    <span class="expert-team-lifecycle-dot"></span>
+    <span class="expert-team-lifecycle-copy">
+      <strong>${esc(title)}</strong>
+      <small>${esc(detail)}</small>
     </span>
-    <button type="button" onclick="${actionHandler};event.stopPropagation()">去确认 ${actionIcon}</button>
   </div>`;
 }
 
@@ -1397,8 +1427,8 @@ function syncExpertTeamChatConfirmationCard(card){
   if(arguments.length)_activeExpertTeamStatusCard=card||null;
   const inner=(typeof $==='function'&&$('msgInner'))||document.getElementById('msgInner');
   if(!inner)return false;
-  inner.querySelectorAll('.expert-team-chat-confirmation-card').forEach(node=>node.remove());
-  const html=_expertTeamChatConfirmationCardHtml(_activeExpertTeamStatusCard);
+  inner.querySelectorAll('.expert-team-chat-confirmation-card,.expert-team-lifecycle-card').forEach(node=>node.remove());
+  const html=_expertTeamLifecycleCardHtml(_activeExpertTeamStatusCard);
   if(!html)return false;
   const wrap=document.createElement('div');
   wrap.innerHTML=html;
@@ -1545,7 +1575,18 @@ function _expertTeamQuestionPopoverElement(trigger){
 function _focusExpertTeamQuestionPopover(trigger){
   const popover=_expertTeamQuestionPopoverElement(trigger);
   if(!popover)return false;
-  const target=popover.querySelector('textarea:not(:disabled),.expert-team-question-primary:not(:disabled),button:not(:disabled)');
+  const focusSelectors=[
+    '.status-card-expert-question.pending.is-current [data-expert-team-answer-input]:not(:disabled)',
+    '[data-expert-team-answer-input]:not(:disabled)',
+    '.expert-team-question-primary:not(:disabled)',
+    'button:not(.expert-team-question-close):not(:disabled)',
+    '.expert-team-question-close:not(:disabled)',
+  ];
+  let target=null;
+  for(const selector of focusSelectors){
+    target=popover.querySelector(selector);
+    if(target)break;
+  }
   if(target&&target.scrollIntoView)target.scrollIntoView({block:'nearest',inline:'nearest'});
   if(target&&target.focus){
     try{target.focus({preventScroll:true});}catch(_){target.focus();}
@@ -1665,6 +1706,7 @@ function _expertTeamWorkspacePanelHtml(card){
   const canRetry=!!(card.actions&&card.actions.can_retry);
   const stageReview=card.stageReview||{};
   const stageOutput=stageReview.output||{};
+  const isFinalStageReview=!!(stageReview.is_final_stage||stageReview.isFinalStage);
   const canApproveStage=!!(card.actions&&card.actions.can_approve_stage);
   const canRequestRevision=!!(card.actions&&card.actions.can_request_revision);
   const resumeHtml=canResume?`<button class="expert-team-panel-action expert-team-panel-resume" type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'';
@@ -1728,9 +1770,13 @@ function _expertTeamWorkspacePanelHtml(card){
     stageReview.worker_name||'专家团',
     Number(stageReview.revision_count||stageOutput.revision_count||0)?`第 ${Number(stageReview.revision_count||stageOutput.revision_count||0)} 次修订`:'',
   ].filter(Boolean).join(' · ');
-  const stageReviewContent=stageOutput.content||stageOutput.note||'阶段结果已写入当前对话，请检查后确认是否进入下一阶段。';
+  const stageReviewFallback=isFinalStageReview?'最终成果已写入当前对话，请检查后确认是否完成任务。':'阶段结果已写入当前对话，请检查后确认是否进入下一阶段。';
+  const stageReviewContent=stageOutput.summary||stageOutput.preview||stageOutput.note||stageReviewFallback;
   const stageOutputLocator=stageOutput.locator||'chat';
   const stageOutputArtifactId=stageOutput.artifact_id||stageOutput.artifactId||'';
+  const stageApproveLabel=isFinalStageReview?'无修改，完成任务':'无修改，进入下一阶段';
+  const stageApproveBusyLabel=isFinalStageReview?'正在完成任务...':'正在进入下一阶段...';
+  const stageLocateLabel=isFinalStageReview?'查看成果':'查看初稿';
   const stageConfirmation=confirmations.find(item=>String(item&&item.kind||'')==='stage_review');
   const clarificationConfirmation=confirmations.find(item=>String(item&&item.kind||'')==='clarification');
   const confirmationStageSummaryHtml=stageConfirmation?`<div class="expert-team-confirmation-stage-summary">
@@ -1775,8 +1821,8 @@ function _expertTeamWorkspacePanelHtml(card){
         <p>${esc(stageReviewContent)}</p>
       </div>
       ${canApproveStage||canRequestRevision?`<div class="expert-team-stage-actions">
-        <button class="expert-team-panel-action expert-team-stage-locate" type="button" data-expert-team-stage-output-locator="${esc(stageOutputLocator)}" data-expert-team-stage-output-artifact-id="${esc(stageOutputArtifactId)}" onclick="locateExpertTeamStageOutput(this);event.stopPropagation()">查看初稿</button>
-        ${canApproveStage?`<button class="expert-team-panel-action expert-team-stage-approve" type="button" data-expert-team-stage-approve-run-id="${esc(runId)}" onclick="approveExpertTeamStage(this);event.stopPropagation()">无修改，进入下一阶段</button>`:''}
+        <button class="expert-team-panel-action expert-team-stage-locate" type="button" data-expert-team-stage-output-locator="${esc(stageOutputLocator)}" data-expert-team-stage-output-artifact-id="${esc(stageOutputArtifactId)}" onclick="locateExpertTeamStageOutput(this);event.stopPropagation()">${esc(stageLocateLabel)}</button>
+        ${canApproveStage?`<button class="expert-team-panel-action expert-team-stage-approve" type="button" data-expert-team-stage-approve-run-id="${esc(runId)}" data-expert-team-stage-approve-label="${esc(stageApproveLabel)}" data-expert-team-stage-approve-busy-label="${esc(stageApproveBusyLabel)}" onclick="approveExpertTeamStage(this);event.stopPropagation()">${esc(stageApproveLabel)}</button>`:''}
         ${canRequestRevision?`<button class="expert-team-panel-action expert-team-stage-revision-toggle" type="button" data-expert-team-stage-revision-toggle="1" aria-expanded="false" onclick="toggleExpertTeamStageRevision(this);event.stopPropagation()">需要修改</button>
         <div class="expert-team-stage-feedback" hidden aria-hidden="true">
           <label>
@@ -1794,8 +1840,8 @@ function _expertTeamWorkspacePanelHtml(card){
     : (deliveredArtifacts.length
       ? `<button class="expert-team-panel-artifact-open" type="button" data-expert-team-chat-delivery="1" onclick="openExpertTeamChatDelivery(this);event.stopPropagation()">${artifactActionLabel}</button>`
       : `<button class="expert-team-panel-artifact-open" type="button" disabled>暂无产物</button>`);
-  const pendingAction=confirmations.length?(confirmationSummary.title||'1 项待确认'):((canApproveStage||canRequestRevision)?'阶段产物待确认':(canRetry?'可重新尝试':(canRestartStage?'已取消':(canCancel?'生成中':(canResume?'生成中断':'无需补充')))));
-  const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?'可以确认进入下一阶段，也可以提出修改意见。':(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canRestartStage?'本阶段已取消，可重新开始本阶段。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成')))));
+  const pendingAction=confirmations.length?(confirmationSummary.title||'1 项待确认'):((canApproveStage||canRequestRevision)?(isFinalStageReview?'最终成果待确认':'阶段产物待确认'):(canRetry?'可重新尝试':(canRestartStage?'已取消':(canCancel?'生成中':(canResume?'生成中断':'无需补充')))));
+  const pendingDetail=confirmations.length?confirmationSummary.detail:((canApproveStage||canRequestRevision)?(isFinalStageReview?'可以确认完成任务，也可以提出修改意见。':'可以确认进入下一阶段，也可以提出修改意见。'):(canRetry?'本轮生成没有可交付结果，可重新尝试。':(canRestartStage?'本阶段已取消，可重新开始本阶段。':(canCancel?'需要时可以停止本轮生成。':(canResume?'执行流需要重新接续。':'需求确认已完成')))));
   const pendingButton=confirmations.length
     ? `<button type="button" onclick="${pending.length?'openExpertTeamQuestionPopover(this)':'focusExpertTeamBottomDock(this)'};event.stopPropagation()">去确认</button>`
     : ((canApproveStage||canRequestRevision)?`<button type="button" onclick="focusExpertTeamBottomDock(this);event.stopPropagation()">处理阶段产物</button>`:(canRetry?`<button type="button" class="expert-team-panel-retry" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新尝试</button>`:(canRestartStage?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">重新开始本阶段</button>`:(canCancel?`<button type="button" class="expert-team-panel-cancel" data-expert-team-cancel-run-id="${esc(runId)}" onclick="cancelExpertTeamRun(this);event.stopPropagation()">停止生成</button>`:(canResume?`<button type="button" data-expert-team-resume-run-id="${esc(runId)}" onclick="resumeExpertTeamRun(this);event.stopPropagation()">继续生成</button>`:'<button type="button" disabled>暂无待办</button>')))));
@@ -2069,8 +2115,15 @@ function shouldPreserveExpertTeamDraftDock(sessionId){
   const targetSid=String(sessionId||'');
   if(targetSid&&sourceSid&&sourceSid!==targetSid)return false;
   const active=typeof document!=='undefined'?document.activeElement:null;
-  const inputs=Array.from(dock.querySelectorAll('.status-card-expert-question.pending [data-expert-team-answer-input]'));
-  return inputs.some(input=>input===active||String(input.value||'').trim());
+  const selectors=[
+    '.status-card-expert-question.pending [data-expert-team-answer-input]',
+    '.expert-team-question-popover [data-expert-team-answer-input]',
+    '[data-expert-team-stage-feedback]',
+  ];
+  const inputs=Array.from(dock.querySelectorAll(selectors.join(',')));
+  const shouldPreserve=inputs.some(input=>input===active||String(input.value||'').trim());
+  if(shouldPreserve&&typeof _restoreExpertTeamDraftFocusIfNeeded==='function')_restoreExpertTeamDraftFocusIfNeeded(dock);
+  return shouldPreserve;
 }
 
 function clearExpertTeamWorkspacePanel(){
@@ -2212,6 +2265,7 @@ function _focusExpertTeamArtifactEntry(btn,path){
   return true;
 }
 function openExpertTeamChatDelivery(btn){
+  if(typeof openExpertTeamResultViewer==='function'&&openExpertTeamResultViewer(btn))return true;
   if(typeof hideExpertTeamWorkspacePanel==='function')hideExpertTeamWorkspacePanel(btn);
   if(typeof scrollToBottom==='function'){
     try{scrollToBottom();}catch(_){}
@@ -2220,6 +2274,171 @@ function openExpertTeamChatDelivery(btn){
     if(messages)messages.scrollTop=messages.scrollHeight;
   }
   if(typeof showToast==='function')showToast('专家团结果已写入当前对话。');
+  return true;
+}
+function _expertTeamPlainText(text){
+  return String(text||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim();
+}
+function _expertTeamCompactSummary(text,limit=140){
+  const raw=_expertTeamPlainText(text);
+  const first=raw.split('\n').map(line=>line.replace(/^\s*(?:#{1,6}\s*|[-*]\s*|\d+[\.、．)]\s*)/,'').trim()).find(Boolean)||raw;
+  const compact=first.replace(/\s+/g,' ').trim();
+  return compact.length>limit?`${compact.slice(0,limit).trim()}...`:compact;
+}
+function _expertTeamCompactPreview(text,limit=360){
+  const compact=_expertTeamPlainText(text).replace(/\s+/g,' ').trim();
+  return compact.length>limit?`${compact.slice(0,limit).trim()}...`:compact;
+}
+function _expertTeamResultFromCard(){
+  const card=_activeExpertTeamStatusCard||{};
+  const stageReview=card.stageReview||{};
+  const output=stageReview.output||{};
+  const outputs=Array.isArray(card.stageOutputs)?card.stageOutputs:[];
+  const latest=outputs.slice().reverse().find(item=>item&&String(item.content||'').trim())||{};
+  const content=String(output.content||latest.content||'').trim();
+  if(!content)return null;
+  let rawIdx='';
+  if(typeof S!=='undefined'&&Array.isArray(S.messages)){
+    for(let idx=S.messages.length-1;idx>=0;idx--){
+      const messageContent=_expertTeamPlainText(msgContent(S.messages[idx])||String(S.messages[idx]&&S.messages[idx].content||''));
+      if(messageContent===content){
+        rawIdx=idx;
+        break;
+      }
+    }
+  }
+  if(rawIdx===''&&typeof document!=='undefined'){
+    const cards=Array.from(document.querySelectorAll('.expert-team-result-card[data-expert-team-result-raw-idx]'));
+    const latestCard=cards.reverse().find(card=>card&&card.dataset&&card.dataset.expertTeamResultRawIdx!=='');
+    if(latestCard&&latestCard.dataset)rawIdx=latestCard.dataset.expertTeamResultRawIdx;
+  }
+  return {
+    rawIdx,
+    title:stageReview.title||output.title||output.label||latest.title||latest.label||'专家团成果',
+    phase:stageReview.phase||output.phase||latest.phase||card.phase||'交付成果',
+    summary:output.summary||_expertTeamCompactSummary(content),
+    preview:output.preview||_expertTeamCompactPreview(content),
+    content,
+    contentLength:Number(output.content_length||content.length||0),
+    updatedAt:output.updated_at||latest.updated_at||'',
+  };
+}
+function _expertTeamDeliveryMessageInfo(message,rawIdx){
+  if(!message||message.role!=='assistant')return null;
+  const content=_expertTeamPlainText(msgContent(message)||String(message.content||''));
+  if(!content)return null;
+  const hasExpertShape=/(阶段目标|阶段产物|待人工补充事项|交付后核对事项|下一阶段建议)/.test(content)
+    && /(阶段产物|待人工补充事项|交付后核对事项|下一阶段建议)/.test(content);
+  const card=_activeExpertTeamStatusCard||{};
+  const outputs=Array.isArray(card.stageOutputs)?card.stageOutputs:[];
+  const matched=outputs.find(item=>item&&String(item.content||'').trim()===content);
+  const activeOutput=(card.stageReview&&card.stageReview.output)||{};
+  const matchesActive=String(activeOutput.content||'').trim()===content;
+  if(!matched&&!matchesActive&&!hasExpertShape)return null;
+  if(content.length<420&&!matched&&!matchesActive)return null;
+  const output=matched||activeOutput||{};
+  return {
+    rawIdx,
+    title:output.title||output.label||'专家团交付成果',
+    phase:output.phase||card.phase||'交付成果',
+    summary:output.summary||_expertTeamCompactSummary(content),
+    preview:output.preview||_expertTeamCompactPreview(content),
+    content,
+    contentLength:Number(output.content_length||content.length||0),
+    updatedAt:output.updated_at||message.timestamp||message._ts||'',
+  };
+}
+function _expertTeamLatestDeliveryMessageInfo(){
+  if(typeof S==='undefined'||!Array.isArray(S.messages))return null;
+  for(let idx=S.messages.length-1;idx>=0;idx--){
+    const info=_expertTeamDeliveryMessageInfo(S.messages[idx],idx);
+    if(info)return info;
+  }
+  return null;
+}
+function _expertTeamDeliveryCardHtml(info){
+  info=info||{};
+  const rawIdx=info.rawIdx===''?'':String(info.rawIdx);
+  const count=Number(info.contentLength||String(info.content||'').length||0);
+  const meta=[info.phase||'专家团成果',count?`${count} 字`:'',info.updatedAt?String(info.updatedAt):''].filter(Boolean).join(' · ');
+  const icon=(typeof li==='function')?li('file-text',16):'□';
+  return `<div class="expert-team-result-card" data-expert-team-result-card="1" data-expert-team-result-raw-idx="${esc(rawIdx)}">
+    <div class="expert-team-result-card-icon">${icon}</div>
+    <div class="expert-team-result-card-main">
+      <strong>${esc(info.title||'专家团交付成果')}</strong>
+      <small>${esc(meta||'结果已写入当前对话')}</small>
+      <p>${esc(info.summary||info.preview||'点击查看完整成果。')}</p>
+      <div class="expert-team-result-card-actions">
+        <button type="button" data-expert-team-result-raw-idx="${esc(rawIdx)}" onclick="openExpertTeamResultViewer(this);event.stopPropagation()">查看完整成果</button>
+        ${rawIdx!==''?`<button type="button" data-expert-team-result-raw-idx="${esc(rawIdx)}" onclick="locateExpertTeamDeliveryMessage(this);event.stopPropagation()">定位原文</button>`:''}
+      </div>
+    </div>
+  </div>`;
+}
+function _expertTeamResultFromTrigger(trigger){
+  const rawIdx=trigger&&trigger.dataset?trigger.dataset.expertTeamResultRawIdx:'';
+  if(rawIdx!==''&&typeof S!=='undefined'&&Array.isArray(S.messages)){
+    const idx=Number(rawIdx);
+    const msg=Number.isFinite(idx)?S.messages[idx]:null;
+    const info=_expertTeamDeliveryMessageInfo(msg,idx);
+    if(info)return info;
+  }
+  return _expertTeamResultFromCard()||_expertTeamLatestDeliveryMessageInfo();
+}
+function _expertTeamResultViewerElement(){
+  if(typeof document==='undefined')return null;
+  let viewer=document.getElementById('expertTeamResultViewer');
+  if(viewer)return viewer;
+  viewer=document.createElement('div');
+  viewer.id='expertTeamResultViewer';
+  viewer.className='expert-team-result-viewer';
+  viewer.hidden=true;
+  document.body.appendChild(viewer);
+  return viewer;
+}
+function closeExpertTeamResultViewer(trigger){
+  const viewer=(trigger&&trigger.closest&&trigger.closest('.expert-team-result-viewer'))||document.getElementById('expertTeamResultViewer');
+  if(viewer)viewer.hidden=true;
+  return true;
+}
+function openExpertTeamResultViewer(trigger){
+  const info=_expertTeamResultFromTrigger(trigger);
+  if(!info||!String(info.content||'').trim())return false;
+  const viewer=_expertTeamResultViewerElement();
+  if(!viewer)return false;
+  const rendered=(typeof renderMd==='function')?renderMd(info.content):`<pre>${esc(info.content)}</pre>`;
+  viewer.innerHTML=`<div class="expert-team-result-viewer-panel" role="dialog" aria-modal="false" aria-label="专家团完整成果预览">
+    <div class="expert-team-result-viewer-head">
+      <span>
+        <strong>${esc(info.title||'专家团完整成果')}</strong>
+        <small>${esc([info.phase||'',info.contentLength?`${info.contentLength} 字`:''].filter(Boolean).join(' · ')||'完整成果预览')}</small>
+      </span>
+      <button type="button" onclick="closeExpertTeamResultViewer(this);event.stopPropagation()" aria-label="关闭专家团成果预览">×</button>
+    </div>
+    <div class="expert-team-result-viewer-content">${rendered}</div>
+    <div class="expert-team-result-viewer-actions">
+      ${info.rawIdx!==''?`<button type="button" data-expert-team-result-raw-idx="${esc(String(info.rawIdx))}" onclick="locateExpertTeamDeliveryMessage(this);event.stopPropagation()">定位原文</button>`:''}
+      <button type="button" onclick="closeExpertTeamResultViewer(this);event.stopPropagation()">关闭</button>
+    </div>
+  </div>`;
+  viewer.hidden=false;
+  const closeBtn=viewer.querySelector('button');
+  if(closeBtn&&closeBtn.focus){
+    try{closeBtn.focus({preventScroll:true});}catch(_){closeBtn.focus();}
+  }
+  return true;
+}
+function locateExpertTeamDeliveryMessage(trigger){
+  const rawIdx=trigger&&trigger.dataset?trigger.dataset.expertTeamResultRawIdx:'';
+  if(rawIdx==='')return false;
+  const cssEscape=(typeof CSS!=='undefined'&&CSS&&CSS.escape)?CSS.escape(String(rawIdx)):String(rawIdx).replace(/"/g,'\\"');
+  const target=document.querySelector(`[data-msg-idx="${cssEscape}"]`);
+  if(!target)return false;
+  closeExpertTeamResultViewer(trigger);
+  try{target.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'});}catch(_){try{target.scrollIntoView();}catch(__){}}
+  target.classList.add('expert-team-result-source-focus');
+  setTimeout(()=>{try{target.classList.remove('expert-team-result-source-focus');}catch(_){}},1800);
+  if(typeof showToast==='function')showToast('已定位到专家团原文。');
   return true;
 }
 async function openExpertTeamArtifact(btn){
@@ -2276,12 +2495,16 @@ async function handleExpertTeamDockAction(btn){
     const opened=await openExpertTeamArtifact(btn);
     if(opened)return true;
   }
+  if(typeof openExpertTeamResultViewer==='function'&&openExpertTeamResultViewer(btn))return true;
   return focusExpertTeamBottomDock(btn);
 }
 if(typeof window!=='undefined'){
   window.openWriteflowArtifact=openWriteflowArtifact;
   window.openExpertTeamArtifact=openExpertTeamArtifact;
   window.openExpertTeamChatDelivery=openExpertTeamChatDelivery;
+  window.openExpertTeamResultViewer=openExpertTeamResultViewer;
+  window.closeExpertTeamResultViewer=closeExpertTeamResultViewer;
+  window.locateExpertTeamDeliveryMessage=locateExpertTeamDeliveryMessage;
   window.downloadWriteflowArtifact=downloadWriteflowArtifact;
   window.handleExpertTeamDockAction=handleExpertTeamDockAction;
 }
@@ -2541,7 +2764,7 @@ async function approveExpertTeamStage(btn){
   if(btn){
     btn.disabled=true;
     try{btn.setAttribute('aria-busy','true');}catch(_){}
-    btn.textContent='正在进入下一阶段...';
+    btn.textContent=(btn.dataset&&btn.dataset.expertTeamStageApproveBusyLabel)||'正在进入下一阶段...';
   }
   try{
     const data=await api('/api/expert-teams/stage/approve',{
@@ -2559,7 +2782,7 @@ async function approveExpertTeamStage(btn){
     if(btn){
       btn.disabled=false;
       try{btn.removeAttribute('aria-busy');}catch(_){}
-      btn.textContent='无修改，进入下一阶段';
+      btn.textContent=(btn.dataset&&btn.dataset.expertTeamStageApproveLabel)||'无修改，进入下一阶段';
     }
     showToast('确认阶段产物失败：'+(e&&e.message||e));
     return false;
@@ -9210,7 +9433,6 @@ function _messageRenderCacheSignature(){
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
   add(messages.length);
-  add(_expertTeamChatConfirmationSignature());
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
     add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
@@ -9644,7 +9866,8 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = _getCachedRender(displayContent, isUser);
+    const expertTeamDelivery=!isUser?_expertTeamDeliveryMessageInfo(m,rawIdx):null;
+    let bodyHtml = expertTeamDelivery ? _expertTeamDeliveryCardHtml(expertTeamDelivery) : _getCachedRender(displayContent, isUser);
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;

@@ -85,6 +85,26 @@ async function prepareSession(page, workspace) {
 
 async function renderExpertCard(page, artifact) {
   await page.evaluate(({ artifact }) => {
+    const resultContent = String(artifact.content || "").trim();
+    const resultOutput = resultContent
+      ? {
+          id: "stage-delivery",
+          task_id: "delivery",
+          phase: "交付",
+          title: "专家团生成结果",
+          label: "专家团生成结果",
+          kind: "chat",
+          status: "approved",
+          content: resultContent,
+          summary: "交付成果已生成，请查看完整成果。",
+          preview: resultContent.replace(/\s+/g, " ").slice(0, 360),
+          content_length: resultContent.length,
+          has_long_content: resultContent.length > 720,
+          note: "已写入当前对话",
+          locator: "chat",
+          artifact_id: "",
+        }
+      : null;
     const base = {
       type: "expert-team",
       kind: "expert_team",
@@ -112,6 +132,17 @@ async function renderExpertCard(page, artifact) {
       ],
       artifacts: [artifact],
       questions: [],
+      stageReview: resultOutput
+        ? {
+            task_id: "delivery",
+            phase: "交付",
+            title: "最终成果待确认",
+            status: "done",
+            is_final_stage: true,
+            output: resultOutput,
+          }
+        : {},
+      stageOutputs: resultOutput ? [resultOutput] : [],
     };
     renderWriteflowStatusDock(base);
     if (typeof focusExpertTeamBottomDock === "function") focusExpertTeamBottomDock(null);
@@ -224,6 +255,7 @@ async function renderConfirmationCard(page, run) {
   await page.evaluate(({ run }) => {
     const card = _expertTeamStatusCardFromRun(run, { session_id: run.session_id, team_id: run.team_id });
     renderWriteflowStatusDock(card);
+    if (typeof syncExpertTeamChatConfirmationCard === "function") syncExpertTeamChatConfirmationCard(card);
     if (typeof focusExpertTeamBottomDock === "function") focusExpertTeamBottomDock(null);
   }, { run });
 }
@@ -306,6 +338,20 @@ async function main() {
     });
     await renderConfirmationCard(page, buildConfirmationRun(sessionId, confirmationAnswers));
     await page.waitForSelector("#writeflowStatusDock .expert-team-question-summary button", { timeout: 10000 });
+    const uniqueConfirmationState = await page.evaluate(() => {
+      const messageText = document.querySelector("#msgInner")?.textContent.replace(/\s+/g, " ").trim() || "";
+      return {
+        lifecycle: Boolean(document.querySelector("#msgInner .expert-team-lifecycle-card")),
+        chatActionCards: document.querySelectorAll("#msgInner .expert-team-chat-confirmation-card").length,
+        chatConfirmButtons: Array.from(document.querySelectorAll("#msgInner button")).filter((button) => button.textContent.includes("去确认")).length,
+        dockConfirmButtons: Array.from(document.querySelectorAll("#writeflowStatusDock button")).filter((button) => button.textContent.includes("打开需求确认") || button.textContent.includes("去确认")).length,
+        messageText,
+      };
+    });
+    assertState(uniqueConfirmationState.lifecycle, "Expert-team creation did not render passive lifecycle state", uniqueConfirmationState);
+    assertState(uniqueConfirmationState.chatActionCards === 0, "Chat area still renders actionable confirmation cards", uniqueConfirmationState);
+    assertState(uniqueConfirmationState.chatConfirmButtons === 0, "Chat area still has a 去确认 action", uniqueConfirmationState);
+    assertState(uniqueConfirmationState.dockConfirmButtons >= 1, "Bottom dock does not expose the unique confirmation action", uniqueConfirmationState);
     await page.click("#writeflowStatusDock .expert-team-question-summary button");
     await page.waitForSelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea", { timeout: 10000 });
     let confirmationState = await page.evaluate(() => {
@@ -354,28 +400,42 @@ async function main() {
       return button && !button.disabled;
     }, { timeout: 5000 });
     await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
-    await page.waitForFunction(() => {
-      const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
-      const text = document.querySelector("#writeflowStatusDock")?.textContent || "";
-      const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea");
-      const skip = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
+	    await page.waitForFunction(() => {
+	      const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
+	      const text = document.querySelector("#writeflowStatusDock")?.textContent || "";
+	      const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea");
+	      const skip = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
       return card && card.classList.contains("is-expanded") &&
         text.includes("生成尚未开始") &&
         input && !input.disabled && input.offsetParent !== null &&
         (input.getAttribute("aria-label") || "").includes("已知素材") &&
-        skip && skip.textContent.includes("跳过并开始生成");
-    }, { timeout: 10000 });
-    await page.waitForTimeout(30000);
-    const notAutoStarted = await page.evaluate(() => {
-      const text = document.querySelector("#writeflowStatusDock")?.textContent || "";
-      return {
-        text: text.replace(/\s+/g, " ").trim(),
-        activeStream: Boolean(S && S.activeStreamId),
-      };
-    });
-    assertState(!notAutoStarted.activeStream, "Optional pending state started stream before explicit skip", notAutoStarted);
-    assertState(notAutoStarted.text.includes("生成尚未开始"), "Optional pending state did not keep the waiting copy", notAutoStarted);
-    await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
+	        skip && skip.textContent.includes("跳过并开始生成");
+	    }, { timeout: 10000 });
+	    const optionalSelector = "#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea";
+	    await page.fill(optionalSelector, "这是一段刷新保护草稿");
+	    await page.focus(optionalSelector);
+	    await page.waitForFunction((selector) => document.activeElement === document.querySelector(selector), optionalSelector, { timeout: 3000 });
+	    await page.waitForTimeout(6200);
+	    const notAutoStarted = await page.evaluate(() => {
+	      const text = document.querySelector("#writeflowStatusDock")?.textContent || "";
+	      const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea");
+	      const active = document.activeElement;
+	      return {
+	        text: text.replace(/\s+/g, " ").trim(),
+	        activeStream: Boolean(S && S.activeStreamId),
+	        draft: input ? input.value : "",
+	        activeIsInput: Boolean(input && document.activeElement === input),
+	        activeTag: active ? active.tagName : "",
+	        activeClass: active ? active.className || "" : "",
+	        activeText: active ? active.textContent.replace(/\s+/g, " ").trim().slice(0, 80) : "",
+	      };
+	    });
+	    assertState(!notAutoStarted.activeStream, "Optional pending state started stream before explicit skip", notAutoStarted);
+	    assertState(notAutoStarted.text.includes("生成尚未开始"), "Optional pending state did not keep the waiting copy", notAutoStarted);
+	    assertState(notAutoStarted.draft === "这是一段刷新保护草稿", "Silent refresh dropped the optional answer draft", notAutoStarted);
+	    assertState(notAutoStarted.activeIsInput, "Silent refresh did not preserve focus in the question popover", notAutoStarted);
+	    await page.fill(optionalSelector, "");
+	    await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .expert-team-question-skip");
     await page.waitForFunction(() => {
       const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
       const toast = document.getElementById("toast");
@@ -430,18 +490,88 @@ async function main() {
     );
     await page.screenshot({ path: path.join(outDir, "expert-team-electron-file-artifact.png"), fullPage: true });
 
-    await renderExpertCard(page, {
-      id: "expert-team-chat-delivery",
-      label: "专家团生成结果",
-      path: "",
-      kind: "chat",
-      exists: true,
-      openable: false,
-      note: "已写入当前对话",
-    });
-    const chatState = await page.evaluate(() => {
-      const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
-      const priority = document.querySelector("#writeflowStatusDock .expert-team-panel-priority-card.artifact");
+	    const longResultContent = [
+	      "# 迎峰度夏保供电 6 月重点工作推进情况汇报",
+	      "",
+	      "## 阶段目标",
+	      "面向公司分管领导汇报本月重点工作进展、存在问题和下一步安排。",
+	      "",
+	      "## 阶段产物",
+	      "已形成办公材料初稿，包含完成工作、风险隐患、协同事项和后续安排。",
+	      "",
+	      "## 待人工补充事项",
+	      "1. 请补充本月负荷峰值和重点线路名称。",
+	      "2. 请核对跨部门协同事项责任人。",
+	      "",
+	      "## 交付后核对事项",
+	      "核对数据、名称、时间、责任部门后即可进入内部流转。",
+	      "",
+	      "这一段是只应出现在完整预览中的长正文标识。".repeat(24),
+	    ].join("\\n");
+	    await page.evaluate(({ content }) => {
+	      S.messages = [
+	        { role: "user", content: "召唤内容创作专家团：起草迎峰度夏保供电工作汇报", timestamp: Date.now() / 1000 - 1 },
+	        { role: "assistant", content, timestamp: Date.now() / 1000 },
+	      ];
+	      if (typeof renderMessages === "function") renderMessages();
+	    }, { content: longResultContent });
+	    await renderExpertCard(page, {
+	      id: "expert-team-chat-delivery",
+	      label: "专家团生成结果",
+	      path: "",
+	      kind: "chat",
+	      exists: true,
+	      openable: false,
+	      note: "已写入当前对话",
+	      content: longResultContent,
+	    });
+	    await page.waitForSelector("#msgInner .expert-team-result-card", { timeout: 10000 });
+	    const compactMessageState = await page.evaluate(() => {
+	      const resultCard = document.querySelector("#msgInner .expert-team-result-card");
+	      const body = resultCard && resultCard.closest(".msg-body");
+	      return {
+	        hasResultCard: Boolean(resultCard),
+	        text: resultCard ? resultCard.textContent.replace(/\s+/g, " ").trim() : "",
+	        bodyText: body ? body.textContent.replace(/\s+/g, " ").trim() : "",
+	      };
+	    });
+	    assertState(compactMessageState.hasResultCard, "Long expert-team delivery did not render as a compact result card", compactMessageState);
+	    assertState(compactMessageState.text.includes("查看完整成果"), "Compact result card does not expose full-result action", compactMessageState);
+	    assertState(compactMessageState.text.includes("定位原文"), "Compact result card does not expose source location action", compactMessageState);
+	    assertState(!compactMessageState.bodyText.includes("这一段是只应出现在完整预览中的长正文标识这一段是只应出现在完整预览中的长正文标识"), "Long markdown was expanded directly in the chat body", compactMessageState);
+	    const openedFromResultCard = await page.evaluate(() => {
+	      if (typeof hideExpertTeamWorkspacePanel === "function") hideExpertTeamWorkspacePanel(null);
+	      const button = document.querySelector("#msgInner .expert-team-result-card [onclick*='openExpertTeamResultViewer']");
+	      if (!button) return false;
+	      button.click();
+	      return true;
+	    });
+	    assertState(openedFromResultCard, "Compact result card disappeared before it could be opened");
+	    await page.waitForFunction(
+	      () => {
+	        const viewer = document.querySelector("#expertTeamResultViewer:not([hidden])");
+	        return viewer && viewer.textContent.includes("完整预览中的长正文标识") &&
+	          viewer.textContent.includes("定位原文");
+	      },
+	      undefined,
+	      { timeout: 5000 }
+	    );
+	    await page.click("#expertTeamResultViewer [data-expert-team-result-raw-idx]");
+	    await page.waitForFunction(
+	      () => {
+	        const viewer = document.querySelector("#expertTeamResultViewer");
+	        return viewer && viewer.hidden && document.querySelector("#msgInner .expert-team-result-source-focus");
+	      },
+	      undefined,
+	      { timeout: 5000 }
+	    );
+	    await page.evaluate(() => {
+	      if (typeof showExpertTeamWorkspacePanel === "function") showExpertTeamWorkspacePanel(null);
+	    });
+	    await page.waitForTimeout(200);
+	    const chatState = await page.evaluate(() => {
+	      const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
+	      const priority = document.querySelector("#writeflowStatusDock .expert-team-panel-priority-card.artifact");
       const button = priority && priority.querySelector(".expert-team-panel-artifact-open");
       return {
         expanded: Boolean(card && card.classList.contains("is-expanded")),
@@ -452,29 +582,49 @@ async function main() {
       };
     });
     assertState(chatState.expanded, "Chat delivery card is not expanded", chatState);
-    assertState(chatState.text.includes("已写入当前对话"), "Chat delivery is not labeled as conversation result", chatState);
-    assertState(!chatState.text.includes("1 个可打开"), "Chat delivery is still presented as openable", chatState);
-    assertState(chatState.buttonText.includes("查看对话结果"), "Chat delivery button has the wrong label", chatState);
-    assertState(!chatState.buttonDisabled && chatState.buttonChatDelivery, "Chat delivery button is not actionable", chatState);
-    await page.click("#writeflowStatusDock .expert-team-panel-artifact-open");
-    await page.waitForFunction(
-      () => {
-        const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
-        const toast = document.getElementById("toast");
-        return card && card.classList.contains("is-collapsed") &&
-          toast && (toast.dataset.toastMessage || "").includes("专家团结果已写入当前对话");
-      },
-      { timeout: 5000 }
-    );
-    const compactChatState = await page.evaluate(() => {
-      const summary = document.querySelector("#writeflowStatusDock .status-card-expert-dock-summary");
-      return {
-        text: summary ? summary.textContent.replace(/\s+/g, " ").trim() : "",
-      };
-    });
-    assertState(compactChatState.text.includes("查看结果"), "Compact chat delivery summary should say 查看结果", compactChatState);
-    assertState(!compactChatState.text.includes("查看产物"), "Compact chat delivery summary still says 查看产物", compactChatState);
-    await page.screenshot({ path: path.join(outDir, "expert-team-electron-chat-delivery.png"), fullPage: true });
+	    assertState(chatState.text.includes("已写入当前对话"), "Chat delivery is not labeled as conversation result", chatState);
+	    assertState(!chatState.text.includes("1 个可打开"), "Chat delivery is still presented as openable", chatState);
+	    assertState(chatState.buttonText.includes("查看对话结果"), "Chat delivery button has the wrong label", chatState);
+	    assertState(!chatState.buttonDisabled && chatState.buttonChatDelivery, "Chat delivery button is not actionable", chatState);
+	    await page.click("#writeflowStatusDock .expert-team-panel-artifact-open");
+	    await page.waitForTimeout(600);
+	    const viewerState = await page.evaluate(() => {
+	      const viewer = document.querySelector("#expertTeamResultViewer");
+	      const latestInfo = typeof _expertTeamLatestDeliveryMessageInfo === "function" ? _expertTeamLatestDeliveryMessageInfo() : null;
+	      const cardInfo = typeof _expertTeamResultFromCard === "function" ? _expertTeamResultFromCard() : null;
+	      return {
+	        hasViewer: Boolean(viewer),
+	        hidden: viewer ? viewer.hidden : null,
+	        viewerText: viewer ? viewer.textContent.replace(/\s+/g, " ").trim().slice(0, 240) : "",
+	        viewerHasMarker: Boolean(viewer && viewer.textContent.includes("完整预览中的长正文标识")),
+	        viewerHasLocate: Boolean(viewer && viewer.textContent.includes("定位原文")),
+	        latestInfo: latestInfo ? { title: latestInfo.title, len: latestInfo.contentLength, summary: latestInfo.summary } : null,
+	        cardInfo: cardInfo ? { title: cardInfo.title, len: cardInfo.contentLength, summary: cardInfo.summary } : null,
+	        dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim().slice(0, 240) || "",
+	      };
+	    });
+	    assertState(
+	      viewerState.hasViewer && viewerState.hidden === false &&
+	        viewerState.viewerHasMarker,
+	      "Chat delivery button did not open the result viewer",
+	      viewerState
+	    );
+	    await page.screenshot({ path: path.join(outDir, "expert-team-electron-result-viewer.png"), fullPage: true });
+	    await page.click("#expertTeamResultViewer .expert-team-result-viewer-head button");
+	    const compactChatState = await page.evaluate(() => {
+	      const summary = document.querySelector("#writeflowStatusDock .status-card-expert-dock-summary");
+	      const approve = document.querySelector("#writeflowStatusDock .expert-team-stage-approve");
+	      return {
+	        text: summary ? summary.textContent.replace(/\s+/g, " ").trim() : "",
+	        hasApprove: Boolean(approve),
+	        dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
+	      };
+	    });
+	    assertState(compactChatState.text.includes("查看结果"), "Compact chat delivery summary should say 查看结果", compactChatState);
+	    assertState(!compactChatState.text.includes("查看产物"), "Compact chat delivery summary still says 查看产物", compactChatState);
+	    assertState(!compactChatState.hasApprove, "Completed expert team still exposes a stage approval action", compactChatState);
+	    assertState(!compactChatState.dockText.includes("下一阶段建议"), "Completed expert team still hints at a next stage", compactChatState);
+	    await page.screenshot({ path: path.join(outDir, "expert-team-electron-chat-delivery.png"), fullPage: true });
   } finally {
     await app.close().catch(() => {});
   }

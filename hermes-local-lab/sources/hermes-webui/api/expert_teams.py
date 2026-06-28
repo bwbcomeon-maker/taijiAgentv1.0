@@ -32,6 +32,7 @@ EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume", "cance
 QUESTION_TERMINAL_STATUSES = {"answered", "skipped"}
 PUBLIC_EXPERT_TEAM_IDS = ("content-creator-team", "deep-research-team")
 STAGE_GATED_TEAM_IDS = set(PUBLIC_EXPERT_TEAM_IDS)
+STAGE_OUTPUT_PREVIEW_LIMIT = 720
 EXPERT_TEAM_PHASES = {
     "ai-content-creator-brand-moodboard": ["需求确认", "创意策划", "方向确认", "图像生成", "交付"],
     "content-creator-team": ["需求确认", "生成初稿", "打磨发布", "交付"],
@@ -381,6 +382,12 @@ def _task_index(run: dict, task_id: str | None) -> int:
     return -1
 
 
+def _is_final_stage_task(run: dict, task_id: str | None) -> bool:
+    idx = _task_index(run, task_id)
+    tasks = run.get("tasks") or []
+    return idx >= 0 and idx == len(tasks) - 1
+
+
 def _task_by_id(run: dict, task_id: str | None) -> dict | None:
     idx = _task_index(run, task_id)
     if idx < 0:
@@ -500,6 +507,28 @@ def _extract_stage_confirmation_points(content: str) -> list[str]:
     return cleaned
 
 
+def _stage_output_text_meta(content: str) -> dict:
+    text = str(content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    compact = re.sub(r"\s+", " ", text).strip()
+    summary = ""
+    for line in text.split("\n"):
+        line = re.sub(r"^\s*(?:#{1,6}\s*|[-*]\s*|\d+[\.、．)]\s*)", "", line).strip()
+        if line:
+            summary = line[:160]
+            break
+    if not summary and compact:
+        summary = compact[:160]
+    preview = compact[:STAGE_OUTPUT_PREVIEW_LIMIT]
+    if len(compact) > STAGE_OUTPUT_PREVIEW_LIMIT:
+        preview = preview.rstrip() + "..."
+    return {
+        "summary": summary or "阶段结果已写入当前对话。",
+        "preview": preview or summary or "阶段结果已写入当前对话。",
+        "content_length": len(text),
+        "has_long_content": len(compact) > STAGE_OUTPUT_PREVIEW_LIMIT,
+    }
+
+
 def _replace_stage_confirmation_questions(run: dict, task: dict, content: str, now: str) -> list[dict]:
     task_id = str(task.get("id") or "")
     if not task_id:
@@ -564,12 +593,18 @@ def _stage_review_for_view(run: dict) -> dict:
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     output = _stage_output_for_task(run, current.get("task_id")) if current else None
     output_view = {}
+    current_task_id = str(current.get("task_id") or "")
+    current_title = str(current.get("title") or "")
+    if current_task_id and _is_final_stage_task(run, current_task_id) and str(current.get("status") or "") == "awaiting_review":
+        current_title = "最终成果待确认"
     if isinstance(output, dict):
         output_kind = str(output.get("kind") or "chat")
         artifact_id = str(output.get("artifact_id") or output.get("id") or "")
         locator = str(output.get("locator") or "")
         if not locator:
             locator = "artifact" if output.get("path") or output.get("artifact_id") else ("inline" if output_kind == "inline" else "chat")
+        content = str(output.get("content") or "")
+        text_meta = _stage_output_text_meta(content)
         output_view = {
             "id": str(output.get("id") or ""),
             "task_id": str(output.get("task_id") or ""),
@@ -578,7 +613,8 @@ def _stage_review_for_view(run: dict) -> dict:
             "label": str(output.get("label") or output.get("title") or "阶段产物"),
             "kind": output_kind,
             "status": str(output.get("status") or ""),
-            "content": str(output.get("content") or ""),
+            "content": content,
+            **text_meta,
             "note": str(output.get("note") or ""),
             "locator": locator,
             "artifact_id": artifact_id if locator == "artifact" else "",
@@ -588,10 +624,11 @@ def _stage_review_for_view(run: dict) -> dict:
     return {
         "task_id": str(current.get("task_id") or ""),
         "phase": str(current.get("phase") or run.get("phase") or ""),
-        "title": str(current.get("title") or ""),
+        "title": current_title,
         "worker_id": str(current.get("worker_id") or ""),
         "worker_name": str(current.get("worker_name") or ""),
         "status": str(current.get("status") or ""),
+        "is_final_stage": _is_final_stage_task(run, current_task_id),
         "revision_count": int(current.get("revision_count") or 0),
         "feedback": str(current.get("feedback") or ""),
         "output": output_view,
@@ -806,7 +843,7 @@ def _stage_review_confirmation_for_view(stage_review: dict) -> dict:
     output = stage_review.get("output") if isinstance(stage_review.get("output"), dict) else {}
     task_id = str(stage_review.get("task_id") or output.get("task_id") or "")
     title = str(stage_review.get("title") or output.get("title") or output.get("label") or "阶段成果")
-    description = str(output.get("content") or output.get("note") or "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。")
+    description = str(output.get("summary") or output.get("preview") or output.get("note") or "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。")
     return {
         "id": f"stage:{task_id}",
         "kind": "stage_review",
@@ -1185,11 +1222,17 @@ def _mark_stage_execution_complete(workspace: Path, run: dict, *, delivery: dict
         return write_expert_team_run(Path(workspace), run)
 
     output = _ensure_stage_output(run, task)
+    is_final_stage = _is_final_stage_task(run, task.get("id"))
+    default_delivery_content = (
+        "最终成果已写入当前对话，请检查后确认是否完成任务。"
+        if is_final_stage
+        else "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。"
+    )
     delivery_content = str(
         delivery.get("content")
         or delivery.get("note")
         or output.get("content")
-        or "阶段结果已写入当前对话，请检查后确认是否进入下一阶段。"
+        or default_delivery_content
     )
     output["status"] = "awaiting_review"
     output["label"] = str(delivery.get("label") or output.get("label") or task.get("title") or "阶段产物")
@@ -1208,7 +1251,11 @@ def _mark_stage_execution_complete(workspace: Path, run: dict, *, delivery: dict
         run,
         str(task.get("id") or ""),
         "waiting_user",
-        result_summary="阶段结果已写入当前对话，等待你确认或提出修改意见。",
+        result_summary=(
+            "最终成果已写入当前对话，等待你确认完成任务或提出修改意见。"
+            if is_final_stage
+            else "阶段结果已写入当前对话，等待你确认或提出修改意见。"
+        ),
     )
     run["current_stage"] = {
         "task_id": str(task.get("id") or ""),

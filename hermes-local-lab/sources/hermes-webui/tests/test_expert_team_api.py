@@ -556,6 +556,10 @@ def test_review_items_contract_is_non_blocking_and_stage_output_has_locator(tmp_
     ]
     assert view["stage_review"]["output"]["locator"] == "chat"
     assert view["stage_review"]["output"]["artifact_id"] == ""
+    assert view["stage_review"]["output"]["summary"] == "办公材料初稿已生成。"
+    assert view["stage_review"]["output"]["preview"].startswith("办公材料初稿已生成。")
+    assert view["stage_review"]["output"]["content_length"] == len(complete["stage_outputs"][0]["content"])
+    assert view["stage_review"]["output"]["has_long_content"] is False
 
 
 def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_path):
@@ -1222,7 +1226,7 @@ def test_run_truth_repairs_existing_generic_stage_output_from_latest_assistant(m
 
 
 def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(tmp_path):
-    from api import expert_teams
+    from api import expert_teams, routes
 
     run = expert_teams.start_expert_team(
         tmp_path,
@@ -1275,6 +1279,10 @@ def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(
     assert delivery_run["phase"] == "交付"
     assert delivery_run["current_stage"]["task_id"] == "delivery"
     assert [task["status"] for task in delivery_run["tasks"]] == ["done", "done", "running"]
+    delivery_prompt = routes._content_expert_team_execution_prompt(delivery_run)
+    assert "交付后核对事项" in delivery_prompt
+    assert "可选后续动作" in delivery_prompt
+    assert "下一阶段建议" not in delivery_prompt
 
     final_started = expert_teams.mark_expert_team_execution_started(
         tmp_path,
@@ -1286,6 +1294,8 @@ def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(
         final_started["run_id"],
         delivery={"kind": "chat", "label": "交付确认阶段结果", "exists": True},
     )
+    assert final_reviewed["view"]["stage_review"]["title"] == "最终成果待确认"
+    assert final_reviewed["view"]["stage_review"]["output"]["summary"]
     done = expert_teams.approve_expert_team_stage(tmp_path, final_reviewed["run_id"])
 
     assert done["status"] == "done"

@@ -146,15 +146,21 @@ def test_expert_team_uses_unified_confirmation_entrypoints():
     assert "expert-team-confirmation-stage-summary" in UI_JS
     assert "expert-team-confirmation-fallback" in UI_JS
     assert "聊天中有待确认事项，请查看最新专家团回复。" in UI_JS
-    assert "function _expertTeamChatConfirmationCardHtml" in UI_JS
     assert "function syncExpertTeamChatConfirmationCard" in UI_JS
-    assert "expert-team-chat-confirmation-card" in UI_JS
-    assert "data-expert-team-chat-confirmation" in UI_JS
+    assert "function _expertTeamLifecycleCardHtml" in UI_JS
+    assert "expert-team-lifecycle-card" in UI_JS
+    assert "data-expert-team-lifecycle" in UI_JS
     assert "focusExpertTeamBottomDock(this)" in UI_JS
     assert "window.syncExpertTeamChatConfirmationCard=syncExpertTeamChatConfirmationCard" in UI_JS
-    assert "add(_expertTeamChatConfirmationSignature())" in UI_JS
+    assert "add(_expertTeamChatConfirmationSignature())" not in UI_JS
 
-    assert ".expert-team-chat-confirmation-card" in STYLE_CSS
+    lifecycle_start = UI_JS.index("function _expertTeamLifecycleCardHtml")
+    lifecycle_body = UI_JS[lifecycle_start : UI_JS.index("function syncExpertTeamChatConfirmationCard", lifecycle_start)]
+    assert "openExpertTeamQuestionPopover" not in lifecycle_body
+    assert "focusExpertTeamBottomDock" not in lifecycle_body
+    assert "去确认" not in lifecycle_body
+
+    assert ".expert-team-lifecycle-card" in STYLE_CSS
     assert ".expert-team-confirmation-stage-summary" in STYLE_CSS
     assert ".expert-team-confirmation-fallback" in STYLE_CSS
 
@@ -183,13 +189,6 @@ def test_expert_team_question_confirmation_uses_dock_popover_flow():
     assert "已回答" in UI_JS
     assert "openExpertTeamQuestionPopover(this)" in UI_JS
     assert "focusExpertTeamBottomDock(this)" in UI_JS
-
-    chat_start = UI_JS.index("function _expertTeamChatConfirmationCardHtml")
-    chat_body = UI_JS[chat_start : UI_JS.index("function syncExpertTeamChatConfirmationCard", chat_start)]
-    assert "hasQuestion" in chat_body
-    assert "openExpertTeamQuestionPopover(this)" in chat_body
-    assert "focusExpertTeamBottomDock(this)" in chat_body
-    assert chat_body.index("openExpertTeamQuestionPopover(this)") < chat_body.index("focusExpertTeamBottomDock(this)")
 
     panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
     panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
@@ -412,12 +411,32 @@ def test_expert_team_pending_question_draft_survives_silent_status_refresh_miss(
     helper_body = UI_JS[helper_start : UI_JS.index("function renderWriteflowStatusDock", helper_start)]
     assert "dock.dataset.writeflowSourceSessionId" in helper_body
     assert ".status-card-expert-question.pending [data-expert-team-answer-input]" in helper_body
+    assert ".expert-team-question-popover [data-expert-team-answer-input]" in helper_body
+    assert "[data-expert-team-stage-feedback]" in helper_body
     assert "document.activeElement" in helper_body
     assert "String(input.value||'').trim()" in helper_body
+    assert "_restoreExpertTeamDraftFocusIfNeeded(dock)" in helper_body
 
     hydrate_start = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession")
     hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("function _removeWriteflowStatusCardsFromMessages", hydrate_start)]
     assert "if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;" in hydrate_body
+    assert hydrate_body.find("shouldPreserveExpertTeamDraftDock(sid)") < hydrate_body.find("await _hydrateExpertTeamStatusCardForSession(sid")
+
+    load_start = SESSIONS_JS.index("async function loadSession")
+    load_body = SESSIONS_JS[load_start : SESSIONS_JS.index("// Mark this session as the in-flight load", load_start)]
+    assert "opts.externalRefreshReason" in load_body
+    assert "shouldPreserveExpertTeamDraftDock(sid)" in load_body
+    assert load_body.find("shouldPreserveExpertTeamDraftDock(sid)") < load_body.find("_resetWriteflowDockForSessionChange('load-session')")
+
+
+def test_expert_team_question_popover_focus_prefers_current_input():
+    focus_start = UI_JS.index("function _focusExpertTeamQuestionPopover")
+    focus_body = UI_JS[focus_start : UI_JS.index("function _syncExpertTeamQuestionPopover", focus_start)]
+    assert "const focusSelectors=[" in focus_body
+    assert ".status-card-expert-question.pending.is-current [data-expert-team-answer-input]:not(:disabled)" in focus_body
+    assert ".expert-team-question-close:not(:disabled)" in focus_body
+    assert focus_body.index("[data-expert-team-answer-input]:not(:disabled)") < focus_body.index(".expert-team-question-close:not(:disabled)")
+    assert "for(const selector of focusSelectors)" in focus_body
 
 
 def test_expert_team_workspace_uses_bottom_dock_without_top_panel_squeeze():
@@ -507,6 +526,31 @@ def test_expert_team_chat_delivery_is_not_presented_as_openable_file_artifact():
     assert "readyArtifacts.length?'查看产物':'查看对话结果'" in panel_body
 
 
+def test_expert_team_chat_delivery_uses_compact_result_viewer():
+    assert "function _expertTeamDeliveryMessageInfo" in UI_JS
+    assert "function _expertTeamLatestDeliveryMessageInfo" in UI_JS
+    assert "function _expertTeamDeliveryCardHtml" in UI_JS
+    assert "function openExpertTeamResultViewer" in UI_JS
+    assert "function locateExpertTeamDeliveryMessage" in UI_JS
+    assert "expert-team-result-card" in UI_JS
+    assert "expert-team-result-viewer" in UI_JS
+    assert "查看完整成果" in UI_JS
+    assert "定位原文" in UI_JS
+    assert "window.openExpertTeamResultViewer=openExpertTeamResultViewer" in UI_JS
+    assert "window.locateExpertTeamDeliveryMessage=locateExpertTeamDeliveryMessage" in UI_JS
+
+    render_start = UI_JS.index("for(let vi=0;vi<renderVisWithIdx.length;vi++)")
+    render_body = UI_JS[render_start : UI_JS.index("syncExpertTeamChatConfirmationCard();", render_start)]
+    assert "_expertTeamDeliveryMessageInfo(m,rawIdx)" in render_body
+    assert "_expertTeamDeliveryCardHtml(expertTeamDelivery)" in render_body
+    assert "let bodyHtml = expertTeamDelivery" in render_body
+    assert "return _expertTeamResultFromCard()||_expertTeamLatestDeliveryMessageInfo();" in UI_JS
+
+    assert ".expert-team-result-card" in STYLE_CSS
+    assert ".expert-team-result-viewer" in STYLE_CSS
+    assert ".expert-team-result-viewer-content" in STYLE_CSS
+
+
 def test_expert_team_answer_response_attaches_real_stream_runtime():
     assert "function _applyExpertTeamStreamResponse" in UI_JS
     assert "data&&data.stream_id" in UI_JS
@@ -556,14 +600,16 @@ def test_expert_team_workspace_exposes_stage_review_actions():
     assert "card.stageOutputs=Array.isArray(run.stage_outputs)?run.stage_outputs:[]" in UI_JS
     assert "expert-team-stage-review" in stage_review_body
     assert "expert-team-stage-output" in stage_review_body
-    assert "查看初稿" in stage_review_body
+    assert "const stageLocateLabel=isFinalStageReview?'查看成果':'查看初稿';" in UI_JS
+    assert "stageLocateLabel" in stage_review_body
     assert "data-expert-team-stage-feedback" in stage_review_body
     assert "data-expert-team-stage-output-locator" in stage_review_body
     assert "data-expert-team-stage-revision-toggle" in stage_review_body
     assert 'class="expert-team-stage-feedback" hidden aria-hidden="true"' in stage_review_body
     assert "请确认阶段成果" in stage_review_body
-    assert stage_review_body.index("查看初稿") < stage_review_body.index("无修改，进入下一阶段")
-    assert "无修改，进入下一阶段" in stage_review_body
+    assert "const stageApproveLabel=isFinalStageReview?'无修改，完成任务':'无修改，进入下一阶段';" in UI_JS
+    assert "stageApproveLabel" in stage_review_body
+    assert stage_review_body.index("stageLocateLabel") < stage_review_body.index("stageApproveLabel")
     assert "需要修改" in stage_review_body
     assert "提交修改意见" in stage_review_body
     assert "提出修改意见" not in stage_review_body
@@ -633,5 +679,5 @@ def test_expert_team_hydrates_before_writeflow_fallback():
     assert "async function _hydrateExpertTeamStatusCardForSession" in SESSIONS_JS
     assert "/api/expert-teams/run?session_id=" in SESSIONS_JS
     hydrate = SESSIONS_JS[SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession") :]
-    assert "await _hydrateExpertTeamStatusCardForSession(sid)" in hydrate
-    assert hydrate.find("await _hydrateExpertTeamStatusCardForSession(sid)") < hydrate.find("/api/writeflow/run?session_id=")
+    assert "await _hydrateExpertTeamStatusCardForSession(sid,options)" in hydrate
+    assert hydrate.find("await _hydrateExpertTeamStatusCardForSession(sid,options)") < hydrate.find("/api/writeflow/run?session_id=")

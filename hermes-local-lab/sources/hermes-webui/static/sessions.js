@@ -607,6 +607,15 @@ async function loadSession(sid){
   // refresh paths pass {force:true} when external state.db changes arrive.
   // Legacy invariant kept for static regression tests: if(currentSid===sid) return
   if(currentSid===sid && !forceReload) return;
+  if(
+    currentSid===sid &&
+    forceReload &&
+    opts.externalRefreshReason &&
+    typeof shouldPreserveExpertTeamDraftDock==='function' &&
+    shouldPreserveExpertTeamDraftDock(sid)
+  ){
+    return;
+  }
   if(currentSid !== sid || forceReload){
     _resetWriteflowDockForSessionChange('load-session');
   }
@@ -1029,8 +1038,8 @@ async function _hydrateWriteflowStatusCardForSession(sid,options={}){
     if(_isWriteflowHydrationForActiveSession(sid)&&typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
     return false;
   }
-  if(await _hydrateExpertTeamStatusCardForSession(sid))return true;
   if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return false;
+  if(await _hydrateExpertTeamStatusCardForSession(sid,options))return true;
   if(!Array.isArray(S.messages)){
     if(!options.silent)_stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();

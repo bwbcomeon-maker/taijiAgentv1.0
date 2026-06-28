@@ -1112,16 +1112,19 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
             "当前只执行“打磨发布”阶段：基于已确认初稿，完成表达润色、版式/配图建议、流转前检查和可执行修改清单。"
             "不要重写完整初稿，除非用户修订意见明确要求。"
         )
+        output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     elif task_id == "delivery":
         stage_instruction = (
             "当前只执行“交付确认”阶段：基于已确认初稿和打磨发布方案，形成最终流转版、事实核对项、流转风险和交付说明。"
             "不要新增未确认的大方向；如仍有风险，明确列为发布前人工确认项。"
         )
+        output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作"
     else:
         stage_instruction = (
             "当前只执行“生成初稿”阶段：输出材料定位、标题方案、一级结构和可供用户确认的办公材料初稿。"
             "版式和流转检查只给必要提示，不展开成最终交付。"
         )
+        output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     return (
         "你现在作为内容创作专家团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
@@ -1129,7 +1132,7 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         f"目标读者：{audience}\n"
         f"素材、篇幅或表达边界：{boundary}\n\n"
         f"{stage_instruction}\n\n"
-        "请用中文输出，结构必须包含：阶段目标、阶段产物、待人工补充事项、下一阶段建议。\n\n"
+        f"请用中文输出，结构必须包含：{output_sections}。\n\n"
         "不要夸大产品能力；不确定的信息必须标注需要人工确认。"
     )
 
@@ -1148,6 +1151,7 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         "draft": "当前只执行“材料初稿”阶段：按已确认结构提纲起草材料初稿，保留事实待核项，不做最终复核结论。",
         "review": "当前只执行“复核交付”阶段：检查事实、逻辑、表达、流转风险，并形成交付建议。",
     }
+    output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作" if task_id == "review" else "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     return (
         "你现在作为深度材料研究团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
@@ -1155,7 +1159,7 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         f"目标读者与用途：{audience_goal}\n"
         f"资料范围、案例偏好或避坑边界：{source_boundary}\n\n"
         f"{stage_instructions.get(task_id) or '当前只执行当前阶段，输出可供用户确认的阶段产物。'}\n\n"
-        "请用中文输出，结构必须包含：阶段目标、阶段产物、待人工补充事项、下一阶段建议。\n\n"
+        f"请用中文输出，结构必须包含：{output_sections}。\n\n"
         "没有来源或不确定的信息必须标注需要人工确认；不要编造案例、数据或出处。"
     )
 
