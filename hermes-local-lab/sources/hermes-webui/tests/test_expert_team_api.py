@@ -36,6 +36,8 @@ def test_content_creator_catalog_uses_sgcc_daily_office_copy():
         "材料面向哪些对象，使用场景是什么？",
         "有哪些已知素材、口径要求、篇幅或表述边界？",
     ]
+    assert [task["title"] for task in team["tasks"]] == ["起草办公材料初稿", "打磨发布方案", "交付确认"]
+    assert "撰写" + "公众号长文" not in json.dumps(team, ensure_ascii=False)
 
 
 def test_deep_research_expert_team_start_persists_structured_run(tmp_path):
@@ -188,11 +190,11 @@ def test_expert_team_writeflow_adapter_preserves_existing_runs():
             "run_id": "wr-demo",
             "session_id": "sid-old",
             "team_id": "content-creator-team",
-            "title": "公众号长文",
+            "title": "历史写作任务",
             "status": "running",
             "phase": "生成初稿",
             "members": [{"id": "writing-executor", "name": "文案创作专家", "role": "正文写作", "status": "执行中"}],
-            "tasks": [{"id": "draft", "title": "撰写公众号长文", "status": "running"}],
+            "tasks": [{"id": "draft", "title": "历史稿件初稿", "status": "running"}],
             "artifacts": [],
             "events": [],
         }
@@ -263,7 +265,7 @@ def test_content_expert_team_answer_starts_real_stream_without_exposing_internal
         {
             "session_id": "sid-stream",
             "team_id": "content-creator-team",
-            "prompt": "帮我写一篇公众号长文",
+            "prompt": "帮我起草一篇部门月度工作汇报",
         },
     )
     sent = {}
@@ -340,6 +342,113 @@ def test_content_expert_team_answer_starts_real_stream_without_exposing_internal
     assert response["run"]["view"]["health"]["needs_resume"] is False
     assert response["run"]["view"]["phase_progress"]["total"] == 4
     assert response["run"]["view"]["pending_questions"] == []
+
+
+def test_content_expert_team_waits_for_optional_intake_before_stream(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-optional-wait",
+            "team_id": "content-creator-team",
+            "prompt": "帮我起草一篇部门月度工作汇报",
+        },
+    )
+    called = {"stream": False}
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", lambda *args, **kwargs: called.update(stream=True))
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "sid-optional-wait",
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
+                "audience": "公司分管领导和部门负责人",
+            },
+        },
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/answer"))
+
+    assert called["stream"] is False
+    assert response["run"]["status"] == "awaiting_user"
+    assert "stream_id" not in response
+    assert response["run"]["view"]["intake"]["required_pending"] == []
+    assert response["run"]["view"]["intake"]["optional_pending"] == ["boundary"]
+    assert response["run"]["view"]["intake"]["optional_status"] == "pending"
+    assert response["run"]["view"]["primary_confirmation"]["id"] == "question:boundary"
+
+
+def test_content_expert_team_skip_optional_intake_allows_stream(monkeypatch, tmp_path):
+    import api.routes as routes
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-optional-skip",
+            "team_id": "content-creator-team",
+            "prompt": "帮我起草一篇部门月度工作汇报",
+        },
+    )
+    session = SimpleNamespace(
+        session_id="sid-optional-skip",
+        workspace=str(tmp_path),
+        model="deepseek-v4-pro",
+        model_provider=None,
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=None,
+        pending_started_at=None,
+        title="Untitled",
+        save=lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, **_kwargs: payload)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider: (requested_model or "deepseek-v4-pro", requested_provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda s, **kwargs: {"stream_id": "stream-optional-skip", "session_id": s.session_id, "pending_started_at": 1.0},
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "sid-optional-skip",
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
+                "audience": "公司分管领导和部门负责人",
+                "boundary": "",
+            },
+            "skip_optional": True,
+        },
+    )
+
+    response = routes.handle_post(object(), urlparse("/api/expert-teams/answer"))
+
+    assert response["stream_id"] == "stream-optional-skip"
+    assert response["run"]["execution_status"] == "running"
+    boundary = next(question for question in response["run"]["questions"] if question["id"] == "boundary")
+    assert boundary["status"] == "skipped"
+    assert response["run"]["view"]["intake"]["optional_status"] == "skipped"
 
 
 def test_deep_research_expert_team_answer_starts_real_stream(monkeypatch, tmp_path):
@@ -435,7 +544,7 @@ def test_content_expert_team_answer_waits_until_required_questions_are_done(monk
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-wait", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-wait", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     called = {"stream": False}
 
@@ -466,7 +575,7 @@ def test_expert_team_run_marks_legacy_running_without_stream_as_needs_resume(mon
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-stale", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-stale", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     stale = expert_teams.answer_expert_team(
         tmp_path,
@@ -504,7 +613,7 @@ def test_expert_team_resume_starts_legacy_stale_run_on_explicit_action(monkeypat
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-resume", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-resume", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     stale = expert_teams.answer_expert_team(
         tmp_path,
@@ -573,7 +682,7 @@ def test_expert_team_resume_retries_error_run_on_explicit_action(monkeypatch, tm
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-retry", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-retry", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,
@@ -645,7 +754,7 @@ def test_expert_team_start_returns_view_contract_for_pending_questions(tmp_path)
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-view", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-view", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
 
     view = run["view"]
@@ -675,7 +784,7 @@ def test_expert_team_view_exposes_unified_pending_confirmations_for_questions(tm
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-confirmations", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-confirmations", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
 
     confirmations = run["view"]["pending_confirmations"]
@@ -689,6 +798,7 @@ def test_expert_team_view_exposes_unified_pending_confirmations_for_questions(tm
         "fields": [{"id": "topic", "type": "text", "required": True, "options": []}],
         "actions": {"submit": "answer"},
         "source_task_id": "",
+        "origin": "",
         "status": "pending",
     }
 
@@ -741,7 +851,7 @@ def test_content_expert_team_completion_requires_real_delivery_evidence(tmp_path
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-evidence", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-evidence", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,
@@ -775,7 +885,7 @@ def test_content_expert_team_stage_completion_waits_for_user_review(tmp_path):
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-delivery", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-delivery", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,
@@ -822,7 +932,7 @@ def test_expert_team_view_preserves_structured_clarification_without_text_parsin
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-clarify", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-clarify", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,
@@ -901,24 +1011,19 @@ def test_stage_completion_extracts_numbered_confirmation_points_as_current_stage
     )
 
     stage_questions = [question for question in updated["questions"] if question.get("source_task_id") == "direction"]
-    assert [question["id"] for question in stage_questions] == [
-        "stage_direction_confirm_1",
-        "stage_direction_confirm_2",
-        "stage_direction_confirm_3",
-    ]
-    assert [question["title"] for question in stage_questions] == [
+    assert stage_questions == []
+    assert [item["title"] for item in updated["view"]["review_items"]] == [
         "核心问题定位是否以“企业 AI Agent 的投入产出比”为主线？",
         "目标读者是否设定为 CTO/CIO/数字化负责人？",
         "是否排除传统 RPA 和规则引擎？",
     ]
-    assert all(question["status"] == "pending" for question in stage_questions)
-    assert all(question["confirmation_group"] == "stage:direction" for question in stage_questions)
-    assert [item["kind"] for item in updated["view"]["pending_confirmations"]] == ["question", "question", "question"]
-    assert updated["view"]["actions"]["can_answer"] is True
-    assert updated["view"]["actions"]["can_approve_stage"] is False
+    assert [item["kind"] for item in updated["view"]["pending_confirmations"]] == ["stage_review"]
+    assert updated["view"]["primary_confirmation"]["kind"] == "stage_review"
+    assert updated["view"]["actions"]["can_answer"] is False
+    assert updated["view"]["actions"]["can_approve_stage"] is True
 
 
-def test_answering_current_stage_questions_reveals_stage_review_without_restarting_stage(tmp_path):
+def test_stage_review_items_do_not_create_a_second_question_loop(tmp_path):
     from api import expert_teams
 
     run = expert_teams.start_expert_team(
@@ -952,25 +1057,11 @@ def test_answering_current_stage_questions_reveals_stage_review_without_restarti
         },
     )
 
-    updated = expert_teams.answer_expert_team(
-        tmp_path,
-        {
-            "run_id": waiting["run_id"],
-            "answers": {
-                "stage_direction_confirm_1": "确认",
-                "stage_direction_confirm_2": "确认",
-            },
-        },
-    )
-
-    direction_task = next(task for task in updated["tasks"] if task["id"] == "direction")
-    assert updated["status"] == "awaiting_user"
-    assert updated["current_stage"]["task_id"] == "direction"
-    assert updated["current_stage"]["status"] == "awaiting_review"
-    assert direction_task["status"] == "waiting_user"
-    assert [item["kind"] for item in updated["view"]["pending_confirmations"]] == ["stage_review"]
-    assert updated["view"]["actions"]["can_answer"] is False
-    assert updated["view"]["actions"]["can_approve_stage"] is True
+    assert [question for question in waiting["questions"] if question.get("source_task_id") == "direction"] == []
+    assert [item["kind"] for item in waiting["view"]["pending_confirmations"]] == ["stage_review"]
+    assert [item["title"] for item in waiting["view"]["review_items"]] == ["是否确认研究主线？", "是否确认目标读者？"]
+    assert waiting["view"]["actions"]["can_answer"] is False
+    assert waiting["view"]["actions"]["can_approve_stage"] is True
 
 
 def test_run_truth_repairs_existing_generic_stage_output_from_latest_assistant(monkeypatch, tmp_path):
@@ -1017,8 +1108,9 @@ def test_run_truth_repairs_existing_generic_stage_output_from_latest_assistant(m
     repaired = routes._expert_team_run_with_execution_truth(tmp_path, waiting)
 
     stage_questions = [question for question in repaired["questions"] if question.get("source_task_id") == "direction"]
-    assert [question["title"] for question in stage_questions] == ["是否确认研究主线？", "是否确认目标读者？"]
-    assert [item["kind"] for item in repaired["view"]["pending_confirmations"]] == ["question", "question"]
+    assert stage_questions == []
+    assert [item["title"] for item in repaired["view"]["review_items"]] == ["是否确认研究主线？", "是否确认目标读者？"]
+    assert [item["kind"] for item in repaired["view"]["pending_confirmations"]] == ["stage_review"]
 
 
 def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(tmp_path):
@@ -1026,7 +1118,7 @@ def test_expert_team_stage_approve_starts_next_stage_and_final_approve_finishes(
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-approve", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-approve", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,
@@ -1149,7 +1241,7 @@ def test_expert_team_stage_approve_route_starts_next_stage_stream(monkeypatch, t
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-stage-route", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-stage-route", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,
@@ -1303,7 +1395,7 @@ def test_expert_team_cancel_signals_active_execution_stream(monkeypatch, tmp_pat
 
     run = expert_teams.start_expert_team(
         tmp_path,
-        {"session_id": "sid-cancel", "team_id": "content-creator-team", "prompt": "帮我写一篇公众号长文"},
+        {"session_id": "sid-cancel", "team_id": "content-creator-team", "prompt": "帮我起草一篇部门月度工作汇报"},
     )
     answered = expert_teams.answer_expert_team(
         tmp_path,

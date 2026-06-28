@@ -441,9 +441,9 @@ _WRITEFLOW_STATE_MACHINES = {
             },
             {
                 "id": "draft",
-                "title": "撰写公众号长文",
+                "title": "起草办公材料初稿",
                 "worker_id": "writing-executor",
-                "description": "标题方案、正文初稿、配图建议和发布建议。",
+                "description": "材料定位、标题方案、正文初稿、版式建议和流转提示。",
                 "phase": "生成初稿",
                 "phase_on_done": "打磨发布",
                 "start_events": ["draft_started", "direction_done"],
@@ -818,9 +818,9 @@ def _writeflow_public_artifact_requirement_lines(team_id: str) -> list[str]:
         ]
     return [
         "- 主要通过聊天窗口和用户确认，不要让用户理解内部 10 阶段细节。",
-        "- 第一版固定两项任务：`撰写公众号长文` 与 `生成封面和文中配图`。",
-        "- 文稿阶段要形成：标题方案、正文初稿、配图建议、发布建议；需要审稿时形成审稿报告；发布前形成发布版。",
-        "- 配图阶段优先生成封面和文中配图；如果图片生成能力不可用，必须输出可复用配图提示词，并保持图片任务为待生成。",
+        "- 第一版固定两项任务：`起草办公材料初稿` 与 `生成版式和配图建议`。",
+        "- 文稿阶段要形成：材料定位、标题方案、正文初稿、版式建议、流转提示；需要审稿时形成审稿报告；流转前形成定稿版。",
+        "- 配图阶段优先生成封面和文中配图建议；如果图片生成能力不可用，必须输出可复用配图提示词，并保持图片任务为待生成。",
         "- 需要分工时，按成员职责推进，不要向用户暴露内部调度方式。",
         "- 每轮结束必须用中文返回：本轮结论、已产出的成果物类型、当前三步位置、下一步可选操作。",
     ]
@@ -993,12 +993,17 @@ def _active_stream_id_set() -> set[str]:
         return set()
 
 
-def _expert_team_has_pending_required_questions(run: dict) -> bool:
+def _expert_team_has_pending_intake_questions(run: dict) -> bool:
     return any(
-        bool(question.get("required", True)) and str(question.get("status") or "") != "answered"
+        str(question.get("origin") or "") != "stage_confirmation_points"
+        and str(question.get("status") or "").lower() not in {"answered", "skipped"}
         for question in run.get("questions") or []
         if isinstance(question, dict)
     )
+
+
+def _expert_team_has_pending_required_questions(run: dict) -> bool:
+    return _expert_team_has_pending_intake_questions(run)
 
 
 def _expert_team_answers_by_id(run: dict) -> dict[str, str]:
@@ -1071,7 +1076,7 @@ def _expert_team_prompt_header(run: dict, task: dict) -> str:
         "本轮用户修订意见：\n"
         f"{feedback or '无，本轮为首次生成当前阶段。'}\n\n"
         "重要规则：请只重做当前阶段，不要替用户跳到后续阶段，也不要宣布整个专家团已完成。"
-        "输出结尾必须列出“需要用户确认的点”，等待用户确认后才进入下一阶段。\n\n"
+        "输出结尾可列出“待人工补充事项”，这些事项只是复核清单，不要要求用户逐题确认后才进入下一阶段。\n\n"
     )
 
 
@@ -1089,13 +1094,13 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         )
     elif task_id == "delivery":
         stage_instruction = (
-            "当前只执行“交付确认”阶段：基于已确认初稿和打磨发布方案，形成最终发布版、事实核对项、发布风险和交付说明。"
+            "当前只执行“交付确认”阶段：基于已确认初稿和打磨发布方案，形成最终流转版、事实核对项、流转风险和交付说明。"
             "不要新增未确认的大方向；如仍有风险，明确列为发布前人工确认项。"
         )
     else:
         stage_instruction = (
-            "当前只执行“生成初稿”阶段：输出文章定位、标题方案、一级结构和可供用户确认的正文初稿。"
-            "配图和发布检查只给必要提示，不展开成最终交付。"
+            "当前只执行“生成初稿”阶段：输出材料定位、标题方案、一级结构和可供用户确认的办公材料初稿。"
+            "版式和流转检查只给必要提示，不展开成最终交付。"
         )
     return (
         "你现在作为内容创作专家团执行阶段性任务。\n\n"
@@ -1104,7 +1109,7 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         f"目标读者：{audience}\n"
         f"素材、篇幅或表达边界：{boundary}\n\n"
         f"{stage_instruction}\n\n"
-        "请用中文输出，结构必须包含：阶段目标、阶段产物、需要用户确认的点、下一阶段建议。\n\n"
+        "请用中文输出，结构必须包含：阶段目标、阶段产物、待人工补充事项、下一阶段建议。\n\n"
         "不要夸大产品能力；不确定的信息必须标注需要人工确认。"
     )
 
@@ -1130,7 +1135,7 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         f"目标读者与用途：{audience_goal}\n"
         f"资料范围、案例偏好或避坑边界：{source_boundary}\n\n"
         f"{stage_instructions.get(task_id) or '当前只执行当前阶段，输出可供用户确认的阶段产物。'}\n\n"
-        "请用中文输出，结构必须包含：阶段目标、阶段产物、需要用户确认的点、下一阶段建议。\n\n"
+        "请用中文输出，结构必须包含：阶段目标、阶段产物、待人工补充事项、下一阶段建议。\n\n"
         "没有来源或不确定的信息必须标注需要人工确认；不要编造案例、数据或出处。"
     )
 
@@ -1253,7 +1258,8 @@ def _repair_expert_team_stage_confirmations_from_session(workspace: Path, run: d
         content = _latest_expert_team_assistant_content_after_execution(session, run)
     except Exception:
         return run
-    if "需要用户确认的点" not in content and "需要你确认的点" not in content:
+    confirmation_headings = ("需要" + "用户确认的点", "需要" + "你确认的点", "待人工补充事项")
+    if not any(heading in content for heading in confirmation_headings):
         return run
     try:
         from api import expert_teams
@@ -1324,7 +1330,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
         return run
     run = _repair_expert_team_stage_confirmations_from_session(workspace, run)
-    if _expert_team_has_pending_required_questions(run):
+    if _expert_team_has_pending_intake_questions(run):
         return run
     stream_id = str(run.get("execution_stream_id") or "")
     active_stream_ids = _active_stream_id_set()
@@ -2342,7 +2348,7 @@ def _writeflow_default_tasks(project_slug: str, meta: dict, workspace: Path | No
     return [
         {
             "id": "draft",
-            "title": "撰写公众号长文",
+            "title": "起草办公材料初稿",
             "worker_id": "writing-executor",
             "worker_name": "文案创作专家",
             "status": draft_status,
@@ -2832,7 +2838,7 @@ def _writeflow_display_tasks_for_run(run: dict) -> list[dict]:
     return [
         {
             "id": "draft",
-            "title": "撰写公众号长文",
+            "title": "起草办公材料初稿",
             "worker_id": "writing-executor",
             "worker_name": "文案创作专家",
             "status": article_status,
@@ -10450,7 +10456,7 @@ def handle_post(handler, parsed) -> bool:
             if (
                 str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
                 and str(run.get("status") or "") == "running"
-                and not _expert_team_has_pending_required_questions(run)
+                and not _expert_team_has_pending_intake_questions(run)
                 and not str(run.get("execution_stream_id") or "")
             ):
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)

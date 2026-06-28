@@ -91,7 +91,7 @@ def _render_smoke_card(page, done=False):
             sessionId: S.session.session_id,
             sourceSessionId: S.session.session_id,
             team: {id: 'content-creator-team', title: '内容创作专家团'},
-            subtitle: '围绕企业为什么需要本地 AI Agent 工作台做一篇公众号长文',
+            subtitle: '起草一篇部门月度工作汇报',
             status: done ? 'done' : 'waiting_user',
             statusLabel: done ? '已完成' : '待确认',
             phase: done ? '交付' : '需求确认',
@@ -105,8 +105,8 @@ def _render_smoke_card(page, done=False):
             ],
             tasks: [
               {id: 'direction', title: '需求确认', worker_name: '流程编排', status: done ? 'done' : 'waiting', status_label: done ? '完成' : '待确认'},
-              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
-              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
+              {id: 'draft', title: '起草办公材料初稿', worker_name: '文案创作专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
+              {id: 'image', title: '生成版式和配图建议', worker_name: '配图专家', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
               {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: done ? 'done' : 'idle', status_label: done ? '完成' : '待执行'},
             ],
             artifacts: done ? [
@@ -172,8 +172,8 @@ def _render_multi_question_card(page, answered_first=False):
             ],
             tasks: [
               {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'waiting', status_label: '待确认'},
-              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: 'idle', status_label: '待执行'},
-              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: 'idle', status_label: '待执行'},
+              {id: 'draft', title: '起草办公材料初稿', worker_name: '文案创作专家', status: 'idle', status_label: '待执行'},
+              {id: 'image', title: '生成版式和配图建议', worker_name: '配图专家', status: 'idle', status_label: '待执行'},
               {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'idle', status_label: '待执行'},
             ],
             artifacts: [],
@@ -225,8 +225,8 @@ def _render_action_smoke_card(page, state):
             ],
             tasks: [
               {id: 'direction', title: '需求确认', worker_name: '流程编排', status: 'done', status_label: '完成'},
-              {id: 'draft', title: '撰写公众号长文', worker_name: '文案创作专家', status: isError ? 'error' : 'running', status_label: isError ? '执行异常' : '执行中'},
-              {id: 'image', title: '生成封面和文中配图', worker_name: '配图专家', status: 'pending', status_label: '待执行'},
+              {id: 'draft', title: '起草办公材料初稿', worker_name: '文案创作专家', status: isError ? 'error' : 'running', status_label: isError ? '执行异常' : '执行中'},
+              {id: 'image', title: '生成版式和配图建议', worker_name: '配图专家', status: 'pending', status_label: '待执行'},
               {id: 'delivery', title: '交付整理', worker_name: '审稿润色', status: 'pending', status_label: '待执行'},
             ],
             artifacts: [],
@@ -784,7 +784,7 @@ def main():
                 done_screenshot = output_dir / f"expert-team-dock-done-expanded-{width}x{height}.png"
                 page.screenshot(path=str(done_screenshot), full_page=True)
                 titles = _execution_row_titles(page)
-                expected_titles = ["需求确认", "撰写公众号长文", "生成封面和文中配图", "交付整理"]
+                expected_titles = ["需求确认", "起草办公材料初稿", "生成版式和配图建议", "交付整理"]
                 if titles[:4] != expected_titles:
                     failures.append(
                         f"{width}x{height}: execution rows mismatch "

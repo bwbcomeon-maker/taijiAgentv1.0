@@ -29,6 +29,7 @@ STATUS_LABELS = {
     "waiting_user": "等待确认",
 }
 EXECUTION_STATUSES = {"idle", "running", "done", "error", "needs_resume", "cancelled"}
+QUESTION_TERMINAL_STATUSES = {"answered", "skipped"}
 PUBLIC_EXPERT_TEAM_IDS = ("content-creator-team", "deep-research-team")
 STAGE_GATED_TEAM_IDS = set(PUBLIC_EXPERT_TEAM_IDS)
 EXPERT_TEAM_PHASES = {
@@ -136,11 +137,11 @@ EXPERT_TEAM_TEMPLATES: dict[str, dict] = {
         "tasks": [
             {
                 "id": "draft",
-                "title": "撰写公众号长文",
+                "title": "起草办公材料初稿",
                 "worker_id": "writing-executor",
                 "worker_name": "文案创作专家",
                 "phase": "生成初稿",
-                "description": "标题方案、正文初稿、配图建议和发布建议。",
+                "description": "材料定位、标题方案、正文初稿、版式建议和流转提示。",
             },
             {
                 "id": "illustrations",
@@ -424,13 +425,27 @@ def _stage_confirmation_question_id(task_id: str, index: int) -> str:
     return f"stage_{safe_task_id}_confirm_{index}"
 
 
+def _is_stage_confirmation_question(question: dict) -> bool:
+    return str((question or {}).get("origin") or "") == "stage_confirmation_points"
+
+
+def _question_is_terminal(question: dict) -> bool:
+    return str((question or {}).get("status") or "pending").lower() in QUESTION_TERMINAL_STATUSES
+
+
+def _is_intake_question(question: dict) -> bool:
+    if not isinstance(question, dict) or _is_stage_confirmation_question(question):
+        return False
+    return not str(question.get("source_task_id") or "").strip()
+
+
 def _extract_stage_confirmation_points(content: str) -> list[str]:
     text = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
     if not text.strip():
         return []
     lines = text.split("\n")
     start_idx = -1
-    heading_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?需要(?:用户|你)?确认的点\s*[:：]?\s*$")
+    heading_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:待人工补充事项|需要(?:用户|你)?确认的点)\s*[:：]?\s*$")
     for idx, line in enumerate(lines):
         if heading_re.match(line):
             start_idx = idx + 1
@@ -469,8 +484,8 @@ def _replace_stage_confirmation_questions(run: dict, task: dict, content: str, n
     task_id = str(task.get("id") or "")
     if not task_id:
         return []
-    points = _extract_stage_confirmation_points(content)
     group = f"stage:{task_id}"
+    existing_count = len(run.get("questions") or [])
     run["questions"] = [
         question
         for question in run.get("questions") or []
@@ -480,31 +495,9 @@ def _replace_stage_confirmation_questions(run: dict, task: dict, content: str, n
             and str(question.get("confirmation_group") or "") == group
         )
     ]
-    if not points:
-        return []
-    rows = []
-    for idx, point in enumerate(points, start=1):
-        rows.append(
-            {
-                "id": _stage_confirmation_question_id(task_id, idx),
-                "title": point,
-                "description": "请逐条确认该点，确认完成后再处理阶段成果。",
-                "type": "textarea",
-                "options": [],
-                "required": True,
-                "status": "pending",
-                "answer": "",
-                "answered_at": "",
-                "source_task_id": task_id,
-                "confirmation_group": group,
-                "origin": "stage_confirmation_points",
-                "phase": str(task.get("phase") or run.get("phase") or ""),
-                "created_at": now,
-            }
-        )
-    run.setdefault("questions", []).extend(rows)
-    _append_event(run, "stage_confirmation_questions_created", f"{task.get('title') or '当前阶段'}需要确认 {len(rows)} 项")
-    return rows
+    if existing_count != len(run.get("questions") or []):
+        _append_event(run, "stage_confirmation_questions_demoted", f"{task.get('title') or '当前阶段'}确认点已降级为待人工补充事项")
+    return []
 
 
 def _set_current_stage(run: dict, task: dict, status: str, *, stream_id: str = "", feedback: str = "") -> dict:
@@ -668,7 +661,11 @@ def _phase_progress(run: dict) -> dict:
 def _pending_questions(run: dict) -> list[dict]:
     rows = []
     for question in run.get("questions") or []:
-        if not isinstance(question, dict) or str(question.get("status") or "") == "answered":
+        if (
+            not isinstance(question, dict)
+            or _question_is_terminal(question)
+            or _is_stage_confirmation_question(question)
+        ):
             continue
         rows.append(
             {
@@ -676,28 +673,75 @@ def _pending_questions(run: dict) -> list[dict]:
                 "title": str(question.get("title") or question.get("id") or ""),
                 "type": str(question.get("type") or "text"),
                 "required": question.get("required") is not False,
+                "status": str(question.get("status") or "pending"),
+                "source_task_id": str(question.get("source_task_id") or ""),
+                "origin": str(question.get("origin") or ""),
             }
         )
     return rows
 
 
+def _intake_view(run: dict) -> dict:
+    required_pending = []
+    optional_pending = []
+    optional_status = "answered"
+    optional_seen = False
+    optional_skipped = False
+    optional_answered = False
+    for question in run.get("questions") or []:
+        if not _is_intake_question(question):
+            continue
+        required = question.get("required") is not False
+        status = str(question.get("status") or "pending").lower()
+        terminal = status in QUESTION_TERMINAL_STATUSES
+        if required and not terminal:
+            required_pending.append(str(question.get("id") or ""))
+            continue
+        if not required:
+            optional_seen = True
+            if not terminal:
+                optional_pending.append(str(question.get("id") or ""))
+            elif status == "skipped":
+                optional_skipped = True
+            elif status == "answered":
+                optional_answered = True
+    if optional_pending:
+        optional_status = "pending"
+    elif optional_skipped:
+        optional_status = "skipped"
+    elif optional_seen and optional_answered:
+        optional_status = "answered"
+    elif not optional_seen:
+        optional_status = "answered"
+    return {
+        "required_pending": required_pending,
+        "optional_pending": optional_pending,
+        "optional_status": optional_status,
+    }
+
+
 def _question_confirmation_for_view(question: dict) -> dict:
     qid = str(question.get("id") or "")
+    required = question.get("required") is not False
+    description = str(question.get("description") or "")
+    if not description:
+        description = "请补充确认信息，专家团才会继续推进。" if required else "可选补充，补充后结果更准确；也可以跳过后开始生成。"
     return {
         "id": f"question:{qid}",
         "kind": "question",
         "title": str(question.get("title") or question.get("id") or ""),
-        "description": str(question.get("description") or "请补充确认信息，专家团才会继续推进。"),
+        "description": description,
         "fields": [
             {
                 "id": qid,
                 "type": str(question.get("type") or "text"),
-                "required": question.get("required") is not False,
+                "required": required,
                 "options": list(question.get("options") or []) if isinstance(question.get("options"), list) else [],
             }
         ],
-        "actions": {"submit": "answer"},
+        "actions": {"submit": "answer", "skip": "answer/skip_optional"} if not required else {"submit": "answer"},
         "source_task_id": str(question.get("source_task_id") or ""),
+        "origin": str(question.get("origin") or ""),
         "status": str(question.get("status") or "pending"),
     }
 
@@ -756,12 +800,49 @@ def _pending_confirmations_for_view(
 ) -> list[dict]:
     rows = []
     for question in run.get("questions") or []:
-        if not isinstance(question, dict) or str(question.get("status") or "").lower() == "answered":
+        if (
+            not isinstance(question, dict)
+            or _question_is_terminal(question)
+            or _is_stage_confirmation_question(question)
+        ):
             continue
         rows.append(_question_confirmation_for_view(question))
     rows.extend(structured_confirmations if structured_confirmations is not None else _structured_pending_confirmations(run))
     if can_review_stage:
         rows.append(_stage_review_confirmation_for_view(stage_review))
+    return rows
+
+
+def _review_items_for_view(run: dict) -> list[dict]:
+    rows = []
+    seen = set()
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    current_task_id = str(current.get("task_id") or "")
+    outputs = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        task_id = str(output.get("task_id") or "")
+        status = str(output.get("status") or "")
+        if current_task_id and task_id != current_task_id and status != "awaiting_review":
+            continue
+        for idx, title in enumerate(_extract_stage_confirmation_points(str(output.get("content") or "")), start=1):
+            key = (task_id, title)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "id": f"review:{task_id or 'stage'}:{idx}",
+                    "kind": "review_item",
+                    "title": title,
+                    "source_task_id": task_id,
+                    "phase": str(output.get("phase") or ""),
+                    "status": "pending",
+                }
+            )
+            if len(rows) >= 12:
+                return rows
     return rows
 
 
@@ -772,6 +853,8 @@ def expert_team_run_view(run: dict) -> dict:
     needs_resume = bool(run.get("needs_resume") or execution_status == "needs_resume")
     stage_review = _stage_review_for_view(run)
     structured_confirmations = _structured_pending_confirmations(run)
+    intake = _intake_view(run)
+    review_items = _review_items_for_view(run)
     can_review_stage = bool(
         _is_stage_gated_run(run)
         and not pending
@@ -799,18 +882,22 @@ def expert_team_run_view(run: dict) -> dict:
         )
     can_cancel = status == "running" and execution_status == "running" and bool(run.get("execution_stream_id"))
     can_retry = status == "error" or execution_status == "error"
+    pending_confirmations = _pending_confirmations_for_view(
+        run,
+        stage_review,
+        can_review_stage,
+        structured_confirmations,
+    )
     return {
         "status": status,
         "status_label": str(run.get("status_label") or STATUS_LABELS.get(status, status)),
         "execution_status": execution_status,
         "phase_progress": _phase_progress(run),
+        "intake": intake,
         "pending_questions": pending,
-        "pending_confirmations": _pending_confirmations_for_view(
-            run,
-            stage_review,
-            can_review_stage,
-            structured_confirmations,
-        ),
+        "pending_confirmations": pending_confirmations,
+        "primary_confirmation": pending_confirmations[0] if pending_confirmations else {},
+        "review_items": review_items,
         "artifacts": artifacts,
         "actions": {
             "can_answer": bool(pending),
@@ -1207,7 +1294,25 @@ def _pending_required_questions(run: dict) -> list[dict]:
     return [
         question
         for question in run.get("questions") or []
-        if question.get("required", True) and question.get("status") != "answered"
+        if (
+            isinstance(question, dict)
+            and question.get("required", True)
+            and not _question_is_terminal(question)
+            and not _is_stage_confirmation_question(question)
+        )
+    ]
+
+
+def _pending_optional_questions(run: dict) -> list[dict]:
+    return [
+        question
+        for question in run.get("questions") or []
+        if (
+            isinstance(question, dict)
+            and question.get("required") is False
+            and not _question_is_terminal(question)
+            and not _is_stage_confirmation_question(question)
+        )
     ]
 
 
@@ -1360,22 +1465,31 @@ def _complete_brand_moodboard(run: dict) -> None:
 def answer_expert_team(workspace: Path, body: dict) -> dict:
     run = read_expert_team_run(Path(workspace), str(body.get("run_id") or ""))
     answers = body.get("answers") if isinstance(body.get("answers"), dict) else {}
+    skip_optional = bool(body.get("skip_optional"))
     now = _now()
     answered_ids = set()
     for question in run.get("questions") or []:
         qid = str(question.get("id") or "")
         if qid not in answers:
             continue
+        if _is_stage_confirmation_question(question):
+            continue
         answer = str(answers.get(qid) or "").strip()
-        if not answer and question.get("required", True):
+        required = question.get("required", True) is not False
+        if not answer and required:
+            continue
+        if not answer and not required and not skip_optional:
             continue
         question["answer"] = answer
-        question["status"] = "answered"
+        question["status"] = "skipped" if (not answer and not required and skip_optional) else "answered"
         question["answered_at"] = now
         answered_ids.add(qid)
     if answered_ids and not any(event.get("type") == "questions_answered" for event in run.get("events") or []):
         _append_event(run, "questions_answered", "需求问答已确认")
     if _pending_required_questions(run):
+        run["status"] = "awaiting_user"
+        run["phase"] = run.get("phase") or "需求确认"
+    elif _pending_optional_questions(run):
         run["status"] = "awaiting_user"
         run["phase"] = run.get("phase") or "需求确认"
     elif "visual_direction" in answered_ids:

@@ -102,8 +102,8 @@ async function renderExpertCard(page, artifact) {
       ],
       tasks: [
         { id: "direction", title: "需求确认", worker_name: "流程编排", status: "done", status_label: "完成" },
-        { id: "draft", title: "撰写公众号长文", worker_name: "文案创作专家", status: "done", status_label: "完成" },
-        { id: "image", title: "生成封面和文中配图", worker_name: "配图专家", status: "done", status_label: "完成" },
+        { id: "draft", title: "起草办公材料初稿", worker_name: "文案创作专家", status: "done", status_label: "完成" },
+        { id: "image", title: "生成版式和配图建议", worker_name: "配图专家", status: "done", status_label: "完成" },
         { id: "delivery", title: "交付整理", worker_name: "审稿润色", status: "done", status_label: "完成" },
       ],
       artifacts: [artifact],
@@ -136,6 +136,21 @@ function buildConfirmationRun(sessionId, answers) {
       required: true,
     },
   ];
+  const pendingQuestions = questions.filter((question) => question.status !== "answered");
+  const primaryQuestion = pendingQuestions[0] || null;
+  const primaryConfirmation = primaryQuestion
+    ? {
+        id: `question:${primaryQuestion.id}`,
+        kind: "question",
+        title: primaryQuestion.title,
+        description: "请先补充必填需求，专家团再继续推进。",
+        fields: [{ id: primaryQuestion.id, type: "text", required: true, options: [] }],
+        actions: { submit: "answer" },
+        source_task_id: "",
+        origin: "",
+        status: "pending",
+      }
+    : {};
   return {
     run_id: "expert-team-electron-confirmation",
     session_id: sessionId,
@@ -156,8 +171,8 @@ function buildConfirmationRun(sessionId, answers) {
     ],
     display_tasks: [
       { id: "direction", title: "需求确认", worker_name: "流程编排", status: complete ? "done" : "waiting", status_label: complete ? "完成" : "待确认" },
-      { id: "draft", title: "撰写公众号长文", worker_name: "文案创作专家", status: complete ? "running" : "idle", status_label: complete ? "执行中" : "待执行" },
-      { id: "image", title: "生成封面和文中配图", worker_name: "配图专家", status: "idle", status_label: "待执行" },
+      { id: "draft", title: "起草办公材料初稿", worker_name: "文案创作专家", status: complete ? "running" : "idle", status_label: complete ? "执行中" : "待执行" },
+      { id: "image", title: "生成版式和配图建议", worker_name: "配图专家", status: "idle", status_label: "待执行" },
       { id: "delivery", title: "交付整理", worker_name: "审稿润色", status: "idle", status_label: "待执行" },
     ],
     artifacts: [],
@@ -167,7 +182,15 @@ function buildConfirmationRun(sessionId, answers) {
       status_label: complete ? "执行中" : "待确认",
       execution_status: complete ? "running" : "waiting_user",
       phase_progress: { current: complete ? "生成初稿" : "需求确认", done: complete ? 1 : 0, total: 4 },
-      pending_questions: questions.filter((question) => question.status !== "answered"),
+      intake: {
+        required_pending: pendingQuestions.map((question) => question.id),
+        optional_pending: [],
+        optional_status: "answered",
+      },
+      pending_questions: pendingQuestions,
+      pending_confirmations: primaryQuestion ? [primaryConfirmation] : [],
+      primary_confirmation: primaryConfirmation,
+      review_items: [],
       actions: {
         can_answer: !complete,
         can_resume: false,
@@ -244,7 +267,7 @@ async function main() {
       hasChatDeliveryHandler: typeof openExpertTeamChatDelivery === "function",
     }));
     assertState(shellState.desktop === "1", "Electron shell did not load desktop mode", shellState);
-    assertState(shellState.uiScript.includes("taiji-shell-34"), "Electron shell loaded stale ui.js cache token", shellState);
+    assertState(shellState.uiScript.includes("/static/ui.js?v="), "Electron shell did not load cache-busted ui.js", shellState);
     assertState(shellState.hasChatDeliveryHandler, "Electron shell did not load chat delivery handler", shellState);
 
     await prepareSession(page, workspace);
@@ -261,9 +284,12 @@ async function main() {
       });
     });
     await renderConfirmationCard(page, buildConfirmationRun(sessionId, confirmationAnswers));
-    await page.waitForSelector("#writeflowStatusDock .status-card-writeflow.is-expanded .status-card-expert-question.pending.is-current textarea", { timeout: 10000 });
+    await page.waitForSelector("#writeflowStatusDock .expert-team-question-summary button", { timeout: 10000 });
+    await page.click("#writeflowStatusDock .expert-team-question-summary button");
+    await page.waitForSelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea", { timeout: 10000 });
     let confirmationState = await page.evaluate(() => {
       const workspace = document.querySelector("#writeflowStatusDock .expert-team-confirmation-workspace");
+      const popover = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden])");
       const current = document.querySelector("#writeflowStatusDock .status-card-expert-question.pending.is-current");
       const input = current && current.querySelector("[data-expert-team-answer-input]");
       const button = current && current.querySelector(".status-card-expert-question-submit");
@@ -272,38 +298,41 @@ async function main() {
       const phasesRect = phases && phases.getBoundingClientRect();
       return {
         workspaceText: workspace ? workspace.textContent.replace(/\s+/g, " ").trim() : "",
+        popoverText: popover ? popover.textContent.replace(/\s+/g, " ").trim() : "",
         inputAria: input ? input.getAttribute("aria-label") || "" : "",
-        inputActive: document.activeElement === input,
+        inputUsable: Boolean(input && !input.disabled && input.offsetParent !== null),
         buttonText: button ? button.textContent.replace(/\s+/g, " ").trim() : "",
         buttonDisabled: Boolean(button && button.disabled),
         beforePhases: Boolean(workspaceRect && phasesRect && workspaceRect.top <= phasesRect.top),
       };
     });
-    assertState(confirmationState.workspaceText.includes("需要你确认 1/2"), "Confirmation workspace is not the first task", confirmationState);
-    assertState(confirmationState.workspaceText.includes("确认此项并继续"), "Confirmation workspace does not teach the next action", confirmationState);
+    assertState(confirmationState.workspaceText.includes("必填需求待确认"), "Confirmation workspace is not the first task", confirmationState);
+    assertState(confirmationState.popoverText.includes("需求确认 1/2"), "Question popover is not on the first item", confirmationState);
+    assertState(confirmationState.popoverText.includes("请先填写"), "Question popover does not show the empty required state", confirmationState);
     assertState(confirmationState.inputAria.includes("这篇内容的主题是什么"), "Confirmation textarea lacks a precise accessible name", confirmationState);
-    assertState(confirmationState.inputActive, "Confirmation textarea is not focused on expand", confirmationState);
+    assertState(confirmationState.inputUsable, "Confirmation textarea is not usable after opening popover", confirmationState);
     assertState(confirmationState.buttonText === "请先填写" && confirmationState.buttonDisabled, "Empty required confirmation is not disabled", confirmationState);
     assertState(confirmationState.beforePhases, "Confirmation workspace is not above progress content", confirmationState);
-    await page.fill("#writeflowStatusDock .status-card-expert-question.pending.is-current textarea", "本地优先 AI 助理");
+    await page.fill("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea", "本地优先 AI 助理");
     await page.waitForFunction(() => {
-      const button = document.querySelector("#writeflowStatusDock .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
-      return button && !button.disabled && button.textContent.includes("确认此项并继续");
+      const button = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
+      return button && !button.disabled && button.textContent.includes("确认并下一题");
     }, { timeout: 5000 });
-    await page.click("#writeflowStatusDock .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
+    await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
     await page.waitForFunction(() => {
       const workspace = document.querySelector("#writeflowStatusDock .expert-team-confirmation-workspace");
-      const input = document.querySelector("#writeflowStatusDock .status-card-expert-question.pending.is-current textarea");
-      return workspace && workspace.textContent.includes("需要你确认 2/2") &&
-        input && document.activeElement === input &&
+      const popover = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden])");
+      const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea");
+      return workspace && popover && popover.textContent.includes("需求确认 2/2") &&
+        input && !input.disabled && input.offsetParent !== null &&
         (input.getAttribute("aria-label") || "").includes("目标读者是谁");
     }, { timeout: 10000 });
-    await page.fill("#writeflowStatusDock .status-card-expert-question.pending.is-current textarea", "企业管理者");
+    await page.fill("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current textarea", "企业管理者");
     await page.waitForFunction(() => {
-      const button = document.querySelector("#writeflowStatusDock .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
+      const button = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
       return button && !button.disabled;
     }, { timeout: 5000 });
-    await page.click("#writeflowStatusDock .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
+    await page.click("#writeflowStatusDock .expert-team-question-popover:not([hidden]) .status-card-expert-question.pending.is-current .status-card-expert-question-submit");
     await page.waitForFunction(() => {
       const card = document.querySelector("#writeflowStatusDock .status-card-writeflow");
       const toast = document.getElementById("toast");

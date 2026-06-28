@@ -78,6 +78,9 @@ def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks()
     assert "const view=run.view||{}" in UI_JS
     assert "card.actions=view.actions||{}" in UI_JS
     assert "card.health=view.health||{}" in UI_JS
+    assert "card.intake=view.intake||{}" in UI_JS
+    assert "card.primaryConfirmation=view.primary_confirmation||{}" in UI_JS
+    assert "card.reviewItems=Array.isArray(view.review_items)" in UI_JS
     assert "view.phase_progress||run.phase_progress" in UI_JS
     assert "taiji-expert-team-active" in UI_JS
     assert "syncExpertTeamBottomDockState(card)" in UI_JS
@@ -105,7 +108,8 @@ def test_expert_team_status_card_has_questions_members_tasks_and_process_hooks()
 
 def test_pending_expert_team_questions_are_visible_and_answerable():
     assert "card.kind==='expert_team'" in UI_JS
-    assert "question.status||'')!=='answered'" in UI_JS
+    assert "function _expertTeamQuestionIsTerminal" in UI_JS
+    assert "['answered','skipped'].includes" in UI_JS
     assert "data-expert-team-answer-input" in UI_JS
     assert "status-card-expert-question-input" in UI_JS
     assert "expert-team-confirmation-workspace" in UI_JS
@@ -120,6 +124,8 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
     assert "questionEl&&questionEl.dataset?questionEl.dataset.expertTeamRunId" in UI_JS
     assert "root.dataset.expertTeamRunId" in UI_JS
     assert "请先填写确认信息。" in UI_JS
+    assert "请填写补充内容，或点击跳过并开始生成。" in UI_JS
+    assert "skip_optional:skipOptional" in UI_JS
     assert "需求已确认，正在进入生成。" in UI_JS
     assert ".status-card-expert-question-input" in STYLE_CSS
     assert ".expert-team-confirmation-workspace" in STYLE_CSS
@@ -131,6 +137,7 @@ def test_pending_expert_team_questions_are_visible_and_answerable():
 def test_expert_team_uses_unified_confirmation_entrypoints():
     assert "card.pendingConfirmations" in UI_JS
     assert "view.pending_confirmations" in UI_JS
+    assert "card.primaryConfirmation" in UI_JS
     assert "function _expertTeamPendingConfirmations" in UI_JS
     assert "function _expertTeamConfirmationSummary" in UI_JS
     assert "待你确认：${confirmations.length} 项" in UI_JS
@@ -164,7 +171,11 @@ def test_expert_team_question_confirmation_uses_dock_popover_flow():
     assert "function editExpertTeamAnsweredQuestion" in UI_JS
     assert "expert-team-question-popover" in UI_JS
     assert "data-expert-team-question-popover" in UI_JS
-    assert "待确认问题" in UI_JS
+    assert "需求确认" in UI_JS
+    assert "必填问题" in UI_JS
+    assert "可选补充" in UI_JS
+    assert "跳过并开始生成" in UI_JS
+    assert "保存补充并生成" in UI_JS
     assert "确认并下一题" in UI_JS
     assert "保存草稿" in UI_JS
     assert "已回答" in UI_JS
@@ -180,12 +191,17 @@ def test_expert_team_question_confirmation_uses_dock_popover_flow():
 
     panel_start = UI_JS.index("function _expertTeamWorkspacePanelHtml")
     panel_body = UI_JS[panel_start : UI_JS.index("function _setExpertTeamWorkspaceActive", panel_start)]
-    assert "打开逐题确认" in panel_body
+    assert "打开需求确认" in panel_body
     assert "expert-team-question-summary" in panel_body
+    assert "待人工补充事项" in panel_body
+    assert "expert-team-review-items" in panel_body
 
     assert ".expert-team-question-popover" in STYLE_CSS
     assert ".expert-team-question-progress" in STYLE_CSS
+    assert ".expert-team-question-groups" in STYLE_CSS
+    assert ".expert-team-question-skip" in STYLE_CSS
     assert ".expert-team-question-review" in STYLE_CSS
+    assert ".expert-team-review-items" in STYLE_CSS
 
 
 def test_expert_team_question_inputs_survive_status_refresh_rerender():
