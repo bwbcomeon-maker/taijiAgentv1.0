@@ -79,10 +79,28 @@ def test_expert_team_workspace_panel_is_visible_and_not_dock_only():
     assert "function renderExpertTeamDockFromPresentation" in EXPERT_UI_JS
     assert "function mountExpertTeamWorkspacePanel" in UI_JS
     assert "renderExpertTeamWorkspacePanel(card)" in UI_JS
+    mount_start = UI_JS.index("function mountExpertTeamWorkspacePanel")
+    mount_body = UI_JS[mount_start : UI_JS.index("function _expertTeamWorkspaceStorageKey", mount_start)]
+    assert "document.getElementById('mainChat')" in mount_body
+    assert "mainChat.insertBefore(panel,messagesShell)" in mount_body
+    assert "messages.insertBefore(panel,msgInner)" not in mount_body
     assert "_removeExpertTeamWorkspacePanelElement();" not in UI_JS[UI_JS.index("function syncExpertTeamBottomDockState") : UI_JS.index("function _expertTeamBottomDockTarget")]
     assert ".expert-team-workspace-panel{display:none;}" not in STYLE_CSS
     desktop_css = STYLE_CSS[STYLE_CSS.index('@media (min-width:901px)') :]
     assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" not in desktop_css
+
+
+def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():
+    assert "function toggleExpertTeamWorkspacePanel" in UI_JS
+    assert "window.toggleExpertTeamWorkspacePanel=toggleExpertTeamWorkspacePanel" in UI_JS
+    assert "_expertTeamWorkspacePanelHiddenForRun(runId)" in UI_JS
+    sync_start = UI_JS.index("function _syncExpertTeamWorkspacePanelVisibility")
+    sync_body = UI_JS[sync_start : UI_JS.index("function syncExpertTeamBottomDockState", sync_start)]
+    assert "taiji-expert-team-panel-collapsed" in sync_body
+    assert "shell.classList.toggle('taiji-expert-team-panel-collapsed',collapsed)" in sync_body
+    assert "panel.hidden=!visible" in sync_body
+    assert "expert-team-panel-collapse-toggle" in EXPERT_UI_JS
+    assert "toggleExpertTeamWorkspacePanel(this)" in EXPERT_UI_JS
 
 
 def test_dock_and_workspace_render_from_single_presentation():
@@ -103,6 +121,26 @@ def test_dock_and_workspace_render_from_single_presentation():
     assert "专家团工作台" in EXPERT_UI_JS
 
 
+def test_review_action_opens_workspace_review_panel_not_only_bottom_dock():
+    review_start = ACTIONS_JS.index("if(action==='review_stage')")
+    review_body = ACTIONS_JS[review_start : ACTIONS_JS.index("if(action==='revise_stage')", review_start)]
+    assert "openExpertTeamReviewPanel(btn)" in review_body
+    assert "focusExpertTeamBottomDock(btn)" not in review_body
+    assert "function openExpertTeamReviewPanel" in UI_JS or "function openExpertTeamReviewPanel" in ACTIONS_JS
+    assert "window.openExpertTeamReviewPanel=openExpertTeamReviewPanel" in UI_JS or "window.openExpertTeamReviewPanel=openExpertTeamReviewPanel" in ACTIONS_JS
+
+
+def test_workspace_review_panel_exposes_stage_review_controls():
+    assert "expert-team-stage-review" in EXPERT_UI_JS
+    assert "data-expert-team-stage-feedback" in EXPERT_UI_JS
+    assert "查看成果" in EXPERT_UI_JS
+    assert "无修改，进入下一阶段" in EXPERT_UI_JS or "presentation.secondaryActions" in EXPERT_UI_JS
+    assert "需要修改" in EXPERT_UI_JS or "presentation.secondaryActions" in EXPERT_UI_JS
+    assert "submitExpertTeamStageRevision(this)" in EXPERT_UI_JS
+    assert "approve_stage" in EXPERT_UI_JS
+    assert "revise_stage" in EXPERT_UI_JS
+
+
 def test_real_expert_team_start_syncs_session_messages_immediately():
     fn_start = COMMANDS_JS.index("async function sendExpertTeamAction")
     fn_body = COMMANDS_JS[fn_start : COMMANDS_JS.index("if(typeof window!=='undefined')window.sendExpertTeamAction", fn_start)]
@@ -114,6 +152,9 @@ def test_real_expert_team_start_syncs_session_messages_immediately():
 
 def test_actions_map_only_presentation_actions_to_api_calls():
     assert "function handleExpertTeamPresentationAction" in ACTIONS_JS
+    assert "function applyExpertTeamActionResponse" in ACTIONS_JS
+    assert "_applyExpertTeamStreamResponse(data)" in ACTIONS_JS
+    assert "renderWriteflowStatusDock(card)" in ACTIONS_JS
     assert "answer_required" in ACTIONS_JS
     assert "answer_optional" in ACTIONS_JS
     assert "start_generation" in ACTIONS_JS

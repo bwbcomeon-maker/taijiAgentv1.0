@@ -286,6 +286,11 @@ async function main() {
       dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
       workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
       workspaceVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel:not([hidden])")),
+      workspaceParentId: document.querySelector("#expertTeamWorkspacePanel")?.parentElement?.id || "",
+      workspaceRect: (() => {
+        const rect = document.querySelector("#expertTeamWorkspacePanel")?.getBoundingClientRect();
+        return rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height, bottom: rect.bottom } : null;
+      })(),
       runIds: (Array.isArray(S.messages) ? S.messages : []).map((msg) => msg && msg.expert_team_run_id).filter(Boolean),
       memberAvatars: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-member-avatar img").length,
       timelineRows: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-timeline-item").length,
@@ -295,6 +300,8 @@ async function main() {
     assertState(realStart.dockText.includes("必须需求待确认") && realStart.dockText.includes("去确认"), "Real expert-team start did not render the dock action", realStart);
     assertState(realStart.runIds.length >= 2, "Session messages are missing expert-team run ids", realStart);
     assertState(realStart.workspaceVisible && realStart.workspaceText.includes("专家团工作台"), "Expert team workspace panel is not visible after real start", realStart);
+    assertState(realStart.workspaceParentId === "mainChat", "Expert team workspace is mounted inside the wrong container", realStart);
+    assertState(realStart.workspaceRect && realStart.workspaceRect.width > 360 && realStart.workspaceRect.height > 80 && realStart.workspaceRect.top >= 0 && realStart.workspaceRect.bottom < 900, "Expert team workspace rectangle is not usable in the desktop viewport", realStart);
     assertState(realStart.memberAvatars >= 2 && realStart.timelineRows >= 1, "Expert team members or timeline are not visible in the workspace after real start", realStart);
 
     await renderRun(page, "collecting_required");
@@ -331,16 +338,47 @@ async function main() {
     assertState(generating.text.includes("专家团正在生成") && generating.text.includes("停止生成"), "Generating state lacks the single running action", generating);
     assertState(generating.workspaceText.includes("专家团工作台") && generating.workspaceText.includes("文案创作专家"), "Generating state did not show current expert in workspace", generating);
     assertState(!generating.text.includes("未检测到结果") && !generating.text.includes("阶段成果待复核"), "Generating state is mixed with result or missing states", generating);
+    await page.click("#expertTeamWorkspacePanel .expert-team-panel-collapse-toggle");
+    const collapsed = await page.evaluate(() => ({
+      shellCollapsed: document.querySelector(".taiji-home-shell")?.classList.contains("taiji-expert-team-panel-collapsed") || false,
+      bodyVisible: (() => {
+        const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+        return body ? getComputedStyle(body).display !== "none" : false;
+      })(),
+      panelText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
+    }));
+    assertState(collapsed.shellCollapsed && !collapsed.bodyVisible && collapsed.panelText.includes("专家团工作台"), "Expert team workspace does not collapse to a lightweight header", collapsed);
+    await page.click("#expertTeamWorkspacePanel .expert-team-panel-collapse-toggle");
+    const expanded = await page.evaluate(() => ({
+      shellCollapsed: document.querySelector(".taiji-home-shell")?.classList.contains("taiji-expert-team-panel-collapsed") || false,
+      bodyVisible: (() => {
+        const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+        return body ? getComputedStyle(body).display !== "none" : false;
+      })(),
+    }));
+    assertState(!expanded.shellCollapsed && expanded.bodyVisible, "Expert team workspace does not expand after collapse", expanded);
 
     await renderRun(page, "awaiting_review");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-result-card", { timeout: 10000 });
+    await page.click("#writeflowStatusDock .status-card-expert-dock-button");
+    await page.waitForSelector("#expertTeamWorkspacePanel.is-review-open .expert-team-stage-review", { timeout: 10000 });
     const review = await page.evaluate(() => ({
       text: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
       workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
       resultCards: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-result-card").length,
+      reviewPanelVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel.is-review-open .expert-team-stage-review")),
+      reviewButtons: Array.from(document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-stage-review button")).map((button) => button.textContent.trim()).filter(Boolean),
     }));
     assertState(review.text.includes("阶段成果待复核") && review.resultCards === 1, "Awaiting review does not show one workspace result card", review);
+    assertState(review.reviewPanelVisible && review.reviewButtons.includes("查看成果") && review.reviewButtons.includes("需要修改"), "Dock review action did not open a usable stage review panel", review);
     assertState(review.workspaceText.includes("查看完整成果") && !review.workspaceText.includes("公众号"), "Office-material result workspace is missing the result entry or still contains public-account wording", review);
+    await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
+    await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea", { timeout: 10000 });
+    const revision = await page.evaluate(() => ({
+      textareaVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea")),
+      focusedTag: document.activeElement ? document.activeElement.tagName : "",
+    }));
+    assertState(revision.textareaVisible && revision.focusedTag === "TEXTAREA", "Need-revision action did not reveal and focus the revision textarea", revision);
     await page.click("#expertTeamWorkspacePanel .expert-team-result-card [data-expert-team-action='view_result']");
     await page.waitForSelector("#expertTeamResultViewer:not([hidden])", { timeout: 10000 });
     const viewer = await page.evaluate(() => ({

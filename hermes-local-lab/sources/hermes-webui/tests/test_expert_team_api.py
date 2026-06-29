@@ -215,6 +215,69 @@ def test_valid_generation_registers_structured_output_and_review_action(tmp_path
     assert output["has_long_content"] is True
 
 
+def test_final_stage_review_action_completes_task_not_next_stage(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-final-review", "team_id": "content-creator-team", "prompt": "帮我起草工作汇报"},
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": _answer_all_required(expert_teams, tmp_path, run)["run_id"],
+            "answers": {"optional_context": ""},
+            "skip_optional": True,
+        },
+    )
+    data = ready
+    last_index = data["view"]["phase_progress"]["total"] - 1
+    for index in range(last_index):
+        generated = expert_teams.mark_expert_team_execution_complete(
+            tmp_path,
+            data["run_id"],
+            delivery={
+                "id": f"stage-{index}",
+                "kind": "chat",
+                "content": (
+                    "阶段摘要：完成当前阶段。\n"
+                    "正文草稿：标题：工作汇报\n\n"
+                    "一、工作开展情况\n本阶段按专家分工完成阶段产物，未越阶段输出最终稿。\n\n"
+                    "二、存在问题\n部分素材仍需人工补充确认。\n\n"
+                    "三、下一步工作安排\n继续按阶段推进材料整理、初稿撰写和复核交付。\n"
+                    "待补充事项：无。\n"
+                    "建议下一步：进入下一阶段。"
+                ),
+            },
+        )
+        data = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": generated["run_id"]})
+
+    assert data["current_stage"]["index"] == last_index
+    final_review = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        data["run_id"],
+        delivery={
+            "id": "final-stage",
+            "kind": "chat",
+            "content": (
+                "阶段摘要：完成交付确认。\n"
+                "正文草稿：标题：工作汇报\n\n"
+                "一、工作开展情况\n重点工作已经按计划推进。\n\n"
+                "二、存在问题\n个别数据仍需人工确认。\n\n"
+                "三、下一步工作安排\n持续推进问题闭环和成果沉淀。\n"
+                "待补充事项：无。\n"
+                "建议下一步：完成任务。"
+            ),
+        },
+    )
+
+    actions = final_review["view"]["presentation"]["secondary_actions"]
+    approve = next(action for action in actions if action["id"] == "approve_stage")
+    assert final_review["workflow_state"] == "awaiting_review"
+    assert approve["label"] == "无修改，完成任务"
+    assert "进入下一阶段" not in json.dumps(actions, ensure_ascii=False)
+
+
 def test_plan_stage_allows_audience_terms_and_waits_for_review(tmp_path):
     from api import expert_teams
 

@@ -5014,11 +5014,12 @@ main.main > #mainPlugin{display:none;}
 .expert-team-question-review button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .expert-team-question-review.empty{justify-content:center;align-items:flex-start;color:var(--muted);}
 .expert-team-question-complete-message{border:1px solid color-mix(in srgb,var(--success) 30%,var(--border-subtle));border-radius:12px;background:color-mix(in srgb,var(--success) 8%,rgba(255,255,255,.86));padding:12px;color:color-mix(in srgb,var(--success) 72%,var(--text));font-size:13px;font-weight:760;}
-.expert-team-workspace-panel{display:block;width:min(980px,92%);margin:0 auto 14px;padding:0 0 2px;position:relative;z-index:2;}
+.expert-team-workspace-panel{display:block;width:min(980px,92%);margin:0 auto 14px;padding:0 0 2px;position:relative;z-index:2;outline:none;}
+.expert-team-workspace-panel:focus-visible{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-bg-strong) 28%,transparent);}
 .expert-team-workspace-panel[hidden]{display:none!important;}
 .taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel{display:none!important;}
 .expert-team-panel-inner{height:100%;min-height:0;display:flex;flex-direction:column;gap:7px;}
-.expert-team-workspace-panel .expert-team-panel-inner{height:auto;gap:10px;}
+.expert-team-workspace-panel .expert-team-panel-inner{height:auto;gap:10px;border:1px solid rgba(172,216,231,.88);border-radius:14px;background:rgba(248,253,255,.94);box-shadow:0 18px 42px rgba(47,95,135,.18),inset 0 1px 0 rgba(255,255,255,.9);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);padding:10px;}
 .expert-team-workbench-hero{border-color:color-mix(in srgb,var(--accent-bg-strong) 42%,var(--taiji-ui-line,var(--border-subtle)))!important;background:linear-gradient(180deg,rgba(255,255,255,.86),color-mix(in srgb,var(--accent-bg-strong) 8%,rgba(255,255,255,.7)))!important;}
 .expert-team-workbench-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:6px;}
 .expert-team-workbench-grid span{min-width:0;display:flex;flex-direction:column;gap:3px;border:1px solid var(--border-subtle);border-radius:10px;background:rgba(255,255,255,.68);padding:8px 10px;}
@@ -10647,7 +10648,32 @@ main.main.showing-logs > #mainLogs{display:flex;}
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .taiji-main-workspace{
     position:relative!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:block!important;}
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{
+    display:block!important;
+    position:absolute!important;
+    left:50%!important;
+    top:clamp(82px,10vh,124px)!important;
+    width:min(880px,calc(100% - 72px))!important;
+    max-height:min(52vh,540px)!important;
+    margin:0!important;
+    transform:translateX(-50%)!important;
+    overflow:hidden!important;
+    z-index:3!important;
+    pointer-events:auto!important;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active.taiji-expert-team-panel-collapsed .expert-team-workspace-panel{
+    max-height:128px!important;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel .expert-team-panel-inner{
+    max-height:inherit!important;
+    padding:10px!important;
+    overflow:hidden!important;
+  }
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel .expert-team-panel-expanded-body{
+    max-height:calc(min(52vh,540px) - 118px)!important;
+    overflow:auto!important;
+    overscroll-behavior:contain!important;
+  }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active.taiji-welcome .taiji-hero{
     display:none!important;
   }

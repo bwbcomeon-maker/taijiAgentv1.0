@@ -36,11 +36,19 @@ def _primary_action(state: str) -> dict | None:
     }.get(state)
 
 
-def _secondary_actions(state: str) -> list[dict]:
+def _is_final_stage(run: dict) -> bool:
+    tasks = [task for task in run.get("tasks") or [] if isinstance(task, dict)]
+    if not tasks:
+        return False
+    return int(run.get("current_stage_index") or 0) >= len(tasks) - 1
+
+
+def _secondary_actions(state: str, run: dict | None = None) -> list[dict]:
     if state == "awaiting_review":
+        approve_label = "无修改，完成任务" if _is_final_stage(run or {}) else "无修改，进入下一阶段"
         return [
             {"id": "view_result", "label": "查看成果", "kind": "ghost"},
-            {"id": "approve_stage", "label": "无修改，进入下一阶段", "kind": "primary"},
+            {"id": "approve_stage", "label": approve_label, "kind": "primary"},
             {"id": "revise_stage", "label": "需要修改", "kind": "ghost"},
         ]
     if state == "generated_invalid":
@@ -123,7 +131,7 @@ def _presentation(run: dict, business_context: dict) -> dict:
         "visible_title": str(business_context.get("visible_title") or run.get("title") or "专家团任务"),
         "detail": detail,
         "primary_action": _primary_action(state),
-        "secondary_actions": _secondary_actions(state),
+        "secondary_actions": _secondary_actions(state, run),
         "result": output,
         "summary": content_summary(str(output.get("content") or output.get("summary") or run.get("title") or "")),
         "current_stage": deepcopy(current),
@@ -251,5 +259,6 @@ def expert_team_run_view(run: dict) -> dict:
             "can_cancel": state in {"generating", "revising"},
             "can_retry": state in {"generated_invalid", "failed", "cancelled"},
             "can_approve_stage": state == "awaiting_review",
+            "can_request_revision": state == "awaiting_review",
         },
     }

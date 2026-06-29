@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Expert-team desktop sessions now keep a visible, collapsible workspace outside the chat message stream; the Dock `去复核` action opens a real stage-review panel with result, approve, and revision controls, and final-stage approval is labeled as task completion.
 - Taiji desktop homepage group filters now use a compact `分组 N` dropdown management panel with search, select, rename, delete, and create actions, while the composer send controls size to the actual status/ring/badge/send cluster instead of drifting outside the input box.
 - Taiji desktop homepage now shows an inline current-group filter strip with the active group name, visible conversation count, and one-click clear action, so selecting a group remains visible above the recent conversation list.
 

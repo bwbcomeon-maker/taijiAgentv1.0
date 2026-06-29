@@ -1874,16 +1874,18 @@ function _removeExpertTeamWorkspacePanelElement(){
 
 function mountExpertTeamWorkspacePanel(card){
   if(!_isExpertTeamStatusCard(card)||typeof document==='undefined')return clearExpertTeamWorkspacePanel();
-  const messages=document.getElementById('messages');
-  const msgInner=document.getElementById('msgInner');
-  if(!messages||!msgInner)return false;
+  const mainChat=document.getElementById('mainChat');
+  const messagesShell=mainChat&&mainChat.querySelector?mainChat.querySelector('.messages-shell'):null;
+  if(!mainChat||!messagesShell)return false;
   let panel=document.getElementById('expertTeamWorkspacePanel');
   if(!panel){
     panel=document.createElement('section');
     panel.id='expertTeamWorkspacePanel';
     panel.className='expert-team-workspace-panel';
     panel.setAttribute('aria-label','专家团工作台');
-    messages.insertBefore(panel,msgInner);
+    mainChat.insertBefore(panel,messagesShell);
+  }else if(panel.parentElement!==mainChat){
+    mainChat.insertBefore(panel,messagesShell);
   }
   panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
   panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||'';
@@ -1945,13 +1947,18 @@ function _syncExpertTeamWorkspacePanelVisibility(){
   const hasCurrentExpert=!!(isCurrentSession&&(runId||hasExpertDock));
   const isChat=_expertTeamActivePanelName()==='chat';
   const visible=!!(hasCurrentExpert&&isChat);
+  const collapsed=visible&&_expertTeamWorkspacePanelHiddenForRun(runId);
   if(shell){
     shell.classList.toggle('taiji-expert-team-active',visible);
     shell.classList.toggle('taiji-expert-team-panel-visible',visible);
+    shell.classList.toggle('taiji-expert-team-panel-collapsed',collapsed);
     shell.classList.remove('taiji-expert-team-panel-hidden');
-    shell.classList.remove('taiji-expert-team-panel-collapsed');
   }
-  if(panel)panel.hidden=!visible;
+  if(panel){
+    panel.hidden=!visible;
+    panel.classList.toggle('is-collapsed',collapsed);
+    panel.setAttribute('aria-expanded',collapsed?'false':'true');
+  }
   return visible;
 }
 
@@ -2053,15 +2060,33 @@ function _syncExpertTeamBlankCollapseListener(enabled){
 }
 
 function hideExpertTeamWorkspacePanel(btn){
-  const collapsed=_setExpertTeamBottomDockExpanded(false,btn);
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  const runId=_expertTeamWorkspacePanelRunId(panel)||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)||'';
+  _setExpertTeamWorkspacePanelHiddenForRun(runId,true);
+  const collapsed=true;
   _syncExpertTeamWorkspacePanelVisibility();
   return collapsed;
 }
 
 function showExpertTeamWorkspacePanel(btn){
-  const expanded=_setExpertTeamBottomDockExpanded(true,btn);
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  const runId=_expertTeamWorkspacePanelRunId(panel)||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)||'';
+  _setExpertTeamWorkspacePanelHiddenForRun(runId,false);
+  const expanded=true;
   _syncExpertTeamWorkspacePanelVisibility();
   return expanded;
+}
+
+function toggleExpertTeamWorkspacePanel(btn){
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  const runId=_expertTeamWorkspacePanelRunId(panel)||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)||'';
+  const hidden=_expertTeamWorkspacePanelHiddenForRun(runId);
+  _setExpertTeamWorkspacePanelHiddenForRun(runId,!hidden);
+  _syncExpertTeamWorkspacePanelVisibility();
+  if(hidden&&panel&&panel.focus){
+    try{panel.focus({preventScroll:true});}catch(_){panel.focus();}
+  }
+  return !hidden;
 }
 
 function renderExpertTeamWorkspacePanel(card){
@@ -2135,7 +2160,33 @@ function focusExpertTeamBottomDock(trigger){
 }
 
 function focusExpertTeamWorkspacePanel(trigger){
-  return focusExpertTeamBottomDock(trigger);
+  showExpertTeamWorkspacePanel(trigger);
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  if(!panel)return focusExpertTeamBottomDock(trigger);
+  try{panel.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+  const focusTarget=panel.querySelector&&(
+    panel.querySelector('.expert-team-stage-review button:not(:disabled)')||
+    panel.querySelector('.expert-team-panel-action:not(:disabled)')||
+    panel.querySelector('.expert-team-panel-collapse-toggle')
+  );
+  if(focusTarget&&focusTarget.focus){
+    try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
+  }
+  return true;
+}
+
+function openExpertTeamReviewPanel(trigger){
+  showExpertTeamWorkspacePanel(trigger);
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  const review=panel&&panel.querySelector?panel.querySelector('.expert-team-stage-review'):null;
+  if(!review)return focusExpertTeamWorkspacePanel(trigger);
+  panel.classList.add('is-review-open');
+  try{review.scrollIntoView({block:'center',inline:'nearest'});}catch(_){}
+  const focusTarget=review.querySelector('.expert-team-stage-locate:not(:disabled), .expert-team-stage-approve:not(:disabled), .expert-team-stage-revision-toggle:not(:disabled), button:not(:disabled)');
+  if(focusTarget&&focusTarget.focus){
+    try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
+  }
+  return true;
 }
 if(typeof window!=='undefined'){
   window.renderExpertTeamWorkspacePanel=renderExpertTeamWorkspacePanel;
@@ -2145,6 +2196,8 @@ if(typeof window!=='undefined'){
   window._syncExpertTeamWorkspacePanelVisibility=_syncExpertTeamWorkspacePanelVisibility;
   window.hideExpertTeamWorkspacePanel=hideExpertTeamWorkspacePanel;
   window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel;
+  window.toggleExpertTeamWorkspacePanel=toggleExpertTeamWorkspacePanel;
+  window.openExpertTeamReviewPanel=openExpertTeamReviewPanel;
   window.handleExpertTeamPanelBlankCollapse=handleExpertTeamPanelBlankCollapse;
   window.syncExpertTeamBottomDockState=syncExpertTeamBottomDockState;
   window.shouldPreserveExpertTeamDraftDock=shouldPreserveExpertTeamDraftDock;
@@ -2796,12 +2849,16 @@ async function reviseExpertTeamStage(btn){
     return false;
   }
 }
+async function submitExpertTeamStageRevision(btn){
+  return reviseExpertTeamStage(btn);
+}
 if(typeof window!=='undefined'){
   window._applyExpertTeamStreamResponse=_applyExpertTeamStreamResponse;
   window.resumeExpertTeamRun=resumeExpertTeamRun;
   window.cancelExpertTeamRun=cancelExpertTeamRun;
   window.approveExpertTeamStage=approveExpertTeamStage;
   window.reviseExpertTeamStage=reviseExpertTeamStage;
+  window.submitExpertTeamStageRevision=submitExpertTeamStageRevision;
   window.toggleExpertTeamStageRevision=toggleExpertTeamStageRevision;
   window.locateExpertTeamStageOutput=locateExpertTeamStageOutput;
   window.appendExpertTeamReviewItemToRevision=appendExpertTeamReviewItemToRevision;

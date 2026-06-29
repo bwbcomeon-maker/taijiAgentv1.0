@@ -3,7 +3,8 @@
   function actionButton(action,extraClass){
     if(!action||!action.id)return '';
     const cls=extraClass||'expert-team-action-button';
-    return `<button type="button" class="${cls}" data-expert-team-action="${safeEsc(action.id)}" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()">${safeEsc(action.label||'操作')}</button>`;
+    const kind=action.kind?` data-expert-team-action-kind="${safeEsc(action.kind)}"`:'';
+    return `<button type="button" class="${cls}" data-expert-team-action="${safeEsc(action.id)}"${kind} onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()" aria-label="${safeEsc(action.label||'操作')}">${safeEsc(action.label||'操作')}</button>`;
   }
   function presentationTone(state){
     if(state==='generating'||state==='ready_to_generate'||state==='revising')return 'running';
@@ -65,10 +66,24 @@
     const result=presentation.result||{};
     const tasks=Array.isArray(card&&card.tasks)?card.tasks:[];
     const members=Array.isArray(card&&card.members)?card.members:[];
+    const secondaryActions=Array.isArray(presentation.secondaryActions)?presentation.secondaryActions:[];
+    const runId=card&&card.runId||card&&card.sessionId||'';
+    const progress=card&&card.progress||{};
+    const total=Number(progress.total||tasks.length||0);
+    const done=Number(progress.done||0);
+    const currentIndex=Number(currentStage.index||0);
+    const progressText=total?`${Math.min(total,Math.max(done,currentIndex+1))}/${total}`:'0/0';
+    const progressPct=total?Math.max(0,Math.min(100,Math.round((Math.min(total,Math.max(done,currentIndex+(presentation.state==='collecting_required'||presentation.state==='collecting_optional'?0:1))))*100/total))):0;
+    const statusTone=presentationTone(presentation.state);
     const timelineEvents=Array.isArray(workspace.timeline)&&workspace.timeline.length?workspace.timeline:(Array.isArray(card&&card.timelineEvents)?card.timelineEvents:[]);
     const taskRows=tasks.map(task=>{
       const active=(task.id&&task.id===(currentStage.id||currentStage.task_id))?' active':'';
       return `<span class="expert-team-process-row${active}"><b>${safeEsc(task.title||task.id||'阶段')}</b><small>${safeEsc(task.worker_name||'专家')} · ${safeEsc(task.statusText||statusText(task.status))}</small></span>`;
+    }).join('');
+    const phaseRows=tasks.map((task,idx)=>{
+      const active=(task.id&&task.id===(currentStage.id||currentStage.task_id))?' active':'';
+      const doneCls=idx<currentIndex||task.status==='done'?' done':'';
+      return `<span class="expert-team-panel-phase${active}${doneCls}"><i>${idx+1}</i><b>${safeEsc(task.phase||task.title||`阶段${idx+1}`)}</b></span>`;
     }).join('');
     const memberHtml=members.length
       ? `<div class="expert-team-member-strip" aria-label="专家团成员状态">${members.map(member=>{
@@ -96,32 +111,87 @@
     const currentWorkerHtml=currentWorker&&currentWorker.name
       ? `<div class="expert-team-current-worker">${avatarHtml(currentWorker.image,currentWorker.name)}<span><strong>${safeEsc(currentWorker.name)}</strong><small>${safeEsc(currentWorker.role||currentStage.phase||'当前阶段负责专家')}</small></span></div>`
       : '';
-    return `<div class="expert-team-panel-inner" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}">
-      <section class="expert-team-panel-section expert-team-workbench-hero" aria-label="专家团工作台">
-        <div class="expert-team-panel-section-title"><span>专家团工作台</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
-        <div class="expert-team-workbench-grid">
-          <span><b>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</b><small>当前阶段</small></span>
-          <span><b>${safeEsc(currentStage.title||presentation.visibleTitle||'阶段任务')}</b><small>阶段任务</small></span>
-          <span><b>${safeEsc(currentWorker.name||currentStage.worker_name||'专家团')}</b><small>当前专家</small></span>
+    const reviewActions={
+      view:secondaryActions.find(action=>action&&action.id==='view_result')||{id:'view_result',label:'查看成果',kind:'ghost'},
+      approve:secondaryActions.find(action=>action&&action.id==='approve_stage')||{id:'approve_stage',label:'无修改，进入下一阶段',kind:'primary'},
+      revise:secondaryActions.find(action=>action&&action.id==='revise_stage')||{id:'revise_stage',label:'需要修改',kind:'ghost'}
+    };
+    const reviewItems=Array.isArray(card&&card.reviewItems)?card.reviewItems:[];
+    const reviewItemHtml=reviewItems.length
+      ? `<div class="expert-team-review-items-list">${reviewItems.map((item,idx)=>`<span class="expert-team-review-item"><i>${idx+1}</i><b>${safeEsc(item.title||'待确认事项')}</b><small>${safeEsc(item.phase||'待人工补充')}</small><span class="expert-team-review-item-actions"><button type="button" data-expert-team-review-item-title="${safeEsc(item.title||'')}" onclick="appendExpertTeamReviewItemToRevision(this);event.stopPropagation()">加入修改意见</button><button type="button" onclick="markExpertTeamReviewItemRead(this);event.stopPropagation()">标记已阅</button></span></span>`).join('')}</div>`
+      : '';
+    const stageReviewHtml=presentation.state==='awaiting_review'
+      ? `<section class="expert-team-panel-section expert-team-stage-review" aria-label="阶段成果复核" data-expert-team-run-id="${safeEsc(runId)}">
+          <div class="expert-team-panel-section-title"><span>阶段成果待复核</span><small>${safeEsc(currentStage.phase||'当前阶段')}</small></div>
+          <p class="expert-team-panel-detail">${safeEsc(stageSummary||'阶段结果已生成，请查看后确认是否进入下一阶段。')}</p>
+          ${resultHtml}
+          ${reviewItemHtml}
+          <div class="expert-team-stage-actions">
+            ${actionButton(reviewActions.view,'expert-team-panel-action expert-team-secondary-action expert-team-stage-locate')}
+            ${actionButton(reviewActions.approve,'expert-team-panel-action expert-team-primary-action expert-team-stage-approve')}
+            ${actionButton(reviewActions.revise,'expert-team-panel-action expert-team-secondary-action expert-team-stage-revision-toggle')}
+          </div>
+          <div class="expert-team-stage-feedback" hidden aria-hidden="true">
+            <label>
+              <span>修改意见</span>
+              <textarea data-expert-team-stage-feedback rows="4" placeholder="请写明需要调整的内容、口径、事实或结构。"></textarea>
+            </label>
+            <button type="button" class="expert-team-panel-action expert-team-primary-action" data-expert-team-stage-revise-run-id="${safeEsc(runId)}" onclick="submitExpertTeamStageRevision(this);event.stopPropagation()">提交修改意见</button>
+          </div>
+        </section>`
+      : '';
+    return `<div class="expert-team-panel-inner" data-expert-team-run-id="${safeEsc(runId)}" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}">
+      <div class="expert-team-panel-head">
+        <div class="expert-team-panel-topbar">
+          <span class="expert-team-panel-copy">
+            <small class="expert-team-panel-eyebrow">专家团工作台</small>
+            <strong class="expert-team-panel-title">${safeEsc(card&&card.team&&card.team.title||'专家团')}</strong>
+            <span class="expert-team-panel-summary">${safeEsc(presentation.visibleTitle||'专家团任务')}</span>
+          </span>
+          <button type="button" class="expert-team-panel-hide expert-team-panel-collapse-toggle" onclick="toggleExpertTeamWorkspacePanel(this);event.stopPropagation()" aria-label="展开或合上专家团工作台">
+            <span class="expert-team-panel-collapse-icon is-collapse">合上</span>
+            <span class="expert-team-panel-collapse-icon is-expand">展开</span>
+          </button>
         </div>
-        ${currentWorkerHtml}
-      </section>
-      <section class="expert-team-panel-section">
-        <div class="expert-team-panel-section-title"><span>${safeEsc(presentation.title||'专家团状态')}</span><small>${safeEsc(presentation.visibleTitle||'')}</small></div>
-        <p class="expert-team-panel-detail">${safeEsc(presentation.detail||'')}</p>
-        ${memberHtml}
-        <div class="expert-team-panel-actions">${actionButton(presentation.primaryAction,'expert-team-panel-action expert-team-primary-action')}${(presentation.secondaryActions||[]).map(action=>actionButton(action,'expert-team-panel-action expert-team-secondary-action')).join('')}</div>
-      </section>
-      <section class="expert-team-panel-section">
-        <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
-        <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
-        ${resultHtml}
-      </section>
-      <section class="expert-team-panel-section">
-        <div class="expert-team-panel-section-title"><span>执行明细</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
-        ${timelineHtml}
-        <div class="expert-team-process-panel">${taskRows||'<span class="expert-team-process-row">等待阶段初始化</span>'}</div>
-      </section>
+        <div class="expert-team-panel-overview">
+          <span class="expert-team-panel-copy">
+            <span class="expert-team-panel-status ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span>
+            <span class="expert-team-panel-summary">${safeEsc(presentation.detail||'')}</span>
+          </span>
+          <span class="expert-team-panel-progress-summary"><b>${safeEsc(progressText)}</b><i><em style="width:${progressPct}%"></em></i><small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small></span>
+        </div>
+      </div>
+      <div class="expert-team-panel-expanded-body">
+        <section class="expert-team-panel-section expert-team-workbench-hero" aria-label="专家团当前阶段">
+          <div class="expert-team-panel-section-title"><span>当前协作</span><small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small></div>
+          <div class="expert-team-workbench-grid">
+            <span><b>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</b><small>当前阶段</small></span>
+            <span><b>${safeEsc(currentStage.title||presentation.visibleTitle||'阶段任务')}</b><small>阶段任务</small></span>
+            <span><b>${safeEsc(currentWorker.name||currentStage.worker_name||'专家团')}</b><small>当前专家</small></span>
+          </div>
+          ${currentWorkerHtml}
+        </section>
+        <section class="expert-team-panel-section">
+          <div class="expert-team-panel-section-title"><span>阶段进度</span><small>${safeEsc(progressText)}</small></div>
+          <div class="expert-team-panel-progress" style="--expert-team-panel-progress:${progressPct}%"><i></i><span><b>${safeEsc(progressText)}</b> · ${safeEsc(currentStage.title||'等待阶段推进')}</span></div>
+          <div class="expert-team-panel-phases">${phaseRows||'<span class="expert-team-panel-phase active"><i>1</i><b>需求确认</b></span>'}</div>
+        </section>
+        <section class="expert-team-panel-section">
+          <div class="expert-team-panel-section-title"><span>专家团成员</span><small>各司其职</small></div>
+          ${memberHtml}
+        </section>
+        ${stageReviewHtml}
+        <section class="expert-team-panel-section">
+          <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
+          <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
+          ${presentation.state==='awaiting_review'?'':resultHtml}
+        </section>
+        <section class="expert-team-panel-section">
+          <div class="expert-team-panel-section-title"><span>执行明细</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
+          ${timelineHtml}
+          <div class="expert-team-process-panel">${taskRows||'<span class="expert-team-process-row">等待阶段初始化</span>'}</div>
+        </section>
+      </div>
     </div>`;
   }
   if(typeof window!=='undefined'){
