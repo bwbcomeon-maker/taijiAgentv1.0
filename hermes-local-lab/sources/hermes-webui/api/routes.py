@@ -1249,7 +1249,7 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
         },
         {
             "role": "assistant",
-            "content": f"{team_title}已创建，等待需求确认。\n\n本次任务：{visible_title}。请通过底部待办条补充必填信息。",
+            "content": f"{team_title}已创建，等待需求确认。\n\n本次任务：{visible_title}。请在右侧专家团工作台补充必填信息。",
             "timestamp": now + 0.001,
             "_ts": now + 0.001,
             "type": "expert_team_lifecycle",
@@ -1323,6 +1323,11 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
         return run
     if _expert_team_has_pending_intake_questions(run):
+        return run
+    if str(run.get("workflow_state") or "") == "awaiting_stage_input":
+        from api import expert_teams
+
+        run["view"] = expert_teams.expert_team_run_view(run)
         return run
     stream_id = str(run.get("execution_stream_id") or "")
     active_stream_ids = _active_stream_id_set()
@@ -10524,6 +10529,36 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "expert team run not found", 404)
         except Exception as exc:
             return bad(handler, f"Failed to revise expert team stage: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/stage/input":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(run.get("session_id") or "") != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+            run = expert_teams.submit_expert_team_stage_input(
+                workspace,
+                {
+                    "run_id": str(run.get("run_id") or ""),
+                    "answer": str(body.get("answer") or ""),
+                    "note": str(body.get("note") or ""),
+                    "selected_option": str(body.get("selected_option") or ""),
+                },
+            )
+            payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+            if str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS:
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+                payload.update(stream_payload)
+                payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+                return j(handler, payload, status=status)
+            return j(handler, payload)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except Exception as exc:
+            return bad(handler, f"Failed to submit expert team stage input: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/expert-teams/resume":
         from api import expert_teams

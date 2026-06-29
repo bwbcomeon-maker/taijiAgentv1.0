@@ -172,7 +172,7 @@ def validate_stage_output(text: str, material_type: str, task_id: str, team_id: 
             }
         return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
     if team == "deep-research-team":
-        required = ["阶段", "待人工"] if task in {"research", "outline", "draft", "review"} else []
+        required = ["阶段", "待人工"] if task in {"research", "evidence", "outline", "draft", "review"} else []
         missing = [section for section in required if section not in normalized]
         violations = [term for term in FORBIDDEN_TERMS if term in normalized]
         if missing or violations:

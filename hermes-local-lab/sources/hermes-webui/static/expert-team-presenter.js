@@ -36,7 +36,8 @@
       primaryAction:normalizeAction(primary_action),
       secondaryActions:arr(presentation.secondary_actions||presentation.secondaryActions).map(normalizeAction).filter(Boolean),
       result:presentation.result||((view.stage_review||{}).output)||{},
-      summary:str(presentation.summary)
+      summary:str(presentation.summary),
+      progressText:str(presentation.progress_text)
     };
   }
   function buildExpertTeamWorkspace(run){
@@ -51,7 +52,8 @@
       phases:arr(workspace.phases),
       members:arr(workspace.members),
       timeline:arr(workspace.timeline||view.timeline_events),
-      stageResult:workspace.stage_result||view.stage_result||{}
+      stageResult:workspace.stage_result||view.stage_result||{},
+      pendingInput:workspace.pending_input||view.pending_input||{}
     };
   }
   function buildExpertTeamCardFromRun(run,data){
@@ -60,10 +62,13 @@
     const presentation=buildExpertTeamPresentation(run);
     const view=run.view||{};
     const workspace=buildExpertTeamWorkspace(run);
-    const dock=view.dock||{};
+    const teamView=view.team||{};
+    const workflow=view.workflow||{};
+    const pendingInput=view.pending_input||workspace.pendingInput||{};
     const stageResult=view.stage_result||workspace.stageResult||{};
-    const teamTitle=str(run.team_title,'专家团');
-    const tasks=arr(run.tasks).map(task=>({
+    const teamTitle=str(teamView.title||run.team_title,'专家团');
+    const workflowStages=arr(workflow.stages);
+    const tasks=(workflowStages.length?workflowStages:arr(run.tasks)).map(task=>({
       id:str(task&&task.id),
       title:str(task&&task.title,task&&task.id||'阶段任务'),
       phase:str(task&&task.phase),
@@ -71,7 +76,8 @@
       statusText:taskStatusText(task),
       worker_name:str(task&&task.worker_name)
     }));
-    const members=arr(run.members).map(member=>({
+    const teamMembers=arr(teamView.members);
+    const members=(teamMembers.length?teamMembers:arr(run.members)).map(member=>({
       id:str(member&&member.id),
       name:str(member&&member.name,member&&member.id||'成员'),
       role:str(member&&member.role),
@@ -96,7 +102,7 @@
       required:question&&question.required!==false,
       confirmationGroup:str(question&&question.confirmation_group)
     }));
-    const phaseProgress=view.phase_progress||{};
+    const phaseProgress=(workflow&&workflow.progress)||view.phase_progress||{};
     return {
       type:'writeflow',
       kind:'expert_team',
@@ -105,13 +111,14 @@
       sessionId:str(run.run_id),
       runId:str(run.run_id),
       sourceSessionId:str(run.session_id),
-      team:{id:str(run.team_id),title:teamTitle,category:str((data.team||{}).category,'专家团'),image:str(run.team_image)},
+      team:{id:str(teamView.id||run.team_id),title:teamTitle,category:str((data.team||{}).category,'专家团'),image:str(teamView.image||run.team_image),members},
       status:presentation.state,
       phase:str(phaseProgress.current||run.phase,'需求确认'),
       progress:{done:Number(phaseProgress.done||0),total:Number(phaseProgress.total||tasks.length||0)},
       presentation,
       workspace,
-      dock,
+      workflow:{stages:tasks,currentStage:workflow.current_stage||workspace.currentStage||{},progress:phaseProgress},
+      pendingInput,
       stageResult,
       questions,
       primaryConfirmation:view.primary_confirmation||null,

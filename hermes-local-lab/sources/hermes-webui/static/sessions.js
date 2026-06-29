@@ -1026,7 +1026,7 @@ async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
     ? _expertTeamStatusCardFromRun(run,data)
     : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);
   if(!card)return {status:'missing'};
-  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+  if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
   _scheduleWriteflowStatusRefresh(sid,run);
   _removeWriteflowStatusCardsFromMessages();
   if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();

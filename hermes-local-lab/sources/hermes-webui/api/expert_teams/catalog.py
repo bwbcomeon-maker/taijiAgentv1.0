@@ -59,6 +59,7 @@ CONTENT_PHASES = [
 DEEP_RESEARCH_PHASES = [
     {"id": "direction", "title": "确定研究方向", "phase": "研究方向", "worker_id": "director", "worker_name": "研究总导演"},
     {"id": "research", "title": "补充案例素材", "phase": "资料调研", "worker_id": "researcher", "worker_name": "资料研究员"},
+    {"id": "evidence", "title": "事实核验", "phase": "事实核验", "worker_id": "evidence", "worker_name": "事实核验专家"},
     {"id": "outline", "title": "结构提纲", "phase": "结构提纲", "worker_id": "architect", "worker_name": "结构架构师"},
     {"id": "draft", "title": "研究材料初稿", "phase": "材料初稿", "worker_id": "writer", "worker_name": "材料起草专家"},
     {"id": "review", "title": "复核交付", "phase": "复核交付", "worker_id": "reviewer", "worker_name": "复核专家"},
@@ -169,6 +170,12 @@ _CATALOG = {
                 "name": "资料研究员",
                 "role": "资料整理",
                 "image": "static/assets/writeflow/member-research-expert.png",
+            },
+            {
+                "id": "evidence",
+                "name": "事实核验专家",
+                "role": "事实核验",
+                "image": "static/assets/writeflow/member-editor.png",
             },
             {
                 "id": "architect",

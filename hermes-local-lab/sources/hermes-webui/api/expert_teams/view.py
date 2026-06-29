@@ -12,6 +12,7 @@ STATE_LABELS = {
     "collecting_optional": "可选补充待处理",
     "ready_to_generate": "准备开始生成",
     "generating": "专家团正在生成",
+    "awaiting_stage_input": "需要确认后继续",
     "generated_invalid": "草稿未通过校验",
     "awaiting_review": "阶段成果待复核",
     "revising": "正在按修改意见调整",
@@ -27,6 +28,7 @@ def _primary_action(state: str) -> dict | None:
         "collecting_optional": {"id": "answer_optional", "label": "补充或跳过", "kind": "question_popover"},
         "ready_to_generate": {"id": "start_generation", "label": "开始生成", "kind": "primary"},
         "generating": {"id": "cancel", "label": "停止生成", "kind": "danger"},
+        "awaiting_stage_input": {"id": "submit_stage_input", "label": "确认并继续生成", "kind": "primary"},
         "generated_invalid": {"id": "regenerate", "label": "重新生成", "kind": "primary"},
         "awaiting_review": {"id": "review_stage", "label": "去复核", "kind": "primary"},
         "revising": {"id": "cancel", "label": "停止生成", "kind": "danger"},
@@ -117,6 +119,9 @@ def _presentation(run: dict, business_context: dict) -> dict:
         detail = "请先补充需求信息，专家团再继续推进。"
     elif state in {"ready_to_generate", "generating", "revising"}:
         detail = "后台正在按当前阶段生成内容。"
+    elif state == "awaiting_stage_input":
+        pending = _pending_input(run)
+        detail = str(pending.get("description") or pending.get("question") or "当前专家需要你确认后继续生成。")
     elif state == "generated_invalid":
         detail = str(run.get("last_validation_error") or "草稿未通过办公材料口径校验。")
     elif state == "awaiting_review":
@@ -135,6 +140,7 @@ def _presentation(run: dict, business_context: dict) -> dict:
         "result": output,
         "summary": content_summary(str(output.get("content") or output.get("summary") or run.get("title") or "")),
         "current_stage": deepcopy(current),
+        "progress_text": _progress_text(run, state),
     }
 
 
@@ -142,7 +148,35 @@ def _progress(run: dict) -> dict:
     tasks = [task for task in run.get("tasks") or [] if isinstance(task, dict)]
     done = sum(1 for task in tasks if str(task.get("status") or "") == "done")
     current = str(run.get("phase") or "")
-    return {"done": done, "total": len(tasks), "current": current}
+    state = str(run.get("workflow_state") or "")
+    is_intake = state in {"collecting_required", "collecting_optional"}
+    current_index = int(run.get("current_stage_index") or 0)
+    if is_intake:
+        done = 0
+        current = "需求确认"
+        current_index = 0
+    return {
+        "done": done,
+        "total": len(tasks),
+        "current": current,
+        "current_index": current_index,
+        "is_intake": is_intake,
+    }
+
+
+def _progress_text(run: dict, state: str | None = None) -> str:
+    progress = _progress(run)
+    total = int(progress.get("total") or 0)
+    if not total:
+        return "0/0"
+    if progress.get("is_intake"):
+        return f"0/{total}"
+    if (state or str(run.get("workflow_state") or "")) == "completed":
+        return f"{total}/{total}"
+    index = int(progress.get("current_index") or 0)
+    done = int(progress.get("done") or 0)
+    current = min(total, max(done, index + 1))
+    return f"{current}/{total}"
 
 
 def _current_worker(run: dict) -> dict:
@@ -180,6 +214,43 @@ def _workspace(run: dict) -> dict:
         "members": members,
         "timeline": _timeline_events(run),
         "stage_result": _stage_result(run),
+        "pending_input": _pending_input(run),
+    }
+
+
+def _team(run: dict) -> dict:
+    return {
+        "id": str(run.get("team_id") or ""),
+        "title": str(run.get("team_title") or "专家团"),
+        "image": str(run.get("team_image") or ""),
+        "members": [deepcopy(member) for member in run.get("members") or [] if isinstance(member, dict)],
+    }
+
+
+def _workflow(run: dict) -> dict:
+    tasks = [deepcopy(task) for task in run.get("tasks") or [] if isinstance(task, dict)]
+    progress = _progress(run)
+    progress["text"] = _progress_text(run)
+    return {
+        "stages": tasks,
+        "current_stage": deepcopy(run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}),
+        "progress": progress,
+    }
+
+
+def _pending_input(run: dict) -> dict:
+    pending = run.get("pending_input")
+    if not isinstance(pending, dict):
+        return {}
+    return {
+        "id": str(pending.get("id") or "stage-input"),
+        "question": str(pending.get("question") or ""),
+        "description": str(pending.get("description") or ""),
+        "options": [str(item) for item in pending.get("options") or []],
+        "required": pending.get("required", True) is not False,
+        "stage_id": str(pending.get("stage_id") or ""),
+        "worker_id": str(pending.get("worker_id") or ""),
+        "created_at": str(pending.get("created_at") or ""),
     }
 
 
@@ -241,12 +312,26 @@ def expert_team_run_view(run: dict) -> dict:
             }
     elif state == "awaiting_review":
         primary_confirmation = {"type": "stage_review", "title": "阶段成果待复核"}
+    elif state == "awaiting_stage_input":
+        pending_input = _pending_input(run)
+        primary_confirmation = {
+            "type": "stage_input",
+            "input_id": pending_input.get("id"),
+            "title": pending_input.get("question") or "需要确认后继续",
+        }
+    else:
+        pending_input = _pending_input(run)
+    if state != "awaiting_stage_input":
+        pending_input = _pending_input(run)
     return {
         "business_context": business_context,
         "presentation": presentation,
+        "team": _team(run),
+        "workflow": _workflow(run),
         "workspace": _workspace(run),
         "dock": _dock(run, presentation),
         "stage_result": _stage_result(run),
+        "pending_input": pending_input,
         "intake": intake,
         "primary_confirmation": primary_confirmation,
         "pending_confirmations": [primary_confirmation] if primary_confirmation else [],
@@ -257,6 +342,7 @@ def expert_team_run_view(run: dict) -> dict:
         "actions": {
             "can_start_generation": state == "ready_to_generate",
             "can_cancel": state in {"generating", "revising"},
+            "can_submit_stage_input": state == "awaiting_stage_input",
             "can_retry": state in {"generated_invalid", "failed", "cancelled"},
             "can_approve_stage": state == "awaiting_review",
             "can_request_revision": state == "awaiting_review",

@@ -12,9 +12,11 @@ from .runtime import (
     mark_expert_team_execution_complete,
     mark_expert_team_execution_started,
     read_expert_team_run,
+    request_expert_team_stage_input,
     request_expert_team_stage_revision,
     resume_expert_team,
     start_expert_team,
+    submit_expert_team_stage_input,
 )
 from .view import expert_team_run_view
 
@@ -31,7 +33,9 @@ __all__ = [
     "mark_expert_team_execution_complete",
     "mark_expert_team_execution_started",
     "read_expert_team_run",
+    "request_expert_team_stage_input",
     "request_expert_team_stage_revision",
     "resume_expert_team",
     "start_expert_team",
+    "submit_expert_team_stage_input",
 ]

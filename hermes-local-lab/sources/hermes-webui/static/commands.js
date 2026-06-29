@@ -1007,7 +1007,7 @@ async function sendExpertTeamAction(payload){
       });
       if(typeof renderMessages==='function')renderMessages();
     }
-    if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
     if(typeof window!=='undefined'){
       window._pendingWriteflowStatusCard={
         sessionId:S.session&&S.session.session_id||'',

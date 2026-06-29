@@ -53,6 +53,7 @@ def _task_statuses(tasks: list[dict], index: int, state: str) -> list[dict]:
                 "collecting_optional": "pending",
                 "ready_to_generate": "pending",
                 "generating": "running",
+                "awaiting_stage_input": "awaiting_input",
                 "generated_invalid": "error",
                 "awaiting_review": "awaiting_review",
                 "revising": "running",
@@ -67,6 +68,7 @@ def _task_statuses(tasks: list[dict], index: int, state: str) -> list[dict]:
             "pending": "待执行",
             "running": "执行中",
             "awaiting_review": "待复核",
+            "awaiting_input": "等待确认",
             "error": "需重试",
             "cancelled": "已取消",
         }.get(str(item.get("status")), str(item.get("status")))
@@ -173,6 +175,8 @@ def _sync_derived(run: dict) -> dict:
             item["status"] = "待启动"
         elif state in {"generating", "revising"} and (member_id == current_worker_id or name == current_worker):
             item["status"] = "执行中"
+        elif state == "awaiting_stage_input" and (member_id == current_worker_id or name == current_worker):
+            item["status"] = "等待确认"
         elif state in {"awaiting_review", "generated_invalid"} and (member_id == current_worker_id or name == current_worker):
             item["status"] = "待复核"
         elif state == "completed":
@@ -187,6 +191,7 @@ def _sync_derived(run: dict) -> dict:
         "collecting_optional": "awaiting_user",
         "ready_to_generate": "awaiting_user",
         "generating": "running",
+        "awaiting_stage_input": "awaiting_user",
         "generated_invalid": "awaiting_user",
         "awaiting_review": "awaiting_user",
         "revising": "running",
@@ -197,6 +202,7 @@ def _sync_derived(run: dict) -> dict:
     run["execution_status"] = {
         "ready_to_generate": "idle",
         "generating": "running",
+        "awaiting_stage_input": "paused",
         "revising": "running",
         "completed": "done",
         "failed": "error",
@@ -221,6 +227,8 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
     timeline_title = {
         "questions_answered": "需求信息已更新",
         "generation_started": "专家开始执行当前阶段",
+        "stage_input_requested": "当前专家请求确认",
+        "stage_input_answered": "阶段确认已提交",
         "generation_completed": "阶段成果已生成",
         "generation_invalid": "草稿未通过办公材料校验",
         "stage_approved": "阶段成果已确认",
@@ -338,6 +346,74 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
         "last_execution_error": "",
     }
     return _transition(workspace, run, "generating", "generation_started", patch)
+
+
+def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
+    run = read_run(workspace, str(body.get("run_id") or ""))
+    if str(run.get("workflow_state") or "") not in {"ready_to_generate", "generating", "revising"}:
+        raise ValueError("Expert team cannot request stage input in current state")
+    synced = _sync_derived(deepcopy(run))
+    current = synced.get("current_stage") if isinstance(synced.get("current_stage"), dict) else {}
+    pending_input = {
+        "id": str(body.get("input_id") or ("stage-input-" + uuid.uuid4().hex[:8])),
+        "question": str(body.get("question") or "当前阶段需要你确认后继续生成。").strip(),
+        "description": str(body.get("description") or "").strip(),
+        "options": [str(option) for option in body.get("options") or []],
+        "required": body.get("required", True) is not False,
+        "stage_id": str(current.get("task_id") or current.get("id") or ""),
+        "worker_id": str(current.get("worker_id") or ""),
+        "created_at": _now(),
+    }
+    if not pending_input["question"]:
+        pending_input["question"] = "当前阶段需要你确认后继续生成。"
+    return _transition(
+        workspace,
+        run,
+        "awaiting_stage_input",
+        "stage_input_requested",
+        {
+            "pending_input": pending_input,
+            "execution_status": "paused",
+            "last_execution_error": "",
+        },
+    )
+
+
+def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
+    run = read_run(workspace, str(body.get("run_id") or ""))
+    if str(run.get("workflow_state") or "") != "awaiting_stage_input":
+        raise ValueError("Expert team is not awaiting stage input")
+    pending = run.get("pending_input") if isinstance(run.get("pending_input"), dict) else {}
+    answer = str(body.get("answer") or "").strip()
+    note = str(body.get("note") or "").strip()
+    selected_option = str(body.get("selected_option") or "").strip()
+    if not answer and selected_option:
+        answer = selected_option
+    if pending.get("required", True) is not False and not answer and not note:
+        raise ValueError("Stage input answer is required")
+    rows = [deepcopy(row) for row in run.get("stage_inputs") or [] if isinstance(row, dict)]
+    rows.append(
+        {
+            "input_id": str(pending.get("id") or ""),
+            "stage_id": str(pending.get("stage_id") or ""),
+            "worker_id": str(pending.get("worker_id") or ""),
+            "question": str(pending.get("question") or ""),
+            "answer": answer,
+            "note": note,
+            "answered_at": _now(),
+        }
+    )
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "stage_input_answered",
+        {
+            "pending_input": {},
+            "stage_inputs": rows,
+            "last_execution_error": "",
+        },
+    )
 
 
 def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: dict | None = None) -> dict:

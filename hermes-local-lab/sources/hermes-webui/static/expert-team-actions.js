@@ -8,9 +8,9 @@
   }
   function applyExpertTeamActionResponse(data){
     const run=data&&data.run;
-    if(run&&typeof _expertTeamStatusCardFromRun==='function'&&typeof renderWriteflowStatusDock==='function'){
+    if(run&&typeof _expertTeamStatusCardFromRun==='function'&&typeof renderExpertTeamStatusSurface==='function'){
       const card=_expertTeamStatusCardFromRun(run,data);
-      if(card)renderWriteflowStatusDock(card);
+      if(card)renderExpertTeamStatusSurface(card);
     }
     if(typeof _applyExpertTeamStreamResponse==='function')_applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
@@ -31,6 +31,24 @@
     }
     if(action==='cancel'){
       const data=await api('/api/expert-teams/cancel',{method:'POST',body:JSON.stringify({run_id:runId,session_id:S&&S.session&&S.session.session_id||''})});
+      applyExpertTeamActionResponse(data);
+      await refreshExpertTeamAfterAction();
+      return true;
+    }
+    if(action==='submit_stage_input'){
+      const root=btn&&btn.closest&&btn.closest('[data-expert-team-run-id]');
+      const selected=root&&root.querySelector?root.querySelector('[data-expert-team-stage-input-choice].is-selected'):null;
+      const input=root&&root.querySelector?root.querySelector('[data-expert-team-stage-input-text]'):null;
+      const answer=(selected&&selected.dataset&&selected.dataset.expertTeamStageInputChoice)||'';
+      const note=input?String(input.value||'').trim():'';
+      if(!answer&&!note){
+        if(typeof showToast==='function')showToast('请先选择确认项，或填写补充说明。');
+        if(input&&input.focus){
+          try{input.focus({preventScroll:true});}catch(_){input.focus();}
+        }
+        return false;
+      }
+      const data=await api('/api/expert-teams/stage/input',{method:'POST',body:JSON.stringify({run_id:runId,session_id:S&&S.session&&S.session.session_id||'',answer,note})});
       applyExpertTeamActionResponse(data);
       await refreshExpertTeamAfterAction();
       return true;
@@ -58,5 +76,18 @@
   }
   if(typeof window!=='undefined'){
     window.handleExpertTeamPresentationAction=handleExpertTeamPresentationAction;
+    window.selectExpertTeamStageInputChoice=function(btn){
+      const root=btn&&btn.closest&&btn.closest('.expert-team-stage-input-card');
+      if(root&&root.querySelectorAll){
+        root.querySelectorAll('[data-expert-team-stage-input-choice]').forEach(item=>item.classList.remove('is-selected'));
+      }
+      if(btn)btn.classList.add('is-selected');
+      return true;
+    };
+    window.deferExpertTeamStageInput=function(btn){
+      if(typeof showToast==='function')showToast('已保留当前确认项，可稍后在右侧工作台继续处理。');
+      if(typeof toggleExpertTeamWorkspacePanel==='function')toggleExpertTeamWorkspacePanel(btn);
+      return true;
+    };
   }
 })();

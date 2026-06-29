@@ -132,7 +132,45 @@ def test_generating_presentation_has_single_running_state(tmp_path):
     assert "阶段成果待复核" not in json.dumps(presentation, ensure_ascii=False)
     assert generating["view"]["workspace"]["visible"] is True
     assert generating["view"]["workspace"]["current_worker"]["name"] == "写作总导演"
-    assert generating["view"]["dock"]["primary_action"]["id"] == "cancel"
+    assert generating["view"]["team"]["members"][0]["name"] == "写作总导演"
+    assert generating["view"]["workflow"]["stages"][0]["id"] == "plan"
+    assert generating["view"]["workflow"]["progress"]["total"] == 5
+
+
+def test_requirements_are_prestep_and_workflow_progress_is_catalog_driven(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-progress", "team_id": "content-creator-team", "prompt": "帮我起草一份部门月度工作汇报"},
+    )
+
+    view = run["view"]
+    assert view["presentation"]["state"] == "collecting_required"
+    assert view["presentation"]["progress_text"] == "0/5"
+    assert view["workflow"]["progress"]["done"] == 0
+    assert view["workflow"]["progress"]["total"] == 5
+    assert view["workflow"]["progress"]["current_index"] == 0
+    assert view["workflow"]["progress"]["is_intake"] is True
+    assert view["workspace"]["current_stage"]["id"] == "plan"
+
+    research = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-progress-research",
+            "team_id": "deep-research-team",
+            "prompt": "帮我研究本地优先 AI 助理在企业内部办公场景的落地趋势",
+        },
+    )
+    assert research["view"]["team"]["id"] == "deep-research-team"
+    assert len(research["view"]["team"]["members"]) == len(research["members"])
+    assert len(research["view"]["workflow"]["stages"]) == len(research["tasks"])
+    assert research["view"]["workflow"]["progress"]["total"] == len(research["tasks"])
+    assert research["view"]["presentation"]["progress_text"] == f"0/{len(research['tasks'])}"
+    assert len(run["view"]["team"]["members"]) == 5
+    assert len(run["view"]["workflow"]["stages"]) == 5
+    assert len(research["view"]["team"]["members"]) == 6
+    assert len(research["view"]["workflow"]["stages"]) == 6
 
 
 def test_invalid_generation_does_not_mix_result_running_and_missing_states(tmp_path):
@@ -213,6 +251,63 @@ def test_valid_generation_registers_structured_output_and_review_action(tmp_path
     assert "受众" not in completed["validation"].get("violations", [])
     assert output["locator"] == "chat"
     assert output["has_long_content"] is True
+
+
+def test_stage_input_pause_is_single_right_workspace_confirmation(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-stage-input", "team_id": "content-creator-team", "prompt": "帮我起草内部通知"},
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": _answer_all_required(expert_teams, tmp_path, run)["run_id"],
+            "answers": {"optional_context": ""},
+            "skip_optional": True,
+        },
+    )
+    generating = expert_teams.mark_expert_team_execution_started(tmp_path, ready["run_id"], {"stream_id": "stream-stage-input"})
+    paused = expert_teams.request_expert_team_stage_input(
+        tmp_path,
+        {
+            "run_id": generating["run_id"],
+            "question": "本次通知是否需要隐去具体部门或人员名称？",
+            "description": "资料整理专家需要确认脱敏口径后继续当前阶段。",
+            "options": ["不需要隐去", "需要隐去，使用代号"],
+        },
+    )
+
+    view = paused["view"]
+    assert paused["workflow_state"] == "awaiting_stage_input"
+    assert paused["execution_status"] == "paused"
+    assert view["presentation"]["state"] == "awaiting_stage_input"
+    assert view["presentation"]["primary_action"] == {
+        "id": "submit_stage_input",
+        "label": "确认并继续生成",
+        "kind": "primary",
+    }
+    assert view["primary_confirmation"]["type"] == "stage_input"
+    assert view["pending_input"]["question"] == "本次通知是否需要隐去具体部门或人员名称？"
+    assert view["workspace"]["pending_input"]["question"] == view["pending_input"]["question"]
+    assert view["stage_review"]["actionable"] is False
+    assert view["actions"]["can_submit_stage_input"] is True
+    assert "草稿未通过校验" not in json.dumps(view, ensure_ascii=False)
+    assert "阶段成果待复核" not in json.dumps(view["presentation"], ensure_ascii=False)
+
+    resumed = expert_teams.submit_expert_team_stage_input(
+        tmp_path,
+        {
+            "run_id": paused["run_id"],
+            "answer": "需要隐去，使用代号",
+            "note": "涉及客户名称全部使用 A 客户、B 客户代称。",
+        },
+    )
+    assert resumed["workflow_state"] == "ready_to_generate"
+    assert resumed["current_stage"]["index"] == paused["current_stage"]["index"]
+    assert resumed.get("pending_input") in (None, {})
+    assert resumed["stage_inputs"][-1]["answer"] == "需要隐去，使用代号"
 
 
 def test_final_stage_review_action_completes_task_not_next_stage(tmp_path):

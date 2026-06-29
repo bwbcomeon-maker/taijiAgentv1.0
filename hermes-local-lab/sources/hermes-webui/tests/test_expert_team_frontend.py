@@ -28,7 +28,9 @@ def test_presenter_is_the_only_source_of_main_state_and_action():
     assert "presentation.state" in PRESENTER_JS
     assert "presentation.primary_action" in PRESENTER_JS
     assert "view.workspace" in PRESENTER_JS
-    assert "view.dock" in PRESENTER_JS
+    assert "view.team" in PRESENTER_JS
+    assert "view.workflow" in PRESENTER_JS
+    assert "view.pending_input" in PRESENTER_JS
     assert "view.stage_result" in PRESENTER_JS
     assert "window.buildExpertTeamPresentation=buildExpertTeamPresentation" in PRESENTER_JS
     assert "window.buildExpertTeamCardFromRun=buildExpertTeamCardFromRun" in PRESENTER_JS
@@ -74,20 +76,22 @@ def test_session_hydration_uses_tri_state_and_preserve_blocks_writeflow_fallback
     assert "/api/writeflow/run?session_id=" not in refresh_body
 
 
-def test_expert_team_workspace_panel_is_visible_and_not_dock_only():
+def test_expert_team_workspace_panel_is_right_side_surface_and_not_bottom_dock():
     assert "function renderExpertTeamWorkspaceFromPresentation" in EXPERT_UI_JS
-    assert "function renderExpertTeamDockFromPresentation" in EXPERT_UI_JS
     assert "function mountExpertTeamWorkspacePanel" in UI_JS
-    assert "renderExpertTeamWorkspacePanel(card)" in UI_JS
+    assert "function renderExpertTeamStatusSurface" in UI_JS
+    assert "renderExpertTeamStatusSurface(card)" in UI_JS
     mount_start = UI_JS.index("function mountExpertTeamWorkspacePanel")
     mount_body = UI_JS[mount_start : UI_JS.index("function _expertTeamWorkspaceStorageKey", mount_start)]
     assert "document.getElementById('mainChat')" in mount_body
     assert "mainChat.insertBefore(panel,messagesShell)" in mount_body
     assert "messages.insertBefore(panel,msgInner)" not in mount_body
-    assert "_removeExpertTeamWorkspacePanelElement();" not in UI_JS[UI_JS.index("function syncExpertTeamBottomDockState") : UI_JS.index("function _expertTeamBottomDockTarget")]
     assert ".expert-team-workspace-panel{display:none;}" not in STYLE_CSS
     desktop_css = STYLE_CSS[STYLE_CSS.index('@media (min-width:901px)') :]
     assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" not in desktop_css
+    assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock{display:none!important;}" in desktop_css
+    assert "right:clamp(" in desktop_css
+    assert "width:clamp(240px" in desktop_css or "width:clamp(260px" in desktop_css
 
 
 def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():
@@ -103,11 +107,13 @@ def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message()
     assert "toggleExpertTeamWorkspacePanel(this)" in EXPERT_UI_JS
 
 
-def test_dock_and_workspace_render_from_single_presentation():
-    assert "function renderExpertTeamDockFromPresentation" in EXPERT_UI_JS
+def test_right_workspace_and_capsule_render_from_single_presentation():
     assert "function renderExpertTeamWorkspaceFromPresentation" in EXPERT_UI_JS
     assert "card.presentation" in EXPERT_UI_JS
     assert "card.workspace" in EXPERT_UI_JS
+    assert "card.team" in EXPERT_UI_JS
+    assert "card.workflow" in EXPERT_UI_JS
+    assert "card.pendingInput" in EXPERT_UI_JS
     assert "card.stageResult" in EXPERT_UI_JS
     assert "presentation.primaryAction" in EXPERT_UI_JS
     assert "presentation.state" in EXPERT_UI_JS
@@ -119,6 +125,9 @@ def test_dock_and_workspace_render_from_single_presentation():
     assert "expert-team-timeline" in EXPERT_UI_JS
     assert "timelineEvents" in EXPERT_UI_JS
     assert "专家团工作台" in EXPERT_UI_JS
+    assert "expert-team-capsule" in EXPERT_UI_JS
+    assert "Math.max(done,currentIndex+1)" not in EXPERT_UI_JS
+    assert "progress.currentIndex" in EXPERT_UI_JS
 
 
 def test_review_action_opens_workspace_review_panel_not_only_bottom_dock():
@@ -154,16 +163,32 @@ def test_actions_map_only_presentation_actions_to_api_calls():
     assert "function handleExpertTeamPresentationAction" in ACTIONS_JS
     assert "function applyExpertTeamActionResponse" in ACTIONS_JS
     assert "_applyExpertTeamStreamResponse(data)" in ACTIONS_JS
-    assert "renderWriteflowStatusDock(card)" in ACTIONS_JS
+    assert "renderExpertTeamStatusSurface(card)" in ACTIONS_JS
+    assert "renderWriteflowStatusDock(card)" not in ACTIONS_JS
     assert "answer_required" in ACTIONS_JS
     assert "answer_optional" in ACTIONS_JS
+    assert "submit_stage_input" in ACTIONS_JS
     assert "start_generation" in ACTIONS_JS
     assert "review_stage" in ACTIONS_JS
     assert "regenerate" in ACTIONS_JS
     assert "view_result" in ACTIONS_JS
     assert "/api/expert-teams/stage/approve" in ACTIONS_JS
+    assert "/api/expert-teams/stage/input" in ACTIONS_JS
     assert "/api/expert-teams/resume" in ACTIONS_JS
     assert "/api/writeflow/run" not in ACTIONS_JS
+
+
+def test_stage_input_confirmation_is_in_right_workspace_not_chat_or_bottom_dock():
+    assert "awaiting_stage_input" in EXPERT_UI_JS
+    assert "expert-team-stage-input-card" in EXPERT_UI_JS
+    assert "data-expert-team-stage-input-text" in EXPERT_UI_JS
+    assert "确认并继续生成" in EXPERT_UI_JS
+    assert "稍后处理" in EXPERT_UI_JS
+    assert "pendingInput" in EXPERT_UI_JS
+    assert "stage_input" not in SESSIONS_JS
+    joined = "\n".join([COMMANDS_JS, PANELS_JS, SESSIONS_JS, UI_JS])
+    assert "expert-team-chat-confirmation-card" not in joined
+    assert "status-card-expert-dock-summary" not in ACTIONS_JS
 
 
 def test_modal_examples_are_office_material_templates_not_long_prompt_cards():
@@ -189,3 +214,15 @@ def test_expert_team_actions_never_call_legacy_writeflow_api():
     assert "/api/writeflow/run" not in joined
     assert "/api/writeflow/status" not in joined
     assert "sendWriteflowAction(" not in ACTIONS_JS
+
+
+def test_expert_team_hydration_never_renders_bottom_dock_for_expert_team():
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]
+    assert "renderExpertTeamStatusSurface(card)" in hydrate_body
+    assert "renderWriteflowStatusDock(card)" not in hydrate_body
+
+    send_start = COMMANDS_JS.index("async function sendExpertTeamAction")
+    send_body = COMMANDS_JS[send_start : COMMANDS_JS.index("if(typeof window!=='undefined')window.sendExpertTeamAction", send_start)]
+    assert "renderExpertTeamStatusSurface(card)" in send_body
+    assert "renderWriteflowStatusDock(card)" not in send_body

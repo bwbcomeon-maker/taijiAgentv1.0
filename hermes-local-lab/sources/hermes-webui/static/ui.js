@@ -1359,7 +1359,7 @@ function _expertTeamLifecycleCardHtml(card){
   const stateClass=_statusCardStateClass(card&&card.statusLabel||card&&card.status);
   if(!confirmations.length&&stateClass!=='running')return '';
   const title=confirmations.length?'专家团已创建，等待需求确认':'专家团正在生成';
-  const detail=confirmations.length?'请通过底部待办条完成需求确认，确认窗口会保留你的输入。':'后台正在生成阶段成果，完成后会在底部待办条提示复核。';
+  const detail=confirmations.length?'请在右侧专家团工作台完成需求确认，确认窗口会保留你的输入。':'后台正在生成阶段成果，完成后会在右侧专家团工作台提示复核。';
   return `<div class="expert-team-lifecycle-card" data-expert-team-lifecycle="1" data-expert-team-run-id="${esc(card&&card.runId||card&&card.sessionId||'')}">
     <span class="expert-team-lifecycle-dot"></span>
     <span class="expert-team-lifecycle-copy">
@@ -1373,7 +1373,7 @@ function renderExpertTeamLifecycleNotice(card){
   if(arguments.length)_activeExpertTeamStatusCard=card||null;
   const inner=(typeof $==='function'&&$('msgInner'))||document.getElementById('msgInner');
   if(!inner)return false;
-  inner.querySelectorAll('.expert-team-chat-confirmation-card,.expert-team-lifecycle-card').forEach(node=>node.remove());
+  inner.querySelectorAll('.expert-team-lifecycle-card').forEach(node=>node.remove());
   return false;
 }
 
@@ -1503,7 +1503,9 @@ function _expertTeamQuestionPopoverHtml(card){
 }
 
 function _expertTeamQuestionPopoverElement(trigger){
-  const root=(trigger&&trigger.closest&&(trigger.closest('#writeflowStatusDock')||trigger.closest('.status-card-writeflow')))||((typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'));
+  const root=(trigger&&trigger.closest&&(trigger.closest('.expert-team-workspace-panel')||trigger.closest('#writeflowStatusDock')||trigger.closest('.status-card-writeflow')))
+    ||document.getElementById('expertTeamWorkspacePanel')
+    ||((typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'));
   return root&&root.querySelector?root.querySelector('[data-expert-team-question-popover]'):null;
 }
 
@@ -1550,7 +1552,7 @@ function _invalidateExpertTeamDockRenderKey(){
 function openExpertTeamQuestionPopover(trigger){
   const card=_activeExpertTeamStatusCard;
   const state=_expertTeamQuestionWizardState(card);
-  if(!state.total)return focusExpertTeamBottomDock(trigger);
+  if(!state.total)return focusExpertTeamWorkspacePanel(trigger);
   _expertTeamQuestionPopoverOpen=true;
   _expertTeamQuestionPopoverRunId=state.runId;
   if(!_expertTeamQuestionPopoverQuestionId||!state.questions.some(question=>String(question&&question.id||'')===String(_expertTeamQuestionPopoverQuestionId))){
@@ -1569,8 +1571,8 @@ function closeExpertTeamQuestionPopover(trigger){
   _expertTeamQuestionPopoverOpen=false;
   const popover=_expertTeamQuestionPopoverElement(trigger);
   if(popover)popover.hidden=true;
-  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
-  const summary=dock&&dock.querySelector?dock.querySelector('.status-card-expert-dock-summary'):null;
+  const panel=document.getElementById('expertTeamWorkspacePanel');
+  const summary=panel&&panel.querySelector?panel.querySelector('.expert-team-capsule-action,.expert-team-panel-collapse-toggle'):null;
   if(summary&&summary.focus){
     try{summary.focus({preventScroll:true});}catch(_){summary.focus();}
   }
@@ -1583,7 +1585,7 @@ function goExpertTeamQuestionStep(trigger,delta){
   const nextIndex=Math.max(0,Math.min(state.questions.length-1,(state.currentIndex-1)+Number(delta||0)));
   _expertTeamQuestionPopoverQuestionId=state.questions[nextIndex]&&state.questions[nextIndex].id||'';
   _invalidateExpertTeamDockRenderKey();
-  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(_activeExpertTeamStatusCard);
+  if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(_activeExpertTeamStatusCard);
   openExpertTeamQuestionPopover(trigger);
   return true;
 }
@@ -1604,7 +1606,7 @@ function editExpertTeamAnsweredQuestion(trigger){
   if(!qid)return false;
   _expertTeamQuestionPopoverQuestionId=qid;
   _invalidateExpertTeamDockRenderKey();
-  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(_activeExpertTeamStatusCard);
+  if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(_activeExpertTeamStatusCard);
   return openExpertTeamQuestionPopover(trigger);
 }
 
@@ -1938,13 +1940,11 @@ function _expertTeamWorkspacePanelRunId(panel){
 function _syncExpertTeamWorkspacePanelVisibility(){
   const shell=typeof document!=='undefined'?document.querySelector('.taiji-home-shell'):null;
   const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
-  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
   const runId=_expertTeamWorkspacePanelRunId(panel);
-  const sourceSid=(panel&&panel.dataset&&panel.dataset.expertTeamSourceSessionId)||(dock&&dock.dataset&&dock.dataset.writeflowSourceSessionId)||'';
+  const sourceSid=(panel&&panel.dataset&&panel.dataset.expertTeamSourceSessionId)||(_activeExpertTeamStatusCard&&_activeExpertTeamStatusCard.sourceSessionId)||'';
   const activeSid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
   const isCurrentSession=!sourceSid||!activeSid||sourceSid===activeSid;
-  const hasExpertDock=!!(dock&&dock.querySelector&&dock.querySelector('.status-card-expert-dock-summary'));
-  const hasCurrentExpert=!!(isCurrentSession&&(runId||hasExpertDock));
+  const hasCurrentExpert=!!(isCurrentSession&&(runId||_activeExpertTeamStatusCard));
   const isChat=_expertTeamActivePanelName()==='chat';
   const visible=!!(hasCurrentExpert&&isChat);
   const collapsed=visible&&_expertTeamWorkspacePanelHiddenForRun(runId);
@@ -2092,13 +2092,13 @@ function toggleExpertTeamWorkspacePanel(btn){
 function renderExpertTeamWorkspacePanel(card){
   if(!_isExpertTeamStatusCard(card))return clearExpertTeamWorkspacePanel();
   mountExpertTeamWorkspacePanel(card);
-  return syncExpertTeamBottomDockState(card);
+  return _syncExpertTeamWorkspacePanelVisibility();
 }
 
 function shouldPreserveExpertTeamDraftDock(sessionId){
-  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
-  if(!dock||dock.hidden)return false;
-  const sourceSid=String(dock.dataset.writeflowSourceSessionId||'');
+  const root=document.getElementById('expertTeamWorkspacePanel')||((typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'));
+  if(!root||root.hidden)return false;
+  const sourceSid=String((root.dataset&&root.dataset.expertTeamSourceSessionId)||(_activeExpertTeamStatusCard&&_activeExpertTeamStatusCard.sourceSessionId)||'');
   const targetSid=String(sessionId||'');
   if(targetSid&&sourceSid&&sourceSid!==targetSid)return false;
   const active=typeof document!=='undefined'?document.activeElement:null;
@@ -2107,9 +2107,9 @@ function shouldPreserveExpertTeamDraftDock(sessionId){
     '.expert-team-question-popover [data-expert-team-answer-input]',
     '[data-expert-team-stage-feedback]',
   ];
-  const inputs=Array.from(dock.querySelectorAll(selectors.join(',')));
+  const inputs=Array.from(root.querySelectorAll(selectors.join(',')));
   const shouldPreserve=inputs.some(input=>input===active||String(input.value||'').trim());
-  if(shouldPreserve&&typeof _restoreExpertTeamDraftFocusIfNeeded==='function')_restoreExpertTeamDraftFocusIfNeeded(dock);
+  if(shouldPreserve&&typeof _restoreExpertTeamDraftFocusIfNeeded==='function')_restoreExpertTeamDraftFocusIfNeeded(root);
   return shouldPreserve;
 }
 
@@ -2578,11 +2578,11 @@ async function answerExpertTeamQuestion(btn){
     if(card&&_expertTeamQuestionPopoverOpen){
       _expertTeamQuestionPopoverRunId=card.runId||card.sessionId||'';
       _expertTeamQuestionPopoverQuestionId=(pendingAfter[0]&&pendingAfter[0].id)||qid||'';
-      if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+      if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
       openExpertTeamQuestionPopover(null);
     }else if(card){
-      if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
-      if(typeof focusExpertTeamBottomDock==='function')focusExpertTeamBottomDock(null);
+      if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
+      if(typeof focusExpertTeamWorkspacePanel==='function')focusExpertTeamWorkspacePanel(null);
     }
     if(card&&Array.isArray(card.questions)&&card.questions.length&&!pendingAfter.length&&typeof showToast==='function'){
       showToast('需求已确认，正在进入生成。');
@@ -2644,7 +2644,7 @@ async function resumeExpertTeamRun(btn){
     });
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
     _applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
     return true;
@@ -2667,7 +2667,7 @@ async function cancelExpertTeamRun(btn){
     });
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
     if(typeof S!=='undefined'&&S.session&&S.session.session_id===sid){
       S.busy=false;
       S.activeStreamId=null;
@@ -2791,7 +2791,7 @@ async function approveExpertTeamStage(btn){
     });
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
     _applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
     if(typeof showToast==='function')showToast(data&&data.stream_id?'已确认，正在进入下一阶段。':'专家团任务已完成。');
@@ -2834,7 +2834,7 @@ async function reviseExpertTeamStage(btn){
     });
     const run=data&&data.run;
     const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
+    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
     _applyExpertTeamStreamResponse(data);
     if(typeof renderSessionList==='function')renderSessionList();
     if(typeof showToast==='function')showToast('已提交修改意见，正在重做当前阶段。');
@@ -3067,6 +3067,34 @@ function _statusCardHtml(card){
   </div>`;
 }
 
+function _hideExpertTeamLegacyDock(){
+  const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
+  if(!dock)return false;
+  dock.innerHTML='';
+  dock.hidden=true;
+  dock.onclick=null;
+  delete dock.dataset.writeflowRunId;
+  delete dock.dataset.writeflowSourceSessionId;
+  delete dock.dataset.expertTeamRenderKey;
+  return true;
+}
+
+function renderExpertTeamStatusSurface(card){
+  if(!_isExpertTeamStatusCard(card))return clearExpertTeamWorkspacePanel();
+  const activeSid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
+  const sourceSid=card.sourceSessionId||card.source_session_id||'';
+  if(sourceSid&&activeSid&&sourceSid!==activeSid){
+    return clearExpertTeamWorkspacePanel();
+  }
+  _activeExpertTeamStatusCard=card;
+  if(typeof window!=='undefined')window._activeExpertTeamStatusCard=card;
+  _hideExpertTeamLegacyDock();
+  mountExpertTeamWorkspacePanel(card);
+  _syncExpertTeamBlankCollapseListener(false);
+  _syncExpertTeamQuestionPopover(card);
+  return _syncExpertTeamWorkspacePanelVisibility();
+}
+
 function renderWriteflowStatusDock(card){
   const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
   if(!dock||!card){
@@ -3078,6 +3106,7 @@ function renderWriteflowStatusDock(card){
     return clearWriteflowStatusDock();
   }
   const isExpertTeam=_isExpertTeamStatusCard(card);
+  if(isExpertTeam)return renderExpertTeamStatusSurface(card);
   const renderKey=isExpertTeam?_expertTeamWorkspaceRenderKey(card):'';
   const dockInputState=isExpertTeam?_captureExpertTeamQuestionInputState(dock):null;
   const canReuseExpertDock=isExpertTeam&&dock.dataset.expertTeamRenderKey===renderKey&&dock.querySelector('.status-card-writeflow');
@@ -3134,6 +3163,7 @@ function clearWriteflowStatusDock(){
 }
 
 if(typeof window!=='undefined'){
+  window.renderExpertTeamStatusSurface=renderExpertTeamStatusSurface;
   window.renderWriteflowStatusDock=renderWriteflowStatusDock;
   window.clearWriteflowStatusDock=clearWriteflowStatusDock;
 }

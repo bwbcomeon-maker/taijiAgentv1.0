@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Electron smoke for the rebuilt expert-team presenter.
+ * Electron smoke for expert-team Plan A: right-side workbench, no bottom dock.
  */
 const fs = require("fs");
 const path = require("path");
@@ -18,9 +18,7 @@ const electronBin = path.join(appDir, "node_modules", "electron", "dist", "Elect
 const outDir = path.join(repoRoot, "output", "playwright");
 
 function assertState(condition, message, detail) {
-  if (!condition) {
-    throw new Error(`${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
-  }
+  if (!condition) throw new Error(`${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
 }
 
 async function prepareDesktopSession(page, workspace) {
@@ -45,175 +43,150 @@ async function prepareDesktopSession(page, workspace) {
 }
 
 function runFixture(sessionId, state, overrides = {}) {
+  const stageIndex = {
+    collecting_required: 0,
+    collecting_optional: 0,
+    ready_to_generate: 0,
+    generating: 1,
+    awaiting_stage_input: 1,
+    generated_invalid: 1,
+    awaiting_review: 1,
+    completed: 4,
+  }[state] ?? 0;
   const outputContent = [
-    "阶段摘要：已完成办公材料初稿。",
-    "正文草稿：标题：关于开展近期安全生产专项检查的通知",
+    "阶段摘要：资料整理专家已完成本阶段素材梳理。",
     "",
-    "为进一步压实安全生产责任，现就近期安全生产专项检查有关事项通知如下。",
+    "正文草稿：关于迎峰度夏保供电重点工作推进情况的部门月度工作汇报",
     "",
-    "一、检查范围",
-    "覆盖各部门、各基层单位重点场所、重点设备和重点作业环节。",
+    "开头概述：本月围绕迎峰度夏保供电重点任务，持续推进负荷预测、隐患治理、应急保障和客户服务协同。",
     "",
-    "二、时间安排",
-    "自本周起至月底前完成自查、抽查和问题整改闭环。",
+    "一、工作开展情况",
+    "1. 加强设备巡视与风险排查。",
+    "2. 推进重点线路隐患整治。",
+    "3. 完善应急值守和抢修联动。",
     "",
-    "三、责任分工",
-    "各责任部门按职责落实检查、整改、报送和复核工作。",
+    "二、存在问题",
+    "部分台区负荷增长较快，个别跨部门事项还需进一步压实责任。",
     "",
-    "待补充事项：请补充检查联系人和报送邮箱。",
-    "建议下一步：进入材料打磨。",
+    "三、下一步工作安排",
+    "持续跟踪高温天气变化，细化保供电措施，按周闭环重点问题。",
+    "",
+    "待补充事项：请补充具体月份、关键指标和责任部门。",
   ].join("\n");
-  const presentation = {
-    collecting_required: {
-      title: "必须需求待确认",
-      detail: "请先补充需求信息，专家团再继续推进。",
-      primary_action: { id: "answer_required", label: "去确认", kind: "question_popover" },
-    },
-    collecting_optional: {
-      title: "可选补充待处理",
-      detail: "可继续补充材料，也可以跳过后开始生成。",
-      primary_action: { id: "answer_optional", label: "补充或跳过", kind: "question_popover" },
-    },
-    generating: {
-      title: "专家团正在生成",
-      detail: "后台正在按当前阶段生成内容。",
-      primary_action: { id: "cancel", label: "停止生成", kind: "danger" },
-    },
-    generated_invalid: {
-      title: "草稿未通过校验",
-      detail: "草稿未通过办公材料口径校验，请重新生成。",
-      primary_action: { id: "regenerate", label: "重新生成", kind: "primary" },
-      secondary_actions: [{ id: "view_result", label: "查看草稿", kind: "ghost" }],
-    },
-    awaiting_review: {
-      title: "阶段成果待复核",
-      detail: "阶段结果已生成，请查看后确认是否进入下一阶段。",
-      primary_action: { id: "review_stage", label: "去复核", kind: "primary" },
-      secondary_actions: [
-        { id: "view_result", label: "查看成果", kind: "ghost" },
-        { id: "approve_stage", label: "无修改，进入下一阶段", kind: "primary" },
-        { id: "revise_stage", label: "需要修改", kind: "ghost" },
-      ],
-    },
-    completed: {
-      title: "专家团任务已完成",
-      detail: "所有阶段已完成，结果已写入当前对话。",
-      primary_action: { id: "view_result", label: "查看成果", kind: "primary" },
-    },
-  }[state];
-  const requiredPending = state === "collecting_required";
-  const optionalPending = state === "collecting_optional";
   const output = {
     id: "delivery-office-material",
     kind: "chat",
-    title: "起草通知通报初稿",
-    visible_title: "起草通知通报初稿",
-    summary: "当前阶段已形成内部通知初稿，包含检查范围、时间安排、责任分工和报送要求。",
-    preview: "关于开展近期安全生产专项检查的通知。",
+    title: "起草工作汇报初稿",
+    visible_title: "起草工作汇报初稿",
+    summary: "当前阶段已形成工作汇报素材摘要，包含工作开展、问题和下一步安排。",
+    preview: "关于迎峰度夏保供电重点工作推进情况的部门月度工作汇报。",
     content: outputContent,
     content_length: outputContent.length,
     has_long_content: true,
     locator: "chat",
     artifact_id: "",
   };
-  const currentStage = {
-    id: state === "collecting_required" || state === "collecting_optional" ? "plan" : "draft",
-    task_id: state === "collecting_required" || state === "collecting_optional" ? "plan" : "draft",
-    index: state === "collecting_required" || state === "collecting_optional" ? 0 : 2,
-    title: state === "collecting_required" || state === "collecting_optional" ? "流程安排" : "起草办公材料初稿",
-    phase: state === "collecting_required" || state === "collecting_optional" ? "需求确认" : "生成初稿",
-    worker_id: state === "collecting_required" || state === "collecting_optional" ? "director" : "writer",
-    worker_name: state === "collecting_required" || state === "collecting_optional" ? "写作总导演" : "文案创作专家",
-    status: state === "generating" ? "running" : state === "awaiting_review" ? "awaiting_review" : "pending",
-  };
   const members = [
-    { id: "director", name: "写作总导演", role: "流程编排", status: state === "collecting_required" || state === "collecting_optional" ? "等待确认" : "已完成", image: "static/assets/writeflow/member-workflow-producer.png" },
-    { id: "material", name: "资料整理专家", role: "素材整理", status: "待命", image: "static/assets/writeflow/member-research-expert.png" },
-    { id: "writer", name: "文案创作专家", role: "正文写作", status: state === "generating" ? "执行中" : state === "awaiting_review" || state === "completed" ? "待复核" : "待命", image: "static/assets/writeflow/member-writing-executor.png" },
+    { id: "director", name: "写作总导演", role: "流程编排", status: stageIndex > 0 ? "已完成" : "等待确认", image: "static/assets/writeflow/member-workflow-producer.png" },
+    { id: "material", name: "资料整理专家", role: "素材整理", status: state === "generating" ? "执行中" : state === "awaiting_stage_input" ? "等待确认" : stageIndex > 1 ? "已完成" : "待命", image: "static/assets/writeflow/member-research-expert.png" },
+    { id: "writer", name: "文案创作专家", role: "正文写作", status: "待命", image: "static/assets/writeflow/member-writing-executor.png" },
     { id: "reviewer", name: "审稿专家", role: "审稿打磨", status: "待命", image: "static/assets/writeflow/member-editor.png" },
     { id: "delivery", name: "交付复核专家", role: "交付确认", status: state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-proofreader.png" },
   ];
   const tasks = [
-    { id: "plan", title: "流程安排", phase: "流程安排", status: currentStage.id === "plan" ? (state === "collecting_required" || state === "collecting_optional" ? "pending" : "running") : "done", worker_id: "director", worker_name: "写作总导演" },
-    { id: "materials", title: "素材整理", phase: "素材整理", status: state === "completed" ? "done" : currentStage.id === "draft" ? "done" : "pending", worker_id: "material", worker_name: "资料整理专家" },
-    { id: "draft", title: "起草办公材料初稿", phase: "生成初稿", status: state === "generating" ? "running" : state === "awaiting_review" ? "awaiting_review" : state === "completed" ? "done" : "pending", worker_id: "writer", worker_name: "文案创作专家" },
-    { id: "polish", title: "审稿打磨", phase: "审稿打磨", status: state === "completed" ? "done" : "pending", worker_id: "reviewer", worker_name: "审稿专家" },
+    { id: "plan", title: "流程安排", phase: "流程安排", status: stageIndex > 0 ? "done" : "pending", worker_id: "director", worker_name: "写作总导演" },
+    { id: "materials", title: "素材整理", phase: "素材整理", status: state === "generating" ? "running" : state === "awaiting_stage_input" ? "awaiting_input" : stageIndex > 1 ? "done" : "pending", worker_id: "material", worker_name: "资料整理专家" },
+    { id: "draft", title: "起草工作汇报初稿", phase: "初稿撰写", status: stageIndex > 2 ? "done" : "pending", worker_id: "writer", worker_name: "文案创作专家" },
+    { id: "polish", title: "审稿打磨", phase: "审稿打磨", status: stageIndex > 3 ? "done" : "pending", worker_id: "reviewer", worker_name: "审稿专家" },
     { id: "delivery", title: "交付确认", phase: "交付确认", status: state === "completed" ? "done" : "pending", worker_id: "delivery", worker_name: "交付复核专家" },
   ];
+  const currentStage = tasks[stageIndex] || tasks[0];
+  const pendingInput = state === "awaiting_stage_input" ? {
+    id: "stage-input-hide-name",
+    question: "本次汇报是否需要隐去项目或客户名称？",
+    description: "资料整理专家需要你确认后继续生成；确认后仍停留在当前素材整理阶段。",
+    options: ["不需要隐去", "需要隐去，使用代号"],
+    required: true,
+    stage_id: currentStage.id,
+    worker_id: currentStage.worker_id,
+  } : {};
   const stageResult = state === "awaiting_review" || state === "completed" || state === "generated_invalid" ? {
     stage_id: currentStage.id,
     worker_id: currentStage.worker_id,
     summary: output.summary,
     deliverable: output.preview,
-    review_items: [{ id: "ri-1", title: "请补充检查联系人和报送邮箱。", status: "pending", used_in_revision: false }],
+    review_items: [{ id: "ri-1", title: "请补充具体月份、关键指标和责任部门。", status: "pending", used_in_revision: false }],
     next_action: "请复核当前阶段成果，确认后进入下一阶段。",
     validation: state === "generated_invalid" ? { status: "fail", message: "草稿未通过办公材料口径校验。" } : { status: "pass", message: "" },
   } : {};
-  const timelineEvents = [
-    { type: "team_created", title: "专家团已创建", detail: "等待需求确认", member_id: "director", member_name: "写作总导演", member_image: "static/assets/writeflow/member-workflow-producer.png" },
-    { type: "generation_started", title: "专家开始执行当前阶段", detail: currentStage.phase, member_id: currentStage.worker_id, member_name: currentStage.worker_name },
-    { type: "generation_completed", title: "阶段成果已生成", detail: state === "awaiting_review" ? "等待复核" : "", member_id: currentStage.worker_id, member_name: currentStage.worker_name },
+  const presentationByState = {
+    collecting_required: { title: "必须需求待确认", detail: "请先补充需求信息，专家团再继续推进。", primary_action: { id: "answer_required", label: "去确认", kind: "question_popover" } },
+    collecting_optional: { title: "可选补充待处理", detail: "可继续补充材料，也可以跳过后开始生成。", primary_action: { id: "answer_optional", label: "补充或跳过", kind: "question_popover" } },
+    ready_to_generate: { title: "准备开始生成", detail: "需求已经确认，可以启动当前阶段。", primary_action: { id: "start_generation", label: "开始生成", kind: "primary" } },
+    generating: { title: "专家团正在生成", detail: "资料整理专家正在处理当前阶段。", primary_action: { id: "cancel", label: "停止生成", kind: "danger" } },
+    awaiting_stage_input: { title: "需要确认后继续", detail: pendingInput.description, primary_action: { id: "submit_stage_input", label: "确认并继续生成", kind: "primary" } },
+    generated_invalid: { title: "草稿未通过校验", detail: "草稿未通过办公材料口径校验，请重新生成。", primary_action: { id: "regenerate", label: "重新生成", kind: "primary" }, secondary_actions: [{ id: "view_result", label: "查看草稿", kind: "ghost" }] },
+    awaiting_review: { title: "阶段成果待复核", detail: "阶段结果已生成，请查看后确认是否进入下一阶段。", primary_action: { id: "review_stage", label: "去复核", kind: "primary" }, secondary_actions: [{ id: "view_result", label: "查看成果", kind: "ghost" }, { id: "approve_stage", label: "无修改，进入下一阶段", kind: "primary" }, { id: "revise_stage", label: "需要修改", kind: "ghost" }] },
+    completed: { title: "专家团任务已完成", detail: "所有阶段已完成，结果已写入当前对话。", primary_action: { id: "view_result", label: "查看成果", kind: "primary" } },
+  };
+  const progress = {
+    done: tasks.filter((task) => task.status === "done").length,
+    total: tasks.length,
+    current: state.startsWith("collecting") ? "需求确认" : currentStage.phase,
+    current_index: stageIndex,
+    is_intake: state.startsWith("collecting"),
+    text: state.startsWith("collecting") ? `0/${tasks.length}` : state === "completed" ? `${tasks.length}/${tasks.length}` : `${Math.min(tasks.length, stageIndex + 1)}/${tasks.length}`,
+  };
+  const questions = [
+    { id: "topic", title: "这次要编制哪类办公材料，主题是什么？", required: true, status: state === "collecting_required" ? "pending" : "answered", answer: state === "collecting_required" ? "" : "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况" },
+    { id: "audience", title: "材料面向哪些对象，使用场景是什么？", required: true, status: state === "collecting_required" ? "pending" : "answered", answer: state === "collecting_required" ? "" : "公司分管领导，月度例会" },
+    { id: "boundary", title: "有哪些已知素材、口径要求、篇幅或表述边界？", required: true, status: state === "collecting_required" ? "pending" : "answered", answer: state === "collecting_required" ? "" : "正式、条理清晰、包含问题和下步安排" },
+    { id: "optional_context", title: "还有没有可选补充材料或特别强调的点？", required: false, status: state === "collecting_optional" ? "pending" : "skipped", answer: "" },
   ];
-  const workspaceView = {
-    visible: true,
-    title: "专家团工作台",
-    state,
-    current_stage: currentStage,
-    current_worker: members.find((member) => member.id === currentStage.worker_id) || {},
-    phases: tasks,
-    members,
-    timeline: timelineEvents,
+  const view = {
+    business_context: { material_type: "work_report", visible_title: "起草工作汇报初稿", style_contract: "采用正式工作汇报口径。", forbidden_terms: [] },
+    presentation: { state, visible_title: "起草工作汇报初稿", result: output, summary: output.summary, progress_text: progress.text, ...presentationByState[state] },
+    team: { id: "content-creator-team", title: "内容创作专家团", image: "", members },
+    workflow: { stages: tasks, current_stage: currentStage, progress },
+    workspace: {
+      visible: true,
+      title: "专家团工作台",
+      state,
+      current_stage: currentStage,
+      current_worker: members.find((member) => member.id === currentStage.worker_id) || {},
+      phases: tasks,
+      members,
+      timeline: [
+        { type: "team_created", title: "内容创作专家团已创建", detail: "等待需求确认后开始协作。", member_id: "director", member_name: "写作总导演" },
+        { type: state === "awaiting_stage_input" ? "stage_input_requested" : "generation_started", title: state === "awaiting_stage_input" ? "资料整理专家请求确认" : "专家正在处理当前阶段", detail: currentStage.phase, member_id: currentStage.worker_id, member_name: currentStage.worker_name },
+      ],
+      stage_result: stageResult,
+      pending_input: pendingInput,
+    },
     stage_result: stageResult,
+    pending_input: pendingInput,
+    intake: { required_pending: state === "collecting_required" ? 3 : 0, optional_pending: state === "collecting_optional" ? 1 : 0, optional_status: state === "collecting_optional" ? "pending" : "skipped", questions },
+    primary_confirmation: state === "awaiting_stage_input" ? { type: "stage_input", title: pendingInput.question } : state.startsWith("collecting") ? { type: "question", title: "需求待确认" } : state === "awaiting_review" ? { type: "stage_review", title: "阶段成果待复核" } : null,
+    pending_confirmations: state === "awaiting_stage_input" || state.startsWith("collecting") || state === "awaiting_review" ? [{}] : [],
+    review_items: state === "awaiting_review" ? stageResult.review_items : [],
+    stage_review: { display_state: state === "generating" ? "running" : state, actionable: state === "awaiting_review", output },
+    actions: { can_submit_stage_input: state === "awaiting_stage_input", can_approve_stage: state === "awaiting_review", can_request_revision: state === "awaiting_review", can_cancel: state === "generating", can_retry: state === "generated_invalid" },
+    timeline_events: [],
   };
   return {
-    run_id: `electron-presenter-${state}`,
+    run_id: `electron-plan-a-${state}`,
     session_id: sessionId,
     team_id: "content-creator-team",
     team_title: "内容创作专家团",
-    title: "帮我起草一份内部通知，主题是近期安全生产专项检查安排",
+    title: "帮我起草一份部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
     workflow_state: state,
-    phase: state === "collecting_required" || state === "collecting_optional" ? "需求确认" : "生成初稿",
-    questions: [
-      { id: "topic", title: "这次要编制哪类办公材料，主题是什么？", placeholder: "例如：内部通知，主题是近期安全生产专项检查安排", required: true, status: requiredPending ? "pending" : "answered", answer: requiredPending ? "" : "内部通知，主题是近期安全生产专项检查安排" },
-      { id: "audience", title: "材料面向哪些对象，使用场景是什么？", placeholder: "例如：公司各部门、各基层单位", required: true, status: requiredPending ? "pending" : "answered", answer: requiredPending ? "" : "公司各部门、各基层单位" },
-      { id: "boundary", title: "有哪些已知素材、口径要求、篇幅或表述边界？", placeholder: "正式、简洁，包含检查范围、时间节点、责任分工和报送要求", required: true, status: requiredPending ? "pending" : "answered", answer: requiredPending ? "" : "正式、简洁" },
-      { id: "optional_context", title: "还有没有可选补充材料或特别强调的点？", placeholder: "没有可直接跳过", required: false, status: optionalPending ? "pending" : "skipped", answer: "" },
-    ],
+    phase: currentStage.phase,
+    questions,
     members,
     tasks,
     artifacts: state === "awaiting_review" || state === "completed" ? [{ id: output.id, kind: "chat", label: "结果已写入对话", exists: true }] : [],
     stage_outputs: state === "awaiting_review" || state === "completed" || state === "generated_invalid" ? [output] : [],
-    view: {
-      business_context: {
-        material_type: "notice",
-        visible_title: "起草通知通报初稿",
-        style_contract: "采用内部通知通报口径。",
-        forbidden_terms: [],
-      },
-      presentation: { state, visible_title: "起草通知通报初稿", result: output, summary: output.summary, ...presentation },
-      workspace: workspaceView,
-      dock: {
-        state,
-        title: presentation.title,
-        detail: presentation.detail,
-        primary_action: presentation.primary_action,
-        secondary_actions: presentation.secondary_actions || [],
-      },
-      stage_result: stageResult,
-      intake: {
-        required_pending: requiredPending ? 3 : 0,
-        optional_pending: optionalPending ? 1 : 0,
-        optional_status: optionalPending ? "pending" : "skipped",
-        questions: [],
-      },
-      primary_confirmation: requiredPending || optionalPending ? { type: "question", question_id: requiredPending ? "topic" : "optional_context", title: requiredPending ? "这次要编制哪类办公材料，主题是什么？" : "还有没有可选补充材料或特别强调的点？" } : state === "awaiting_review" ? { type: "stage_review", title: "阶段成果待复核" } : null,
-      pending_confirmations: requiredPending || optionalPending || state === "awaiting_review" ? [{}] : [],
-      review_items: [],
-      stage_review: { display_state: state === "generating" ? "running" : state, actionable: state === "awaiting_review", output },
-      phase_progress: { done: state === "completed" ? 3 : state === "awaiting_review" ? 1 : 0, total: 3, current: state === "completed" ? "交付" : state === "collecting_required" || state === "collecting_optional" ? "需求确认" : "生成初稿" },
-      actions: {},
-      timeline_events: timelineEvents,
-    },
+    view,
     ...overrides,
   };
 }
@@ -222,9 +195,31 @@ async function renderRun(page, state, overrides) {
   await page.evaluate(({ state, overrides }) => {
     const run = window.__expertTeamRunFixture(S.session.session_id, state, overrides || {});
     const card = _expertTeamStatusCardFromRun(run, { session_id: S.session.session_id });
-    renderWriteflowStatusDock(card);
-    if (typeof focusExpertTeamBottomDock === "function") focusExpertTeamBottomDock(null);
+    renderExpertTeamStatusSurface(card);
   }, { state, overrides });
+  await page.waitForSelector("#expertTeamWorkspacePanel:not([hidden])", { timeout: 10000 });
+}
+
+async function snapshotState(page) {
+  return page.evaluate(() => {
+    const panel = document.querySelector("#expertTeamWorkspacePanel");
+    const dock = document.querySelector("#writeflowStatusDock");
+    const shell = document.querySelector(".taiji-home-shell");
+    const panelRect = panel ? panel.getBoundingClientRect() : null;
+    return {
+      chatText: document.querySelector("#msgInner")?.textContent.replace(/\s+/g, " ").trim() || "",
+      panelText: panel?.textContent.replace(/\s+/g, " ").trim() || "",
+      dockHidden: !dock || dock.hidden || getComputedStyle(dock).display === "none",
+      dockText: dock?.textContent.replace(/\s+/g, " ").trim() || "",
+      panelVisible: Boolean(panel && !panel.hidden && getComputedStyle(panel).display !== "none"),
+      collapsed: shell?.classList.contains("taiji-expert-team-panel-collapsed") || false,
+      panelRect: panelRect ? { top: panelRect.top, left: panelRect.left, width: panelRect.width, height: panelRect.height, right: panelRect.right, bottom: panelRect.bottom } : null,
+      chatConfirmButtons: Array.from(document.querySelectorAll("#msgInner button")).filter((button) => /去确认|去复核|确认并继续/.test(button.textContent || "")).length,
+      memberCount: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-member").length,
+      stageCount: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-panel-phase").length,
+      primaryButtons: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-primary-task-card [data-expert-team-action], #expertTeamWorkspacePanel .expert-team-stage-input-card [data-expert-team-action], #expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action]").length,
+    };
+  });
 }
 
 async function main() {
@@ -254,14 +249,13 @@ async function main() {
     },
     timeout: 90000,
   });
-  let page;
   try {
-    page = await app.firstWindow({ timeout: 90000 });
+    const page = await app.firstWindow({ timeout: 90000 });
     await page.waitForLoadState("domcontentloaded", { timeout: 90000 });
     await page.waitForFunction(
       () => location.href.includes("taiji_desktop=1") &&
         typeof buildExpertTeamCardFromRun === "function" &&
-        typeof renderExpertTeamDockFromPresentation === "function" &&
+        typeof renderExpertTeamStatusSurface === "function" &&
         typeof handleExpertTeamPresentationAction === "function",
       { timeout: 90000 }
     );
@@ -273,112 +267,70 @@ async function main() {
     await page.evaluate(async () => {
       const ok = await sendExpertTeamAction({
         team_id: "content-creator-team",
-        prompt: "帮我起草一份内部通知，主题是近期安全生产专项检查安排",
+        prompt: "帮我起草一份部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
         new_session: false,
       });
       if (!ok) throw new Error("sendExpertTeamAction returned false");
     });
-    await page.waitForSelector("#writeflowStatusDock .status-card-expert-dock-button", { timeout: 10000 });
     await page.waitForSelector("#expertTeamWorkspacePanel:not([hidden])", { timeout: 10000 });
-    const realStart = await page.evaluate(() => ({
-      msgCount: Array.isArray(S.messages) ? S.messages.length : -1,
-      chatText: document.querySelector("#msgInner")?.textContent.replace(/\s+/g, " ").trim() || "",
-      dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
-      workspaceVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel:not([hidden])")),
-      workspaceParentId: document.querySelector("#expertTeamWorkspacePanel")?.parentElement?.id || "",
-      workspaceRect: (() => {
-        const rect = document.querySelector("#expertTeamWorkspacePanel")?.getBoundingClientRect();
-        return rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height, bottom: rect.bottom } : null;
-      })(),
-      runIds: (Array.isArray(S.messages) ? S.messages : []).map((msg) => msg && msg.expert_team_run_id).filter(Boolean),
-      memberAvatars: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-member-avatar img").length,
-      timelineRows: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-timeline-item").length,
-    }));
-    assertState(realStart.msgCount >= 2, "Real expert-team start did not sync session messages immediately", realStart);
-    assertState(realStart.chatText.includes("召唤内容创作专家团") && realStart.chatText.includes("专家团已创建"), "Real expert-team start did not render lifecycle messages in chat", realStart);
-    assertState(realStart.dockText.includes("必须需求待确认") && realStart.dockText.includes("去确认"), "Real expert-team start did not render the dock action", realStart);
-    assertState(realStart.runIds.length >= 2, "Session messages are missing expert-team run ids", realStart);
-    assertState(realStart.workspaceVisible && realStart.workspaceText.includes("专家团工作台"), "Expert team workspace panel is not visible after real start", realStart);
-    assertState(realStart.workspaceParentId === "mainChat", "Expert team workspace is mounted inside the wrong container", realStart);
-    assertState(realStart.workspaceRect && realStart.workspaceRect.width > 360 && realStart.workspaceRect.height > 80 && realStart.workspaceRect.top >= 0 && realStart.workspaceRect.bottom < 900, "Expert team workspace rectangle is not usable in the desktop viewport", realStart);
-    assertState(realStart.memberAvatars >= 2 && realStart.timelineRows >= 1, "Expert team members or timeline are not visible in the workspace after real start", realStart);
+    const realStart = await snapshotState(page);
+    assertState(realStart.panelVisible && realStart.panelText.includes("专家团工作台"), "Real start did not show the right-side workbench", realStart);
+    assertState(realStart.dockHidden && !realStart.dockText, "Real start still exposes the legacy bottom dock", realStart);
+    assertState(realStart.chatText.includes("专家团已创建") && realStart.chatText.includes("右侧专家团工作台"), "Real start lifecycle message is missing or still points to bottom dock", realStart);
+    assertState(realStart.panelRect && realStart.panelRect.left > 600 && realStart.panelRect.width >= 240 && realStart.panelRect.bottom <= 900, "Workbench is not positioned as a right-side surface", realStart);
 
     await renderRun(page, "collecting_required");
-    await page.waitForSelector("#writeflowStatusDock .status-card-expert-dock-button", { timeout: 10000 });
-    const initial = await page.evaluate(() => ({
-      dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
-      chatConfirmCards: document.querySelectorAll("#msgInner .expert-team-chat-confirmation-card").length,
-      directChatButtons: Array.from(document.querySelectorAll("#msgInner button")).filter((button) => button.textContent.includes("去确认")).length,
-    }));
-    assertState(initial.dockText.includes("必须需求待确认") && initial.dockText.includes("去确认"), "Collecting-required state is not driven by dock presentation", initial);
-    assertState(initial.workspaceText.includes("专家团工作台") && initial.workspaceText.includes("流程安排"), "Collecting-required state did not keep the workspace visible", initial);
-    assertState(initial.chatConfirmCards === 0 && initial.directChatButtons === 0, "Chat area still exposes duplicate expert-team confirmation", initial);
+    const collecting = await snapshotState(page);
+    assertState(collecting.panelText.includes("必须需求待确认") && collecting.panelText.includes("去确认"), "Collecting state has no right-side confirmation action", collecting);
+    assertState(collecting.stageCount === 5 && collecting.memberCount === 5, "Content team members/stages are not dynamically rendered from fixture", collecting);
+    assertState(collecting.dockHidden && collecting.chatConfirmButtons === 0, "Collecting state still duplicates actions outside the workbench", collecting);
 
-    await page.click("#writeflowStatusDock .status-card-expert-dock-button");
-    await page.waitForSelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) textarea", { timeout: 10000 });
-    await page.fill("#writeflowStatusDock .expert-team-question-popover:not([hidden]) textarea", "安全生产专项检查通知");
-    await page.focus("#writeflowStatusDock .expert-team-question-popover:not([hidden]) textarea");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-action='answer_required']");
+    await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea", { timeout: 10000 });
+    await page.fill("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea", "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况");
+    await page.focus("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea");
     await page.waitForTimeout(6500);
     const draftProtected = await page.evaluate(() => {
-      const input = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden]) textarea");
-      const popover = document.querySelector("#writeflowStatusDock .expert-team-question-popover:not([hidden])");
-      return { value: input ? input.value : "", popoverOpen: Boolean(popover) };
+      const input = document.querySelector("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea");
+      return { value: input ? input.value : "", popoverOpen: Boolean(input), activeInside: Boolean(document.activeElement && document.activeElement.closest("#expertTeamWorkspacePanel")) };
     });
-    assertState(draftProtected.value === "安全生产专项检查通知" && draftProtected.popoverOpen, "Question draft or popover state was not preserved", draftProtected);
+    assertState(draftProtected.value.includes("迎峰度夏") && draftProtected.popoverOpen && draftProtected.activeInside, "Question popover draft was not preserved during refresh window", draftProtected);
+    await page.keyboard.press("Escape").catch(() => {});
 
     await renderRun(page, "generating");
-    const generating = await page.evaluate(() => ({
-      text: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
-      cards: document.querySelectorAll("#writeflowStatusDock .status-card-expert-dock-summary").length,
-    }));
-    assertState(generating.cards === 1, "Generating state rendered more than one dock state", generating);
-    assertState(generating.text.includes("专家团正在生成") && generating.text.includes("停止生成"), "Generating state lacks the single running action", generating);
-    assertState(generating.workspaceText.includes("专家团工作台") && generating.workspaceText.includes("文案创作专家"), "Generating state did not show current expert in workspace", generating);
-    assertState(!generating.text.includes("未检测到结果") && !generating.text.includes("阶段成果待复核"), "Generating state is mixed with result or missing states", generating);
+    const generating = await snapshotState(page);
+    assertState(generating.panelText.includes("专家团正在生成") && generating.panelText.includes("停止生成"), "Generating state is not represented in the right workbench", generating);
+    assertState(!generating.panelText.includes("阶段成果待复核") && !generating.panelText.includes("未检测到结果"), "Generating state is mixed with review or missing-result state", generating);
+    assertState(generating.dockHidden && generating.chatConfirmButtons === 0, "Generating state leaks duplicate actions", generating);
+
+    await renderRun(page, "awaiting_stage_input");
+    const stageInput = await snapshotState(page);
+    assertState(stageInput.panelText.includes("需要确认后继续") && stageInput.panelText.includes("本次汇报是否需要隐去项目或客户名称？"), "Stage input is not shown in the right workbench", stageInput);
+    assertState(stageInput.primaryButtons === 1 && stageInput.chatConfirmButtons === 0, "Stage input has duplicate or missing primary actions", stageInput);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-stage-input-choice='不需要隐去']");
+    const selectedInput = await page.evaluate(() => Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-stage-input-choice].is-selected")));
+    assertState(selectedInput, "Stage input quick choice cannot be selected");
+
     await page.click("#expertTeamWorkspacePanel .expert-team-panel-collapse-toggle");
-    const collapsed = await page.evaluate(() => ({
-      shellCollapsed: document.querySelector(".taiji-home-shell")?.classList.contains("taiji-expert-team-panel-collapsed") || false,
-      bodyVisible: (() => {
-        const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
-        return body ? getComputedStyle(body).display !== "none" : false;
-      })(),
-      panelText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
-    }));
-    assertState(collapsed.shellCollapsed && !collapsed.bodyVisible && collapsed.panelText.includes("专家团工作台"), "Expert team workspace does not collapse to a lightweight header", collapsed);
-    await page.click("#expertTeamWorkspacePanel .expert-team-panel-collapse-toggle");
-    const expanded = await page.evaluate(() => ({
-      shellCollapsed: document.querySelector(".taiji-home-shell")?.classList.contains("taiji-expert-team-panel-collapsed") || false,
-      bodyVisible: (() => {
-        const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
-        return body ? getComputedStyle(body).display !== "none" : false;
-      })(),
-    }));
-    assertState(!expanded.shellCollapsed && expanded.bodyVisible, "Expert team workspace does not expand after collapse", expanded);
+    const collapsed = await snapshotState(page);
+    assertState(collapsed.collapsed && collapsed.panelText.includes("处理") && !collapsed.panelText.includes("工作流程"), "Workbench did not collapse to the right capsule", collapsed);
+    await page.click("#expertTeamWorkspacePanel .expert-team-capsule-action");
+    const expanded = await snapshotState(page);
+    assertState(!expanded.collapsed && expanded.panelText.includes("专家团成员"), "Capsule action did not expand the workbench", expanded);
 
     await renderRun(page, "awaiting_review");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-result-card", { timeout: 10000 });
-    await page.click("#writeflowStatusDock .status-card-expert-dock-button");
-    await page.waitForSelector("#expertTeamWorkspacePanel.is-review-open .expert-team-stage-review", { timeout: 10000 });
-    const review = await page.evaluate(() => ({
-      text: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
-      resultCards: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-result-card").length,
-      reviewPanelVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel.is-review-open .expert-team-stage-review")),
-      reviewButtons: Array.from(document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-stage-review button")).map((button) => button.textContent.trim()).filter(Boolean),
-    }));
-    assertState(review.text.includes("阶段成果待复核") && review.resultCards === 1, "Awaiting review does not show one workspace result card", review);
-    assertState(review.reviewPanelVisible && review.reviewButtons.includes("查看成果") && review.reviewButtons.includes("需要修改"), "Dock review action did not open a usable stage review panel", review);
-    assertState(review.workspaceText.includes("查看完整成果") && !review.workspaceText.includes("公众号"), "Office-material result workspace is missing the result entry or still contains public-account wording", review);
+    await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-stage-review", { timeout: 10000 });
+    const review = await snapshotState(page);
+    assertState(review.panelText.includes("阶段成果待复核") && review.panelText.includes("查看成果") && review.panelText.includes("需要修改"), "Review state is not actionable inside the workbench", review);
+    assertState(!review.panelText.includes("公众号"), "Office-material review still contains public-account wording", review);
     await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea", { timeout: 10000 });
     const revision = await page.evaluate(() => ({
       textareaVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea")),
       focusedTag: document.activeElement ? document.activeElement.tagName : "",
     }));
-    assertState(revision.textareaVisible && revision.focusedTag === "TEXTAREA", "Need-revision action did not reveal and focus the revision textarea", revision);
+    assertState(revision.textareaVisible && revision.focusedTag === "TEXTAREA", "Review revision action did not reveal and focus the textarea", revision);
     await page.click("#expertTeamWorkspacePanel .expert-team-result-card [data-expert-team-action='view_result']");
     await page.waitForSelector("#expertTeamResultViewer:not([hidden])", { timeout: 10000 });
     const viewer = await page.evaluate(() => ({
@@ -386,27 +338,31 @@ async function main() {
       height: document.querySelector("#expertTeamResultViewer .expert-team-result-viewer-panel")?.getBoundingClientRect().height || 0,
       viewport: window.innerHeight,
     }));
-    assertState(viewer.text.includes("关于开展近期安全生产专项检查的通知"), "Result viewer did not open the full office-material draft", viewer);
-    assertState(viewer.height < viewer.viewport, "Result viewer exceeds viewport height", viewer);
+    assertState(viewer.text.includes("关于迎峰度夏保供电重点工作推进情况") && viewer.height < viewer.viewport, "Result viewer did not open bounded full content", viewer);
 
+    await page.evaluate(() => { const viewer = document.getElementById("expertTeamResultViewer"); if (viewer) viewer.hidden = true; });
     await renderRun(page, "completed");
-    const completed = await page.evaluate(() => ({
-      text: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-    }));
-    assertState(completed.text.includes("专家团任务已完成") && completed.text.includes("查看成果"), "Completed state does not close the workflow cleanly", completed);
-    assertState(!completed.text.includes("下一阶段建议"), "Completed state still shows next-stage workflow copy", completed);
+    const completed = await snapshotState(page);
+    assertState(completed.panelText.includes("专家团任务已完成") && completed.panelText.includes("查看成果"), "Completed state is not closed cleanly", completed);
+    assertState(!completed.panelText.includes("下一阶段建议"), "Completed state still exposes next-stage wording", completed);
 
-    await page.evaluate(() => {
-      const viewer = document.getElementById("expertTeamResultViewer");
-      if (viewer) viewer.hidden = true;
-    });
     for (const width of [1024, 1280, 1440]) {
       await page.setViewportSize({ width, height: 900 });
-      await renderRun(page, "awaiting_review");
-      await page.screenshot({ path: path.join(outDir, `expert-team-refactor-${width}.png`), fullPage: false });
+      await renderRun(page, "awaiting_stage_input");
+      await page.evaluate(() => {
+        if (typeof showExpertTeamWorkspacePanel === "function") showExpertTeamWorkspacePanel(document.querySelector("#expertTeamWorkspacePanel"));
+      });
+      await page.screenshot({ path: path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`), fullPage: false });
+      await page.click("#expertTeamWorkspacePanel .expert-team-panel-collapse-toggle");
+      await page.screenshot({ path: path.join(outDir, `expert-team-plan-a-capsule-${width}.png`), fullPage: false });
     }
 
-    console.log("EXPERT TEAM ELECTRON SMOKE OK", JSON.stringify({ screenshots: [1024, 1280, 1440].map((width) => path.join(outDir, `expert-team-refactor-${width}.png`)) }, null, 2));
+    console.log("EXPERT TEAM ELECTRON SMOKE OK", JSON.stringify({
+      screenshots: [1024, 1280, 1440].flatMap((width) => [
+        path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
+        path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),
+      ]),
+    }, null, 2));
   } finally {
     if (app) await app.close().catch(() => {});
   }

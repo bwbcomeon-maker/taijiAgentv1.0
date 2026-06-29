@@ -485,7 +485,8 @@ async function send(){
       const fresh=!pending.createdAt||Date.now()-pending.createdAt<15000;
       const sameSession=!pending.sessionId||pending.sessionId===activeSid;
       if(fresh&&sameSession&&pending.card){
-        if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(pending.card);
+        if(pending.card.kind==='expert_team'&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(pending.card);
+        else if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(pending.card);
       }
       window._pendingWriteflowStatusCard=null;
     }
