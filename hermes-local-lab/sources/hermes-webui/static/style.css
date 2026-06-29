@@ -5014,10 +5014,20 @@ main.main > #mainPlugin{display:none;}
 .expert-team-question-review button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .expert-team-question-review.empty{justify-content:center;align-items:flex-start;color:var(--muted);}
 .expert-team-question-complete-message{border:1px solid color-mix(in srgb,var(--success) 30%,var(--border-subtle));border-radius:12px;background:color-mix(in srgb,var(--success) 8%,rgba(255,255,255,.86));padding:12px;color:color-mix(in srgb,var(--success) 72%,var(--text));font-size:13px;font-weight:760;}
-.expert-team-workspace-panel{display:none;}
+.expert-team-workspace-panel{display:block;width:min(980px,92%);margin:0 auto 14px;padding:0 0 2px;position:relative;z-index:2;}
 .expert-team-workspace-panel[hidden]{display:none!important;}
 .taiji-home-shell:not(.taiji-expert-team-panel-visible) .expert-team-workspace-panel{display:none!important;}
 .expert-team-panel-inner{height:100%;min-height:0;display:flex;flex-direction:column;gap:7px;}
+.expert-team-workspace-panel .expert-team-panel-inner{height:auto;gap:10px;}
+.expert-team-workbench-hero{border-color:color-mix(in srgb,var(--accent-bg-strong) 42%,var(--taiji-ui-line,var(--border-subtle)))!important;background:linear-gradient(180deg,rgba(255,255,255,.86),color-mix(in srgb,var(--accent-bg-strong) 8%,rgba(255,255,255,.7)))!important;}
+.expert-team-workbench-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:6px;}
+.expert-team-workbench-grid span{min-width:0;display:flex;flex-direction:column;gap:3px;border:1px solid var(--border-subtle);border-radius:10px;background:rgba(255,255,255,.68);padding:8px 10px;}
+.expert-team-workbench-grid b{min-width:0;color:var(--text);font-size:13px;line-height:1.25;font-weight:820;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.expert-team-workbench-grid small{color:var(--muted);font-size:10px;line-height:1.2;font-weight:720;}
+.expert-team-current-worker{display:inline-flex;align-items:center;gap:8px;margin-top:8px;border:1px solid color-mix(in srgb,var(--success) 26%,var(--border-subtle));border-radius:999px;background:color-mix(in srgb,var(--success) 7%,rgba(255,255,255,.78));padding:5px 10px 5px 6px;}
+.expert-team-current-worker strong{display:block;color:var(--text);font-size:12px;line-height:1.2;font-weight:820;}
+.expert-team-current-worker small{display:block;color:var(--muted);font-size:10px;line-height:1.2;}
+.expert-team-process-row.active{border-color:var(--accent-bg-strong);background:var(--accent-bg);}
 .expert-team-panel-head{position:relative;display:flex;flex-direction:column;gap:7px;border:1px solid var(--taiji-ui-line,var(--border-subtle));border-radius:12px;background:rgba(255,255,255,.76);padding:10px 14px 10px;box-shadow:inset 0 1px 0 rgba(255,255,255,.72);}
 .expert-team-panel-topbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;}
 .expert-team-panel-hide{appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:0;min-height:26px;border:1px solid var(--taiji-ui-line,var(--border-subtle));border-radius:999px;background:rgba(255,255,255,.86);color:var(--muted);cursor:pointer;padding:0 10px;box-shadow:0 8px 20px rgba(47,95,135,.12),inset 0 1px 0 rgba(255,255,255,.78);font-size:11px;font-weight:700;white-space:nowrap;}
@@ -10637,7 +10647,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .taiji-main-workspace{
     position:relative!important;
   }
-  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}
+  :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:block!important;}
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active.taiji-welcome .taiji-hero{
     display:none!important;
   }
@@ -10712,7 +10722,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     overscroll-behavior:auto!important;
   }
   :root[data-taiji-desktop="1"] .taiji-home-shell.taiji-expert-team-active:has(#writeflowStatusDock:not([hidden]) .status-card-writeflow.is-expanded) main.main.taiji-real-main #mainChat .messages-shell{
-    bottom:clamp(380px,62vh,540px)!important;
+    bottom:clamp(220px,36vh,360px)!important;
   }
 }
 
@@ -10773,7 +10783,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 
 @media (max-width:900px){
-  .expert-team-workspace-panel{display:none!important;}
+  .expert-team-workspace-panel{width:calc(100% - 24px);margin-bottom:10px;}
+  .expert-team-workbench-grid{grid-template-columns:1fr;}
 }
 
 /* When config hides workspace controls, use the freed compact-footer space for reasoning. */

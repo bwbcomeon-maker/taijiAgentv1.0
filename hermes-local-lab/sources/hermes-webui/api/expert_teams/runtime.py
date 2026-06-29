@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .catalog import CONTENT_CREATOR_TEAM_ID, DEEP_RESEARCH_TEAM_ID, get_template
-from .materials import business_context_for_run, structured_output_from_delivery, validate_office_material_output
+from .materials import (
+    business_context_for_run,
+    stage_result_from_output,
+    structured_output_from_delivery,
+    validate_stage_output,
+)
 from .storage import latest_run_for_session, read_run, write_run
 from .view import expert_team_run_view
 
@@ -108,7 +113,7 @@ def _initial_timeline_events(template: dict) -> list[dict]:
         {
             "type": "phase_plan_created",
             "title": "已生成专家团阶段计划",
-            "detail": "将按计划、初稿、打磨、交付确认推进。",
+            "detail": "将按流程安排、素材整理、初稿撰写、审稿打磨、交付确认推进。",
             "member_id": "director",
             "at": now,
         }
@@ -136,9 +141,11 @@ def _current_stage(run: dict) -> dict:
     task = deepcopy(tasks[index])
     return {
         "index": index,
+        "id": task.get("id"),
         "task_id": task.get("id"),
         "title": task.get("title"),
         "phase": task.get("phase"),
+        "worker_id": task.get("worker_id"),
         "worker_name": task.get("worker_name"),
         "status": str(task.get("status") or "pending"),
     }
@@ -153,20 +160,24 @@ def _sync_derived(run: dict) -> dict:
     run["current_stage"] = _current_stage(run)
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     run["phase"] = str(current.get("phase") or "需求确认")
+    current_worker_id = str(current.get("worker_id") or "")
     current_worker = str(current.get("worker_name") or "")
     member_status = []
     for member in run.get("members") or []:
         item = deepcopy(member) if isinstance(member, dict) else {}
         name = str(item.get("name") or "")
-        if state in {"collecting_required", "collecting_optional", "ready_to_generate"} and item.get("id") == "director":
-            item["status"] = "等待确认" if state != "ready_to_generate" else "待启动"
-        elif state in {"generating", "revising"} and name == current_worker:
+        member_id = str(item.get("id") or "")
+        if state in {"collecting_required", "collecting_optional"} and item.get("id") == "director":
+            item["status"] = "等待确认"
+        elif state == "ready_to_generate" and (member_id == current_worker_id or name == current_worker):
+            item["status"] = "待启动"
+        elif state in {"generating", "revising"} and (member_id == current_worker_id or name == current_worker):
             item["status"] = "执行中"
-        elif state in {"awaiting_review", "generated_invalid"} and name == current_worker:
+        elif state in {"awaiting_review", "generated_invalid"} and (member_id == current_worker_id or name == current_worker):
             item["status"] = "待复核"
         elif state == "completed":
             item["status"] = "已完成"
-        elif not item.get("status"):
+        elif member_id != current_worker_id:
             item["status"] = "待命"
         member_status.append(item)
     if member_status:
@@ -219,12 +230,13 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
         "generation_cancelled": "本轮生成已停止",
     }.get(event)
     if timeline_title:
+        current = _current_stage(next_run)
         timeline.append(
             {
                 "type": event,
                 "title": timeline_title,
-                "detail": str(next_run.get("phase") or ""),
-                "member_id": "director",
+                "detail": str(current.get("phase") or next_run.get("phase") or ""),
+                "member_id": str(current.get("worker_id") or "director"),
                 "at": next_run["updated_at"],
             }
         )
@@ -334,16 +346,23 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
     output = structured_output_from_delivery(delivery or {}, business_context)
     current = _current_stage(_sync_derived(deepcopy(run)))
     output["task_id"] = current.get("task_id") or ""
+    output["stage_id"] = current.get("task_id") or ""
+    output["worker_id"] = current.get("worker_id") or ""
     output["phase"] = current.get("phase") or ""
     output["worker_name"] = current.get("worker_name") or ""
     if str(current.get("task_id") or "") == "plan":
         output["title"] = current.get("title") or "专家团计划"
         output["visible_title"] = current.get("title") or "专家团计划"
     material_type = str(business_context.get("material_type") or "office_material")
-    validation_material_type = material_type if str(current.get("task_id") or "") == "draft" else "office_material"
-    validation = validate_office_material_output(output.get("content") or "", validation_material_type)
+    task_id = str(current.get("task_id") or "")
+    validation = validate_stage_output(output.get("content") or "", material_type, task_id, str(run.get("team_id") or ""))
+    stage_result = stage_result_from_output(output, validation)
     run.setdefault("stage_outputs", [])
     run["stage_outputs"].append(output)
+    run.setdefault("stage_results", [])
+    run["stage_results"].append(stage_result)
+    run["stage_result"] = stage_result
+    run["review_items"] = stage_result.get("review_items") or []
     run.setdefault("artifacts", [])
     if output.get("kind") == "chat":
         run["artifacts"] = [{"id": output["id"], "kind": "chat", "label": "结果已写入对话", "exists": True}]

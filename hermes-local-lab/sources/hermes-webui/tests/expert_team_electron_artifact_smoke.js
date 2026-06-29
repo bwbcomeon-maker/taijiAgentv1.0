@@ -108,13 +108,62 @@ function runFixture(sessionId, state, overrides = {}) {
     kind: "chat",
     title: "起草通知通报初稿",
     visible_title: "起草通知通报初稿",
-    summary: "已生成内部通知初稿，包含检查范围、时间安排、责任分工和报送要求。",
+    summary: "当前阶段已形成内部通知初稿，包含检查范围、时间安排、责任分工和报送要求。",
     preview: "关于开展近期安全生产专项检查的通知。",
     content: outputContent,
     content_length: outputContent.length,
     has_long_content: true,
     locator: "chat",
     artifact_id: "",
+  };
+  const currentStage = {
+    id: state === "collecting_required" || state === "collecting_optional" ? "plan" : "draft",
+    task_id: state === "collecting_required" || state === "collecting_optional" ? "plan" : "draft",
+    index: state === "collecting_required" || state === "collecting_optional" ? 0 : 2,
+    title: state === "collecting_required" || state === "collecting_optional" ? "流程安排" : "起草办公材料初稿",
+    phase: state === "collecting_required" || state === "collecting_optional" ? "需求确认" : "生成初稿",
+    worker_id: state === "collecting_required" || state === "collecting_optional" ? "director" : "writer",
+    worker_name: state === "collecting_required" || state === "collecting_optional" ? "写作总导演" : "文案创作专家",
+    status: state === "generating" ? "running" : state === "awaiting_review" ? "awaiting_review" : "pending",
+  };
+  const members = [
+    { id: "director", name: "写作总导演", role: "流程编排", status: state === "collecting_required" || state === "collecting_optional" ? "等待确认" : "已完成", image: "static/assets/writeflow/member-workflow-producer.png" },
+    { id: "material", name: "资料整理专家", role: "素材整理", status: "待命", image: "static/assets/writeflow/member-research-expert.png" },
+    { id: "writer", name: "文案创作专家", role: "正文写作", status: state === "generating" ? "执行中" : state === "awaiting_review" || state === "completed" ? "待复核" : "待命", image: "static/assets/writeflow/member-writing-executor.png" },
+    { id: "reviewer", name: "审稿专家", role: "审稿打磨", status: "待命", image: "static/assets/writeflow/member-editor.png" },
+    { id: "delivery", name: "交付复核专家", role: "交付确认", status: state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-proofreader.png" },
+  ];
+  const tasks = [
+    { id: "plan", title: "流程安排", phase: "流程安排", status: currentStage.id === "plan" ? (state === "collecting_required" || state === "collecting_optional" ? "pending" : "running") : "done", worker_id: "director", worker_name: "写作总导演" },
+    { id: "materials", title: "素材整理", phase: "素材整理", status: state === "completed" ? "done" : currentStage.id === "draft" ? "done" : "pending", worker_id: "material", worker_name: "资料整理专家" },
+    { id: "draft", title: "起草办公材料初稿", phase: "生成初稿", status: state === "generating" ? "running" : state === "awaiting_review" ? "awaiting_review" : state === "completed" ? "done" : "pending", worker_id: "writer", worker_name: "文案创作专家" },
+    { id: "polish", title: "审稿打磨", phase: "审稿打磨", status: state === "completed" ? "done" : "pending", worker_id: "reviewer", worker_name: "审稿专家" },
+    { id: "delivery", title: "交付确认", phase: "交付确认", status: state === "completed" ? "done" : "pending", worker_id: "delivery", worker_name: "交付复核专家" },
+  ];
+  const stageResult = state === "awaiting_review" || state === "completed" || state === "generated_invalid" ? {
+    stage_id: currentStage.id,
+    worker_id: currentStage.worker_id,
+    summary: output.summary,
+    deliverable: output.preview,
+    review_items: [{ id: "ri-1", title: "请补充检查联系人和报送邮箱。", status: "pending", used_in_revision: false }],
+    next_action: "请复核当前阶段成果，确认后进入下一阶段。",
+    validation: state === "generated_invalid" ? { status: "fail", message: "草稿未通过办公材料口径校验。" } : { status: "pass", message: "" },
+  } : {};
+  const timelineEvents = [
+    { type: "team_created", title: "专家团已创建", detail: "等待需求确认", member_id: "director", member_name: "写作总导演", member_image: "static/assets/writeflow/member-workflow-producer.png" },
+    { type: "generation_started", title: "专家开始执行当前阶段", detail: currentStage.phase, member_id: currentStage.worker_id, member_name: currentStage.worker_name },
+    { type: "generation_completed", title: "阶段成果已生成", detail: state === "awaiting_review" ? "等待复核" : "", member_id: currentStage.worker_id, member_name: currentStage.worker_name },
+  ];
+  const workspaceView = {
+    visible: true,
+    title: "专家团工作台",
+    state,
+    current_stage: currentStage,
+    current_worker: members.find((member) => member.id === currentStage.worker_id) || {},
+    phases: tasks,
+    members,
+    timeline: timelineEvents,
+    stage_result: stageResult,
   };
   return {
     run_id: `electron-presenter-${state}`,
@@ -130,15 +179,8 @@ function runFixture(sessionId, state, overrides = {}) {
       { id: "boundary", title: "有哪些已知素材、口径要求、篇幅或表述边界？", placeholder: "正式、简洁，包含检查范围、时间节点、责任分工和报送要求", required: true, status: requiredPending ? "pending" : "answered", answer: requiredPending ? "" : "正式、简洁" },
       { id: "optional_context", title: "还有没有可选补充材料或特别强调的点？", placeholder: "没有可直接跳过", required: false, status: optionalPending ? "pending" : "skipped", answer: "" },
     ],
-    members: [
-      { id: "director", name: "写作总导演", role: "流程编排", status: state === "generating" ? "执行中" : "待命", image: "static/assets/writeflow/member-workflow-producer.png" },
-      { id: "writer", name: "文案创作专家", role: "正文写作", status: state === "awaiting_review" || state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-writing-executor.png" },
-    ],
-    tasks: [
-      { id: "draft", title: "起草办公材料初稿", phase: "生成初稿", status: state === "generating" ? "running" : state === "awaiting_review" || state === "completed" ? "awaiting_review" : "pending", worker_name: "文案创作专家" },
-      { id: "polish", title: "材料打磨", phase: "材料打磨", status: "pending", worker_name: "审稿专家" },
-      { id: "delivery", title: "交付确认", phase: "交付", status: "pending", worker_name: "交付复核专家" },
-    ],
+    members,
+    tasks,
     artifacts: state === "awaiting_review" || state === "completed" ? [{ id: output.id, kind: "chat", label: "结果已写入对话", exists: true }] : [],
     stage_outputs: state === "awaiting_review" || state === "completed" || state === "generated_invalid" ? [output] : [],
     view: {
@@ -149,6 +191,15 @@ function runFixture(sessionId, state, overrides = {}) {
         forbidden_terms: [],
       },
       presentation: { state, visible_title: "起草通知通报初稿", result: output, summary: output.summary, ...presentation },
+      workspace: workspaceView,
+      dock: {
+        state,
+        title: presentation.title,
+        detail: presentation.detail,
+        primary_action: presentation.primary_action,
+        secondary_actions: presentation.secondary_actions || [],
+      },
+      stage_result: stageResult,
       intake: {
         required_pending: requiredPending ? 3 : 0,
         optional_pending: optionalPending ? 1 : 0,
@@ -161,10 +212,7 @@ function runFixture(sessionId, state, overrides = {}) {
       stage_review: { display_state: state === "generating" ? "running" : state, actionable: state === "awaiting_review", output },
       phase_progress: { done: state === "completed" ? 3 : state === "awaiting_review" ? 1 : 0, total: 3, current: state === "completed" ? "交付" : state === "collecting_required" || state === "collecting_optional" ? "需求确认" : "生成初稿" },
       actions: {},
-      timeline_events: [
-        { type: "team_created", title: "专家团已创建", detail: "等待需求确认", member_id: "director" },
-        { type: "member_joined", title: "写作总导演已加入", detail: "负责流程编排", member_id: "director" },
-      ],
+      timeline_events: timelineEvents,
     },
     ...overrides,
   };
@@ -231,28 +279,34 @@ async function main() {
       if (!ok) throw new Error("sendExpertTeamAction returned false");
     });
     await page.waitForSelector("#writeflowStatusDock .status-card-expert-dock-button", { timeout: 10000 });
+    await page.waitForSelector("#expertTeamWorkspacePanel:not([hidden])", { timeout: 10000 });
     const realStart = await page.evaluate(() => ({
       msgCount: Array.isArray(S.messages) ? S.messages.length : -1,
       chatText: document.querySelector("#msgInner")?.textContent.replace(/\s+/g, " ").trim() || "",
       dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
+      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
+      workspaceVisible: Boolean(document.querySelector("#expertTeamWorkspacePanel:not([hidden])")),
       runIds: (Array.isArray(S.messages) ? S.messages : []).map((msg) => msg && msg.expert_team_run_id).filter(Boolean),
-      memberAvatars: document.querySelectorAll("#writeflowStatusDock .expert-team-member-avatar img").length,
-      timelineRows: document.querySelectorAll("#writeflowStatusDock .expert-team-timeline-item").length,
+      memberAvatars: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-member-avatar img").length,
+      timelineRows: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-timeline-item").length,
     }));
     assertState(realStart.msgCount >= 2, "Real expert-team start did not sync session messages immediately", realStart);
     assertState(realStart.chatText.includes("召唤内容创作专家团") && realStart.chatText.includes("专家团已创建"), "Real expert-team start did not render lifecycle messages in chat", realStart);
     assertState(realStart.dockText.includes("必须需求待确认") && realStart.dockText.includes("去确认"), "Real expert-team start did not render the dock action", realStart);
     assertState(realStart.runIds.length >= 2, "Session messages are missing expert-team run ids", realStart);
-    assertState(realStart.memberAvatars >= 2 && realStart.timelineRows >= 1, "Expert team members or timeline are not visible after real start", realStart);
+    assertState(realStart.workspaceVisible && realStart.workspaceText.includes("专家团工作台"), "Expert team workspace panel is not visible after real start", realStart);
+    assertState(realStart.memberAvatars >= 2 && realStart.timelineRows >= 1, "Expert team members or timeline are not visible in the workspace after real start", realStart);
 
     await renderRun(page, "collecting_required");
     await page.waitForSelector("#writeflowStatusDock .status-card-expert-dock-button", { timeout: 10000 });
     const initial = await page.evaluate(() => ({
       dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-      chatConfirmCards: document.querySelectorAll("#msgInner .expert-team-chat-confirmation-card,.expert-team-lifecycle-card").length,
+      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
+      chatConfirmCards: document.querySelectorAll("#msgInner .expert-team-chat-confirmation-card").length,
       directChatButtons: Array.from(document.querySelectorAll("#msgInner button")).filter((button) => button.textContent.includes("去确认")).length,
     }));
     assertState(initial.dockText.includes("必须需求待确认") && initial.dockText.includes("去确认"), "Collecting-required state is not driven by dock presentation", initial);
+    assertState(initial.workspaceText.includes("专家团工作台") && initial.workspaceText.includes("流程安排"), "Collecting-required state did not keep the workspace visible", initial);
     assertState(initial.chatConfirmCards === 0 && initial.directChatButtons === 0, "Chat area still exposes duplicate expert-team confirmation", initial);
 
     await page.click("#writeflowStatusDock .status-card-expert-dock-button");
@@ -270,21 +324,24 @@ async function main() {
     await renderRun(page, "generating");
     const generating = await page.evaluate(() => ({
       text: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
+      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
       cards: document.querySelectorAll("#writeflowStatusDock .status-card-expert-dock-summary").length,
     }));
     assertState(generating.cards === 1, "Generating state rendered more than one dock state", generating);
     assertState(generating.text.includes("专家团正在生成") && generating.text.includes("停止生成"), "Generating state lacks the single running action", generating);
+    assertState(generating.workspaceText.includes("专家团工作台") && generating.workspaceText.includes("文案创作专家"), "Generating state did not show current expert in workspace", generating);
     assertState(!generating.text.includes("未检测到结果") && !generating.text.includes("阶段成果待复核"), "Generating state is mixed with result or missing states", generating);
 
     await renderRun(page, "awaiting_review");
-    await page.waitForSelector("#writeflowStatusDock .expert-team-result-card", { timeout: 10000 });
+    await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-result-card", { timeout: 10000 });
     const review = await page.evaluate(() => ({
       text: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
-      resultCards: document.querySelectorAll("#writeflowStatusDock .expert-team-result-card").length,
+      workspaceText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
+      resultCards: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-result-card").length,
     }));
-    assertState(review.text.includes("阶段成果待复核") && review.resultCards === 1, "Awaiting review does not show one result card", review);
-    assertState(!review.text.includes("公众号"), "Office-material result still contains public-account wording", review);
-    await page.click("#writeflowStatusDock [data-expert-team-action='view_result']");
+    assertState(review.text.includes("阶段成果待复核") && review.resultCards === 1, "Awaiting review does not show one workspace result card", review);
+    assertState(review.workspaceText.includes("查看完整成果") && !review.workspaceText.includes("公众号"), "Office-material result workspace is missing the result entry or still contains public-account wording", review);
+    await page.click("#expertTeamWorkspacePanel .expert-team-result-card [data-expert-team-action='view_result']");
     await page.waitForSelector("#expertTeamResultViewer:not([hidden])", { timeout: 10000 });
     const viewer = await page.evaluate(() => ({
       text: document.querySelector("#expertTeamResultViewer")?.textContent.replace(/\s+/g, " ").trim() || "",

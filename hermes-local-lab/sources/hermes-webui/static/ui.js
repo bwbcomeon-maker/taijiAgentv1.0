@@ -1872,6 +1872,30 @@ function _removeExpertTeamWorkspacePanelElement(){
   return true;
 }
 
+function mountExpertTeamWorkspacePanel(card){
+  if(!_isExpertTeamStatusCard(card)||typeof document==='undefined')return clearExpertTeamWorkspacePanel();
+  const messages=document.getElementById('messages');
+  const msgInner=document.getElementById('msgInner');
+  if(!messages||!msgInner)return false;
+  let panel=document.getElementById('expertTeamWorkspacePanel');
+  if(!panel){
+    panel=document.createElement('section');
+    panel.id='expertTeamWorkspacePanel';
+    panel.className='expert-team-workspace-panel';
+    panel.setAttribute('aria-label','专家团工作台');
+    messages.insertBefore(panel,msgInner);
+  }
+  panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
+  panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||'';
+  panel.hidden=false;
+  panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation==='function'
+    ? renderExpertTeamWorkspaceFromPresentation(card)
+    : '';
+  _setExpertTeamWorkspaceActive(true);
+  _syncExpertTeamWorkspacePanelVisibility();
+  return true;
+}
+
 function _expertTeamWorkspaceStorageKey(runId){
   return `expert-team-workspace-panel:${String(runId||'default')}:hidden`;
 }
@@ -1923,17 +1947,17 @@ function _syncExpertTeamWorkspacePanelVisibility(){
   const visible=!!(hasCurrentExpert&&isChat);
   if(shell){
     shell.classList.toggle('taiji-expert-team-active',visible);
-    shell.classList.remove('taiji-expert-team-panel-visible');
+    shell.classList.toggle('taiji-expert-team-panel-visible',visible);
     shell.classList.remove('taiji-expert-team-panel-hidden');
     shell.classList.remove('taiji-expert-team-panel-collapsed');
   }
-  if(panel)panel.hidden=true;
+  if(panel)panel.hidden=!visible;
   return visible;
 }
 
 function syncExpertTeamBottomDockState(card){
   if(!_isExpertTeamStatusCard(card))return clearExpertTeamWorkspacePanel();
-  _removeExpertTeamWorkspacePanelElement();
+  mountExpertTeamWorkspacePanel(card);
   _setExpertTeamWorkspaceActive(true);
   return _syncExpertTeamWorkspacePanelVisibility();
 }
@@ -2042,6 +2066,7 @@ function showExpertTeamWorkspacePanel(btn){
 
 function renderExpertTeamWorkspacePanel(card){
   if(!_isExpertTeamStatusCard(card))return clearExpertTeamWorkspacePanel();
+  mountExpertTeamWorkspacePanel(card);
   return syncExpertTeamBottomDockState(card);
 }
 
@@ -2905,9 +2930,7 @@ function _statusCardWriteflowHtml(card,copyBtn){
     <div class="expert-team-process-artifacts">${artifactHtml}</div>
   </div>`;
   const expertQuestionPopoverHtml=isExpertTeam?_expertTeamQuestionPopoverHtml(card):'';
-  const expertBodyHtml=isExpertTeam&&typeof renderExpertTeamWorkspaceFromPresentation==='function'
-    ? renderExpertTeamWorkspaceFromPresentation(card)
-    : (isExpertTeam?_expertTeamWorkspacePanelHtml(card):'');
+  const expertBodyHtml='';
   return `<div class="status-card status-card-writeflow ${expanded?'is-expanded':'is-collapsed'}" data-status-card="1" data-status-card-kind="writeflow" data-writeflow-card-key="${esc(storageKey)}" data-expert-team-run-id="${esc(card.runId||card.sessionId||'')}">
     ${expertQuestionPopoverHtml}
     ${miniHtml}

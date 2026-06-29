@@ -1042,42 +1042,12 @@ async function _hydrateWriteflowStatusCardForSession(sid,options={}){
   const expertTeamHydration=await _hydrateExpertTeamStatusCardForSession(sid,options);
   if(expertTeamHydration&&expertTeamHydration.status==='handled')return true;
   if(expertTeamHydration&&expertTeamHydration.status==='preserved')return true;
-  if(!(expertTeamHydration&&expertTeamHydration.status==='missing'))return false;
-  if(!Array.isArray(S.messages)){
-    if(!options.silent)_stopWriteflowStatusRefresh();
-    if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
-    return false;
-  }
-  let data;
-  try{
-    data=await api(`/api/writeflow/run?session_id=${encodeURIComponent(sid)}`);
-  }catch(_){
-    if(!_isWriteflowHydrationForActiveSession(sid))return false;
-    if(!options.silent)_stopWriteflowStatusRefresh();
-    if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
-    return false;
-  }
-  if(!_isWriteflowHydrationForActiveSession(sid))return false;
-  const run=(data&&data.run&&data.run.session_id===sid)?data.run:null;
-  if(!run||!run.run_id){
+  if(expertTeamHydration&&expertTeamHydration.status==='missing'){
     _removeWriteflowStatusCardsFromMessages();
     _stopWriteflowStatusRefresh();
     if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
-    return false;
   }
-  const card=typeof _writeflowStatusCardFromRun==='function'
-    ? _writeflowStatusCardFromRun(run,data)
-    : (typeof _writeflowStatusCardFromCompose==='function'?_writeflowStatusCardFromCompose({run}):null);
-  if(!_isWriteflowHydrationForActiveSession(sid))return false;
-  if(!card){
-    if(typeof clearWriteflowStatusDock==='function')clearWriteflowStatusDock();
-    return false;
-  }
-  if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
-  _scheduleWriteflowStatusRefresh(sid,run);
-  _removeWriteflowStatusCardsFromMessages();
-  if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();
-  return true;
+  return false;
 }
 
 async function refreshWriteflowStatusDockForActiveSession(){

@@ -130,6 +130,9 @@ def test_generating_presentation_has_single_running_state(tmp_path):
     assert presentation["primary_action"] == {"id": "cancel", "label": "停止生成", "kind": "danger"}
     assert "未检测到结果" not in json.dumps(presentation, ensure_ascii=False)
     assert "阶段成果待复核" not in json.dumps(presentation, ensure_ascii=False)
+    assert generating["view"]["workspace"]["visible"] is True
+    assert generating["view"]["workspace"]["current_worker"]["name"] == "写作总导演"
+    assert generating["view"]["dock"]["primary_action"]["id"] == "cancel"
 
 
 def test_invalid_generation_does_not_mix_result_running_and_missing_states(tmp_path):
@@ -205,8 +208,68 @@ def test_valid_generation_registers_structured_output_and_review_action(tmp_path
     assert completed["view"]["presentation"]["state"] == "awaiting_review"
     assert completed["view"]["presentation"]["primary_action"]["id"] == "review_stage"
     assert output["visible_title"] == "专家团计划"
+    assert completed["view"]["stage_result"]["stage_id"] == "plan"
+    assert completed["view"]["stage_result"]["worker_id"] == "director"
+    assert "受众" not in completed["validation"].get("violations", [])
     assert output["locator"] == "chat"
     assert output["has_long_content"] is True
+
+
+def test_plan_stage_allows_audience_terms_and_waits_for_review(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {"session_id": "sid-plan-validation", "team_id": "content-creator-team", "prompt": "帮我起草一份部门月度工作汇报"},
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": _answer_all_required(expert_teams, tmp_path, run)["run_id"],
+            "answers": {"optional_context": ""},
+            "skip_optional": True,
+        },
+    )
+
+    completed = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        ready["run_id"],
+        delivery={
+            "id": "plan-with-audience",
+            "kind": "chat",
+            "content": (
+                "阶段摘要：写作总导演完成流程安排。\n"
+                "正文草稿：本阶段只形成执行计划。材料受众为部门领导，阅读对象关注工作进展、问题和下一步安排。"
+                "后续由资料整理、初稿撰写、审稿打磨、交付确认四个阶段逐步完成。\n"
+                "待补充事项：请补充具体月份、关键数据和典型问题。\n"
+                "建议下一步：确认计划后进入素材整理。"
+            ),
+        },
+    )
+
+    assert completed["workflow_state"] == "awaiting_review"
+    assert completed["validation"]["status"] == "pass"
+    assert completed["view"]["workspace"]["current_stage"]["id"] == "plan"
+    assert completed["view"]["workspace"]["current_worker"]["name"] == "写作总导演"
+
+
+def test_deep_research_view_uses_research_specific_workspace_copy(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-research",
+            "team_id": "deep-research-team",
+            "prompt": "帮我研究本地优先 AI 助理在企业内部办公场景的落地趋势",
+        },
+    )
+
+    payload = json.dumps(run["view"], ensure_ascii=False)
+    assert run["view"]["business_context"]["material_type"] == "research_report"
+    assert run["view"]["business_context"]["visible_title"] == "梳理专题研究材料"
+    assert "起草办公材料初稿" not in payload
+    assert run["view"]["workspace"]["current_worker"]["name"] == "研究总导演"
 
 
 def test_stage_approval_advances_until_final_completed(tmp_path):

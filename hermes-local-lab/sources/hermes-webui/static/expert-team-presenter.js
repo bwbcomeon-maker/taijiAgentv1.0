@@ -39,11 +39,29 @@
       summary:str(presentation.summary)
     };
   }
+  function buildExpertTeamWorkspace(run){
+    const view=run&&run.view||{};
+    const workspace=view.workspace||{};
+    return {
+      visible:workspace.visible!==false,
+      title:str(workspace.title,'专家团工作台'),
+      state:str(workspace.state,run&&run.workflow_state||'collecting_required'),
+      currentStage:workspace.current_stage||{},
+      currentWorker:workspace.current_worker||{},
+      phases:arr(workspace.phases),
+      members:arr(workspace.members),
+      timeline:arr(workspace.timeline||view.timeline_events),
+      stageResult:workspace.stage_result||view.stage_result||{}
+    };
+  }
   function buildExpertTeamCardFromRun(run,data){
     if(!run||!run.run_id)return null;
     data=data||{};
     const presentation=buildExpertTeamPresentation(run);
     const view=run.view||{};
+    const workspace=buildExpertTeamWorkspace(run);
+    const dock=view.dock||{};
+    const stageResult=view.stage_result||workspace.stageResult||{};
     const teamTitle=str(run.team_title,'专家团');
     const tasks=arr(run.tasks).map(task=>({
       id:str(task&&task.id),
@@ -92,6 +110,9 @@
       phase:str(phaseProgress.current||run.phase,'需求确认'),
       progress:{done:Number(phaseProgress.done||0),total:Number(phaseProgress.total||tasks.length||0)},
       presentation,
+      workspace,
+      dock,
+      stageResult,
       questions,
       primaryConfirmation:view.primary_confirmation||null,
       pendingConfirmations:arr(view.pending_confirmations),

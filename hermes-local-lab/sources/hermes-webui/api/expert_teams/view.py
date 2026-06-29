@@ -68,6 +68,27 @@ def _stage_output(run: dict) -> dict:
     return deepcopy(outputs[-1])
 
 
+def _stage_result(run: dict) -> dict:
+    results = [item for item in run.get("stage_results") or [] if isinstance(item, dict)]
+    if results:
+        return deepcopy(results[-1])
+    result = run.get("stage_result")
+    if isinstance(result, dict):
+        return deepcopy(result)
+    output = _stage_output(run)
+    if not output:
+        return {}
+    return {
+        "stage_id": str(output.get("task_id") or output.get("stage_id") or ""),
+        "worker_id": str(output.get("worker_id") or ""),
+        "summary": str(output.get("summary") or content_summary(str(output.get("content") or ""))),
+        "deliverable": str(output.get("content") or ""),
+        "review_items": [],
+        "next_action": "请复核当前阶段成果。",
+        "validation": deepcopy(run.get("validation") or {}),
+    }
+
+
 def _stage_review(run: dict, state: str) -> dict:
     output = _stage_output(run)
     actionable = state == "awaiting_review"
@@ -82,6 +103,7 @@ def _stage_review(run: dict, state: str) -> dict:
 def _presentation(run: dict, business_context: dict) -> dict:
     state = str(run.get("workflow_state") or "collecting_required")
     output = _stage_output(run)
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     detail = ""
     if state in {"collecting_required", "collecting_optional"}:
         detail = "请先补充需求信息，专家团再继续推进。"
@@ -104,6 +126,7 @@ def _presentation(run: dict, business_context: dict) -> dict:
         "secondary_actions": _secondary_actions(state),
         "result": output,
         "summary": content_summary(str(output.get("content") or output.get("summary") or run.get("title") or "")),
+        "current_stage": deepcopy(current),
     }
 
 
@@ -112,6 +135,54 @@ def _progress(run: dict) -> dict:
     done = sum(1 for task in tasks if str(task.get("status") or "") == "done")
     current = str(run.get("phase") or "")
     return {"done": done, "total": len(tasks), "current": current}
+
+
+def _current_worker(run: dict) -> dict:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    worker_id = str(current.get("worker_id") or "")
+    worker_name = str(current.get("worker_name") or "")
+    for member in run.get("members") or []:
+        if not isinstance(member, dict):
+            continue
+        if str(member.get("id") or "") == worker_id or str(member.get("name") or "") == worker_name:
+            return deepcopy(member)
+    return {"id": worker_id, "name": worker_name or "专家团", "role": "阶段负责", "status": ""}
+
+
+def _workspace(run: dict) -> dict:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    tasks = [deepcopy(task) for task in run.get("tasks") or [] if isinstance(task, dict)]
+    members = [deepcopy(member) for member in run.get("members") or [] if isinstance(member, dict)]
+    state = str(run.get("workflow_state") or "collecting_required")
+    return {
+        "visible": True,
+        "title": "专家团工作台",
+        "state": state,
+        "current_stage": {
+            "id": str(current.get("task_id") or current.get("id") or ""),
+            "index": int(current.get("index") or 0),
+            "title": str(current.get("title") or ""),
+            "phase": str(current.get("phase") or ""),
+            "status": str(current.get("status") or ""),
+            "worker_id": str(current.get("worker_id") or ""),
+            "worker_name": str(current.get("worker_name") or ""),
+        },
+        "current_worker": _current_worker(run),
+        "phases": tasks,
+        "members": members,
+        "timeline": _timeline_events(run),
+        "stage_result": _stage_result(run),
+    }
+
+
+def _dock(run: dict, presentation: dict) -> dict:
+    return {
+        "state": presentation.get("state") or str(run.get("workflow_state") or ""),
+        "title": presentation.get("title") or "专家团状态",
+        "detail": presentation.get("detail") or "",
+        "primary_action": deepcopy(presentation.get("primary_action")),
+        "secondary_actions": deepcopy(presentation.get("secondary_actions") or []),
+    }
 
 
 def _timeline_events(run: dict) -> list[dict]:
@@ -145,6 +216,7 @@ def expert_team_run_view(run: dict) -> dict:
     state = str(run.get("workflow_state") or "collecting_required")
     intake = _question_state(run)
     stage_review = _stage_review(run, state)
+    presentation = _presentation(run, business_context)
     primary_confirmation = None
     if state in {"collecting_required", "collecting_optional"}:
         pending = [
@@ -163,7 +235,10 @@ def expert_team_run_view(run: dict) -> dict:
         primary_confirmation = {"type": "stage_review", "title": "阶段成果待复核"}
     return {
         "business_context": business_context,
-        "presentation": _presentation(run, business_context),
+        "presentation": presentation,
+        "workspace": _workspace(run),
+        "dock": _dock(run, presentation),
+        "stage_result": _stage_result(run),
         "intake": intake,
         "primary_confirmation": primary_confirmation,
         "pending_confirmations": [primary_confirmation] if primary_confirmation else [],

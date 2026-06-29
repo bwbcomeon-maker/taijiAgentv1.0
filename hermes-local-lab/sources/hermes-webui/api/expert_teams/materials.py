@@ -10,7 +10,6 @@ FORBIDDEN_TERMS = [
     "文章大纲",
     "标题党",
     "你有没有",
-    "读者",
     "封面配图",
     "发布前检查",
     "发布版",
@@ -52,6 +51,11 @@ MATERIAL_DEFINITIONS = {
         "style_contract": "采用企业内部正式办公材料口径，结构清晰、表述稳妥、事实不确定处标注待确认。",
         "keywords": (),
     },
+    "research_report": {
+        "visible_title": "梳理专题研究材料",
+        "style_contract": "采用调研材料和专题报告口径，突出研究问题、资料边界、案例线索、结构提纲和事实待核项。",
+        "keywords": ("研究", "调研", "专题", "趋势", "案例", "报告"),
+    },
 }
 
 PUBLIC_ACCOUNT_KEYWORDS = ("公众号", "文章", "发布")
@@ -84,6 +88,13 @@ def style_contract(material_type: str) -> str:
 
 
 def business_context_for_run(run: dict) -> dict:
+    if str(run.get("team_id") or "") == "deep-research-team":
+        return {
+            "material_type": "research_report",
+            "style_contract": style_contract("research_report"),
+            "visible_title": normalize_visible_title("research_report"),
+            "forbidden_terms": list(FORBIDDEN_TERMS),
+        }
     prompt = " ".join(
         str(part or "")
         for part in [
@@ -140,6 +151,51 @@ def validate_office_material_output(text: str, material_type: str) -> dict:
     return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
 
 
+def validate_stage_output(text: str, material_type: str, task_id: str, team_id: str = "") -> dict:
+    normalized = normalize_output_text(text)
+    task = str(task_id or "")
+    team = str(team_id or "")
+    if material_type == "public_account":
+        return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+    if task in {"plan", "direction"}:
+        missing = []
+        if "阶段摘要" not in normalized and "阶段目标" not in normalized:
+            missing.append("阶段摘要/阶段目标")
+        if "待补充" not in normalized and "待人工" not in normalized:
+            missing.append("待补充/待人工")
+        if missing:
+            return {
+                "status": "rewrite_required",
+                "violations": [],
+                "missing_sections": missing,
+                "message": "阶段计划不完整，请重新生成。",
+            }
+        return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+    if team == "deep-research-team":
+        required = ["阶段", "待人工"] if task in {"research", "outline", "draft", "review"} else []
+        missing = [section for section in required if section not in normalized]
+        violations = [term for term in FORBIDDEN_TERMS if term in normalized]
+        if missing or violations:
+            return {
+                "status": "rewrite_required",
+                "violations": violations,
+                "missing_sections": missing,
+                "message": "研究材料阶段产物不完整，请重新生成。",
+            }
+        return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+    if task in {"materials", "polish", "delivery"}:
+        violations = [term for term in FORBIDDEN_TERMS if term in normalized]
+        if violations:
+            return {
+                "status": "rewrite_required",
+                "violations": violations,
+                "missing_sections": [],
+                "message": "阶段产物存在文章化表达，请重新生成。",
+            }
+        return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+    return validate_office_material_output(normalized, material_type)
+
+
 def structured_output_from_delivery(delivery: dict, business_context: dict) -> dict:
     content = normalize_output_text(str((delivery or {}).get("content") or ""))
     visible_title = str(business_context.get("visible_title") or "专家团成果").strip()
@@ -157,4 +213,24 @@ def structured_output_from_delivery(delivery: dict, business_context: dict) -> d
         "has_long_content": len(content) > 120,
         "locator": "artifact" if (delivery or {}).get("artifact_id") else "chat",
         "artifact_id": (delivery or {}).get("artifact_id") or "",
+    }
+
+
+def stage_result_from_output(output: dict, validation: dict | None = None) -> dict:
+    content = normalize_output_text(str((output or {}).get("content") or ""))
+    stage_id = str((output or {}).get("task_id") or "")
+    worker_id = str((output or {}).get("worker_id") or "")
+    summary = str((output or {}).get("summary") or content_summary(content)).strip()
+    review_items = []
+    for idx, line in enumerate(re.findall(r"(?:^|\n)\s*(?:[-*]|\d+[.、])\s*([^\n]{4,160})", content), 1):
+        if any(marker in line for marker in ("补充", "确认", "待核", "待提供")):
+            review_items.append({"id": f"{stage_id or 'stage'}-review-{idx}", "title": line.strip(), "status": "pending"})
+    return {
+        "stage_id": stage_id,
+        "worker_id": worker_id,
+        "summary": summary,
+        "deliverable": content,
+        "review_items": review_items[:8],
+        "next_action": str((output or {}).get("next_action") or "请复核当前阶段成果。"),
+        "validation": validation or {},
     }

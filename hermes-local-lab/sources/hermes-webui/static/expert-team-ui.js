@@ -58,11 +58,18 @@
   }
   function renderExpertTeamWorkspaceFromPresentation(card){
     const presentation=card&&card.presentation||{};
+    const workspace=card&&card.workspace||{};
+    const stageResult=card&&card.stageResult||workspace.stageResult||{};
+    const currentStage=workspace.currentStage||{};
+    const currentWorker=workspace.currentWorker||{};
     const result=presentation.result||{};
     const tasks=Array.isArray(card&&card.tasks)?card.tasks:[];
     const members=Array.isArray(card&&card.members)?card.members:[];
-    const timelineEvents=Array.isArray(card&&card.timelineEvents)?card.timelineEvents:[];
-    const taskRows=tasks.map(task=>`<span class="expert-team-process-row"><b>${safeEsc(task.title||task.id||'阶段')}</b><small>${safeEsc(task.statusText||statusText(task.status))}</small></span>`).join('');
+    const timelineEvents=Array.isArray(workspace.timeline)&&workspace.timeline.length?workspace.timeline:(Array.isArray(card&&card.timelineEvents)?card.timelineEvents:[]);
+    const taskRows=tasks.map(task=>{
+      const active=(task.id&&task.id===(currentStage.id||currentStage.task_id))?' active':'';
+      return `<span class="expert-team-process-row${active}"><b>${safeEsc(task.title||task.id||'阶段')}</b><small>${safeEsc(task.worker_name||'专家')} · ${safeEsc(task.statusText||statusText(task.status))}</small></span>`;
+    }).join('');
     const memberHtml=members.length
       ? `<div class="expert-team-member-strip" aria-label="专家团成员状态">${members.map(member=>{
           const tone=presentationTone(member.status==='执行中'?'generating':member.status==='已完成'?'completed':'collecting_required');
@@ -85,7 +92,20 @@
           </span>
         </div>`
       : `<div class="expert-team-empty-result">结果将在生成完成后显示</div>`;
+    const stageSummary=stageResult&&stageResult.summary?stageResult.summary:(result&&result.summary||'当前阶段产物生成后会在这里沉淀。');
+    const currentWorkerHtml=currentWorker&&currentWorker.name
+      ? `<div class="expert-team-current-worker">${avatarHtml(currentWorker.image,currentWorker.name)}<span><strong>${safeEsc(currentWorker.name)}</strong><small>${safeEsc(currentWorker.role||currentStage.phase||'当前阶段负责专家')}</small></span></div>`
+      : '';
     return `<div class="expert-team-panel-inner" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}">
+      <section class="expert-team-panel-section expert-team-workbench-hero" aria-label="专家团工作台">
+        <div class="expert-team-panel-section-title"><span>专家团工作台</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
+        <div class="expert-team-workbench-grid">
+          <span><b>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</b><small>当前阶段</small></span>
+          <span><b>${safeEsc(currentStage.title||presentation.visibleTitle||'阶段任务')}</b><small>阶段任务</small></span>
+          <span><b>${safeEsc(currentWorker.name||currentStage.worker_name||'专家团')}</b><small>当前专家</small></span>
+        </div>
+        ${currentWorkerHtml}
+      </section>
       <section class="expert-team-panel-section">
         <div class="expert-team-panel-section-title"><span>${safeEsc(presentation.title||'专家团状态')}</span><small>${safeEsc(presentation.visibleTitle||'')}</small></div>
         <p class="expert-team-panel-detail">${safeEsc(presentation.detail||'')}</p>
@@ -94,6 +114,7 @@
       </section>
       <section class="expert-team-panel-section">
         <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
+        <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
         ${resultHtml}
       </section>
       <section class="expert-team-panel-section">

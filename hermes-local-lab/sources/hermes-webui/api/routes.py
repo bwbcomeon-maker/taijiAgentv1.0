@@ -1129,7 +1129,13 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
             "当前只执行“专家团计划”阶段：不要直接起草完整正文。"
             "请先收敛材料类型、使用场景、写作边界、阶段分工和需要用户确认的资料缺口，形成后续生成初稿的执行计划。"
         )
-        output_sections = "阶段摘要、正文草稿（本阶段写执行计划，不写完整材料正文）、待补充事项、建议下一步"
+        output_sections = "阶段摘要、阶段产物（本阶段写执行计划，不写完整材料正文）、待补充事项、建议下一步"
+    elif task_id == "materials":
+        stage_instruction = (
+            "当前只执行“素材整理”阶段：基于已确认计划，整理素材目录、资料缺口、数据口径、事实待核项和初稿写作输入。"
+            "不要直接写完整初稿，也不要宣布后续阶段已经完成。"
+        )
+        output_sections = "阶段摘要、阶段产物（素材清单、资料缺口、数据口径、事实待核项）、待补充事项、建议下一步"
     elif task_id == "polish":
         stage_instruction = (
             "当前只执行“材料打磨”阶段：基于已确认初稿，完成表达润色、版式建议、流转前核对和可执行修改清单。"
@@ -1175,12 +1181,12 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
 def _deep_research_expert_team_execution_prompt(run: dict) -> str:
     answers = _expert_team_answers_by_id(run)
     topic = answers.get("research_topic") or run.get("title") or "本次研究主题"
-    audience_goal = answers.get("audience_goal") or "目标读者和使用场景待确认"
+    audience_goal = answers.get("audience_goal") or "使用对象和使用场景待确认"
     source_boundary = answers.get("source_boundary") or "没有额外资料边界"
     task = _expert_team_current_task(run)
     task_id = str(task.get("id") or "")
     stage_instructions = {
-        "direction": "当前只执行“确定研究方向”阶段：收敛核心问题、论证主线、目标读者、资料边界和不展开的范围。",
+        "direction": "当前只执行“确定研究方向”阶段：收敛核心问题、论证主线、使用对象、资料边界和不展开的范围。",
         "research": "当前只执行“补充案例素材”阶段：整理事实、案例线索、论据类型、可验证来源方向和待人工确认项。",
         "outline": "当前只执行“结构提纲”阶段：把已确认研究材料组织成一级/二级标题、段落顺序和关键观点。",
         "draft": "当前只执行“材料初稿”阶段：按已确认结构提纲起草材料初稿，保留事实待核项，不做最终复核结论。",
@@ -1191,7 +1197,7 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         "你现在作为深度材料研究团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
         f"研究主题或核心问题：{topic}\n"
-        f"目标读者与用途：{audience_goal}\n"
+        f"使用对象与用途：{audience_goal}\n"
         f"资料范围、案例偏好或避坑边界：{source_boundary}\n\n"
         f"{stage_instructions.get(task_id) or '当前只执行当前阶段，输出可供用户确认的阶段产物。'}\n\n"
         f"请用中文输出，结构必须包含：{output_sections}。\n\n"

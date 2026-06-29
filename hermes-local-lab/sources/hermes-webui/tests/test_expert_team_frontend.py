@@ -27,6 +27,9 @@ def test_presenter_is_the_only_source_of_main_state_and_action():
     assert "view.presentation" in PRESENTER_JS
     assert "presentation.state" in PRESENTER_JS
     assert "presentation.primary_action" in PRESENTER_JS
+    assert "view.workspace" in PRESENTER_JS
+    assert "view.dock" in PRESENTER_JS
+    assert "view.stage_result" in PRESENTER_JS
     assert "window.buildExpertTeamPresentation=buildExpertTeamPresentation" in PRESENTER_JS
     assert "window.buildExpertTeamCardFromRun=buildExpertTeamCardFromRun" in PRESENTER_JS
 
@@ -68,13 +71,26 @@ def test_session_hydration_uses_tri_state_and_preserve_blocks_writeflow_fallback
     assert "expertTeamHydration.status==='handled'" in refresh_body
     assert "expertTeamHydration.status==='preserved'" in refresh_body
     assert "expertTeamHydration.status==='missing'" in refresh_body
-    assert refresh_body.index("expertTeamHydration.status==='missing'") < refresh_body.index("/api/writeflow/run?session_id=")
+    assert "/api/writeflow/run?session_id=" not in refresh_body
+
+
+def test_expert_team_workspace_panel_is_visible_and_not_dock_only():
+    assert "function renderExpertTeamWorkspaceFromPresentation" in EXPERT_UI_JS
+    assert "function renderExpertTeamDockFromPresentation" in EXPERT_UI_JS
+    assert "function mountExpertTeamWorkspacePanel" in UI_JS
+    assert "renderExpertTeamWorkspacePanel(card)" in UI_JS
+    assert "_removeExpertTeamWorkspacePanelElement();" not in UI_JS[UI_JS.index("function syncExpertTeamBottomDockState") : UI_JS.index("function _expertTeamBottomDockTarget")]
+    assert ".expert-team-workspace-panel{display:none;}" not in STYLE_CSS
+    desktop_css = STYLE_CSS[STYLE_CSS.index('@media (min-width:901px)') :]
+    assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" not in desktop_css
 
 
 def test_dock_and_workspace_render_from_single_presentation():
     assert "function renderExpertTeamDockFromPresentation" in EXPERT_UI_JS
     assert "function renderExpertTeamWorkspaceFromPresentation" in EXPERT_UI_JS
     assert "card.presentation" in EXPERT_UI_JS
+    assert "card.workspace" in EXPERT_UI_JS
+    assert "card.stageResult" in EXPERT_UI_JS
     assert "presentation.primaryAction" in EXPERT_UI_JS
     assert "presentation.state" in EXPERT_UI_JS
     assert "专家团正在生成" in EXPERT_UI_JS
@@ -84,6 +100,7 @@ def test_dock_and_workspace_render_from_single_presentation():
     assert "expert-team-member-avatar" in EXPERT_UI_JS
     assert "expert-team-timeline" in EXPERT_UI_JS
     assert "timelineEvents" in EXPERT_UI_JS
+    assert "专家团工作台" in EXPERT_UI_JS
 
 
 def test_real_expert_team_start_syncs_session_messages_immediately():
@@ -124,3 +141,10 @@ def test_default_user_visible_copy_has_no_public_account_language():
     joined = "\n".join([COMMANDS_JS, PANELS_JS, SESSIONS_JS, UI_JS, PRESENTER_JS, EXPERT_UI_JS, ACTIONS_JS])
     for text in ("公众号长文", "文章大纲", "标题党", "你有没有", "读者", "封面配图", "发布前检查"):
         assert text not in joined
+
+
+def test_expert_team_actions_never_call_legacy_writeflow_api():
+    joined = "\n".join([SESSIONS_JS, ACTIONS_JS, PRESENTER_JS, EXPERT_UI_JS])
+    assert "/api/writeflow/run" not in joined
+    assert "/api/writeflow/status" not in joined
+    assert "sendWriteflowAction(" not in ACTIONS_JS
