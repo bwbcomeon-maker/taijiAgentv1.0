@@ -995,6 +995,18 @@ async function sendExpertTeamAction(payload){
       : (typeof _writeflowStatusCardFromCompose==='function'?_writeflowStatusCardFromCompose({run}):null);
     if(!card)throw new Error('专家团状态不可用');
     if(typeof switchPanel==='function')await switchPanel('chat');
+    const sessionMessages=Array.isArray(data.session_messages)?data.session_messages:[];
+    if(sessionMessages.length&&Array.isArray(S.messages)){
+      sessionMessages.forEach(message=>{
+        if(!message||typeof message!=='object')return;
+        const runId=message.expert_team_run_id||'';
+        const msgType=message.type||'';
+        const content=message.content||'';
+        const exists=S.messages.some(existing=>existing&&existing.expert_team_run_id===runId&&existing.type===msgType&&existing.content===content);
+        if(!exists)S.messages.push(message);
+      });
+      if(typeof renderMessages==='function')renderMessages();
+    }
     if(typeof renderWriteflowStatusDock==='function')renderWriteflowStatusDock(card);
     if(typeof window!=='undefined'){
       window._pendingWriteflowStatusCard={

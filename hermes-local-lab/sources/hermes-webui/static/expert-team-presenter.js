@@ -9,6 +9,19 @@
       kind:str(action.kind,'primary')
     };
   }
+  function taskStatusText(task){
+    const explicit=str(task&&task.status_label);
+    if(explicit)return explicit;
+    const status=str(task&&task.status,'pending');
+    return {
+      pending:'待执行',
+      running:'执行中',
+      done:'完成',
+      awaiting_review:'待复核',
+      error:'需处理',
+      cancelled:'已取消'
+    }[status]||status;
+  }
   function buildExpertTeamPresentation(run){
     run=run||{};
     const view=run.view||{};
@@ -37,13 +50,24 @@
       title:str(task&&task.title,task&&task.id||'阶段任务'),
       phase:str(task&&task.phase),
       status:str(task&&task.status,'pending'),
+      statusText:taskStatusText(task),
       worker_name:str(task&&task.worker_name)
     }));
     const members=arr(run.members).map(member=>({
       id:str(member&&member.id),
       name:str(member&&member.name,member&&member.id||'成员'),
       role:str(member&&member.role),
-      status:str(member&&member.status,'待命')
+      status:str(member&&member.status,'待命'),
+      image:str(member&&member.image)
+    }));
+    const timelineEvents=arr(view.timeline_events).map(event=>({
+      type:str(event&&event.type),
+      title:str(event&&event.title,event&&event.type||'专家团动态'),
+      detail:str(event&&event.detail),
+      memberId:str(event&&event.member_id),
+      memberName:str(event&&event.member_name),
+      memberImage:str(event&&event.member_image),
+      at:str(event&&event.at)
     }));
     const questions=arr(run.questions).map(question=>({
       id:str(question&&question.id),
@@ -74,6 +98,7 @@
       intake:view.intake||{},
       stageReview:view.stage_review||{},
       reviewItems:arr(view.review_items),
+      timelineEvents,
       tasks,
       members,
       artifacts:arr(run.artifacts),

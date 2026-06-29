@@ -32,6 +32,8 @@ def test_presenter_is_the_only_source_of_main_state_and_action():
 
     for old_source in ("statusLabel", "can_retry", "stage_confirmation_points"):
         assert old_source not in PRESENTER_JS
+    assert "view.timeline_events" in PRESENTER_JS
+    assert "member&&member.image" in PRESENTER_JS
 
 
 def test_ui_shell_delegates_expert_team_cards_to_presenter():
@@ -78,6 +80,19 @@ def test_dock_and_workspace_render_from_single_presentation():
     assert "专家团正在生成" in EXPERT_UI_JS
     assert "草稿未通过校验" in EXPERT_UI_JS
     assert "阶段成果待复核" in EXPERT_UI_JS
+    assert "expert-team-member-strip" in EXPERT_UI_JS
+    assert "expert-team-member-avatar" in EXPERT_UI_JS
+    assert "expert-team-timeline" in EXPERT_UI_JS
+    assert "timelineEvents" in EXPERT_UI_JS
+
+
+def test_real_expert_team_start_syncs_session_messages_immediately():
+    fn_start = COMMANDS_JS.index("async function sendExpertTeamAction")
+    fn_body = COMMANDS_JS[fn_start : COMMANDS_JS.index("if(typeof window!=='undefined')window.sendExpertTeamAction", fn_start)]
+    assert "data.session_messages" in fn_body
+    assert "S.messages.push" in fn_body
+    assert "renderMessages()" in fn_body
+    assert "expert_team_run_id" in fn_body
 
 
 def test_actions_map_only_presentation_actions_to_api_calls():

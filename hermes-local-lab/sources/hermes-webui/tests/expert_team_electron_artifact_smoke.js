@@ -36,7 +36,7 @@ async function prepareDesktopSession(page, workspace) {
     if (!response.ok) throw new Error(`session/new failed ${response.status}: ${await response.text()}`);
     const payload = await response.json();
     S.session = payload.session;
-    S.messages = [{ role: "user", content: "召唤内容创作专家团：帮我起草一份内部通知，主题是近期安全生产专项检查安排" }];
+    S.messages = [];
     if (typeof renderMessages === "function") renderMessages();
     if (typeof switchPanel === "function") await switchPanel("chat");
     const onboarding = document.getElementById("onboardingOverlay");
@@ -131,8 +131,8 @@ function runFixture(sessionId, state, overrides = {}) {
       { id: "optional_context", title: "还有没有可选补充材料或特别强调的点？", placeholder: "没有可直接跳过", required: false, status: optionalPending ? "pending" : "skipped", answer: "" },
     ],
     members: [
-      { id: "director", name: "写作总导演", role: "流程编排", status: state === "generating" ? "执行中" : "待命" },
-      { id: "writer", name: "文案创作专家", role: "正文写作", status: state === "awaiting_review" || state === "completed" ? "已完成" : "待命" },
+      { id: "director", name: "写作总导演", role: "流程编排", status: state === "generating" ? "执行中" : "待命", image: "static/assets/writeflow/member-workflow-producer.png" },
+      { id: "writer", name: "文案创作专家", role: "正文写作", status: state === "awaiting_review" || state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-writing-executor.png" },
     ],
     tasks: [
       { id: "draft", title: "起草办公材料初稿", phase: "生成初稿", status: state === "generating" ? "running" : state === "awaiting_review" || state === "completed" ? "awaiting_review" : "pending", worker_name: "文案创作专家" },
@@ -161,6 +161,10 @@ function runFixture(sessionId, state, overrides = {}) {
       stage_review: { display_state: state === "generating" ? "running" : state, actionable: state === "awaiting_review", output },
       phase_progress: { done: state === "completed" ? 3 : state === "awaiting_review" ? 1 : 0, total: 3, current: state === "completed" ? "交付" : state === "collecting_required" || state === "collecting_optional" ? "需求确认" : "生成初稿" },
       actions: {},
+      timeline_events: [
+        { type: "team_created", title: "专家团已创建", detail: "等待需求确认", member_id: "director" },
+        { type: "member_joined", title: "写作总导演已加入", detail: "负责流程编排", member_id: "director" },
+      ],
     },
     ...overrides,
   };
@@ -218,6 +222,29 @@ async function main() {
       window.__expertTeamRunFixture = eval(`(${fixtureSource})`);
     }, { fixtureSource: runFixture.toString() });
 
+    await page.evaluate(async () => {
+      const ok = await sendExpertTeamAction({
+        team_id: "content-creator-team",
+        prompt: "帮我起草一份内部通知，主题是近期安全生产专项检查安排",
+        new_session: false,
+      });
+      if (!ok) throw new Error("sendExpertTeamAction returned false");
+    });
+    await page.waitForSelector("#writeflowStatusDock .status-card-expert-dock-button", { timeout: 10000 });
+    const realStart = await page.evaluate(() => ({
+      msgCount: Array.isArray(S.messages) ? S.messages.length : -1,
+      chatText: document.querySelector("#msgInner")?.textContent.replace(/\s+/g, " ").trim() || "",
+      dockText: document.querySelector("#writeflowStatusDock")?.textContent.replace(/\s+/g, " ").trim() || "",
+      runIds: (Array.isArray(S.messages) ? S.messages : []).map((msg) => msg && msg.expert_team_run_id).filter(Boolean),
+      memberAvatars: document.querySelectorAll("#writeflowStatusDock .expert-team-member-avatar img").length,
+      timelineRows: document.querySelectorAll("#writeflowStatusDock .expert-team-timeline-item").length,
+    }));
+    assertState(realStart.msgCount >= 2, "Real expert-team start did not sync session messages immediately", realStart);
+    assertState(realStart.chatText.includes("召唤内容创作专家团") && realStart.chatText.includes("专家团已创建"), "Real expert-team start did not render lifecycle messages in chat", realStart);
+    assertState(realStart.dockText.includes("必须需求待确认") && realStart.dockText.includes("去确认"), "Real expert-team start did not render the dock action", realStart);
+    assertState(realStart.runIds.length >= 2, "Session messages are missing expert-team run ids", realStart);
+    assertState(realStart.memberAvatars >= 2 && realStart.timelineRows >= 1, "Expert team members or timeline are not visible after real start", realStart);
+
     await renderRun(page, "collecting_required");
     await page.waitForSelector("#writeflowStatusDock .status-card-expert-dock-button", { timeout: 10000 });
     const initial = await page.evaluate(() => ({
@@ -274,6 +301,10 @@ async function main() {
     assertState(completed.text.includes("专家团任务已完成") && completed.text.includes("查看成果"), "Completed state does not close the workflow cleanly", completed);
     assertState(!completed.text.includes("下一阶段建议"), "Completed state still shows next-stage workflow copy", completed);
 
+    await page.evaluate(() => {
+      const viewer = document.getElementById("expertTeamResultViewer");
+      if (viewer) viewer.hidden = true;
+    });
     for (const width of [1024, 1280, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       await renderRun(page, "awaiting_review");

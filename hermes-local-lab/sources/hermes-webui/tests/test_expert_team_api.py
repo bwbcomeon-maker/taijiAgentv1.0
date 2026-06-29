@@ -51,6 +51,11 @@ def test_start_run_uses_collecting_required_presentation(tmp_path):
         "label": "去确认",
         "kind": "question_popover",
     }
+    assert run["view"]["timeline_events"][0]["type"] == "team_created"
+    assert any(event["type"] == "member_joined" for event in run["view"]["timeline_events"])
+    assert any(member.get("image") for member in run["members"])
+    assert run["tasks"][0]["id"] == "plan"
+    assert run["tasks"][0]["title"] == "专家团计划"
 
 
 def test_required_complete_moves_to_collecting_optional_not_generating(tmp_path):
@@ -90,7 +95,8 @@ def test_optional_skip_is_the_only_empty_answer_that_starts_generation(tmp_path)
         {"run_id": pending_optional["run_id"], "answers": {"optional_context": ""}, "skip_optional": True},
     )
     assert ready["workflow_state"] == "ready_to_generate"
-    assert ready["status"] == "running"
+    assert ready["status"] == "awaiting_user"
+    assert ready["execution_status"] == "idle"
     assert ready["questions"][-1]["status"] == "skipped"
     assert ready["view"]["presentation"]["state"] == "ready_to_generate"
     assert ready["view"]["presentation"]["primary_action"]["id"] == "start_generation"
@@ -184,15 +190,13 @@ def test_valid_generation_registers_structured_output_and_review_action(tmp_path
         delivery={
             "id": "delivery-valid",
             "kind": "chat",
-            "content": (
-                "阶段摘要：已完成工作汇报初稿。\n"
-                "正文草稿：标题：部门月度工作汇报\n\n开头概述：本月围绕重点任务推进。\n\n"
-                "一、工作开展情况\n持续推进迎峰度夏保供电。\n\n"
-                "二、存在问题\n部分基础数据仍需补充。\n\n"
-                "三、下一步工作安排\n完善台账并抓好闭环。\n\n"
-                "待补充事项：请补充具体数据。\n"
-                "建议下一步：进入材料打磨。"
-            ),
+                "content": (
+                    "阶段摘要：已形成专家团执行计划。\n"
+                    "正文草稿：本阶段不直接起草完整正文，先确认材料定位、使用对象、结构边界、素材缺口和后续分工。"
+                    "计划安排为先形成工作汇报初稿，再进行材料打磨，最后完成交付复核，过程中保留待人工确认的数据口径。\n"
+                    "待补充事项：请补充具体数据、典型成效和下月重点工作安排。\n"
+                    "建议下一步：进入生成初稿。"
+                ),
         },
     )
 
@@ -200,7 +204,7 @@ def test_valid_generation_registers_structured_output_and_review_action(tmp_path
     assert completed["workflow_state"] == "awaiting_review"
     assert completed["view"]["presentation"]["state"] == "awaiting_review"
     assert completed["view"]["presentation"]["primary_action"]["id"] == "review_stage"
-    assert output["visible_title"] == "起草工作汇报初稿"
+    assert output["visible_title"] == "专家团计划"
     assert output["locator"] == "chat"
     assert output["has_long_content"] is True
 
@@ -231,11 +235,23 @@ def test_stage_approval_advances_until_final_completed(tmp_path):
     assert next_stage["current_stage"]["index"] == 1
 
     run_id = next_stage["run_id"]
-    for _ in range(2):
+    remaining = next_stage["view"]["phase_progress"]["total"] - next_stage["current_stage"]["index"]
+    for _ in range(remaining):
         done = expert_teams.mark_expert_team_execution_complete(
             tmp_path,
             run_id,
-            delivery={"id": "d", "kind": "chat", "content": "阶段摘要：完成。\n正文草稿：正式材料内容。\n待补充事项：无\n建议下一步：继续。"},
+            delivery={
+                "id": "d",
+                "kind": "chat",
+                "content": (
+                    "阶段摘要：完成。\n"
+                    "正文草稿：标题：工作汇报\n\n"
+                    "一、工作开展情况\n已按计划推进重点任务。\n\n"
+                    "二、存在问题\n部分数据仍需补充。\n\n"
+                    "三、下一步工作安排\n继续完善台账并闭环推进。\n"
+                    "待补充事项：无\n建议下一步：继续。"
+                ),
+            },
         )
         approved = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": done["run_id"]})
         run_id = approved["run_id"]

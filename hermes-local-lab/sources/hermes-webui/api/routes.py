@@ -1124,7 +1124,13 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         + "、".join(str(term) for term in forbidden_terms)
         + "。除非用户明确要求公众号/文章发布场景，否则必须改为正式办公材料表达。\n"
     )
-    if task_id == "polish":
+    if task_id == "plan":
+        stage_instruction = (
+            "当前只执行“专家团计划”阶段：不要直接起草完整正文。"
+            "请先收敛材料类型、使用场景、写作边界、阶段分工和需要用户确认的资料缺口，形成后续生成初稿的执行计划。"
+        )
+        output_sections = "阶段摘要、正文草稿（本阶段写执行计划，不写完整材料正文）、待补充事项、建议下一步"
+    elif task_id == "polish":
         stage_instruction = (
             "当前只执行“材料打磨”阶段：基于已确认初稿，完成表达润色、版式建议、流转前核对和可执行修改清单。"
             "不要重写完整初稿，除非用户修订意见明确要求。"
@@ -1210,30 +1216,41 @@ def _expert_team_execution_display_message(run: dict) -> str:
     return f"专家团开始生成：{prefix}{title[:80]}"
 
 
-def _append_expert_team_session_entry(run: dict) -> None:
+def _append_expert_team_session_entry(run: dict) -> list[dict]:
     sid = str(run.get("session_id") or "").strip()
     if not sid:
-        return
+        return []
     try:
         session = get_session(sid)
     except Exception:
-        return
+        return []
     run_id = str(run.get("run_id") or "")
     messages = list(getattr(session, "messages", None) or [])
     if any(isinstance(msg, dict) and msg.get("expert_team_run_id") == run_id for msg in messages):
-        return
+        return []
     title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
     team_title = str(run.get("team_title") or "专家团").strip()
+    visible_title = str(((run.get("view") or {}).get("business_context") or {}).get("visible_title") or title).strip()
     now = time.time()
-    messages.append(
+    new_messages = [
         {
             "role": "user",
             "content": f"召唤{team_title}：{title[:120]}",
             "timestamp": now,
+            "_ts": now,
             "type": "expert_team_start",
             "expert_team_run_id": run_id,
-        }
-    )
+        },
+        {
+            "role": "assistant",
+            "content": f"{team_title}已创建，等待需求确认。\n\n本次任务：{visible_title}。请通过底部待办条补充必填信息。",
+            "timestamp": now + 0.001,
+            "_ts": now + 0.001,
+            "type": "expert_team_lifecycle",
+            "expert_team_run_id": run_id,
+        },
+    ]
+    messages.extend(new_messages)
     session.messages = scrub_messages(messages)
     if _is_default_or_empty_session_title(getattr(session, "title", None)):
         session.title = title_from(session.messages, getattr(session, "title", None) or "Untitled")
@@ -1242,6 +1259,7 @@ def _append_expert_team_session_entry(run: dict) -> None:
         publish_session_list_changed("session_update")
     except Exception:
         logger.debug("Failed to persist expert team session entry", exc_info=True)
+    return new_messages
 
 
 def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
@@ -10421,8 +10439,16 @@ def handle_post(handler, parsed) -> bool:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.start_expert_team(workspace, body)
-            _append_expert_team_session_entry(run)
-            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            session_messages = _append_expert_team_session_entry(run)
+            return j(
+                handler,
+                {
+                    "ok": True,
+                    "run": run,
+                    "teams": expert_teams.expert_team_catalog()["teams"],
+                    "session_messages": session_messages,
+                },
+            )
         except Exception as exc:
             return bad(handler, f"Failed to start expert team: {_sanitize_error(exc)}", 400)
 

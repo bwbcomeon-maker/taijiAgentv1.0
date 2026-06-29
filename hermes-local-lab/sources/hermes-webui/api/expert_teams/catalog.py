@@ -49,6 +49,7 @@ CONTENT_MATERIAL_TEMPLATES = [
 ]
 
 CONTENT_PHASES = [
+    {"id": "plan", "title": "专家团计划", "phase": "流程安排", "worker_name": "写作总导演"},
     {"id": "draft", "title": "起草办公材料初稿", "phase": "生成初稿", "worker_name": "文案创作专家"},
     {"id": "polish", "title": "材料打磨", "phase": "材料打磨", "worker_name": "审稿专家"},
     {"id": "delivery", "title": "交付确认", "phase": "交付", "worker_name": "交付复核专家"},
@@ -101,10 +102,30 @@ _CATALOG = {
             },
         ],
         "members": [
-            {"id": "director", "name": "写作总导演", "role": "流程编排"},
-            {"id": "writer", "name": "文案创作专家", "role": "正文写作"},
-            {"id": "reviewer", "name": "审稿专家", "role": "审稿润色"},
-            {"id": "delivery", "name": "交付复核专家", "role": "交付确认"},
+            {
+                "id": "director",
+                "name": "写作总导演",
+                "role": "流程编排",
+                "image": "static/assets/writeflow/member-workflow-producer.png",
+            },
+            {
+                "id": "writer",
+                "name": "文案创作专家",
+                "role": "正文写作",
+                "image": "static/assets/writeflow/member-writing-executor.png",
+            },
+            {
+                "id": "reviewer",
+                "name": "审稿专家",
+                "role": "审稿润色",
+                "image": "static/assets/writeflow/member-editor-review.png",
+            },
+            {
+                "id": "delivery",
+                "name": "交付复核专家",
+                "role": "交付确认",
+                "image": "static/assets/writeflow/member-outline-architect.png",
+            },
         ],
         "tasks": CONTENT_PHASES,
     },
@@ -130,11 +151,36 @@ _CATALOG = {
             {"id": "optional_context", "title": "还有没有可选补充资料？", "required": False},
         ],
         "members": [
-            {"id": "director", "name": "研究总导演", "role": "流程编排"},
-            {"id": "researcher", "name": "资料研究员", "role": "资料整理"},
-            {"id": "architect", "name": "结构架构师", "role": "结构提纲"},
-            {"id": "writer", "name": "材料起草专家", "role": "材料初稿"},
-            {"id": "reviewer", "name": "复核专家", "role": "复核交付"},
+            {
+                "id": "director",
+                "name": "研究总导演",
+                "role": "流程编排",
+                "image": "static/assets/writeflow/member-workflow-producer.png",
+            },
+            {
+                "id": "researcher",
+                "name": "资料研究员",
+                "role": "资料整理",
+                "image": "static/assets/writeflow/member-research-expert.png",
+            },
+            {
+                "id": "architect",
+                "name": "结构架构师",
+                "role": "结构提纲",
+                "image": "static/assets/writeflow/member-outline-architect.png",
+            },
+            {
+                "id": "writer",
+                "name": "材料起草专家",
+                "role": "材料初稿",
+                "image": "static/assets/writeflow/member-writing-executor.png",
+            },
+            {
+                "id": "reviewer",
+                "name": "复核专家",
+                "role": "复核交付",
+                "image": "static/assets/writeflow/member-editor-review.png",
+            },
         ],
         "tasks": DEEP_RESEARCH_PHASES,
     },

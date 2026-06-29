@@ -114,6 +114,32 @@ def _progress(run: dict) -> dict:
     return {"done": done, "total": len(tasks), "current": current}
 
 
+def _timeline_events(run: dict) -> list[dict]:
+    members = {
+        str(member.get("id") or ""): member
+        for member in run.get("members") or []
+        if isinstance(member, dict)
+    }
+    rows = []
+    for event in run.get("timeline_events") or run.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        member_id = str(event.get("member_id") or "")
+        member = members.get(member_id) or {}
+        rows.append(
+            {
+                "type": str(event.get("type") or "event"),
+                "title": str(event.get("title") or event.get("type") or "专家团动态"),
+                "detail": str(event.get("detail") or ""),
+                "member_id": member_id,
+                "member_name": str(member.get("name") or ""),
+                "member_image": str(member.get("image") or ""),
+                "at": str(event.get("at") or ""),
+            }
+        )
+    return rows
+
+
 def expert_team_run_view(run: dict) -> dict:
     business_context = business_context_for_run(run)
     state = str(run.get("workflow_state") or "collecting_required")
@@ -143,6 +169,7 @@ def expert_team_run_view(run: dict) -> dict:
         "pending_confirmations": [primary_confirmation] if primary_confirmation else [],
         "review_items": deepcopy(run.get("review_items") or []),
         "stage_review": stage_review,
+        "timeline_events": _timeline_events(run),
         "phase_progress": _progress(run),
         "actions": {
             "can_start_generation": state == "ready_to_generate",

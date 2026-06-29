@@ -74,6 +74,48 @@ def _members(template: dict) -> list[dict]:
     return [{**deepcopy(member), "status": "待命"} for member in template.get("members") or []]
 
 
+def _initial_timeline_events(template: dict) -> list[dict]:
+    now = _now()
+    events = [
+        {
+            "type": "team_created",
+            "title": f"{template.get('title') or '专家团'}已创建",
+            "detail": "等待需求确认后开始协作。",
+            "member_id": "director",
+            "at": now,
+        }
+    ]
+    for member in template.get("members") or []:
+        events.append(
+            {
+                "type": "member_joined",
+                "title": f"{member.get('name') or '专家'}已加入",
+                "detail": str(member.get("role") or "专家协作"),
+                "member_id": str(member.get("id") or ""),
+                "at": now,
+            }
+        )
+    events.append(
+        {
+            "type": "intake_requested",
+            "title": "等待需求确认",
+            "detail": "请先补充必填需求，可选补充需要提交或跳过。",
+            "member_id": "director",
+            "at": now,
+        }
+    )
+    events.append(
+        {
+            "type": "phase_plan_created",
+            "title": "已生成专家团阶段计划",
+            "detail": "将按计划、初稿、打磨、交付确认推进。",
+            "member_id": "director",
+            "at": now,
+        }
+    )
+    return events
+
+
 def _questions(template: dict, prompt: str) -> list[dict]:
     rows = []
     for question in template.get("questions") or []:
@@ -111,10 +153,28 @@ def _sync_derived(run: dict) -> dict:
     run["current_stage"] = _current_stage(run)
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     run["phase"] = str(current.get("phase") or "需求确认")
+    current_worker = str(current.get("worker_name") or "")
+    member_status = []
+    for member in run.get("members") or []:
+        item = deepcopy(member) if isinstance(member, dict) else {}
+        name = str(item.get("name") or "")
+        if state in {"collecting_required", "collecting_optional", "ready_to_generate"} and item.get("id") == "director":
+            item["status"] = "等待确认" if state != "ready_to_generate" else "待启动"
+        elif state in {"generating", "revising"} and name == current_worker:
+            item["status"] = "执行中"
+        elif state in {"awaiting_review", "generated_invalid"} and name == current_worker:
+            item["status"] = "待复核"
+        elif state == "completed":
+            item["status"] = "已完成"
+        elif not item.get("status"):
+            item["status"] = "待命"
+        member_status.append(item)
+    if member_status:
+        run["members"] = member_status
     run["status"] = {
         "collecting_required": "awaiting_user",
         "collecting_optional": "awaiting_user",
-        "ready_to_generate": "running",
+        "ready_to_generate": "awaiting_user",
         "generating": "running",
         "generated_invalid": "awaiting_user",
         "awaiting_review": "awaiting_user",
@@ -146,6 +206,29 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
     events = list(next_run.get("events") or [])
     events.append({"type": event, "from": previous, "to": state, "at": next_run["updated_at"]})
     next_run["events"] = events
+    timeline = list(next_run.get("timeline_events") or [])
+    timeline_title = {
+        "questions_answered": "需求信息已更新",
+        "generation_started": "专家开始执行当前阶段",
+        "generation_completed": "阶段成果已生成",
+        "generation_invalid": "草稿未通过办公材料校验",
+        "stage_approved": "阶段成果已确认",
+        "stage_revision_requested": "已收到修改意见",
+        "generation_resumed": "准备重新生成当前阶段",
+        "generation_failed": "生成失败",
+        "generation_cancelled": "本轮生成已停止",
+    }.get(event)
+    if timeline_title:
+        timeline.append(
+            {
+                "type": event,
+                "title": timeline_title,
+                "detail": str(next_run.get("phase") or ""),
+                "member_id": "director",
+                "at": next_run["updated_at"],
+            }
+        )
+        next_run["timeline_events"] = timeline
     return write_run(workspace, _sync_derived(next_run))
 
 
@@ -159,6 +242,7 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "session_id": str(body.get("session_id") or "").strip(),
         "team_id": template["id"],
         "team_title": template["title"],
+        "team_image": template.get("image") or "",
         "title": prompt[:120],
         "prompt": prompt,
         "created_at": _now(),
@@ -174,6 +258,7 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "stage_outputs": [],
         "review_items": [],
         "events": [{"type": "team_created", "to": "collecting_required", "at": _now()}],
+        "timeline_events": _initial_timeline_events(template),
     }
     return write_run(workspace, _sync_derived(run))
 
@@ -248,6 +333,12 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
     business_context = business_context_for_run(run)
     output = structured_output_from_delivery(delivery or {}, business_context)
     current = _current_stage(_sync_derived(deepcopy(run)))
+    output["task_id"] = current.get("task_id") or ""
+    output["phase"] = current.get("phase") or ""
+    output["worker_name"] = current.get("worker_name") or ""
+    if str(current.get("task_id") or "") == "plan":
+        output["title"] = current.get("title") or "专家团计划"
+        output["visible_title"] = current.get("title") or "专家团计划"
     material_type = str(business_context.get("material_type") or "office_material")
     validation_material_type = material_type if str(current.get("task_id") or "") == "draft" else "office_material"
     validation = validate_office_material_output(output.get("content") or "", validation_material_type)
@@ -275,6 +366,14 @@ def approve_expert_team_stage(workspace: Path, body: dict) -> dict:
         raise ValueError("Expert team stage is not awaiting review")
     index = int(run.get("current_stage_index") or 0)
     total = len(run.get("_tasks_template") or run.get("tasks") or [])
+    current_task_id = str((run.get("current_stage") or {}).get("task_id") or "")
+    outputs = [deepcopy(output) for output in run.get("stage_outputs") or [] if isinstance(output, dict)]
+    for output in reversed(outputs):
+        if not current_task_id or str(output.get("task_id") or "") == current_task_id:
+            output["status"] = "approved"
+            output["approved_at"] = _now()
+            break
+    run["stage_outputs"] = outputs
     run["current_stage_index"] = index + 1
     if index + 1 >= total:
         return _transition(workspace, run, "completed", "stage_approved")
