@@ -1524,12 +1524,37 @@ function _focusExpertTeamQuestionPopover(trigger){
     target=popover.querySelector(selector);
     if(target)break;
   }
-  if(target&&target.scrollIntoView)target.scrollIntoView({block:'nearest',inline:'nearest'});
+  const insideWorkspace=!!(target&&target.closest&&target.closest('.expert-team-workspace-panel'));
+  if(target&&target.scrollIntoView&&!insideWorkspace)target.scrollIntoView({block:'nearest',inline:'nearest'});
   if(target&&target.focus){
     try{target.focus({preventScroll:true});}catch(_){target.focus();}
     return true;
   }
   return false;
+}
+
+function _scrollExpertTeamQuestionPopoverIntoPanel(trigger){
+  const popover=_expertTeamQuestionPopoverElement(trigger);
+  if(!popover||popover.hidden)return false;
+  const scroller=(popover.closest&&popover.closest('.expert-team-panel-expanded-body'))
+    ||(popover.closest&&popover.closest('.expert-team-panel-inner'))
+    ||(popover.closest&&popover.closest('.expert-team-workspace-panel'));
+  if(scroller&&typeof scroller.scrollTop==='number'){
+    const scrollerRect=scroller.getBoundingClientRect();
+    const focusBlock=(scroller.clientHeight<popover.offsetHeight*.7&&popover.querySelector)
+      ? (popover.querySelector('.status-card-expert-question.pending.is-current')||popover)
+      : popover;
+    const focusRect=focusBlock.getBoundingClientRect();
+    const nextTop=Math.max(0,scroller.scrollTop+(focusRect.top-scrollerRect.top)-12);
+    if(typeof scroller.scrollTo==='function'){
+      try{scroller.scrollTo({top:nextTop,behavior:'auto'});}catch(_){scroller.scrollTop=nextTop;}
+    }else{
+      scroller.scrollTop=nextTop;
+    }
+    return true;
+  }
+  try{popover.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+  return true;
 }
 
 function _syncExpertTeamQuestionPopover(card){
@@ -1560,10 +1585,13 @@ function openExpertTeamQuestionPopover(trigger){
   }
   const popover=_expertTeamQuestionPopoverElement(trigger);
   if(popover)popover.hidden=false;
-  try{popover&&popover.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+  _scrollExpertTeamQuestionPopoverIntoPanel(popover||trigger);
   syncExpertTeamQuestionInputState(popover||trigger);
   _focusExpertTeamQuestionPopover(popover||trigger);
-  try{setTimeout(()=>_focusExpertTeamQuestionPopover(popover||trigger),40);}catch(_){}
+  try{setTimeout(()=>{
+    _scrollExpertTeamQuestionPopoverIntoPanel(popover||trigger);
+    _focusExpertTeamQuestionPopover(popover||trigger);
+  },40);}catch(_){}
   return true;
 }
 

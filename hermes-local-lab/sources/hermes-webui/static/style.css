@@ -10944,6 +10944,197 @@ main.main.showing-logs > #mainLogs{display:flex;}
   }
 }
 
+/* Expert team desktop split workspace: reserve layout space instead of overlaying the task board. */
+@media (min-width:901px){
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #mainChat{
+    display:grid!important;
+    grid-template-columns:minmax(0,1fr) clamp(380px,36%,500px)!important;
+    grid-template-rows:minmax(0,1fr) auto!important;
+    gap:16px 18px!important;
+    align-items:stretch!important;
+    min-width:0!important;
+    min-height:0!important;
+    padding:clamp(18px,2vw,30px)!important;
+    overflow:hidden!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) .expert-team-workspace-panel{
+    grid-column:2!important;
+    grid-row:1 / span 2!important;
+    position:relative!important;
+    inset:auto!important;
+    top:auto!important;
+    right:auto!important;
+    bottom:auto!important;
+    left:auto!important;
+    width:100%!important;
+    max-width:none!important;
+    height:100%!important;
+    min-height:0!important;
+    max-height:none!important;
+    margin:0!important;
+    padding:0!important;
+    transform:none!important;
+    overflow:hidden!important;
+    z-index:5!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) .expert-team-workspace-panel .expert-team-panel-inner{
+    height:100%!important;
+    max-height:100%!important;
+    min-height:0!important;
+    padding:14px!important;
+    overflow:hidden!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) .expert-team-workspace-panel .expert-team-panel-expanded-body{
+    min-height:0!important;
+    max-height:none!important;
+    overflow:hidden auto!important;
+    scrollbar-gutter:stable!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #mainChat .messages-shell{
+    grid-column:1!important;
+    grid-row:1!important;
+    position:relative!important;
+    inset:auto!important;
+    top:auto!important;
+    right:auto!important;
+    bottom:auto!important;
+    left:auto!important;
+    width:100%!important;
+    max-width:none!important;
+    min-width:0!important;
+    min-height:0!important;
+    height:auto!important;
+    padding:14px 12px 12px!important;
+    transform:none!important;
+    overflow:hidden!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #messages{
+    min-height:0!important;
+    overflow:auto!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #msgInner{
+    width:100%!important;
+    max-width:100%!important;
+    padding:4px 0 16px!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) #composerWrap{
+    grid-column:1!important;
+    grid-row:2!important;
+    position:relative!important;
+    inset:auto!important;
+    top:auto!important;
+    right:auto!important;
+    bottom:auto!important;
+    left:auto!important;
+    width:100%!important;
+    max-width:none!important;
+    min-width:0!important;
+    min-height:0!important;
+    margin:0!important;
+    transform:none!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main .msg-row[data-role="user"]{
+    grid-template-columns:minmax(0,min(420px,100%)) 40px!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main .msg-row[data-role="user"] .msg-body{
+    max-width:min(420px,100%)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main .assistant-turn,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main .assistant-segment .msg-body,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main .assistant-turn .msg-body{
+    max-width:min(100%,520px)!important;
+  }
+  .expert-team-workspace-panel .expert-team-question-popover{
+    position:relative!important;
+    inset:auto!important;
+    left:auto!important;
+    top:auto!important;
+    bottom:auto!important;
+    width:100%!important;
+    min-width:0!important;
+    max-width:100%!important;
+    max-height:none!important;
+    padding:10px!important;
+    transform:none!important;
+    overflow:visible!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.78)!important;
+  }
+  .expert-team-workspace-panel .expert-team-question-popover-body,
+  .expert-team-workspace-panel .expert-team-question-groups,
+  .expert-team-workspace-panel .expert-team-workbench-grid,
+  .expert-team-workspace-panel .expert-team-panel-priority-grid{
+    grid-template-columns:1fr!important;
+  }
+  .expert-team-workspace-panel .expert-team-question-popover .status-card-expert-question{
+    grid-template-columns:1fr!important;
+  }
+  .expert-team-workspace-panel .expert-team-question-popover .status-card-expert-question-step{
+    grid-row:auto!important;
+    flex-direction:row!important;
+    justify-content:space-between!important;
+  }
+  .expert-team-workspace-panel .expert-team-question-actions{
+    grid-column:1!important;
+    justify-content:stretch!important;
+  }
+  .expert-team-workspace-panel .expert-team-question-actions button{
+    flex:1 1 auto!important;
+  }
+  .expert-team-workspace-panel .expert-team-stage-actions{
+    grid-template-columns:1fr!important;
+    grid-template-areas:"locate" "approve" "revise" "feedback";
+    align-items:stretch!important;
+  }
+  .expert-team-workspace-panel .expert-team-stage-locate,
+  .expert-team-workspace-panel .expert-team-stage-revision-toggle{
+    justify-self:stretch!important;
+  }
+  .expert-team-workspace-panel .expert-team-stage-approve{
+    justify-self:stretch!important;
+    min-width:0!important;
+  }
+  .expert-team-workspace-panel .expert-team-stage-actions .expert-team-panel-action{
+    width:100%!important;
+  }
+  .expert-team-workspace-panel .expert-team-stage-feedback{
+    grid-template-columns:1fr!important;
+  }
+  .expert-team-workspace-panel .expert-team-review-item{
+    grid-template-columns:24px minmax(0,1fr)!important;
+  }
+  .expert-team-workspace-panel .expert-team-review-item-actions{
+    grid-column:2!important;
+    grid-row:auto!important;
+    justify-content:flex-start!important;
+  }
+}
+
+@media (min-width:901px) and (max-width:1320px){
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #mainChat{
+    grid-template-columns:1fr!important;
+    grid-template-rows:auto minmax(0,1fr) auto!important;
+    gap:12px!important;
+    padding:16px!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) .expert-team-workspace-panel{
+    grid-column:1!important;
+    grid-row:1!important;
+    height:auto!important;
+    max-height:min(46vh,360px)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) .expert-team-workspace-panel .expert-team-panel-inner{
+    max-height:min(46vh,360px)!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #mainChat .messages-shell{
+    grid-column:1!important;
+    grid-row:2!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) #composerWrap{
+    grid-column:1!important;
+    grid-row:3!important;
+  }
+}
+
 .expert-team-capsule{
   flex-direction:column;
   align-items:center;

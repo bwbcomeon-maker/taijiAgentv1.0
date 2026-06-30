@@ -1,7 +1,9 @@
+import importlib.util
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CATALOG_PY = REPO_ROOT / "api" / "expert_teams" / "catalog.py"
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -13,12 +15,28 @@ ACTIONS_JS = (REPO_ROOT / "static" / "expert-team-actions.js").read_text(encodin
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def _load_expert_team_catalog():
+    spec = importlib.util.spec_from_file_location("_expert_team_catalog_test", CATALOG_PY)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_expert_team_scripts_are_loaded_before_legacy_ui_shell():
     assert "static/expert-team-presenter.js" in INDEX_HTML
     assert "static/expert-team-ui.js" in INDEX_HTML
     assert "static/expert-team-actions.js" in INDEX_HTML
     assert INDEX_HTML.index("static/expert-team-presenter.js") < INDEX_HTML.index("static/ui.js")
     assert INDEX_HTML.index("static/expert-team-ui.js") < INDEX_HTML.index("static/ui.js")
+
+
+def test_public_expert_team_catalog_images_exist():
+    catalog = _load_expert_team_catalog()._CATALOG
+    for team in catalog.values():
+        for image_ref in [team.get("image"), *(member.get("image") for member in team.get("members", []))]:
+            assert image_ref
+            assert (REPO_ROOT / image_ref).exists(), f"missing expert team image: {image_ref}"
 
 
 def test_presenter_is_the_only_source_of_main_state_and_action():
@@ -94,6 +112,25 @@ def test_expert_team_workspace_panel_is_right_side_surface_and_not_bottom_dock()
     assert "width:clamp(240px" in desktop_css or "width:clamp(260px" in desktop_css
 
 
+def test_expert_team_workspace_uses_reserved_layout_not_overlay():
+    assert "Expert team desktop split workspace" in STYLE_CSS
+    assert "grid-template-columns:minmax(0,1fr) clamp(380px,36%,500px)!important;" in STYLE_CSS
+    assert "grid-template-rows:minmax(0,1fr) auto!important;" in STYLE_CSS
+    assert "grid-row:1 / span 2!important;" in STYLE_CSS
+    assert "position:relative!important;" in STYLE_CSS
+    assert "transform:none!important;" in STYLE_CSS
+    assert "grid-column:1!important;" in STYLE_CSS
+    assert "grid-row:2!important;" in STYLE_CSS
+    assert ".expert-team-workspace-panel .expert-team-question-popover{" in STYLE_CSS
+    assert ".expert-team-workspace-panel .expert-team-stage-actions{" in STYLE_CSS
+    assert "grid-template-areas:\"locate\" \"approve\" \"revise\" \"feedback\";" in STYLE_CSS
+    assert ".expert-team-workspace-panel .expert-team-stage-approve{" in STYLE_CSS
+    assert "justify-self:stretch!important;" in STYLE_CSS
+    assert "min-width:0!important;" in STYLE_CSS
+    assert "@media (min-width:901px) and (max-width:1320px)" in STYLE_CSS
+    assert "max-height:min(46vh,360px)!important;" in STYLE_CSS
+
+
 def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():
     assert "function toggleExpertTeamWorkspacePanel" in UI_JS
     assert "window.toggleExpertTeamWorkspacePanel=toggleExpertTeamWorkspacePanel" in UI_JS
@@ -105,6 +142,26 @@ def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message()
     assert "panel.hidden=!visible" in sync_body
     assert "expert-team-panel-collapse-toggle" in EXPERT_UI_JS
     assert "toggleExpertTeamWorkspacePanel(this)" in EXPERT_UI_JS
+
+
+def test_question_popover_scrolls_into_workspace_panel_when_opened():
+    assert "function _scrollExpertTeamQuestionPopoverIntoPanel" in UI_JS
+    scroll_start = UI_JS.index("function _scrollExpertTeamQuestionPopoverIntoPanel")
+    scroll_body = UI_JS[scroll_start : UI_JS.index("function _syncExpertTeamQuestionPopover", scroll_start)]
+    assert ".expert-team-panel-expanded-body" in scroll_body
+    assert "scroller.clientHeight<popover.offsetHeight*.7" in scroll_body
+    assert ".status-card-expert-question.pending.is-current" in scroll_body
+    assert "scroller.scrollTop+(focusRect.top-scrollerRect.top)-12" in scroll_body
+    assert "scroller.scrollTo({top:nextTop,behavior:'auto'})" in scroll_body
+
+    focus_start = UI_JS.index("function _focusExpertTeamQuestionPopover")
+    focus_body = UI_JS[focus_start : UI_JS.index("function _scrollExpertTeamQuestionPopoverIntoPanel", focus_start)]
+    assert "closest('.expert-team-workspace-panel')" in focus_body
+    assert "target.scrollIntoView&&!insideWorkspace" in focus_body
+
+    open_start = UI_JS.index("function openExpertTeamQuestionPopover")
+    open_body = UI_JS[open_start : UI_JS.index("function closeExpertTeamQuestionPopover", open_start)]
+    assert "_scrollExpertTeamQuestionPopoverIntoPanel(popover||trigger);" in open_body
 
 
 def test_right_workspace_and_capsule_render_from_single_presentation():

@@ -175,7 +175,7 @@ _CATALOG = {
                 "id": "evidence",
                 "name": "事实核验专家",
                 "role": "事实核验",
-                "image": "static/assets/writeflow/member-editor.png",
+                "image": "static/assets/writeflow/member-editor-review.png",
             },
             {
                 "id": "architect",
