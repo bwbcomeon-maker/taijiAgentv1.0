@@ -287,6 +287,28 @@ async function main() {
 
     await page.click("#expertTeamWorkspacePanel [data-expert-team-action='answer_required']");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea", { timeout: 10000 });
+    const confirmOpen = await page.evaluate(() => {
+      const panel = document.querySelector("#expertTeamWorkspacePanel");
+      const popover = panel?.querySelector(".expert-team-question-popover:not([hidden])");
+      const tabVisible = Array.from(panel?.querySelectorAll(".expert-team-panel-tabs,[data-expert-team-tab-panel]") || [])
+        .some((node) => !node.hidden && getComputedStyle(node).display !== "none");
+      const panelRect = panel ? panel.getBoundingClientRect() : null;
+      const popoverRect = popover ? popover.getBoundingClientRect() : null;
+      return {
+        mode: panel?.dataset.expertTeamWorkspaceMode || "",
+        popoverVisible: Boolean(popover && getComputedStyle(popover).display !== "none"),
+        tabVisible,
+        focusedTag: document.activeElement ? document.activeElement.tagName : "",
+        panelRect: panelRect ? { top: panelRect.top, left: panelRect.left, width: panelRect.width, height: panelRect.height, right: panelRect.right, bottom: panelRect.bottom } : null,
+        popoverRect: popoverRect ? { top: popoverRect.top, left: popoverRect.left, width: popoverRect.width, height: popoverRect.height, right: popoverRect.right, bottom: popoverRect.bottom } : null,
+      };
+    });
+    assertState(
+      confirmOpen.mode === "confirm" && confirmOpen.popoverVisible && !confirmOpen.tabVisible && confirmOpen.focusedTag === "TEXTAREA",
+      "Question confirmation did not switch the right workbench into a focused wizard",
+      confirmOpen
+    );
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-confirmation-open.png"), fullPage: false });
     await page.fill("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea", "部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况");
     await page.focus("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea");
     await page.waitForTimeout(6500);
@@ -358,10 +380,13 @@ async function main() {
     }
 
     console.log("EXPERT TEAM ELECTRON SMOKE OK", JSON.stringify({
-      screenshots: [1024, 1280, 1440].flatMap((width) => [
+      screenshots: [
+        path.join(outDir, "expert-team-plan-a-confirmation-open.png"),
+        ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
         path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),
       ]),
+      ],
     }, null, 2));
   } finally {
     if (app) await app.close().catch(() => {});

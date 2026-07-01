@@ -76,6 +76,20 @@
   }
   if(typeof window!=='undefined'){
     window.handleExpertTeamPresentationAction=handleExpertTeamPresentationAction;
+    window.switchExpertTeamWorkspaceTab=function(btn){
+      const root=btn&&btn.closest&&btn.closest('.expert-team-panel-inner');
+      const tab=btn&&btn.dataset?btn.dataset.expertTeamWorkspaceTab:'';
+      if(!root||!tab)return false;
+      root.querySelectorAll('[data-expert-team-workspace-tab]').forEach(item=>{
+        const active=item.dataset&&item.dataset.expertTeamWorkspaceTab===tab;
+        item.classList.toggle('is-active',active);
+        item.setAttribute('aria-selected',active?'true':'false');
+      });
+      root.querySelectorAll('[data-expert-team-tab-panel]').forEach(panel=>{
+        panel.hidden=!(panel.dataset&&panel.dataset.expertTeamTabPanel===tab);
+      });
+      return true;
+    };
     window.selectExpertTeamStageInputChoice=function(btn){
       const root=btn&&btn.closest&&btn.closest('.expert-team-stage-input-card');
       if(root&&root.querySelectorAll){

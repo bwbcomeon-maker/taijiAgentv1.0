@@ -177,7 +177,49 @@
         </section>`
       : '';
     const questionPopoverHtml=(typeof _expertTeamQuestionPopoverHtml==='function')?_expertTeamQuestionPopoverHtml(card):'';
-    return `<div class="expert-team-panel-inner" data-expert-team-run-id="${safeEsc(runId)}" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}">
+    const currentTodoLabel=presentation.state==='awaiting_review'
+      ? '阶段成果待复核'
+      : (presentation.state==='awaiting_stage_input'
+        ? '当前阶段需要确认'
+        : (presentation.primaryAction&&presentation.primaryAction.label||statusText(presentation.state)));
+    const currentTodoDetail=presentation.detail||stageSummary||'请处理当前专家团待办。';
+    const hasDetailedTask=!!(genericActionHtml||stageInputHtml||stageReviewHtml);
+    const actionSummaryHtml=presentation.primaryAction&&!hasDetailedTask
+      ? `<button type="button" class="expert-team-panel-inline-action" data-expert-team-action="${safeEsc(presentation.primaryAction.id)}" data-expert-team-action-kind="${safeEsc(presentation.primaryAction.kind||'')}" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()">${safeEsc(presentation.primaryAction.label||'处理')}</button>`
+      : `<span class="expert-team-panel-inline-note">${safeEsc(statusText(presentation.state))}</span>`;
+    const todoSummaryCardHtml=hasDetailedTask?'':`<section class="expert-team-panel-section expert-team-primary-task-card" aria-label="当前待办摘要">
+          <div class="expert-team-panel-section-title"><span>当前待办</span><small>${safeEsc(statusText(presentation.state))}</small></div>
+          <div class="expert-team-todo-summary">
+            <span><strong>${safeEsc(currentTodoLabel)}</strong><small>${safeEsc(currentTodoDetail)}</small></span>
+            ${actionSummaryHtml}
+          </div>
+        </section>`;
+    const todoPanelHtml=`${genericActionHtml}${stageInputHtml}${stageReviewHtml}${todoSummaryCardHtml}`;
+    const flowPanelHtml=`<section class="expert-team-panel-section expert-team-workbench-hero" aria-label="专家团当前阶段">
+          <div class="expert-team-panel-section-title"><span>当前协作</span><small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small></div>
+          <div class="expert-team-workbench-grid">
+            <span><b>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</b><small>当前阶段</small></span>
+            <span><b>${safeEsc(currentStage.title||presentation.visibleTitle||'阶段任务')}</b><small>阶段任务</small></span>
+            <span><b>${safeEsc(currentWorker.name||currentStage.worker_name||'专家团')}</b><small>当前专家</small></span>
+          </div>
+          ${currentWorkerHtml}
+        </section>
+        <section class="expert-team-panel-section">
+          <div class="expert-team-panel-section-title"><span>阶段进度</span><small>${safeEsc(progress.text)}</small></div>
+          <div class="expert-team-panel-progress" style="--expert-team-panel-progress:${progress.pct}%"><i></i><span><b>${safeEsc(progress.text)}</b> · ${safeEsc(currentStage.title||'等待阶段推进')}</span></div>
+          <div class="expert-team-panel-phases">${phaseRows||'<span class="expert-team-panel-phase active"><i>0</i><b>需求确认</b><small>前置准备</small></span>'}</div>
+        </section>
+        <section class="expert-team-panel-section"><div class="expert-team-panel-section-title"><span>执行明细</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>${timelineHtml}<div class="expert-team-process-panel">${taskRows||'<span class="expert-team-process-row">等待阶段初始化</span>'}</div></section>`;
+    const membersPanelHtml=`<section class="expert-team-panel-section"><div class="expert-team-panel-section-title"><span>专家团成员</span><small>各司其职</small></div>${memberHtml||'<div class="expert-team-panel-empty">专家团成员将在任务初始化后显示</div>'}</section>`;
+    const resultPanelHtml=`<section class="expert-team-panel-section">
+          <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='awaiting_stage_input'?'等待确认后继续':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
+          <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
+          ${presentation.state==='awaiting_review'?'':resultHtml}
+        </section>`;
+    function tabPanel(id,html,active){
+      return `<div class="expert-team-tab-panel" data-expert-team-tab-panel="${safeEsc(id)}" ${active?'':'hidden'}>${html}</div>`;
+    }
+    return `<div class="expert-team-panel-inner" data-expert-team-run-id="${safeEsc(runId)}" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}" data-expert-team-workspace-mode="summary">
       <div class="expert-team-capsule" aria-label="专家团收起状态">
         <span class="expert-team-capsule-icon">专</span>
         <strong>${safeEsc(progress.text)}</strong>
@@ -203,31 +245,17 @@
         </div>
       </div>
       <div class="expert-team-panel-expanded-body">
-        ${genericActionHtml}
-        ${stageInputHtml}
-        ${stageReviewHtml}
-        <section class="expert-team-panel-section expert-team-workbench-hero" aria-label="专家团当前阶段">
-          <div class="expert-team-panel-section-title"><span>当前协作</span><small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small></div>
-          <div class="expert-team-workbench-grid">
-            <span><b>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</b><small>当前阶段</small></span>
-            <span><b>${safeEsc(currentStage.title||presentation.visibleTitle||'阶段任务')}</b><small>阶段任务</small></span>
-            <span><b>${safeEsc(currentWorker.name||currentStage.worker_name||'专家团')}</b><small>当前专家</small></span>
-          </div>
-          ${currentWorkerHtml}
-        </section>
-        <section class="expert-team-panel-section">
-          <div class="expert-team-panel-section-title"><span>阶段进度</span><small>${safeEsc(progress.text)}</small></div>
-          <div class="expert-team-panel-progress" style="--expert-team-panel-progress:${progress.pct}%"><i></i><span><b>${safeEsc(progress.text)}</b> · ${safeEsc(currentStage.title||'等待阶段推进')}</span></div>
-          <div class="expert-team-panel-phases">${phaseRows||'<span class="expert-team-panel-phase active"><i>0</i><b>需求确认</b><small>前置准备</small></span>'}</div>
-        </section>
-        <section class="expert-team-panel-section"><div class="expert-team-panel-section-title"><span>专家团成员</span><small>各司其职</small></div>${memberHtml}</section>
-        ${questionPopoverHtml}
-        <section class="expert-team-panel-section">
-          <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='awaiting_stage_input'?'等待确认后继续':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
-          <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
-          ${presentation.state==='awaiting_review'?'':resultHtml}
-        </section>
-        <section class="expert-team-panel-section"><div class="expert-team-panel-section-title"><span>执行明细</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>${timelineHtml}<div class="expert-team-process-panel">${taskRows||'<span class="expert-team-process-row">等待阶段初始化</span>'}</div></section>
+        <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
+        <nav class="expert-team-panel-tabs" aria-label="专家团工作台视图">
+          <button type="button" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(statusText(presentation.state))}</small></button>
+          <button type="button" data-expert-team-workspace-tab="flow" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>流程</span><small>${safeEsc(progress.text)}</small></button>
+          <button type="button" data-expert-team-workspace-tab="members" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成员</span><small>${safeEsc(members.length?`${members.length} 人`:'待定')}</small></button>
+          <button type="button" data-expert-team-workspace-tab="result" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成果</span><small>${safeEsc(presentation.state==='completed'?'可查看':'沉淀中')}</small></button>
+        </nav>
+        ${tabPanel('todo',todoPanelHtml,true)}
+        ${tabPanel('flow',flowPanelHtml,false)}
+        ${tabPanel('members',membersPanelHtml,false)}
+        ${tabPanel('result',resultPanelHtml,false)}
       </div>
     </div>`;
   }

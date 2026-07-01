@@ -1352,6 +1352,7 @@ let _activeExpertTeamStatusCard=null;
 let _expertTeamQuestionPopoverOpen=false;
 let _expertTeamQuestionPopoverRunId='';
 let _expertTeamQuestionPopoverQuestionId='';
+let _expertTeamQuestionPopoverReturnFocus=null;
 
 function _expertTeamLifecycleCardHtml(card){
   if(!_isExpertTeamStatusCard(card))return '';
@@ -1441,7 +1442,7 @@ function _expertTeamQuestionPopoverHtml(card){
   const isOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId===runId);
   const progressHtml=_expertTeamQuestionPopoverProgressHtml(state);
   if(state.isComplete){
-    return `<section class="expert-team-question-popover is-complete" data-expert-team-question-popover="1" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认完成">
+    return `<section class="expert-team-question-popover expert-team-confirmation-wizard is-complete" data-expert-team-question-popover="1" data-expert-team-workspace-mode="confirm" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认完成" onkeydown="trapExpertTeamQuestionPopoverKeydown(event)">
       <div class="expert-team-question-popover-head">
         <span><strong>需求确认完成</strong><small>已完成或跳过 ${state.answeredCount}/${state.total} 项，专家团将继续推进。</small></span>
         <button type="button" class="expert-team-question-close" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()" aria-label="关闭需求确认窗口">×</button>
@@ -1469,18 +1470,19 @@ function _expertTeamQuestionPopoverHtml(card){
       <span>${required?'你的确认意见':'可选补充'}</span>
       <textarea rows="4" data-expert-team-answer-input="1" aria-label="${esc(ariaLabel)}" placeholder="${esc(required?'输入你的确认意见...':'可补充素材、口径或边界；也可以直接跳过')}" oninput="syncExpertTeamQuestionInputState(this)">${esc(initialAnswer)}</textarea>
     </label>`:'';
-  const groupHtml=`<div class="expert-team-question-groups" aria-label="需求确认分组">
-      <span class="${state.requiredQuestions.length?'':'is-empty'}"><b>必填问题</b><small>${state.requiredQuestions.filter(item=>!_expertTeamQuestionIsTerminal(item)).length} 项待处理</small></span>
-      <span class="${state.optionalQuestions.length?'':'is-empty'}"><b>可选补充</b><small>${state.optionalQuestions.filter(item=>!_expertTeamQuestionIsTerminal(item)).length} 项待处理</small></span>
+  const questionMetaHtml=`<div class="expert-team-question-compact-meta" aria-label="需求确认摘要">
+      <span><b>${required?'必填问题':'可选补充'}</b><small>第 ${state.currentIndex} 项</small></span>
+      <span><b>已回答 ${state.answeredCount}</b><small>${state.pending.length} 项待处理</small></span>
     </div>`;
+  const deferHtml=`<button type="button" class="expert-team-question-secondary" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()">稍后处理</button>`;
   const skipOptionalHtml=!required?`<button type="button" class="expert-team-question-secondary expert-team-question-skip" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}" data-expert-team-required="0" data-expert-team-skip-optional="1" onclick="submitExpertTeamQuestionStep(this);event.stopPropagation()">跳过并开始生成</button>`:'';
-  return `<section class="expert-team-question-popover" data-expert-team-question-popover="1" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认">
+  return `<section class="expert-team-question-popover expert-team-confirmation-wizard" data-expert-team-question-popover="1" data-expert-team-workspace-mode="confirm" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认" onkeydown="trapExpertTeamQuestionPopoverKeydown(event)">
     <div class="expert-team-question-popover-head">
-      <span><strong>需求确认 ${state.currentIndex}/${state.total}</strong><small>生成尚未开始；必填完成后，请处理或跳过可选补充。</small></span>
+      <span><strong>需求确认 ${state.currentIndex}/${state.total}</strong><small>生成尚未开始；当前只处理这一项。</small></span>
       <button type="button" class="expert-team-question-close" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()" aria-label="关闭需求确认窗口">×</button>
     </div>
     ${progressHtml}
-    ${groupHtml}
+    ${questionMetaHtml}
     <div class="expert-team-question-popover-body">
       <article class="status-card-expert-question pending is-current ${hasInitialAnswer?'is-filled':'is-empty'}" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}">
         <span class="status-card-expert-question-step"><b>${required?'必填':'可选'}</b><small>第 ${state.currentIndex} 项</small></span>
@@ -1493,13 +1495,44 @@ function _expertTeamQuestionPopoverHtml(card){
         <div class="expert-team-question-actions">
           <button type="button" class="expert-team-question-secondary" onclick="goExpertTeamQuestionStep(this,-1);event.stopPropagation()" ${state.currentIndex<=1?'disabled':''}>上一题</button>
           <button type="button" class="expert-team-question-secondary" onclick="saveExpertTeamQuestionDraft(this);event.stopPropagation()">保存草稿</button>
+          ${deferHtml}
           ${skipOptionalHtml}
           <button class="status-card-expert-question-submit expert-team-question-primary" type="button" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}" data-expert-team-required="${required?'1':'0'}" data-expert-team-empty-label="${esc(emptyLabel)}" data-expert-team-ready-label="${esc(readyLabel)}" data-expert-team-aria-base="${esc(ariaLabel)}" aria-label="${esc(`${ariaLabel}，${hasInitialAnswer?readyLabel:emptyLabel}`)}" ${hasInitialAnswer?'':'disabled'} onclick="submitExpertTeamQuestionStep(this);event.stopPropagation()">${hasInitialAnswer?readyLabel:emptyLabel}</button>
         </div>
       </article>
-      ${_expertTeamQuestionPopoverReviewHtml(state)}
     </div>
   </section>`;
+}
+
+function trapExpertTeamQuestionPopoverKeydown(event){
+  if(!event)return false;
+  const popover=event.currentTarget||(event.target&&event.target.closest&&event.target.closest('[data-expert-team-question-popover]'));
+  if(!popover||popover.hidden)return false;
+  if(event.key==='Escape'){
+    event.preventDefault();
+    closeExpertTeamQuestionPopover(popover);
+    return true;
+  }
+  if(event.key!=='Tab')return false;
+  const focusable=Array.from(popover.querySelectorAll('button:not(:disabled),textarea:not(:disabled),input:not(:disabled),select:not(:disabled),a[href],[tabindex]:not([tabindex="-1"])')).filter(item=>{
+    if(!item||item.hidden)return false;
+    const style=typeof getComputedStyle==='function'?getComputedStyle(item):null;
+    return !style||style.display!=='none'&&style.visibility!=='hidden';
+  });
+  if(!focusable.length)return false;
+  const first=focusable[0];
+  const last=focusable[focusable.length-1];
+  if(event.shiftKey&&document.activeElement===first){
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if(!event.shiftKey&&document.activeElement===last){
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
 }
 
 function _expertTeamQuestionPopoverElement(trigger){
@@ -1565,6 +1598,7 @@ function _syncExpertTeamQuestionPopover(card){
   }
   const popover=_expertTeamQuestionPopoverElement(null);
   if(popover)popover.hidden=!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId===state.runId);
+  _setExpertTeamWorkspaceMode(popover&&!popover.hidden?'confirm':'summary');
   if(popover&&!popover.hidden)syncExpertTeamQuestionInputState(popover);
   return !!(popover&&!popover.hidden);
 }
@@ -1578,6 +1612,7 @@ function openExpertTeamQuestionPopover(trigger){
   const card=_activeExpertTeamStatusCard;
   const state=_expertTeamQuestionWizardState(card);
   if(!state.total)return focusExpertTeamWorkspacePanel(trigger);
+  if(trigger&&trigger.focus)_expertTeamQuestionPopoverReturnFocus=trigger;
   _expertTeamQuestionPopoverOpen=true;
   _expertTeamQuestionPopoverRunId=state.runId;
   if(!_expertTeamQuestionPopoverQuestionId||!state.questions.some(question=>String(question&&question.id||'')===String(_expertTeamQuestionPopoverQuestionId))){
@@ -1585,6 +1620,7 @@ function openExpertTeamQuestionPopover(trigger){
   }
   const popover=_expertTeamQuestionPopoverElement(trigger);
   if(popover)popover.hidden=false;
+  _setExpertTeamWorkspaceMode('confirm');
   _scrollExpertTeamQuestionPopoverIntoPanel(popover||trigger);
   syncExpertTeamQuestionInputState(popover||trigger);
   _focusExpertTeamQuestionPopover(popover||trigger);
@@ -1599,10 +1635,15 @@ function closeExpertTeamQuestionPopover(trigger){
   _expertTeamQuestionPopoverOpen=false;
   const popover=_expertTeamQuestionPopoverElement(trigger);
   if(popover)popover.hidden=true;
+  _setExpertTeamWorkspaceMode('summary');
   const panel=document.getElementById('expertTeamWorkspacePanel');
-  const summary=panel&&panel.querySelector?panel.querySelector('.expert-team-capsule-action,.expert-team-panel-collapse-toggle'):null;
-  if(summary&&summary.focus){
-    try{summary.focus({preventScroll:true});}catch(_){summary.focus();}
+  const fallback=panel&&panel.querySelector?panel.querySelector('[data-expert-team-action="answer_required"],[data-expert-team-action="answer_optional"],.expert-team-capsule-action,.expert-team-panel-collapse-toggle'):null;
+  const target=(_expertTeamQuestionPopoverReturnFocus&&document.contains&&document.contains(_expertTeamQuestionPopoverReturnFocus))
+    ? _expertTeamQuestionPopoverReturnFocus
+    : fallback;
+  _expertTeamQuestionPopoverReturnFocus=null;
+  if(target&&target.focus){
+    try{target.focus({preventScroll:true});}catch(_){target.focus();}
   }
   return true;
 }
@@ -1892,6 +1933,15 @@ function _setExpertTeamWorkspaceActive(active){
   }
 }
 
+function _setExpertTeamWorkspaceMode(mode){
+  const next=mode==='confirm'?'confirm':'summary';
+  const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
+  if(panel&&panel.dataset)panel.dataset.expertTeamWorkspaceMode=next;
+  const inner=panel&&panel.querySelector?panel.querySelector('.expert-team-panel-inner'):null;
+  if(inner)inner.setAttribute('data-expert-team-workspace-mode',next);
+  return true;
+}
+
 function _removeExpertTeamWorkspacePanelElement(){
   const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
   if(panel){
@@ -1923,6 +1973,9 @@ function mountExpertTeamWorkspacePanel(card){
   panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation==='function'
     ? renderExpertTeamWorkspaceFromPresentation(card)
     : '';
+  const runId=panel.dataset.expertTeamRunId||'';
+  const confirmOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId&&_expertTeamQuestionPopoverRunId===runId);
+  _setExpertTeamWorkspaceMode(confirmOpen?'confirm':'summary');
   _setExpertTeamWorkspaceActive(true);
   _syncExpertTeamWorkspacePanelVisibility();
   return true;
@@ -2630,6 +2683,7 @@ if(typeof window!=='undefined'){
   window.syncExpertTeamQuestionInputState=syncExpertTeamQuestionInputState;
   window.openExpertTeamQuestionPopover=openExpertTeamQuestionPopover;
   window.closeExpertTeamQuestionPopover=closeExpertTeamQuestionPopover;
+  window.trapExpertTeamQuestionPopoverKeydown=trapExpertTeamQuestionPopoverKeydown;
   window.goExpertTeamQuestionStep=goExpertTeamQuestionStep;
   window.saveExpertTeamQuestionDraft=saveExpertTeamQuestionDraft;
   window.submitExpertTeamQuestionStep=submitExpertTeamQuestionStep;

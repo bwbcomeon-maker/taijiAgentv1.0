@@ -128,7 +128,25 @@ def test_expert_team_workspace_uses_reserved_layout_not_overlay():
     assert "justify-self:stretch!important;" in STYLE_CSS
     assert "min-width:0!important;" in STYLE_CSS
     assert "@media (min-width:901px) and (max-width:1320px)" in STYLE_CSS
-    assert "max-height:min(46vh,360px)!important;" in STYLE_CSS
+    assert "max-height:min(46vh,360px)!important;" not in STYLE_CSS
+    assert "data-expert-team-workspace-mode" in EXPERT_UI_JS
+
+
+def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
+    assert "expert-team-panel-tabs" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"todo\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"flow\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"members\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"result\"" in EXPERT_UI_JS
+    assert "expert-team-confirmation-wizard" in EXPERT_UI_JS
+    assert "需求确认 1/" in EXPERT_UI_JS
+    assert "确认并下一题" in EXPERT_UI_JS
+    assert "保存草稿" in EXPERT_UI_JS
+    assert "稍后处理" in EXPERT_UI_JS
+    assert "expert-team-primary-task-card" in EXPERT_UI_JS
+    assert "expert-team-workbench-hero" in EXPERT_UI_JS
+    assert "执行明细" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-mode=\"confirm\"" in EXPERT_UI_JS
 
 
 def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():
