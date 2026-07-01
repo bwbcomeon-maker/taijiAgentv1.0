@@ -147,6 +147,8 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "expert-team-workbench-hero" in EXPERT_UI_JS
     assert "执行明细" in EXPERT_UI_JS
     assert "data-expert-team-workspace-mode=\"confirm\"" in EXPERT_UI_JS
+    assert "window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab" in ACTIONS_JS
+    assert "restoreExpertTeamWorkspaceTab(panel)" in UI_JS
 
 
 def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():

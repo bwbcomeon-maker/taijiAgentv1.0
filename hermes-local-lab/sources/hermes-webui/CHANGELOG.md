@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Expert-team workspace tabs now preserve the selected Todo/Flow/Members/Result view across live status refreshes for the same run without leaking that selection into another run.
 - Expert-team desktop workspace now uses a task-first summary with Todo/Flow/Members/Result tabs, and opens demand confirmation as a single-question wizard so the right panel no longer becomes a long stacked status page.
 - Expert-team desktop sessions now keep a visible, collapsible workspace outside the chat message stream; the Dock `去复核` action opens a real stage-review panel with result, approve, and revision controls, and final-stage approval is labeled as task completion.
 - Taiji desktop homepage group filters now use a compact `分组 N` dropdown management panel with search, select, rename, delete, and create actions, while the composer send controls size to the actual status/ring/badge/send cluster instead of drifting outside the input box.

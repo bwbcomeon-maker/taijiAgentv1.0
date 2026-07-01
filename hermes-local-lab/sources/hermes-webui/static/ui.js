@@ -1976,6 +1976,7 @@ function mountExpertTeamWorkspacePanel(card){
   const runId=panel.dataset.expertTeamRunId||'';
   const confirmOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId&&_expertTeamQuestionPopoverRunId===runId);
   _setExpertTeamWorkspaceMode(confirmOpen?'confirm':'summary');
+  if(typeof restoreExpertTeamWorkspaceTab==='function')restoreExpertTeamWorkspaceTab(panel);
   _setExpertTeamWorkspaceActive(true);
   _syncExpertTeamWorkspacePanelVisibility();
   return true;

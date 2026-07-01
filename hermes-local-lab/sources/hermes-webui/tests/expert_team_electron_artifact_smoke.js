@@ -222,6 +222,20 @@ async function snapshotState(page) {
   });
 }
 
+async function activeWorkbenchTab(page) {
+  return page.evaluate(() => {
+    const active = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab].is-active");
+    const visiblePanel = Array.from(document.querySelectorAll("#expertTeamWorkspacePanel [data-expert-team-tab-panel]"))
+      .find((panel) => !panel.hidden && getComputedStyle(panel).display !== "none");
+    return {
+      tab: active?.dataset.expertTeamWorkspaceTab || "",
+      label: active?.textContent.replace(/\s+/g, " ").trim() || "",
+      panel: visiblePanel?.dataset.expertTeamTabPanel || "",
+      text: visiblePanel?.textContent.replace(/\s+/g, " ").trim() || "",
+    };
+  });
+}
+
 async function main() {
   assertState(fs.existsSync(electronBin), `Electron binary not found: ${electronBin}`);
   fs.mkdirSync(outDir, { recursive: true });
@@ -284,6 +298,29 @@ async function main() {
     assertState(collecting.panelText.includes("必须需求待确认") && collecting.panelText.includes("去确认"), "Collecting state has no right-side confirmation action", collecting);
     assertState(collecting.stageCount === 5 && collecting.memberCount === 5, "Content team members/stages are not dynamically rendered from fixture", collecting);
     assertState(collecting.dockHidden && collecting.chatConfirmButtons === 0, "Collecting state still duplicates actions outside the workbench", collecting);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']");
+    const flowBeforeRefresh = await activeWorkbenchTab(page);
+    assertState(flowBeforeRefresh.tab === "flow" && flowBeforeRefresh.panel === "flow", "Flow tab did not become active before refresh", flowBeforeRefresh);
+    await renderRun(page, "collecting_required");
+    const flowAfterRefresh = await activeWorkbenchTab(page);
+    assertState(flowAfterRefresh.tab === "flow" && flowAfterRefresh.panel === "flow", "Flow tab did not survive workbench refresh", flowAfterRefresh);
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-flow-tab-after-refresh.png"), fullPage: false });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='members']");
+    const membersBeforeRefresh = await activeWorkbenchTab(page);
+    assertState(membersBeforeRefresh.tab === "members" && membersBeforeRefresh.panel === "members", "Members tab did not become active before refresh", membersBeforeRefresh);
+    await renderRun(page, "collecting_required");
+    const membersAfterRefresh = await activeWorkbenchTab(page);
+    assertState(membersAfterRefresh.tab === "members" && membersAfterRefresh.panel === "members", "Members tab did not survive workbench refresh", membersAfterRefresh);
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-members-tab-after-refresh.png"), fullPage: false });
+    await renderRun(page, "collecting_required", { run_id: "electron-plan-a-stable-run" });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']");
+    await renderRun(page, "generating", { run_id: "electron-plan-a-stable-run" });
+    const flowAfterStateRefresh = await activeWorkbenchTab(page);
+    assertState(flowAfterStateRefresh.tab === "flow" && flowAfterStateRefresh.panel === "flow", "Flow tab did not survive same-run state refresh", flowAfterStateRefresh);
+    await renderRun(page, "collecting_required", { run_id: "electron-plan-a-new-run" });
+    const newRunTab = await activeWorkbenchTab(page);
+    assertState(newRunTab.tab === "todo" && newRunTab.panel === "todo", "A different expert-team run inherited the previous run tab", newRunTab);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='todo']");
 
     await page.click("#expertTeamWorkspacePanel [data-expert-team-action='answer_required']");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea", { timeout: 10000 });
@@ -382,6 +419,8 @@ async function main() {
     console.log("EXPERT TEAM ELECTRON SMOKE OK", JSON.stringify({
       screenshots: [
         path.join(outDir, "expert-team-plan-a-confirmation-open.png"),
+        path.join(outDir, "expert-team-plan-a-flow-tab-after-refresh.png"),
+        path.join(outDir, "expert-team-plan-a-members-tab-after-refresh.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
         path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),

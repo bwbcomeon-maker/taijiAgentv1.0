@@ -1,7 +1,37 @@
 (function(){
+  const workspaceTabByRun=Object.create(null);
   function currentExpertTeamRunId(btn){
     const root=btn&&btn.closest&&btn.closest('[data-expert-team-run-id]');
     return (root&&root.dataset&&root.dataset.expertTeamRunId)||((window._activeExpertTeamStatusCard||{}).runId)||'';
+  }
+  function workspaceRunId(root){
+    const source=root&&root.closest?root.closest('[data-expert-team-run-id]'):root;
+    return source&&source.dataset&&source.dataset.expertTeamRunId||'';
+  }
+  function applyExpertTeamWorkspaceTab(root,tab){
+    if(!root||!tab)return false;
+    const target=root.querySelector&&root.querySelector(`[data-expert-team-workspace-tab="${tab}"]`);
+    if(!target)return false;
+    root.querySelectorAll('[data-expert-team-workspace-tab]').forEach(item=>{
+      const active=item.dataset&&item.dataset.expertTeamWorkspaceTab===tab;
+      item.classList.toggle('is-active',active);
+      item.setAttribute('aria-selected',active?'true':'false');
+    });
+    root.querySelectorAll('[data-expert-team-tab-panel]').forEach(panel=>{
+      panel.hidden=!(panel.dataset&&panel.dataset.expertTeamTabPanel===tab);
+    });
+    return true;
+  }
+  function rememberExpertTeamWorkspaceTab(root,tab){
+    const runId=workspaceRunId(root);
+    if(runId&&tab)workspaceTabByRun[runId]=tab;
+  }
+  function restoreExpertTeamWorkspaceTab(root){
+    const panel=root&&root.querySelector?root:document.getElementById('expertTeamWorkspacePanel');
+    const inner=panel&&panel.querySelector?panel.querySelector('.expert-team-panel-inner'):(panel&&panel.classList&&panel.classList.contains('expert-team-panel-inner')?panel:null);
+    if(!inner)return false;
+    const tab=workspaceTabByRun[workspaceRunId(inner)]||'todo';
+    return applyExpertTeamWorkspaceTab(inner,tab)||applyExpertTeamWorkspaceTab(inner,'todo');
   }
   async function refreshExpertTeamAfterAction(){
     if(typeof refreshWriteflowStatusDockForActiveSession==='function')await refreshWriteflowStatusDockForActiveSession();
@@ -80,16 +110,10 @@
       const root=btn&&btn.closest&&btn.closest('.expert-team-panel-inner');
       const tab=btn&&btn.dataset?btn.dataset.expertTeamWorkspaceTab:'';
       if(!root||!tab)return false;
-      root.querySelectorAll('[data-expert-team-workspace-tab]').forEach(item=>{
-        const active=item.dataset&&item.dataset.expertTeamWorkspaceTab===tab;
-        item.classList.toggle('is-active',active);
-        item.setAttribute('aria-selected',active?'true':'false');
-      });
-      root.querySelectorAll('[data-expert-team-tab-panel]').forEach(panel=>{
-        panel.hidden=!(panel.dataset&&panel.dataset.expertTeamTabPanel===tab);
-      });
-      return true;
+      rememberExpertTeamWorkspaceTab(root,tab);
+      return applyExpertTeamWorkspaceTab(root,tab);
     };
+    window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab;
     window.selectExpertTeamStageInputChoice=function(btn){
       const root=btn&&btn.closest&&btn.closest('.expert-team-stage-input-card');
       if(root&&root.querySelectorAll){
