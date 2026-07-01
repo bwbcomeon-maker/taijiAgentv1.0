@@ -90,8 +90,8 @@ function runFixture(sessionId, state, overrides = {}) {
     { id: "director", name: "写作总导演", role: "流程编排", status: stageIndex > 0 ? "已完成" : "等待确认", image: "static/assets/writeflow/member-workflow-producer.png" },
     { id: "material", name: "资料整理专家", role: "素材整理", status: state === "generating" ? "执行中" : state === "awaiting_stage_input" ? "等待确认" : stageIndex > 1 ? "已完成" : "待命", image: "static/assets/writeflow/member-research-expert.png" },
     { id: "writer", name: "文案创作专家", role: "正文写作", status: "待命", image: "static/assets/writeflow/member-writing-executor.png" },
-    { id: "reviewer", name: "审稿专家", role: "审稿打磨", status: "待命", image: "static/assets/writeflow/member-editor.png" },
-    { id: "delivery", name: "交付复核专家", role: "交付确认", status: state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-proofreader.png" },
+    { id: "reviewer", name: "审稿专家", role: "审稿打磨", status: "待命", image: "static/assets/writeflow/member-editor-review.png" },
+    { id: "delivery", name: "交付复核专家", role: "交付确认", status: state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-outline-architect.png" },
   ];
   const tasks = [
     { id: "plan", title: "流程安排", phase: "流程安排", status: stageIndex > 0 ? "done" : "pending", worker_id: "director", worker_name: "写作总导演" },
@@ -215,7 +215,7 @@ async function snapshotState(page) {
       collapsed: shell?.classList.contains("taiji-expert-team-panel-collapsed") || false,
       panelRect: panelRect ? { top: panelRect.top, left: panelRect.left, width: panelRect.width, height: panelRect.height, right: panelRect.right, bottom: panelRect.bottom } : null,
       chatConfirmButtons: Array.from(document.querySelectorAll("#msgInner button")).filter((button) => /去确认|去复核|确认并继续/.test(button.textContent || "")).length,
-      memberCount: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-member").length,
+      memberCount: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-member-row").length,
       stageCount: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-panel-phase").length,
       primaryButtons: document.querySelectorAll("#expertTeamWorkspacePanel .expert-team-primary-task-card [data-expert-team-action], #expertTeamWorkspacePanel .expert-team-stage-input-card [data-expert-team-action], #expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action]").length,
     };
@@ -311,6 +311,22 @@ async function main() {
     await renderRun(page, "collecting_required");
     const membersAfterRefresh = await activeWorkbenchTab(page);
     assertState(membersAfterRefresh.tab === "members" && membersAfterRefresh.panel === "members", "Members tab did not survive workbench refresh", membersAfterRefresh);
+    const membersLayout = await page.evaluate(() => {
+      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='members']");
+      const list = panel?.querySelector(".expert-team-member-list");
+      return {
+        hasVerticalList: Boolean(list),
+        rowCount: panel?.querySelectorAll(".expert-team-member-row").length || 0,
+        hasHorizontalStrip: Boolean(panel?.querySelector(".expert-team-member-strip")),
+        scrollWidth: list ? list.scrollWidth : 0,
+        clientWidth: list ? list.clientWidth : 0,
+      };
+    });
+    assertState(
+      membersLayout.hasVerticalList && membersLayout.rowCount === 5 && !membersLayout.hasHorizontalStrip && membersLayout.scrollWidth <= membersLayout.clientWidth + 1,
+      "Members tab still uses a cramped horizontal member strip",
+      membersLayout
+    );
     await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-members-tab-after-refresh.png"), fullPage: false });
     await renderRun(page, "collecting_required", { run_id: "electron-plan-a-stable-run" });
     await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']");

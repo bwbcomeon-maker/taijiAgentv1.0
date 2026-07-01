@@ -149,6 +149,11 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "data-expert-team-workspace-mode=\"confirm\"" in EXPERT_UI_JS
     assert "window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab" in ACTIONS_JS
     assert "restoreExpertTeamWorkspaceTab(panel)" in UI_JS
+    assert "expert-team-member-list" in EXPERT_UI_JS
+    assert "expert-team-member-row" in EXPERT_UI_JS
+    assert "expert-team-member-state" in EXPERT_UI_JS
+    assert "expert-team-member-list{display:grid" in STYLE_CSS
+    assert "expert-team-member-row{min-width:0;display:grid" in STYLE_CSS
 
 
 def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():
@@ -197,7 +202,7 @@ def test_right_workspace_and_capsule_render_from_single_presentation():
     assert "专家团正在生成" in EXPERT_UI_JS
     assert "草稿未通过校验" in EXPERT_UI_JS
     assert "阶段成果待复核" in EXPERT_UI_JS
-    assert "expert-team-member-strip" in EXPERT_UI_JS
+    assert "expert-team-member-list" in EXPERT_UI_JS
     assert "expert-team-member-avatar" in EXPERT_UI_JS
     assert "expert-team-timeline" in EXPERT_UI_JS
     assert "timelineEvents" in EXPERT_UI_JS

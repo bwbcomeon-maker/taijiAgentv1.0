@@ -114,10 +114,15 @@
       const waitCls=task.status==='awaiting_input'?' waiting':'';
       return `<span class="expert-team-panel-phase${active}${doneCls}${waitCls}"><i>${idx+1}</i><b>${safeEsc(task.phase||task.title||`阶段${idx+1}`)}</b><small>${safeEsc(task.statusText||statusText(task.status))}</small></span>`;
     }).join('');
-    const memberHtml=members.length
-      ? `<div class="expert-team-member-strip" aria-label="专家团成员状态">${members.map(member=>{
-          const tone=presentationTone(member.status==='执行中'?'generating':member.status==='已完成'?'completed':member.status==='等待确认'?'awaiting_stage_input':'collecting_required');
-          return `<span class="expert-team-member ${safeEsc(tone)}">${avatarHtml(member.image,member.name)}<span><strong>${safeEsc(member.name||member.id||'专家')}</strong><small>${safeEsc(member.role||member.status||'协作')}</small></span></span>`;
+    const currentWorkerId=String(currentWorker.id||currentWorker.member_id||currentStage.worker_id||'');
+    const currentWorkerName=String(currentWorker.name||currentStage.worker_name||'');
+    const memberListHtml=members.length
+      ? `<div class="expert-team-member-list" aria-label="专家团成员状态">${members.map(member=>{
+          const isCurrent=!!((member.id&&String(member.id)===currentWorkerId)||(member.name&&String(member.name)===currentWorkerName));
+          const rawStatus=String(member.status||'待命');
+          const tone=isCurrent?'running':presentationTone(rawStatus==='执行中'?'generating':rawStatus==='已完成'?'completed':rawStatus==='等待确认'?'awaiting_stage_input':'collecting_required');
+          const statusLabel=isCurrent?'当前':rawStatus;
+          return `<span class="expert-team-member-row ${safeEsc(tone)}">${avatarHtml(member.image,member.name)}<span class="expert-team-member-copy"><strong>${safeEsc(member.name||member.id||'专家')}</strong><small>${safeEsc(member.role||'协作')} · ${safeEsc(rawStatus)}</small></span><em class="expert-team-member-state ${safeEsc(tone)}">${safeEsc(statusLabel)}</em></span>`;
         }).join('')}</div>`
       : '';
     const timelineHtml=timelineEvents.length
@@ -210,7 +215,7 @@
           <div class="expert-team-panel-phases">${phaseRows||'<span class="expert-team-panel-phase active"><i>0</i><b>需求确认</b><small>前置准备</small></span>'}</div>
         </section>
         <section class="expert-team-panel-section"><div class="expert-team-panel-section-title"><span>执行明细</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>${timelineHtml}<div class="expert-team-process-panel">${taskRows||'<span class="expert-team-process-row">等待阶段初始化</span>'}</div></section>`;
-    const membersPanelHtml=`<section class="expert-team-panel-section"><div class="expert-team-panel-section-title"><span>专家团成员</span><small>各司其职</small></div>${memberHtml||'<div class="expert-team-panel-empty">专家团成员将在任务初始化后显示</div>'}</section>`;
+    const membersPanelHtml=`<section class="expert-team-panel-section expert-team-members-section"><div class="expert-team-panel-section-title"><span>专家团成员</span><small>各司其职</small></div>${memberListHtml||'<div class="expert-team-panel-empty">专家团成员将在任务初始化后显示</div>'}</section>`;
     const resultPanelHtml=`<section class="expert-team-panel-section">
           <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='awaiting_stage_input'?'等待确认后继续':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
           <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
