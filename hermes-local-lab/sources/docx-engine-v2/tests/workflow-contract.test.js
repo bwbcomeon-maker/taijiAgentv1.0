@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const { installTemplatePackage } = require('../src/templates/install-template-package');
 const { runDocumentJob } = require('../src/workflow/run-document-job');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
@@ -122,4 +123,61 @@ test('runDocumentJob writes traceable failure artifacts for input validation fai
   assert.equal(failureReport.code, 'validation_failed');
   assert.equal(failureReport.jobId, jobManifest.jobId);
   assert.equal(failureReport.jobManifest, 'job.manifest.json');
+});
+
+test('runDocumentJob rejects an installed template that was modified after installation', async (t) => {
+  const root = makeTempWorkspace(t);
+  const engineRoot = path.join(root, 'engine');
+  const sourcePath = path.join(root, 'source.md');
+  const assetDir = path.join(root, 'source.assets');
+  const deliveryDir = path.join(root, 'delivery');
+  const packageDir = path.join(root, 'incoming', 'custom-proposal');
+  fs.mkdirSync(engineRoot, { recursive: true });
+  fs.cpSync(path.join(ENGINE_ROOT, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(engineRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(ENGINE_ROOT, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  await installTemplatePackage({ rootDir: engineRoot, packageDir });
+  fs.writeFileSync(path.join(engineRoot, 'installed', 'custom-proposal', 'template.docx'), 'not a docx package', 'utf8');
+  writeRichMarkdown({ root, sourcePath, assetDir });
+
+  const result = await runDocumentJob({
+    engineRoot,
+    templateId: 'custom-proposal',
+    sourcePath,
+    assetDir,
+    deliveryDir,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'validation_failed');
+  assert.equal(result.stage, 'validation');
+  assert.match(result.message, /Template package validation failed|template_docx_invalid/);
+  assert.equal(result.job.status, 'failed');
+  assert.ok(result.job.failures.some((failure) => /template_docx_invalid|Template DOCX/.test(failure)));
+  assert.equal(result.jobManifestPath, path.join(deliveryDir, 'job.manifest.json'));
+  assert.equal(result.failureReportPath, path.join(deliveryDir, 'failure-report.json'));
+
+  const jobManifest = readJson(path.join(deliveryDir, 'job.manifest.json'));
+  const failureReport = readJson(path.join(deliveryDir, 'failure-report.json'));
+  assert.equal(jobManifest.status, 'failed');
+  assert.equal(failureReport.code, 'validation_failed');
+  assert.equal(failureReport.stage, 'validation');
 });

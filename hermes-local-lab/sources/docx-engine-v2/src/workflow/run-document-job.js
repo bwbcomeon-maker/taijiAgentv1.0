@@ -13,6 +13,7 @@ const { normalizeDocxSource } = require('../source/normalize-docx');
 const { normalizeMarkdownSource } = require('../source/normalize-markdown');
 const { normalizeTextSource } = require('../source/normalize-text');
 const { getTemplatePackage } = require('../templates/registry');
+const { validateTemplatePackage } = require('../templates/validate-template-package');
 const { validateDeliveryPackage } = require('../validation/validate-delivery-package');
 
 async function runDocumentJob({
@@ -60,6 +61,7 @@ async function runDocumentJob({
     });
 
     const templatePackage = getTemplatePackage(templateId, { rootDir: path.resolve(engineRoot) });
+    assertTemplatePackageValid(templatePackage);
     assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage });
     job = transitionJob(job, 'template_selected', {
       templateId: templatePackage.templateId,
@@ -190,6 +192,13 @@ async function runDocumentJob({
     });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+function assertTemplatePackageValid(templatePackage) {
+  const validation = validateTemplatePackage(templatePackage);
+  if (!validation.ok) {
+    throw new Error(`Template package validation failed: ${JSON.stringify(validation.errors)}`);
   }
 }
 
