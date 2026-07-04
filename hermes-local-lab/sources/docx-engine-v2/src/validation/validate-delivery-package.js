@@ -213,16 +213,74 @@ function addReplayReportCheck({ addCheck, deliveryDir, deliveryPackage, replayRe
     return;
   }
 
-  if (replayReport?.status === 'failed') {
+  if (!replayReport) {
+    addCheck('replay_report', 'failed', 'replay-report.json must be valid JSON for final delivery validation.');
+    return;
+  }
+
+  const replayStatus = String(replayReport.status || '').trim();
+  const failedReplayChecks = replayReportChecksWithStatus(replayReport, 'failed');
+  if (replayStatus === 'failed' || failedReplayChecks.length > 0 || (replayReport.failures || []).length > 0) {
     addCheck(
       'replay_report',
       'failed',
-      `replay-report.json records a failed delivery replay: ${(replayReport.failures || []).join('; ') || 'unknown failure'}`
+      `replay-report.json records a failed delivery replay: ${replayReportFailureMessage({
+        replayReport,
+        failedReplayChecks,
+      })}`
+    );
+    return;
+  }
+
+  if (!['passed', 'passed_with_warnings'].includes(replayStatus)) {
+    addCheck(
+      'replay_report',
+      'failed',
+      `replay-report.json status must be passed or passed_with_warnings for final delivery validation, got ${replayStatus || 'missing'}`
+    );
+    return;
+  }
+
+  const warningMessages = replayReportWarnings(replayReport);
+  if (warningMessages.length > 0) {
+    addCheck(
+      'replay_report',
+      'passed_with_warnings',
+      `replay-report.json records replay warnings: ${warningMessages.join('; ') || replayStatus}`
     );
     return;
   }
 
   addCheck('replay_report', 'passed');
+}
+
+function replayReportChecksWithStatus(replayReport, status) {
+  return (replayReport.checks || []).filter((check) => check?.status === status);
+}
+
+function replayReportFailureMessage({ replayReport, failedReplayChecks }) {
+  const failures = [
+    ...(replayReport.failures || []),
+    ...failedReplayChecks.map((check) => `${check.id || 'unknown'} ${check.status}${check.message ? `: ${check.message}` : ''}`),
+  ].filter(Boolean);
+  return failures.join('; ') || 'unknown failure';
+}
+
+function replayReportWarnings(replayReport) {
+  return [
+    ...(replayReport.warnings || []),
+    ...replayReportChecksWithStatus(replayReport, 'passed_with_warnings')
+      .map((check) => check.message || `${check.id || 'unknown'} passed_with_warnings`),
+    ...replayReportChecksWithStatus(replayReport, 'not_verified')
+      .map((check) => check.message || `${check.id || 'unknown'} not_verified`),
+  ].filter((message) => message && !isExpectedPreAcceptanceReplayWarning(message));
+}
+
+function isExpectedPreAcceptanceReplayWarning(message) {
+  return (
+    /WPS\/Word visual inspection has not been performed/i.test(message) ||
+    /^Delivery validation passed with warnings\.$/.test(message)
+  );
 }
 
 function addSchemaCheck({ addCheck, jsonFiles }) {

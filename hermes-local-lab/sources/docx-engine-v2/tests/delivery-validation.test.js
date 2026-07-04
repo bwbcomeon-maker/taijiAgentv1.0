@@ -283,6 +283,53 @@ test('validateDeliveryPackage final mode accepts a hash-bound replay-report.json
   assert.equal(replayReportCheck?.status, 'passed');
 });
 
+test('validateDeliveryPackage final mode fails when replay-report.json is not verified', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir, {
+    status: 'not_verified',
+    checks: [{ id: 'document_replay', status: 'not_verified', message: 'replay was not run' }],
+    warnings: ['replay was not run'],
+  });
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const replayReportCheck = report.checks.find((check) => check.id === 'replay_report');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(replayReportCheck?.status, 'failed');
+  assert.match(replayReportCheck?.message || '', /replay-report\.json.*not_verified/i);
+});
+
+test('validateDeliveryPackage final mode fails when replay-report.json contains a failed check', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir, {
+    status: 'passed',
+    checks: [{ id: 'document_replay', status: 'failed', message: 'document.docx drifted' }],
+  });
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const replayReportCheck = report.checks.find((check) => check.id === 'replay_report');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(replayReportCheck?.status, 'failed');
+  assert.match(replayReportCheck?.message || '', /document_replay.*failed|document\.docx drifted/i);
+});
+
+test('validateDeliveryPackage final mode preserves replay-report.json warnings', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir, {
+    status: 'passed_with_warnings',
+    checks: [{ id: 'document_replay', status: 'passed_with_warnings', message: 'document replay used stable zip ordering' }],
+    warnings: ['document replay used stable zip ordering'],
+  });
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const replayReportCheck = report.checks.find((check) => check.id === 'replay_report');
+
+  assert.ok(['passed_with_warnings', 'failed'].includes(report.status));
+  assert.equal(replayReportCheck?.status, 'passed_with_warnings');
+  assert.match(replayReportCheck?.message || '', /stable zip ordering/);
+});
+
 test('validateDeliveryPackage fails when image instructions no longer list editable assets', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   fs.writeFileSync(
