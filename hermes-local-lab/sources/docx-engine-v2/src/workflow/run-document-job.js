@@ -5,6 +5,7 @@ const path = require('node:path');
 const { packageAssets } = require('../assets/package-assets');
 const { writeDeliveryPackage } = require('../delivery/write-delivery-package');
 const { createDocumentJob, transitionJob } = require('../domain/document-job');
+const { validateDomainObject } = require('../domain/validate');
 const { buildRenderPlan } = require('../planning/build-render-plan');
 const { postprocessDocx } = require('../rendering/postprocess-docx');
 const { renderDocx } = require('../rendering/render-docx');
@@ -108,12 +109,15 @@ async function runDocumentJob({
 
     const qualityReport = validateDeliveryPackage({ deliveryDir: validationDeliveryDir });
     if (qualityReport.status === 'failed') {
-      return failureResult({
-        code: 'validation_failed',
-        message: qualityReport.failures.join('；') || 'Delivery package validation failed.',
-        job,
-        stage,
-        failures: qualityReport.failures,
+      return persistFailureArtifacts({
+        deliveryDir: absoluteDeliveryDir,
+        result: failureResult({
+          code: 'validation_failed',
+          message: qualityReport.failures.join('；') || 'Delivery package validation failed.',
+          job,
+          stage,
+          failures: qualityReport.failures,
+        }),
       });
     }
 
@@ -149,12 +153,15 @@ async function runDocumentJob({
       'utf8'
     );
     if (finalQualityReport.status === 'failed') {
-      return failureResult({
-        code: 'validation_failed',
-        message: finalQualityReport.failures.join('；') || 'Final delivery package validation failed.',
-        job: transitionFailedJob(job, finalQualityReport.failures),
-        stage,
-        failures: finalQualityReport.failures,
+      return persistFailureArtifacts({
+        deliveryDir: absoluteDeliveryDir,
+        result: failureResult({
+          code: 'validation_failed',
+          message: finalQualityReport.failures.join('；') || 'Final delivery package validation failed.',
+          job: transitionFailedJob(job, finalQualityReport.failures),
+          stage,
+          failures: finalQualityReport.failures,
+        }),
       });
     }
 
@@ -170,12 +177,15 @@ async function runDocumentJob({
       qualityStatus: finalQualityReport.status,
     };
   } catch (error) {
-    return failureResult({
-      code: stage === 'render' ? 'render_failed' : 'validation_failed',
-      message: error.message,
-      job,
-      stage,
-      failures: [error.message],
+    return persistFailureArtifacts({
+      deliveryDir: absoluteDeliveryDir,
+      result: failureResult({
+        code: stage === 'render' ? 'render_failed' : 'validation_failed',
+        message: error.message,
+        job,
+        stage,
+        failures: [error.message],
+      }),
     });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -293,6 +303,59 @@ function failureResult({ code, message, job, stage, failures }) {
   };
 }
 
+function persistFailureArtifacts({ deliveryDir, result }) {
+  if (!result || result.ok || !result.job || !canWriteFailureArtifacts(deliveryDir)) {
+    return result;
+  }
+
+  const jobManifestPath = path.join(deliveryDir, 'job.manifest.json');
+  const failureReportPath = path.join(deliveryDir, 'failure-report.json');
+  const failureReport = buildFailureReport(result);
+
+  try {
+    assertDomainObject('DocumentJob', result.job, 'failed job manifest');
+    assertDomainObject('FailureReport', failureReport, 'failure report');
+    fs.mkdirSync(deliveryDir, { recursive: true });
+    writeJson(jobManifestPath, result.job);
+    writeJson(failureReportPath, failureReport);
+  } catch (error) {
+    return {
+      ...result,
+      warnings: [...(result.warnings || []), `Failure artifacts were not written: ${error.message}`],
+    };
+  }
+
+  return {
+    ...result,
+    jobManifestPath,
+    failureReportPath,
+    failureReport,
+  };
+}
+
+function canWriteFailureArtifacts(deliveryDir) {
+  if (!deliveryDir) {
+    return false;
+  }
+  if (!fs.existsSync(deliveryDir)) {
+    return true;
+  }
+  return fs.statSync(deliveryDir).isDirectory() && fs.readdirSync(deliveryDir).length === 0;
+}
+
+function buildFailureReport(result) {
+  return {
+    schemaVersion: 'docx-engine-v2/failure-report',
+    ok: false,
+    code: result.code,
+    stage: result.stage,
+    message: result.message,
+    failures: result.failures || [],
+    jobId: result.job.jobId,
+    jobManifest: 'job.manifest.json',
+  };
+}
+
 function transitionFailedJob(job, failures) {
   if (!job || job.status === 'failed') {
     return job;
@@ -323,6 +386,17 @@ function collectWarnings(warnings) {
     }
     return JSON.stringify(warning);
   });
+}
+
+function assertDomainObject(schemaName, value, label) {
+  const validation = validateDomainObject(schemaName, value);
+  if (!validation.ok) {
+    throw new Error(`${label} validation failed: ${JSON.stringify(validation.errors)}`);
+  }
+}
+
+function writeJson(filePath, value) {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
 function moveVerifiedDelivery({ fromDir, toDir }) {

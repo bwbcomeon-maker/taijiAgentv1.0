@@ -120,6 +120,8 @@ function toCliPayload(result) {
       stage: result.stage,
       failures: result.failures || [],
       job: result.job || undefined,
+      jobManifestPath: result.jobManifestPath || undefined,
+      failureReportPath: result.failureReportPath || undefined,
     };
   }
 

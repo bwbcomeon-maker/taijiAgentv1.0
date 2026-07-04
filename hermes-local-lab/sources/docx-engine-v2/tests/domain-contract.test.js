@@ -433,3 +433,19 @@ test('DeliveryPackage contract requires the complete editable delivery bundle', 
   const result = validateDomainObject('DeliveryPackage', deliveryPackage);
   assert.equal(result.ok, true, JSON.stringify(result.errors || result));
 });
+
+test('FailureReport contract models a reusable failed job result', () => {
+  const failureReport = {
+    schemaVersion: 'docx-engine-v2/failure-report',
+    ok: false,
+    code: 'validation_failed',
+    stage: 'validation',
+    message: '模板输入不满足要求。',
+    failures: ['模板输入不满足要求。'],
+    jobId: 'job-failed-render',
+    jobManifest: 'job.manifest.json',
+  };
+
+  const result = validateDomainObject('FailureReport', failureReport);
+  assert.equal(result.ok, true, JSON.stringify(result.errors || result));
+});

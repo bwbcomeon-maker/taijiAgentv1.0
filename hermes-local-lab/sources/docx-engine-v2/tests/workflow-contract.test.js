@@ -90,7 +90,7 @@ test('runDocumentJob drives the canonical job lifecycle and writes a complete ma
   assert.equal(fs.existsSync(path.join(deliveryDir, 'quality-report.json')), true);
 });
 
-test('runDocumentJob returns a failed job and keeps delivery output empty for input validation failures', async (t) => {
+test('runDocumentJob writes traceable failure artifacts for input validation failures', async (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.txt');
   const deliveryDir = path.join(root, 'delivery');
@@ -108,5 +108,16 @@ test('runDocumentJob returns a failed job and keeps delivery output empty for in
   assert.equal(result.job.status, 'failed');
   assert.match(result.message, /富内容初稿|表格|图示|图片/);
   assert.ok(result.job.failures.some((failure) => /富内容初稿|表格|图示|图片/.test(failure)));
-  assert.equal(fs.existsSync(deliveryDir), false);
+  assert.equal(result.jobManifestPath, path.join(deliveryDir, 'job.manifest.json'));
+  assert.equal(result.failureReportPath, path.join(deliveryDir, 'failure-report.json'));
+
+  const jobManifest = readJson(path.join(deliveryDir, 'job.manifest.json'));
+  const failureReport = readJson(path.join(deliveryDir, 'failure-report.json'));
+  assert.equal(jobManifest.status, 'failed');
+  assert.ok(jobManifest.failures.some((failure) => /富内容初稿|表格|图示|图片/.test(failure)));
+  assert.equal(failureReport.schemaVersion, 'docx-engine-v2/failure-report');
+  assert.equal(failureReport.ok, false);
+  assert.equal(failureReport.code, 'validation_failed');
+  assert.equal(failureReport.jobId, jobManifest.jobId);
+  assert.equal(failureReport.jobManifest, 'job.manifest.json');
 });

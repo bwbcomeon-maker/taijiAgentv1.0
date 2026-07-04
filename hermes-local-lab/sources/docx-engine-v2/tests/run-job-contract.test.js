@@ -94,6 +94,25 @@ function findQualityCheck(report, checkId) {
   return undefined;
 }
 
+function assertFailureArtifacts({ deliveryDir, payload, messagePattern }) {
+  assert.equal(fs.existsSync(deliveryDir), true, 'failed jobs should leave trace artifacts');
+
+  const jobManifest = readJsonFile(path.join(deliveryDir, 'job.manifest.json'));
+  assert.equal(jobManifest.status, 'failed');
+  assert.ok(jobManifest.failures.some((failure) => messagePattern.test(failure)));
+
+  const failureReport = readJsonFile(path.join(deliveryDir, 'failure-report.json'));
+  assert.equal(failureReport.schemaVersion, 'docx-engine-v2/failure-report');
+  assert.equal(failureReport.ok, false);
+  assert.equal(failureReport.code, payload.code);
+  assert.equal(failureReport.stage, payload.stage);
+  assert.equal(failureReport.jobId, jobManifest.jobId);
+  assert.equal(failureReport.jobManifest, 'job.manifest.json');
+  assert.ok(failureReport.failures.some((failure) => messagePattern.test(failure)));
+  assert.equal(payload.jobManifestPath, path.join(deliveryDir, 'job.manifest.json'));
+  assert.equal(payload.failureReportPath, path.join(deliveryDir, 'failure-report.json'));
+}
+
 test('run-job requires explicit template selection and does not create delivery output', (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.md');
@@ -280,7 +299,11 @@ test('run-job reports missing source assets as validation failure before renderi
   assert.equal(payload.ok, false);
   assert.equal(payload.code, 'validation_failed');
   assert.match(payload.message, /缺少必需图片资产/);
-  assert.equal(fs.existsSync(deliveryDir), false);
+  assertFailureArtifacts({
+    deliveryDir,
+    payload,
+    messagePattern: /缺少必需图片资产/,
+  });
 });
 
 test('run-job rejects text-only sources for rich proposal templates before rendering', (t) => {
@@ -305,7 +328,11 @@ test('run-job rejects text-only sources for rich proposal templates before rende
   assert.equal(payload.ok, false);
   assert.equal(payload.code, 'validation_failed');
   assert.match(payload.message, /富内容初稿|表格|图示|图片/);
-  assert.equal(fs.existsSync(deliveryDir), false);
+  assertFailureArtifacts({
+    deliveryDir,
+    payload,
+    messagePattern: /富内容初稿|表格|图示|图片/,
+  });
 });
 
 test('run-job reports non-empty delivery directories as validation failure', (t) => {
@@ -333,4 +360,6 @@ test('run-job reports non-empty delivery directories as validation failure', (t)
   assert.equal(payload.code, 'validation_failed');
   assert.match(payload.message, /输出目录非空/);
   assert.equal(fs.readFileSync(path.join(deliveryDir, 'existing.txt'), 'utf8'), 'do not overwrite');
+  assert.equal(fs.existsSync(path.join(deliveryDir, 'job.manifest.json')), false);
+  assert.equal(fs.existsSync(path.join(deliveryDir, 'failure-report.json')), false);
 });

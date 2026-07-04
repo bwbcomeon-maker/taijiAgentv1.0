@@ -525,6 +525,22 @@ const schemas = {
     },
   },
 
+  FailureReport: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['schemaVersion', 'ok', 'code', 'stage', 'message', 'failures', 'jobId', 'jobManifest'],
+    properties: {
+      schemaVersion: { const: 'docx-engine-v2/failure-report' },
+      ok: { const: false },
+      code: { type: 'string', minLength: 1 },
+      stage: { type: 'string', minLength: 1 },
+      message: { type: 'string' },
+      failures: stringArraySchema,
+      jobId: { type: 'string', minLength: 1 },
+      jobManifest: { type: 'string', minLength: 1 },
+    },
+  },
+
   DeliveryPackage: {
     type: 'object',
     additionalProperties: false,

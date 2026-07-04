@@ -46,3 +46,4 @@
 - 已让记录 WPS/Word 人工验收前先执行当前交付包自动校验；除 `wps_visual` 本身外，只要任一自动门失败就拒绝写入“人工通过”。
 - 已新增 `validate-delivery` 交付包复验 CLI，并在 copyable skill 暴露 `scripts/validate-delivery.js`，让用户拿到交付包后可独立重新验证质量报告。
 - 已为 `validate-delivery` 增加显式 `--write-report`，复验后可把最新质量报告写回交付包，避免 `quality-report.json` 与当前文件状态脱节。
+- 已让失败作业在安全输出目录中写入 `job.manifest.json` 和 `failure-report.json`，CLI 同步返回路径；非空输出目录仍不写入，避免污染用户已有文件。
