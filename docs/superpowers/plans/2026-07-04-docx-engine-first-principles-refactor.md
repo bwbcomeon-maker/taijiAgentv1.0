@@ -68,3 +68,4 @@
 - 已让 DOCX 后处理按 `templateData.sections[].blocks` 的源 block 顺序插入表格和图片，使 `afterBlockId` 不再只是 metadata，而是真正的正文落位规则；新增 `block_order` 质量门，避免图表虽然在同章节内却全部堆到章节开头、打断原文顺序时仍假通过。
 - 已让交付包复验校验 `job.manifest.json`、`render-plan.json`、`template.manifest.json` 的模板 ID 一致性，避免多个清单各自合法但指向不同模板。
 - 已让交付包复验校验 `job.manifest.json` 与 `render-plan.json` 的 jobId 一致性，避免作业清单和渲染计划各自合法但来自不同作业。
+- 已让 DOCX 来源中的内嵌媒体从 SourcePackage 进入 AssetPackage，并作为标准 `assets/<figureId>/figure.*` 参与 RenderPlan、DOCX 后处理和质量门校验，避免“归一化识别到图片但最终交付丢图”。

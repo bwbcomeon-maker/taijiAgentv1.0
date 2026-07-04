@@ -87,6 +87,10 @@ function packageFigure({
     };
   }
 
+  if (figure.sourceType === 'docx-embedded') {
+    return packageDocxEmbeddedFigure({ figure, figureId, sourcePackage, workspace, figureDir });
+  }
+
   const sourceDisplayPath = resolveExistingAssetPath({
     requestedPath: figure.displayPath,
     absoluteAssetDir,
@@ -116,6 +120,49 @@ function packageFigure({
     sha256: sha256File(displayPath),
     metadata: { ...(figure.metadata || {}) },
   };
+}
+
+function packageDocxEmbeddedFigure({ figure, figureId, sourcePackage, workspace, figureDir }) {
+  const media = findEmbeddedMediaForFigure(sourcePackage, figure);
+  if (!media?.contentBase64) {
+    throw new Error(`缺少 DOCX 内嵌图形资产: ${figure.displayPath || figureId}`);
+  }
+
+  const extension = path.extname(media.fileName || media.path || figure.displayPath).toLowerCase();
+  if (!QUALIFIED_DISPLAY_EXTENSIONS.has(extension)) {
+    throw new Error(`不支持的 DOCX 内嵌图形资产格式: ${media.path || figure.displayPath || figureId}`);
+  }
+
+  const displayPath = path.join(figureDir, `figure${extension}`);
+  fs.writeFileSync(displayPath, Buffer.from(media.contentBase64, 'base64'));
+
+  return {
+    ...figure,
+    figureId,
+    editable: {
+      ...(figure.editable || {}),
+      format: 'docx-embedded',
+      sourcePath: toRelativePath(workspace, displayPath),
+      sourceSha256: sha256File(displayPath),
+    },
+    displayPath: toRelativePath(workspace, displayPath),
+    sha256: sha256File(displayPath),
+    metadata: {
+      ...(figure.metadata || {}),
+      mediaId: media.mediaId || '',
+      mediaPath: media.path || '',
+      originalContentType: media.contentType || '',
+    },
+  };
+}
+
+function findEmbeddedMediaForFigure(sourcePackage, figure) {
+  const mediaId = String(figure?.metadata?.mediaId || '').trim();
+  const mediaPath = String(figure?.metadata?.mediaPath || figure?.displayPath || '').trim();
+  return (sourcePackage.embeddedMedia || []).find((media) =>
+    (mediaId && media.mediaId === mediaId) ||
+    (mediaPath && media.path === mediaPath)
+  ) || null;
 }
 
 function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sourceBaseDir }) {

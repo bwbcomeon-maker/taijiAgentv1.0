@@ -17,6 +17,8 @@ async function normalizeDocxSource({ sourcePath } = {}) {
   const relationshipsXml = zipEntries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
   const embeddedMedia = extractEmbeddedMedia(zipEntries, relationshipsXml);
   const { title, sections, blocks, tables } = extractBodyStructure(documentXml);
+  const figures = extractFigureMarkers(documentXml, embeddedMedia, blocks);
+  bindFigureMarkersToBlocks(blocks, figures);
 
   return {
     schemaVersion: 'docx-engine-v2/source-package',
@@ -30,7 +32,7 @@ async function normalizeDocxSource({ sourcePath } = {}) {
     sections,
     blocks,
     tables,
-    figures: extractFigureMarkers(documentXml, embeddedMedia, blocks),
+    figures,
     images: [],
     embeddedMedia,
     warnings: [],
@@ -237,6 +239,7 @@ function extractEmbeddedMedia(zipEntries, relationshipsXml) {
         contentType: contentTypeFor(entryPath),
         size: buffer.length,
         sha256: sha256(buffer),
+        contentBase64: buffer.toString('base64'),
       };
     });
 }
@@ -273,6 +276,28 @@ function extractFigureMarkers(documentXml, embeddedMedia, blocks) {
       },
     };
   });
+}
+
+function bindFigureMarkersToBlocks(blocks, figures) {
+  for (const figure of figures || []) {
+    const marker = figure.metadata?.marker;
+    if (!marker) {
+      continue;
+    }
+    const block = (blocks || []).find((candidate) => candidate.text.includes(marker));
+    if (!block) {
+      continue;
+    }
+    block.type = 'figure';
+    block.caption = figure.caption || '';
+    block.anchorText = marker;
+    block.metadata = {
+      ...(block.metadata || {}),
+      figureId: figure.figureId,
+      mediaId: figure.metadata?.mediaId || '',
+      mediaPath: figure.metadata?.mediaPath || '',
+    };
+  }
 }
 
 function normalizeRelationshipTarget(target) {

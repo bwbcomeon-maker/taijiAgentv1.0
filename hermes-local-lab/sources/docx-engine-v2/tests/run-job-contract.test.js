@@ -4,7 +4,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { once } = require('node:events');
 const test = require('node:test');
+const yazl = require('yazl');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const RUN_JOB = path.join(ENGINE_ROOT, 'src', 'cli', 'run-job.js');
@@ -280,6 +282,47 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(templateMarkersCheck.status, 'passed');
 });
 
+test('run-job preserves embedded media from DOCX sources in the delivery package', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithEmbeddedImage(sourcePath);
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 0);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, true);
+
+  const assetPackage = readJsonFile(path.join(deliveryDir, 'asset-package.json'));
+  assert.equal(assetPackage.figures[0].sourceType, 'docx-embedded');
+  assert.equal(assetPackage.figures[0].displayPath, 'assets/fig-001/figure.png');
+  assert.equal(
+    fs.readFileSync(path.join(deliveryDir, assetPackage.figures[0].displayPath)).subarray(0, 4).toString('hex'),
+    '89504e47'
+  );
+
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  const plannedFigure = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedFigure?.path, 'assets/fig-001/figure.png');
+  assert.equal(plannedFigure?.metadata?.sourceType, 'figure');
+
+  const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
+  assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+  assert.equal(findQualityCheck(qualityReport, 'image_coverage')?.status, 'passed');
+  assert.equal(findQualityCheck(qualityReport, 'figure_id_metadata')?.status, 'passed');
+});
+
 test('run-job reports missing source assets as validation failure before rendering', (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.md');
@@ -382,3 +425,52 @@ test('run-job reports non-empty delivery directories as validation failure', (t)
   assert.equal(fs.existsSync(path.join(deliveryDir, 'job.manifest.json')), false);
   assert.equal(fs.existsSync(path.join(deliveryDir, 'failure-report.json')), false);
 });
+
+async function writeDocxSourceWithEmbeddedImage(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>`),
+    'word/_rels/document.xml.rels'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>DOCX 来源方案</w:t></w:r></w:p>
+    <w:p><w:r><w:t>一、总体架构</w:t></w:r></w:p>
+    <w:p><w:r><w:t>DOCX 原文中的图片必须进入最终交付资产包。</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>模块</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>状态</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>嵌入图片</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>应保留</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p><w:r><w:t>figureId=fig-001</w:t></w:r></w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
+  zip.addEmptyDirectory('word/media');
+  zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/image1.png');
+  zip.end();
+
+  await once(output, 'close');
+}
