@@ -238,6 +238,7 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
   }
 
   bindVisibleFigureCaptionBlocks(blocks, sections);
+  bindVisibleTableCaptionBlocks(blocks, sections, tables);
   return { title, sections, blocks, tables };
 }
 
@@ -285,11 +286,83 @@ function bindVisibleFigureCaptionBlocks(blocks, sections) {
 }
 
 function parseVisibleFigureCaption(value) {
+  return parseNumberedCaption(value, '图');
+}
+
+function bindVisibleTableCaptionBlocks(blocks, sections, tables) {
+  const tableById = new Map((tables || []).map((table) => [table.tableId, table]));
+  const captionBlockIds = new Set();
+
+  for (let index = 1; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    const previousBlock = blocks[index - 1];
+    if (block.type !== 'table' || previousBlock?.type !== 'paragraph') {
+      continue;
+    }
+    if ((block.sectionId || '') !== (previousBlock.sectionId || '')) {
+      continue;
+    }
+
+    const caption = parseVisibleTableCaption(previousBlock.text);
+    if (!caption) {
+      continue;
+    }
+
+    const tableId = block.metadata?.tableId || '';
+    const table = tableById.get(tableId);
+    block.caption = caption;
+    block.metadata = {
+      ...(block.metadata || {}),
+      captionSource: 'visible-paragraph',
+      visibleCaptionText: previousBlock.text,
+    };
+    if (table) {
+      table.title = caption;
+      table.afterBlockId = previousBlockIdBefore(blocks, index - 1, block.sectionId);
+      table.metadata = {
+        ...(table.metadata || {}),
+        captionSource: 'visible-paragraph',
+        visibleCaptionText: previousBlock.text,
+      };
+    }
+    captionBlockIds.add(previousBlock.id);
+  }
+
+  if (captionBlockIds.size === 0) {
+    return;
+  }
+
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (captionBlockIds.has(blocks[index].id)) {
+      blocks.splice(index, 1);
+    }
+  }
+
+  for (const section of sections) {
+    section.blockIds = (section.blockIds || []).filter((blockId) => !captionBlockIds.has(blockId));
+  }
+}
+
+function parseVisibleTableCaption(value) {
+  return parseNumberedCaption(value, '表');
+}
+
+function parseNumberedCaption(value, label) {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim();
   const match = normalized.match(
-    /^图\s*(?:\d+(?:[-.．—–]\d+)*|[一二三四五六七八九十百]+)\s*[.．、:：-]?\s*(.+)$/
+    new RegExp(`^${label}\\s*(?:\\d+(?:[-.．\\u2013\\u2014]\\d+)*|[一二三四五六七八九十百]+)\\s*[.．、:：-]?\\s*(.+)$`)
   );
   return match?.[1]?.trim() || '';
+}
+
+function previousBlockIdBefore(blocks, beforeIndex, sectionId) {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if ((block.sectionId || '') === (sectionId || '')) {
+      return block.id;
+    }
+  }
+  return '';
 }
 
 function extractTableRows(tableXml) {

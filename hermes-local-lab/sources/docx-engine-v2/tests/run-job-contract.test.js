@@ -454,7 +454,7 @@ test('run-job rejects DOCX sources with external linked images before rendering'
 
   const result = runJob([
     '--template-id',
-    'meeting-minutes',
+    'general-proposal',
     '--source',
     sourcePath,
     '--source-type',
@@ -474,6 +474,38 @@ test('run-job rejects DOCX sources with external linked images before rendering'
     payload,
     messagePattern: /外链图片|unsupported_external_docx_image/,
   });
+});
+
+test('run-job uses visible DOCX table caption paragraphs for table titles', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithVisibleTableCaption(sourcePath);
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 0);
+
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  assert.equal(renderPlan.tables.find((table) => table.tableId === 'tbl-001')?.title, '会议议题表');
+  assert.equal(renderPlan.templateData.tables.find((table) => table.tableId === 'tbl-001')?.title, '会议议题表');
+  assert.equal(
+    renderPlan.templateData.sections.some((section) =>
+      section.blocks.some((block) => block.type === 'paragraph' && block.text === '表 1 会议议题表')
+    ),
+    false,
+    'visible DOCX table caption paragraphs should not be rendered again as body text'
+  );
 });
 
 test('run-job reports missing source assets as validation failure before rendering', (t) => {
@@ -640,6 +672,67 @@ async function writeDocxSourceWithUnmarkedDrawing(filePath, options = {}) {
   );
   zip.addEmptyDirectory('word/media');
   zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/unmarked.png');
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxSourceWithVisibleTableCaption(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdTableImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/table-context.png"/>
+</Relationships>`),
+    'word/_rels/document.xml.rels'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>DOCX 来源方案</w:t></w:r></w:p>
+    <w:p><w:r><w:t>一、会议内容</w:t></w:r></w:p>
+    <w:p><w:r><w:t>表 1 会议议题表</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>议题</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>结论</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>模板渲染</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>继续推进</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:docPr id="11" name="配套图片"/>
+            <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdTableImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
+  zip.addEmptyDirectory('word/media');
+  zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/table-context.png');
   zip.end();
 
   await once(output, 'close');
