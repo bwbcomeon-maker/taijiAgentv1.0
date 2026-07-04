@@ -24,6 +24,27 @@ const stringArraySchema = {
   items: { type: 'string' },
 };
 
+const warningEntrySchema = {
+  oneOf: [
+    { type: 'string' },
+    {
+      type: 'object',
+      additionalProperties: true,
+      required: ['code', 'message'],
+      properties: {
+        code: { type: 'string', minLength: 1 },
+        message: { type: 'string', minLength: 1 },
+        severity: { enum: ['info', 'warning', 'error'] },
+      },
+    },
+  ],
+};
+
+const warningArraySchema = {
+  type: 'array',
+  items: warningEntrySchema,
+};
+
 const sourceRefSchema = {
   type: 'object',
   additionalProperties: false,
@@ -334,7 +355,7 @@ const schemas = {
         type: 'array',
         items: metadataSchema,
       },
-      warnings: stringArraySchema,
+      warnings: warningArraySchema,
     },
   },
 
