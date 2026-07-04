@@ -5,22 +5,6 @@ const path = require('node:path');
 const { validateDomainObject } = require('../domain/validate');
 const { buildDeliveryFileSha256 } = require('./file-hashes');
 
-const IMAGE_INSTRUCTIONS = [
-  '# 图片调整说明',
-  '',
-  '本交付包保留了可编辑资产和生成后的 DOCX：',
-  '',
-  '- `document.docx` 是生成文档。',
-  '- `delivery-package.json` 是交付包清单，记录文档、源文件、模板清单、渲染计划和质量报告的位置。',
-  '- `source/original/` 保存原始输入文件，`source.md` 是用于人工查看的 Markdown 副本。',
-  '- `source-package.json` 是引擎归一化后的结构化源包，用于追溯章节、表格、图片和块级锚点。',
-  '- `assets/` 保存图片、图形源文件和展示文件。',
-  '- `asset-package.json` 记录资产包结构、可编辑源文件和展示文件。',
-  '- `render-plan.json` 记录图表与模板位置绑定关系。',
-  '- 如需替换图片，优先修改 `assets/` 中对应源文件，再按 `figureId` 回写或重渲染文档。',
-  '',
-].join('\n');
-
 function writeDeliveryPackage({
   deliveryDir,
   job,
@@ -72,10 +56,15 @@ function writeDeliveryPackage({
   copyAssets({ deliveryDir, sourcePackage, assetPackage });
   writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizedJob);
   writeJson(path.join(deliveryDir, 'template.manifest.json'), templatePackage.manifest || {});
-  writeJson(path.join(deliveryDir, 'asset-package.json'), normalizeAssetPackageForDelivery(assetPackage));
+  const deliveryAssetPackage = normalizeAssetPackageForDelivery(assetPackage);
+  writeJson(path.join(deliveryDir, 'asset-package.json'), deliveryAssetPackage);
   writeJson(path.join(deliveryDir, 'render-plan.json'), renderPlan);
   writeJson(path.join(deliveryDir, 'quality-report.json'), qualityReport || emptyQualityReport());
-  fs.writeFileSync(path.join(deliveryDir, 'README-图片调整说明.md'), IMAGE_INSTRUCTIONS, 'utf8');
+  fs.writeFileSync(
+    path.join(deliveryDir, 'README-图片调整说明.md'),
+    buildImageInstructions({ assetPackage: deliveryAssetPackage }),
+    'utf8'
+  );
 
   const deliveryPackage = {
     schemaVersion: 'docx-engine-v2/delivery-package',
@@ -241,6 +230,79 @@ function normalizeAssetPackageForDelivery(assetPackage) {
     ...assetPackage,
     assetDir: 'assets',
   };
+}
+
+function buildImageInstructions({ assetPackage }) {
+  const lines = [
+    '# 图片调整说明',
+    '',
+    '本交付包保留了可编辑资产和生成后的 DOCX：',
+    '',
+    '- `document.docx` 是生成文档。',
+    '- `delivery-package.json` 是交付包清单，记录文档、源文件、模板清单、渲染计划和质量报告的位置。',
+    '- `source/original/` 保存原始输入文件，`source.md` 是用于人工查看的 Markdown 副本。',
+    '- `source-package.json` 是引擎归一化后的结构化源包，用于追溯章节、表格、图片和块级锚点。',
+    '- `assets/` 保存图片、图形源文件和展示文件。',
+    '- `asset-package.json` 记录资产包结构、可编辑源文件和展示文件。',
+    '- `render-plan.json` 记录图表与模板位置绑定关系。',
+    '- 如需替换图片，优先修改 `assets/` 中对应源文件，再按 `figureId` 回写或重渲染文档。',
+    '',
+    '## 图片清单',
+    '',
+  ];
+
+  const figures = Array.isArray(assetPackage.figures) ? assetPackage.figures : [];
+  const images = Array.isArray(assetPackage.images) ? assetPackage.images : [];
+  if (figures.length === 0 && images.length === 0) {
+    lines.push('本次交付包没有可替换的图片资产。', '');
+    return `${lines.join('\n')}\n`;
+  }
+
+  if (figures.length > 0) {
+    lines.push('### 图形资产', '');
+    for (const figure of figures) {
+      lines.push(...assetInstructionLines({
+        idLabel: 'figureId',
+        id: figure.figureId,
+        caption: figure.caption,
+        displayPath: figure.displayPath,
+        sourcePath: figure.editable?.sourcePath,
+        sectionId: figure.sectionId,
+      }));
+    }
+  }
+
+  if (images.length > 0) {
+    lines.push('### 图片资产', '');
+    for (const image of images) {
+      lines.push(...assetInstructionLines({
+        idLabel: 'imageId',
+        id: image.imageId,
+        caption: image.caption,
+        displayPath: image.displayPath,
+        sourcePath: image.sourcePath,
+        sectionId: image.sectionId,
+      }));
+    }
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, sectionId }) {
+  const lines = [
+    `- ${idLabel}: \`${id || 'unknown'}\``,
+    `  - 标题: ${caption || '未命名图片'}`,
+    `  - 展示文件: \`${displayPath || 'missing'}\``,
+  ];
+  if (sourcePath) {
+    lines.push(`  - 可编辑/原始文件: \`${sourcePath}\``);
+  }
+  if (sectionId) {
+    lines.push(`  - 章节锚点: \`${sectionId}\``);
+  }
+  lines.push('');
+  return lines;
 }
 
 function emptyQualityReport() {

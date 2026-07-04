@@ -107,6 +107,10 @@ function findQualityCheck(report, checkId) {
   return undefined;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function assertFailureArtifacts({ deliveryDir, payload, messagePattern }) {
   assert.equal(fs.existsSync(deliveryDir), true, 'failed jobs should leave trace artifacts');
 
@@ -281,6 +285,27 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(assetPackage.assetDir, 'assets');
   assert.equal(assetPackage.figures.length >= 1, true);
   assert.equal(assetPackage.images.length >= 1, true);
+  const imageInstructions = fs.readFileSync(path.join(deliveryDir, 'README-图片调整说明.md'), 'utf8');
+  for (const figure of assetPackage.figures) {
+    assert.match(imageInstructions, new RegExp(`\\b${escapeRegExp(figure.figureId)}\\b`));
+    assert.match(imageInstructions, new RegExp(escapeRegExp(figure.displayPath)));
+    if (figure.editable?.sourcePath) {
+      assert.match(imageInstructions, new RegExp(escapeRegExp(figure.editable.sourcePath)));
+    }
+    if (figure.caption) {
+      assert.match(imageInstructions, new RegExp(escapeRegExp(figure.caption)));
+    }
+  }
+  for (const image of assetPackage.images) {
+    assert.match(imageInstructions, new RegExp(`\\b${escapeRegExp(image.imageId)}\\b`));
+    assert.match(imageInstructions, new RegExp(escapeRegExp(image.displayPath)));
+    if (image.sourcePath) {
+      assert.match(imageInstructions, new RegExp(escapeRegExp(image.sourcePath)));
+    }
+    if (image.caption) {
+      assert.match(imageInstructions, new RegExp(escapeRegExp(image.caption)));
+    }
+  }
 
   const jobManifest = readJsonFile(path.join(deliveryDir, 'job.manifest.json'));
   assert.equal(jobManifest.jobId, payload.jobId);
