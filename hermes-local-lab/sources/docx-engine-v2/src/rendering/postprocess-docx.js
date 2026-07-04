@@ -30,7 +30,7 @@ async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
 function bindPlannedContent({ entries, documentXml, renderPlan, outputPath }) {
   const images = renderPlan.templateData?.images || [];
   if (images.length === 0) {
-    const nextDocumentXml = insertTablesBySection(documentXml, renderPlan);
+    const nextDocumentXml = insertRichBlocksBySourceOrder(documentXml, { boundDrawings: [], renderPlan });
     entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
     return;
   }
@@ -40,14 +40,14 @@ function bindPlannedContent({ entries, documentXml, renderPlan, outputPath }) {
   let relationshipsXml = entries.get(relationshipsEntry)?.toString('utf8') || '';
   let contentTypesXml = entries.get(contentTypesEntry)?.toString('utf8') || '';
   if (!relationshipsXml || !contentTypesXml) {
-    const nextDocumentXml = insertTablesBySection(documentXml, renderPlan);
+    const nextDocumentXml = insertRichBlocksBySourceOrder(documentXml, { boundDrawings: [], renderPlan });
     entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
     return;
   }
 
   const drawingTemplate = firstDrawingXml(documentXml);
   if (!drawingTemplate) {
-    const nextDocumentXml = insertTablesBySection(documentXml, renderPlan);
+    const nextDocumentXml = insertRichBlocksBySourceOrder(documentXml, { boundDrawings: [], renderPlan });
     entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
     return;
   }
@@ -89,10 +89,7 @@ function bindPlannedContent({ entries, documentXml, renderPlan, outputPath }) {
 
   entries.set(relationshipsEntry, Buffer.from(relationshipsXml, 'utf8'));
   entries.set(contentTypesEntry, Buffer.from(contentTypesXml, 'utf8'));
-  let nextDocumentXml = boundDrawings.length
-    ? insertDrawingsBySection(documentXml, boundDrawings, renderPlan)
-    : documentXml;
-  nextDocumentXml = insertTablesBySection(nextDocumentXml, renderPlan);
+  const nextDocumentXml = insertRichBlocksBySourceOrder(documentXml, { boundDrawings, renderPlan });
   entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
 }
 
@@ -154,34 +151,139 @@ function firstDrawingXml(documentXml) {
   return String(documentXml || '').match(/<w:drawing\b[\s\S]*?<\/w:drawing>/)?.[0] || '';
 }
 
-function insertDrawingsBySection(documentXml, boundDrawings, renderPlan) {
-  const sectionsById = new Map((renderPlan.templateData?.sections || renderPlan.sections || []).map((section) => [
-    section.sectionId,
-    section,
-  ]));
-  const groups = new Map();
-  for (const binding of boundDrawings) {
-    const sectionId = binding.image?.metadata?.sectionId || '';
-    if (!groups.has(sectionId)) {
-      groups.set(sectionId, []);
+function insertRichBlocksBySourceOrder(documentXml, { boundDrawings = [], renderPlan } = {}) {
+  const extractedTables = extractPlannedTableBlocks(documentXml, renderPlan);
+  let cleanDocumentXml = removeRanges(documentXml, extractedTables.map((table) => table.range));
+  cleanDocumentXml = removeUnboundTableBlocks(cleanDocumentXml);
+  cleanDocumentXml = removeUnboundFigureCaptionBlocks(cleanDocumentXml);
+
+  const richBlockXmlByBlockId = new Map();
+  for (const table of extractedTables) {
+    if (table.blockId) {
+      richBlockXmlByBlockId.set(table.blockId, table.xml);
     }
-    groups.get(sectionId).push(figureBlockXml(binding));
   }
 
-  const cleanDocumentXml = removeUnboundFigureCaptionBlocks(documentXml);
-  const insertions = [];
-  for (const [sectionId, drawings] of groups) {
-    const section = sectionsById.get(sectionId);
-    const insertionIndex = section ? sectionInsertionIndex(cleanDocumentXml, section.title) : -1;
-    insertions.push({
-      index: insertionIndex >= 0 ? insertionIndex : fallbackInsertionIndex(cleanDocumentXml),
-      xml: drawings.join(''),
-    });
+  const figureBlockIdByFigureId = figureBlockIdByFigureIdMap(renderPlan);
+  for (const binding of boundDrawings) {
+    const blockId = binding.image?.metadata?.blockId || figureBlockIdByFigureId.get(binding.image?.figureId) || '';
+    if (blockId) {
+      richBlockXmlByBlockId.set(blockId, figureBlockXml(binding));
+    }
   }
 
+  const insertions = richBlockInsertions(cleanDocumentXml, renderPlan, richBlockXmlByBlockId);
   let nextXml = cleanDocumentXml;
   for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
     nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
+  }
+  return nextXml;
+}
+
+function extractPlannedTableBlocks(documentXml, renderPlan) {
+  const templateTablesById = new Map((renderPlan.templateData?.tables || []).map((table) => [table.tableId, table]));
+  const blockIdByTableId = tableBlockIdByTableIdMap(renderPlan);
+  const tableBlocks = [];
+  const consumedRanges = [];
+  for (const table of renderPlan.tables || []) {
+    const templateTable = templateTablesById.get(table.tableId) || {};
+    const tableBlock = findRenderedTableBlock({
+      documentXml,
+      title: templateTable.title || table.title,
+      consumedRanges,
+    });
+    if (!tableBlock) {
+      continue;
+    }
+    consumedRanges.push({ start: tableBlock.start, end: tableBlock.end });
+    tableBlocks.push({
+      blockId: blockIdByTableId.get(table.tableId) || '',
+      range: { start: tableBlock.start, end: tableBlock.end },
+      xml: tableBlockXml(table, tableBlock.xml, blockIdByTableId.get(table.tableId) || ''),
+    });
+  }
+  return tableBlocks;
+}
+
+function richBlockInsertions(documentXml, renderPlan, richBlockXmlByBlockId) {
+  const insertionsByIndex = new Map();
+  for (const section of renderPlan.templateData?.sections || renderPlan.sections || []) {
+    let insertionIndex = sectionInsertionIndex(documentXml, section.title);
+    if (insertionIndex < 0) {
+      insertionIndex = fallbackInsertionIndex(documentXml);
+    }
+    let pendingXml = '';
+    for (const block of section.blocks || []) {
+      const richXml = richBlockXmlByBlockId.get(block.blockId);
+      if (richXml) {
+        pendingXml += richXml;
+        continue;
+      }
+      if (block.type !== 'paragraph' || isSectionTitleBlock(block, section)) {
+        continue;
+      }
+      if (pendingXml) {
+        appendInsertion(insertionsByIndex, insertionIndex, pendingXml);
+        pendingXml = '';
+      }
+      const paragraph = findParagraphAfter(documentXml, block.text, insertionIndex);
+      if (paragraph) {
+        insertionIndex = paragraph.end;
+      }
+    }
+    if (pendingXml) {
+      appendInsertion(insertionsByIndex, insertionIndex, pendingXml);
+    }
+  }
+  return [...insertionsByIndex.entries()].map(([index, xml]) => ({ index, xml }));
+}
+
+function appendInsertion(insertionsByIndex, index, xml) {
+  insertionsByIndex.set(index, `${insertionsByIndex.get(index) || ''}${xml}`);
+}
+
+function findParagraphAfter(documentXml, text, afterIndex) {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) {
+    return null;
+  }
+  return paragraphRanges(documentXml).find(
+    (paragraph) => paragraph.start >= afterIndex && paragraph.text.trim() === normalizedText
+  ) || null;
+}
+
+function isSectionTitleBlock(block, section) {
+  return String(block?.text || '').trim() === String(section?.title || '').trim();
+}
+
+function tableBlockIdByTableIdMap(renderPlan) {
+  const blockIdByTableId = new Map();
+  for (const section of renderPlan.templateData?.sections || renderPlan.sections || []) {
+    for (const block of section.blocks || []) {
+      if (block.tableId && block.blockId) {
+        blockIdByTableId.set(block.tableId, block.blockId);
+      }
+    }
+  }
+  return blockIdByTableId;
+}
+
+function figureBlockIdByFigureIdMap(renderPlan) {
+  const blockIdByFigureId = new Map();
+  for (const section of renderPlan.templateData?.sections || renderPlan.sections || []) {
+    for (const block of section.blocks || []) {
+      if (block.figureId && block.blockId) {
+        blockIdByFigureId.set(block.figureId, block.blockId);
+      }
+    }
+  }
+  return blockIdByFigureId;
+}
+
+function removeRanges(documentXml, ranges) {
+  let nextXml = documentXml;
+  for (const range of [...ranges].sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, range.start)}${nextXml.slice(range.end)}`;
   }
   return nextXml;
 }
@@ -269,76 +371,8 @@ function hasFigureSequenceField(paragraphXml) {
   return /<w:instrText\b[^>]*>[^<]*SEQ\s+图(?:\s|<|$)/.test(String(paragraphXml || ''));
 }
 
-function insertTablesBySection(documentXml, renderPlan) {
-  const tables = renderPlan.tables || [];
-  if (tables.length === 0) {
-    return documentXml;
-  }
-
-  const templateTablesById = new Map((renderPlan.templateData?.tables || []).map((table) => [table.tableId, table]));
-  const tableBlocks = [];
-  const consumedRanges = [];
-  for (const table of tables) {
-    const templateTable = templateTablesById.get(table.tableId) || {};
-    const tableBlock = findRenderedTableBlock({
-      documentXml,
-      title: templateTable.title || table.title,
-      consumedRanges,
-    });
-    if (!tableBlock) {
-      continue;
-    }
-    consumedRanges.push({ start: tableBlock.start, end: tableBlock.end });
-    tableBlocks.push({
-      table,
-      start: tableBlock.start,
-      end: tableBlock.end,
-      xml: tableBlockXml(table, tableBlock.xml),
-    });
-  }
-
-  if (tableBlocks.length === 0) {
-    return documentXml;
-  }
-
-  let withoutTables = documentXml;
-  for (const block of [...tableBlocks].sort((left, right) => right.start - left.start)) {
-    withoutTables = `${withoutTables.slice(0, block.start)}${withoutTables.slice(block.end)}`;
-  }
-  withoutTables = removeUnboundTableBlocks(withoutTables);
-
-  const sectionsById = new Map((renderPlan.templateData?.sections || renderPlan.sections || []).map((section) => [
-    section.sectionId,
-    section,
-  ]));
-  const groups = new Map();
-  for (const block of tableBlocks) {
-    const sectionId = block.table.sectionId || '';
-    if (!groups.has(sectionId)) {
-      groups.set(sectionId, []);
-    }
-    groups.get(sectionId).push(block.xml);
-  }
-
-  const insertions = [];
-  for (const [sectionId, blocks] of groups) {
-    const section = sectionsById.get(sectionId);
-    const insertionIndex = section ? sectionInsertionIndex(withoutTables, section.title) : -1;
-    insertions.push({
-      index: insertionIndex >= 0 ? insertionIndex : fallbackInsertionIndex(withoutTables),
-      xml: blocks.join(''),
-    });
-  }
-
-  let nextXml = withoutTables;
-  for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
-    nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
-  }
-  return nextXml;
-}
-
-function tableBlockXml(table, blockXml) {
-  return injectTableCaptionMetadata(blockXml, table);
+function tableBlockXml(table, blockXml, blockId = '') {
+  return injectTableCaptionMetadata(blockXml, table, blockId);
 }
 
 function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
@@ -369,25 +403,28 @@ function rangeOverlaps(range, consumedRanges) {
   return consumedRanges.some((consumed) => range.start < consumed.end && range.end > consumed.start);
 }
 
-function injectTableCaptionMetadata(blockXml, table) {
-  return String(blockXml || '').replace(/(<w:p\b[^>]*>)/, `$1${tableCaptionMarkerRun(table)}`);
+function injectTableCaptionMetadata(blockXml, table, blockId = '') {
+  return String(blockXml || '').replace(/(<w:p\b[^>]*>)/, `$1${tableCaptionMarkerRun(table, blockId)}`);
 }
 
-function tableCaptionMarkerRun(table) {
+function tableCaptionMarkerRun(table, blockId = '') {
   return [
     '<w:r>',
     '<w:rPr><w:vanish/></w:rPr>',
-    `<w:t>${escapeXmlText(tableCaptionMetadata(table))}</w:t>`,
+    `<w:t>${escapeXmlText(tableCaptionMetadata(table, blockId))}</w:t>`,
     '</w:r>',
   ].join('');
 }
 
-function tableCaptionMetadata(table) {
+function tableCaptionMetadata(table, blockId = '') {
   const tokens = [
     'docx-engine-v2',
     'tableCaption',
     `tableId=${safeMetadataValue(table.tableId)}`,
   ];
+  if (blockId) {
+    tokens.push(`blockId=${safeMetadataValue(blockId)}`);
+  }
   for (const key of ['sectionId', 'afterBlockId']) {
     const value = safeMetadataValue(table[key]);
     if (value) {

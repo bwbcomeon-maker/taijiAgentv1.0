@@ -115,6 +115,7 @@ async function makeDeliveryPackage(t) {
         { id: 'table_coverage', status: 'passed' },
         { id: 'table_placement', status: 'passed' },
         { id: 'table_caption', status: 'passed' },
+        { id: 'block_order', status: 'passed' },
         { id: 'figure_id_metadata', status: 'passed' },
         { id: 'figure_placement', status: 'passed' },
         { id: 'figure_caption', status: 'passed' },
@@ -192,6 +193,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
   assert.ok(
     report.checks.some(
+      (check) => check.id === 'block_order' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    report.checks.some(
       (check) => check.id === 'figure_placement' && check.status === 'passed'
     )
   );
@@ -211,6 +217,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'table_coverage',
       'table_placement',
       'table_caption',
+      'block_order',
       'figure_id_metadata',
       'figure_placement',
       'figure_caption',
@@ -726,6 +733,19 @@ test('validateDeliveryPackage fails when DOCX contains an unbound table caption'
   assert.match(captionCheck?.message || '', /unbound|SEQ 表|table caption/i);
 });
 
+test('validateDeliveryPackage fails when DOCX rich content no longer follows source block order', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await moveFigureBlockBeforeSourceAnchor(path.join(deliveryDir, 'document.docx'), 'fig-001', 'Architecture');
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const orderCheck = report.checks.find((check) => check.id === 'block_order');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(orderCheck?.status, 'failed');
+  assert.match(orderCheck?.message || '', /fig-001|block order|afterBlockId|source/i);
+});
+
 test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
@@ -766,6 +786,24 @@ async function moveFigureDrawingBeforeBody(docxPath, figureId) {
   entries.set(
     'word/document.xml',
     Buffer.from(withoutDrawing.replace('<w:body>', `<w:body>${drawing}`), 'utf8')
+  );
+  await writeZipEntries(entries, docxPath);
+}
+
+async function moveFigureBlockBeforeSourceAnchor(docxPath, figureId, sectionTitle) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const figureBlock = findFigureBlock(documentXml, figureId);
+  assert.ok(figureBlock, `fixture must include figure block for ${figureId}`);
+  const withoutFigure = documentXml.replace(figureBlock, '');
+  const insertionIndex = sectionAnchorEnd(withoutFigure, sectionTitle);
+  assert.ok(insertionIndex > 0, `fixture must include section anchor ${sectionTitle}`);
+  entries.set(
+    'word/document.xml',
+    Buffer.from(
+      `${withoutFigure.slice(0, insertionIndex)}${figureBlock}${withoutFigure.slice(insertionIndex)}`,
+      'utf8'
+    )
   );
   await writeZipEntries(entries, docxPath);
 }
@@ -839,6 +877,32 @@ function findDrawingForFigure(documentXml, figureId) {
   return '';
 }
 
+function findFigureBlock(documentXml, figureId) {
+  const drawing = findDrawingForFigure(documentXml, figureId);
+  if (!drawing) {
+    return '';
+  }
+  const paragraphs = [...String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
+  const drawingParagraphIndex = paragraphs.findIndex((paragraph) => paragraph[0].includes(drawing));
+  if (drawingParagraphIndex < 0) {
+    return '';
+  }
+  const drawingParagraph = paragraphs[drawingParagraphIndex][0];
+  const captionParagraph = paragraphs[drawingParagraphIndex + 1]?.[0] || '';
+  if (!new RegExp(`\\bfigureId=${figureId}\\b`).test(captionParagraph)) {
+    return drawingParagraph;
+  }
+  return drawingParagraph + captionParagraph;
+}
+
+function sectionAnchorEnd(documentXml, sectionTitle) {
+  const title = String(sectionTitle || '').trim();
+  const matches = [...String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
+    .filter((match) => paragraphText(match[0]).trim() === title);
+  const anchor = matches[matches.length - 1];
+  return anchor ? anchor.index + anchor[0].length : -1;
+}
+
 async function moveTableBlockBeforeBody(docxPath, tableId, tableTitle) {
   const entries = await readZipEntries(docxPath);
   const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
@@ -868,6 +932,17 @@ function findTableBlock(documentXml, tableId, tableTitle) {
     return paragraph[0] + tableMatch[0];
   }
   return '';
+}
+
+function paragraphText(paragraphXml) {
+  return [...String(paragraphXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => match[1]
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&'))
+    .join('');
 }
 
 function refreshDeliveryDocumentHash(deliveryDir) {

@@ -15,6 +15,7 @@ const CHECK_IDS = [
   'table_coverage',
   'table_placement',
   'table_caption',
+  'block_order',
   'figure_id_metadata',
   'figure_placement',
   'figure_caption',
@@ -124,6 +125,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addTablePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addTableCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addBlockOrderCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigurePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
@@ -778,6 +780,29 @@ function addTableCaptionCheck({ addCheck, documentXml, renderPlan }) {
   addCheck('table_caption', 'passed');
 }
 
+function addBlockOrderCheck({ addCheck, documentXml, renderPlan }) {
+  if (!documentXml) {
+    addCheck('block_order', 'failed', 'Cannot inspect block order without word/document.xml.');
+    return;
+  }
+  if (!renderPlan) {
+    addCheck('block_order', 'failed', 'render-plan.json is required for block order validation.');
+    return;
+  }
+
+  const orderFailures = blockOrderFailures({ documentXml, renderPlan });
+  if (orderFailures.length > 0) {
+    addCheck(
+      'block_order',
+      'failed',
+      `DOCX rich content does not follow source block order: ${orderFailures.join(', ')}`
+    );
+    return;
+  }
+
+  addCheck('block_order', 'passed');
+}
+
 function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
   if (!documentXml) {
     addCheck('figure_id_metadata', 'failed', 'Cannot inspect figure metadata without word/document.xml.');
@@ -1095,6 +1120,81 @@ function hasTableSequenceField(paragraphXml) {
 function tableBodyImmediatelyFollowsCaption(documentXml, caption) {
   const afterCaption = String(documentXml || '').slice(caption.end);
   return /^\s*<w:tbl\b/.test(afterCaption);
+}
+
+function blockOrderFailures({ documentXml, renderPlan }) {
+  const failures = [];
+  const paragraphs = paragraphRanges(documentXml);
+  const tableCaptions = tableCaptionParagraphs(paragraphs);
+  const figureDrawings = figureDrawingParagraphs(paragraphs);
+
+  for (const section of renderPlan.templateData?.sections || renderPlan.sections || []) {
+    let previous = {
+      blockId: '',
+      position: sectionInsertionIndexForOrder(documentXml, section.title),
+    };
+    for (const block of section.blocks || []) {
+      if (block.type === 'paragraph' && isSectionTitleBlock(block, section)) {
+        continue;
+      }
+      const current = blockOrderPosition({
+        block,
+        section,
+        paragraphs,
+        tableCaptions,
+        figureDrawings,
+        afterPosition: previous.position,
+      });
+      if (!current) {
+        failures.push(`${block.blockId || block.tableId || block.figureId || 'unknown'} missing DOCX position for block order`);
+        continue;
+      }
+      if (Number.isInteger(previous.position) && current.position < previous.position) {
+        failures.push(
+          `${current.label} appears before source block order afterBlockId=${previous.blockId || 'section'}`
+        );
+      }
+      previous = {
+        blockId: block.blockId || current.label,
+        position: current.position,
+      };
+    }
+  }
+
+  return failures;
+}
+
+function blockOrderPosition({ block, section, paragraphs, tableCaptions, figureDrawings, afterPosition }) {
+  if (block.type === 'paragraph') {
+    const paragraph = paragraphs.find(
+      (item) =>
+        item.start >= afterPosition &&
+        item.text.trim() === String(block.text || '').trim()
+    );
+    return paragraph ? { label: block.blockId, position: paragraph.start } : null;
+  }
+  if (block.type === 'table') {
+    const caption = tableCaptions.get(block.tableId);
+    return caption ? { label: block.tableId || block.blockId, position: caption.start } : null;
+  }
+  if (block.type === 'figure') {
+    const drawing = figureDrawings.get(block.figureId);
+    return drawing ? { label: block.figureId || block.blockId, position: drawing.start } : null;
+  }
+  return { label: block.blockId || section.sectionId || 'unknown', position: afterPosition };
+}
+
+function isSectionTitleBlock(block, section) {
+  return String(block?.text || '').trim() === String(section?.title || '').trim();
+}
+
+function sectionInsertionIndexForOrder(documentXml, sectionTitle) {
+  const title = String(sectionTitle || '').trim();
+  if (!title) {
+    return 0;
+  }
+  const anchors = paragraphRanges(documentXml).filter((paragraph) => paragraph.text.trim() === title);
+  return anchors.length ? anchors[anchors.length - 1].end : 0;
 }
 
 function figureCaptionFailures({ documentXml, renderPlan }) {
