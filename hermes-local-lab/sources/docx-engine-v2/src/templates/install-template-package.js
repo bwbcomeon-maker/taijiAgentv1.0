@@ -1,9 +1,11 @@
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
+const { renderTemplateSample } = require('./render-template-sample');
 const { validateTemplatePackage } = require('./validate-template-package');
 
-function installTemplatePackage({
+async function installTemplatePackage({
   rootDir = path.resolve(__dirname, '../..'),
   packageDir,
   installRoot = 'installed',
@@ -53,6 +55,7 @@ function installTemplatePackage({
   if (!validation.ok) {
     throw new Error(`Template package validation failed: ${JSON.stringify(validation.errors)}`);
   }
+  await assertTemplateSampleRenders(absolutePackageDir);
 
   if (installedIndex >= 0) {
     replaceDirectory(absolutePackageDir, targetDir);
@@ -78,6 +81,15 @@ function installTemplatePackage({
     registryPath,
     registryEntry,
   };
+}
+
+async function assertTemplateSampleRenders(packageDir) {
+  const smokeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-install-smoke-'));
+  try {
+    await renderTemplateSample({ packageDir, outDir: smokeDir });
+  } finally {
+    fs.rmSync(smokeDir, { recursive: true, force: true });
+  }
 }
 
 function loadPackageFromDir({ packageDir, registryPath = '', registrySource = 'installed' }) {

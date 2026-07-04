@@ -3,7 +3,6 @@ const path = require('node:path');
 
 const { renderDocx } = require('../rendering/render-docx');
 const { inspectRenderedDocx } = require('../validation/docx-render-inspection');
-const { loadPackageFromDir } = require('./install-template-package');
 const { validateTemplatePackage } = require('./validate-template-package');
 
 async function renderTemplateSample({
@@ -21,9 +20,8 @@ async function renderTemplateSample({
   const absoluteOutDir = path.resolve(outDir);
   assertWritableOutDir(absoluteOutDir);
 
-  const templatePackage = loadPackageFromDir({
+  const templatePackage = loadIncomingPackage({
     packageDir: absolutePackageDir,
-    registrySource: 'incoming',
   });
   const validation = validateTemplatePackage(templatePackage);
   if (!validation.ok) {
@@ -77,6 +75,14 @@ async function renderTemplateSample({
     reportPath,
     report,
   };
+}
+
+function loadIncomingPackage({ packageDir }) {
+  const { loadPackageFromDir } = require('./install-template-package');
+  return loadPackageFromDir({
+    packageDir,
+    registrySource: 'incoming',
+  });
 }
 
 function assertWritableOutDir(outDir) {

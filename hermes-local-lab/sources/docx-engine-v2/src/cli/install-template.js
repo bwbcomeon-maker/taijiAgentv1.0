@@ -11,12 +11,12 @@ const EXIT_CODES = {
 
 main();
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   try {
     const engineRoot = args.rootDir ? path.resolve(args.rootDir) : path.resolve(__dirname, '../..');
-    const result = installTemplatePackage({
+    const result = await installTemplatePackage({
       rootDir: engineRoot,
       packageDir: path.resolve(args.packageDir),
       replace: args.replace,

@@ -91,7 +91,7 @@ test('template registry rejects duplicate template ids across sources', (t) => {
   );
 });
 
-test('installTemplatePackage validates, copies, and registers a new installed template', (t) => {
+test('installTemplatePackage validates, smoke-renders, copies, and registers a new installed template', async (t) => {
   const tempRoot = makeTempDir(t);
   const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
   fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
@@ -116,7 +116,7 @@ test('installTemplatePackage validates, copies, and registers a new installed te
     'utf8'
   );
 
-  const result = installTemplatePackage({ rootDir: tempRoot, packageDir });
+  const result = await installTemplatePackage({ rootDir: tempRoot, packageDir });
 
   assert.equal(result.ok, true);
   assert.equal(result.templateId, 'custom-proposal');
@@ -130,7 +130,7 @@ test('installTemplatePackage validates, copies, and registers a new installed te
   assert.deepEqual(registry.installed, [{ templateId: 'custom-proposal', path: 'installed/custom-proposal' }]);
 });
 
-test('installTemplatePackage rejects duplicate template ids before copying files', (t) => {
+test('installTemplatePackage rejects duplicate template ids before copying files', async (t) => {
   const tempRoot = makeTempDir(t);
   const packageDir = path.join(tempRoot, 'incoming', 'general-proposal');
   fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
@@ -148,7 +148,7 @@ test('installTemplatePackage rejects duplicate template ids before copying files
     'utf8'
   );
 
-  assert.throws(
+  await assert.rejects(
     () => installTemplatePackage({ rootDir: tempRoot, packageDir }),
     /Template already exists: general-proposal/
   );
@@ -156,7 +156,7 @@ test('installTemplatePackage rejects duplicate template ids before copying files
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
 
-test('installTemplatePackage replaces an existing installed template only when requested', (t) => {
+test('installTemplatePackage replaces an existing installed template only when requested', async (t) => {
   const tempRoot = makeTempDir(t);
   const installedDir = path.join(tempRoot, 'installed', 'custom-proposal');
   const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
@@ -189,7 +189,7 @@ test('installTemplatePackage replaces an existing installed template only when r
     'utf8'
   );
 
-  const result = installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true });
+  const result = await installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true });
 
   assert.equal(result.ok, true);
   assert.equal(result.action, 'replaced');
@@ -202,7 +202,7 @@ test('installTemplatePackage replaces an existing installed template only when r
   assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Updated Custom Proposal');
 });
 
-test('installTemplatePackage refuses to replace builtin templates', (t) => {
+test('installTemplatePackage refuses to replace builtin templates', async (t) => {
   const tempRoot = makeTempDir(t);
   const packageDir = path.join(tempRoot, 'incoming', 'general-proposal');
   fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
@@ -220,7 +220,7 @@ test('installTemplatePackage refuses to replace builtin templates', (t) => {
     'utf8'
   );
 
-  assert.throws(
+  await assert.rejects(
     () => installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true }),
     /Cannot replace builtin template: general-proposal/
   );
@@ -228,7 +228,7 @@ test('installTemplatePackage refuses to replace builtin templates', (t) => {
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
 
-test('installTemplatePackage refuses to replace an unsafe installed registry path', (t) => {
+test('installTemplatePackage refuses to replace an unsafe installed registry path', async (t) => {
   const tempRoot = makeTempDir(t);
   const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
   fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
@@ -253,11 +253,76 @@ test('installTemplatePackage refuses to replace an unsafe installed registry pat
     'utf8'
   );
 
-  assert.throws(
+  await assert.rejects(
     () => installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true }),
     /Installed template path is outside the managed installed directory/
   );
   assert.equal(fs.existsSync(path.join(tempRoot, 'template-registry.json')), true);
+});
+
+test('installTemplatePackage rejects template packages that fail sample rendering before registry mutation', async (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'marker-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'marker-proposal', name: 'Marker Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  const adapterSamplePath = path.join(packageDir, 'adapter-sample.render-plan.json');
+  const adapterSample = readJson(adapterSamplePath);
+  fs.writeFileSync(
+    adapterSamplePath,
+    `${JSON.stringify(
+      {
+        ...adapterSample,
+        jobId: 'job-marker-proposal-adapter-sample',
+        templateId: 'marker-proposal',
+        templateData: {
+          ...adapterSample.templateData,
+          metadata: { ...adapterSample.templateData.metadata, templateId: 'marker-proposal' },
+        },
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  fs.appendFileSync(
+    path.join(packageDir, 'data-adapter.js'),
+    [
+      '',
+      'const originalBuildTemplateData = module.exports.buildTemplateData;',
+      'module.exports.buildTemplateData = (args) => {',
+      '  const data = originalBuildTemplateData(args);',
+      "  return { ...data, cover: { ...data.cover, title: '{d.cover.title}' } };",
+      '};',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  await assert.rejects(
+    () => installTemplatePackage({ rootDir: tempRoot, packageDir }),
+    /Template data markers remain/
+  );
+  assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'marker-proposal')), false);
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
 
 test('migrated template packages expose required files and manifest metadata', () => {
