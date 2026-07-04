@@ -197,6 +197,7 @@ function extractBodyStructure(documentXml, drawingBindings = [], paragraphStyleN
           metadata: {
             sourceIndex,
             drawingIndex: drawing.drawingIndex,
+            visualType: drawing.visualType || 'drawing',
             figureId: drawing.figureId || '',
             relationshipId: drawing.relationshipId,
             mediaPath: drawing.mediaPath,
@@ -519,6 +520,7 @@ function extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, bloc
         mediaPath: media.path || block.metadata.mediaPath || '',
         relationshipId: block.metadata.relationshipId || media.relationshipId || '',
         drawingIndex: block.metadata.drawingIndex || 0,
+        visualType: block.metadata.visualType || 'drawing',
       },
     });
   }
@@ -541,15 +543,15 @@ function extractDrawingBindings(documentXml, relationshipsXml) {
   const bindings = [];
   let drawingIndex = 0;
 
-  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+  for (const drawingMatch of String(documentXml || '').matchAll(/<w:(drawing|pict)\b[\s\S]*?<\/w:\1>/g)) {
     drawingIndex += 1;
+    const visualType = drawingMatch[1];
     const drawingXml = drawingMatch[0];
-    const relationshipMatch = drawingXml.match(/\br:embed="([^"]+)"/);
-    if (!relationshipMatch) {
+    const relationshipId = extractImageRelationshipId(drawingXml);
+    if (!relationshipId) {
       continue;
     }
 
-    const relationshipId = relationshipMatch[1];
     const relationship = relationshipById.get(relationshipId) || {};
     if (!isImageRelationship(relationship.Type)) {
       continue;
@@ -565,6 +567,7 @@ function extractDrawingBindings(documentXml, relationshipsXml) {
       caption: drawingCaption(drawingXml, drawingIndex),
       relationshipId,
       mediaPath,
+      visualType,
     });
   }
 
@@ -572,8 +575,8 @@ function extractDrawingBindings(documentXml, relationshipsXml) {
 }
 
 function extractParagraphDrawingBindings(paragraphXml, drawingBindingByRelationshipId) {
-  return [...String(paragraphXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)]
-    .map((drawingMatch) => drawingMatch[0].match(/\br:embed="([^"]+)"/)?.[1] || '')
+  return [...String(paragraphXml || '').matchAll(/<w:(drawing|pict)\b[\s\S]*?<\/w:\1>/g)]
+    .map((drawingMatch) => extractImageRelationshipId(drawingMatch[0]))
     .filter(Boolean)
     .map((relationshipId) => drawingBindingByRelationshipId.get(relationshipId))
     .filter(Boolean);
@@ -584,9 +587,9 @@ function extractUnsupportedImageWarnings(documentXml, relationshipsXml) {
   const seenRelationshipIds = new Set();
   const warnings = [];
 
-  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+  for (const drawingMatch of String(documentXml || '').matchAll(/<w:(drawing|pict)\b[\s\S]*?<\/w:\1>/g)) {
     const drawingXml = drawingMatch[0];
-    for (const relationshipMatch of drawingXml.matchAll(/\br:(?:embed|link)="([^"]+)"/g)) {
+    for (const relationshipMatch of drawingXml.matchAll(/\br:(?:embed|link|id)="([^"]+)"/g)) {
       const relationshipId = relationshipMatch[1];
       if (seenRelationshipIds.has(relationshipId)) {
         continue;
@@ -621,10 +624,16 @@ function isUnsupportedImageRelationship(relationship) {
   return targetMode === 'external' || /^[a-z][a-z0-9+.-]*:/i.test(target) || !normalizeRelationshipTarget(target);
 }
 
+function extractImageRelationshipId(value) {
+  return String(value || '').match(/\br:(?:embed|id)="([^"]+)"/)?.[1] || '';
+}
+
 function drawingCaption(drawingXml, drawingIndex) {
   const docPrMatch = String(drawingXml || '').match(/<wp:docPr\b([^>]*)\/?>/);
+  const imageDataMatch = String(drawingXml || '').match(/<v:imagedata\b([^>]*)\/?>/);
   const attributes = docPrMatch ? parseAttributes(docPrMatch[1]) : {};
-  return [attributes.title, attributes.descr, attributes.name]
+  const imageDataAttributes = imageDataMatch ? parseAttributes(imageDataMatch[1]) : {};
+  return [attributes.title, attributes.descr, attributes.name, imageDataAttributes['o:title'], imageDataAttributes.title]
     .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
     .find(isMeaningfulDrawingCaption) || `图 ${drawingIndex}`;
 }

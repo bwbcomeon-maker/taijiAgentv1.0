@@ -373,6 +373,51 @@ test('run-job promotes unmarked DOCX drawings into traceable figure assets', asy
   assert.equal(findQualityCheck(qualityReport, 'figure_placement')?.status, 'passed');
 });
 
+test('run-job promotes legacy DOCX VML pictures into traceable figure assets', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithVmlImage(sourcePath);
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 0);
+
+  const assetPackage = readJsonFile(path.join(deliveryDir, 'asset-package.json'));
+  assert.equal(assetPackage.figures.length, 1);
+  assert.equal(assetPackage.figures[0].figureId, 'fig-001');
+  assert.equal(assetPackage.figures[0].sourceType, 'docx-embedded');
+  assert.equal(assetPackage.figures[0].metadata.relationshipId, 'rIdVmlImage');
+  assert.equal(assetPackage.figures[0].metadata.mediaPath, 'word/media/vml.png');
+  assert.equal(assetPackage.figures[0].displayPath, 'assets/fig-001/figure.png');
+  assert.equal(
+    fs.readFileSync(path.join(deliveryDir, assetPackage.figures[0].displayPath)).subarray(0, 4).toString('hex'),
+    '89504e47'
+  );
+
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  const plannedFigure = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedFigure?.caption, '传统 VML 架构图');
+  assert.equal(plannedFigure?.metadata?.sourceType, 'figure');
+  assert.equal(plannedFigure?.metadata?.relationshipId, 'rIdVmlImage');
+  assert.equal(plannedFigure?.metadata?.sectionId, 'sec-001');
+
+  const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
+  assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+  assert.equal(findQualityCheck(qualityReport, 'image_coverage')?.status, 'passed');
+  assert.equal(findQualityCheck(qualityReport, 'figure_id_metadata')?.status, 'passed');
+});
+
 test('run-job uses visible DOCX figure caption paragraphs for unmarked drawings', async (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.docx');
@@ -672,6 +717,67 @@ async function writeDocxSourceWithUnmarkedDrawing(filePath, options = {}) {
   );
   zip.addEmptyDirectory('word/media');
   zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/unmarked.png');
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxSourceWithVmlImage(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdVmlImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/vml.png"/>
+</Relationships>`),
+    'word/_rels/document.xml.rels'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:v="urn:schemas-microsoft-com:vml"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>DOCX 来源方案</w:t></w:r></w:p>
+    <w:p><w:r><w:t>一、总体架构</w:t></w:r></w:p>
+    <w:p><w:r><w:t>旧版 Word/WPS 可能用 VML 结构保存图片。</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>模块</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>状态</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>VML 图片</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>应保留</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p>
+      <w:r>
+        <w:pict>
+          <v:shape id="_x0000_i1025" type="#_x0000_t75" style="width:24pt;height:24pt">
+            <v:imagedata r:id="rIdVmlImage" o:title="传统 VML 架构图"/>
+          </v:shape>
+        </w:pict>
+      </w:r>
+    </w:p>
+    <w:p><w:r><w:t>图 1 传统 VML 架构图</w:t></w:r></w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
+  zip.addEmptyDirectory('word/media');
+  zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/vml.png');
   zip.end();
 
   await once(output, 'close');
