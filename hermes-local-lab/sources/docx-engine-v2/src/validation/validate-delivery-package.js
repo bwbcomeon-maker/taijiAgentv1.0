@@ -1224,6 +1224,17 @@ function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, renderPlan, f
         message = visualChecksValidation.message;
       }
     }
+    if (status !== 'failed') {
+      const visualEvidenceValidation = validateWpsVisualEvidence({
+        deliveryDir,
+        recordedCheck,
+        status: recordedStatus,
+      });
+      if (!visualEvidenceValidation.ok) {
+        status = 'failed';
+        message = visualEvidenceValidation.message;
+      }
+    }
   }
   addCheck('wps_visual', status, message, wpsVisualEvidence(recordedCheck));
 }
@@ -1266,6 +1277,51 @@ function validateWpsVisualChecks({ recordedCheck, renderPlan, status }) {
   return { ok: true };
 }
 
+function validateWpsVisualEvidence({ deliveryDir, recordedCheck, status }) {
+  if (!['passed', 'passed_with_warnings'].includes(status)) {
+    return { ok: true };
+  }
+  const evidence = Array.isArray(recordedCheck?.visualEvidence) ? recordedCheck.visualEvidence : [];
+  if (evidence.length === 0) {
+    return {
+      ok: false,
+      message: 'WPS/Word visual acceptance is missing visual evidence files.',
+    };
+  }
+
+  for (const item of evidence) {
+    const relativePath = normalizeRelativePackagePath(item?.path);
+    const expectedHash = String(item?.sha256 || '').trim();
+    if (!relativePath || !relativePath.startsWith('evidence/wps-visual/')) {
+      return {
+        ok: false,
+        message: `WPS/Word visual evidence path must be inside evidence/wps-visual/: ${item?.path || ''}`,
+      };
+    }
+    if (!expectedHash) {
+      return {
+        ok: false,
+        message: `WPS/Word visual evidence sha256 is required: ${relativePath}`,
+      };
+    }
+    const evidencePath = path.join(deliveryDir, relativePath);
+    if (!fs.existsSync(evidencePath) || !fs.statSync(evidencePath).isFile()) {
+      return {
+        ok: false,
+        message: `WPS/Word visual evidence file is missing: ${relativePath}`,
+      };
+    }
+    const actualHash = sha256File(evidencePath);
+    if (actualHash !== expectedHash) {
+      return {
+        ok: false,
+        message: `WPS/Word visual evidence sha256 mismatch for ${relativePath}: expected ${expectedHash}, got ${actualHash}.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 function requiredWpsVisualChecks(renderPlan) {
   const required = ['document_opened', 'layout_reviewed', 'content_order_reviewed'];
   if ((renderPlan?.templateData?.images || renderPlan?.figures || []).length > 0) {
@@ -1293,7 +1349,7 @@ function wpsVisualEvidence(check) {
     return {};
   }
   const evidence = {};
-  for (const key of ['reviewedAt', 'reviewedBy', 'documentSha256', 'visualChecks']) {
+  for (const key of ['reviewedAt', 'reviewedBy', 'documentSha256', 'visualChecks', 'visualEvidence']) {
     if (check[key]) {
       evidence[key] = check[key];
     }

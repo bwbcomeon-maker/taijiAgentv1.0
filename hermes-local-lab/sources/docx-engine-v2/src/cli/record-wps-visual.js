@@ -20,6 +20,7 @@ function main() {
       reviewedBy: args.reviewer,
       note: args.note,
       visualChecks: args.visualChecks,
+      evidenceFiles: args.evidenceFiles,
     });
     const payload = {
       ok: true,
@@ -51,6 +52,7 @@ function parseArgs(argv) {
     reviewer: 'user',
     note: '',
     visualChecks: [],
+    evidenceFiles: [],
     json: false,
   };
 
@@ -66,6 +68,15 @@ function parseArgs(argv) {
         throw new Error(`参数缺少值: ${arg}`);
       }
       parsed.visualChecks.push(check);
+      index += 1;
+      continue;
+    }
+    if (arg === '--evidence-file') {
+      const evidenceFile = argv[index + 1];
+      if (!evidenceFile || evidenceFile.startsWith('--')) {
+        throw new Error(`参数缺少值: ${arg}`);
+      }
+      parsed.evidenceFiles.push(path.resolve(evidenceFile));
       index += 1;
       continue;
     }

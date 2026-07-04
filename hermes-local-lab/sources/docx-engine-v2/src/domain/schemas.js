@@ -529,6 +529,18 @@ const schemas = {
             reviewedBy: { type: 'string' },
             documentSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
             visualChecks: stringArraySchema,
+            visualEvidence: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['path', 'sha256'],
+                properties: {
+                  path: { type: 'string', minLength: 1 },
+                  sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+                },
+              },
+            },
           },
         },
       },

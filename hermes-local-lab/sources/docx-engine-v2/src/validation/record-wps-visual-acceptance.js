@@ -18,6 +18,7 @@ function recordWpsVisualAcceptance({
   reviewedBy = '',
   note = '',
   visualChecks = [],
+  evidenceFiles = [],
 } = {}) {
   if (!deliveryDir) {
     throw new Error('deliveryDir is required.');
@@ -32,11 +33,16 @@ function recordWpsVisualAcceptance({
   }
   const normalizedStatus = normalizeAcceptanceStatus(status);
   let report = null;
+  let visualEvidence = [];
   if (normalizedStatus !== 'failed') {
     report = assertAutomatedDeliveryGatesPassed(path.resolve(deliveryDir));
     assertVisualChecksComplete({
       deliveryDir: path.resolve(deliveryDir),
       visualChecks,
+    });
+    visualEvidence = packageVisualEvidenceFiles({
+      deliveryDir: path.resolve(deliveryDir),
+      evidenceFiles,
     });
   }
   report = report || readJson(qualityReportPath);
@@ -54,8 +60,11 @@ function recordWpsVisualAcceptance({
   if (normalizedVisualChecks.length > 0) {
     nextWpsCheck.visualChecks = normalizedVisualChecks;
   }
+  if (visualEvidence.length > 0) {
+    nextWpsCheck.visualEvidence = visualEvidence;
+  }
   if (wpsCheckIndex >= 0) {
-    checks[wpsCheckIndex] = { ...checks[wpsCheckIndex], ...nextWpsCheck };
+    checks[wpsCheckIndex] = nextWpsCheck;
   } else {
     checks.push(nextWpsCheck);
   }
@@ -124,6 +133,63 @@ function normalizeVisualChecks(visualChecks) {
   return [...new Set((Array.isArray(visualChecks) ? visualChecks : [visualChecks])
     .map((item) => String(item || '').trim())
     .filter(Boolean))];
+}
+
+function packageVisualEvidenceFiles({ deliveryDir, evidenceFiles }) {
+  const normalizedFiles = normalizeEvidenceFiles(evidenceFiles);
+  if (normalizedFiles.length === 0) {
+    throw new Error('Missing WPS visual evidence file for passed visual acceptance.');
+  }
+
+  const evidenceDir = path.join(deliveryDir, 'evidence', 'wps-visual');
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const usedNames = new Set();
+  return normalizedFiles.map((sourcePath) => {
+    const resolvedSourcePath = path.resolve(sourcePath);
+    if (!fs.existsSync(resolvedSourcePath) || !fs.statSync(resolvedSourcePath).isFile()) {
+      throw new Error(`WPS visual evidence file is missing: ${sourcePath}`);
+    }
+    const targetName = uniqueEvidenceFileName({
+      evidenceDir,
+      usedNames,
+      fileName: safeEvidenceFileName(resolvedSourcePath),
+    });
+    const targetPath = path.join(evidenceDir, targetName);
+    if (path.resolve(targetPath) !== resolvedSourcePath) {
+      fs.copyFileSync(resolvedSourcePath, targetPath);
+    }
+    return {
+      path: path.relative(deliveryDir, targetPath).replaceAll(path.sep, '/'),
+      sha256: sha256File(targetPath),
+    };
+  });
+}
+
+function normalizeEvidenceFiles(evidenceFiles) {
+  return [...new Set((Array.isArray(evidenceFiles) ? evidenceFiles : [evidenceFiles])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean))];
+}
+
+function safeEvidenceFileName(filePath) {
+  const baseName = path.basename(filePath).replace(/[^A-Za-z0-9._-]/g, '_');
+  if (!baseName || baseName === '.' || baseName === '..') {
+    return 'evidence.txt';
+  }
+  return baseName;
+}
+
+function uniqueEvidenceFileName({ evidenceDir, usedNames, fileName }) {
+  const extension = path.extname(fileName);
+  const stem = fileName.slice(0, fileName.length - extension.length) || 'evidence';
+  let candidate = fileName;
+  let suffix = 1;
+  while (usedNames.has(candidate) || fs.existsSync(path.join(evidenceDir, candidate))) {
+    candidate = `${stem}-${suffix}${extension}`;
+    suffix += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
 }
 
 function buildWpsMessage(status, note) {

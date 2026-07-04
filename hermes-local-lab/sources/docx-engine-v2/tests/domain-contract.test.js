@@ -413,6 +413,10 @@ test('ValidationReport contract can record WPS visual reviewer evidence', () => 
         reviewedAt: '2026-07-05T10:00:00.000Z',
         reviewedBy: 'user',
         visualChecks: ['document_opened', 'layout_reviewed'],
+        visualEvidence: [{
+          path: 'evidence/wps-visual/review.txt',
+          sha256: 'a'.repeat(64),
+        }],
       },
     ],
     warnings: [],

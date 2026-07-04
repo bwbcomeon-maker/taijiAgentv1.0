@@ -78,8 +78,15 @@ function readDeliveryManifest(deliveryDir) {
   return JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
 }
 
+function writeEvidenceFile(deliveryDir, name = 'wps-visual-evidence.txt') {
+  const evidencePath = path.join(path.dirname(deliveryDir), name);
+  fs.writeFileSync(evidencePath, 'WPS visual review evidence\n', 'utf8');
+  return evidencePath;
+}
+
 test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-verified warning', async (t) => {
   const deliveryDir = await makeDelivery(t);
+  const evidencePath = writeEvidenceFile(deliveryDir);
 
   const result = recordWpsVisualAcceptance({
     deliveryDir,
@@ -88,6 +95,7 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
     reviewedBy: 'user',
     note: '目录、图表、图片和版式已在 WPS 检查。',
     visualChecks: VISUAL_CHECKS,
+    evidenceFiles: [evidencePath],
   });
 
   assert.equal(result.ok, true);
@@ -99,6 +107,12 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   assert.equal(wpsVisual.reviewedBy, 'user');
   assert.equal(wpsVisual.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.deepEqual(wpsVisual.visualChecks, VISUAL_CHECKS);
+  assert.equal(wpsVisual.visualEvidence.length, 1);
+  assert.equal(wpsVisual.visualEvidence[0].sha256, sha256File(evidencePath));
+  assert.equal(
+    fs.existsSync(path.join(deliveryDir, wpsVisual.visualEvidence[0].path)),
+    true
+  );
   assert.match(wpsVisual.message, /目录、图表、图片和版式/);
   assert.equal(readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual').status, 'passed');
   assert.equal(
@@ -124,8 +138,27 @@ test('recordWpsVisualAcceptance rejects passed status without required visual ch
   assert.notEqual(wpsVisual?.status, 'passed');
 });
 
+test('recordWpsVisualAcceptance rejects passed status without visual evidence files', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+
+  assert.throws(
+    () => recordWpsVisualAcceptance({
+      deliveryDir,
+      status: 'passed',
+      reviewedAt: '2026-07-05T10:00:45.000Z',
+      reviewedBy: 'user',
+      note: '只打勾但没有证据文件不应算最终验收。',
+      visualChecks: VISUAL_CHECKS,
+    }),
+    /visual evidence|evidence file/i
+  );
+  const wpsVisual = readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual');
+  assert.notEqual(wpsVisual?.status, 'passed');
+});
+
 test('recordWpsVisualAcceptance writes back the full final validation report', async (t) => {
   const deliveryDir = await makeDelivery(t);
+  const evidencePath = writeEvidenceFile(deliveryDir, 'wps-final-evidence.txt');
   const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
   const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
   const staleQualityReport = readQualityReport(deliveryDir);
@@ -143,6 +176,7 @@ test('recordWpsVisualAcceptance writes back the full final validation report', a
     reviewedBy: 'user',
     note: '最终验收前先刷新质量报告。',
     visualChecks: VISUAL_CHECKS,
+    evidenceFiles: [evidencePath],
   });
 
   assert.ok(
@@ -169,6 +203,7 @@ test('recordWpsVisualAcceptance rejects WPS pass when automated package validati
       reviewedBy: 'user',
       note: '不应允许自动校验失败后记录通过。',
       visualChecks: VISUAL_CHECKS,
+      evidenceFiles: [writeEvidenceFile(deliveryDir, 'blocked-automation-evidence.txt')],
     }),
     /automated validation.*render-plan\.json/i
   );
@@ -194,6 +229,7 @@ test('recordWpsVisualAcceptance rejects WPS pass when replay-report.json is miss
       reviewedBy: 'user',
       note: '不能把缺少重放证据的包标记为人工通过。',
       visualChecks: VISUAL_CHECKS,
+      evidenceFiles: [writeEvidenceFile(deliveryDir, 'missing-replay-evidence.txt')],
     }),
     /automated validation.*replay-report\.json/i
   );
@@ -236,8 +272,35 @@ test('recordWpsVisualAcceptance records failed WPS visual inspection as report f
   assert.equal(wpsVisual.status, 'failed');
 });
 
+test('recordWpsVisualAcceptance clears previous visual evidence when recording WPS failure', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+  const evidencePath = writeEvidenceFile(deliveryDir, 'previous-pass-evidence.txt');
+  recordWpsVisualAcceptance({
+    deliveryDir,
+    status: 'passed',
+    reviewedAt: '2026-07-05T10:05:30.000Z',
+    reviewedBy: 'user',
+    visualChecks: VISUAL_CHECKS,
+    evidenceFiles: [evidencePath],
+  });
+
+  const result = recordWpsVisualAcceptance({
+    deliveryDir,
+    status: 'failed',
+    reviewedAt: '2026-07-05T10:06:00.000Z',
+    reviewedBy: 'user',
+    note: '人工复查发现图片没有刷新。',
+  });
+
+  const wpsVisual = result.qualityReport.checks.find((check) => check.id === 'wps_visual');
+  assert.equal(wpsVisual.status, 'failed');
+  assert.equal(wpsVisual.visualChecks, undefined);
+  assert.equal(wpsVisual.visualEvidence, undefined);
+});
+
 test('record-wps-visual CLI updates quality-report and emits JSON', async (t) => {
   const deliveryDir = await makeDelivery(t);
+  const evidencePath = writeEvidenceFile(deliveryDir, 'cli-evidence.txt');
 
   const result = spawnSync(process.execPath, [
     CLI,
@@ -257,6 +320,8 @@ test('record-wps-visual CLI updates quality-report and emits JSON', async (t) =>
     'figures_reviewed',
     '--visual-check',
     'tables_reviewed',
+    '--evidence-file',
+    evidencePath,
     '--note',
     '已在 WPS 打开检查。',
     '--json',

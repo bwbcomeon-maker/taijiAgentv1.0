@@ -70,13 +70,16 @@ node src/cli/record-wps-visual.js --delivery-dir <delivery-dir> --status passed 
   --visual-check content_order_reviewed \
   --visual-check figures_reviewed \
   --visual-check tables_reviewed \
+  --evidence-file <wps-screenshot-or-export> \
   --note "checked in WPS" --json
 ```
 
 For `passed` or `passed_with_warnings`, the CLI requires structured visual
 checks. `document_opened`, `layout_reviewed`, and `content_order_reviewed` are
 always required. `figures_reviewed` is required when the render plan contains
-images, and `tables_reviewed` is required when it contains tables.
+images, and `tables_reviewed` is required when it contains tables. At least one
+`--evidence-file` is also required; evidence files are copied into the delivery
+package and rebound by sha256.
 
 ## Template Packages
 

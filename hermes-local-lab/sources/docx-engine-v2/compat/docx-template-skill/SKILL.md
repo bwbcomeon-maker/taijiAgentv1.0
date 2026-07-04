@@ -54,9 +54,10 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
      --visual-check content_order_reviewed \
      --visual-check figures_reviewed \
      --visual-check tables_reviewed \
+     --evidence-file <wps-screenshot-or-export> \
      --note "已检查目录、图表、图片和版式" --json
    ```
-   For `passed` or `passed_with_warnings`, include all required `--visual-check` values. `figures_reviewed` is required only when the render plan contains images, and `tables_reviewed` is required only when it contains tables.
+   For `passed` or `passed_with_warnings`, include all required `--visual-check` values and at least one `--evidence-file`. `figures_reviewed` is required only when the render plan contains images, and `tables_reviewed` is required only when it contains tables. Evidence files are copied into the delivery package and rebound by sha256.
 10. Create a new template package from an existing package before editing its DOCX/schema/prompt files:
    ```bash
    node scripts/scaffold-template.js --from general-proposal --template-id <new-template-id> --name "<template-name>" --out-dir <template-package-dir> --json
