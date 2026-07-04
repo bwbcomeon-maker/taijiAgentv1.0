@@ -54,7 +54,12 @@ Replay a delivery package from its packaged original source:
 
 ```bash
 node src/cli/replay-delivery.js --delivery-dir <delivery-dir> --json
+node src/cli/replay-delivery.js --delivery-dir <delivery-dir> --write-report --json
 ```
+
+Use `--write-report` after package-level figure rerendering or other accepted
+asset updates. It writes `replay-report.json` back into the delivery package,
+updates the delivery manifest hashes, and refreshes `quality-report.json`.
 
 Record human WPS/Word visual acceptance:
 

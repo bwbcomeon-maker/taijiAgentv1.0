@@ -314,6 +314,74 @@ test('copyable render-figure-assets wrapper keeps a delivery package internally 
   assert.match(entries.get('word/media/fig-001.svg').toString('utf8'), /PACKAGE_RERENDER_MARKER/);
 });
 
+test('copyable replay-delivery wrapper can rebind replay evidence after package rerender', (t) => {
+  const { workspace, outDir } = buildSkillPackage(t);
+  const { assetDir, sourcePath } = writeRichSource(workspace);
+  const deliveryDir = path.join(workspace, 'delivery-for-replay-rebind');
+
+  const renderResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/apply-template.js'),
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--asset-dir',
+    assetDir,
+    '--out-dir',
+    deliveryDir,
+  ], { encoding: 'utf8' });
+  assert.equal(renderResult.status, 0, renderResult.stderr || renderResult.stdout);
+
+  fs.writeFileSync(
+    path.join(deliveryDir, 'assets/fig-001/source.mmd'),
+    ['flowchart LR', '  A[Source] --> B[REBOUND_REPLAY_MARKER]', ''].join('\n'),
+    'utf8'
+  );
+
+  const rerenderResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/render-figure-assets.js'),
+    '--manifest',
+    path.join(deliveryDir, 'render-plan.json'),
+    '--figure-id',
+    'fig-001',
+  ], { encoding: 'utf8' });
+  assert.equal(rerenderResult.status, 0, rerenderResult.stderr || rerenderResult.stdout);
+
+  const replayResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/replay-delivery.js'),
+    '--delivery-dir',
+    deliveryDir,
+    '--write-report',
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(replayResult.status, 0, replayResult.stderr || replayResult.stdout);
+  const replayPayload = JSON.parse(replayResult.stdout);
+  assert.equal(replayPayload.ok, true);
+  assert.equal(fs.existsSync(path.join(deliveryDir, 'replay-report.json')), true);
+
+  const deliveryPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+  assert.equal(deliveryPackage.files.replayReport, 'replay-report.json');
+  assert.equal(deliveryPackage.fileSha256.replayReport, sha256File(path.join(deliveryDir, 'replay-report.json')));
+
+  const validateResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/validate-delivery.js'),
+    '--delivery-dir',
+    deliveryDir,
+    '--write-report',
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(validateResult.status, 0, validateResult.stderr || validateResult.stdout);
+  const validationPayload = JSON.parse(validateResult.stdout);
+  assert.equal(validationPayload.ok, true);
+  assert.ok(['passed', 'passed_with_warnings'].includes(validationPayload.qualityReport.status));
+  assert.equal(
+    validationPayload.qualityReport.checks.find((check) => check.id === 'replay_report')?.status,
+    'passed'
+  );
+});
+
 test('copyable list-templates cli exposes migrated templates', (t) => {
   const { outDir } = buildSkillPackage(t);
   const result = spawnSync(process.execPath, [

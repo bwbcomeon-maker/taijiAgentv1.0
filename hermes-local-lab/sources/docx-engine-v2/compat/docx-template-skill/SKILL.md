@@ -42,8 +42,10 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
 8. Replay a delivery package from its original source copy, template manifest, and packaged assets:
    ```bash
    node scripts/replay-delivery.js --delivery-dir <delivery-dir> --json
+   node scripts/replay-delivery.js --delivery-dir <delivery-dir> --write-report --json
    node scripts/replay-delivery.js --delivery-dir <delivery-dir> --out-dir <replay-output-dir> --json
    ```
+   Use `--write-report` after rerendering package assets so `replay-report.json`, `delivery-package.json`, and `quality-report.json` are rebound before final validation.
 9. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
    ```bash
    node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --note "已检查目录、图表、图片和版式" --json
