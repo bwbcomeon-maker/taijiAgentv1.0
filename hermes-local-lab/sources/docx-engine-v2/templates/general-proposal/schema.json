@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "general-proposal.schema.json",
+  "title": "通用方案模板数据",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cover", "chapters", "tables", "figures", "images", "conclusion"],
+  "properties": {
+    "cover": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["title", "client", "company", "date"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "subtitle": { "type": "string" },
+        "client": { "type": "string", "minLength": 1 },
+        "company": { "type": "string", "minLength": 1 },
+        "version": { "type": "string" },
+        "security_level": { "type": "string" },
+        "date": { "type": "string", "minLength": 1 }
+      }
+    },
+    "chapters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["title", "sections"],
+        "properties": {
+          "number": { "type": "string" },
+          "title": { "type": "string", "minLength": 1 },
+          "sections": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["title", "paragraphs"],
+              "properties": {
+                "number": { "type": "string" },
+                "title": { "type": "string", "minLength": 1 },
+                "paragraphs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "required": ["text"],
+                    "properties": {
+                      "text": { "type": "string" }
+                    }
+                  }
+                },
+                "blocks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "required": ["type"],
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": ["paragraph", "table", "figure"]
+                      },
+                      "blockId": { "type": "string" },
+                      "text": { "type": "string" },
+                      "tableId": { "type": "string", "pattern": "^tbl-[0-9]{3}$" },
+                      "figureId": { "type": "string", "pattern": "^fig-[0-9]{3}$" },
+                      "title": { "type": "string" },
+                      "anchor": { "type": "string" },
+                      "layoutIntent": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["title", "headers", "rows"],
+        "properties": {
+          "title": { "type": "string" },
+          "headers": { "type": "object", "minProperties": 1 },
+          "rows": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "object" }
+          }
+        }
+      }
+    },
+    "figures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+          "required": ["path", "title"],
+          "properties": {
+          "blockId": { "type": "string" },
+          "path": { "type": "string", "minLength": 1 },
+          "figureId": { "type": "string", "pattern": "^fig-[0-9]{3}$" },
+          "title": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "anchor": { "type": "string", "minLength": 1 },
+          "layoutIntent": { "type": "string" },
+          "width": { "type": "number", "minimum": 1 },
+          "height": { "type": "number", "minimum": 1 },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
+    "conclusion": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["title", "paragraphs"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "paragraphs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["text"],
+            "properties": {
+              "text": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

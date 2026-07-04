@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "builtin": [
+    {
+      "templateId": "general-proposal",
+      "path": "templates/general-proposal"
+    },
+    {
+      "templateId": "meeting-minutes",
+      "path": "templates/meeting-minutes"
+    }
+  ],
+  "installed": []
+}

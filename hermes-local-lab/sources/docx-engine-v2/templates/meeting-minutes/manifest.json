@@ -1,0 +1,20 @@
+{
+  "id": "meeting-minutes",
+  "name": "会议纪要模板",
+  "version": "1.0.0",
+  "description": "用于会议基本信息、议题、决议和待办事项的标准会议纪要。",
+  "template": "template.docx",
+  "schema": "schema.json",
+  "prompt": "prompt.md",
+  "sample": "sample.json",
+  "outputFormat": "docx",
+  "documentTypes": ["meeting-minutes"],
+  "capabilities": ["sections", "tables"],
+  "requiredAssets": [],
+  "qualityGates": ["schema_valid", "sample_valid", "docx_template_present", "wps_visual"],
+  "compatibility": {
+    "engine": "docx-engine-v2",
+    "minVersion": "0.1.0",
+    "format": "docx"
+  }
+}

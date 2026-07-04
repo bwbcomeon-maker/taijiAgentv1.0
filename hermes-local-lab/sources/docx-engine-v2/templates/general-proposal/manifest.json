@@ -1,0 +1,20 @@
+{
+  "id": "general-proposal",
+  "name": "通用方案模板",
+  "version": "1.0.0",
+  "description": "用于项目建设方案、技术方案、汇报方案等通用方案类文档。",
+  "template": "template.docx",
+  "schema": "schema.json",
+  "prompt": "prompt.md",
+  "sample": "sample.json",
+  "outputFormat": "docx",
+  "documentTypes": ["proposal", "technical-proposal", "implementation-plan"],
+  "capabilities": ["sections", "tables", "images"],
+  "requiredAssets": [],
+  "qualityGates": ["schema_valid", "sample_valid", "docx_template_present", "wps_visual"],
+  "compatibility": {
+    "engine": "docx-engine-v2",
+    "minVersion": "0.1.0",
+    "format": "docx"
+  }
+}
