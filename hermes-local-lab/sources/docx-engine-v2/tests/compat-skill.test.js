@@ -128,6 +128,29 @@ test('copyable apply-template wrapper keeps the legacy --out docx path working',
   assert.equal(fs.existsSync(outputDocx), true);
 });
 
+test('copyable package-rich-draft wrapper creates editable draft package through v2', (t) => {
+  const { workspace, outDir } = buildSkillPackage(t);
+  const { assetDir, sourcePath } = writeRichSource(workspace);
+  const packageDir = path.join(workspace, 'rich-draft-package');
+
+  const result = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/package-rich-draft.js'),
+    '--source',
+    sourcePath,
+    '--asset-dir',
+    assetDir,
+    '--out-dir',
+    packageDir,
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /package-rich-draft-ok/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'draft.manifest.json'), 'utf8'));
+  assert.equal(manifest.schemaVersion, 'rich-draft-package/v2');
+  assert.equal(fs.existsSync(path.join(packageDir, '图片清单.md')), true);
+  assert.ok(manifest.figures.some((figure) => figure.editable?.sourcePath));
+});
+
 test('copyable replace-docx-image wrapper delegates stable figure replacement to v2', async (t) => {
   const { workspace, outDir } = buildSkillPackage(t);
   const { assetDir, sourcePath } = writeRichSource(workspace);
