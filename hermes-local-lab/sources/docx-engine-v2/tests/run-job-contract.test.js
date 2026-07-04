@@ -27,6 +27,7 @@ const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
 );
+const MINIMAL_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 
 function makeTempWorkspace(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-contract-'));
@@ -323,6 +324,44 @@ test('run-job preserves embedded media from DOCX sources in the delivery package
   assert.equal(findQualityCheck(qualityReport, 'figure_id_metadata')?.status, 'passed');
 });
 
+test('run-job preserves embedded JPEG media from DOCX sources in the delivery package', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithEmbeddedImage(sourcePath, {
+    mediaFileName: 'image1.jpg',
+    mediaBuffer: MINIMAL_JPEG,
+  });
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 0);
+  const assetPackage = readJsonFile(path.join(deliveryDir, 'asset-package.json'));
+  assert.equal(assetPackage.figures[0].displayPath, 'assets/fig-001/figure.jpg');
+  assert.deepEqual(
+    fs.readFileSync(path.join(deliveryDir, assetPackage.figures[0].displayPath)),
+    MINIMAL_JPEG
+  );
+
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  const plannedFigure = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedFigure?.path, 'assets/fig-001/figure.jpg');
+
+  const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
+  assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+  assert.equal(findQualityCheck(qualityReport, 'image_coverage')?.status, 'passed');
+});
+
 test('run-job reports missing source assets as validation failure before rendering', (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.md');
@@ -426,23 +465,29 @@ test('run-job reports non-empty delivery directories as validation failure', (t)
   assert.equal(fs.existsSync(path.join(deliveryDir, 'failure-report.json')), false);
 });
 
-async function writeDocxSourceWithEmbeddedImage(filePath) {
+async function writeDocxSourceWithEmbeddedImage(filePath, options = {}) {
+  const {
+    mediaFileName = 'image1.png',
+    mediaBuffer = ONE_BY_ONE_PNG,
+  } = options;
   const zip = new yazl.ZipFile();
   const output = fs.createWriteStream(filePath);
   zip.outputStream.pipe(output);
+  const mediaExtension = path.extname(mediaFileName).slice(1).toLowerCase() || 'png';
+  const mediaContentType = mediaExtension === 'jpg' || mediaExtension === 'jpeg' ? 'image/jpeg' : 'image/png';
 
   zip.addBuffer(
     Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="xml" ContentType="application/xml"/>
-  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="${mediaExtension}" ContentType="${mediaContentType}"/>
 </Types>`),
     '[Content_Types].xml'
   );
   zip.addBuffer(
     Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${mediaFileName}"/>
 </Relationships>`),
     'word/_rels/document.xml.rels'
   );
@@ -469,7 +514,7 @@ async function writeDocxSourceWithEmbeddedImage(filePath) {
     'word/document.xml'
   );
   zip.addEmptyDirectory('word/media');
-  zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/image1.png');
+  zip.addBuffer(mediaBuffer, `word/media/${mediaFileName}`);
   zip.end();
 
   await once(output, 'close');

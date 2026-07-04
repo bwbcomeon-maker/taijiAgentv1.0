@@ -4,7 +4,7 @@ const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
 
-const QUALIFIED_DISPLAY_EXTENSIONS = new Set(['.png', '.svg']);
+const QUALIFIED_DISPLAY_EXTENSIONS = new Set(['.png', '.svg', '.jpg', '.jpeg']);
 
 function packageAssets({ sourcePackage, assetDir = '', outDir } = {}) {
   if (!sourcePackage) {

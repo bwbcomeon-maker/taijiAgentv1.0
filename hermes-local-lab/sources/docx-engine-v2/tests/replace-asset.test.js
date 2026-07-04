@@ -19,6 +19,7 @@ const PNG_REPLACEMENT = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
 );
+const JPEG_REPLACEMENT = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 
 function makeWorkspace(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-replace-'));
@@ -82,6 +83,30 @@ test('replaceDocxAsset supports png replacements without changing unrelated path
   const entries = await readZipEntries(replacedPath);
   const replacementBuffer = findMediaBuffer(entries, PNG_REPLACEMENT);
   assert.deepEqual(replacementBuffer, PNG_REPLACEMENT);
+});
+
+test('replaceDocxAsset supports jpeg replacements with matching content type', async (t) => {
+  const workspace = makeWorkspace(t);
+  const docxPath = await makeDocxWithFigureMetadata(workspace);
+  const replacementPath = path.join(workspace, 'replacement.jpg');
+  const replacedPath = path.join(workspace, 'replaced-jpeg.docx');
+  fs.writeFileSync(replacementPath, JPEG_REPLACEMENT);
+
+  const { replaceDocxAsset } = require('../src/assets/replace-docx-asset');
+  const result = await replaceDocxAsset({
+    docxPath,
+    figureId: 'fig-001',
+    imagePath: replacementPath,
+    outputPath: replacedPath,
+  });
+
+  assert.equal(result.mediaPath, 'word/media/fig-001.jpg');
+  const entries = await readZipEntries(replacedPath);
+  const relationshipsXml = entries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
+  const contentTypesXml = entries.get('[Content_Types].xml')?.toString('utf8') || '';
+  assert.match(relationshipsXml, /Target="media\/fig-001\.jpg"/);
+  assert.match(contentTypesXml, /Extension="jpg" ContentType="image\/jpeg"/);
+  assert.deepEqual(findMediaBuffer(entries, JPEG_REPLACEMENT), JPEG_REPLACEMENT);
 });
 
 test('replace-asset CLI writes JSON on successful replacement', async (t) => {
