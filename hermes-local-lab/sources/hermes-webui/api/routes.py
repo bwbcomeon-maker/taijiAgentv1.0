@@ -6528,6 +6528,7 @@ from api.workspace import (
     _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
+from api import docx_engine_v2
 from api.streaming import (
     _sse,
     _run_agent_streaming,
@@ -8709,6 +8710,9 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/docx-engine-v2/templates":
+        return _handle_docx_engine_v2_templates(handler)
+
     if parsed.path == "/api/sessions/search":
         return _handle_sessions_search(handler, parsed)
 
@@ -10735,6 +10739,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/file/open-vscode":
         return _handle_file_open_vscode(handler, body)
+
+    if parsed.path == "/api/docx-engine-v2/jobs":
+        return _handle_docx_engine_v2_create_job(handler, body)
+
+    if parsed.path == "/api/docx-engine-v2/assets/replace":
+        return _handle_docx_engine_v2_replace_asset(handler, body)
 
     # ── Workspace management (POST) ──
     if parsed.path == "/api/workspaces/add":
@@ -16085,6 +16095,41 @@ def _handle_file_path(handler, body):
         return j(handler, {"ok": True, "path": str(target)})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
+
+
+def _docx_engine_v2_workspace(body) -> Path:
+    require(body, "session_id")
+    s = get_session_for_file_ops(body["session_id"])
+    return Path(s.workspace).expanduser().resolve()
+
+
+def _handle_docx_engine_v2_templates(handler):
+    try:
+        return j(handler, docx_engine_v2.list_templates())
+    except (FileNotFoundError, subprocess.TimeoutExpired, docx_engine_v2.DocxEngineV2Error) as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_docx_engine_v2_create_job(handler, body):
+    try:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.create_job(body, workspace)
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+    except subprocess.TimeoutExpired as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_docx_engine_v2_replace_asset(handler, body):
+    try:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.replace_asset(body, workspace)
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+    except subprocess.TimeoutExpired as e:
+        return bad(handler, _sanitize_error(e), 500)
 
 
 def _handle_file_open_vscode(handler, body):
