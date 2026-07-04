@@ -9,6 +9,19 @@ async function normalizeDocxSource({ sourcePath } = {}) {
   }
 
   const [sourceBuffer, zipEntries] = await Promise.all([fs.readFile(sourcePath), readZip(sourcePath)]);
+  return normalizeDocxSourceFromEntries({ sourcePath, sourceBuffer, zipEntries });
+}
+
+function normalizeDocxSourceFromEntries({ sourcePath, sourceBuffer, zipEntries } = {}) {
+  if (!sourcePath) {
+    throw new Error('sourcePath is required for DOCX source normalization.');
+  }
+  if (!sourceBuffer) {
+    throw new Error('sourceBuffer is required for DOCX source normalization.');
+  }
+  if (!zipEntries || typeof zipEntries.has !== 'function') {
+    throw new Error('zipEntries are required for DOCX source normalization.');
+  }
   if (!zipEntries.has('word/document.xml')) {
     throw new Error('DOCX source is missing word/document.xml.');
   }
@@ -772,4 +785,4 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-module.exports = { normalizeDocxSource };
+module.exports = { normalizeDocxSource, normalizeDocxSourceFromEntries };

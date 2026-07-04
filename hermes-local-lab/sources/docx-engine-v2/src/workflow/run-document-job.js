@@ -246,6 +246,7 @@ function initialQualityReport() {
     status: 'not_verified',
     checks: [
       { id: 'schema', status: 'not_verified' },
+      { id: 'source_replay', status: 'not_verified' },
       { id: 'docx_zip', status: 'not_verified' },
       { id: 'template_markers', status: 'not_verified' },
       { id: 'image_coverage', status: 'not_verified' },

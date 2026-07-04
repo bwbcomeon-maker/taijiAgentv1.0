@@ -4,6 +4,11 @@ const path = require('node:path');
 
 async function normalizeTextSource({ sourcePath = 'inline.txt', text } = {}) {
   const sourceText = text ?? (await fs.readFile(sourcePath, 'utf8'));
+  return normalizeTextContent({ sourcePath, text: sourceText });
+}
+
+function normalizeTextContent({ sourcePath = 'inline.txt', text = '' } = {}) {
+  const sourceText = text ?? '';
   const paragraphs = sourceText
     .split(/\n\s*\n|\r?\n/)
     .map((paragraph) => paragraph.trim())
@@ -58,4 +63,4 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-module.exports = { normalizeTextSource };
+module.exports = { normalizeTextSource, normalizeTextContent };

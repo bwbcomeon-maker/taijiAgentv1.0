@@ -16,6 +16,11 @@ async function normalizeMarkdownSource(options = {}) {
     sourceText = await fs.readFile(sourcePath, 'utf8');
   }
 
+  return normalizeMarkdownText({ sourcePath, markdownText: sourceText });
+}
+
+function normalizeMarkdownText({ sourcePath = 'inline.md', markdownText = '' } = {}) {
+  const sourceText = markdownText ?? '';
   const context = createContext({
     sourceType: 'markdown',
     sourcePath,
@@ -309,4 +314,4 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-module.exports = { normalizeMarkdownSource };
+module.exports = { normalizeMarkdownSource, normalizeMarkdownText };

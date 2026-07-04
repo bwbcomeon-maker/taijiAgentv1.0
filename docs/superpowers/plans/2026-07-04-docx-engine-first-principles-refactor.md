@@ -49,6 +49,7 @@
 - 已把 `source.md` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免人工查看/后续处理入口被改动却仍通过质量门。
 - 已把归一化后的 `SourcePackage` 持久化为 `source-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终包只能查看 Markdown/原始文件却无法追溯引擎实际理解到的章节、表格、图片和块级锚点。
 - 已让交付包复验校验 `source-package.json.sourceRef` 与 `job.manifest.json.sourceRef` 完全一致，避免源包与作业清单各自合法、哈希也同步更新，但实际指向不同原始输入。
+- 已新增 `source_replay` 质量门，用包内 `source/original/` 原始输入重新归一化并比对 `source-package.json`，覆盖 Markdown/text/DOCX，避免源包和下游计划一起被改成自洽假证据后脱离真实输入。
 - 已让交付包复验校验 `render-plan.json` 的章节、表格、figure 和普通图片仍与 `source-package.json` 对齐，避免渲染计划与归一化源包各自合法但结构来源已经脱钩。
 - 已让交付包复验校验 `render-plan.json` 的章节 `blockIds` 与 `templateData.sections[].blocks` 仍和 `source-package.json` 的正文块一致，避免归一化正文被改动或章节块归属漂移后仍通过自动质量门。
 - 已让交付包复验校验 `asset-package.json` 的表格、figure、普通图片仍与 `source-package.json` 对齐，并校验其展示文件路径/哈希与 `render-plan.json` 一致，避免资产包元数据或文件指针与真实渲染计划脱钩。

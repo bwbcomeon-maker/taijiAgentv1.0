@@ -218,6 +218,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
     [
       'schema',
       'source_original',
+      'source_replay',
       'docx_zip',
       'template_markers',
       'image_coverage',
@@ -736,6 +737,31 @@ test('validateDeliveryPackage fails when the original source copy hash differs f
   assert.equal(report.status, 'failed');
   assert.equal(sourceCheck?.status, 'failed');
   assert.match(sourceCheck?.message || '', /hash/i);
+});
+
+test('validateDeliveryPackage fails when source package can no longer be replayed from the original source', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  sourcePackage.title = 'Tampered replay title';
+  renderPlan.templateData.title = 'Tampered replay title';
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  deliveryManifest.fileSha256.renderPlan = sha256File(renderPlanPath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const replayCheck = report.checks.find((check) => check.id === 'source_replay');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(replayCheck?.status, 'failed');
+  assert.match(replayCheck?.message || '', /source-package\.json title|original source/i);
 });
 
 test('validateDeliveryPackage fails when delivery manifest originalSource points at the wrong source copy', async (t) => {

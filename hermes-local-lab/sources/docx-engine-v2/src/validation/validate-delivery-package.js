@@ -6,10 +6,14 @@ const zlib = require('node:zlib');
 const { validateDomainObject } = require('../domain/validate');
 const { deliveryFileHashFailures } = require('../delivery/file-hashes');
 const { resolveSectionAnchors } = require('../domain/section-anchors');
+const { normalizeDocxSourceFromEntries } = require('../source/normalize-docx');
+const { normalizeMarkdownText } = require('../source/normalize-markdown');
+const { normalizeTextContent } = require('../source/normalize-text');
 
 const CHECK_IDS = [
   'schema',
   'source_original',
+  'source_replay',
   'docx_zip',
   'template_markers',
   'image_coverage',
@@ -123,6 +127,12 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
     jobManifest: jsonFiles.jobManifest,
   });
   addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest: jsonFiles.jobManifest });
+  addSourceReplayCheck({
+    addCheck,
+    deliveryDir,
+    sourcePackage: jsonFiles.sourcePackage,
+    jobManifest: jsonFiles.jobManifest,
+  });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addTemplateMarkersCheck({ addCheck, documentXml });
   addImageCoverageCheck({
@@ -1041,6 +1051,95 @@ function addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest }) {
     return;
   }
   addCheck('source_original', 'passed');
+}
+
+function addSourceReplayCheck({ addCheck, deliveryDir, sourcePackage, jobManifest }) {
+  if (!sourcePackage || typeof sourcePackage !== 'object') {
+    addCheck('source_replay', 'failed', 'source-package.json is required for original source replay validation.');
+    return;
+  }
+
+  const sourceRef = jobManifest?.sourceRef || sourcePackage.sourceRef || {};
+  const sourceType = String(sourcePackage.sourceType || sourceRef.type || '').trim();
+  const originalSourcePath = path.join(deliveryDir, expectedOriginalSourcePath(sourceRef));
+  if (!fs.existsSync(originalSourcePath)) {
+    addCheck('source_replay', 'failed', `Original source copy is missing for replay: ${path.relative(deliveryDir, originalSourcePath)}`);
+    return;
+  }
+
+  let replayedSourcePackage;
+  try {
+    const sourceBuffer = fs.readFileSync(originalSourcePath);
+    replayedSourcePackage = replayOriginalSourcePackage({
+      sourceType,
+      sourcePath: sourcePackage.sourceRef?.path || sourceRef.path,
+      sourceBuffer,
+    });
+  } catch (error) {
+    addCheck('source_replay', 'failed', `Original source replay failed: ${error.message}`);
+    return;
+  }
+
+  const failures = sourceReplayFailures({
+    actual: sourcePackage,
+    expected: replayedSourcePackage,
+  });
+  if (failures.length > 0) {
+    addCheck(
+      'source_replay',
+      'failed',
+      `source-package.json no longer matches original source replay: ${failures.join('; ')}`
+    );
+    return;
+  }
+
+  addCheck('source_replay', 'passed');
+}
+
+function replayOriginalSourcePackage({ sourceType, sourcePath, sourceBuffer }) {
+  if (sourceType === 'markdown') {
+    return normalizeMarkdownText({ sourcePath, markdownText: sourceBuffer.toString('utf8') });
+  }
+  if (sourceType === 'text') {
+    return normalizeTextContent({ sourcePath, text: sourceBuffer.toString('utf8') });
+  }
+  if (sourceType === 'docx') {
+    return normalizeDocxSourceFromEntries({
+      sourcePath,
+      sourceBuffer,
+      zipEntries: readZipEntriesFromBuffer(sourceBuffer),
+    });
+  }
+  throw new Error(`Unsupported source type for replay: ${sourceType || 'missing'}`);
+}
+
+function sourceReplayFailures({ actual, expected }) {
+  const failures = [];
+  for (const field of ['sourceType', 'title']) {
+    const actualValue = normalizeComparableJsonValue(actual?.[field]);
+    const expectedValue = normalizeComparableJsonValue(expected?.[field]);
+    if (actualValue !== expectedValue) {
+      failures.push(
+        `source-package.json ${field}=${displayValue(actualValue)} does not match original source ${field}=${displayValue(expectedValue)}`
+      );
+    }
+  }
+
+  for (const field of ['sourceRef', 'sections', 'blocks', 'tables', 'figures', 'images', 'embeddedMedia', 'warnings']) {
+    const actualValue = normalizeComparableJsonValue(actual?.[field]);
+    const expectedValue = normalizeComparableJsonValue(expected?.[field]);
+    if (actualValue !== expectedValue) {
+      failures.push(`source-package.json ${field} does not match original source replay`);
+    }
+  }
+  return failures;
+}
+
+function normalizeComparableJsonValue(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  return JSON.stringify(value ?? null);
 }
 
 function originalSourceFileName(sourceRef = {}) {
@@ -2273,7 +2372,10 @@ function uniqueStrings(items) {
 }
 
 function readZipEntries(filePath) {
-  const buffer = fs.readFileSync(filePath);
+  return readZipEntriesFromBuffer(fs.readFileSync(filePath));
+}
+
+function readZipEntriesFromBuffer(buffer) {
   const eocdOffset = findEndOfCentralDirectory(buffer);
   if (eocdOffset < 0) {
     throw new Error('missing ZIP end of central directory');
