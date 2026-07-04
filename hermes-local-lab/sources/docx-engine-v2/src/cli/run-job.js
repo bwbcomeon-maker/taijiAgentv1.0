@@ -122,6 +122,8 @@ function toCliPayload(result) {
     deliveryDir: result.deliveryDir,
     documentPath: result.documentPath,
     qualityStatus: result.qualityStatus,
+    replayStatus: result.replayStatus,
+    replayReport: result.replayReport,
     job: result.job,
   };
 }

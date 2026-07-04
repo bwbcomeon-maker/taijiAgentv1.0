@@ -87,6 +87,12 @@ test('runDocumentJob drives the canonical job lifecycle and writes a complete ma
   assert.equal(result.job.workspace, deliveryDir);
   assert.equal(fs.existsSync(result.job.workspace), true);
   assert.deepEqual(result.job.failures, []);
+  assert.match(result.replayReport.status, /^(passed|passed_with_warnings)$/);
+  assert.ok(
+    result.replayReport.checks.some(
+      (check) => check.id === 'document_replay' && check.status === 'passed'
+    )
+  );
 
   const manifest = readJson(path.join(deliveryDir, 'job.manifest.json'));
   assert.deepEqual(manifest, result.job);

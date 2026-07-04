@@ -9,6 +9,7 @@ const { validateDomainObject } = require('../domain/validate');
 const { buildRenderPlan } = require('../planning/build-render-plan');
 const { postprocessDocx } = require('../rendering/postprocess-docx');
 const { renderDocx } = require('../rendering/render-docx');
+const { replayDeliveryPackage } = require('../replay/replay-delivery-package');
 const { normalizeDocxSource } = require('../source/normalize-docx');
 const { normalizeMarkdownSource } = require('../source/normalize-markdown');
 const { normalizeTextSource } = require('../source/normalize-text');
@@ -168,6 +169,27 @@ async function runDocumentJob({
       });
     }
 
+    const replayReport = await replayDeliveryPackage({
+      engineRoot: path.resolve(engineRoot),
+      deliveryDir: finalDeliveryDir,
+    });
+    if (replayReport.status === 'failed') {
+      return persistFailureArtifacts({
+        deliveryDir: absoluteDeliveryDir,
+        result: failureResult({
+          code: 'validation_failed',
+          message: replayReport.failures.join('；') || 'Final delivery package replay failed.',
+          job: transitionFailedJob(job, replayReport.failures),
+          stage: 'delivery_replay',
+          failures: replayReport.failures,
+        }),
+      });
+    }
+    const finalReplayReport = {
+      ...replayReport,
+      deliveryDir: absoluteDeliveryDir,
+    };
+
     moveVerifiedDelivery({ fromDir: finalDeliveryDir, toDir: absoluteDeliveryDir });
 
     return {
@@ -178,6 +200,8 @@ async function runDocumentJob({
       documentPath: path.join(absoluteDeliveryDir, 'document.docx'),
       qualityReport: finalQualityReport,
       qualityStatus: finalQualityReport.status,
+      replayReport: finalReplayReport,
+      replayStatus: finalReplayReport.status,
     };
   } catch (error) {
     return persistFailureArtifacts({

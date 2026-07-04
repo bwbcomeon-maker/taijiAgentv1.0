@@ -228,6 +228,12 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(payload.deliveryDir, deliveryDir);
   assert.equal(payload.documentPath, path.join(deliveryDir, 'document.docx'));
   assert.match(payload.qualityStatus, /^(passed|passed_with_warnings)$/);
+  assert.match(payload.replayStatus, /^(passed|passed_with_warnings)$/);
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'document_replay' && check.status === 'passed'
+    )
+  );
 
   for (const entry of REQUIRED_DELIVERY_ENTRIES) {
     assert.equal(fs.existsSync(path.join(deliveryDir, entry)), true, `${entry} must exist`);
