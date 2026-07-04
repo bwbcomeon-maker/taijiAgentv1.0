@@ -49,6 +49,7 @@
 - 已把归一化后的 `SourcePackage` 持久化为 `source-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终包只能查看 Markdown/原始文件却无法追溯引擎实际理解到的章节、表格、图片和块级锚点。
 - 已让交付包复验校验 `source-package.json.sourceRef` 与 `job.manifest.json.sourceRef` 完全一致，避免源包与作业清单各自合法、哈希也同步更新，但实际指向不同原始输入。
 - 已让交付包复验校验 `render-plan.json` 的章节、表格、figure 和普通图片仍与 `source-package.json` 对齐，避免渲染计划与归一化源包各自合法但结构来源已经脱钩。
+- 已让交付包复验校验 `render-plan.json` 的章节 `blockIds` 与 `templateData.sections[].blocks` 仍和 `source-package.json` 的正文块一致，避免归一化正文被改动或章节块归属漂移后仍通过自动质量门。
 - 已让交付包复验校验 `asset-package.json` 的表格、figure、普通图片仍与 `source-package.json` 对齐，并校验其展示文件路径/哈希与 `render-plan.json` 一致，避免资产包元数据或文件指针与真实渲染计划脱钩。
 - 已把 `job.manifest.json`、`template.manifest.json`、`render-plan.json`、`quality-report.json` 等交付证据文件纳入 `fileSha256`，并让复验写回和 WPS/Word 验收写回同步刷新质量报告哈希，避免清单文件被改动后仍被误判为同一交付包。
 - 已把 `AssetPackage` 持久化为 `asset-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终交付只剩散落的 `assets/` 目录而缺少资产结构证据。

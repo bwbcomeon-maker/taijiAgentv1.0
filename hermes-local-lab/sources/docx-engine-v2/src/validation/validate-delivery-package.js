@@ -331,6 +331,7 @@ function renderPlanSourceConsistencyFailures({ sourcePackage, renderPlan }) {
       expectedSections: sourceSections,
       actualLabel: 'render-plan.json sections',
       expectedLabel: 'source-package.json sections',
+      compareBlockIds: true,
     })
   );
   failures.push(
@@ -339,6 +340,13 @@ function renderPlanSourceConsistencyFailures({ sourcePackage, renderPlan }) {
       expectedSections: sourceSections,
       actualLabel: 'render-plan.json templateData.sections',
       expectedLabel: 'source-package.json sections',
+    })
+  );
+  failures.push(
+    ...templateSectionBlockConsistencyFailures({
+      actualSections: renderPlan?.templateData?.sections || [],
+      sourcePackage,
+      renderPlan,
     })
   );
   const sourceTables = sourcePackage?.tables || [];
@@ -658,7 +666,113 @@ function templateTableConsistencyFailures({ actualTables, expectedTables }) {
   return failures;
 }
 
-function sectionListConsistencyFailures({ actualSections, expectedSections, actualLabel, expectedLabel }) {
+function templateSectionBlockConsistencyFailures({ actualSections, sourcePackage, renderPlan }) {
+  const failures = [];
+  const actualById = new Map((actualSections || []).map((section) => [section.sectionId, section]));
+  const tableIds = new Set((renderPlan?.templateData?.tables || []).map((table) => table.tableId));
+  const figureIds = new Set(
+    (renderPlan?.templateData?.images || [])
+      .filter((image) => image.metadata?.sourceType === 'figure')
+      .map((image) => image.figureId)
+  );
+  const sourceImagesById = new Map(
+    (renderPlan?.templateData?.images || [])
+      .filter((image) => image.metadata?.sourceType === 'image')
+      .map((image) => [image.metadata?.sourceImageId || image.metadata?.imageId || '', image])
+  );
+
+  for (const section of sourcePackage?.sections || []) {
+    const actualSection = actualById.get(section.sectionId);
+    if (!actualSection) {
+      failures.push(`render-plan.json templateData.sections missing sectionId=${section.sectionId}`);
+      continue;
+    }
+
+    const expectedBlocks = (sourcePackage?.blocks || [])
+      .filter((block) => block.sectionId === section.sectionId)
+      .map((block) => expectedTemplateBlockFromSource({ block, tableIds, figureIds, sourceImagesById }))
+      .filter(Boolean);
+    const actualBlocks = Array.isArray(actualSection.blocks) ? actualSection.blocks : [];
+    if (actualBlocks.length !== expectedBlocks.length) {
+      failures.push(
+        `render-plan.json templateData.sections.${section.sectionId}.blocks count=${actualBlocks.length} does not match source-package.json blocks sectionId=${section.sectionId} count=${expectedBlocks.length}`
+      );
+    }
+
+    const maxLength = Math.max(actualBlocks.length, expectedBlocks.length);
+    for (let index = 0; index < maxLength; index += 1) {
+      const actual = actualBlocks[index];
+      const expected = expectedBlocks[index];
+      if (!actual || !expected) {
+        continue;
+      }
+      for (const field of Object.keys(expected)) {
+        const actualValue = String(actual[field] ?? '');
+        const expectedValue = String(expected[field] ?? '');
+        if (actualValue !== expectedValue) {
+          failures.push(
+            `render-plan.json templateData.sections.${section.sectionId}.blocks[${index}].${field}=${displayValue(actualValue)} does not match source-package.json blocks.${expected.blockId}.${field}=${displayValue(expectedValue)}`
+          );
+        }
+      }
+    }
+  }
+
+  return failures;
+}
+
+function expectedTemplateBlockFromSource({ block, tableIds, figureIds, sourceImagesById }) {
+  const tableId = block.metadata?.tableId;
+  if (tableId && tableIds.has(tableId)) {
+    return {
+      type: 'table',
+      blockId: block.id,
+      tableId,
+      anchor: block.anchorText || tableId,
+    };
+  }
+
+  const figureId = block.metadata?.figureId;
+  if (figureId && figureIds.has(figureId)) {
+    return {
+      type: 'figure',
+      blockId: block.id,
+      figureId,
+      anchor: block.anchorText || figureId,
+    };
+  }
+
+  const imageId = block.metadata?.imageId;
+  if (imageId && sourceImagesById.has(imageId)) {
+    const plannedImage = sourceImagesById.get(imageId);
+    return {
+      type: 'figure',
+      blockId: block.id,
+      figureId: plannedImage.figureId,
+      sourceImageId: imageId,
+      title: block.caption || block.text || imageId,
+      anchor: block.anchorText || imageId,
+    };
+  }
+
+  if (block.type === 'paragraph' || block.type === 'heading') {
+    return {
+      type: 'paragraph',
+      blockId: block.id,
+      text: block.text || '',
+    };
+  }
+
+  return null;
+}
+
+function sectionListConsistencyFailures({
+  actualSections,
+  expectedSections,
+  actualLabel,
+  expectedLabel,
+  compareBlockIds = false,
+}) {
   const failures = [];
   if (actualSections.length !== expectedSections.length) {
     failures.push(
@@ -682,8 +796,20 @@ function sectionListConsistencyFailures({ actualSections, expectedSections, actu
         );
       }
     }
+    if (compareBlockIds && !stringArraysEqual(actual.blockIds || [], expected.blockIds || [])) {
+      failures.push(
+        `${actualLabel}[${index}].blockIds=${displayValue((actual.blockIds || []).join('|'))} does not match ${expectedLabel}[${index}].blockIds=${displayValue((expected.blockIds || []).join('|'))}`
+      );
+    }
   }
   return failures;
+}
+
+function stringArraysEqual(actual, expected) {
+  if (actual.length !== expected.length) {
+    return false;
+  }
+  return actual.every((item, index) => String(item) === String(expected[index]));
 }
 
 function displayValue(value) {

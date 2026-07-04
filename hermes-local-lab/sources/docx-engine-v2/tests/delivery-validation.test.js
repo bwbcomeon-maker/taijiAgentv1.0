@@ -439,6 +439,50 @@ test('validateDeliveryPackage fails when render plan source images disagree with
   assert.match(schemaCheck?.message || '', /render-plan\.json templateData\.images.*source-package\.json images/);
 });
 
+test('validateDeliveryPackage fails when render plan section block text disagrees with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+  const paragraph = sourcePackage.blocks.find((block) => block.type === 'paragraph' && block.text);
+
+  assert.ok(paragraph, 'fixture must include normalized paragraph blocks');
+  paragraph.text = 'Tampered normalized source paragraph';
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /render-plan\.json templateData\.sections.*source-package\.json blocks/);
+});
+
+test('validateDeliveryPackage fails when render plan section block ids disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+  const section = sourcePackage.sections.find((item) => (item.blockIds || []).length > 1);
+
+  assert.ok(section, 'fixture must include a section with multiple block ids');
+  section.blockIds = section.blockIds.slice(1);
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /blockIds|render-plan\.json sections.*source-package\.json sections/);
+});
+
 test('validateDeliveryPackage fails when render-plan.json no longer matches the delivery manifest hash', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
