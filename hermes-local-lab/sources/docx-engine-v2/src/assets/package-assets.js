@@ -203,18 +203,129 @@ function resolveMermaidSourceText(sourcePackage, figure) {
 function renderDeterministicMermaidSvg({ figure, sourceText }) {
   const caption = escapeXml(figure.caption || figure.figureId || 'Figure');
   const escapedSource = escapeXml(sourceText);
+  const flowchart = parseMermaidFlowchart(sourceText);
 
+  if (flowchart.nodes.length > 0) {
+    return renderFlowchartSvg({ caption, escapedSource, flowchart });
+  }
+
+  return renderMermaidSourcePreviewSvg({ caption, escapedSource });
+}
+
+function renderFlowchartSvg({ caption, escapedSource, flowchart }) {
+  const nodeWidth = 180;
+  const nodeHeight = 72;
+  const centerY = 286;
+  const left = 100;
+  const right = 860;
+  const gap = flowchart.nodes.length > 1 ? (right - left) / (flowchart.nodes.length - 1) : 0;
+  const nodeCenters = new Map();
+  const nodeElements = [];
+  flowchart.nodes.forEach((node, index) => {
+    const cx = flowchart.nodes.length > 1 ? left + gap * index : 480;
+    const cy = centerY;
+    nodeCenters.set(node.id, { x: cx, y: cy });
+    nodeElements.push(
+      `  <rect x="${cx - nodeWidth / 2}" y="${cy - nodeHeight / 2}" width="${nodeWidth}" height="${nodeHeight}" rx="10" fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>`,
+      `  <text x="${cx}" y="${cy + 6}" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">${escapeXml(node.label)}</text>`
+    );
+  });
+
+  const edgeElements = [];
+  for (const edge of flowchart.edges) {
+    const from = nodeCenters.get(edge.from);
+    const to = nodeCenters.get(edge.to);
+    if (!from || !to) {
+      continue;
+    }
+    const fromX = from.x < to.x ? from.x + nodeWidth / 2 : from.x - nodeWidth / 2;
+    const toX = from.x < to.x ? to.x - nodeWidth / 2 : to.x + nodeWidth / 2;
+    edgeElements.push(
+      `  <line x1="${fromX}" y1="${from.y}" x2="${toX}" y2="${to.y}" stroke="#0f766e" stroke-width="3" marker-end="url(#arrow)"/>`
+    );
+  }
+
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img">',
+    `  <title>${caption}</title>`,
+    `  <desc>${escapedSource}</desc>`,
+    '  <defs>',
+    '    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">',
+    '      <path d="M2,2 L10,6 L2,10 Z" fill="#0f766e"/>',
+    '    </marker>',
+    '  </defs>',
+    '  <rect width="960" height="540" fill="#ffffff"/>',
+    '  <rect x="24" y="24" width="912" height="492" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>',
+    `  <text x="48" y="74" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">${caption}</text>`,
+    ...edgeElements,
+    ...nodeElements,
+    '</svg>',
+    '',
+  ].join('\n');
+}
+
+function renderMermaidSourcePreviewSvg({ caption, escapedSource }) {
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img">',
     `  <title>${caption}</title>`,
     `  <desc>${escapedSource}</desc>`,
     '  <rect width="960" height="540" fill="#ffffff"/>',
     '  <rect x="24" y="24" width="912" height="492" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>',
-    '  <text x="48" y="72" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">Mermaid diagram</text>',
+    '  <text x="48" y="72" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">Mermaid source</text>',
     `  <text x="48" y="116" font-family="Menlo, Consolas, monospace" font-size="18" fill="#334155">${firstLine(escapedSource)}</text>`,
     '</svg>',
     '',
   ].join('\n');
+}
+
+function parseMermaidFlowchart(sourceText) {
+  const nodesById = new Map();
+  const edges = [];
+  for (const rawLine of String(sourceText || '').split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/;$/, '');
+    if (!line || /^(flowchart|graph)\b/i.test(line)) {
+      continue;
+    }
+    const edge = line.match(/^(.+?)\s*(-->|---|==>|-\.->)\s*(.+)$/);
+    if (!edge) {
+      continue;
+    }
+    const from = parseMermaidEndpoint(edge[1]);
+    const to = parseMermaidEndpoint(edge[3]);
+    if (!from.id || !to.id) {
+      continue;
+    }
+    upsertMermaidNode(nodesById, from);
+    upsertMermaidNode(nodesById, to);
+    edges.push({ from: from.id, to: to.id });
+  }
+
+  return { nodes: [...nodesById.values()], edges };
+}
+
+function parseMermaidEndpoint(value) {
+  const endpoint = String(value || '').trim().replace(/^\|[^|]*\|/, '').replace(/\|[^|]*\|$/, '').trim();
+  const match = endpoint.match(/^([A-Za-z0-9_-]+)\s*(?:\["([^"]+)"\]|\[([^\]]+)\]|\(([^)]+)\)|\{([^}]+)\})?$/);
+  if (!match) {
+    return { id: '', label: '' };
+  }
+  const label = match[2] || match[3] || match[4] || match[5] || match[1];
+  return { id: match[1], label: normalizeMermaidLabel(label) };
+}
+
+function upsertMermaidNode(nodesById, node) {
+  const existing = nodesById.get(node.id);
+  if (!existing) {
+    nodesById.set(node.id, node);
+    return;
+  }
+  if (existing.label === existing.id && node.label !== node.id) {
+    existing.label = node.label;
+  }
+}
+
+function normalizeMermaidLabel(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 28);
 }
 
 function firstLine(value) {

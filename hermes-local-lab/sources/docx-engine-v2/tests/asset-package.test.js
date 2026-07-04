@@ -75,6 +75,11 @@ test('packageAssets writes editable figure assets and copies qualified image fil
   assert.equal(fs.existsSync(path.join(workspace, assetPackage.images[0].displayPath)), true);
   assert.match(assetPackage.figures[0].sha256, /^[a-f0-9]{64}$/);
   assert.match(assetPackage.images[0].sha256, /^[a-f0-9]{64}$/);
+  const generatedFigureSvg = fs.readFileSync(path.join(workspace, assetPackage.figures[0].displayPath), 'utf8');
+  assert.match(generatedFigureSvg, /<text\b[^>]*>用户资料<\/text>/);
+  assert.match(generatedFigureSvg, /<text\b[^>]*>结构化草稿<\/text>/);
+  assert.match(generatedFigureSvg, /<line\b/);
+  assert.doesNotMatch(generatedFigureSvg, />Mermaid diagram</);
   assert.deepEqual(
     fs.readFileSync(path.join(workspace, assetPackage.images[0].displayPath)),
     ONE_BY_ONE_PNG
