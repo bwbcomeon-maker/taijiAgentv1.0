@@ -229,6 +229,7 @@ const renderFigureSchema = {
     figureId: { type: 'string', minLength: 1 },
     caption: { type: 'string' },
     sectionId: { type: 'string' },
+    sectionTitle: { type: 'string' },
     afterBlockId: { type: 'string' },
     anchorText: { type: 'string' },
     displayPath: { type: 'string', minLength: 1 },
