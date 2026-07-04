@@ -157,6 +157,23 @@ test('normalizeDocxSource recognizes Word heading styles as sections', async () 
   assert.equal(summaryBlock?.sectionTitle, 'Executive Summary');
 });
 
+test('normalizeDocxSource resolves custom Word style ids through styles.xml', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-custom-style-'));
+  const sourcePath = path.join(tempDir, 'source.docx');
+  await writeDocxFixtureWithCustomHeadingStyle(sourcePath);
+
+  const source = await normalizeDocxSource({ sourcePath });
+
+  assertSourcePackage(source);
+  assert.deepEqual(
+    source.sections.map((section) => ({ title: section.title, level: section.level })),
+    [{ title: 'Current State', level: 2 }]
+  );
+  const stateBlock = source.blocks.find((block) => block.text === 'This heading uses a custom style id.');
+  assert.equal(stateBlock?.sectionId, 'sec-001');
+  assert.equal(stateBlock?.sectionTitle, 'Current State');
+});
+
 test('normalizeDocxSource rejects zip files that are missing the Word document body', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-missing-'));
   const sourcePath = path.join(tempDir, 'source.docx');
@@ -304,6 +321,52 @@ async function writeDocxFixtureWithHeadingStyles(filePath) {
       <w:r><w:t>Executive Summary</w:t></w:r>
     </w:p>
     <w:p><w:r><w:t>The section is marked only by Word style.</w:t></w:r></w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxFixtureWithCustomHeadingStyle(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="DocTitle">
+    <w:name w:val="Title"/>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="CustomHeadingTwo">
+    <w:name w:val="heading 2"/>
+  </w:style>
+</w:styles>`),
+    'word/styles.xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="DocTitle"/></w:pPr>
+      <w:r><w:t>Styled proposal</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="CustomHeadingTwo"/></w:pPr>
+      <w:r><w:t>Current State</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>This heading uses a custom style id.</w:t></w:r></w:p>
   </w:body>
 </w:document>`),
     'word/document.xml'

@@ -15,10 +15,12 @@ async function normalizeDocxSource({ sourcePath } = {}) {
 
   const documentXml = zipEntries.get('word/document.xml').toString('utf8');
   const relationshipsXml = zipEntries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
+  const stylesXml = zipEntries.get('word/styles.xml')?.toString('utf8') || '';
   const embeddedMedia = extractEmbeddedMedia(zipEntries, relationshipsXml);
   const drawingBindings = extractDrawingBindings(documentXml, relationshipsXml);
   const warnings = extractUnsupportedImageWarnings(documentXml, relationshipsXml);
-  const { title, sections, blocks, tables } = extractBodyStructure(documentXml, drawingBindings);
+  const paragraphStyleNames = extractParagraphStyleNames(stylesXml);
+  const { title, sections, blocks, tables } = extractBodyStructure(documentXml, drawingBindings, paragraphStyleNames);
   const figures = extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, blocks);
   bindFigureMarkersToBlocks(blocks, figures);
 
@@ -107,7 +109,7 @@ function readZip(sourcePath) {
   });
 }
 
-function extractBodyStructure(documentXml, drawingBindings = []) {
+function extractBodyStructure(documentXml, drawingBindings = [], paragraphStyleNames = new Map()) {
   const sections = [];
   const blocks = [];
   const tables = [];
@@ -133,7 +135,8 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
       }
 
       if (paragraph) {
-        const styleHeadingLevel = headingLevelFromParagraphStyle(paragraphStyle);
+        const paragraphStyleName = paragraphStyleNames.get(paragraphStyle) || '';
+        const styleHeadingLevel = headingLevelFromParagraphStyle(paragraphStyle) || headingLevelFromParagraphStyle(paragraphStyleName);
         const isTitle = !title;
         const isSectionHeading = !isTitle && (Boolean(styleHeadingLevel) || looksLikeSectionHeading(paragraph));
         const sectionLevel = styleHeadingLevel || 2;
@@ -148,7 +151,7 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
           anchorText: anchorText(paragraph),
           path: `word/document.xml#block-${blocks.length + 1}`,
           caption: '',
-          metadata: { sourceIndex, paragraphStyle },
+          metadata: { sourceIndex, paragraphStyle, paragraphStyleName },
         };
 
         if (isTitle) {
@@ -388,6 +391,22 @@ function extractText(xml) {
 function extractParagraphStyle(paragraphXml) {
   const styleMatch = String(paragraphXml || '').match(/<w:pStyle\b[^>]*\bw:val="([^"]+)"/);
   return styleMatch ? decodeXml(styleMatch[1]).trim() : '';
+}
+
+function extractParagraphStyleNames(stylesXml) {
+  const styleNames = new Map();
+  for (const styleMatch of String(stylesXml || '').matchAll(/<w:style\b([^>]*)>([\s\S]*?)<\/w:style>/g)) {
+    const attributes = parseAttributes(styleMatch[1]);
+    if (attributes['w:type'] !== 'paragraph' || !attributes['w:styleId']) {
+      continue;
+    }
+    const nameMatch = styleMatch[2].match(/<w:name\b[^>]*\bw:val="([^"]+)"/);
+    if (!nameMatch) {
+      continue;
+    }
+    styleNames.set(attributes['w:styleId'], decodeXml(nameMatch[1]).trim());
+  }
+  return styleNames;
 }
 
 function headingLevelFromParagraphStyle(value) {
