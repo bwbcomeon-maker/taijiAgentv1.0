@@ -74,11 +74,15 @@ test('run-job requires explicit template selection and does not create delivery 
   const result = runJob(['--source', sourcePath, '--out-dir', deliveryDir]);
 
   assertExitCode(result, 2);
-  assert.deepEqual(parseStdoutJson(result), {
-    ok: false,
-    code: 'template_selection_required',
-    templates: ['general-proposal', 'meeting-minutes'],
-  });
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'template_selection_required');
+  assert.ok(Array.isArray(payload.templates), 'templates must be an array');
+  assert.ok(payload.templates.every((item) => item && typeof item === 'object'));
+  assert.deepEqual(
+    payload.templates.map((item) => item.id),
+    ['general-proposal', 'meeting-minutes']
+  );
   assert.equal(fs.existsSync(deliveryDir), false);
 });
 

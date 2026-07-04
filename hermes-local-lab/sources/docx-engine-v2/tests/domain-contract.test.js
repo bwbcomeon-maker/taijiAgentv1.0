@@ -13,19 +13,16 @@ test('DocumentJob contract accepts a complete render job', () => {
       sha256: 'c9ad04f6c5f4d9a46c95c6642ce8c09b',
     },
     templateId: 'general-proposal',
-    status: 'planned',
-    workspace: {
-      root: '/tmp/docx-engine-v2/job-20260704-001',
-      deliveryDir: '/tmp/docx-engine-v2/job-20260704-001/delivery',
-    },
-    inputs: {
-      source: 'source.md',
-      assetDir: 'assets',
-    },
-    outputs: {
-      document: 'document.docx',
-      deliveryPackage: 'delivery',
-    },
+    status: 'created',
+    workspace: '/tmp/docx-engine-v2/job-20260704-001',
+    inputs: [
+      { type: 'source', path: 'source.md' },
+      { type: 'asset_dir', path: 'assets' },
+    ],
+    outputs: [
+      { type: 'document', path: 'delivery/document.docx' },
+      { type: 'delivery_package', path: 'delivery' },
+    ],
     warnings: [],
     failures: [],
   };
@@ -82,18 +79,16 @@ test('DeliveryPackage contract requires the complete editable delivery bundle', 
     templateId: 'general-proposal',
     createdAt: '2026-07-04T09:35:00.000Z',
     status: 'ready',
-    delivery: {
-      root: '/tmp/docx-engine-v2/job-20260704-001/delivery',
-      files: [
-        'document.docx',
-        'source.md',
-        'assets',
-        'job.manifest.json',
-        'template.manifest.json',
-        'render-plan.json',
-        'quality-report.json',
-        'README-图片调整说明.md',
-      ],
+    root: '/tmp/docx-engine-v2/job-20260704-001/delivery',
+    files: {
+      document: 'document.docx',
+      source: 'source.md',
+      assetsDir: 'assets',
+      jobManifest: 'job.manifest.json',
+      templateManifest: 'template.manifest.json',
+      renderPlan: 'render-plan.json',
+      qualityReport: 'quality-report.json',
+      imageInstructions: 'README-图片调整说明.md',
     },
   };
 
