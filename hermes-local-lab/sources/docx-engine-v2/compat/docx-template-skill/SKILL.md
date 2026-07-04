@@ -48,11 +48,15 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    ```bash
    node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --note "已检查目录、图表、图片和版式" --json
    ```
-10. Validate a template package before installing or replacing it:
+10. Create a new template package from an existing package before editing its DOCX/schema/prompt files:
+   ```bash
+   node scripts/scaffold-template.js --from general-proposal --template-id <new-template-id> --name "<template-name>" --out-dir <template-package-dir> --json
+   ```
+11. Validate a template package before installing or replacing it:
    ```bash
    node scripts/validate-template.js --package <template-package-dir> --json
    ```
-11. Install a validated template package into this skill's engine registry:
+12. Install a validated template package into this skill's engine registry:
    ```bash
    node scripts/install-template.js --package <template-package-dir> --json
    ```
