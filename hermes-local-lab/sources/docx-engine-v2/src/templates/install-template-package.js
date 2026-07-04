@@ -57,21 +57,12 @@ async function installTemplatePackage({
   }
   const sampleRender = await assertTemplateSampleRenders(absolutePackageDir);
 
-  if (installedIndex >= 0) {
-    replaceDirectory(absolutePackageDir, targetDir);
-  } else {
-    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
-    fs.cpSync(absolutePackageDir, targetDir, { recursive: true, errorOnExist: true });
-  }
-
   const registryEntry = { ...(existingEntry || {}), templateId, path: relativeInstallPath };
   if (installedIndex >= 0) {
     installedEntries[installedIndex] = registryEntry;
   } else {
     installedEntries.push(registryEntry);
   }
-  registry.installed = installedEntries;
-  writeJson(registryPath, registry);
 
   const action = installedIndex >= 0 ? 'replaced' : 'installed';
   const installReportPath = path.join(targetDir, 'template-install-report.json');
@@ -85,7 +76,26 @@ async function installTemplatePackage({
     validation,
     sampleRender,
   });
-  writeJson(installReportPath, installReport);
+
+  const preparedDir = prepareInstallDirectory({
+    sourceDir: absolutePackageDir,
+    targetDir,
+    installReport,
+  });
+  let committedDirectory = null;
+  try {
+    committedDirectory = commitPreparedDirectory({ preparedDir, targetDir });
+    registry.installed = installedEntries;
+    writeJson(registryPath, registry);
+  } catch (error) {
+    if (committedDirectory) {
+      rollbackCommittedDirectory({ targetDir, ...committedDirectory });
+    } else {
+      fs.rmSync(preparedDir, { recursive: true, force: true });
+    }
+    throw error;
+  }
+  finalizeCommittedDirectory(committedDirectory);
 
   return {
     ok: true,
@@ -96,6 +106,65 @@ async function installTemplatePackage({
     registryEntry,
     installReportPath,
   };
+}
+
+function prepareInstallDirectory({ sourceDir, targetDir, installReport }) {
+  const tempDir = createSiblingTempDir(targetDir, 'new');
+  fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  try {
+    fs.cpSync(sourceDir, tempDir, { recursive: true, errorOnExist: true });
+    writeJson(path.join(tempDir, 'template-install-report.json'), installReport);
+    return tempDir;
+  } catch (error) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function commitPreparedDirectory({ preparedDir, targetDir }) {
+  const backupDir = createSiblingTempDir(targetDir, 'old');
+  let hasBackup = false;
+  let committed = false;
+
+  try {
+    if (fs.existsSync(targetDir)) {
+      fs.renameSync(targetDir, backupDir);
+      hasBackup = true;
+    }
+    fs.renameSync(preparedDir, targetDir);
+    committed = true;
+    return { backupDir, hasBackup };
+  } catch (error) {
+    fs.rmSync(preparedDir, { recursive: true, force: true });
+    if (committed) {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+    if (hasBackup && !fs.existsSync(targetDir) && fs.existsSync(backupDir)) {
+      fs.renameSync(backupDir, targetDir);
+    }
+    throw error;
+  }
+}
+
+function finalizeCommittedDirectory({ backupDir, hasBackup }) {
+  if (hasBackup) {
+    fs.rmSync(backupDir, { recursive: true, force: true });
+  }
+}
+
+function rollbackCommittedDirectory({ targetDir, backupDir, hasBackup }) {
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  if (hasBackup && fs.existsSync(backupDir)) {
+    fs.renameSync(backupDir, targetDir);
+  }
+}
+
+function createSiblingTempDir(targetDir, suffixName) {
+  const parentDir = path.dirname(targetDir);
+  const baseName = path.basename(targetDir);
+  const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return path.join(parentDir, `.${baseName}.${suffix}.${suffixName}`);
 }
 
 async function assertTemplateSampleRenders(packageDir) {
@@ -231,38 +300,6 @@ function assertInstallTargetWithinRoot(targetDir, rootDir) {
 function assertSafeTemplateId(templateId) {
   if (!/^[A-Za-z0-9_-]+$/.test(templateId || '')) {
     throw new Error(`Invalid template id: ${templateId || ''}`);
-  }
-}
-
-function replaceDirectory(sourceDir, targetDir) {
-  const parentDir = path.dirname(targetDir);
-  const baseName = path.basename(targetDir);
-  const suffix = `${process.pid}-${Date.now()}`;
-  const tempDir = path.join(parentDir, `.${baseName}.${suffix}.new`);
-  const backupDir = path.join(parentDir, `.${baseName}.${suffix}.old`);
-  let hasBackup = false;
-
-  fs.mkdirSync(parentDir, { recursive: true });
-  fs.rmSync(tempDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, tempDir, { recursive: true, errorOnExist: true });
-
-  try {
-    if (fs.existsSync(targetDir)) {
-      fs.renameSync(targetDir, backupDir);
-      hasBackup = true;
-    }
-    fs.renameSync(tempDir, targetDir);
-    if (hasBackup) {
-      fs.rmSync(backupDir, { recursive: true, force: true });
-      hasBackup = false;
-    }
-  } catch (error) {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    if (hasBackup && !fs.existsSync(targetDir) && fs.existsSync(backupDir)) {
-      fs.renameSync(backupDir, targetDir);
-      hasBackup = false;
-    }
-    throw error;
   }
 }
 

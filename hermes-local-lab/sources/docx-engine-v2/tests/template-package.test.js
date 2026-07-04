@@ -214,6 +214,51 @@ test('installTemplatePackage replaces an existing installed template only when r
   assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Updated Custom Proposal');
 });
 
+test('installTemplatePackage keeps the previous installed template when replacement report cannot be written', async (t) => {
+  const tempRoot = makeTempDir(t);
+  const installedDir = path.join(tempRoot, 'installed', 'custom-proposal');
+  const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), installedDir, { recursive: true });
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  for (const [dir, name] of [
+    [installedDir, 'Old Custom Proposal'],
+    [packageDir, 'Updated Custom Proposal'],
+  ]) {
+    const manifestPath = path.join(dir, 'manifest.json');
+    const manifest = readJson(manifestPath);
+    fs.writeFileSync(
+      manifestPath,
+      `${JSON.stringify({ ...manifest, id: 'custom-proposal', name }, null, 2)}\n`,
+      'utf8'
+    );
+  }
+  fs.writeFileSync(path.join(installedDir, 'old-only.txt'), 'stale file', 'utf8');
+  fs.mkdirSync(path.join(packageDir, 'template-install-report.json'));
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [{ templateId: 'custom-proposal', path: 'installed/custom-proposal' }],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  await assert.rejects(
+    () => installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true }),
+    /template-install-report\.json|EISDIR|illegal operation/
+  );
+  assert.equal(readJson(path.join(installedDir, 'manifest.json')).name, 'Old Custom Proposal');
+  assert.equal(fs.readFileSync(path.join(installedDir, 'old-only.txt'), 'utf8'), 'stale file');
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
+    { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
+  ]);
+});
+
 test('installTemplatePackage refuses to replace builtin templates', async (t) => {
   const tempRoot = makeTempDir(t);
   const packageDir = path.join(tempRoot, 'incoming', 'general-proposal');
@@ -334,6 +379,40 @@ test('installTemplatePackage rejects template packages that fail sample renderin
     /Template data markers remain/
   );
   assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'marker-proposal')), false);
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
+});
+
+test('installTemplatePackage rolls back package copy and registry when install report cannot be written', async (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'report-conflict-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'report-conflict-proposal', name: 'Report Conflict Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.mkdirSync(path.join(packageDir, 'template-install-report.json'));
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  await assert.rejects(
+    () => installTemplatePackage({ rootDir: tempRoot, packageDir }),
+    /template-install-report\.json|EISDIR|illegal operation/
+  );
+  assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'report-conflict-proposal')), false);
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
 
