@@ -56,7 +56,11 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    ```bash
    node scripts/validate-template.js --package <template-package-dir> --json
    ```
-12. Install a validated template package into this skill's engine registry:
+12. Render the template package adapter sample before installing it:
+   ```bash
+   node scripts/render-template-sample.js --package <template-package-dir> --out-dir <sample-output-dir> --json
+   ```
+13. Install a validated and sample-rendered template package into this skill's engine registry:
    ```bash
    node scripts/install-template.js --package <template-package-dir> --json
    ```
@@ -72,6 +76,8 @@ A usable delivery package contains `document.docx`, `source.md`, `assets/`, `ass
 A usable rich draft package contains `draft.manifest.json`, `source.md`, `assets/`, `图片清单.md`, and editable Mermaid sources such as `source.mmd`. The package keeps `figureId` stable so a later DOCX replacement can target the exact picture.
 
 `quality-report.json` keeps WPS/Word visual inspection as `not_verified` until a human opens and checks the document. Do not describe CLI success as final visual approval.
+
+`template-smoke-report.json` only proves that a template package can render its adapter sample into `sample.docx`. It does not replace delivery package validation or WPS/Word visual inspection for a real document.
 
 Run the installation self-test with:
 

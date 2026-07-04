@@ -84,11 +84,13 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/replay-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/validate-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/scaffold-template.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'scripts/render-template-sample.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/record-wps-visual.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/validate-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/replay-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/validate-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/scaffold-template.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/render-template-sample.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'runtime')), false);
 });
@@ -335,6 +337,42 @@ test('copyable scaffold-template wrapper creates a valid template package', (t) 
   ], { encoding: 'utf8' });
   assert.equal(validation.status, 0, validation.stderr || validation.stdout);
   assert.equal(JSON.parse(validation.stdout).ok, true);
+});
+
+test('copyable render-template-sample wrapper renders an uninstalled template package', (t) => {
+  const { workspace, outDir } = buildSkillPackage(t);
+  const packageDir = path.join(workspace, 'sample-render-proposal');
+  const smokeDir = path.join(workspace, 'template-smoke-output');
+
+  const scaffold = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/scaffold-template.js'),
+    '--from',
+    'general-proposal',
+    '--template-id',
+    'sample-render-proposal',
+    '--name',
+    'Sample Render Proposal',
+    '--out-dir',
+    packageDir,
+    '--json',
+  ], { encoding: 'utf8' });
+  assert.equal(scaffold.status, 0, scaffold.stderr || scaffold.stdout);
+
+  const result = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/render-template-sample.js'),
+    '--package',
+    packageDir,
+    '--out-dir',
+    smokeDir,
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.templateId, 'sample-render-proposal');
+  assert.equal(fs.existsSync(path.join(smokeDir, 'sample.docx')), true);
+  assert.equal(fs.existsSync(path.join(smokeDir, 'template-smoke-report.json')), true);
 });
 
 test('copyable self-test renders both smoke documents with template-appropriate sources', (t) => {
