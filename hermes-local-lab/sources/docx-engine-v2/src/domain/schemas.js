@@ -569,6 +569,7 @@ const schemas = {
         required: [
           'document',
           'source',
+          'sourcePackage',
           'originalSource',
           'assetPackage',
           'jobManifest',
@@ -580,6 +581,7 @@ const schemas = {
         properties: {
           document: sha256Schema,
           source: sha256Schema,
+          sourcePackage: sha256Schema,
           originalSource: sha256Schema,
           assetPackage: sha256Schema,
           jobManifest: sha256Schema,
@@ -595,6 +597,7 @@ const schemas = {
         required: [
           'document',
           'source',
+          'sourcePackage',
           'originalSource',
           'assetsDir',
           'assetPackage',
@@ -607,6 +610,7 @@ const schemas = {
         properties: {
           document: { type: 'string', minLength: 1 },
           source: { type: 'string', minLength: 1 },
+          sourcePackage: { type: 'string', minLength: 1 },
           originalSource: { type: 'string', minLength: 1 },
           assetsDir: { type: 'string', minLength: 1 },
           assetPackage: { type: 'string', minLength: 1 },

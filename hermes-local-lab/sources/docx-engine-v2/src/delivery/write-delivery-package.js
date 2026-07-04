@@ -13,6 +13,7 @@ const IMAGE_INSTRUCTIONS = [
   '- `document.docx` 是生成文档。',
   '- `delivery-package.json` 是交付包清单，记录文档、源文件、模板清单、渲染计划和质量报告的位置。',
   '- `source/original/` 保存原始输入文件，`source.md` 是用于人工查看的 Markdown 副本。',
+  '- `source-package.json` 是引擎归一化后的结构化源包，用于追溯章节、表格、图片和块级锚点。',
   '- `assets/` 保存图片、图形源文件和展示文件。',
   '- `asset-package.json` 记录资产包结构、可编辑源文件和展示文件。',
   '- `render-plan.json` 记录图表与模板位置绑定关系。',
@@ -55,6 +56,7 @@ function writeDeliveryPackage({
 
   const normalizedJob = normalizeJob(job, renderPlan, sourcePackage);
   assertDomainObject('DocumentJob', normalizedJob, 'DocumentJob manifest');
+  assertDomainObject('SourcePackage', sourcePackage, 'SourcePackage');
   assertDomainObject('TemplateManifest', templatePackage.manifest || {}, 'TemplateManifest');
 
   assertEmptyOutputDirectory(deliveryDir);
@@ -62,8 +64,10 @@ function writeDeliveryPackage({
 
   const deliveryDocumentPath = path.join(deliveryDir, 'document.docx');
   const deliverySourcePath = path.join(deliveryDir, 'source.md');
+  const deliverySourcePackagePath = path.join(deliveryDir, 'source-package.json');
   fs.copyFileSync(documentPath, deliveryDocumentPath);
   fs.writeFileSync(deliverySourcePath, sourceMarkdown(sourcePackage), 'utf8');
+  writeJson(deliverySourcePackagePath, sourcePackage);
   const originalSource = copyOriginalSource({ deliveryDir, sourcePackage });
   copyAssets({ deliveryDir, sourcePackage, assetPackage });
   writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizedJob);
@@ -81,6 +85,7 @@ function writeDeliveryPackage({
     files: {
       document: 'document.docx',
       source: 'source.md',
+      sourcePackage: 'source-package.json',
       originalSource,
       assetsDir: 'assets',
       assetPackage: 'asset-package.json',

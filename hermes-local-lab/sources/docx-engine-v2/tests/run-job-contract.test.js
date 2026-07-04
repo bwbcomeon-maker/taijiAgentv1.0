@@ -14,6 +14,7 @@ const REQUIRED_DELIVERY_ENTRIES = [
   'document.docx',
   'delivery-package.json',
   'source.md',
+  'source-package.json',
   'source/original',
   'assets',
   'asset-package.json',
@@ -222,6 +223,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.sourceSha256, sha256File(path.join(deliveryDir, 'source.md')));
   assert.equal(deliveryManifest.fileSha256.document, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.equal(deliveryManifest.fileSha256.source, sha256File(path.join(deliveryDir, 'source.md')));
+  assert.equal(deliveryManifest.fileSha256.sourcePackage, sha256File(path.join(deliveryDir, 'source-package.json')));
   assert.equal(deliveryManifest.fileSha256.originalSource, sha256File(path.join(deliveryDir, 'source', 'original', path.basename(sourcePath))));
   assert.equal(deliveryManifest.fileSha256.assetPackage, sha256File(path.join(deliveryDir, 'asset-package.json')));
   assert.equal(deliveryManifest.fileSha256.jobManifest, sha256File(path.join(deliveryDir, 'job.manifest.json')));
@@ -231,6 +233,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.fileSha256.imageInstructions, sha256File(path.join(deliveryDir, 'README-图片调整说明.md')));
   assert.equal(deliveryManifest.files.document, 'document.docx');
   assert.equal(deliveryManifest.files.source, 'source.md');
+  assert.equal(deliveryManifest.files.sourcePackage, 'source-package.json');
   assert.equal(deliveryManifest.files.originalSource, `source/original/${path.basename(sourcePath)}`);
   assert.equal(deliveryManifest.files.assetsDir, 'assets');
   assert.equal(deliveryManifest.files.assetPackage, 'asset-package.json');
@@ -240,6 +243,14 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.files.qualityReport, 'quality-report.json');
   assert.equal(deliveryManifest.files.imageInstructions, 'README-图片调整说明.md');
   assert.equal(deliveryManifest.status, 'delivered');
+
+  const sourcePackage = readJsonFile(path.join(deliveryDir, 'source-package.json'));
+  assert.equal(sourcePackage.schemaVersion, 'docx-engine-v2/source-package');
+  assert.equal(sourcePackage.sourceRef.path, sourcePath);
+  assert.equal(sourcePackage.sourceRef.sha256, sha256File(sourcePath));
+  assert.equal(sourcePackage.blocks.some((block) => block.type === 'table'), true);
+  assert.equal(sourcePackage.figures.length >= 1, true);
+  assert.equal(sourcePackage.images.length >= 1, true);
 
   const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
   assert.equal(renderPlan.templateData.metadata.assetDir, 'assets');

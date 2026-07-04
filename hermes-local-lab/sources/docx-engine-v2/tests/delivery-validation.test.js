@@ -318,6 +318,23 @@ test('validateDeliveryPackage fails when source.md no longer matches the deliver
   assert.ok(report.failures.some((failure) => /source\.md sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when source-package.json no longer matches the delivery manifest hash', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+
+  assert.ok(deliveryManifest.fileSha256?.sourcePackage, 'delivery manifest must bind source-package.json sha256');
+  assert.equal(deliveryManifest.fileSha256.sourcePackage, sha256File(sourcePackagePath));
+
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  sourcePackage.warnings = [...(sourcePackage.warnings || []), 'tampered after delivery'];
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  assert.ok(report.failures.some((failure) => /source-package\.json sha256 mismatch/.test(failure)));
+});
+
 test('validateDeliveryPackage fails when render-plan.json no longer matches the delivery manifest hash', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const renderPlanPath = path.join(deliveryDir, 'render-plan.json');

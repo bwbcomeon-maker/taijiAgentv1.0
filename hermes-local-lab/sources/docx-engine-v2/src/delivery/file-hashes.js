@@ -5,6 +5,7 @@ const path = require('node:path');
 const HASHED_FILE_ROLES = [
   'document',
   'source',
+  'sourcePackage',
   'originalSource',
   'assetPackage',
   'jobManifest',
