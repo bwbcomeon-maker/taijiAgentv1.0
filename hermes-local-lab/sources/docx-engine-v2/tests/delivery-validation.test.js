@@ -355,6 +355,90 @@ test('validateDeliveryPackage fails when source package sourceRef disagrees with
   assert.match(schemaCheck?.message || '', /source-package\.json sourceRef.*job\.manifest\.json sourceRef/);
 });
 
+test('validateDeliveryPackage fails when render plan sections disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(sourcePackage.sections.length > 0, 'fixture must include normalized source sections');
+  sourcePackage.sections[0].title = 'Tampered source section';
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /render-plan\.json sections.*source-package\.json sections/);
+});
+
+test('validateDeliveryPackage fails when render plan tables disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(sourcePackage.tables.length > 0, 'fixture must include normalized source tables');
+  sourcePackage.tables[0].title = 'Tampered source table';
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /render-plan\.json tables.*source-package\.json tables/);
+});
+
+test('validateDeliveryPackage fails when render plan figures disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(sourcePackage.figures.length > 0, 'fixture must include normalized source figures');
+  sourcePackage.figures[0].caption = 'Tampered source figure';
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /render-plan\.json figures.*source-package\.json figures/);
+});
+
+test('validateDeliveryPackage fails when render plan source images disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(sourcePackage.images.length > 0, 'fixture must include normalized source images');
+  sourcePackage.images[0].caption = 'Tampered source image';
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /render-plan\.json templateData\.images.*source-package\.json images/);
+});
+
 test('validateDeliveryPackage fails when render-plan.json no longer matches the delivery manifest hash', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const renderPlanPath = path.join(deliveryDir, 'render-plan.json');

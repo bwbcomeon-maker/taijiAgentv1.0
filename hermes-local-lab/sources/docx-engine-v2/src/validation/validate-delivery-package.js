@@ -249,6 +249,19 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     return;
   }
 
+  const renderPlanSourceFailures = renderPlanSourceConsistencyFailures({
+    sourcePackage: jsonFiles.sourcePackage,
+    renderPlan: jsonFiles.renderPlan,
+  });
+  if (renderPlanSourceFailures.length > 0) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package render plan/source package mismatch: ${renderPlanSourceFailures.join(', ')}`
+    );
+    return;
+  }
+
   if (
     jsonFiles.jobManifest.status === 'delivered' &&
     normalizeComparablePath(jsonFiles.jobManifest.workspace) !==
@@ -281,6 +294,250 @@ function sourceRefConsistencyFailures({ sourcePackage, jobManifest }) {
     }
   }
   return failures;
+}
+
+function renderPlanSourceConsistencyFailures({ sourcePackage, renderPlan }) {
+  const failures = [];
+  const sourceSections = sourcePackage?.sections || [];
+  failures.push(
+    ...sectionListConsistencyFailures({
+      actualSections: renderPlan?.sections || [],
+      expectedSections: sourceSections,
+      actualLabel: 'render-plan.json sections',
+      expectedLabel: 'source-package.json sections',
+    })
+  );
+  failures.push(
+    ...sectionListConsistencyFailures({
+      actualSections: renderPlan?.templateData?.sections || [],
+      expectedSections: sourceSections,
+      actualLabel: 'render-plan.json templateData.sections',
+      expectedLabel: 'source-package.json sections',
+    })
+  );
+  const sourceTables = sourcePackage?.tables || [];
+  failures.push(
+    ...tableListConsistencyFailures({
+      actualTables: renderPlan?.tables || [],
+      expectedTables: sourceTables,
+      actualLabel: 'render-plan.json tables',
+      expectedLabel: 'source-package.json tables',
+    })
+  );
+  failures.push(
+    ...templateTableConsistencyFailures({
+      actualTables: renderPlan?.templateData?.tables || [],
+      expectedTables: sourceTables,
+    })
+  );
+  const sourceFigures = sourcePackage?.figures || [];
+  const sourceImages = sourcePackage?.images || [];
+  failures.push(
+    ...figureListConsistencyFailures({
+      actualFigures: renderPlan?.figures || [],
+      expectedFigures: sourceFigures,
+    })
+  );
+  failures.push(
+    ...templateImageConsistencyFailures({
+      actualImages: renderPlan?.templateData?.images || [],
+      expectedFigures: sourceFigures,
+      expectedImages: sourceImages,
+    })
+  );
+
+  const renderTitle = String(renderPlan?.templateData?.title || '');
+  const sourceTitle = String(sourcePackage?.title || '');
+  if (renderTitle !== sourceTitle) {
+    failures.push(
+      `render-plan.json templateData.title=${displayValue(renderTitle)} does not match source-package.json title=${displayValue(sourceTitle)}`
+    );
+  }
+  return failures;
+}
+
+function figureListConsistencyFailures({ actualFigures, expectedFigures }) {
+  const failures = [];
+  if (actualFigures.length !== expectedFigures.length) {
+    failures.push(
+      `render-plan.json figures count=${actualFigures.length} does not match source-package.json figures count=${expectedFigures.length}`
+    );
+  }
+
+  const actualById = new Map(actualFigures.map((figure) => [figure.figureId, figure]));
+  for (const expected of expectedFigures) {
+    const actual = actualById.get(expected.figureId);
+    if (!actual) {
+      failures.push(`render-plan.json figures missing figureId=${expected.figureId}`);
+      continue;
+    }
+    for (const field of ['figureId', 'caption', 'sectionId', 'anchorText']) {
+      const actualValue = String(actual[field] ?? '');
+      const expectedValue = String(expected[field] ?? '');
+      if (actualValue !== expectedValue) {
+        failures.push(
+          `render-plan.json figures.${expected.figureId}.${field}=${displayValue(actualValue)} does not match source-package.json figures.${expected.figureId}.${field}=${displayValue(expectedValue)}`
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function templateImageConsistencyFailures({ actualImages, expectedFigures, expectedImages }) {
+  const failures = [];
+  const actualFigureImages = actualImages.filter((image) => image.metadata?.sourceType === 'figure');
+  const actualSourceImages = actualImages.filter((image) => image.metadata?.sourceType === 'image');
+  if (actualFigureImages.length !== expectedFigures.length) {
+    failures.push(
+      `render-plan.json templateData.images figure count=${actualFigureImages.length} does not match source-package.json figures count=${expectedFigures.length}`
+    );
+  }
+  if (actualSourceImages.length !== expectedImages.length) {
+    failures.push(
+      `render-plan.json templateData.images source image count=${actualSourceImages.length} does not match source-package.json images count=${expectedImages.length}`
+    );
+  }
+
+  const figuresById = new Map(expectedFigures.map((figure) => [figure.figureId, figure]));
+  for (const actual of actualFigureImages) {
+    const expected = figuresById.get(actual.figureId);
+    if (!expected) {
+      failures.push(`render-plan.json templateData.images has unknown source figureId=${actual.figureId || 'missing'}`);
+      continue;
+    }
+    compareTemplateImageSourceFields({
+      failures,
+      actual,
+      expected,
+      actualLabel: `render-plan.json templateData.images.${actual.figureId}`,
+      expectedLabel: `source-package.json figures.${expected.figureId}`,
+    });
+  }
+
+  const imagesById = new Map(expectedImages.map((image) => [image.imageId, image]));
+  for (const actual of actualSourceImages) {
+    const sourceImageId = actual.metadata?.sourceImageId || actual.metadata?.imageId || '';
+    const expected = imagesById.get(sourceImageId);
+    if (!expected) {
+      failures.push(
+        `render-plan.json templateData.images has unknown source imageId=${sourceImageId || 'missing'}`
+      );
+      continue;
+    }
+    compareTemplateImageSourceFields({
+      failures,
+      actual,
+      expected,
+      actualLabel: `render-plan.json templateData.images.${actual.figureId}`,
+      expectedLabel: `source-package.json images.${expected.imageId}`,
+    });
+  }
+  return failures;
+}
+
+function compareTemplateImageSourceFields({ failures, actual, expected, actualLabel, expectedLabel }) {
+  const actualCaption = String(actual.caption ?? '');
+  const expectedCaption = String(expected.caption ?? '');
+  if (actualCaption !== expectedCaption) {
+    failures.push(
+      `${actualLabel}.caption=${displayValue(actualCaption)} does not match ${expectedLabel}.caption=${displayValue(expectedCaption)}`
+    );
+  }
+  const actualSectionId = String(actual.metadata?.sectionId ?? '');
+  const expectedSectionId = String(expected.sectionId ?? '');
+  if (actualSectionId !== expectedSectionId) {
+    failures.push(
+      `${actualLabel}.metadata.sectionId=${displayValue(actualSectionId)} does not match ${expectedLabel}.sectionId=${displayValue(expectedSectionId)}`
+    );
+  }
+}
+
+function tableListConsistencyFailures({ actualTables, expectedTables, actualLabel, expectedLabel }) {
+  const failures = [];
+  if (actualTables.length !== expectedTables.length) {
+    failures.push(
+      `${actualLabel} count=${actualTables.length} does not match ${expectedLabel} count=${expectedTables.length}`
+    );
+  }
+
+  const actualById = new Map(actualTables.map((table) => [table.tableId, table]));
+  for (const expected of expectedTables) {
+    const actual = actualById.get(expected.tableId);
+    if (!actual) {
+      failures.push(`${actualLabel} missing tableId=${expected.tableId}`);
+      continue;
+    }
+    for (const field of ['tableId', 'title', 'sectionId', 'afterBlockId', 'anchorText']) {
+      const actualValue = String(actual[field] ?? '');
+      const expectedValue = String(expected[field] ?? '');
+      if (actualValue !== expectedValue) {
+        failures.push(
+          `${actualLabel}.${expected.tableId}.${field}=${displayValue(actualValue)} does not match ${expectedLabel}.${expected.tableId}.${field}=${displayValue(expectedValue)}`
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function templateTableConsistencyFailures({ actualTables, expectedTables }) {
+  const failures = [];
+  const actualById = new Map(actualTables.map((table) => [table.tableId, table]));
+  for (const expected of expectedTables) {
+    const actual = actualById.get(expected.tableId);
+    if (!actual) {
+      failures.push(`render-plan.json templateData.tables missing tableId=${expected.tableId}`);
+      continue;
+    }
+    const actualTitle = String(actual.title ?? '');
+    const expectedTitle = String(expected.title ?? '');
+    if (actualTitle !== expectedTitle) {
+      failures.push(
+        `render-plan.json templateData.tables.${expected.tableId}.title=${displayValue(actualTitle)} does not match source-package.json tables.${expected.tableId}.title=${displayValue(expectedTitle)}`
+      );
+    }
+    const actualSectionId = String(actual.metadata?.sectionId ?? '');
+    const expectedSectionId = String(expected.sectionId ?? '');
+    if (actualSectionId !== expectedSectionId) {
+      failures.push(
+        `render-plan.json templateData.tables.${expected.tableId}.metadata.sectionId=${displayValue(actualSectionId)} does not match source-package.json tables.${expected.tableId}.sectionId=${displayValue(expectedSectionId)}`
+      );
+    }
+  }
+  return failures;
+}
+
+function sectionListConsistencyFailures({ actualSections, expectedSections, actualLabel, expectedLabel }) {
+  const failures = [];
+  if (actualSections.length !== expectedSections.length) {
+    failures.push(
+      `${actualLabel} count=${actualSections.length} does not match ${expectedLabel} count=${expectedSections.length}`
+    );
+  }
+
+  const maxLength = Math.max(actualSections.length, expectedSections.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const actual = actualSections[index];
+    const expected = expectedSections[index];
+    if (!actual || !expected) {
+      continue;
+    }
+    for (const field of ['sectionId', 'title', 'level']) {
+      const actualValue = String(actual[field] ?? '');
+      const expectedValue = String(expected[field] ?? '');
+      if (actualValue !== expectedValue) {
+        failures.push(
+          `${actualLabel}[${index}].${field}=${displayValue(actualValue)} does not match ${expectedLabel}[${index}].${field}=${displayValue(expectedValue)}`
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function displayValue(value) {
+  return value === '' ? 'missing' : value;
 }
 
 function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage }) {
