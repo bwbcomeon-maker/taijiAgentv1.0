@@ -14,6 +14,16 @@ const STATUSES = {
   delivery: ['delivered', 'failed'],
 };
 
+const metadataSchema = {
+  type: 'object',
+  additionalProperties: true,
+};
+
+const stringArraySchema = {
+  type: 'array',
+  items: { type: 'string' },
+};
+
 const sourceRefSchema = {
   type: 'object',
   additionalProperties: false,
@@ -35,9 +45,209 @@ const pathEntrySchema = {
   },
 };
 
-const stringArraySchema = {
-  type: 'array',
-  items: { type: 'string' },
+const dimensionsSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    width: { type: 'number' },
+    height: { type: 'number' },
+    unit: { type: 'string' },
+  },
+};
+
+const qualitySchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    status: { enum: STATUSES.check },
+    warnings: stringArraySchema,
+  },
+};
+
+const sectionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['sectionId', 'title', 'level'],
+  properties: {
+    sectionId: { type: 'string', minLength: 1 },
+    title: { type: 'string' },
+    level: { type: 'integer', minimum: 1 },
+    blockIds: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    metadata: metadataSchema,
+  },
+};
+
+const blockSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'type'],
+  properties: {
+    id: { type: 'string', minLength: 1 },
+    type: { type: 'string', minLength: 1 },
+    text: { type: 'string' },
+    content: true,
+    level: { type: 'integer', minimum: 1 },
+    sectionId: { type: 'string' },
+    sectionTitle: { type: 'string' },
+    anchorText: { type: 'string' },
+    path: { type: 'string' },
+    caption: { type: 'string' },
+    metadata: metadataSchema,
+  },
+};
+
+const tableSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['tableId', 'title', 'sectionId', 'afterBlockId', 'anchorText', 'metadata'],
+  properties: {
+    tableId: { type: 'string', minLength: 1 },
+    title: { type: 'string' },
+    sectionId: { type: 'string' },
+    afterBlockId: { type: 'string' },
+    anchorText: { type: 'string' },
+    headers: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+    rows: {
+      type: 'array',
+      items: {
+        oneOf: [
+          {
+            type: 'array',
+            items: true,
+          },
+          metadataSchema,
+        ],
+      },
+    },
+    metadata: metadataSchema,
+  },
+};
+
+const figureSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'figureId',
+    'caption',
+    'sectionId',
+    'anchorText',
+    'sourceType',
+    'editable',
+    'displayPath',
+    'dimensions',
+    'quality',
+    'metadata',
+  ],
+  properties: {
+    figureId: { type: 'string', minLength: 1 },
+    caption: { type: 'string' },
+    sectionId: { type: 'string' },
+    anchorText: { type: 'string' },
+    sourceType: { type: 'string', minLength: 1 },
+    editable: metadataSchema,
+    displayPath: { type: 'string', minLength: 1 },
+    dimensions: dimensionsSchema,
+    quality: qualitySchema,
+    metadata: metadataSchema,
+  },
+};
+
+const sourceImageSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['imageId', 'path'],
+  properties: {
+    imageId: { type: 'string', minLength: 1 },
+    path: { type: 'string', minLength: 1 },
+    caption: { type: 'string' },
+    sectionId: { type: 'string' },
+    anchorText: { type: 'string' },
+    metadata: metadataSchema,
+  },
+};
+
+const assetImageSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['imageId', 'sourcePath', 'displayPath'],
+  properties: {
+    imageId: { type: 'string', minLength: 1 },
+    sourcePath: { type: 'string', minLength: 1 },
+    displayPath: { type: 'string', minLength: 1 },
+    caption: { type: 'string' },
+    sectionId: { type: 'string' },
+    metadata: metadataSchema,
+  },
+};
+
+const renderTableSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['tableId', 'title', 'sectionId', 'afterBlockId', 'anchorText', 'metadata'],
+  properties: {
+    tableId: { type: 'string', minLength: 1 },
+    title: { type: 'string' },
+    sectionId: { type: 'string' },
+    afterBlockId: { type: 'string' },
+    anchorText: { type: 'string' },
+    metadata: metadataSchema,
+  },
+};
+
+const renderFigureSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['figureId', 'caption', 'sectionId', 'afterBlockId', 'anchorText', 'displayPath', 'metadata'],
+  properties: {
+    figureId: { type: 'string', minLength: 1 },
+    caption: { type: 'string' },
+    sectionId: { type: 'string' },
+    afterBlockId: { type: 'string' },
+    anchorText: { type: 'string' },
+    displayPath: { type: 'string', minLength: 1 },
+    metadata: metadataSchema,
+  },
+};
+
+const templateDataImageSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['figureId', 'path'],
+  properties: {
+    figureId: { type: 'string', minLength: 1 },
+    path: { type: 'string', minLength: 1 },
+    caption: { type: 'string' },
+    metadata: metadataSchema,
+  },
+};
+
+const templateDataTableSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['tableId'],
+  properties: {
+    tableId: { type: 'string', minLength: 1 },
+    title: { type: 'string' },
+    rows: {
+      type: 'array',
+      items: {
+        oneOf: [
+          {
+            type: 'array',
+            items: true,
+          },
+          metadataSchema,
+        ],
+      },
+    },
+    metadata: metadataSchema,
+  },
 };
 
 const schemas = {
@@ -82,23 +292,49 @@ const schemas = {
   SourcePackage: {
     type: 'object',
     additionalProperties: false,
-    required: ['schemaVersion', 'sourceRef', 'title', 'blocks'],
+    required: [
+      'schemaVersion',
+      'sourceType',
+      'sourceRef',
+      'title',
+      'sections',
+      'blocks',
+      'tables',
+      'figures',
+      'images',
+      'embeddedMedia',
+      'warnings',
+    ],
     properties: {
       schemaVersion: { const: 'docx-engine-v2/source-package' },
+      sourceType: { enum: ['markdown', 'text', 'docx'] },
       sourceRef: sourceRefSchema,
       title: { type: 'string' },
+      sections: {
+        type: 'array',
+        items: sectionSchema,
+      },
       blocks: {
         type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['type', 'content'],
-          properties: {
-            type: { type: 'string', minLength: 1 },
-            content: true,
-          },
-        },
+        items: blockSchema,
       },
+      tables: {
+        type: 'array',
+        items: tableSchema,
+      },
+      figures: {
+        type: 'array',
+        items: figureSchema,
+      },
+      images: {
+        type: 'array',
+        items: sourceImageSchema,
+      },
+      embeddedMedia: {
+        type: 'array',
+        items: metadataSchema,
+      },
+      warnings: stringArraySchema,
     },
   },
 
@@ -124,11 +360,39 @@ const schemas = {
       manifest: {
         type: 'object',
         additionalProperties: true,
-        required: ['id', 'name', 'version'],
+        required: [
+          'id',
+          'name',
+          'version',
+          'description',
+          'documentTypes',
+          'capabilities',
+          'requiredAssets',
+          'qualityGates',
+          'compatibility',
+        ],
         properties: {
           id: { type: 'string', minLength: 1 },
           name: { type: 'string', minLength: 1 },
           version: { type: 'string', minLength: 1 },
+          description: { type: 'string' },
+          documentTypes: {
+            type: 'array',
+            items: { type: 'string', minLength: 1 },
+          },
+          capabilities: {
+            type: 'array',
+            items: { type: 'string', minLength: 1 },
+          },
+          requiredAssets: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          qualityGates: {
+            type: 'array',
+            items: { type: 'string', minLength: 1 },
+          },
+          compatibility: metadataSchema,
         },
       },
     },
@@ -137,50 +401,68 @@ const schemas = {
   AssetPackage: {
     type: 'object',
     additionalProperties: false,
-    required: ['schemaVersion', 'assetDir', 'assets'],
+    required: ['schemaVersion', 'assetDir', 'figures', 'tables'],
     properties: {
       schemaVersion: { const: 'docx-engine-v2/asset-package' },
       assetDir: { type: 'string', minLength: 1 },
-      assets: {
+      figures: {
         type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['assetId', 'kind', 'sourcePath', 'displayPath'],
-          properties: {
-            assetId: { type: 'string', minLength: 1 },
-            kind: { enum: ['figure', 'table', 'image'] },
-            sourcePath: { type: 'string', minLength: 1 },
-            displayPath: { type: 'string', minLength: 1 },
-            caption: { type: 'string' },
-          },
-        },
+        items: figureSchema,
       },
+      tables: {
+        type: 'array',
+        items: tableSchema,
+      },
+      images: {
+        type: 'array',
+        items: assetImageSchema,
+      },
+      warnings: stringArraySchema,
     },
   },
 
   RenderPlan: {
     type: 'object',
     additionalProperties: false,
-    required: ['schemaVersion', 'jobId', 'templateId', 'steps', 'outputPath'],
+    required: ['schemaVersion', 'jobId', 'templateId', 'sections', 'tables', 'figures', 'templateData'],
     properties: {
       schemaVersion: { const: 'docx-engine-v2/render-plan' },
       jobId: { type: 'string', minLength: 1 },
       templateId: { type: 'string', minLength: 1 },
-      steps: {
+      sections: {
         type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['type', 'target'],
-          properties: {
-            type: { type: 'string', minLength: 1 },
-            target: { type: 'string', minLength: 1 },
-            source: { type: 'string' },
+        items: sectionSchema,
+      },
+      tables: {
+        type: 'array',
+        items: renderTableSchema,
+      },
+      figures: {
+        type: 'array',
+        items: renderFigureSchema,
+      },
+      templateData: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['images', 'tables'],
+        properties: {
+          title: { type: 'string' },
+          sections: {
+            type: 'array',
+            items: true,
           },
+          images: {
+            type: 'array',
+            items: templateDataImageSchema,
+          },
+          tables: {
+            type: 'array',
+            items: templateDataTableSchema,
+          },
+          metadata: metadataSchema,
         },
       },
-      outputPath: { type: 'string', minLength: 1 },
+      warnings: stringArraySchema,
     },
   },
 

@@ -29,6 +29,8 @@ function validateDomainObject(schemaName, value) {
           path: error.instancePath || '/',
           message: error.message || 'invalid value',
           keyword: error.keyword,
+          params: error.params || {},
+          schemaPath: error.schemaPath || '',
         })),
   };
 }
