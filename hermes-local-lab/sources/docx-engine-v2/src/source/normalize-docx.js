@@ -126,26 +126,29 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
 
     if (elementType === 'p') {
       const paragraph = extractText(xml);
+      const paragraphStyle = extractParagraphStyle(xml);
       const paragraphDrawings = extractParagraphDrawingBindings(xml, drawingBindingByRelationshipId);
       if (!paragraph && paragraphDrawings.length === 0) {
         continue;
       }
 
       if (paragraph) {
+        const styleHeadingLevel = headingLevelFromParagraphStyle(paragraphStyle);
         const isTitle = !title;
-        const isSectionHeading = !isTitle && looksLikeSectionHeading(paragraph);
+        const isSectionHeading = !isTitle && (Boolean(styleHeadingLevel) || looksLikeSectionHeading(paragraph));
+        const sectionLevel = styleHeadingLevel || 2;
         const block = {
           id: nextId('block', blocks.length + 1),
           type: isTitle || isSectionHeading ? 'heading' : 'paragraph',
           text: paragraph,
           content: { text: paragraph },
-          level: isTitle ? 1 : isSectionHeading ? 2 : currentSection?.level || 1,
+          level: isTitle ? 1 : isSectionHeading ? sectionLevel : currentSection?.level || 1,
           sectionId: currentSection?.sectionId || '',
           sectionTitle: currentSection?.title || '',
           anchorText: anchorText(paragraph),
           path: `word/document.xml#block-${blocks.length + 1}`,
           caption: '',
-          metadata: { sourceIndex },
+          metadata: { sourceIndex, paragraphStyle },
         };
 
         if (isTitle) {
@@ -156,7 +159,7 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
           currentSection = {
             sectionId: nextId('sec', sections.length + 1),
             title: paragraph,
-            level: 2,
+            level: sectionLevel,
             blockIds: [block.id],
             metadata: { sourceIndex },
           };
@@ -380,6 +383,28 @@ function extractText(xml) {
     .map((textMatch) => decodeXml(textMatch[1]))
     .join('')
     .trim();
+}
+
+function extractParagraphStyle(paragraphXml) {
+  const styleMatch = String(paragraphXml || '').match(/<w:pStyle\b[^>]*\bw:val="([^"]+)"/);
+  return styleMatch ? decodeXml(styleMatch[1]).trim() : '';
+}
+
+function headingLevelFromParagraphStyle(value) {
+  const styleName = normalizeStyleName(value);
+  if (!styleName) {
+    return 0;
+  }
+
+  const headingMatch = styleName.match(/^(?:heading|标题)([1-9])$/i);
+  if (headingMatch) {
+    return Number(headingMatch[1]);
+  }
+  return 0;
+}
+
+function normalizeStyleName(value) {
+  return String(value || '').replace(/[\s_-]+/g, '').trim();
 }
 
 function extractEmbeddedMedia(zipEntries, relationshipsXml) {

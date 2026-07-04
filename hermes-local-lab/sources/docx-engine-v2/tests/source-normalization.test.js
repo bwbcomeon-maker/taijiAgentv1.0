@@ -139,6 +139,24 @@ test('normalizeDocxSource binds DOCX figure markers to media through drawing rel
   assert.equal(source.figures[1].metadata.mediaPath, 'word/media/image1.png');
 });
 
+test('normalizeDocxSource recognizes Word heading styles as sections', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-heading-style-'));
+  const sourcePath = path.join(tempDir, 'source.docx');
+  await writeDocxFixtureWithHeadingStyles(sourcePath);
+
+  const source = await normalizeDocxSource({ sourcePath });
+
+  assertSourcePackage(source);
+  assert.equal(source.title, 'Styled proposal');
+  assert.deepEqual(
+    source.sections.map((section) => ({ title: section.title, level: section.level })),
+    [{ title: 'Executive Summary', level: 2 }]
+  );
+  const summaryBlock = source.blocks.find((block) => block.text === 'The section is marked only by Word style.');
+  assert.equal(summaryBlock?.sectionId, 'sec-001');
+  assert.equal(summaryBlock?.sectionTitle, 'Executive Summary');
+});
+
 test('normalizeDocxSource rejects zip files that are missing the Word document body', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-missing-'));
   const sourcePath = path.join(tempDir, 'source.docx');
@@ -256,6 +274,40 @@ async function writeDocxFixtureWithCrossedImageRelationships(filePath) {
   zip.addEmptyDirectory('word/media');
   zip.addBuffer(Buffer.from('image-one'), 'word/media/image1.png');
   zip.addBuffer(Buffer.from('image-two'), 'word/media/image2.png');
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxFixtureWithHeadingStyles(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Title"/></w:pPr>
+      <w:r><w:t>Styled proposal</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Heading2"/></w:pPr>
+      <w:r><w:t>Executive Summary</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>The section is marked only by Word style.</w:t></w:r></w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
   zip.end();
 
   await once(output, 'close');
