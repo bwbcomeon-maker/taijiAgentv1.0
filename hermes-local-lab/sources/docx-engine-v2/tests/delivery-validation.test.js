@@ -114,6 +114,7 @@ async function makeDeliveryPackage(t, sourceLines = defaultSourceLines()) {
         { id: 'template_markers', status: 'passed' },
         { id: 'image_coverage', status: 'passed' },
         { id: 'table_coverage', status: 'passed' },
+        { id: 'table_content', status: 'passed' },
         { id: 'table_placement', status: 'passed' },
         { id: 'table_caption', status: 'passed' },
         { id: 'block_order', status: 'passed' },
@@ -184,6 +185,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
   assert.ok(
     report.checks.some(
+      (check) => check.id === 'table_content' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    report.checks.some(
       (check) => check.id === 'table_placement' && check.status === 'passed'
     )
   );
@@ -216,6 +222,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'template_markers',
       'image_coverage',
       'table_coverage',
+      'table_content',
       'table_placement',
       'table_caption',
       'block_order',
@@ -395,6 +402,28 @@ test('validateDeliveryPackage fails when render plan tables disagree with the so
   assert.equal(report.status, 'failed');
   assert.equal(schemaCheck?.status, 'failed');
   assert.match(schemaCheck?.message || '', /render-plan\.json tables.*source-package\.json tables/);
+});
+
+test('validateDeliveryPackage fails when render plan table cell data disagrees with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(renderPlan.templateData.tables.length > 0, 'fixture must include render-plan table data');
+  assert.equal(renderPlan.templateData.tables[0].rows[0].c2, 'Ready');
+  renderPlan.templateData.tables[0].rows[0].c2 = 'Tampered table cell';
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.renderPlan = sha256File(renderPlanPath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const tableContentCheck = report.checks.find((check) => check.id === 'table_content');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(tableContentCheck?.status, 'failed');
+  assert.match(tableContentCheck?.message || '', /tbl-001|rows|source-package\.json tables/i);
 });
 
 test('validateDeliveryPackage fails when render plan figures disagree with the source package', async (t) => {
@@ -1031,6 +1060,19 @@ test('validateDeliveryPackage fails when a DOCX table caption is missing', async
   assert.match(captionCheck?.message || '', /tbl-001|caption|SEQ|tableId/i);
 });
 
+test('validateDeliveryPackage fails when DOCX table cell content no longer matches the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await replaceDocumentXmlText(path.join(deliveryDir, 'document.docx'), 'Ready', 'Tampered table cell');
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const tableContentCheck = report.checks.find((check) => check.id === 'table_content');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(tableContentCheck?.status, 'failed');
+  assert.match(tableContentCheck?.message || '', /tbl-001|DOCX table cells|Ready/i);
+});
+
 test('validateDeliveryPackage fails when DOCX contains an unbound table caption', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectUnboundTableCaption(path.join(deliveryDir, 'document.docx'));
@@ -1304,6 +1346,14 @@ function paragraphText(paragraphXml) {
 async function readDocumentXml(docxPath) {
   const entries = await readZipEntries(docxPath);
   return entries.get('word/document.xml')?.toString('utf8') || '';
+}
+
+async function replaceDocumentXmlText(docxPath, fromText, toText) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  assert.ok(documentXml.includes(fromText), `fixture must include text ${fromText}`);
+  entries.set('word/document.xml', Buffer.from(documentXml.replace(fromText, toText), 'utf8'));
+  await writeZipEntries(entries, docxPath);
 }
 
 function paragraphRanges(documentXml) {

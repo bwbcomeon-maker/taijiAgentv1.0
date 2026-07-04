@@ -14,6 +14,7 @@ const CHECK_IDS = [
   'template_markers',
   'image_coverage',
   'table_coverage',
+  'table_content',
   'table_placement',
   'table_caption',
   'block_order',
@@ -132,6 +133,13 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
     assetPackage: jsonFiles.assetPackage,
   });
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addTableContentCheck({
+    addCheck,
+    documentXml,
+    sourcePackage: jsonFiles.sourcePackage,
+    assetPackage: jsonFiles.assetPackage,
+    renderPlan: jsonFiles.renderPlan,
+  });
   addTablePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addTableCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addBlockOrderCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
@@ -1337,6 +1345,35 @@ function addTableCoverageCheck({ addCheck, documentXml, renderPlan }) {
   addCheck('table_coverage', 'passed');
 }
 
+function addTableContentCheck({ addCheck, documentXml, sourcePackage, assetPackage, renderPlan }) {
+  if (!sourcePackage || !assetPackage || !renderPlan) {
+    addCheck(
+      'table_content',
+      'failed',
+      'source-package.json, asset-package.json and render-plan.json are required for table content validation.'
+    );
+    return;
+  }
+
+  const tables = sourcePackage.tables || [];
+  if (tables.length === 0) {
+    addCheck('table_content', 'passed_with_warnings', 'No tables were present in source-package.json.');
+    return;
+  }
+
+  const failures = tableContentFailures({ documentXml, sourcePackage, assetPackage, renderPlan });
+  if (failures.length > 0) {
+    addCheck(
+      'table_content',
+      'failed',
+      `DOCX table content does not match source-package tables: ${failures.join(', ')}`
+    );
+    return;
+  }
+
+  addCheck('table_content', 'passed');
+}
+
 function addTablePlacementCheck({ addCheck, documentXml, renderPlan }) {
   if (!documentXml) {
     addCheck('table_placement', 'failed', 'Cannot inspect table placement without word/document.xml.');
@@ -1627,6 +1664,204 @@ function figurePlacementFailures({ documentXml, renderPlan }) {
   }
 
   return failures;
+}
+
+function tableContentFailures({ documentXml, sourcePackage, assetPackage, renderPlan }) {
+  const failures = [];
+  const sourceBlocksByTableId = new Map(
+    (sourcePackage.blocks || [])
+      .filter((block) => block.metadata?.tableId)
+      .map((block) => [block.metadata.tableId, block])
+  );
+  const assetTablesById = new Map((assetPackage.tables || []).map((table) => [table.tableId, table]));
+  const templateTablesById = new Map((renderPlan.templateData?.tables || []).map((table) => [table.tableId, table]));
+
+  for (const sourceTable of sourcePackage.tables || []) {
+    const tableId = String(sourceTable?.tableId || '').trim();
+    if (!tableId) {
+      failures.push('source-package.json tables has table without tableId');
+      continue;
+    }
+    const expected = sourceTableContent(sourceTable);
+
+    const sourceBlock = sourceBlocksByTableId.get(tableId);
+    if (sourceBlock) {
+      compareTableContent({
+        failures,
+        actual: sourceBlockContent(sourceBlock),
+        expected,
+        actualLabel: `source-package.json blocks.${sourceBlock.id}`,
+        expectedLabel: `source-package.json tables.${tableId}`,
+      });
+    }
+
+    const assetTable = assetTablesById.get(tableId);
+    if (!assetTable) {
+      failures.push(`asset-package.json tables missing tableId=${tableId}`);
+    } else {
+      compareTableContent({
+        failures,
+        actual: sourceTableContent(assetTable),
+        expected,
+        actualLabel: `asset-package.json tables.${tableId}`,
+        expectedLabel: `source-package.json tables.${tableId}`,
+      });
+    }
+
+    const templateTable = templateTablesById.get(tableId);
+    if (!templateTable) {
+      failures.push(`render-plan.json templateData.tables missing tableId=${tableId}`);
+    } else {
+      compareTableContent({
+        failures,
+        actual: templateTableContent(templateTable),
+        expected: templateTableContentFromSource(sourceTable),
+        actualLabel: `render-plan.json templateData.tables.${tableId}`,
+        expectedLabel: `source-package.json tables.${tableId}`,
+      });
+    }
+
+    const docxFailure = docxTableContentFailure({ documentXml, tableId, expected });
+    if (docxFailure) {
+      failures.push(docxFailure);
+    }
+  }
+
+  return failures;
+}
+
+function compareTableContent({ failures, actual, expected, actualLabel, expectedLabel }) {
+  if (!stringArraysEqual(actual.headers, expected.headers)) {
+    failures.push(
+      `${actualLabel}.headers=${displayValue(actual.headers.join('|'))} does not match ${expectedLabel}.headers=${displayValue(expected.headers.join('|'))}`
+    );
+  }
+  if (!tableRowsEqual(actual.rows, expected.rows)) {
+    failures.push(
+      `${actualLabel}.rows=${displayValue(tableRowsDisplay(actual.rows))} does not match ${expectedLabel}.rows=${displayValue(tableRowsDisplay(expected.rows))}`
+    );
+  }
+}
+
+function sourceBlockContent(block) {
+  return sourceTableContent(block.content || {});
+}
+
+function sourceTableContent(table) {
+  const headers = normalizeTableHeaders(table.headers || []);
+  return {
+    headers,
+    rows: normalizeSourceRows(table.rows || [], headers),
+  };
+}
+
+function templateTableContentFromSource(table) {
+  const headers = normalizeTableHeaders(table.headers || []);
+  return {
+    headers,
+    rows: normalizeSourceRows(table.rows || [], headers),
+  };
+}
+
+function templateTableContent(table) {
+  return {
+    headers: valuesByTemplateColumns(table.headers || {}),
+    rows: (table.rows || []).map((row) => valuesByTemplateColumns(row || {})),
+  };
+}
+
+function normalizeTableHeaders(headers) {
+  return (headers || []).map((header) => normalizeTableCell(header));
+}
+
+function normalizeSourceRows(rows, headers) {
+  return (rows || []).map((row) => {
+    if (Array.isArray(row)) {
+      return row.map((cell) => normalizeTableCell(cell));
+    }
+    if (row && typeof row === 'object') {
+      if (headers.length > 0) {
+        return headers.map((header, index) =>
+          normalizeTableCell(row[`c${index + 1}`] ?? row[header] ?? '')
+        );
+      }
+      return Object.keys(row)
+        .sort()
+        .map((key) => normalizeTableCell(row[key]));
+    }
+    return [normalizeTableCell(row)];
+  });
+}
+
+function valuesByTemplateColumns(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return [];
+  }
+  return Object.keys(value)
+    .filter((key) => /^c\d+$/.test(key))
+    .sort((left, right) => Number(left.slice(1)) - Number(right.slice(1)))
+    .map((key) => normalizeTableCell(value[key]));
+}
+
+function tableRowsEqual(actual, expected) {
+  if (actual.length !== expected.length) {
+    return false;
+  }
+  return actual.every((row, index) => stringArraysEqual(row, expected[index] || []));
+}
+
+function tableRowsDisplay(rows) {
+  return (rows || []).map((row) => (row || []).join('|')).join(' / ');
+}
+
+function docxTableContentFailure({ documentXml, tableId, expected }) {
+  if (!documentXml) {
+    return `${tableId} cannot inspect DOCX table content without word/document.xml`;
+  }
+  const tableXml = docxTableXmlForTableId(documentXml, tableId);
+  if (!tableXml) {
+    return `${tableId} missing DOCX table body for content validation`;
+  }
+  const expectedCells = [...expected.headers, ...expected.rows.flat()].filter(Boolean);
+  const actualCells = docxTableCellTexts(tableXml);
+  if (!containsOrderedCells(actualCells, expectedCells)) {
+    return `${tableId} DOCX table cells=${displayValue(actualCells.join('|'))} do not contain expected source-package.json tables cells=${displayValue(expectedCells.join('|'))}`;
+  }
+  return '';
+}
+
+function docxTableXmlForTableId(documentXml, tableId) {
+  const caption = tableCaptionParagraphs(paragraphRanges(documentXml)).get(tableId);
+  if (!caption) {
+    return '';
+  }
+  const afterCaption = String(documentXml || '').slice(caption.end);
+  const match = afterCaption.match(/^\s*(<w:tbl\b[\s\S]*?<\/w:tbl>)/);
+  return match ? match[1] : '';
+}
+
+function docxTableCellTexts(tableXml) {
+  return [...String(tableXml || '').matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)]
+    .map((match) => normalizeTableCell(paragraphText(match[0])))
+    .filter(Boolean);
+}
+
+function containsOrderedCells(actualCells, expectedCells) {
+  let actualIndex = 0;
+  for (const expected of expectedCells) {
+    while (actualIndex < actualCells.length && actualCells[actualIndex] !== expected) {
+      actualIndex += 1;
+    }
+    if (actualIndex >= actualCells.length) {
+      return false;
+    }
+    actualIndex += 1;
+  }
+  return true;
+}
+
+function normalizeTableCell(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
 function tablePlacementFailures({ documentXml, renderPlan }) {
