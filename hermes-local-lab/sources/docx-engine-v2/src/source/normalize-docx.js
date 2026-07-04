@@ -17,7 +17,7 @@ async function normalizeDocxSource({ sourcePath } = {}) {
   const relationshipsXml = zipEntries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
   const embeddedMedia = extractEmbeddedMedia(zipEntries, relationshipsXml);
   const { title, sections, blocks, tables } = extractBodyStructure(documentXml);
-  const figures = extractFigureMarkers(documentXml, embeddedMedia, blocks);
+  const figures = extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, blocks);
   bindFigureMarkersToBlocks(blocks, figures);
 
   return {
@@ -219,12 +219,7 @@ function extractText(xml) {
 }
 
 function extractEmbeddedMedia(zipEntries, relationshipsXml) {
-  const relationshipByTarget = new Map(
-    [...relationshipsXml.matchAll(/<Relationship\b([^>]*)\/?>/g)].map((match) => {
-      const attributes = parseAttributes(match[1]);
-      return [normalizeRelationshipTarget(attributes.Target || ''), attributes];
-    })
-  );
+  const relationshipByTarget = relationshipByTargetPath(relationshipsXml);
 
   return [...zipEntries.entries()]
     .filter(([entryPath]) => entryPath.startsWith('word/media/'))
@@ -244,15 +239,18 @@ function extractEmbeddedMedia(zipEntries, relationshipsXml) {
     });
 }
 
-function extractFigureMarkers(documentXml, embeddedMedia, blocks) {
+function extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, blocks) {
   const decodedXml = decodeXml(documentXml);
   const figureIds = [
     ...new Set([...decodedXml.matchAll(/\bfigureId=(fig-\d{3,})\b/g)].map((match) => match[1])),
   ];
+  const drawingBindingByFigureId = extractDrawingFigureBindings(documentXml, relationshipsXml);
+  const mediaByPath = new Map(embeddedMedia.map((media) => [media.path, media]));
 
   return figureIds.map((figureId, index) => {
     const marker = `figureId=${figureId}`;
-    const media = embeddedMedia[index] || embeddedMedia[0] || {};
+    const drawingBinding = drawingBindingByFigureId.get(figureId) || {};
+    const media = mediaByPath.get(drawingBinding.mediaPath) || embeddedMedia[index] || embeddedMedia[0] || {};
     const markerBlock = blocks.find((block) => block.text.includes(marker));
 
     return {
@@ -272,10 +270,59 @@ function extractFigureMarkers(documentXml, embeddedMedia, blocks) {
         marker,
         mediaId: media.mediaId || '',
         mediaPath: media.path || '',
-        relationshipId: media.relationshipId || '',
+        relationshipId: drawingBinding.relationshipId || media.relationshipId || '',
       },
     };
   });
+}
+
+function extractDrawingFigureBindings(documentXml, relationshipsXml) {
+  const relationshipById = relationshipByRelationshipId(relationshipsXml);
+  const bindings = new Map();
+
+  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+    const drawingXml = drawingMatch[0];
+    const figureMatch = drawingXml.match(/\bfigureId=([A-Za-z0-9_-]+)/);
+    const relationshipMatch = drawingXml.match(/\br:embed="([^"]+)"/);
+    if (!figureMatch || !relationshipMatch) {
+      continue;
+    }
+
+    const figureId = figureMatch[1];
+    const relationshipId = relationshipMatch[1];
+    const relationship = relationshipById.get(relationshipId) || {};
+    const mediaPath = normalizeRelationshipTarget(relationship.Target || '');
+    if (!mediaPath) {
+      continue;
+    }
+
+    bindings.set(figureId, { relationshipId, mediaPath });
+  }
+
+  return bindings;
+}
+
+function relationshipByTargetPath(relationshipsXml) {
+  return new Map(
+    relationshipEntries(relationshipsXml).map((attributes) => [
+      normalizeRelationshipTarget(attributes.Target || ''),
+      attributes,
+    ])
+  );
+}
+
+function relationshipByRelationshipId(relationshipsXml) {
+  return new Map(
+    relationshipEntries(relationshipsXml)
+      .filter((attributes) => attributes.Id)
+      .map((attributes) => [attributes.Id, attributes])
+  );
+}
+
+function relationshipEntries(relationshipsXml) {
+  return [...String(relationshipsXml || '').matchAll(/<Relationship\b([^>]*)\/?>/g)].map((match) =>
+    parseAttributes(match[1])
+  );
 }
 
 function bindFigureMarkersToBlocks(blocks, figures) {
@@ -301,10 +348,16 @@ function bindFigureMarkersToBlocks(blocks, figures) {
 }
 
 function normalizeRelationshipTarget(target) {
-  if (!target) {
+  const rawTarget = String(target || '').trim().replace(/\\/g, '/');
+  if (!rawTarget || /^[a-z][a-z0-9+.-]*:/i.test(rawTarget)) {
     return '';
   }
-  return target.startsWith('word/') ? target : `word/${target.replace(/^\//, '')}`;
+  if (rawTarget.startsWith('/')) {
+    return path.posix.normalize(rawTarget.replace(/^\/+/, ''));
+  }
+
+  const entryName = path.posix.normalize(path.posix.join('word', rawTarget));
+  return entryName.startsWith('../') ? '' : entryName;
 }
 
 function parseAttributes(value) {

@@ -70,3 +70,4 @@
 - 已让交付包复验校验 `job.manifest.json` 与 `render-plan.json` 的 jobId 一致性，避免作业清单和渲染计划各自合法但来自不同作业。
 - 已让 DOCX 来源中的内嵌媒体从 SourcePackage 进入 AssetPackage，并作为标准 `assets/<figureId>/figure.*` 参与 RenderPlan、DOCX 后处理和质量门校验，避免“归一化识别到图片但最终交付丢图”。
 - 已把图片资产生命周期扩展到 JPEG/JPG：DOCX 来源内嵌 JPEG、渲染后处理 content type、以及按 `figureId` 替换 DOCX 图片都能走同一条质量门，避免真实 Word 文档常见照片格式被 PNG-only 路径拒绝。
+- 已让 DOCX 来源归一化按正文 `<w:drawing>` 的 `r:embed` relationship 绑定 `figureId` 与内嵌媒体，而不是按 zip 里的 `word/media/*` 顺序猜测，避免多图文档中 A/B 图片互换后仍进入后续交付链路。

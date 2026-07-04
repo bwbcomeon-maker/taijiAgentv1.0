@@ -121,6 +121,24 @@ test('normalizeDocxSource extracts basic text and embedded media from docx zip',
   assert.equal(source.figures[0].metadata.mediaPath, 'word/media/image1.png');
 });
 
+test('normalizeDocxSource binds DOCX figure markers to media through drawing relationships', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-rel-'));
+  const sourcePath = path.join(tempDir, 'source.docx');
+  await writeDocxFixtureWithCrossedImageRelationships(sourcePath);
+
+  const source = await normalizeDocxSource({ sourcePath });
+
+  assertSourcePackage(source);
+  assert.equal(source.embeddedMedia.length, 2);
+  assert.equal(source.figures.length, 2);
+  assert.equal(source.figures[0].figureId, 'fig-001');
+  assert.equal(source.figures[0].metadata.relationshipId, 'rIdImageSecond');
+  assert.equal(source.figures[0].metadata.mediaPath, 'word/media/image2.png');
+  assert.equal(source.figures[1].figureId, 'fig-002');
+  assert.equal(source.figures[1].metadata.relationshipId, 'rIdImageFirst');
+  assert.equal(source.figures[1].metadata.mediaPath, 'word/media/image1.png');
+});
+
 test('normalizeDocxSource rejects zip files that are missing the Word document body', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-missing-'));
   const sourcePath = path.join(tempDir, 'source.docx');
@@ -176,6 +194,68 @@ async function writeDocxFixture(filePath) {
   );
   zip.addEmptyDirectory('word/media');
   zip.addBuffer(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'word/media/image1.png');
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxFixtureWithCrossedImageRelationships(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImageFirst" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+  <Relationship Id="rIdImageSecond" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.png"/>
+</Relationships>`),
+    'word/_rels/document.xml.rels'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>太极 Agent 企业知识助手建设方案</w:t></w:r></w:p>
+    <w:p><w:r><w:t>一、总体架构</w:t></w:r></w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:docPr id="1" name="架构图" descr="figureId=fig-001"/>
+            <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdImageSecond"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:docPr id="2" name="流程图" descr="figureId=fig-002"/>
+            <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdImageFirst"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
+  zip.addEmptyDirectory('word/media');
+  zip.addBuffer(Buffer.from('image-one'), 'word/media/image1.png');
+  zip.addBuffer(Buffer.from('image-two'), 'word/media/image2.png');
   zip.end();
 
   await once(output, 'close');
