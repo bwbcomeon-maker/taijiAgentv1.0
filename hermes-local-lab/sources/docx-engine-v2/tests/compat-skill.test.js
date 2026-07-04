@@ -82,9 +82,11 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/record-wps-visual.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/validate-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/replay-delivery.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'scripts/validate-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/record-wps-visual.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/validate-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/replay-delivery.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/validate-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'runtime')), false);
 });
@@ -273,6 +275,32 @@ test('copyable install-template wrapper installs a validated template package in
   ], { cwd: outDir, encoding: 'utf8' });
   assert.equal(templates.status, 0, templates.stderr || templates.stdout);
   assert.ok(JSON.parse(templates.stdout).templates.some((template) => template.id === 'custom-proposal'));
+});
+
+test('copyable validate-template wrapper validates a template package without installing it', (t) => {
+  const { workspace, outDir } = buildSkillPackage(t);
+  const packageDir = path.join(workspace, 'validated-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'validated-proposal', name: 'Validated Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const result = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/validate-template.js'),
+    '--package',
+    packageDir,
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.templateId, 'validated-proposal');
+  assert.equal(fs.existsSync(path.join(outDir, 'engine', 'installed', 'validated-proposal')), false);
 });
 
 test('copyable self-test renders both smoke documents with template-appropriate sources', (t) => {

@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const INSTALL_TEMPLATE = path.join(ENGINE_ROOT, 'src', 'cli', 'install-template.js');
+const VALIDATE_TEMPLATE = path.join(ENGINE_ROOT, 'src', 'cli', 'validate-template.js');
 
 function makeTempDir(t) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-install-cli-'));
@@ -53,6 +54,52 @@ function runInstallTemplate(args) {
     encoding: 'utf8',
   });
 }
+
+function runValidateTemplate(args) {
+  return spawnSync(process.execPath, [VALIDATE_TEMPLATE, ...args], {
+    cwd: ENGINE_ROOT,
+    encoding: 'utf8',
+  });
+}
+
+test('validate-template CLI validates a package without mutating registry', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = makeTemplatePackage(tempRoot, 'custom-proposal');
+  const registryPath = path.join(tempRoot, 'template-registry.json');
+
+  const result = runValidateTemplate([
+    '--package',
+    packageDir,
+    '--json',
+  ]);
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim());
+  assert.equal(payload.ok, true);
+  assert.equal(payload.templateId, 'custom-proposal');
+  assert.equal(payload.packageDir, packageDir);
+  assert.deepEqual(payload.validation, { ok: true });
+  assert.equal(fs.existsSync(registryPath), false);
+});
+
+test('validate-template CLI reports package validation errors as JSON', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = makeTemplatePackage(tempRoot, 'broken-proposal');
+  fs.rmSync(path.join(packageDir, 'adapter-sample.render-plan.json'));
+
+  const result = runValidateTemplate([
+    '--package',
+    packageDir,
+    '--json',
+  ]);
+
+  assert.equal(result.status, 3);
+  const payload = JSON.parse(result.stdout.trim());
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'template_validation_failed');
+  assert.equal(payload.templateId, 'broken-proposal');
+  assert.ok(payload.errors.some((error) => error.code === 'template_file_missing' && error.file === 'adapterSample'));
+});
 
 test('install-template CLI installs a validated package and emits JSON', (t) => {
   const tempRoot = makeTempDir(t);
