@@ -12,6 +12,7 @@ const { buildRenderPlan } = require('../src/planning/build-render-plan');
 const { normalizeMarkdownSource } = require('../src/source/normalize-markdown');
 const { getTemplatePackage } = require('../src/templates/registry');
 const { writeDeliveryPackage } = require('../src/delivery/write-delivery-package');
+const { createDocumentJob, transitionJob } = require('../src/domain/document-job');
 const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
 const { validateDeliveryPackage } = require('../src/validation/validate-delivery-package');
@@ -69,14 +70,18 @@ async function makeDeliveryPackage(t) {
 
   await renderDocx({ templatePackage, renderPlan, outputPath: renderPath });
   await postprocessDocx({ docxPath: renderPath, renderPlan, outputPath: postprocessedPath });
+  const job = buildValidatedJob({
+    workspace,
+    sourcePackage,
+    templatePackage,
+    renderPlan,
+    sourcePath,
+    assetDir,
+    documentPath: postprocessedPath,
+  });
   writeDeliveryPackage({
     deliveryDir,
-    job: {
-      jobId: renderPlan.jobId,
-      sourceRef: sourcePackage.sourceRef,
-      templateId: templatePackage.templateId,
-      status: 'validated',
-    },
+    job,
     sourcePackage,
     templatePackage,
     assetPackage,
@@ -101,6 +106,33 @@ async function makeDeliveryPackage(t) {
   });
 
   return { deliveryDir };
+}
+
+function buildValidatedJob({
+  workspace,
+  sourcePackage,
+  templatePackage,
+  renderPlan,
+  sourcePath,
+  assetDir,
+  documentPath,
+}) {
+  let job = createDocumentJob({
+    jobId: renderPlan.jobId,
+    sourceRef: sourcePackage.sourceRef,
+    templateId: templatePackage.templateId,
+    workspace,
+    inputs: [
+      { type: 'source', path: sourcePath },
+      { type: 'asset_dir', path: assetDir },
+    ],
+  });
+  job = transitionJob(job, 'source_normalized');
+  job = transitionJob(job, 'template_selected', { templateId: templatePackage.templateId });
+  job = transitionJob(job, 'assets_packaged');
+  job = transitionJob(job, 'render_planned');
+  job = transitionJob(job, 'rendered', { outputs: [{ type: 'rendered_document', path: documentPath }] });
+  return transitionJob(job, 'validated');
 }
 
 test('validateDeliveryPackage accepts complete delivery package and reports required checks', async (t) => {
@@ -150,6 +182,40 @@ test('validateDeliveryPackage fails when a required delivery file is missing', a
 
   assert.equal(report.status, 'failed');
   assert.ok(report.failures.some((item) => item.includes('render-plan.json')));
+});
+
+test('validateDeliveryPackage fails when job manifest is not traceable', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  fs.writeFileSync(
+    path.join(deliveryDir, 'job.manifest.json'),
+    JSON.stringify({ jobId: 'missing-required-traceability-fields' }, null, 2),
+    'utf8'
+  );
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /job\.manifest\.json|DocumentJob/);
+});
+
+test('validateDeliveryPackage fails when template manifest loses quality gate metadata', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  fs.writeFileSync(
+    path.join(deliveryDir, 'template.manifest.json'),
+    JSON.stringify({ id: 'general-proposal', name: '通用方案模板' }, null, 2),
+    'utf8'
+  );
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /template\.manifest\.json|TemplateManifest/);
 });
 
 test('validateDeliveryPackage requires figure ids to be bound to DOCX image metadata', async (t) => {

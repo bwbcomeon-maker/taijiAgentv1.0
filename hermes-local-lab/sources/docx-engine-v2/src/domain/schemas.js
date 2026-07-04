@@ -273,6 +273,45 @@ const templateDataTableSchema = {
   },
 };
 
+const templateManifestSchema = {
+  type: 'object',
+  additionalProperties: true,
+  required: [
+    'id',
+    'name',
+    'version',
+    'description',
+    'documentTypes',
+    'capabilities',
+    'requiredAssets',
+    'qualityGates',
+    'compatibility',
+  ],
+  properties: {
+    id: { type: 'string', minLength: 1 },
+    name: { type: 'string', minLength: 1 },
+    version: { type: 'string', minLength: 1 },
+    description: { type: 'string' },
+    documentTypes: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    capabilities: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    requiredAssets: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+    qualityGates: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    compatibility: metadataSchema,
+  },
+};
+
 const schemas = {
   DocumentJob: {
     type: 'object',
@@ -384,46 +423,11 @@ const schemas = {
           sample: { type: 'string', minLength: 1 },
         },
       },
-      manifest: {
-        type: 'object',
-        additionalProperties: true,
-        required: [
-          'id',
-          'name',
-          'version',
-          'description',
-          'documentTypes',
-          'capabilities',
-          'requiredAssets',
-          'qualityGates',
-          'compatibility',
-        ],
-        properties: {
-          id: { type: 'string', minLength: 1 },
-          name: { type: 'string', minLength: 1 },
-          version: { type: 'string', minLength: 1 },
-          description: { type: 'string' },
-          documentTypes: {
-            type: 'array',
-            items: { type: 'string', minLength: 1 },
-          },
-          capabilities: {
-            type: 'array',
-            items: { type: 'string', minLength: 1 },
-          },
-          requiredAssets: {
-            type: 'array',
-            items: { type: 'string' },
-          },
-          qualityGates: {
-            type: 'array',
-            items: { type: 'string', minLength: 1 },
-          },
-          compatibility: metadataSchema,
-        },
-      },
+      manifest: templateManifestSchema,
     },
   },
+
+  TemplateManifest: templateManifestSchema,
 
   AssetPackage: {
     type: 'object',

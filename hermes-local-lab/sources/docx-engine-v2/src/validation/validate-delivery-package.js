@@ -99,26 +99,38 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
 }
 
 function addSchemaCheck({ addCheck, jsonFiles }) {
-  if (!jsonFiles.renderPlan || !jsonFiles.qualityReport) {
-    addCheck('schema', 'failed', 'render-plan.json and quality-report.json are required for schema validation.');
+  if (!jsonFiles.jobManifest || !jsonFiles.templateManifest || !jsonFiles.renderPlan || !jsonFiles.qualityReport) {
+    addCheck(
+      'schema',
+      'failed',
+      'job.manifest.json, template.manifest.json, render-plan.json and quality-report.json are required for schema validation.'
+    );
     return;
   }
 
+  const jobManifestResult = validateDomainObject('DocumentJob', jsonFiles.jobManifest);
+  const templateManifestResult = validateDomainObject('TemplateManifest', jsonFiles.templateManifest);
   const renderPlanResult = validateDomainObject('RenderPlan', jsonFiles.renderPlan);
   const qualityReportResult = validateDomainObject('ValidationReport', jsonFiles.qualityReport);
-  if (!renderPlanResult.ok || !qualityReportResult.ok) {
+  if (!jobManifestResult.ok || !templateManifestResult.ok || !renderPlanResult.ok || !qualityReportResult.ok) {
     addCheck(
       'schema',
       'failed',
       `Delivery schema validation failed: ${JSON.stringify([
-        ...renderPlanResult.errors,
-        ...qualityReportResult.errors,
+        ...tagValidationErrors('job.manifest.json', jobManifestResult.errors),
+        ...tagValidationErrors('template.manifest.json', templateManifestResult.errors),
+        ...tagValidationErrors('render-plan.json', renderPlanResult.errors),
+        ...tagValidationErrors('quality-report.json', qualityReportResult.errors),
       ])}`
     );
     return;
   }
 
   addCheck('schema', 'passed');
+}
+
+function tagValidationErrors(source, errors) {
+  return (errors || []).map((error) => ({ source, ...error }));
 }
 
 function addDocxZipCheck({ addCheck, deliveryDir }) {
