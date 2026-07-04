@@ -3,6 +3,7 @@
 const path = require('node:path');
 
 const { listTemplates } = require('../templates/registry');
+const { summarizeTemplate } = require('../templates/template-summary');
 
 main();
 
@@ -10,15 +11,7 @@ function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
     const engineRoot = path.resolve(__dirname, '../..');
-    const templates = listTemplates({ rootDir: engineRoot }).map((template) => ({
-      id: template.id,
-      name: template.manifest?.name || template.id,
-      description: template.manifest?.description || '',
-      documentTypes: template.manifest?.documentTypes || [],
-      capabilities: template.manifest?.capabilities || [],
-      qualityGates: template.manifest?.qualityGates || [],
-      compatibility: template.manifest?.compatibility || {},
-    }));
+    const templates = listTemplates({ rootDir: engineRoot }).map(summarizeTemplate);
 
     if (args.json) {
       process.stdout.write(`${JSON.stringify({ ok: true, templates })}\n`);

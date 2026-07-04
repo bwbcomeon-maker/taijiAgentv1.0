@@ -10,6 +10,7 @@ const yazl = require('yazl');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const RUN_JOB = path.join(ENGINE_ROOT, 'src', 'cli', 'run-job.js');
+const LIST_TEMPLATES = path.join(ENGINE_ROOT, 'src', 'cli', 'list-templates.js');
 const REQUIRED_DELIVERY_ENTRIES = [
   'document.docx',
   'delivery-package.json',
@@ -38,6 +39,13 @@ function makeTempWorkspace(t) {
 
 function runJob(args) {
   return spawnSync(process.execPath, [RUN_JOB, ...args], {
+    cwd: ENGINE_ROOT,
+    encoding: 'utf8',
+  });
+}
+
+function listTemplates(args = ['--json']) {
+  return spawnSync(process.execPath, [LIST_TEMPLATES, ...args], {
     cwd: ENGINE_ROOT,
     encoding: 'utf8',
   });
@@ -137,6 +145,18 @@ test('run-job requires explicit template selection and does not create delivery 
     payload.templates.map((item) => item.id),
     ['general-proposal', 'meeting-minutes']
   );
+  const listResult = listTemplates();
+  assertExitCode(listResult, 0);
+  const listPayload = parseStdoutJson(listResult);
+  assert.deepEqual(payload.templates, listPayload.templates);
+  const proposalTemplate = payload.templates.find((item) => item.id === 'general-proposal');
+  assert.deepEqual(proposalTemplate.sourceRequirements, {
+    richContentRequired: true,
+    minTables: 1,
+    minVisuals: 1,
+  });
+  assert.ok(proposalTemplate.qualityGates.includes('wps_visual'));
+  assert.equal(proposalTemplate.compatibility.engine, 'docx-engine-v2');
   assert.equal(fs.existsSync(deliveryDir), false);
 });
 

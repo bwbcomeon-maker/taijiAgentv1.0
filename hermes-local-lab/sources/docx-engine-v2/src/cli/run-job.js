@@ -3,6 +3,7 @@
 const path = require('node:path');
 
 const { listTemplates } = require('../templates/registry');
+const { summarizeTemplate } = require('../templates/template-summary');
 const { runDocumentJob } = require('../workflow/run-document-job');
 
 const EXIT_CODES = {
@@ -25,7 +26,7 @@ async function main() {
     writeJsonStdout({
       ok: false,
       code: 'template_selection_required',
-      templates: listTemplates({ rootDir: engineRoot }).map(templateSummary),
+      templates: listTemplates({ rootDir: engineRoot }).map(summarizeTemplate),
     });
     process.exitCode = EXIT_CODES.templateSelectionRequired;
     return;
@@ -99,16 +100,6 @@ function parseArgs(argv) {
   }
 
   return parsed;
-}
-
-function templateSummary(template) {
-  return {
-    id: template.id,
-    name: template.manifest?.name || template.id,
-    description: template.manifest?.description || '',
-    documentTypes: template.manifest?.documentTypes || [],
-    capabilities: template.manifest?.capabilities || [],
-  };
 }
 
 function toCliPayload(result) {

@@ -25,6 +25,11 @@ List templates when the user has not selected one:
 node src/cli/list-templates.js --json
 ```
 
+Template selection responses include each template's document types,
+capabilities, source requirements, required assets, quality gates, and engine
+compatibility metadata. Hosts should use those fields to choose or reject a
+template before preparing template data.
+
 Render a delivery package:
 
 ```bash

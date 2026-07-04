@@ -38,6 +38,11 @@ payload with:
 The host must show the returned templates and ask the user to choose one. The
 host must not silently default to `general-proposal` after this response.
 
+Each returned template includes `documentTypes`, `capabilities`,
+`sourceRequirements`, `requiredAssets`, `qualityGates`, and `compatibility`.
+The host should use those fields to decide whether the current source is rich
+enough for the selected template before attempting render.
+
 ## Rendering
 
 Canonical render command:
