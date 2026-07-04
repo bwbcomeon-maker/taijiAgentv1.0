@@ -1,11 +1,12 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 
 const { buildRenderPlan } = require('../planning/build-render-plan');
 const { postprocessDocx } = require('../rendering/postprocess-docx');
 const { renderDocx } = require('../rendering/render-docx');
-const { replayOriginalSourcePackage, sourceReplayFailures } = require('./source-replay');
+const { readZipEntriesFromBuffer, replayOriginalSourcePackage, sourceReplayFailures } = require('./source-replay');
 const { getTemplatePackage } = require('../templates/registry');
 const { validateDeliveryPackage } = require('../validation/validate-delivery-package');
 
@@ -123,8 +124,23 @@ async function replayDeliveryPackage({
     replayedDocumentPath = documentReplayResult.documentPath || '';
     replayOutputWritable = documentReplayResult.outputWritable !== false;
     addReplayResultCheck({ addCheck, result: documentReplayResult, passedId: 'document_rebuild' });
+    if (documentReplayResult.status === 'passed') {
+      const documentFailures = documentReplayResult.documentReplayFailures || [];
+      if (documentFailures.length > 0) {
+        addCheck(
+          'document_replay',
+          'failed',
+          `document.docx does not match deterministic replay: ${documentFailures.join(', ')}`
+        );
+      } else {
+        addCheck('document_replay', 'passed');
+      }
+    } else {
+      addCheck('document_replay', 'not_verified', 'Document replay was skipped because document rebuild failed.');
+    }
   } else {
     addCheck('document_rebuild', 'not_verified', 'Document rebuild was skipped because render plan replay did not pass.');
+    addCheck('document_replay', 'not_verified', 'Document replay was skipped because render plan replay did not pass.');
   }
 
   return finalizeReport({
@@ -230,12 +246,17 @@ async function rebuildDocument({ deliveryDir, replayOutputDir, templatePackage, 
     const documentPath = path.join(workspace, 'document.replayed.docx');
     await renderDocx({ templatePackage, renderPlan, outputPath: renderedPath });
     await postprocessDocx({ docxPath: renderedPath, renderPlan, outputPath: documentPath });
+    const documentReplayFailures = replayedDocumentFailures({
+      deliveredPath: path.join(deliveryDir, 'document.docx'),
+      replayedPath: documentPath,
+    });
 
     return {
       status: 'passed',
       documentPath: cleanupWorkspace ? '' : documentPath,
       outputWritable,
       extra: cleanupWorkspace ? {} : { replayedDocumentPath: documentPath },
+      documentReplayFailures,
     };
   } catch (error) {
     return { status: 'failed', message: `Document rebuild failed: ${error.message}`, outputWritable };
@@ -244,6 +265,49 @@ async function rebuildDocument({ deliveryDir, replayOutputDir, templatePackage, 
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   }
+}
+
+function replayedDocumentFailures({ deliveredPath, replayedPath }) {
+  const failures = [];
+  if (!fs.existsSync(deliveredPath)) {
+    return ['document.docx is missing'];
+  }
+  if (!fs.existsSync(replayedPath)) {
+    return ['replayed document.docx is missing'];
+  }
+
+  let deliveredEntries;
+  let replayedEntries;
+  try {
+    deliveredEntries = readZipEntriesFromBuffer(fs.readFileSync(deliveredPath));
+  } catch (error) {
+    return [`document.docx is not a readable DOCX zip: ${error.message}`];
+  }
+  try {
+    replayedEntries = readZipEntriesFromBuffer(fs.readFileSync(replayedPath));
+  } catch (error) {
+    return [`replayed document.docx is not a readable DOCX zip: ${error.message}`];
+  }
+
+  const entryNames = new Set([...deliveredEntries.keys(), ...replayedEntries.keys()]);
+  for (const entryName of [...entryNames].sort()) {
+    const deliveredEntry = deliveredEntries.get(entryName);
+    const replayedEntry = replayedEntries.get(entryName);
+    if (!deliveredEntry) {
+      failures.push(`${entryName} is missing from document.docx`);
+      continue;
+    }
+    if (!replayedEntry) {
+      failures.push(`${entryName} is extra in document.docx`);
+      continue;
+    }
+    const deliveredHash = sha256Buffer(deliveredEntry);
+    const replayedHash = sha256Buffer(replayedEntry);
+    if (deliveredHash !== replayedHash) {
+      failures.push(`${entryName} sha256 mismatch`);
+    }
+  }
+  return failures;
 }
 
 function addReplayResultCheck({ addCheck, result, passedId }) {
@@ -395,6 +459,10 @@ function originalSourceFileName(sourceRef = {}) {
 
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function sha256Buffer(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 function uniqueStrings(items) {

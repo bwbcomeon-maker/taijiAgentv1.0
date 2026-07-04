@@ -354,6 +354,11 @@ test('replay-delivery CLI rebuilds the source package and render plan from a del
       (check) => check.id === 'document_rebuild' && check.status === 'passed'
     )
   );
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'document_replay' && check.status === 'passed'
+    )
+  );
 });
 
 test('replay-delivery CLI fails when a render plan no longer matches deterministic replay', async (t) => {
@@ -385,6 +390,33 @@ test('replay-delivery CLI fails when a render plan no longer matches determinist
     )
   );
   assert.ok(payload.failures.some((failure) => /render-plan\.json/.test(failure)));
+});
+
+test('replay-delivery CLI fails when document.docx no longer matches deterministic replay', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const documentPath = path.join(deliveryDir, 'document.docx');
+  const entries = await readZipEntries(documentPath);
+  entries.set('docProps/tampered.xml', Buffer.from('<tampered/>', 'utf8'));
+  await writeZipEntries(entries, documentPath);
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const result = spawnSync(process.execPath, [
+    REPLAY_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 3, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'delivery_replay_failed');
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'document_replay' && check.status === 'failed'
+    )
+  );
+  assert.ok(payload.failures.some((failure) => /document\.docx/.test(failure)));
 });
 
 test('validateDeliveryPackage fails when document.docx no longer matches the delivery manifest hash', async (t) => {
