@@ -9998,8 +9998,21 @@ main.main.showing-logs > #mainLogs{display:flex;}
     -webkit-backdrop-filter:blur(12px)!important;
     overflow:hidden!important;
   }
-  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace .taiji-real-main{
-    display:none!important;
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace > main.main.taiji-real-main{
+    display:flex!important;
+    inset:0!important;
+    z-index:7!important;
+    width:auto!important;
+    max-width:none!important;
+    margin:0!important;
+    border:0!important;
+    background:transparent!important;
+    box-shadow:none!important;
+    overflow:visible!important;
+    pointer-events:none!important;
+  }
+  :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome #composerWrap{
+    pointer-events:auto!important;
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{
     inset:0!important;

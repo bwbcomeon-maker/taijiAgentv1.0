@@ -38,6 +38,42 @@ def test_explicit_template_selection_returns_visible_workbench_payload():
     assert result["templates"]
 
 
+def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
+    from api import routes
+
+    saved = []
+    published = []
+    session = SimpleNamespace(
+        session_id="sid-docx",
+        title="Untitled",
+        messages=[],
+        context_messages=[],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        model="",
+        model_provider=None,
+        save=lambda: saved.append("saved"),
+    )
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason: published.append(reason))
+    monkeypatch.setattr(routes, "stamp_turn_duration_on_latest_assistant", lambda *args, **kwargs: None)
+
+    result = routes._docx_template_invocation_result("套用通用方案模板")
+    routes._record_docx_non_streaming_turn_for_session(session, "套用通用方案模板", result)
+
+    assert saved == ["saved"]
+    assert published == ["session_new"]
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+    assert session.messages[0]["role"] == "user"
+    assert session.messages[0]["content"] == "套用通用方案模板"
+    assert session.messages[1]["role"] == "assistant"
+    assert session.messages[1]["docx_engine_workbench"]["template_id"] == "general-proposal"
+    assert session.context_messages[-1]["content"] == "已选择模板，请在文档模板工作台生成 DOCX 交付包。"
+    assert session.title != "Untitled"
+
+
 def test_docx_engine_v2_lists_templates(monkeypatch, tmp_path):
     routes = _patch_route_json(monkeypatch, tmp_path)
     monkeypatch.setattr(

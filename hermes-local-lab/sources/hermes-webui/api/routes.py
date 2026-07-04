@@ -14440,6 +14440,79 @@ def _docx_figure_adjustment_invocation_result(prompt: str) -> dict | None:
     }
 
 
+def _docx_non_streaming_assistant_message(result: dict, now: float) -> dict:
+    message = str((result or {}).get("message") or "").strip()
+    assistant = {
+        "role": "assistant",
+        "content": message,
+        "timestamp": int(now),
+    }
+    if result.get("docx_template_selection_required") or result.get("code") == _DOCX_TEMPLATE_SELECTION_REQUIRED_CODE:
+        assistant["docx_template_selection"] = {
+            "code": result.get("code") or _DOCX_TEMPLATE_SELECTION_REQUIRED_CODE,
+            "templates": list(result.get("templates") or []),
+            "examples": list(result.get("examples") or []),
+        }
+    elif result.get("docx_template_selected"):
+        template = result.get("template") if isinstance(result.get("template"), dict) else {}
+        template_id = str(result.get("template_id") or template.get("id") or "").strip()
+        assistant["docx_engine_workbench"] = {
+            "template_id": template_id,
+            "template": dict(template),
+            "templates": list(result.get("templates") or ([template] if template else [])),
+        }
+    elif result.get("docx_figure_adjustment_required") or result.get("code") == _DOCX_FIGURE_ADJUSTMENT_REQUIRED_CODE:
+        assistant["docx_figure_adjustment"] = {
+            "code": result.get("code") or _DOCX_FIGURE_ADJUSTMENT_REQUIRED_CODE,
+            "actions": list(result.get("actions") or []),
+            "examples": list(result.get("examples") or []),
+        }
+    return assistant
+
+
+def _record_docx_non_streaming_turn_for_session(s, msg: str, result: dict | None) -> None:
+    if not s or not result:
+        return
+    now = time.time()
+    user_text = str(msg or "").strip()
+    assistant = _docx_non_streaming_assistant_message(result, now)
+    if not user_text or not assistant.get("content"):
+        return
+    existing = list(getattr(s, "messages", None) or [])
+    if len(existing) >= 2:
+        previous_user = existing[-2]
+        previous_assistant = existing[-1]
+        if (
+            isinstance(previous_user, dict)
+            and isinstance(previous_assistant, dict)
+            and previous_user.get("role") == "user"
+            and previous_assistant.get("role") == "assistant"
+            and " ".join(str(previous_user.get("content") or "").split()) == " ".join(user_text.split())
+            and str(previous_assistant.get("content") or "") == str(assistant.get("content") or "")
+        ):
+            return
+
+    turn_started_at = getattr(s, "pending_started_at", None) or now
+    was_hidden_empty_session = _is_hidden_empty_session(s)
+    user_msg = {"role": "user", "content": user_text, "timestamp": int(now)}
+    s.active_stream_id = None
+    s.pending_user_message = None
+    s.pending_attachments = []
+    s.pending_started_at = None
+    s.messages = existing + [user_msg, assistant]
+    stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
+    s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+        {"role": "user", "content": user_text},
+        {"role": "assistant", "content": str(assistant.get("content") or "")},
+    ]
+    s.messages = scrub_messages(s.messages)
+    s.context_messages = scrub_messages(s.context_messages)
+    if _is_default_or_empty_session_title(getattr(s, "title", None)):
+        s.title = scrub_brand_leaks(title_from(s.messages, getattr(s, "title", None) or "Untitled"))
+    s.save()
+    publish_session_list_changed("session_new" if was_hidden_empty_session else "session_update")
+
+
 def _enrich_plan_like_chat_prompt(prompt: str) -> str:
     raw = str(prompt or "").strip()
     if not raw:
@@ -15063,10 +15136,12 @@ def _handle_chat_start(handler, body, diag=None):
         display_msg = msg
         docx_template_result = _docx_template_invocation_result(msg)
         if docx_template_result is not None:
+            _record_docx_non_streaming_turn_for_session(s, display_msg, docx_template_result)
             diag.stage("response_write") if diag else None
             return j(handler, docx_template_result)
         docx_figure_adjustment_result = _docx_figure_adjustment_invocation_result(msg)
         if docx_figure_adjustment_result is not None:
+            _record_docx_non_streaming_turn_for_session(s, display_msg, docx_figure_adjustment_result)
             diag.stage("response_write") if diag else None
             return j(handler, docx_figure_adjustment_result)
         msg = _normalize_docx_template_invocation_message(msg)

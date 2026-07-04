@@ -244,8 +244,32 @@ def test_taiji_redesign_writeflow_dock_matches_composer_system():
 
 
 def test_taiji_welcome_keeps_composer_visible_for_quick_prompts():
+    generic_welcome_main_selector = ':root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace > main.main.taiji-real-main{'
+    assert generic_welcome_main_selector in STYLE_CSS
+    generic_welcome_main_rule = STYLE_CSS[
+        STYLE_CSS.rindex(generic_welcome_main_selector) :
+        STYLE_CSS.index("}", STYLE_CSS.rindex(generic_welcome_main_selector))
+    ]
+    assert "display:flex!important" in generic_welcome_main_rule
+    assert "display:none!important" not in generic_welcome_main_rule
+    assert "z-index:7!important" in generic_welcome_main_rule
+    assert "pointer-events:none!important" in generic_welcome_main_rule
+    generic_welcome_composer_selector = ':root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome #composerWrap{'
+    assert generic_welcome_composer_selector in STYLE_CSS
+    generic_welcome_composer_rule = STYLE_CSS[
+        STYLE_CSS.rindex(generic_welcome_composer_selector) :
+        STYLE_CSS.index("}", STYLE_CSS.rindex(generic_welcome_composer_selector))
+    ]
+    assert "pointer-events:auto!important" in generic_welcome_composer_rule
     assert ':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace > main.main.taiji-real-main{' in STYLE_CSS
     assert ':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome #composerWrap{' in STYLE_CSS
+    hidden_main_selector = ':root[data-skin="taiji-light-glass"] .taiji-home-shell.taiji-welcome .taiji-main-workspace .taiji-real-main{'
+    if hidden_main_selector in STYLE_CSS:
+        hidden_main_rule = STYLE_CSS[
+            STYLE_CSS.rindex(hidden_main_selector) :
+            STYLE_CSS.index("}", STYLE_CSS.rindex(hidden_main_selector))
+        ]
+        assert "display:none!important" not in hidden_main_rule
     assert '.taiji-home-shell.taiji-welcome main.main.taiji-real-main #mainChat .messages-shell{' in STYLE_CSS
     assert "display:none!important;" in STYLE_CSS[
         STYLE_CSS.rindex(".taiji-home-shell.taiji-welcome main.main.taiji-real-main #mainChat .messages-shell{") :
