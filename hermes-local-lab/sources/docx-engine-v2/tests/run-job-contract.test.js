@@ -181,7 +181,68 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
   assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
 
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  assert.equal(renderPlan.templateData.metadata.assetDir, 'assets');
+  assert.equal(path.isAbsolute(renderPlan.templateData.metadata.assetDir), false);
+
   const wpsVisualCheck = findQualityCheck(qualityReport, 'wps_visual');
   assert.ok(wpsVisualCheck, 'quality-report.json must include a wps_visual check');
   assert.equal(wpsVisualCheck.status, 'not_verified');
+});
+
+test('run-job reports missing source assets as validation failure before rendering', (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.md');
+  const deliveryDir = path.join(root, 'delivery');
+
+  fs.writeFileSync(
+    sourcePath,
+    ['# Missing asset proposal', '', '## Architecture', '', '![Architecture](missing.png)', ''].join('\n')
+  );
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--asset-dir',
+    path.join(root, 'source.assets'),
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 3);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'validation_failed');
+  assert.match(payload.message, /缺少必需图片资产/);
+  assert.equal(fs.existsSync(deliveryDir), false);
+});
+
+test('run-job reports non-empty delivery directories as validation failure', (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.md');
+  const deliveryDir = path.join(root, 'delivery');
+
+  fs.mkdirSync(deliveryDir);
+  fs.writeFileSync(path.join(deliveryDir, 'existing.txt'), 'do not overwrite', 'utf8');
+  fs.writeFileSync(sourcePath, '# Proposal\n\n## Section\n\nText.\n');
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 3);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'validation_failed');
+  assert.match(payload.message, /输出目录非空/);
+  assert.equal(fs.readFileSync(path.join(deliveryDir, 'existing.txt'), 'utf8'), 'do not overwrite');
 });

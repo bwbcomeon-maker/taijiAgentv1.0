@@ -51,8 +51,10 @@ async function main() {
 
   const deliveryDir = path.resolve(args.outDir);
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-job-'));
+  let stage = 'validation';
 
   try {
+    assertEmptyDeliveryDir(deliveryDir);
     const sourceType = args.sourceType || inferSourceType(sourcePath);
     const sourcePackage = await normalizeSource({ sourceType, sourcePath });
     const templatePackage = getTemplatePackage(args.templateId, { rootDir: engineRoot });
@@ -61,14 +63,19 @@ async function main() {
       assetDir: args.assetDir || '',
       outDir: path.join(workspace, 'assets'),
     });
-    assetPackage.assetDir = path.join(workspace, 'assets');
     const renderPlan = buildRenderPlan({ sourcePackage, templatePackage, assetPackage });
+    const deliveryAssetPackage = {
+      ...assetPackage,
+      assetDir: path.join(workspace, 'assets'),
+    };
     const renderedPath = path.join(workspace, 'rendered.docx');
     const documentPath = path.join(workspace, 'document.docx');
 
+    stage = 'render';
     await renderDocx({ templatePackage, renderPlan, outputPath: renderedPath });
     await postprocessDocx({ docxPath: renderedPath, renderPlan, outputPath: documentPath });
 
+    stage = 'delivery';
     writeDeliveryPackage({
       deliveryDir,
       job: {
@@ -79,7 +86,7 @@ async function main() {
       },
       sourcePackage,
       templatePackage,
-      assetPackage,
+      assetPackage: deliveryAssetPackage,
       renderPlan,
       documentPath,
       qualityReport: initialQualityReport(),
@@ -114,10 +121,21 @@ async function main() {
     }
     process.exitCode = EXIT_CODES.success;
   } catch (error) {
-    writeJsonStdout({ ok: false, code: 'render_failed', message: error.message });
-    process.exitCode = EXIT_CODES.renderFailed;
+    const validationFailure = stage === 'validation' || stage === 'delivery';
+    writeJsonStdout({
+      ok: false,
+      code: validationFailure ? 'validation_failed' : 'render_failed',
+      message: error.message,
+    });
+    process.exitCode = validationFailure ? EXIT_CODES.validationFailed : EXIT_CODES.renderFailed;
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+function assertEmptyDeliveryDir(deliveryDir) {
+  if (fs.existsSync(deliveryDir) && fs.readdirSync(deliveryDir).length > 0) {
+    throw new Error(`输出目录非空: ${deliveryDir}`);
   }
 }
 

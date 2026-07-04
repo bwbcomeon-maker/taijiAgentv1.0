@@ -1,6 +1,5 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const { once } = require('node:events');
 const path = require('node:path');
 const yauzl = require('yauzl');
 const yazl = require('yazl');
@@ -60,15 +59,10 @@ function injectFigureMetadata(documentXml, renderPlan) {
   }
 
   let updatedXml = documentXml;
-  const primaryFigureId = figureIds[0];
+  const docPrMetadata = `docx-engine-v2 ${figureIds.map((figureId) => `figureId=${figureId}`).join(' ')}`;
   updatedXml = updatedXml.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
-    let nextAttributes = attributes;
-    if (!/\bdescr=/.test(nextAttributes)) {
-      nextAttributes += ` descr="${escapeXmlAttribute(`figureId=${primaryFigureId}`)}"`;
-    }
-    if (!/\btitle=/.test(nextAttributes)) {
-      nextAttributes += ` title="${escapeXmlAttribute(`figureId=${primaryFigureId}`)}"`;
-    }
+    let nextAttributes = upsertXmlAttribute(attributes, 'descr', docPrMetadata);
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
     return `<wp:docPr${nextAttributes}/>`;
   });
 
@@ -161,6 +155,7 @@ async function writeZipEntries(entries, outputPath) {
   await fsp.mkdir(path.dirname(absoluteOutputPath), { recursive: true });
   const zip = new yazl.ZipFile();
   const output = fs.createWriteStream(tempPath);
+  const writeFinished = waitForZipWrite({ zip, output, tempPath });
   zip.outputStream.pipe(output);
 
   for (const [entryName, entryBuffer] of entries) {
@@ -168,8 +163,33 @@ async function writeZipEntries(entries, outputPath) {
   }
 
   zip.end();
-  await once(output, 'close');
+  await writeFinished;
   await fsp.rename(tempPath, absoluteOutputPath);
+}
+
+function waitForZipWrite({ zip, output, tempPath }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      fs.rmSync(tempPath, { force: true });
+      reject(error);
+    };
+
+    output.on('error', fail);
+    zip.outputStream.on('error', fail);
+    output.on('close', () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve();
+    });
+  });
 }
 
 function escapeXmlText(value) {
@@ -181,6 +201,15 @@ function escapeXmlText(value) {
 
 function escapeXmlAttribute(value) {
   return escapeXmlText(value).replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+function upsertXmlAttribute(attributes, name, value) {
+  const escapedValue = escapeXmlAttribute(value);
+  const attributePattern = new RegExp(`\\s${name}="[^"]*"`);
+  if (attributePattern.test(attributes)) {
+    return attributes.replace(attributePattern, ` ${name}="${escapedValue}"`);
+  }
+  return `${attributes} ${name}="${escapedValue}"`;
 }
 
 module.exports = { postprocessDocx };

@@ -2,7 +2,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { once } = require('node:events');
 const test = require('node:test');
+const yauzl = require('yauzl');
+const yazl = require('yazl');
 
 const { packageAssets } = require('../src/assets/package-assets');
 const { buildRenderPlan } = require('../src/planning/build-render-plan');
@@ -114,6 +117,16 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   assert.ok(
     report.checks.some((check) => check.id === 'wps_visual' && check.status === 'not_verified')
   );
+  assert.ok(
+    report.checks.some(
+      (check) => check.id === 'image_coverage' && check.status === 'passed_with_warnings'
+    )
+  );
+  assert.ok(
+    report.checks.some(
+      (check) => check.id === 'table_coverage' && check.status === 'passed_with_warnings'
+    )
+  );
   assert.deepEqual(
     report.checks.map((check) => check.id),
     [
@@ -138,3 +151,106 @@ test('validateDeliveryPackage fails when a required delivery file is missing', a
   assert.equal(report.status, 'failed');
   assert.ok(report.failures.some((item) => item.includes('render-plan.json')));
 });
+
+test('validateDeliveryPackage requires figure ids to be bound to DOCX image metadata', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await removeFigureIdFromDocPr(path.join(deliveryDir, 'document.docx'), 'image-001');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const metadataCheck = report.checks.find((check) => check.id === 'figure_id_metadata');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(metadataCheck?.status, 'failed');
+  assert.match(metadataCheck?.message || '', /image-001/);
+});
+
+async function removeFigureIdFromDocPr(docxPath, figureId) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const updatedXml = documentXml.replace(/<wp:docPr\b[^>]*>/g, (tag) =>
+    tag.replace(new RegExp(`\\s?figureId=${figureId}`, 'g'), '')
+  );
+  entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
+  await writeZipEntries(entries, docxPath);
+}
+
+function readZipEntries(docxPath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(docxPath, { lazyEntries: true }, (openError, zipfile) => {
+      if (openError) {
+        reject(openError);
+        return;
+      }
+
+      const entries = new Map();
+      let settled = false;
+
+      const fail = (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          zipfile.close();
+        } catch (_closeError) {
+          // Preserve the original error.
+        }
+        reject(error);
+      };
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(entries);
+      };
+
+      zipfile.on('entry', (entry) => {
+        if (settled) {
+          return;
+        }
+        if (entry.fileName.endsWith('/')) {
+          zipfile.readEntry();
+          return;
+        }
+
+        zipfile.openReadStream(entry, (streamError, readStream) => {
+          if (streamError) {
+            fail(streamError);
+            return;
+          }
+
+          const chunks = [];
+          readStream.on('data', (chunk) => chunks.push(chunk));
+          readStream.on('error', fail);
+          readStream.on('end', () => {
+            if (settled) {
+              return;
+            }
+            entries.set(entry.fileName, Buffer.concat(chunks));
+            zipfile.readEntry();
+          });
+        });
+      });
+      zipfile.on('error', fail);
+      zipfile.on('end', finish);
+      zipfile.readEntry();
+    });
+  });
+}
+
+async function writeZipEntries(entries, docxPath) {
+  const tempPath = `${docxPath}.tmp-${process.pid}`;
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(tempPath);
+  zip.outputStream.pipe(output);
+
+  for (const [entryName, entryBuffer] of entries) {
+    zip.addBuffer(entryBuffer, entryName);
+  }
+
+  zip.end();
+  await once(output, 'close');
+  fs.renameSync(tempPath, docxPath);
+}

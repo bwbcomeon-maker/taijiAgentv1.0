@@ -84,8 +84,8 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addSchemaCheck({ addCheck, jsonFiles });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addTemplateMarkersCheck({ addCheck, documentXml });
-  addImageCoverageCheck({ addCheck, deliveryDir, renderPlan: jsonFiles.renderPlan });
-  addTableCoverageCheck({ addCheck, renderPlan: jsonFiles.renderPlan });
+  addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan: jsonFiles.renderPlan });
+  addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
   const wpsStatus = normalizeWpsStatus(wpsVisualStatus);
@@ -149,7 +149,7 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
     return;
   }
 
-  if (/\{d\.[^}]+}/.test(documentXml)) {
+  if (hasTemplateMarkers(documentXml)) {
     addCheck(
       'template_markers',
       'passed_with_warnings',
@@ -161,7 +161,7 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
   addCheck('template_markers', 'passed');
 }
 
-function addImageCoverageCheck({ addCheck, deliveryDir, renderPlan }) {
+function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan }) {
   if (!renderPlan) {
     addCheck('image_coverage', 'failed', 'render-plan.json is required for image coverage.');
     return;
@@ -177,10 +177,19 @@ function addImageCoverageCheck({ addCheck, deliveryDir, renderPlan }) {
     return;
   }
 
+  if (hasTemplateMarkers(documentXml)) {
+    addCheck(
+      'image_coverage',
+      'passed_with_warnings',
+      'Image assets are present in the delivery package, but DOCX visual insertion is not fully verified while template markers remain.'
+    );
+    return;
+  }
+
   addCheck('image_coverage', 'passed');
 }
 
-function addTableCoverageCheck({ addCheck, renderPlan }) {
+function addTableCoverageCheck({ addCheck, documentXml, renderPlan }) {
   if (!renderPlan) {
     addCheck('table_coverage', 'failed', 'render-plan.json is required for table coverage.');
     return;
@@ -191,6 +200,15 @@ function addTableCoverageCheck({ addCheck, renderPlan }) {
   const missingTableIds = [...plannedTableIds].filter((tableId) => !templateTableIds.has(tableId));
   if (missingTableIds.length > 0) {
     addCheck('table_coverage', 'failed', `Missing template table data: ${missingTableIds.join(', ')}`);
+    return;
+  }
+
+  if (hasTemplateMarkers(documentXml)) {
+    addCheck(
+      'table_coverage',
+      'passed_with_warnings',
+      'Table data is present in render-plan.json, but DOCX table rendering is not fully verified while template markers remain.'
+    );
     return;
   }
 
@@ -213,13 +231,32 @@ function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
     return;
   }
 
-  const missingFigureIds = figureIds.filter((figureId) => !documentXml.includes(`figureId=${figureId}`));
+  const docPrFigureIds = extractDocPrFigureIds(documentXml);
+  const missingFigureIds = figureIds.filter((figureId) => !docPrFigureIds.has(figureId));
   if (missingFigureIds.length > 0) {
-    addCheck('figure_id_metadata', 'failed', `Missing DOCX figureId metadata: ${missingFigureIds.join(', ')}`);
+    addCheck(
+      'figure_id_metadata',
+      'failed',
+      `Missing DOCX figureId metadata on image objects: ${missingFigureIds.join(', ')}`
+    );
     return;
   }
 
   addCheck('figure_id_metadata', 'passed');
+}
+
+function hasTemplateMarkers(documentXml) {
+  return /\{d\.[^}]+}/.test(documentXml || '');
+}
+
+function extractDocPrFigureIds(documentXml) {
+  const figureIds = new Set();
+  for (const match of String(documentXml || '').matchAll(/<wp:docPr\b[^>]*>/g)) {
+    for (const figureMatch of match[0].matchAll(/\bfigureId=([A-Za-z0-9_-]+)/g)) {
+      figureIds.add(figureMatch[1]);
+    }
+  }
+  return figureIds;
 }
 
 function buildReport(checksById, warnings, failures) {
