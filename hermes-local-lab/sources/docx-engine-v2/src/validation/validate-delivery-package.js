@@ -194,6 +194,21 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     return;
   }
 
+  if (
+    jsonFiles.jobManifest.status === 'delivered' &&
+    normalizeComparablePath(jsonFiles.jobManifest.workspace) !==
+      normalizeComparablePath(jsonFiles.deliveryPackage.deliveryDir)
+  ) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package workspace mismatch: job.manifest.json workspace=${
+        jsonFiles.jobManifest.workspace || 'missing'
+      }, delivery-package.json deliveryDir=${jsonFiles.deliveryPackage.deliveryDir || 'missing'}`
+    );
+    return;
+  }
+
   addCheck('schema', 'passed');
 }
 
@@ -315,6 +330,11 @@ function normalizeRelativePackagePath(value) {
     return '';
   }
   return normalized;
+}
+
+function normalizeComparablePath(value) {
+  const normalized = String(value || '').trim();
+  return normalized ? path.resolve(normalized) : '';
 }
 
 function tagValidationErrors(source, errors) {

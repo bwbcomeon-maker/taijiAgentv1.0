@@ -505,6 +505,23 @@ test('validateDeliveryPackage fails when job and render plan disagree on job id'
   assert.match(consistencyCheck?.message || '', /job id|job\.manifest|render-plan/i);
 });
 
+test('validateDeliveryPackage fails when delivered job workspace disagrees with delivery manifest', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const jobManifestPath = path.join(deliveryDir, 'job.manifest.json');
+  const jobManifest = JSON.parse(fs.readFileSync(jobManifestPath, 'utf8'));
+  jobManifest.status = 'delivered';
+  jobManifest.deliveredAt = '2026-07-05T10:00:00.000Z';
+  jobManifest.workspace = path.join(path.dirname(deliveryDir), 'stale-build-workspace');
+  fs.writeFileSync(jobManifestPath, `${JSON.stringify(jobManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const consistencyCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(consistencyCheck?.status, 'failed');
+  assert.match(consistencyCheck?.message || '', /workspace|delivery-package|job\.manifest/i);
+});
+
 test('validateDeliveryPackage requires figure ids to be bound to DOCX image metadata', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await removeFigureIdFromDocPr(path.join(deliveryDir, 'document.docx'), 'fig-002');
