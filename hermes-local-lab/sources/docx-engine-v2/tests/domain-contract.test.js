@@ -30,56 +30,40 @@ test('DocumentJob contract accepts a complete render job', () => {
   assert.deepEqual(validateDomainObject('DocumentJob', documentJob), { ok: true });
 });
 
-test('ValidationReport contract preserves WPS and Word visual checks as not_verified', () => {
+test('ValidationReport contract preserves WPS visual acceptance as not_verified', () => {
   const validationReport = {
-    reportId: 'quality-report-job-20260704-001',
-    jobId: 'job-20260704-001',
+    schemaVersion: 'docx-engine-v2/validation-report',
     status: 'passed_with_warnings',
     checks: [
       {
-        id: 'package_manifest',
+        id: 'docx_zip',
         status: 'passed',
       },
       {
         id: 'wps_visual',
         status: 'not_verified',
-        required: true,
-      },
-      {
-        id: 'word_visual',
-        status: 'not_verified',
-        required: true,
       },
     ],
-    warnings: [
-      {
-        code: 'visual_acceptance_not_verified',
-        message: 'WPS/Word visual acceptance must be completed by a human reviewer.',
-      },
-    ],
+    warnings: ['WPS visual acceptance has not been verified by a human reviewer.'],
     failures: [],
   };
 
   assert.deepEqual(validateDomainObject('ValidationReport', validationReport), { ok: true });
   assert.equal(validationReport.status, 'passed_with_warnings');
   assert.equal(
-    validationReport.checks.find((check) => check.id === 'wps_visual')?.status,
-    'not_verified'
+    validationReport.checks.find((check) => check.id === 'docx_zip')?.status,
+    'passed'
   );
   assert.equal(
-    validationReport.checks.find((check) => check.id === 'word_visual')?.status,
+    validationReport.checks.find((check) => check.id === 'wps_visual')?.status,
     'not_verified'
   );
 });
 
 test('DeliveryPackage contract requires the complete editable delivery bundle', () => {
   const deliveryPackage = {
-    packageId: 'delivery-job-20260704-001',
-    jobId: 'job-20260704-001',
-    templateId: 'general-proposal',
-    createdAt: '2026-07-04T09:35:00.000Z',
-    status: 'ready',
-    root: '/tmp/docx-engine-v2/job-20260704-001/delivery',
+    schemaVersion: 'docx-engine-v2/delivery-package',
+    deliveryDir: '/tmp/delivery',
     files: {
       document: 'document.docx',
       source: 'source.md',
@@ -90,6 +74,7 @@ test('DeliveryPackage contract requires the complete editable delivery bundle', 
       qualityReport: 'quality-report.json',
       imageInstructions: 'README-图片调整说明.md',
     },
+    status: 'delivered',
   };
 
   assert.deepEqual(validateDomainObject('DeliveryPackage', deliveryPackage), { ok: true });
