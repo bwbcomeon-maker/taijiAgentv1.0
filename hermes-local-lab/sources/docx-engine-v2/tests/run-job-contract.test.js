@@ -44,8 +44,31 @@ function assertExitCode(result, expectedCode) {
 }
 
 function parseStdoutJson(result) {
-  assert.ok(result.stdout.trim(), `expected JSON stdout\nstderr:\n${result.stderr}`);
-  return JSON.parse(result.stdout);
+  const rawStdout = result.stdout.trim();
+  assert.ok(
+    rawStdout,
+    `expected JSON stdout\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+  );
+
+  try {
+    return JSON.parse(rawStdout);
+  } catch (error) {
+    assert.fail(
+      `failed to parse stdout as JSON\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}\nerror: ${error.message}`
+    );
+  }
+}
+
+function readJsonFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    assert.fail(
+      `failed to parse JSON file: ${filePath}\ncontents:\n${raw}\nerror: ${error.message}`
+    );
+  }
 }
 
 function findQualityCheck(report, checkId) {
@@ -147,9 +170,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
     assert.equal(fs.existsSync(path.join(deliveryDir, entry)), true, `${entry} must exist`);
   }
 
-  const qualityReport = JSON.parse(
-    fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8')
-  );
+  const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
   assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
 
   const wpsVisualCheck = findQualityCheck(qualityReport, 'wps_visual');

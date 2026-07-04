@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 const { validateDomainObject } = require('../src/domain/validate');
@@ -10,11 +12,11 @@ test('DocumentJob contract accepts a complete render job', () => {
     sourceRef: {
       type: 'markdown',
       path: 'source.md',
-      sha256: 'c9ad04f6c5f4d9a46c95c6642ce8c09b',
+      sha256: '3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7',
     },
     templateId: 'general-proposal',
     status: 'created',
-    workspace: '/tmp/docx-engine-v2/job-20260704-001',
+    workspace: path.join(os.tmpdir(), 'docx-engine-v2', 'job-20260704-001'),
     inputs: [
       { type: 'source', path: 'source.md' },
       { type: 'asset_dir', path: 'assets' },
@@ -27,7 +29,8 @@ test('DocumentJob contract accepts a complete render job', () => {
     failures: [],
   };
 
-  assert.deepEqual(validateDomainObject('DocumentJob', documentJob), { ok: true });
+  const result = validateDomainObject('DocumentJob', documentJob);
+  assert.equal(result.ok, true, JSON.stringify(result.errors || result));
 });
 
 test('ValidationReport contract preserves WPS visual acceptance as not_verified', () => {
@@ -48,7 +51,8 @@ test('ValidationReport contract preserves WPS visual acceptance as not_verified'
     failures: [],
   };
 
-  assert.deepEqual(validateDomainObject('ValidationReport', validationReport), { ok: true });
+  const result = validateDomainObject('ValidationReport', validationReport);
+  assert.equal(result.ok, true, JSON.stringify(result.errors || result));
   assert.equal(validationReport.status, 'passed_with_warnings');
   assert.equal(
     validationReport.checks.find((check) => check.id === 'docx_zip')?.status,
@@ -63,7 +67,7 @@ test('ValidationReport contract preserves WPS visual acceptance as not_verified'
 test('DeliveryPackage contract requires the complete editable delivery bundle', () => {
   const deliveryPackage = {
     schemaVersion: 'docx-engine-v2/delivery-package',
-    deliveryDir: '/tmp/delivery',
+    deliveryDir: path.join(os.tmpdir(), 'delivery'),
     files: {
       document: 'document.docx',
       source: 'source.md',
@@ -77,5 +81,6 @@ test('DeliveryPackage contract requires the complete editable delivery bundle', 
     status: 'delivered',
   };
 
-  assert.deepEqual(validateDomainObject('DeliveryPackage', deliveryPackage), { ok: true });
+  const result = validateDomainObject('DeliveryPackage', deliveryPackage);
+  assert.equal(result.ok, true, JSON.stringify(result.errors || result));
 });
