@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img">
+  <title>Architecture fixture</title>
+  <rect width="640" height="360" fill="#ffffff"/>
+  <rect x="40" y="70" width="160" height="90" rx="8" fill="#ecfeff" stroke="#0891b2" stroke-width="3"/>
+  <rect x="240" y="70" width="160" height="90" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="3"/>
+  <rect x="440" y="70" width="160" height="90" rx="8" fill="#fff7ed" stroke="#ea580c" stroke-width="3"/>
+  <path d="M205 115h30M405 115h30" stroke="#334155" stroke-width="4" marker-end="url(#arrow)"/>
+  <text x="120" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0f172a">Source</text>
+  <text x="320" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0f172a">Plan</text>
+  <text x="520" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0f172a">Delivery</text>
+  <text x="320" y="235" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#0f172a">DOCX Engine V2</text>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+  </defs>
+</svg>

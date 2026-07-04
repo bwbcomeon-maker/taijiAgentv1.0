@@ -163,9 +163,17 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
     assetDir,
     '--out-dir',
     deliveryDir,
+    '--json',
   ]);
 
   assertExitCode(result, 0);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, true);
+  assert.match(payload.jobId, /^job-/);
+  assert.equal(payload.deliveryDir, deliveryDir);
+  assert.equal(payload.documentPath, path.join(deliveryDir, 'document.docx'));
+  assert.match(payload.qualityStatus, /^(passed|passed_with_warnings)$/);
+
   for (const entry of REQUIRED_DELIVERY_ENTRIES) {
     assert.equal(fs.existsSync(path.join(deliveryDir, entry)), true, `${entry} must exist`);
   }
