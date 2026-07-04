@@ -51,6 +51,7 @@
 - 已让交付包复验校验 `render-plan.json` 的章节、表格、figure 和普通图片仍与 `source-package.json` 对齐，避免渲染计划与归一化源包各自合法但结构来源已经脱钩。
 - 已让交付包复验校验 `render-plan.json` 的章节 `blockIds` 与 `templateData.sections[].blocks` 仍和 `source-package.json` 的正文块一致，避免归一化正文被改动或章节块归属漂移后仍通过自动质量门。
 - 已让交付包复验校验 `asset-package.json` 的表格、figure、普通图片仍与 `source-package.json` 对齐，并校验其展示文件路径/哈希与 `render-plan.json` 一致，避免资产包元数据或文件指针与真实渲染计划脱钩。
+- 已让交付包复验校验普通图片 `asset-package.json images[].sourcePath` 仍匹配 `source-package.json images[].path`，避免展示图和 DOCX 正确但资产来源被串换后仍通过自动质量门。
 - 已把 `job.manifest.json`、`template.manifest.json`、`render-plan.json`、`quality-report.json` 等交付证据文件纳入 `fileSha256`，并让复验写回和 WPS/Word 验收写回同步刷新质量报告哈希，避免清单文件被改动后仍被误判为同一交付包。
 - 已把 `AssetPackage` 持久化为 `asset-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终交付只剩散落的 `assets/` 目录而缺少资产结构证据。
 - 已让可编辑图源（如 `assets/fig-001/source.mmd`）记录 `sourceSha256` 并在交付包复验时比对，避免源图被改动但展示图/DOCX 未重渲染时仍误判为同一交付状态。

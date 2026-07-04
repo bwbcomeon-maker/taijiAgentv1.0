@@ -538,8 +538,27 @@ function sourceImageListConsistencyFailures({ actualImages, expectedImages, actu
         );
       }
     }
+    const actualSourcePath = String(actual.sourcePath ?? '');
+    const expectedPath = String(expected.path ?? '');
+    if (actualSourcePath && expectedPath && !assetSourcePathMatchesExpected(actualSourcePath, expectedPath)) {
+      failures.push(
+        `${actualLabel}.${expected.imageId}.sourcePath=${displayValue(actualSourcePath)} does not match ${expectedLabel}.${expected.imageId}.path=${displayValue(expectedPath)}`
+      );
+    }
   }
   return failures;
+}
+
+function assetSourcePathMatchesExpected(actualSourcePath, expectedPath) {
+  const actual = normalizeComparableRelativePath(actualSourcePath);
+  const expected = normalizeComparableRelativePath(expectedPath);
+  if (!actual || !expected) {
+    return false;
+  }
+  if (actual === expected) {
+    return true;
+  }
+  return actual.endsWith(`/${expected}`);
 }
 
 function templateImageConsistencyFailures({ actualImages, expectedFigures, expectedImages }) {
@@ -810,6 +829,14 @@ function stringArraysEqual(actual, expected) {
     return false;
   }
   return actual.every((item, index) => String(item) === String(expected[index]));
+}
+
+function normalizeComparableRelativePath(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+/g, '/');
 }
 
 function displayValue(value) {
