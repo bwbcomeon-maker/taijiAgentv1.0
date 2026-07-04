@@ -14,6 +14,7 @@ const CHECK_IDS = [
   'image_coverage',
   'table_coverage',
   'figure_id_metadata',
+  'figure_placement',
   'delivery_files',
   'wps_visual',
 ];
@@ -119,6 +120,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   });
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addFigurePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
   addWpsVisualCheck({
     addCheck,
@@ -752,6 +754,35 @@ function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
   addCheck('figure_id_metadata', 'passed');
 }
 
+function addFigurePlacementCheck({ addCheck, documentXml, renderPlan }) {
+  if (!documentXml) {
+    addCheck('figure_placement', 'failed', 'Cannot inspect figure placement without word/document.xml.');
+    return;
+  }
+  if (!renderPlan) {
+    addCheck('figure_placement', 'failed', 'render-plan.json is required for figure placement validation.');
+    return;
+  }
+
+  const images = renderPlan.templateData?.images || [];
+  if (images.length === 0) {
+    addCheck('figure_placement', 'passed_with_warnings', 'No images were present in render-plan.json.');
+    return;
+  }
+
+  const placementFailures = figurePlacementFailures({ documentXml, renderPlan });
+  if (placementFailures.length > 0) {
+    addCheck(
+      'figure_placement',
+      'failed',
+      `DOCX figure placement does not match render-plan sections: ${placementFailures.join(', ')}`
+    );
+    return;
+  }
+
+  addCheck('figure_placement', 'passed');
+}
+
 function hasTemplateMarkers(documentXml) {
   return /\{d\.[^}]+}/.test(documentXml || '');
 }
@@ -829,6 +860,109 @@ function parseDocPrMetadata(tag) {
     metadata[match[1]] = match[2];
   }
   return metadata;
+}
+
+function figurePlacementFailures({ documentXml, renderPlan }) {
+  const failures = [];
+  const sectionRanges = figureSectionRanges(documentXml, renderPlan);
+  const figurePositions = docPrFigurePositions(documentXml);
+
+  for (const image of renderPlan.templateData?.images || []) {
+    const figureId = String(image?.figureId || '').trim();
+    const sectionId = String(image?.metadata?.sectionId || '').trim();
+    if (!figureId || !sectionId) {
+      continue;
+    }
+
+    const position = figurePositions.get(figureId);
+    if (!Number.isInteger(position)) {
+      failures.push(`${figureId} missing DOCX drawing for placement check`);
+      continue;
+    }
+
+    const range = sectionRanges.get(sectionId);
+    if (!range) {
+      failures.push(`${figureId} missing render-plan section anchor ${sectionId}`);
+      continue;
+    }
+
+    if (position <= range.start || position >= range.end) {
+      failures.push(
+        `${figureId} appears outside section ${sectionId} placement range`
+      );
+    }
+  }
+
+  return failures;
+}
+
+function figureSectionRanges(documentXml, renderPlan) {
+  const ranges = new Map();
+  const paragraphs = paragraphRanges(documentXml);
+  const sections = renderPlan.templateData?.sections || renderPlan.sections || [];
+  const anchors = sections
+    .map((section) => {
+      const title = String(section?.title || '').trim();
+      if (!section?.sectionId || !title) {
+        return null;
+      }
+      const candidates = paragraphs.filter((paragraph) => paragraph.text.includes(title));
+      const anchor = candidates[candidates.length - 1];
+      return anchor ? { sectionId: section.sectionId, start: anchor.end } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.start - right.start);
+
+  for (let index = 0; index < anchors.length; index += 1) {
+    ranges.set(anchors[index].sectionId, {
+      start: anchors[index].start,
+      end: anchors[index + 1]?.start || bodyEndIndex(documentXml),
+    });
+  }
+  return ranges;
+}
+
+function docPrFigurePositions(documentXml) {
+  const positions = new Map();
+  for (const match of String(documentXml || '').matchAll(/<wp:docPr\b[^>]*>/g)) {
+    const metadata = parseDocPrMetadata(match[0]);
+    if (metadata.figureId && !positions.has(metadata.figureId)) {
+      positions.set(metadata.figureId, match.index);
+    }
+  }
+  return positions;
+}
+
+function paragraphRanges(documentXml) {
+  const ranges = [];
+  for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+    ranges.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: paragraphText(match[0]),
+    });
+  }
+  return ranges;
+}
+
+function paragraphText(paragraphXml) {
+  return [...String(paragraphXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => unescapeXmlText(match[1]))
+    .join('');
+}
+
+function unescapeXmlText(value) {
+  return String(value || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function bodyEndIndex(documentXml) {
+  const bodyEnd = String(documentXml || '').indexOf('</w:body>');
+  return bodyEnd >= 0 ? bodyEnd : String(documentXml || '').length;
 }
 
 function buildReport(checksById, warnings, failures) {

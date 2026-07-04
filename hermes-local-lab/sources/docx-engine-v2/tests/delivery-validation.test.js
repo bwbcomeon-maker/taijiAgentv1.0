@@ -114,6 +114,7 @@ async function makeDeliveryPackage(t) {
         { id: 'image_coverage', status: 'passed' },
         { id: 'table_coverage', status: 'passed' },
         { id: 'figure_id_metadata', status: 'passed' },
+        { id: 'figure_placement', status: 'passed' },
         { id: 'delivery_files', status: 'passed' },
         { id: 'wps_visual', status: 'not_verified' },
       ],
@@ -176,6 +177,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       (check) => check.id === 'table_coverage' && check.status === 'passed'
     )
   );
+  assert.ok(
+    report.checks.some(
+      (check) => check.id === 'figure_placement' && check.status === 'passed'
+    )
+  );
   assert.deepEqual(
     report.checks.map((check) => check.id),
     [
@@ -186,6 +192,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'image_coverage',
       'table_coverage',
       'figure_id_metadata',
+      'figure_placement',
       'delivery_files',
       'wps_visual',
     ]
@@ -630,6 +637,19 @@ test('validateDeliveryPackage fails when DOCX figure section metadata drifts fro
   assert.match(metadataCheck?.message || '', /fig-001|sectionId|render-plan/i);
 });
 
+test('validateDeliveryPackage fails when a DOCX figure appears before its render-plan section', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await moveFigureDrawingBeforeBody(path.join(deliveryDir, 'document.docx'), 'fig-001');
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const placementCheck = report.checks.find((check) => check.id === 'figure_placement');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(placementCheck?.status, 'failed');
+  assert.match(placementCheck?.message || '', /fig-001|section|placement/i);
+});
+
 test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
@@ -659,6 +679,29 @@ async function rewriteDocPrForFigure(docxPath, figureId, rewriteTag) {
   });
   entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
   await writeZipEntries(entries, docxPath);
+}
+
+async function moveFigureDrawingBeforeBody(docxPath, figureId) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const drawing = findDrawingForFigure(documentXml, figureId);
+  assert.ok(drawing, `fixture must include drawing for ${figureId}`);
+  const withoutDrawing = documentXml.replace(drawing, '');
+  entries.set(
+    'word/document.xml',
+    Buffer.from(withoutDrawing.replace('<w:body>', `<w:body>${drawing}`), 'utf8')
+  );
+  await writeZipEntries(entries, docxPath);
+}
+
+function findDrawingForFigure(documentXml, figureId) {
+  const figurePattern = new RegExp(`\\bfigureId=${figureId}\\b`);
+  for (const match of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+    if (figurePattern.test(match[0])) {
+      return match[0];
+    }
+  }
+  return '';
 }
 
 function refreshDeliveryDocumentHash(deliveryDir) {

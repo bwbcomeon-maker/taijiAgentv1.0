@@ -70,20 +70,23 @@ function bindPlannedImages({ entries, documentXml, renderPlan, outputPath }) {
     entries.set(mediaEntry, fs.readFileSync(imagePath));
     relationshipsXml = appendImageRelationship(relationshipsXml, relationshipId, `media/${mediaFileName}`);
     contentTypesXml = ensureContentType(contentTypesXml, extension, contentType);
-    boundDrawings.push(updateDrawingTemplate({
-      drawingXml: drawingTemplate,
-      relationshipId,
-      figureId: image.figureId || `fig-${index + 1}`,
-      docPrId: 9000 + index,
-      title: image.caption || image.figureId || `图 ${index + 1}`,
-      metadata: image.metadata || {},
-    }));
+    boundDrawings.push({
+      image,
+      drawingXml: updateDrawingTemplate({
+        drawingXml: drawingTemplate,
+        relationshipId,
+        figureId: image.figureId || `fig-${index + 1}`,
+        docPrId: 9000 + index,
+        title: image.caption || image.figureId || `图 ${index + 1}`,
+        metadata: image.metadata || {},
+      }),
+    });
   });
 
   entries.set(relationshipsEntry, Buffer.from(relationshipsXml, 'utf8'));
   entries.set(contentTypesEntry, Buffer.from(contentTypesXml, 'utf8'));
   const nextDocumentXml = boundDrawings.length
-    ? replaceFirstDrawing(documentXml, boundDrawings.join(''))
+    ? insertDrawingsBySection(documentXml, boundDrawings, renderPlan)
     : documentXml;
   entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
 }
@@ -146,8 +149,77 @@ function firstDrawingXml(documentXml) {
   return String(documentXml || '').match(/<w:drawing\b[\s\S]*?<\/w:drawing>/)?.[0] || '';
 }
 
-function replaceFirstDrawing(documentXml, drawingsXml) {
-  return String(documentXml || '').replace(/<w:drawing\b[\s\S]*?<\/w:drawing>/, drawingsXml);
+function insertDrawingsBySection(documentXml, boundDrawings, renderPlan) {
+  const sectionsById = new Map((renderPlan.templateData?.sections || renderPlan.sections || []).map((section) => [
+    section.sectionId,
+    section,
+  ]));
+  const groups = new Map();
+  for (const binding of boundDrawings) {
+    const sectionId = binding.image?.metadata?.sectionId || '';
+    if (!groups.has(sectionId)) {
+      groups.set(sectionId, []);
+    }
+    groups.get(sectionId).push(binding.drawingXml);
+  }
+
+  const insertions = [];
+  for (const [sectionId, drawings] of groups) {
+    const section = sectionsById.get(sectionId);
+    const insertionIndex = section ? sectionInsertionIndex(documentXml, section.title) : -1;
+    insertions.push({
+      index: insertionIndex >= 0 ? insertionIndex : fallbackInsertionIndex(documentXml),
+      xml: drawings.join(''),
+    });
+  }
+
+  let nextXml = documentXml;
+  for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
+    nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
+  }
+  return nextXml;
+}
+
+function sectionInsertionIndex(documentXml, sectionTitle) {
+  const title = String(sectionTitle || '').trim();
+  if (!title) {
+    return -1;
+  }
+
+  const candidates = paragraphRanges(documentXml).filter((paragraph) => paragraph.text.includes(title));
+  return candidates.length ? candidates[candidates.length - 1].end : -1;
+}
+
+function fallbackInsertionIndex(documentXml) {
+  const bodyEnd = String(documentXml || '').indexOf('</w:body>');
+  return bodyEnd >= 0 ? bodyEnd : String(documentXml || '').length;
+}
+
+function paragraphRanges(documentXml) {
+  const ranges = [];
+  for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+    ranges.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: paragraphText(match[0]),
+    });
+  }
+  return ranges;
+}
+
+function paragraphText(paragraphXml) {
+  return [...String(paragraphXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => unescapeXmlText(match[1]))
+    .join('');
+}
+
+function unescapeXmlText(value) {
+  return String(value || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 function hasDocPrFigureMetadata(documentXml, figureIds) {
