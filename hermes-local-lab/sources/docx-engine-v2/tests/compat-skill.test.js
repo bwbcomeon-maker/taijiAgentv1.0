@@ -69,6 +69,8 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
 
   assert.equal(fs.existsSync(path.join(outDir, 'SKILL.md')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'skill.json')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'README.md')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'skill-invocation-contract.md')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/apply-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/self-test.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/package-rich-draft.js')), true);
@@ -91,8 +93,21 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/validate-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/scaffold-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/render-template-sample.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'engine/README.md')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'runtime')), false);
+
+  const readme = fs.readFileSync(path.join(outDir, 'README.md'), 'utf8');
+  const contract = fs.readFileSync(path.join(outDir, 'skill-invocation-contract.md'), 'utf8');
+  const engineReadme = fs.readFileSync(path.join(outDir, 'engine/README.md'), 'utf8');
+  assert.match(readme, /node scripts\/self-test\.js --out-dir/);
+  assert.match(readme, /Do not edit engine\/template-registry\.json by hand/);
+  assert.match(contract, /template_selection_required/);
+  assert.match(contract, /template-install-report\.json/);
+  assert.match(contract, /quality-report\.json/);
+  assert.match(contract, /record-wps-visual/);
+  assert.match(engineReadme, /node src\/cli\/run-job\.js/);
+  assert.match(engineReadme, /node src\/cli\/install-template\.js/);
 });
 
 test('copyable apply-template wrapper renders a delivery package through v2', (t) => {

@@ -16,12 +16,18 @@ function main(argv = process.argv.slice(2)) {
 
   copyRecursive(path.join(rootDir, 'compat', 'docx-template-skill', 'SKILL.md'), path.join(outDir, 'SKILL.md'));
   copyRecursive(path.join(rootDir, 'compat', 'docx-template-skill', 'skill.json'), path.join(outDir, 'skill.json'));
+  copyRecursive(path.join(rootDir, 'compat', 'docx-template-skill', 'README.md'), path.join(outDir, 'README.md'));
+  copyRecursive(
+    path.join(rootDir, 'compat', 'docx-template-skill', 'skill-invocation-contract.md'),
+    path.join(outDir, 'skill-invocation-contract.md')
+  );
   copyRecursive(path.join(rootDir, 'compat', 'docx-template-skill', 'scripts'), path.join(outDir, 'scripts'));
   copyRecursive(path.join(rootDir, 'src'), path.join(outDir, 'engine', 'src'));
   copyRecursive(path.join(rootDir, 'templates'), path.join(outDir, 'engine', 'templates'));
   copyRecursive(path.join(rootDir, 'template-registry.json'), path.join(outDir, 'engine', 'template-registry.json'));
   copyRecursive(path.join(rootDir, 'package.json'), path.join(outDir, 'engine', 'package.json'));
   copyRecursive(path.join(rootDir, 'package-lock.json'), path.join(outDir, 'engine', 'package-lock.json'));
+  copyRecursive(path.join(rootDir, 'README.md'), path.join(outDir, 'engine', 'README.md'));
 
   const nodeModules = path.join(rootDir, 'node_modules');
   if (fs.existsSync(nodeModules)) {
