@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const path = require('node:path');
+const fs = require('node:fs');
 
 const { validateDeliveryPackage } = require('../validation/validate-delivery-package');
 
@@ -15,10 +16,15 @@ function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
     const qualityReport = validateDeliveryPackage({ deliveryDir: args.deliveryDir });
+    const qualityReportPath = path.join(args.deliveryDir, 'quality-report.json');
+    if (args.writeReport) {
+      writeJson(qualityReportPath, qualityReport);
+    }
     const payload = {
       ok: qualityReport.status !== 'failed',
       code: qualityReport.status === 'failed' ? 'delivery_validation_failed' : undefined,
       deliveryDir: args.deliveryDir,
+      qualityReportPath: args.writeReport ? qualityReportPath : undefined,
       qualityReport,
       failures: qualityReport.failures,
     };
@@ -44,12 +50,17 @@ function parseArgs(argv) {
   const parsed = {
     deliveryDir: '',
     json: false,
+    writeReport: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--json') {
       parsed.json = true;
+      continue;
+    }
+    if (arg === '--write-report') {
+      parsed.writeReport = true;
       continue;
     }
 
@@ -69,4 +80,8 @@ function parseArgs(argv) {
     throw new Error('缺少必填参数: --delivery-dir');
   }
   return parsed;
+}
+
+function writeJson(filePath, value) {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }

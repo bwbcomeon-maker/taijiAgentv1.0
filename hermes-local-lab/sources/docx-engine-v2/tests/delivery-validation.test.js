@@ -229,6 +229,28 @@ test('validate-delivery CLI exits nonzero when the delivery package is invalid',
   assert.ok(payload.failures.some((failure) => /render-plan\.json/.test(failure)));
 });
 
+test('validate-delivery CLI writes the refreshed quality report when requested', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
+
+  const result = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--write-report',
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 3, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  const writtenReport = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8'));
+
+  assert.equal(payload.ok, false);
+  assert.equal(payload.qualityReport.status, 'failed');
+  assert.equal(writtenReport.status, 'failed');
+  assert.ok(writtenReport.failures.some((failure) => /render-plan\.json/.test(failure)));
+});
+
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const reportPath = path.join(deliveryDir, 'quality-report.json');

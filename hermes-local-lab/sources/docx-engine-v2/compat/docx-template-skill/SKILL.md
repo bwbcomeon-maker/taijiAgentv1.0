@@ -37,6 +37,7 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
 7. Re-run delivery package validation at any time:
    ```bash
    node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
+   node scripts/validate-delivery.js --delivery-dir <delivery-dir> --write-report --json
    ```
 8. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
    ```bash

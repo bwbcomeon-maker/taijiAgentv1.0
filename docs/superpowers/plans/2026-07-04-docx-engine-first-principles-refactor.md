@@ -44,3 +44,4 @@
 - 已把 `wps_visual` 人工验收证据绑定到 `document.docx` 的 SHA-256；记录验收时写入文档哈希，重新校验时若文档被替换或改动则验收门失败。
 - 已让记录 WPS/Word 人工验收前先执行当前交付包自动校验；除 `wps_visual` 本身外，只要任一自动门失败就拒绝写入“人工通过”。
 - 已新增 `validate-delivery` 交付包复验 CLI，并在 copyable skill 暴露 `scripts/validate-delivery.js`，让用户拿到交付包后可独立重新验证质量报告。
+- 已为 `validate-delivery` 增加显式 `--write-report`，复验后可把最新质量报告写回交付包，避免 `quality-report.json` 与当前文件状态脱节。
