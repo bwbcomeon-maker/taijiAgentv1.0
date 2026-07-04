@@ -227,6 +227,36 @@ test('validateDeliveryPackage fails when delivery package manifest is not tracea
   assert.match(schemaCheck?.message || '', /delivery-package\.json|DeliveryPackage/);
 });
 
+test('validateDeliveryPackage fails when delivery package manifest points at missing files', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const manifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.files.document = 'missing-document.docx';
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const filesCheck = report.checks.find((check) => check.id === 'delivery_files');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(filesCheck?.status, 'failed');
+  assert.match(filesCheck?.message || '', /files\.document|missing-document\.docx/);
+});
+
+test('validateDeliveryPackage fails when delivery package manifest maps a role to the wrong path', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const manifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.files.document = 'source.md';
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const filesCheck = report.checks.find((check) => check.id === 'delivery_files');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(filesCheck?.status, 'failed');
+  assert.match(filesCheck?.message || '', /files\.document.*document\.docx/);
+});
+
 test('validateDeliveryPackage fails when job manifest is not traceable', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
 

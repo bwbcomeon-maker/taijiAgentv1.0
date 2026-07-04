@@ -30,6 +30,17 @@ const REQUIRED_ENTRIES = [
   'README-图片调整说明.md',
 ];
 
+const DELIVERY_MANIFEST_FIXED_FILES = {
+  document: 'document.docx',
+  source: 'source.md',
+  assetsDir: 'assets',
+  jobManifest: 'job.manifest.json',
+  templateManifest: 'template.manifest.json',
+  renderPlan: 'render-plan.json',
+  qualityReport: 'quality-report.json',
+  imageInstructions: 'README-图片调整说明.md',
+};
+
 function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified' } = {}) {
   const checksById = new Map();
   const failures = [];
@@ -87,6 +98,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   }
 
   addSchemaCheck({ addCheck, jsonFiles });
+  addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage: jsonFiles.deliveryPackage });
   addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest: jsonFiles.jobManifest });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addTemplateMarkersCheck({ addCheck, documentXml });
@@ -147,6 +159,55 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
   }
 
   addCheck('schema', 'passed');
+}
+
+function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage }) {
+  const files = deliveryPackage?.files;
+  if (!files || typeof files !== 'object') {
+    return;
+  }
+
+  const failures = [];
+  for (const [field, expectedPath] of Object.entries(DELIVERY_MANIFEST_FIXED_FILES)) {
+    if (files[field] !== expectedPath) {
+      failures.push(
+        `delivery-package.json files.${field} must be ${expectedPath}, got ${files[field] || ''}`
+      );
+    }
+  }
+
+  const originalSource = normalizeRelativePackagePath(files.originalSource);
+  if (!originalSource || !originalSource.startsWith('source/original/')) {
+    failures.push(
+      `delivery-package.json files.originalSource must be inside source/original/, got ${files.originalSource || ''}`
+    );
+  }
+
+  for (const [field, relativePath] of Object.entries(files)) {
+    const normalizedPath = normalizeRelativePackagePath(relativePath);
+    if (!normalizedPath) {
+      failures.push(`delivery-package.json files.${field} must be a relative package path.`);
+      continue;
+    }
+    if (!fs.existsSync(path.join(deliveryDir, normalizedPath))) {
+      failures.push(`delivery-package.json files.${field} points to missing path: ${relativePath}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    addCheck('delivery_files', 'failed', `Invalid delivery package file references: ${failures.join('; ')}`);
+  }
+}
+
+function normalizeRelativePackagePath(value) {
+  if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value)) {
+    return '';
+  }
+  const normalized = path.normalize(value).replaceAll(path.sep, '/');
+  if (normalized === '..' || normalized.startsWith('../')) {
+    return '';
+  }
+  return normalized;
 }
 
 function tagValidationErrors(source, errors) {
