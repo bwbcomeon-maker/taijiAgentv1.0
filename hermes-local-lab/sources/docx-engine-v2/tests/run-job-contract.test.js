@@ -215,6 +215,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.schemaVersion, 'docx-engine-v2/delivery-package');
   assert.equal(deliveryManifest.deliveryDir, deliveryDir);
   assert.equal(deliveryManifest.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
+  assert.equal(deliveryManifest.sourceSha256, sha256File(path.join(deliveryDir, 'source.md')));
   assert.equal(deliveryManifest.files.document, 'document.docx');
   assert.equal(deliveryManifest.files.source, 'source.md');
   assert.equal(deliveryManifest.files.originalSource, `source/original/${path.basename(sourcePath)}`);

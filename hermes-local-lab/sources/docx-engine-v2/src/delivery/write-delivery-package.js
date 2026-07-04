@@ -59,8 +59,9 @@ function writeDeliveryPackage({
   fs.mkdirSync(deliveryDir, { recursive: true });
 
   const deliveryDocumentPath = path.join(deliveryDir, 'document.docx');
+  const deliverySourcePath = path.join(deliveryDir, 'source.md');
   fs.copyFileSync(documentPath, deliveryDocumentPath);
-  fs.writeFileSync(path.join(deliveryDir, 'source.md'), sourceMarkdown(sourcePackage), 'utf8');
+  fs.writeFileSync(deliverySourcePath, sourceMarkdown(sourcePackage), 'utf8');
   const originalSource = copyOriginalSource({ deliveryDir, sourcePackage });
   copyAssets({ deliveryDir, sourcePackage, assetPackage });
   writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizedJob);
@@ -73,6 +74,7 @@ function writeDeliveryPackage({
     schemaVersion: 'docx-engine-v2/delivery-package',
     deliveryDir: manifestDeliveryDir || deliveryDir,
     documentSha256: sha256File(deliveryDocumentPath),
+    sourceSha256: sha256File(deliverySourcePath),
     files: {
       document: 'document.docx',
       source: 'source.md',

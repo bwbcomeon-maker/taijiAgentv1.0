@@ -265,6 +265,20 @@ test('validateDeliveryPackage fails when document.docx no longer matches the del
   assert.ok(report.failures.some((failure) => /document\.docx sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when source.md no longer matches the delivery manifest hash', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePath = path.join(deliveryDir, 'source.md');
+  const deliveryManifest = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+
+  assert.equal(deliveryManifest.sourceSha256, sha256File(sourcePath));
+
+  fs.appendFileSync(sourcePath, '\nTampered source summary.\n');
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  assert.ok(report.failures.some((failure) => /source\.md sha256 mismatch/.test(failure)));
+});
+
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const reportPath = path.join(deliveryDir, 'quality-report.json');

@@ -258,6 +258,19 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
     }
   }
 
+  const expectedSourceHash = String(deliveryPackage.sourceSha256 || '').trim();
+  const sourcePath = path.join(deliveryDir, normalizeRelativePackagePath(files.source) || 'source.md');
+  if (!expectedSourceHash) {
+    failures.push('delivery-package.json sourceSha256 is required.');
+  } else if (fs.existsSync(sourcePath)) {
+    const actualSourceHash = sha256File(sourcePath);
+    if (actualSourceHash !== expectedSourceHash) {
+      failures.push(
+        `source.md sha256 mismatch: expected ${expectedSourceHash}, got ${actualSourceHash}`
+      );
+    }
+  }
+
   if (failures.length > 0) {
     addCheck('delivery_files', 'failed', `Invalid delivery package file references: ${failures.join('; ')}`);
   }
