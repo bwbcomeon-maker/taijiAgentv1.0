@@ -860,6 +860,20 @@ test('validateDeliveryPackage fails when the original source copy hash differs f
   assert.match(sourceCheck?.message || '', /hash/i);
 });
 
+test('validateDeliveryPackage fails when source.md drifts from the original markdown source', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  fs.writeFileSync(path.join(deliveryDir, 'source.md'), '# Misleading human source copy\n', 'utf8');
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['source'] });
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const sourceCheck = report.checks.find((check) => check.id === 'source_original');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(sourceCheck?.status, 'failed');
+  assert.match(sourceCheck?.message || '', /source\.md.*original markdown source/i);
+});
+
 test('validateDeliveryPackage fails when source package can no longer be replayed from the original source', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const sourcePackagePath = path.join(deliveryDir, 'source-package.json');

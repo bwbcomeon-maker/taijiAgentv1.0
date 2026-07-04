@@ -128,7 +128,12 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
     deliveryPackage: jsonFiles.deliveryPackage,
     jobManifest: jsonFiles.jobManifest,
   });
-  addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest: jsonFiles.jobManifest });
+  addSourceOriginalCheck({
+    addCheck,
+    deliveryDir,
+    jobManifest: jsonFiles.jobManifest,
+    sourcePackage: jsonFiles.sourcePackage,
+  });
   addSourceReplayCheck({
     addCheck,
     deliveryDir,
@@ -1036,7 +1041,7 @@ function tagValidationErrors(source, errors) {
   return (errors || []).map((error) => ({ source, ...error }));
 }
 
-function addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest }) {
+function addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest, sourcePackage }) {
   const sourceRef = jobManifest?.sourceRef || {};
   const expectedHash = String(sourceRef.sha256 || '').trim();
   const originalSourcePath = path.join(deliveryDir, 'source', 'original', originalSourceFileName(sourceRef));
@@ -1057,7 +1062,36 @@ function addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest }) {
     );
     return;
   }
+  const sourceCopyFailures = sourceMarkdownCopyFailures({
+    deliveryDir,
+    originalSourcePath,
+    sourcePackage,
+    sourceRef,
+  });
+  if (sourceCopyFailures.length > 0) {
+    addCheck('source_original', 'failed', sourceCopyFailures.join('; '));
+    return;
+  }
   addCheck('source_original', 'passed');
+}
+
+function sourceMarkdownCopyFailures({ deliveryDir, originalSourcePath, sourcePackage, sourceRef }) {
+  const sourceType = String(sourcePackage?.sourceType || sourceRef?.type || '').trim();
+  if (sourceType !== 'markdown') {
+    return [];
+  }
+
+  const sourcePath = path.join(deliveryDir, 'source.md');
+  if (!fs.existsSync(sourcePath)) {
+    return ['source.md is missing.'];
+  }
+
+  const sourceCopy = fs.readFileSync(sourcePath);
+  const originalSource = fs.readFileSync(originalSourcePath);
+  if (!sourceCopy.equals(originalSource)) {
+    return ['source.md no longer matches original markdown source copy.'];
+  }
+  return [];
 }
 
 function addSourceReplayCheck({ addCheck, deliveryDir, sourcePackage, jobManifest }) {
