@@ -34,19 +34,14 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    ```bash
    node scripts/replace-docx-image.js --docx <input.docx> --figure-id fig-001 --image <replacement.png|svg> --out <updated.docx>
    ```
-7. Re-run delivery package validation at any time:
-   ```bash
-   node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
-   node scripts/validate-delivery.js --delivery-dir <delivery-dir> --write-report --json
-   ```
-8. Replay a delivery package from its original source copy, template manifest, and packaged assets:
+7. Replay a delivery package from its original source copy, template manifest, and packaged assets:
    ```bash
    node scripts/replay-delivery.js --delivery-dir <delivery-dir> --json
    node scripts/replay-delivery.js --delivery-dir <delivery-dir> --write-report --json
    node scripts/replay-delivery.js --delivery-dir <delivery-dir> --out-dir <replay-output-dir> --json
    ```
    Use `--write-report` after rerendering package assets so `replay-report.json`, `delivery-package.json`, and `quality-report.json` are rebound before final validation.
-9. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
+8. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
    ```bash
    node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed \
      --visual-check document_opened \
@@ -58,6 +53,12 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
      --note "已检查目录、图表、图片和版式" --json
    ```
    For `passed` or `passed_with_warnings`, include all required `--visual-check` values and at least one `--evidence-file`. `figures_reviewed` is required only when the render plan contains images, and `tables_reviewed` is required only when it contains tables. Evidence files are copied into the delivery package and rebound by sha256.
+9. Run final delivery validation after both replay and WPS/Word evidence are recorded:
+   ```bash
+   node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
+   node scripts/validate-delivery.js --delivery-dir <delivery-dir> --write-report --json
+   ```
+   Final validation fails while `wps_visual` remains `not_verified`.
 10. Create a new template package from an existing package before editing its DOCX/schema/prompt files:
    ```bash
    node scripts/scaffold-template.js --from general-proposal --template-id <new-template-id> --name "<template-name>" --out-dir <template-package-dir> --json

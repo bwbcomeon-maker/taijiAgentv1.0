@@ -39,7 +39,7 @@ node src/cli/run-job.js --template-id general-proposal --source <source.md|sourc
 If `--template-id` is missing, `run-job` returns `template_selection_required`
 and does not create delivery output.
 
-Validate a delivery package:
+Validate a final delivery package:
 
 ```bash
 node src/cli/validate-delivery.js --delivery-dir <delivery-dir> --json
@@ -47,8 +47,8 @@ node src/cli/validate-delivery.js --delivery-dir <delivery-dir> --write-report -
 ```
 
 The CLI validates final delivery packages and requires the package to include a
-hash-bound `replay-report.json`. Internal pre-replay staging validation is kept
-inside the workflow API.
+hash-bound `replay-report.json` plus recorded WPS/Word visual acceptance with
+evidence. Internal pre-replay staging validation is kept inside the workflow API.
 
 Replay a delivery package from its packaged original source:
 
@@ -60,6 +60,8 @@ node src/cli/replay-delivery.js --delivery-dir <delivery-dir> --write-report --j
 Use `--write-report` after package-level figure rerendering or other accepted
 asset updates. It writes `replay-report.json` back into the delivery package,
 updates the delivery manifest hashes, and refreshes `quality-report.json`.
+Run final `validate-delivery` after replay evidence and WPS/Word visual
+acceptance have both been recorded.
 
 Record human WPS/Word visual acceptance:
 

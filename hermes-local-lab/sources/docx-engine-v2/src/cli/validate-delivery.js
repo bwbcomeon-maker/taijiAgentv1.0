@@ -20,6 +20,7 @@ function main() {
       deliveryDir: args.deliveryDir,
       requireReplayReport: true,
       enforceStoredQualityReport: !args.writeReport,
+      requireWpsVisualAcceptance: true,
     });
     const qualityReportPath = path.join(args.deliveryDir, 'quality-report.json');
     if (args.writeReport) {

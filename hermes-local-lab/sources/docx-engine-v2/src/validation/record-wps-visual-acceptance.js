@@ -216,7 +216,7 @@ function removeWpsNotVerifiedWarnings(warnings) {
 function removePreviousWpsFailures(failures) {
   return (Array.isArray(failures) ? failures : [])
     .map((item) => String(item || ''))
-    .filter((item) => item && !/^WPS\/Word visual inspection failed/i.test(item));
+    .filter((item) => item && !/^WPS\/Word visual (?:inspection|acceptance)/i.test(item));
 }
 
 function reportStatus({ checks, warnings, failures }) {
@@ -237,7 +237,12 @@ function uniqueStrings(items) {
 }
 
 function assertAutomatedDeliveryGatesPassed(deliveryDir) {
-  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const report = validateDeliveryPackage({
+    deliveryDir,
+    requireReplayReport: true,
+    enforceStoredQualityReport: false,
+    requireWpsVisualAcceptance: false,
+  });
   const failedChecks = (report.checks || []).filter(
     (check) => check.id !== 'wps_visual' && check.status === 'failed'
   );

@@ -37,12 +37,12 @@ the output is the traceable source of truth:
 node scripts/apply-template.js --template-id general-proposal --source <source.md> --asset-dir <asset-dir> --out <output.docx>
 ```
 
-Validate, replay, and record WPS/Word visual acceptance:
+Replay, record WPS/Word visual acceptance, then run final validation:
 
 ```bash
+node scripts/replay-delivery.js --delivery-dir <delivery-dir> --write-report --json
+node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --evidence-file <wps-screenshot-or-export> --note "checked in WPS" --json
 node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
-node scripts/replay-delivery.js --delivery-dir <delivery-dir> --json
-node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --note "checked in WPS" --json
 ```
 
 ## Template Maintenance

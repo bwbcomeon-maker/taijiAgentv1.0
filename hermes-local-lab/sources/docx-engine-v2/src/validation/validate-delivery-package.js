@@ -68,6 +68,7 @@ function validateDeliveryPackage({
   wpsVisualStatus = 'not_verified',
   requireReplayReport = false,
   enforceStoredQualityReport = requireReplayReport,
+  requireWpsVisualAcceptance = false,
 } = {}) {
   const checksById = new Map();
   const failures = [];
@@ -197,6 +198,7 @@ function validateDeliveryPackage({
     qualityReport: jsonFiles.qualityReport,
     renderPlan: jsonFiles.renderPlan,
     fallbackStatus: wpsVisualStatus,
+    requireWpsVisualAcceptance,
   });
 
   return buildReport(checksById, warnings, failures);
@@ -1199,7 +1201,14 @@ function expectedOriginalSourcePath(sourceRef = {}) {
   return `source/original/${originalSourceFileName(sourceRef)}`;
 }
 
-function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, renderPlan, fallbackStatus }) {
+function addWpsVisualCheck({
+  addCheck,
+  deliveryDir,
+  qualityReport,
+  renderPlan,
+  fallbackStatus,
+  requireWpsVisualAcceptance,
+}) {
   const recordedCheck = Array.isArray(qualityReport?.checks)
     ? qualityReport.checks.find((check) => check?.id === 'wps_visual')
     : null;
@@ -1235,6 +1244,14 @@ function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, renderPlan, f
         message = visualEvidenceValidation.message;
       }
     }
+  }
+  if (
+    requireWpsVisualAcceptance &&
+    status !== 'failed' &&
+    !['passed', 'passed_with_warnings'].includes(recordedStatus)
+  ) {
+    status = 'failed';
+    message = 'WPS/Word visual inspection has not been verified for final delivery.';
   }
   addCheck('wps_visual', status, message, wpsVisualEvidence(recordedCheck));
 }

@@ -74,16 +74,18 @@ Every delivery package must include:
 - `quality-report.json`
 - `README-图片调整说明.md`
 
-Validate and replay before claiming package integrity:
+Replay and record WPS/Word evidence before claiming final package integrity:
 
 ```bash
+node scripts/replay-delivery.js --delivery-dir <delivery-dir> --write-report --json
+node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --evidence-file <wps-screenshot-or-export> --note "checked in WPS" --json
 node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
-node scripts/replay-delivery.js --delivery-dir <delivery-dir> --json
 ```
 
 `quality-report.json` can be `passed_with_warnings` while `wps_visual` is
-`not_verified`. That is acceptable for automated validation, but it is not final
-WPS/Word visual approval.
+`not_verified`. That is acceptable for automated validation, but final
+`validate-delivery` fails until WPS/Word visual approval has been recorded with
+evidence.
 
 Record human acceptance only after opening `document.docx` in WPS or Word:
 

@@ -65,6 +65,38 @@ function buildSkillPackage(t) {
   return { workspace, outDir };
 }
 
+function recordWpsVisualAcceptance({ outDir, workspace, deliveryDir, evidenceName }) {
+  const evidencePath = path.join(workspace, evidenceName);
+  fs.writeFileSync(evidencePath, 'WPS visual review evidence\n', 'utf8');
+  const result = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/record-wps-visual.js'),
+    '--delivery-dir',
+    deliveryDir,
+    '--status',
+    'passed',
+    '--reviewer',
+    'test',
+    '--visual-check',
+    'document_opened',
+    '--visual-check',
+    'layout_reviewed',
+    '--visual-check',
+    'content_order_reviewed',
+    '--visual-check',
+    'figures_reviewed',
+    '--visual-check',
+    'tables_reviewed',
+    '--evidence-file',
+    evidencePath,
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  return payload;
+}
+
 test('build-copyable-skill writes a v2-backed skill package without runtime leftovers', (t) => {
   const { outDir } = buildSkillPackage(t);
 
@@ -135,6 +167,13 @@ test('copyable apply-template wrapper renders a delivery package through v2', (t
   assert.equal(fs.existsSync(path.join(deliveryDir, 'document.docx')), true);
   assert.equal(fs.existsSync(path.join(deliveryDir, 'render-plan.json')), true);
   assert.equal(fs.existsSync(path.join(deliveryDir, 'quality-report.json')), true);
+
+  recordWpsVisualAcceptance({
+    outDir,
+    workspace,
+    deliveryDir,
+    evidenceName: 'apply-template-wps-evidence.txt',
+  });
 
   const validateResult = spawnSync(process.execPath, [
     path.join(outDir, 'scripts/validate-delivery.js'),
@@ -363,6 +402,13 @@ test('copyable replay-delivery wrapper can rebind replay evidence after package 
   const deliveryPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
   assert.equal(deliveryPackage.files.replayReport, 'replay-report.json');
   assert.equal(deliveryPackage.fileSha256.replayReport, sha256File(path.join(deliveryDir, 'replay-report.json')));
+
+  recordWpsVisualAcceptance({
+    outDir,
+    workspace,
+    deliveryDir,
+    evidenceName: 'replay-rebind-wps-evidence.txt',
+  });
 
   const validateResult = spawnSync(process.execPath, [
     path.join(outDir, 'scripts/validate-delivery.js'),
