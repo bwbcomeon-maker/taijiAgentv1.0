@@ -47,6 +47,7 @@
 - 已把 `document.docx` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免交付后文档被替换却仍被清单误判为同一交付物。
 - 已把 `source.md` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免人工查看/后续处理入口被改动却仍通过质量门。
 - 已把归一化后的 `SourcePackage` 持久化为 `source-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终包只能查看 Markdown/原始文件却无法追溯引擎实际理解到的章节、表格、图片和块级锚点。
+- 已让交付包复验校验 `source-package.json.sourceRef` 与 `job.manifest.json.sourceRef` 完全一致，避免源包与作业清单各自合法、哈希也同步更新，但实际指向不同原始输入。
 - 已把 `job.manifest.json`、`template.manifest.json`、`render-plan.json`、`quality-report.json` 等交付证据文件纳入 `fileSha256`，并让复验写回和 WPS/Word 验收写回同步刷新质量报告哈希，避免清单文件被改动后仍被误判为同一交付包。
 - 已把 `AssetPackage` 持久化为 `asset-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终交付只剩散落的 `assets/` 目录而缺少资产结构证据。
 - 已让可编辑图源（如 `assets/fig-001/source.mmd`）记录 `sourceSha256` 并在交付包复验时比对，避免源图被改动但展示图/DOCX 未重渲染时仍误判为同一交付状态。

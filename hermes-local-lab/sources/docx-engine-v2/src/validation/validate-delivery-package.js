@@ -236,6 +236,19 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     return;
   }
 
+  const sourceRefFailures = sourceRefConsistencyFailures({
+    sourcePackage: jsonFiles.sourcePackage,
+    jobManifest: jsonFiles.jobManifest,
+  });
+  if (sourceRefFailures.length > 0) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package sourceRef mismatch: ${sourceRefFailures.join(', ')}`
+    );
+    return;
+  }
+
   if (
     jsonFiles.jobManifest.status === 'delivered' &&
     normalizeComparablePath(jsonFiles.jobManifest.workspace) !==
@@ -252,6 +265,22 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
   }
 
   addCheck('schema', 'passed');
+}
+
+function sourceRefConsistencyFailures({ sourcePackage, jobManifest }) {
+  const failures = [];
+  const sourceRef = sourcePackage?.sourceRef || {};
+  const jobSourceRef = jobManifest?.sourceRef || {};
+  for (const field of ['type', 'path', 'sha256']) {
+    const sourcePackageValue = String(sourceRef[field] || '');
+    const jobManifestValue = String(jobSourceRef[field] || '');
+    if (sourcePackageValue !== jobManifestValue) {
+      failures.push(
+        `source-package.json sourceRef.${field}=${sourcePackageValue || 'missing'} does not match job.manifest.json sourceRef.${field}=${jobManifestValue || 'missing'}`
+      );
+    }
+  }
+  return failures;
 }
 
 function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage }) {

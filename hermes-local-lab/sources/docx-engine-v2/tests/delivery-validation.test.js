@@ -335,6 +335,26 @@ test('validateDeliveryPackage fails when source-package.json no longer matches t
   assert.ok(report.failures.some((failure) => /source-package\.json sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when source package sourceRef disagrees with the job manifest', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const sourcePackagePath = path.join(deliveryDir, 'source-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const sourcePackage = JSON.parse(fs.readFileSync(sourcePackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  sourcePackage.sourceRef.sha256 = '0'.repeat(64);
+  fs.writeFileSync(sourcePackagePath, `${JSON.stringify(sourcePackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.sourcePackage = sha256File(sourcePackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /source-package\.json sourceRef.*job\.manifest\.json sourceRef/);
+});
+
 test('validateDeliveryPackage fails when render-plan.json no longer matches the delivery manifest hash', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
