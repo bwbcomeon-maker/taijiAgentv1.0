@@ -19,6 +19,7 @@ function main() {
       status: args.status,
       reviewedBy: args.reviewer,
       note: args.note,
+      visualChecks: args.visualChecks,
     });
     const payload = {
       ok: true,
@@ -49,6 +50,7 @@ function parseArgs(argv) {
     status: 'passed',
     reviewer: 'user',
     note: '',
+    visualChecks: [],
     json: false,
   };
 
@@ -56,6 +58,15 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === '--json') {
       parsed.json = true;
+      continue;
+    }
+    if (arg === '--visual-check') {
+      const check = argv[index + 1];
+      if (!check || check.startsWith('--')) {
+        throw new Error(`参数缺少值: ${arg}`);
+      }
+      parsed.visualChecks.push(check);
+      index += 1;
       continue;
     }
     const next = argv[index + 1];

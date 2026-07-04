@@ -528,6 +528,7 @@ const schemas = {
             reviewedAt: { type: 'string' },
             reviewedBy: { type: 'string' },
             documentSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+            visualChecks: stringArraySchema,
           },
         },
       },

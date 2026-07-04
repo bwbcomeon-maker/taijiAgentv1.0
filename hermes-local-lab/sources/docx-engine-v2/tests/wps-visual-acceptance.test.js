@@ -15,6 +15,13 @@ const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
 );
+const VISUAL_CHECKS = [
+  'document_opened',
+  'layout_reviewed',
+  'content_order_reviewed',
+  'figures_reviewed',
+  'tables_reviewed',
+];
 
 async function makeDelivery(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-wps-'));
@@ -80,6 +87,7 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
     reviewedAt: '2026-07-05T10:00:00.000Z',
     reviewedBy: 'user',
     note: '目录、图表、图片和版式已在 WPS 检查。',
+    visualChecks: VISUAL_CHECKS,
   });
 
   assert.equal(result.ok, true);
@@ -90,12 +98,30 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   assert.equal(wpsVisual.reviewedAt, '2026-07-05T10:00:00.000Z');
   assert.equal(wpsVisual.reviewedBy, 'user');
   assert.equal(wpsVisual.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
+  assert.deepEqual(wpsVisual.visualChecks, VISUAL_CHECKS);
   assert.match(wpsVisual.message, /目录、图表、图片和版式/);
   assert.equal(readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual').status, 'passed');
   assert.equal(
     readDeliveryManifest(deliveryDir).fileSha256.qualityReport,
     sha256File(path.join(deliveryDir, 'quality-report.json'))
   );
+});
+
+test('recordWpsVisualAcceptance rejects passed status without required visual checklist', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+
+  assert.throws(
+    () => recordWpsVisualAcceptance({
+      deliveryDir,
+      status: 'passed',
+      reviewedAt: '2026-07-05T10:00:30.000Z',
+      reviewedBy: 'user',
+      note: '只写一句已检查不应算最终验收。',
+    }),
+    /visual checks.*document_opened|missing visual checks/i
+  );
+  const wpsVisual = readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual');
+  assert.notEqual(wpsVisual?.status, 'passed');
 });
 
 test('recordWpsVisualAcceptance writes back the full final validation report', async (t) => {
@@ -116,6 +142,7 @@ test('recordWpsVisualAcceptance writes back the full final validation report', a
     reviewedAt: '2026-07-05T10:01:00.000Z',
     reviewedBy: 'user',
     note: '最终验收前先刷新质量报告。',
+    visualChecks: VISUAL_CHECKS,
   });
 
   assert.ok(
@@ -141,6 +168,7 @@ test('recordWpsVisualAcceptance rejects WPS pass when automated package validati
       reviewedAt: '2026-07-05T10:03:00.000Z',
       reviewedBy: 'user',
       note: '不应允许自动校验失败后记录通过。',
+      visualChecks: VISUAL_CHECKS,
     }),
     /automated validation.*render-plan\.json/i
   );
@@ -165,6 +193,7 @@ test('recordWpsVisualAcceptance rejects WPS pass when replay-report.json is miss
       reviewedAt: '2026-07-05T10:03:30.000Z',
       reviewedBy: 'user',
       note: '不能把缺少重放证据的包标记为人工通过。',
+      visualChecks: VISUAL_CHECKS,
     }),
     /automated validation.*replay-report\.json/i
   );
@@ -218,6 +247,16 @@ test('record-wps-visual CLI updates quality-report and emits JSON', async (t) =>
     'passed',
     '--reviewer',
     'user',
+    '--visual-check',
+    'document_opened',
+    '--visual-check',
+    'layout_reviewed',
+    '--visual-check',
+    'content_order_reviewed',
+    '--visual-check',
+    'figures_reviewed',
+    '--visual-check',
+    'tables_reviewed',
     '--note',
     '已在 WPS 打开检查。',
     '--json',

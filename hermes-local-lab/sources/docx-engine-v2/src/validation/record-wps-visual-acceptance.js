@@ -7,6 +7,9 @@ const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { validateDeliveryPackage } = require('./validate-delivery-package');
 
 const ACCEPTANCE_STATUSES = new Set(['passed', 'passed_with_warnings', 'failed']);
+const BASE_REQUIRED_VISUAL_CHECKS = ['document_opened', 'layout_reviewed', 'content_order_reviewed'];
+const FIGURE_VISUAL_CHECK = 'figures_reviewed';
+const TABLE_VISUAL_CHECK = 'tables_reviewed';
 
 function recordWpsVisualAcceptance({
   deliveryDir,
@@ -14,6 +17,7 @@ function recordWpsVisualAcceptance({
   reviewedAt = new Date().toISOString(),
   reviewedBy = '',
   note = '',
+  visualChecks = [],
 } = {}) {
   if (!deliveryDir) {
     throw new Error('deliveryDir is required.');
@@ -30,8 +34,13 @@ function recordWpsVisualAcceptance({
   let report = null;
   if (normalizedStatus !== 'failed') {
     report = assertAutomatedDeliveryGatesPassed(path.resolve(deliveryDir));
+    assertVisualChecksComplete({
+      deliveryDir: path.resolve(deliveryDir),
+      visualChecks,
+    });
   }
   report = report || readJson(qualityReportPath);
+  const normalizedVisualChecks = normalizeVisualChecks(visualChecks);
   const checks = Array.isArray(report.checks) ? [...report.checks] : [];
   const wpsCheckIndex = checks.findIndex((check) => check.id === 'wps_visual');
   const nextWpsCheck = {
@@ -42,6 +51,9 @@ function recordWpsVisualAcceptance({
     reviewedBy: String(reviewedBy || 'user'),
     documentSha256: sha256File(documentPath),
   };
+  if (normalizedVisualChecks.length > 0) {
+    nextWpsCheck.visualChecks = normalizedVisualChecks;
+  }
   if (wpsCheckIndex >= 0) {
     checks[wpsCheckIndex] = { ...checks[wpsCheckIndex], ...nextWpsCheck };
   } else {
@@ -84,6 +96,34 @@ function normalizeAcceptanceStatus(status) {
     throw new Error(`Invalid WPS visual status: ${normalized || ''}`);
   }
   return normalized;
+}
+
+function assertVisualChecksComplete({ deliveryDir, visualChecks }) {
+  const provided = new Set(normalizeVisualChecks(visualChecks));
+  const required = requiredVisualChecksForDelivery(deliveryDir);
+  const missing = required.filter((check) => !provided.has(check));
+  if (missing.length > 0) {
+    throw new Error(`Missing WPS visual checks: ${missing.join(', ')}`);
+  }
+}
+
+function requiredVisualChecksForDelivery(deliveryDir) {
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const renderPlan = fs.existsSync(renderPlanPath) ? readJson(renderPlanPath) : {};
+  const required = [...BASE_REQUIRED_VISUAL_CHECKS];
+  if ((renderPlan.templateData?.images || renderPlan.figures || []).length > 0) {
+    required.push(FIGURE_VISUAL_CHECK);
+  }
+  if ((renderPlan.templateData?.tables || renderPlan.tables || []).length > 0) {
+    required.push(TABLE_VISUAL_CHECK);
+  }
+  return required;
+}
+
+function normalizeVisualChecks(visualChecks) {
+  return [...new Set((Array.isArray(visualChecks) ? visualChecks : [visualChecks])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean))];
 }
 
 function buildWpsMessage(status, note) {

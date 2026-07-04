@@ -64,8 +64,19 @@ updates the delivery manifest hashes, and refreshes `quality-report.json`.
 Record human WPS/Word visual acceptance:
 
 ```bash
-node src/cli/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --note "checked in WPS" --json
+node src/cli/record-wps-visual.js --delivery-dir <delivery-dir> --status passed \
+  --visual-check document_opened \
+  --visual-check layout_reviewed \
+  --visual-check content_order_reviewed \
+  --visual-check figures_reviewed \
+  --visual-check tables_reviewed \
+  --note "checked in WPS" --json
 ```
+
+For `passed` or `passed_with_warnings`, the CLI requires structured visual
+checks. `document_opened`, `layout_reviewed`, and `content_order_reviewed` are
+always required. `figures_reviewed` is required when the render plan contains
+images, and `tables_reviewed` is required when it contains tables.
 
 ## Template Packages
 

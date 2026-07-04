@@ -195,6 +195,7 @@ function validateDeliveryPackage({
     addCheck,
     deliveryDir,
     qualityReport: jsonFiles.qualityReport,
+    renderPlan: jsonFiles.renderPlan,
     fallbackStatus: wpsVisualStatus,
   });
 
@@ -1198,7 +1199,7 @@ function expectedOriginalSourcePath(sourceRef = {}) {
   return `source/original/${originalSourceFileName(sourceRef)}`;
 }
 
-function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, fallbackStatus }) {
+function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, renderPlan, fallbackStatus }) {
   const recordedCheck = Array.isArray(qualityReport?.checks)
     ? qualityReport.checks.find((check) => check?.id === 'wps_visual')
     : null;
@@ -1211,6 +1212,17 @@ function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, fallbackStatu
     if (!hashValidation.ok) {
       status = 'failed';
       message = hashValidation.message;
+    }
+    if (status !== 'failed') {
+      const visualChecksValidation = validateWpsVisualChecks({
+        recordedCheck,
+        renderPlan,
+        status: recordedStatus,
+      });
+      if (!visualChecksValidation.ok) {
+        status = 'failed';
+        message = visualChecksValidation.message;
+      }
     }
   }
   addCheck('wps_visual', status, message, wpsVisualEvidence(recordedCheck));
@@ -1238,6 +1250,39 @@ function validateWpsVisualDocumentHash({ deliveryDir, recordedCheck }) {
   return { ok: true };
 }
 
+function validateWpsVisualChecks({ recordedCheck, renderPlan, status }) {
+  if (!['passed', 'passed_with_warnings'].includes(status)) {
+    return { ok: true };
+  }
+  const provided = new Set(normalizeVisualChecks(recordedCheck?.visualChecks || []));
+  const required = requiredWpsVisualChecks(renderPlan);
+  const missing = required.filter((check) => !provided.has(check));
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `WPS/Word visual acceptance is missing required visual checks: ${missing.join(', ')}.`,
+    };
+  }
+  return { ok: true };
+}
+
+function requiredWpsVisualChecks(renderPlan) {
+  const required = ['document_opened', 'layout_reviewed', 'content_order_reviewed'];
+  if ((renderPlan?.templateData?.images || renderPlan?.figures || []).length > 0) {
+    required.push('figures_reviewed');
+  }
+  if ((renderPlan?.templateData?.tables || renderPlan?.tables || []).length > 0) {
+    required.push('tables_reviewed');
+  }
+  return required;
+}
+
+function normalizeVisualChecks(visualChecks) {
+  return [...new Set((Array.isArray(visualChecks) ? visualChecks : [visualChecks])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean))];
+}
+
 function normalizeOptionalWpsStatus(status) {
   const normalized = String(status || '').trim();
   return normalized ? normalizeWpsStatus(normalized) : '';
@@ -1248,7 +1293,7 @@ function wpsVisualEvidence(check) {
     return {};
   }
   const evidence = {};
-  for (const key of ['reviewedAt', 'reviewedBy', 'documentSha256']) {
+  for (const key of ['reviewedAt', 'reviewedBy', 'documentSha256', 'visualChecks']) {
     if (check[key]) {
       evidence[key] = check[key];
     }

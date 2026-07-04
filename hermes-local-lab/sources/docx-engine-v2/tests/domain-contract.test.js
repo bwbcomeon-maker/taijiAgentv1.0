@@ -412,6 +412,7 @@ test('ValidationReport contract can record WPS visual reviewer evidence', () => 
         message: 'WPS/Word visual inspection passed.',
         reviewedAt: '2026-07-05T10:00:00.000Z',
         reviewedBy: 'user',
+        visualChecks: ['document_opened', 'layout_reviewed'],
       },
     ],
     warnings: [],
