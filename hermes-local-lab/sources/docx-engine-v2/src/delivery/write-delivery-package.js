@@ -14,6 +14,7 @@ const IMAGE_INSTRUCTIONS = [
   '- `delivery-package.json` 是交付包清单，记录文档、源文件、模板清单、渲染计划和质量报告的位置。',
   '- `source/original/` 保存原始输入文件，`source.md` 是用于人工查看的 Markdown 副本。',
   '- `assets/` 保存图片、图形源文件和展示文件。',
+  '- `asset-package.json` 记录资产包结构、可编辑源文件和展示文件。',
   '- `render-plan.json` 记录图表与模板位置绑定关系。',
   '- 如需替换图片，优先修改 `assets/` 中对应源文件，再按 `figureId` 回写或重渲染文档。',
   '',
@@ -67,6 +68,7 @@ function writeDeliveryPackage({
   copyAssets({ deliveryDir, sourcePackage, assetPackage });
   writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizedJob);
   writeJson(path.join(deliveryDir, 'template.manifest.json'), templatePackage.manifest || {});
+  writeJson(path.join(deliveryDir, 'asset-package.json'), normalizeAssetPackageForDelivery(assetPackage));
   writeJson(path.join(deliveryDir, 'render-plan.json'), renderPlan);
   writeJson(path.join(deliveryDir, 'quality-report.json'), qualityReport || emptyQualityReport());
   fs.writeFileSync(path.join(deliveryDir, 'README-图片调整说明.md'), IMAGE_INSTRUCTIONS, 'utf8');
@@ -81,6 +83,7 @@ function writeDeliveryPackage({
       source: 'source.md',
       originalSource,
       assetsDir: 'assets',
+      assetPackage: 'asset-package.json',
       jobManifest: 'job.manifest.json',
       templateManifest: 'template.manifest.json',
       renderPlan: 'render-plan.json',
@@ -225,6 +228,13 @@ function normalizeJob(job, renderPlan, sourcePackage) {
     templateId: job?.templateId || renderPlan.templateId,
     status: job?.status || 'delivered',
     deliveredAt: job?.deliveredAt || new Date().toISOString(),
+  };
+}
+
+function normalizeAssetPackageForDelivery(assetPackage) {
+  return {
+    ...assetPackage,
+    assetDir: 'assets',
   };
 }
 

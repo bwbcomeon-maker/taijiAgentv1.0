@@ -54,7 +54,7 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
 
 ## Acceptance
 
-A usable delivery package contains `document.docx`, `source.md`, `assets/`, `job.manifest.json`, `template.manifest.json`, `render-plan.json`, `quality-report.json`, and `README-图片调整说明.md`.
+A usable delivery package contains `document.docx`, `source.md`, `assets/`, `asset-package.json`, `job.manifest.json`, `template.manifest.json`, `render-plan.json`, `quality-report.json`, and `README-图片调整说明.md`.
 
 A usable rich draft package contains `draft.manifest.json`, `source.md`, `assets/`, `图片清单.md`, and editable Mermaid sources such as `source.mmd`. The package keeps `figureId` stable so a later DOCX replacement can target the exact picture.
 

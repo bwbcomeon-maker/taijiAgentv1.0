@@ -24,6 +24,7 @@ const REQUIRED_ENTRIES = [
   'source.md',
   'source/original',
   'assets',
+  'asset-package.json',
   'job.manifest.json',
   'template.manifest.json',
   'render-plan.json',
@@ -35,6 +36,7 @@ const DELIVERY_MANIFEST_FIXED_FILES = {
   document: 'document.docx',
   source: 'source.md',
   assetsDir: 'assets',
+  assetPackage: 'asset-package.json',
   jobManifest: 'job.manifest.json',
   templateManifest: 'template.manifest.json',
   renderPlan: 'render-plan.json',
@@ -86,6 +88,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
 
   for (const [key, fileName] of [
     ['deliveryPackage', 'delivery-package.json'],
+    ['assetPackage', 'asset-package.json'],
     ['jobManifest', 'job.manifest.json'],
     ['templateManifest', 'template.manifest.json'],
     ['renderPlan', 'render-plan.json'],
@@ -124,6 +127,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
 function addSchemaCheck({ addCheck, jsonFiles }) {
   if (
     !jsonFiles.deliveryPackage ||
+    !jsonFiles.assetPackage ||
     !jsonFiles.jobManifest ||
     !jsonFiles.templateManifest ||
     !jsonFiles.renderPlan ||
@@ -132,18 +136,20 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     addCheck(
       'schema',
       'failed',
-      'delivery-package.json, job.manifest.json, template.manifest.json, render-plan.json and quality-report.json are required for schema validation.'
+      'delivery-package.json, asset-package.json, job.manifest.json, template.manifest.json, render-plan.json and quality-report.json are required for schema validation.'
     );
     return;
   }
 
   const deliveryPackageResult = validateDomainObject('DeliveryPackage', jsonFiles.deliveryPackage);
+  const assetPackageResult = validateDomainObject('AssetPackage', jsonFiles.assetPackage);
   const jobManifestResult = validateDomainObject('DocumentJob', jsonFiles.jobManifest);
   const templateManifestResult = validateDomainObject('TemplateManifest', jsonFiles.templateManifest);
   const renderPlanResult = validateDomainObject('RenderPlan', jsonFiles.renderPlan);
   const qualityReportResult = validateDomainObject('ValidationReport', jsonFiles.qualityReport);
   if (
     !deliveryPackageResult.ok ||
+    !assetPackageResult.ok ||
     !jobManifestResult.ok ||
     !templateManifestResult.ok ||
     !renderPlanResult.ok ||
@@ -154,6 +160,7 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
       'failed',
       `Delivery schema validation failed: ${JSON.stringify([
         ...tagValidationErrors('delivery-package.json', deliveryPackageResult.errors),
+        ...tagValidationErrors('asset-package.json', assetPackageResult.errors),
         ...tagValidationErrors('job.manifest.json', jobManifestResult.errors),
         ...tagValidationErrors('template.manifest.json', templateManifestResult.errors),
         ...tagValidationErrors('render-plan.json', renderPlanResult.errors),
@@ -162,6 +169,16 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     );
     return;
   }
+
+  if (normalizeRelativePackagePath(jsonFiles.assetPackage.assetDir) !== 'assets') {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery asset package assetDir must be assets, got ${jsonFiles.assetPackage.assetDir || 'missing'}`
+    );
+    return;
+  }
+
   const templateIds = {
     'job.manifest.json': String(jsonFiles.jobManifest.templateId || ''),
     'render-plan.json': String(jsonFiles.renderPlan.templateId || ''),

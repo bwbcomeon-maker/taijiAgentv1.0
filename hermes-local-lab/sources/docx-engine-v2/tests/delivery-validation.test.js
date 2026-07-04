@@ -299,6 +299,23 @@ test('validateDeliveryPackage fails when render-plan.json no longer matches the 
   assert.ok(report.failures.some((failure) => /render-plan\.json sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when asset-package.json no longer matches the delivery manifest hash', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+
+  assert.ok(deliveryManifest.fileSha256?.assetPackage, 'delivery manifest must bind asset-package.json sha256');
+  assert.equal(deliveryManifest.fileSha256.assetPackage, sha256File(assetPackagePath));
+
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  assetPackage.warnings = [...(assetPackage.warnings || []), 'tampered after delivery'];
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  assert.ok(report.failures.some((failure) => /asset-package\.json sha256 mismatch/.test(failure)));
+});
+
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   recordWpsVisualAcceptance({

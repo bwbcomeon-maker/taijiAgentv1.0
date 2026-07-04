@@ -6,6 +6,7 @@ const HASHED_FILE_ROLES = [
   'document',
   'source',
   'originalSource',
+  'assetPackage',
   'jobManifest',
   'templateManifest',
   'renderPlan',

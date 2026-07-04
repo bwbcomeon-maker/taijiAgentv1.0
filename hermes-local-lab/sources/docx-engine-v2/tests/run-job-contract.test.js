@@ -14,6 +14,7 @@ const REQUIRED_DELIVERY_ENTRIES = [
   'source.md',
   'source/original',
   'assets',
+  'asset-package.json',
   'job.manifest.json',
   'template.manifest.json',
   'render-plan.json',
@@ -219,6 +220,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.fileSha256.document, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.equal(deliveryManifest.fileSha256.source, sha256File(path.join(deliveryDir, 'source.md')));
   assert.equal(deliveryManifest.fileSha256.originalSource, sha256File(path.join(deliveryDir, 'source', 'original', path.basename(sourcePath))));
+  assert.equal(deliveryManifest.fileSha256.assetPackage, sha256File(path.join(deliveryDir, 'asset-package.json')));
   assert.equal(deliveryManifest.fileSha256.jobManifest, sha256File(path.join(deliveryDir, 'job.manifest.json')));
   assert.equal(deliveryManifest.fileSha256.templateManifest, sha256File(path.join(deliveryDir, 'template.manifest.json')));
   assert.equal(deliveryManifest.fileSha256.renderPlan, sha256File(path.join(deliveryDir, 'render-plan.json')));
@@ -228,6 +230,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.files.source, 'source.md');
   assert.equal(deliveryManifest.files.originalSource, `source/original/${path.basename(sourcePath)}`);
   assert.equal(deliveryManifest.files.assetsDir, 'assets');
+  assert.equal(deliveryManifest.files.assetPackage, 'asset-package.json');
   assert.equal(deliveryManifest.files.jobManifest, 'job.manifest.json');
   assert.equal(deliveryManifest.files.templateManifest, 'template.manifest.json');
   assert.equal(deliveryManifest.files.renderPlan, 'render-plan.json');
@@ -238,6 +241,12 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
   assert.equal(renderPlan.templateData.metadata.assetDir, 'assets');
   assert.equal(path.isAbsolute(renderPlan.templateData.metadata.assetDir), false);
+
+  const assetPackage = readJsonFile(path.join(deliveryDir, 'asset-package.json'));
+  assert.equal(assetPackage.schemaVersion, 'docx-engine-v2/asset-package');
+  assert.equal(assetPackage.assetDir, 'assets');
+  assert.equal(assetPackage.figures.length >= 1, true);
+  assert.equal(assetPackage.images.length >= 1, true);
 
   const jobManifest = readJsonFile(path.join(deliveryDir, 'job.manifest.json'));
   assert.equal(jobManifest.jobId, payload.jobId);
