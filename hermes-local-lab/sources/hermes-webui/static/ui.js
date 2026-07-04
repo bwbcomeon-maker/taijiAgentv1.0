@@ -9961,6 +9961,33 @@ function _setDocxEngineStatus(root,message,state){
   status.dataset.state=state||'info';
 }
 
+function _docxEngineErrorPayload(err){
+  if(err&&err.payload&&typeof err.payload==='object')return err.payload;
+  const body=err&&typeof err.body==='string'?err.body:'';
+  if(body){
+    try{
+      const payload=JSON.parse(body);
+      if(payload&&typeof payload==='object')return payload;
+    }catch(_){}
+  }
+  return null;
+}
+
+function _docxEngineFailureEvidence(err){
+  const payload=_docxEngineErrorPayload(err);
+  if(!payload)return '';
+  const stage=String(payload.stage||'').trim();
+  const failureReportPath=String(payload.failure_report_path||payload.failureReportPath||'').trim();
+  const jobManifestPath=String(payload.job_manifest_path||payload.jobManifestPath||'').trim();
+  const failures=Array.isArray(payload.failures)?payload.failures.map((item)=>String(item||'').trim()).filter(Boolean).slice(0,2):[];
+  const parts=[];
+  if(stage)parts.push(`失败阶段：${stage}`);
+  if(failureReportPath)parts.push(`失败报告：${failureReportPath}`);
+  if(jobManifestPath)parts.push(`作业清单：${jobManifestPath}`);
+  if(failures.length)parts.push(`失败原因：${failures.join('；')}`);
+  return parts.length?` ${parts.join('；')}`:'';
+}
+
 function _clearDocxEngineFieldErrors(root){
   if(!root||!root.querySelectorAll)return;
   root.querySelectorAll('[data-docx-engine-field]').forEach((node)=>{
@@ -10183,7 +10210,8 @@ async function runDocxEngineJob(button){
     return payload;
   }catch(err){
     const message=err&&err.message?err.message:String(err||'生成失败');
-    _setDocxEngineStatus(root,`生成失败：${message}`,'error');
+    const evidence=_docxEngineFailureEvidence(err);
+    _setDocxEngineStatus(root,`生成失败：${message}${evidence}`,'error');
     if(typeof showToast==='function')showToast(`生成失败：${message}`);
     return null;
   }finally{

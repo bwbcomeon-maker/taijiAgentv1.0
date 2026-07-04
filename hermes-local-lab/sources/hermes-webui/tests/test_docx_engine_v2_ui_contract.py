@@ -81,6 +81,19 @@ def test_docx_engine_workbench_covers_feedback_and_recovery_states():
     assert "delivery_dir" in ui_js
 
 
+def test_docx_engine_workbench_surfaces_traceable_failure_artifacts():
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    workspace_js = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+
+    assert "err.payload" in workspace_js
+    assert "_docxEngineFailureEvidence" in ui_js
+    assert "failure_report_path" in ui_js
+    assert "job_manifest_path" in ui_js
+    assert "失败报告" in ui_js
+    assert "作业清单" in ui_js
+    assert "失败阶段" in ui_js
+
+
 def test_docx_engine_workbench_prevents_duplicate_and_premature_actions():
     ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
