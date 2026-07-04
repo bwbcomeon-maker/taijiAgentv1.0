@@ -165,6 +165,16 @@ function replayInputFileSha256(deliveryManifest) {
   );
 }
 
+function writeStaleFailedQualityReport(deliveryDir) {
+  const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
+  const qualityReport = JSON.parse(fs.readFileSync(qualityReportPath, 'utf8'));
+  qualityReport.status = 'failed';
+  qualityReport.checks.push({ id: 'stale_automated_gate', status: 'failed', message: 'stale automated failure' });
+  qualityReport.failures.push('stale automated failure');
+  fs.writeFileSync(qualityReportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['qualityReport'] });
+}
+
 function buildValidatedJob({
   workspace,
   sourcePackage,
@@ -302,6 +312,20 @@ test('validateDeliveryPackage final mode fails when replay-report.json is not bo
   assert.equal(report.status, 'failed');
   assert.equal(replayReportCheck?.status, 'failed');
   assert.match(replayReportCheck?.message || '', /inputFileSha256|file hashes/i);
+});
+
+test('validateDeliveryPackage final mode fails when quality-report.json records a failed validation', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
+  writeStaleFailedQualityReport(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const qualityReportCheck = report.checks.find((check) => check.id === 'quality_report');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(qualityReportCheck?.status, 'failed');
+  assert.match(qualityReportCheck?.message || '', /quality-report\.json.*failed validation/i);
+  assert.match(qualityReportCheck?.message || '', /stale automated failure/i);
 });
 
 test('validateDeliveryPackage final mode fails when replay-report.json is not verified', async (t) => {
@@ -449,6 +473,28 @@ test('validate-delivery CLI writes the refreshed quality report when requested',
   assert.equal(writtenReport.status, 'failed');
   assert.ok(writtenReport.failures.some((failure) => /render-plan\.json/.test(failure)));
   assert.equal(deliveryManifest.fileSha256.qualityReport, sha256File(path.join(deliveryDir, 'quality-report.json')));
+});
+
+test('validate-delivery CLI write-report refreshes a stale failed quality report', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
+  writeStaleFailedQualityReport(deliveryDir);
+
+  const result = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--write-report',
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  const writtenReport = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8'));
+
+  assert.equal(payload.ok, true);
+  assert.notEqual(writtenReport.status, 'failed');
+  assert.ok(!writtenReport.failures.some((failure) => /stale automated failure/.test(failure)));
 });
 
 test('replay-delivery CLI rebuilds the source package and render plan from a delivery package', async (t) => {

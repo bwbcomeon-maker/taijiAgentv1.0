@@ -19,6 +19,7 @@ function main() {
     const qualityReport = validateDeliveryPackage({
       deliveryDir: args.deliveryDir,
       requireReplayReport: true,
+      enforceStoredQualityReport: !args.writeReport,
     });
     const qualityReportPath = path.join(args.deliveryDir, 'quality-report.json');
     if (args.writeReport) {

@@ -67,6 +67,7 @@ function validateDeliveryPackage({
   deliveryDir,
   wpsVisualStatus = 'not_verified',
   requireReplayReport = false,
+  enforceStoredQualityReport = requireReplayReport,
 } = {}) {
   const checksById = new Map();
   const failures = [];
@@ -137,6 +138,11 @@ function validateDeliveryPackage({
     deliveryPackage: jsonFiles.deliveryPackage,
     replayReport: jsonFiles.replayReport,
     requireReplayReport,
+  });
+  addQualityReportCheck({
+    addCheck,
+    qualityReport: jsonFiles.qualityReport,
+    enforceStoredQualityReport,
   });
   addDeliveryManifestFilesCheck({
     addCheck,
@@ -270,6 +276,62 @@ function addReplayReportCheck({ addCheck, deliveryDir, deliveryPackage, replayRe
   }
 
   addCheck('replay_report', 'passed');
+}
+
+function addQualityReportCheck({ addCheck, qualityReport, enforceStoredQualityReport }) {
+  if (!enforceStoredQualityReport) {
+    return;
+  }
+  if (!qualityReport || typeof qualityReport !== 'object') {
+    return;
+  }
+
+  const failureMessages = recordedQualityReportFailures(qualityReport);
+  if (failureMessages.length > 0) {
+    addCheck(
+      'quality_report',
+      'failed',
+      `quality-report.json records failed validation: ${failureMessages.join('; ')}`
+    );
+    return;
+  }
+
+  const status = String(qualityReport.status || '').trim();
+  if (!['passed', 'passed_with_warnings'].includes(status)) {
+    addCheck(
+      'quality_report',
+      'failed',
+      `quality-report.json status must be passed or passed_with_warnings for final delivery validation, got ${status || 'missing'}`
+    );
+    return;
+  }
+
+  const unverifiedChecks = (qualityReport.checks || [])
+    .filter((check) => check?.id !== 'wps_visual' && check?.status === 'not_verified');
+  if (unverifiedChecks.length > 0) {
+    addCheck(
+      'quality_report',
+      'failed',
+      `quality-report.json records unverified automated checks: ${unverifiedChecks.map(qualityReportCheckMessage).join('; ')}`
+    );
+    return;
+  }
+
+  addCheck('quality_report', 'passed');
+}
+
+function recordedQualityReportFailures(qualityReport) {
+  return [
+    ...(qualityReport.failures || []),
+    ...(qualityReport.checks || [])
+      .filter((check) => check?.status === 'failed')
+      .map(qualityReportCheckMessage),
+    String(qualityReport.status || '').trim() === 'failed' ? 'quality-report.json status=failed' : '',
+  ].filter(Boolean);
+}
+
+function qualityReportCheckMessage(check) {
+  return `${check.id || 'unknown'} ${check.status || 'missing'}${check.message ? `: ${check.message}` : ''}`;
 }
 
 function replayReportInputFileSha256Failures({ deliveryDir, deliveryPackage, replayReport }) {
