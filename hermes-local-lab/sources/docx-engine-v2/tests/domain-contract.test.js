@@ -202,12 +202,14 @@ test('TemplatePackage contract requires plan-level manifest metadata', () => {
       schema: 'schema.json',
       prompt: 'prompt.md',
       sample: 'sample.json',
+      dataAdapter: 'data-adapter.js',
     },
     manifest: {
       id: 'general-proposal',
       name: 'General Proposal',
       version: '0.1.0',
       description: 'Proposal template for editable DOCX delivery.',
+      dataAdapter: 'data-adapter.js',
       documentTypes: ['proposal'],
       capabilities: ['sections', 'tables', 'figures', 'images'],
       requiredAssets: [],
@@ -230,12 +232,14 @@ test('TemplatePackage rejects manifests missing plan-level quality metadata', ()
       schema: 'schema.json',
       prompt: 'prompt.md',
       sample: 'sample.json',
+      dataAdapter: 'data-adapter.js',
     },
     manifest: {
       id: 'general-proposal',
       name: 'General Proposal',
       version: '0.1.0',
       description: 'Proposal template for editable DOCX delivery.',
+      dataAdapter: 'data-adapter.js',
     },
   });
 

@@ -7,6 +7,7 @@
   "schema": "schema.json",
   "prompt": "prompt.md",
   "sample": "sample.json",
+  "dataAdapter": "data-adapter.js",
   "outputFormat": "docx",
   "documentTypes": ["meeting-minutes"],
   "capabilities": ["sections", "tables"],

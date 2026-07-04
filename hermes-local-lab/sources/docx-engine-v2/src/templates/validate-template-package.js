@@ -166,6 +166,7 @@ function validateTemplatePackage(template) {
     ['schema', template?.schemaPath],
     ['prompt', template?.promptPath],
     ['sample', template?.samplePath],
+    ['dataAdapter', template?.dataAdapterPath],
   ]) {
     if (!fileExists(filePath)) {
       errors.push({
@@ -179,6 +180,7 @@ function validateTemplatePackage(template) {
 
   errors.push(...validateTemplateDocx(template?.templatePath));
   errors.push(...validateSchemaSample(template));
+  errors.push(...validateDataAdapter(template));
   errors.push(...validateSourceRequirements(template?.manifest?.sourceRequirements));
   errors.push(...validatePackageCleanliness(template?.packageDir));
 
@@ -187,6 +189,59 @@ function validateTemplatePackage(template) {
   }
 
   return { ok: true };
+}
+
+function validateDataAdapter(template) {
+  if (!template?.manifest?.dataAdapter) {
+    return [
+      {
+        code: 'template_data_adapter_invalid',
+        message: 'Template manifest must declare dataAdapter.',
+      },
+    ];
+  }
+
+  const adapterPath = template.dataAdapterPath;
+  if (!fileExists(adapterPath)) {
+    return [];
+  }
+
+  const packageDir = path.resolve(template.packageDir || path.dirname(template.manifestPath || adapterPath));
+  const resolvedAdapterPath = path.resolve(adapterPath);
+  const relative = path.relative(packageDir, resolvedAdapterPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return [
+      {
+        code: 'template_data_adapter_invalid',
+        path: adapterPath,
+        message: 'Template dataAdapter must stay inside the template package directory.',
+      },
+    ];
+  }
+
+  try {
+    delete require.cache[require.resolve(resolvedAdapterPath)];
+    const adapter = require(resolvedAdapterPath);
+    if (typeof adapter.buildTemplateData !== 'function') {
+      return [
+        {
+          code: 'template_data_adapter_invalid',
+          path: adapterPath,
+          message: 'Template data adapter must export buildTemplateData({ renderPlan, templatePackage }).',
+        },
+      ];
+    }
+  } catch (error) {
+    return [
+      {
+        code: 'template_data_adapter_invalid',
+        path: adapterPath,
+        message: `Template data adapter cannot be loaded: ${error.message}`,
+      },
+    ];
+  }
+
+  return [];
 }
 
 function validateSourceRequirements(sourceRequirements) {
