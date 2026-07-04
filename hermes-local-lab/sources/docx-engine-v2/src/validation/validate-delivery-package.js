@@ -110,7 +110,13 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest: jsonFiles.jobManifest });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addTemplateMarkersCheck({ addCheck, documentXml });
-  addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan: jsonFiles.renderPlan });
+  addImageCoverageCheck({
+    addCheck,
+    deliveryDir,
+    documentXml,
+    renderPlan: jsonFiles.renderPlan,
+    assetPackage: jsonFiles.assetPackage,
+  });
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
@@ -461,7 +467,7 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
   addCheck('template_markers', 'passed');
 }
 
-function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan }) {
+function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan, assetPackage }) {
   if (!renderPlan) {
     addCheck('image_coverage', 'failed', 'render-plan.json is required for image coverage.');
     return;
@@ -510,6 +516,15 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan 
     );
     return;
   }
+  const editableSourceFailures = editableFigureSourceFailures({ deliveryDir, assetPackage });
+  if (editableSourceFailures.length > 0) {
+    addCheck(
+      'image_coverage',
+      'failed',
+      `Editable figure source sha256 mismatch: ${editableSourceFailures.join(', ')}`
+    );
+    return;
+  }
 
   if (hasTemplateMarkers(documentXml)) {
     addCheck(
@@ -521,6 +536,31 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan 
   }
 
   addCheck('image_coverage', 'passed');
+}
+
+function editableFigureSourceFailures({ deliveryDir, assetPackage }) {
+  const failures = [];
+  for (const figure of assetPackage?.figures || []) {
+    const sourcePath = normalizeRelativePackagePath(figure?.editable?.sourcePath);
+    if (!sourcePath || !sourcePath.startsWith('assets/')) {
+      continue;
+    }
+    const expectedHash = String(figure?.editable?.sourceSha256 || '').trim();
+    if (!/^[a-f0-9]{64}$/.test(expectedHash)) {
+      failures.push(`${sourcePath} missing editable source sha256`);
+      continue;
+    }
+    const absoluteSourcePath = path.join(deliveryDir, sourcePath);
+    if (!fs.existsSync(absoluteSourcePath)) {
+      failures.push(`${sourcePath} missing editable source file`);
+      continue;
+    }
+    const actualHash = sha256File(absoluteSourcePath);
+    if (actualHash !== expectedHash) {
+      failures.push(`${sourcePath} expected ${expectedHash}, got ${actualHash}`);
+    }
+  }
+  return failures;
 }
 
 function addTableCoverageCheck({ addCheck, documentXml, renderPlan }) {

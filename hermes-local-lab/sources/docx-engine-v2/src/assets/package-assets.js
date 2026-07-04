@@ -79,6 +79,7 @@ function packageFigure({
         ...(figure.editable || {}),
         format: 'mermaid',
         sourcePath: toRelativePath(workspace, sourcePath),
+        sourceSha256: sha256File(sourcePath),
       },
       displayPath: toRelativePath(workspace, displayPath),
       sha256: sha256File(displayPath),
@@ -109,6 +110,7 @@ function packageFigure({
     editable: {
       ...(figure.editable || {}),
       sourcePath: toRelativePath(workspace, sourceDisplayPath),
+      sourceSha256: sha256File(sourceDisplayPath),
     },
     displayPath: toRelativePath(workspace, displayPath),
     sha256: sha256File(displayPath),

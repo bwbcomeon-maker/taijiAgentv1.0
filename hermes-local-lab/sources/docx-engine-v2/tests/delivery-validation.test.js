@@ -454,6 +454,21 @@ test('validateDeliveryPackage fails when a render plan image asset is modified',
   assert.match(imageCoverage?.message || '', /sha256|changed|modified/i);
 });
 
+test('validateDeliveryPackage fails when an editable figure source changes without rerendering', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'asset-package.json'), 'utf8'));
+  const sourcePath = assetPackage.figures.find((figure) => figure.editable?.format === 'mermaid')?.editable?.sourcePath;
+  assert.equal(sourcePath, 'assets/fig-001/source.mmd');
+
+  fs.appendFileSync(path.join(deliveryDir, sourcePath), '\n  C[Changed after delivery]\n');
+  const report = validateDeliveryPackage({ deliveryDir });
+  const imageCoverage = report.checks.find((check) => check.id === 'image_coverage');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(imageCoverage?.status, 'failed');
+  assert.match(imageCoverage?.message || '', /editable source|source\.mmd|sha256/i);
+});
+
 test('validateDeliveryPackage fails when delivery package manifest maps a role to the wrong path', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const manifestPath = path.join(deliveryDir, 'delivery-package.json');

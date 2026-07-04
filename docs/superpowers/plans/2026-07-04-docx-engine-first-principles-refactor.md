@@ -48,6 +48,7 @@
 - 已把 `source.md` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免人工查看/后续处理入口被改动却仍通过质量门。
 - 已把 `job.manifest.json`、`template.manifest.json`、`render-plan.json`、`quality-report.json` 等交付证据文件纳入 `fileSha256`，并让复验写回和 WPS/Word 验收写回同步刷新质量报告哈希，避免清单文件被改动后仍被误判为同一交付包。
 - 已把 `AssetPackage` 持久化为 `asset-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终交付只剩散落的 `assets/` 目录而缺少资产结构证据。
+- 已让可编辑图源（如 `assets/fig-001/source.mmd`）记录 `sourceSha256` 并在交付包复验时比对，避免源图被改动但展示图/DOCX 未重渲染时仍误判为同一交付状态。
 - 已让交付包校验器读取并保留 `quality-report.json` 中已记录的 `wps_visual` 人工验收状态与 reviewer 证据，避免重新校验时把已验收包降回 `not_verified`。
 - 已把 `wps_visual` 人工验收证据绑定到 `document.docx` 的 SHA-256；记录验收时写入文档哈希，重新校验时若文档被替换或改动则验收门失败。
 - 已让记录 WPS/Word 人工验收前先执行当前交付包自动校验；除 `wps_visual` 本身外，只要任一自动门失败就拒绝写入“人工通过”。
