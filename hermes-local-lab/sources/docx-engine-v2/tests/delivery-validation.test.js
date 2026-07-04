@@ -241,6 +241,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   assert.ok(['passed', 'passed_with_warnings'].includes(report.status));
   assert.ok(report.checks.some((check) => check.id === 'schema' && check.status === 'passed'));
   assert.ok(report.checks.some((check) => check.id === 'docx_zip' && check.status === 'passed'));
+  assert.ok(report.checks.some((check) => check.id === 'docx_xml' && check.status === 'passed'));
   assert.ok(
     report.checks.some((check) => check.id === 'figure_id_metadata' && check.status === 'passed')
   );
@@ -294,6 +295,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'source_original',
       'source_replay',
       'docx_zip',
+      'docx_xml',
       'template_markers',
       'image_coverage',
       'table_coverage',
@@ -309,6 +311,21 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'wps_visual',
     ]
   );
+});
+
+test('validateDeliveryPackage fails when DOCX document XML is malformed', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await rewriteDocumentXml(path.join(deliveryDir, 'document.docx'), (documentXml) =>
+    documentXml.replace('</w:body>', '</w:tc></w:body>')
+  );
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const xmlCheck = report.checks.find((check) => check.id === 'docx_xml');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(xmlCheck?.status, 'failed');
+  assert.match(xmlCheck?.message || '', /document\.xml|mismatched|well-formed/i);
 });
 
 test('validateDeliveryPackage final mode fails when replay-report.json is missing', async (t) => {
@@ -1989,6 +2006,13 @@ async function replaceDocumentXmlText(docxPath, fromText, toText) {
   const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
   assert.ok(documentXml.includes(fromText), `fixture must include text ${fromText}`);
   entries.set('word/document.xml', Buffer.from(documentXml.replace(fromText, toText), 'utf8'));
+  await writeZipEntries(entries, docxPath);
+}
+
+async function rewriteDocumentXml(docxPath, rewrite) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  entries.set('word/document.xml', Buffer.from(rewrite(documentXml), 'utf8'));
   await writeZipEntries(entries, docxPath);
 }
 

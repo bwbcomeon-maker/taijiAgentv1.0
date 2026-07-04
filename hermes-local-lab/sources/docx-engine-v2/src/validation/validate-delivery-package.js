@@ -15,12 +15,14 @@ const {
   sourceReplayFailures,
 } = require('../replay/source-replay');
 const { assertVisualEvidenceFile } = require('./visual-evidence');
+const { validateXmlWellFormed } = require('./xml-well-formed');
 
 const CHECK_IDS = [
   'schema',
   'source_original',
   'source_replay',
   'docx_zip',
+  'docx_xml',
   'template_markers',
   'image_coverage',
   'table_coverage',
@@ -165,6 +167,7 @@ function validateDeliveryPackage({
     jobManifest: jsonFiles.jobManifest,
   });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
+  addDocxXmlCheck({ addCheck, documentXml });
   addTemplateMarkersCheck({ addCheck, documentXml });
   addImageCoverageCheck({
     addCheck,
@@ -1558,6 +1561,21 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
   }
 
   addCheck('template_markers', 'passed');
+}
+
+function addDocxXmlCheck({ addCheck, documentXml }) {
+  if (!documentXml) {
+    addCheck('docx_xml', 'failed', 'Cannot inspect document.xml without word/document.xml.');
+    return;
+  }
+
+  const result = validateXmlWellFormed(documentXml, 'document.xml');
+  if (!result.ok) {
+    addCheck('docx_xml', 'failed', `document.xml is not well-formed: ${result.message}`);
+    return;
+  }
+
+  addCheck('docx_xml', 'passed');
 }
 
 function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan, assetPackage }) {

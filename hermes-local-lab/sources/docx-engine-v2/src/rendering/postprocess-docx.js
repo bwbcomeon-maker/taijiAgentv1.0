@@ -287,10 +287,26 @@ function figureBlockIdByFigureIdMap(renderPlan) {
 
 function removeRanges(documentXml, ranges) {
   let nextXml = documentXml;
-  for (const range of [...ranges].sort((left, right) => right.start - left.start)) {
+  for (const range of mergeRanges(ranges).sort((left, right) => right.start - left.start)) {
     nextXml = `${nextXml.slice(0, range.start)}${nextXml.slice(range.end)}`;
   }
   return nextXml;
+}
+
+function mergeRanges(ranges) {
+  const sorted = [...(ranges || [])]
+    .filter((range) => Number.isInteger(range?.start) && Number.isInteger(range?.end) && range.end > range.start)
+    .sort((left, right) => left.start - right.start);
+  const merged = [];
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1];
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+      continue;
+    }
+    merged.push({ ...range });
+  }
+  return merged;
 }
 
 function figureBlockXml(binding) {
@@ -361,15 +377,11 @@ function removeUnboundFigureCaptionBlocks(documentXml) {
     removals.push({ start: paragraph.start, end: paragraph.end });
     const previous = paragraphs[index - 1];
     if (previous && /图片占位/.test(previous.text)) {
-      removals.push({ start: previous.start, end: previous.end });
+      removals.push(findContainingTableRange(documentXml, previous) || { start: previous.start, end: previous.end });
     }
   }
 
-  let nextXml = documentXml;
-  for (const removal of removals.sort((left, right) => right.start - left.start)) {
-    nextXml = `${nextXml.slice(0, removal.start)}${nextXml.slice(removal.end)}`;
-  }
-  return nextXml;
+  return removeRanges(documentXml, removals);
 }
 
 function hasFigureSequenceField(paragraphXml) {
@@ -390,15 +402,14 @@ function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
     if (!paragraph.text.includes(normalizedTitle) || rangeOverlaps(paragraph, consumedRanges)) {
       continue;
     }
-    const afterParagraph = String(documentXml || '').slice(paragraph.end);
-    const tableMatch = afterParagraph.match(/^[\s\S]*?<w:tbl\b[\s\S]*?<\/w:tbl>/);
-    if (!tableMatch) {
+    const tableRange = findFirstTableRangeAfter(documentXml, paragraph.end);
+    if (!tableRange) {
       continue;
     }
     return {
       start: paragraph.start,
-      end: paragraph.end + tableMatch[0].length,
-      xml: String(documentXml || '').slice(paragraph.start, paragraph.end + tableMatch[0].length),
+      end: tableRange.end,
+      xml: String(documentXml || '').slice(paragraph.start, tableRange.end),
     };
   }
   return null;
@@ -446,19 +457,14 @@ function removeUnboundTableBlocks(documentXml) {
     if (!hasTableSequenceField(paragraph.xml) || /\btableCaption\b/.test(paragraph.text)) {
       continue;
     }
-    const afterParagraph = String(documentXml || '').slice(paragraph.end);
-    const tableMatch = afterParagraph.match(/^\s*<w:tbl\b[\s\S]*?<\/w:tbl>/);
+    const tableRange = findFirstTableRangeAfter(documentXml, paragraph.end);
     removals.push({
       start: paragraph.start,
-      end: paragraph.end + (tableMatch ? tableMatch[0].length : 0),
+      end: tableRange ? tableRange.end : paragraph.end,
     });
   }
 
-  let nextXml = documentXml;
-  for (const removal of removals.sort((left, right) => right.start - left.start)) {
-    nextXml = `${nextXml.slice(0, removal.start)}${nextXml.slice(removal.end)}`;
-  }
-  return nextXml;
+  return removeRanges(documentXml, removals);
 }
 
 function hasTableSequenceField(paragraphXml) {
@@ -488,15 +494,92 @@ function fallbackInsertionIndex(documentXml) {
 
 function paragraphRanges(documentXml) {
   const ranges = [];
-  for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+  const source = String(documentXml || '');
+  const paragraphStartPattern = /<w:p\b[^>]*\/>|<w:p\b[^>]*>/g;
+  let match;
+  while ((match = paragraphStartPattern.exec(source))) {
+    const start = match.index;
+    let end = start + match[0].length;
+    if (!/\/\s*>$/.test(match[0])) {
+      const closeIndex = source.indexOf('</w:p>', paragraphStartPattern.lastIndex);
+      if (closeIndex < 0) {
+        continue;
+      }
+      end = closeIndex + '</w:p>'.length;
+      paragraphStartPattern.lastIndex = end;
+    }
+    const xml = source.slice(start, end);
     ranges.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      xml: match[0],
-      text: paragraphText(match[0]),
+      start,
+      end,
+      xml,
+      text: paragraphText(xml),
     });
   }
   return ranges;
+}
+
+function findFirstTableRangeAfter(documentXml, afterIndex) {
+  const source = String(documentXml || '');
+  const tableTagPattern = /<\/?w:tbl(?=[\s>])[^>]*>/g;
+  tableTagPattern.lastIndex = Math.max(0, afterIndex || 0);
+  let match;
+  while ((match = tableTagPattern.exec(source))) {
+    if (!isClosingTableTag(match[0])) {
+      return findTableRangeAt(source, match.index);
+    }
+  }
+  return null;
+}
+
+function findContainingTableRange(documentXml, range) {
+  const source = String(documentXml || '');
+  const tableTagPattern = /<\/?w:tbl(?=[\s>])[^>]*>/g;
+  const stack = [];
+  let match;
+  while ((match = tableTagPattern.exec(source))) {
+    if (match.index >= range.start) {
+      break;
+    }
+    if (isClosingTableTag(match[0])) {
+      stack.pop();
+    } else {
+      stack.push(match.index);
+    }
+  }
+
+  const tableStart = stack[stack.length - 1];
+  if (tableStart === undefined) {
+    return null;
+  }
+  const tableRange = findTableRangeAt(source, tableStart);
+  if (!tableRange || tableRange.end < range.end) {
+    return null;
+  }
+  return tableRange;
+}
+
+function findTableRangeAt(documentXml, tableStart) {
+  const source = String(documentXml || '');
+  const tableTagPattern = /<\/?w:tbl(?=[\s>])[^>]*>/g;
+  tableTagPattern.lastIndex = tableStart;
+  let depth = 0;
+  let match;
+  while ((match = tableTagPattern.exec(source))) {
+    if (isClosingTableTag(match[0])) {
+      depth -= 1;
+      if (depth === 0) {
+        return { start: tableStart, end: match.index + match[0].length };
+      }
+    } else {
+      depth += 1;
+    }
+  }
+  return null;
+}
+
+function isClosingTableTag(tag) {
+  return /^<\s*\//.test(tag);
 }
 
 function paragraphText(paragraphXml) {

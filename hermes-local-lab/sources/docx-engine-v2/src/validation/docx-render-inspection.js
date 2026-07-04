@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 
 const { readZipEntriesFromBuffer } = require('../replay/source-replay');
+const { validateXmlWellFormed } = require('./xml-well-formed');
 
 function inspectRenderedDocx({ docxPath, label = 'document.docx' } = {}) {
   const checks = [];
@@ -8,6 +9,13 @@ function inspectRenderedDocx({ docxPath, label = 'document.docx' } = {}) {
 
   if (!docxPath) {
     addCheck(checks, failures, 'docx_zip', 'failed', `${label} path is required.`);
+    addCheck(
+      checks,
+      failures,
+      'docx_xml',
+      'failed',
+      'Cannot inspect document.xml without word/document.xml.'
+    );
     addCheck(
       checks,
       failures,
@@ -19,6 +27,13 @@ function inspectRenderedDocx({ docxPath, label = 'document.docx' } = {}) {
   }
   if (!fs.existsSync(docxPath)) {
     addCheck(checks, failures, 'docx_zip', 'failed', `${label} is missing.`);
+    addCheck(
+      checks,
+      failures,
+      'docx_xml',
+      'failed',
+      'Cannot inspect document.xml without word/document.xml.'
+    );
     addCheck(
       checks,
       failures,
@@ -47,20 +62,31 @@ function inspectRenderedDocx({ docxPath, label = 'document.docx' } = {}) {
     addCheck(
       checks,
       failures,
-      'template_markers',
+      'docx_xml',
       'failed',
-      'Cannot inspect template markers without word/document.xml.'
+      'Cannot inspect document.xml without word/document.xml.'
     );
-  } else if (hasTemplateMarkers(documentXml)) {
     addCheck(
       checks,
       failures,
       'template_markers',
       'failed',
-      'Template data markers remain in document.xml; DOCX template rendering did not complete.'
+      'Cannot inspect template markers without word/document.xml.'
     );
   } else {
-    addCheck(checks, failures, 'template_markers', 'passed');
+    const xmlCheck = validateXmlWellFormed(documentXml, 'document.xml');
+    if (!xmlCheck.ok) {
+      addCheck(
+        checks,
+        failures,
+        'docx_xml',
+        'failed',
+        `document.xml is not well-formed: ${xmlCheck.message}`
+      );
+    } else {
+      addCheck(checks, failures, 'docx_xml', 'passed');
+    }
+    addTemplateMarkersCheck({ checks, failures, documentXml });
   }
 
   const ok = failures.length === 0;
@@ -71,6 +97,20 @@ function inspectRenderedDocx({ docxPath, label = 'document.docx' } = {}) {
     failures,
     documentXml,
   };
+}
+
+function addTemplateMarkersCheck({ checks, failures, documentXml }) {
+  if (hasTemplateMarkers(documentXml)) {
+    addCheck(
+      checks,
+      failures,
+      'template_markers',
+      'failed',
+      'Template data markers remain in document.xml; DOCX template rendering did not complete.'
+    );
+    return;
+  }
+  addCheck(checks, failures, 'template_markers', 'passed');
 }
 
 function hasTemplateMarkers(documentXml) {
