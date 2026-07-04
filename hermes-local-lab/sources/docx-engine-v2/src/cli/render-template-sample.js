@@ -38,6 +38,8 @@ async function main() {
       ok: false,
       code: 'template_sample_render_failed',
       message: error.message,
+      documentPath: error.documentPath || undefined,
+      reportPath: error.reportPath || undefined,
     };
     if (args.json) {
       writeJsonStdout(payload);

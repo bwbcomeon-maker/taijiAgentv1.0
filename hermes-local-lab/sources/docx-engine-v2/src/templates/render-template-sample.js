@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { renderDocx } = require('../rendering/render-docx');
+const { inspectRenderedDocx } = require('../validation/docx-render-inspection');
 const { loadPackageFromDir } = require('./install-template-package');
 const { validateTemplatePackage } = require('./validate-template-package');
 
@@ -37,11 +38,12 @@ async function renderTemplateSample({
     renderPlan,
     outputPath: documentPath,
   });
+  const docxInspection = inspectRenderedDocx({ docxPath: documentPath, label: 'sample.docx' });
 
   const report = {
     schemaVersion: 'docx-engine-v2/template-smoke-report',
-    ok: true,
-    status: 'passed',
+    ok: docxInspection.ok,
+    status: docxInspection.status,
     templateId: templatePackage.templateId,
     packageDir: templatePackage.packageDir,
     outDir: absoluteOutDir,
@@ -50,11 +52,21 @@ async function renderTemplateSample({
     checks: [
       { id: 'template_package', status: 'passed' },
       { id: 'adapter_sample_render', status: 'passed' },
+      ...docxInspection.checks,
     ],
+    failures: docxInspection.failures,
     validation,
   };
   const reportPath = path.join(absoluteOutDir, 'template-smoke-report.json');
   writeJson(reportPath, report);
+
+  if (!docxInspection.ok) {
+    const error = new Error(docxInspection.failures.join('；') || 'Template sample render inspection failed.');
+    error.reportPath = reportPath;
+    error.documentPath = documentPath;
+    error.report = report;
+    throw error;
+  }
 
   return {
     ok: true,

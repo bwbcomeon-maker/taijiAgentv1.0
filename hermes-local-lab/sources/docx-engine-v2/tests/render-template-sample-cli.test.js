@@ -116,3 +116,43 @@ test('render-template-sample CLI refuses to write into a non-empty output direct
   assert.match(payload.message, /non-empty/i);
   assert.equal(fs.readFileSync(path.join(outDir, 'keep.txt'), 'utf8'), 'do not overwrite');
 });
+
+test('render-template-sample CLI fails when rendered sample still contains template markers', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = makeTemplatePackage(tempRoot, 'marker-smoke-proposal');
+  const outDir = path.join(tempRoot, 'marker-smoke-output');
+  fs.appendFileSync(
+    path.join(packageDir, 'data-adapter.js'),
+    [
+      '',
+      'const originalBuildTemplateData = module.exports.buildTemplateData;',
+      'module.exports.buildTemplateData = (args) => {',
+      '  const data = originalBuildTemplateData(args);',
+      "  return { ...data, cover: { ...data.cover, title: '{d.cover.title}' } };",
+      '};',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  const result = runRenderTemplateSample([
+    '--package',
+    packageDir,
+    '--out-dir',
+    outDir,
+    '--json',
+  ]);
+
+  assert.equal(result.status, 3);
+  const payload = JSON.parse(result.stdout.trim());
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'template_sample_render_failed');
+  assert.equal(payload.reportPath, path.join(outDir, 'template-smoke-report.json'));
+  assert.match(payload.message, /Template data markers remain/);
+
+  const report = readJson(payload.reportPath);
+  assert.equal(report.ok, false);
+  assert.equal(report.status, 'failed');
+  assert.ok(report.checks.some((check) => check.id === 'docx_zip' && check.status === 'passed'));
+  assert.ok(report.checks.some((check) => check.id === 'template_markers' && check.status === 'failed'));
+});
