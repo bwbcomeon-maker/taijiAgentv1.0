@@ -26,6 +26,7 @@ const CHECK_IDS = [
   'figure_id_metadata',
   'figure_placement',
   'figure_caption',
+  'image_instructions',
   'delivery_files',
   'wps_visual',
 ];
@@ -157,6 +158,11 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigurePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addImageInstructionsCheck({
+    addCheck,
+    deliveryDir,
+    assetPackage: jsonFiles.assetPackage,
+  });
 
   addWpsVisualCheck({
     addCheck,
@@ -1605,6 +1611,68 @@ function addFigureCaptionCheck({ addCheck, documentXml, renderPlan }) {
   }
 
   addCheck('figure_caption', 'passed');
+}
+
+function addImageInstructionsCheck({ addCheck, deliveryDir, assetPackage }) {
+  if (!assetPackage) {
+    addCheck('image_instructions', 'failed', 'asset-package.json is required for image instruction validation.');
+    return;
+  }
+
+  const instructionsPath = path.join(deliveryDir, 'README-图片调整说明.md');
+  if (!fs.existsSync(instructionsPath)) {
+    addCheck('image_instructions', 'failed', 'README-图片调整说明.md is missing.');
+    return;
+  }
+
+  const instructions = fs.readFileSync(instructionsPath, 'utf8');
+  const failures = [];
+  for (const figure of assetPackage.figures || []) {
+    failures.push(...missingInstructionTokens({
+      assetLabel: `figure ${figure.figureId || 'missing'}`,
+      instructions,
+      tokens: [
+        figure.figureId,
+        figure.displayPath,
+        figure.editable?.sourcePath,
+        figure.caption,
+      ],
+    }));
+  }
+  for (const image of assetPackage.images || []) {
+    failures.push(...missingInstructionTokens({
+      assetLabel: `image ${image.imageId || 'missing'}`,
+      instructions,
+      tokens: [
+        image.imageId,
+        image.displayPath,
+        image.sourcePath,
+        image.caption,
+      ],
+    }));
+  }
+
+  if (failures.length > 0) {
+    addCheck(
+      'image_instructions',
+      'failed',
+      `README-图片调整说明.md is missing editable asset references: ${failures.join('; ')}`
+    );
+    return;
+  }
+
+  addCheck('image_instructions', 'passed');
+}
+
+function missingInstructionTokens({ assetLabel, instructions, tokens }) {
+  const failures = [];
+  for (const token of tokens) {
+    const value = String(token || '').trim();
+    if (value && !instructions.includes(value)) {
+      failures.push(`${assetLabel} missing ${value}`);
+    }
+  }
+  return failures;
 }
 
 function hasTemplateMarkers(documentXml) {

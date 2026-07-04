@@ -14,6 +14,7 @@ const { buildRenderPlan } = require('../src/planning/build-render-plan');
 const { normalizeMarkdownSource } = require('../src/source/normalize-markdown');
 const { getTemplatePackage } = require('../src/templates/registry');
 const { writeDeliveryPackage } = require('../src/delivery/write-delivery-package');
+const { refreshDeliveryPackageFileHashes } = require('../src/delivery/file-hashes');
 const { createDocumentJob, transitionJob } = require('../src/domain/document-job');
 const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
@@ -231,10 +232,29 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'figure_id_metadata',
       'figure_placement',
       'figure_caption',
+      'image_instructions',
       'delivery_files',
       'wps_visual',
     ]
   );
+});
+
+test('validateDeliveryPackage fails when image instructions no longer list editable assets', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  fs.writeFileSync(
+    path.join(deliveryDir, 'README-图片调整说明.md'),
+    '# 图片调整说明\n\n这份说明被改成了泛泛说明，没有列出任何实际图片资产。\n',
+    'utf8'
+  );
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['imageInstructions'] });
+
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  const imageInstructions = report.checks.find((check) => check.id === 'image_instructions');
+  assert.equal(imageInstructions?.status, 'failed');
+  assert.match(imageInstructions?.message || '', /README-图片调整说明\.md.*fig-001|image-001/);
+  assert.ok(report.failures.some((failure) => /README-图片调整说明\.md/.test(failure)));
 });
 
 test('validate-delivery CLI emits a delivery quality report as JSON', async (t) => {
