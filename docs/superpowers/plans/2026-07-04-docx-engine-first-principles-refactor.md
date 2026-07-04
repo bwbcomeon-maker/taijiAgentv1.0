@@ -73,3 +73,4 @@
 - 已让 DOCX 来源归一化按正文 `<w:drawing>` 的 `r:embed` relationship 绑定 `figureId` 与内嵌媒体，而不是按 zip 里的 `word/media/*` 顺序猜测，避免多图文档中 A/B 图片互换后仍进入后续交付链路。
 - 已让普通 Word/WPS DOCX 中没有预埋 `figureId` 的图片段落自动生成稳定 `fig-###`、source block 和媒体绑定，确保真实用户文档里的常规插图也能进入 AssetPackage、RenderPlan、最终 DOCX 和质量门，而不是因为缺少内部锚点被当作 0 张图丢弃。
 - 已让 DOCX drawing 的 `wp:docPr` 中有意义的 `title/descr/name` 进入图片 caption，并过滤 `figureId=...`、`Picture 7` 等内部/默认值，避免真实 Word/WPS 文档里的图题或替代文本在交付计划中退化成泛化“图 1”。
+- 已让 DOCX 来源中紧邻图片后的可见图题段落（如“图 1 系统总体架构图”）绑定为图片 caption，并从正文块移除，避免真实 Word/WPS 图题被降级成泛化“图 1”或在最终正文中重复渲染。

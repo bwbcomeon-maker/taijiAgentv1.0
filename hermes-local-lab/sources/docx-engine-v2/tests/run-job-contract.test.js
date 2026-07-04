@@ -373,6 +373,41 @@ test('run-job promotes unmarked DOCX drawings into traceable figure assets', asy
   assert.equal(findQualityCheck(qualityReport, 'figure_placement')?.status, 'passed');
 });
 
+test('run-job uses visible DOCX figure caption paragraphs for unmarked drawings', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithUnmarkedDrawing(sourcePath, {
+    docPrXml: '<wp:docPr id="7" name="Picture 7"/>',
+    afterDrawingParagraphs: '<w:p><w:r><w:t>图 1 系统总体架构图</w:t></w:r></w:p>',
+  });
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 0);
+
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  const plannedFigure = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedFigure?.caption, '系统总体架构图');
+  assert.equal(
+    renderPlan.templateData.sections.some((section) =>
+      section.blocks.some((block) => block.type === 'paragraph' && block.text === '图 1 系统总体架构图')
+    ),
+    false,
+    'visible DOCX figure caption paragraphs should not be rendered again as body text'
+  );
+});
+
 test('run-job preserves embedded JPEG media from DOCX sources in the delivery package', async (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.docx');
@@ -514,7 +549,11 @@ test('run-job reports non-empty delivery directories as validation failure', (t)
   assert.equal(fs.existsSync(path.join(deliveryDir, 'failure-report.json')), false);
 });
 
-async function writeDocxSourceWithUnmarkedDrawing(filePath) {
+async function writeDocxSourceWithUnmarkedDrawing(filePath, options = {}) {
+  const {
+    docPrXml = '<wp:docPr id="7" name="Picture 7" descr="系统总体架构图"/>',
+    afterDrawingParagraphs = '',
+  } = options;
   const zip = new yazl.ZipFile();
   const output = fs.createWriteStream(filePath);
   zip.outputStream.pipe(output);
@@ -558,12 +597,13 @@ async function writeDocxSourceWithUnmarkedDrawing(filePath) {
       <w:r>
         <w:drawing>
           <wp:inline>
-            <wp:docPr id="7" name="Picture 7" descr="系统总体架构图"/>
+            ${docPrXml}
             <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdUnmarkedImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
           </wp:inline>
         </w:drawing>
       </w:r>
     </w:p>
+    ${afterDrawingParagraphs}
   </w:body>
 </w:document>`),
     'word/document.xml'

@@ -236,7 +236,59 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
     });
   }
 
+  bindVisibleFigureCaptionBlocks(blocks, sections);
   return { title, sections, blocks, tables };
+}
+
+function bindVisibleFigureCaptionBlocks(blocks, sections) {
+  const captionBlockIds = new Set();
+
+  for (let index = 0; index < blocks.length - 1; index += 1) {
+    const block = blocks[index];
+    const nextBlock = blocks[index + 1];
+    if (block.type !== 'figure' || nextBlock?.type !== 'paragraph') {
+      continue;
+    }
+    if ((block.sectionId || '') !== (nextBlock.sectionId || '')) {
+      continue;
+    }
+
+    const caption = parseVisibleFigureCaption(nextBlock.text);
+    if (!caption) {
+      continue;
+    }
+
+    block.caption = caption;
+    block.metadata = {
+      ...(block.metadata || {}),
+      captionSource: 'visible-paragraph',
+      visibleCaptionText: nextBlock.text,
+    };
+    captionBlockIds.add(nextBlock.id);
+    index += 1;
+  }
+
+  if (captionBlockIds.size === 0) {
+    return;
+  }
+
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (captionBlockIds.has(blocks[index].id)) {
+      blocks.splice(index, 1);
+    }
+  }
+
+  for (const section of sections) {
+    section.blockIds = (section.blockIds || []).filter((blockId) => !captionBlockIds.has(blockId));
+  }
+}
+
+function parseVisibleFigureCaption(value) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  const match = normalized.match(
+    /^图\s*(?:\d+(?:[-.．—–]\d+)*|[一二三四五六七八九十百]+)\s*[.．、:：-]?\s*(.+)$/
+  );
+  return match?.[1]?.trim() || '';
 }
 
 function extractTableRows(tableXml) {
