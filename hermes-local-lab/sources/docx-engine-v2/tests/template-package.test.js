@@ -33,7 +33,46 @@ test('template registry lists migrated packages in stable order', () => {
   );
 });
 
-test('template registry includes installed templates after builtin templates', (t) => {
+test('template registry includes installer-verified templates after builtin templates', async (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  await installTemplatePackage({ rootDir: tempRoot, packageDir });
+
+  const templates = listTemplates({ rootDir: tempRoot });
+
+  assert.deepEqual(
+    templates.map((template) => template.id),
+    ['general-proposal', 'custom-proposal']
+  );
+  assert.equal(templates[0].registrySource, 'builtin');
+  assert.equal(templates[1].registrySource, 'installed');
+  assert.equal(templates[1].installReportPath, path.join(tempRoot, 'installed', 'custom-proposal', 'template-install-report.json'));
+  assert.equal(templates[1].installReport.ok, true);
+  assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Custom Proposal');
+});
+
+test('template registry rejects manually registered installed templates without an install report', (t) => {
   const tempRoot = makeTempDir(t);
   const installedDir = path.join(tempRoot, 'installed', 'custom-proposal');
   fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), installedDir, { recursive: true });
@@ -58,15 +97,48 @@ test('template registry includes installed templates after builtin templates', (
     'utf8'
   );
 
-  const templates = listTemplates({ rootDir: tempRoot });
-
-  assert.deepEqual(
-    templates.map((template) => template.id),
-    ['general-proposal', 'custom-proposal']
+  assert.throws(
+    () => listTemplates({ rootDir: tempRoot }),
+    /Installed template install report not found: .*template-install-report\.json/
   );
-  assert.equal(templates[0].registrySource, 'builtin');
-  assert.equal(templates[1].registrySource, 'installed');
-  assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Custom Proposal');
+});
+
+test('template registry rejects installed templates whose install report disagrees with the registry', async (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  const result = await installTemplatePackage({ rootDir: tempRoot, packageDir });
+  const installReport = readJson(result.installReportPath);
+  fs.writeFileSync(
+    result.installReportPath,
+    `${JSON.stringify({ ...installReport, templateId: 'other-template' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  assert.throws(
+    () => listTemplates({ rootDir: tempRoot }),
+    /Installed template install report mismatch: custom-proposal/
+  );
 });
 
 test('template registry rejects duplicate template ids across sources', (t) => {
