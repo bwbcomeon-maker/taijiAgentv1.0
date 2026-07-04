@@ -75,6 +75,7 @@ function bindPlannedContent({ entries, documentXml, renderPlan, outputPath }) {
     contentTypesXml = ensureContentType(contentTypesXml, extension, contentType);
     boundDrawings.push({
       image,
+      index: index + 1,
       drawingXml: updateDrawingTemplate({
         drawingXml: drawingTemplate,
         relationshipId,
@@ -164,24 +165,108 @@ function insertDrawingsBySection(documentXml, boundDrawings, renderPlan) {
     if (!groups.has(sectionId)) {
       groups.set(sectionId, []);
     }
-    groups.get(sectionId).push(binding.drawingXml);
+    groups.get(sectionId).push(figureBlockXml(binding));
   }
 
+  const cleanDocumentXml = removeUnboundFigureCaptionBlocks(documentXml);
   const insertions = [];
   for (const [sectionId, drawings] of groups) {
     const section = sectionsById.get(sectionId);
-    const insertionIndex = section ? sectionInsertionIndex(documentXml, section.title) : -1;
+    const insertionIndex = section ? sectionInsertionIndex(cleanDocumentXml, section.title) : -1;
     insertions.push({
-      index: insertionIndex >= 0 ? insertionIndex : fallbackInsertionIndex(documentXml),
+      index: insertionIndex >= 0 ? insertionIndex : fallbackInsertionIndex(cleanDocumentXml),
       xml: drawings.join(''),
     });
   }
 
-  let nextXml = documentXml;
+  let nextXml = cleanDocumentXml;
   for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
     nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
   }
   return nextXml;
+}
+
+function figureBlockXml(binding) {
+  return `${figureDrawingParagraph(binding.drawingXml)}${figureCaptionParagraph(binding.image, binding.index)}`;
+}
+
+function figureDrawingParagraph(drawingXml) {
+  return [
+    '<w:p>',
+    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    '<w:r>',
+    drawingXml,
+    '</w:r>',
+    '</w:p>',
+  ].join('');
+}
+
+function figureCaptionParagraph(image = {}, index = 1) {
+  const caption = figureCaptionText(image.caption || image.figureId || `图 ${index}`, index);
+  return [
+    '<w:p>',
+    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    '<w:r>',
+    '<w:rPr><w:vanish/></w:rPr>',
+    `<w:t>${escapeXmlText(figureCaptionMetadata(image))}</w:t>`,
+    '</w:r>',
+    '<w:r><w:t>图 </w:t></w:r>',
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> SEQ 图 \\* ARABIC </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    `<w:r><w:t>${escapeXmlText(String(index))}</w:t></w:r>`,
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+    `<w:r><w:t xml:space="preserve"> ${escapeXmlText(caption)}</w:t></w:r>`,
+    '</w:p>',
+  ].join('');
+}
+
+function figureCaptionText(value, index) {
+  const raw = String(value || '').trim() || `图 ${index}`;
+  const withoutPrefix = raw.replace(/^图\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+  return withoutPrefix || raw;
+}
+
+function figureCaptionMetadata(image = {}) {
+  const metadata = image.metadata || {};
+  const tokens = [
+    'docx-engine-v2',
+    'figureCaption',
+    `figureId=${safeMetadataValue(image.figureId)}`,
+  ];
+  for (const key of ['sectionId', 'blockId', 'afterBlockId', 'sourceImageId']) {
+    const value = safeMetadataValue(metadata[key]);
+    if (value) {
+      tokens.push(`${key}=${value}`);
+    }
+  }
+  return tokens.join(' ');
+}
+
+function removeUnboundFigureCaptionBlocks(documentXml) {
+  const removals = [];
+  const paragraphs = paragraphRanges(documentXml);
+  for (let index = 0; index < paragraphs.length; index += 1) {
+    const paragraph = paragraphs[index];
+    if (!hasFigureSequenceField(paragraph.xml) || /\bfigureCaption\b/.test(paragraph.text)) {
+      continue;
+    }
+    removals.push({ start: paragraph.start, end: paragraph.end });
+    const previous = paragraphs[index - 1];
+    if (previous && /图片占位/.test(previous.text)) {
+      removals.push({ start: previous.start, end: previous.end });
+    }
+  }
+
+  let nextXml = documentXml;
+  for (const removal of removals.sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, removal.start)}${nextXml.slice(removal.end)}`;
+  }
+  return nextXml;
+}
+
+function hasFigureSequenceField(paragraphXml) {
+  return /<w:instrText\b[^>]*>[^<]*SEQ\s+图(?:\s|<|$)/.test(String(paragraphXml || ''));
 }
 
 function insertTablesBySection(documentXml, renderPlan) {
@@ -306,7 +391,13 @@ function sectionInsertionIndex(documentXml, sectionTitle) {
     return -1;
   }
 
-  const candidates = paragraphRanges(documentXml).filter((paragraph) => paragraph.text.includes(title));
+  const paragraphs = paragraphRanges(documentXml);
+  let candidates = paragraphs.filter((paragraph) => paragraph.text.trim() === title);
+  if (candidates.length === 0) {
+    candidates = paragraphs.filter(
+      (paragraph) => paragraph.text.includes(title) && !/\b(docx-engine-v2|figureCaption|tableId)\b/.test(paragraph.text)
+    );
+  }
   return candidates.length ? candidates[candidates.length - 1].end : -1;
 }
 
@@ -321,6 +412,7 @@ function paragraphRanges(documentXml) {
     ranges.push({
       start: match.index,
       end: match.index + match[0].length,
+      xml: match[0],
       text: paragraphText(match[0]),
     });
   }

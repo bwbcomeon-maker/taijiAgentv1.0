@@ -253,6 +253,7 @@ function initialQualityReport() {
       { id: 'table_placement', status: 'not_verified' },
       { id: 'figure_id_metadata', status: 'not_verified' },
       { id: 'figure_placement', status: 'not_verified' },
+      { id: 'figure_caption', status: 'not_verified' },
       { id: 'delivery_files', status: 'not_verified' },
       { id: 'wps_visual', status: 'not_verified' },
     ],

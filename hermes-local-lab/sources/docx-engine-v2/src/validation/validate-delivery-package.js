@@ -16,6 +16,7 @@ const CHECK_IDS = [
   'table_placement',
   'figure_id_metadata',
   'figure_placement',
+  'figure_caption',
   'delivery_files',
   'wps_visual',
 ];
@@ -123,6 +124,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addTablePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigurePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addFigureCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
   addWpsVisualCheck({
     addCheck,
@@ -814,6 +816,35 @@ function addFigurePlacementCheck({ addCheck, documentXml, renderPlan }) {
   addCheck('figure_placement', 'passed');
 }
 
+function addFigureCaptionCheck({ addCheck, documentXml, renderPlan }) {
+  if (!documentXml) {
+    addCheck('figure_caption', 'failed', 'Cannot inspect figure captions without word/document.xml.');
+    return;
+  }
+  if (!renderPlan) {
+    addCheck('figure_caption', 'failed', 'render-plan.json is required for figure caption validation.');
+    return;
+  }
+
+  const images = renderPlan.templateData?.images || [];
+  if (images.length === 0) {
+    addCheck('figure_caption', 'passed_with_warnings', 'No images were present in render-plan.json.');
+    return;
+  }
+
+  const captionFailures = figureCaptionFailures({ documentXml, renderPlan });
+  if (captionFailures.length > 0) {
+    addCheck(
+      'figure_caption',
+      'failed',
+      `DOCX figure captions are not bound to render-plan images: ${captionFailures.join(', ')}`
+    );
+    return;
+  }
+
+  addCheck('figure_caption', 'passed');
+}
+
 function hasTemplateMarkers(documentXml) {
   return /\{d\.[^}]+}/.test(documentXml || '');
 }
@@ -959,6 +990,106 @@ function tablePlacementFailures({ documentXml, renderPlan }) {
   return failures;
 }
 
+function figureCaptionFailures({ documentXml, renderPlan }) {
+  const failures = [];
+  const sectionRanges = figureSectionRanges(documentXml, renderPlan);
+  const paragraphs = paragraphRanges(documentXml);
+  const drawingParagraphs = figureDrawingParagraphs(paragraphs);
+  const captionParagraphs = figureCaptionParagraphs(paragraphs);
+
+  for (const image of renderPlan.templateData?.images || []) {
+    const figureId = String(image?.figureId || '').trim();
+    const sectionId = String(image?.metadata?.sectionId || '').trim();
+    if (!figureId) {
+      continue;
+    }
+
+    const drawing = drawingParagraphs.get(figureId);
+    if (!drawing) {
+      failures.push(`${figureId} missing DOCX drawing paragraph for caption check`);
+      continue;
+    }
+
+    const caption = captionParagraphs.get(figureId);
+    if (!caption) {
+      failures.push(`${figureId} missing local figure caption with figureId marker`);
+      continue;
+    }
+
+    if (caption.paragraphIndex !== drawing.paragraphIndex + 1) {
+      failures.push(`${figureId} caption must immediately follow its drawing paragraph`);
+    }
+    if (!hasFigureSequenceField(caption.xml)) {
+      failures.push(`${figureId} caption missing Word SEQ 图 field`);
+    }
+    if (sectionId) {
+      const range = sectionRanges.get(sectionId);
+      if (!range) {
+        failures.push(`${figureId} missing render-plan section anchor ${sectionId} for caption`);
+      } else if (caption.start < range.start || caption.start >= range.end) {
+        failures.push(`${figureId} caption appears outside section ${sectionId}`);
+      }
+      if (caption.metadata.sectionId !== sectionId) {
+        failures.push(
+          `${figureId} caption sectionId expected ${sectionId}, got ${caption.metadata.sectionId || 'missing'}`
+        );
+      }
+    }
+
+    const expectedCaption = String(image.caption || '').trim();
+    if (expectedCaption && !visibleParagraphText(caption.xml).includes(expectedCaption)) {
+      failures.push(`${figureId} caption text missing ${expectedCaption}`);
+    }
+  }
+
+  const unboundSeqParagraphs = paragraphs
+    .filter((paragraph) => hasFigureSequenceField(paragraph.xml) && !/\bfigureCaption\b/.test(paragraph.text))
+    .map((paragraph) => `unbound SEQ 图 field at paragraph ${paragraph.paragraphIndex + 1}`);
+  failures.push(...unboundSeqParagraphs);
+
+  return failures;
+}
+
+function figureDrawingParagraphs(paragraphs) {
+  const positions = new Map();
+  for (const paragraph of paragraphs) {
+    if (!/<w:drawing\b/.test(paragraph.xml)) {
+      continue;
+    }
+    for (const docPrTag of paragraph.xml.match(/<wp:docPr\b[^>]*>/g) || []) {
+      const metadata = parseDocPrMetadata(docPrTag);
+      if (metadata.figureId && !positions.has(metadata.figureId)) {
+        positions.set(metadata.figureId, paragraph);
+      }
+    }
+  }
+  return positions;
+}
+
+function figureCaptionParagraphs(paragraphs) {
+  const positions = new Map();
+  for (const paragraph of paragraphs) {
+    if (!/\bfigureCaption\b/.test(paragraph.text)) {
+      continue;
+    }
+    const metadata = parseDocPrMetadata(paragraph.text);
+    if (metadata.figureId && !positions.has(metadata.figureId)) {
+      positions.set(metadata.figureId, { ...paragraph, metadata });
+    }
+  }
+  return positions;
+}
+
+function hasFigureSequenceField(paragraphXml) {
+  return /<w:instrText\b[^>]*>[^<]*SEQ\s+图(?:\s|<|$)/.test(String(paragraphXml || ''));
+}
+
+function visibleParagraphText(paragraphXml) {
+  return paragraphText(
+    String(paragraphXml || '').replace(/<w:r\b(?:(?!<\/w:r>)[\s\S])*<w:vanish\/>(?:(?!<\/w:r>)[\s\S])*<\/w:r>/g, '')
+  );
+}
+
 function tableMarkerPositions(documentXml) {
   const positions = new Map();
   for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
@@ -980,7 +1111,7 @@ function figureSectionRanges(documentXml, renderPlan) {
       if (!section?.sectionId || !title) {
         return null;
       }
-      const candidates = paragraphs.filter((paragraph) => paragraph.text.includes(title));
+      const candidates = sectionAnchorParagraphs(paragraphs, title);
       const anchor = candidates[candidates.length - 1];
       return anchor ? { sectionId: section.sectionId, start: anchor.end } : null;
     })
@@ -996,6 +1127,16 @@ function figureSectionRanges(documentXml, renderPlan) {
   return ranges;
 }
 
+function sectionAnchorParagraphs(paragraphs, title) {
+  const exact = paragraphs.filter((paragraph) => paragraph.text.trim() === title);
+  if (exact.length > 0) {
+    return exact;
+  }
+  return paragraphs.filter(
+    (paragraph) => paragraph.text.includes(title) && !/\b(docx-engine-v2|figureCaption|tableId)\b/.test(paragraph.text)
+  );
+}
+
 function docPrFigurePositions(documentXml) {
   const positions = new Map();
   for (const match of String(documentXml || '').matchAll(/<wp:docPr\b[^>]*>/g)) {
@@ -1009,12 +1150,16 @@ function docPrFigurePositions(documentXml) {
 
 function paragraphRanges(documentXml) {
   const ranges = [];
+  let paragraphIndex = 0;
   for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
     ranges.push({
+      paragraphIndex,
       start: match.index,
       end: match.index + match[0].length,
+      xml: match[0],
       text: paragraphText(match[0]),
     });
+    paragraphIndex += 1;
   }
   return ranges;
 }

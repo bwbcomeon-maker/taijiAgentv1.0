@@ -116,6 +116,7 @@ async function makeDeliveryPackage(t) {
         { id: 'table_placement', status: 'passed' },
         { id: 'figure_id_metadata', status: 'passed' },
         { id: 'figure_placement', status: 'passed' },
+        { id: 'figure_caption', status: 'passed' },
         { id: 'delivery_files', status: 'passed' },
         { id: 'wps_visual', status: 'not_verified' },
       ],
@@ -188,6 +189,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       (check) => check.id === 'figure_placement' && check.status === 'passed'
     )
   );
+  assert.ok(
+    report.checks.some(
+      (check) => check.id === 'figure_caption' && check.status === 'passed'
+    )
+  );
   assert.deepEqual(
     report.checks.map((check) => check.id),
     [
@@ -200,6 +206,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'table_placement',
       'figure_id_metadata',
       'figure_placement',
+      'figure_caption',
       'delivery_files',
       'wps_visual',
     ]
@@ -657,6 +664,19 @@ test('validateDeliveryPackage fails when a DOCX figure appears before its render
   assert.match(placementCheck?.message || '', /fig-001|section|placement/i);
 });
 
+test('validateDeliveryPackage fails when a DOCX figure caption is missing', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await removeFigureCaptionForFigure(path.join(deliveryDir, 'document.docx'), 'fig-002');
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const captionCheck = report.checks.find((check) => check.id === 'figure_caption');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(captionCheck?.status, 'failed');
+  assert.match(captionCheck?.message || '', /fig-002|caption|SEQ|figureId/i);
+});
+
 test('validateDeliveryPackage fails when a DOCX table appears before its render-plan section', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const renderPlan = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'render-plan.json'), 'utf8'));
@@ -714,6 +734,25 @@ async function moveFigureDrawingBeforeBody(docxPath, figureId) {
     'word/document.xml',
     Buffer.from(withoutDrawing.replace('<w:body>', `<w:body>${drawing}`), 'utf8')
   );
+  await writeZipEntries(entries, docxPath);
+}
+
+async function removeFigureCaptionForFigure(docxPath, figureId) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  let removed = false;
+  const updatedXml = documentXml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (paragraph) => {
+    if (
+      !removed &&
+      /\bfigureCaption\b/.test(paragraph) &&
+      new RegExp(`\\bfigureId=${figureId}\\b`).test(paragraph)
+    ) {
+      removed = true;
+      return '';
+    }
+    return paragraph;
+  });
+  entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
   await writeZipEntries(entries, docxPath);
 }
 
