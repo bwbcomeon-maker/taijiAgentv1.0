@@ -159,6 +159,7 @@ function toTemplateFigureImage(figure, index, sectionById) {
   return {
     figureId: figure.figureId,
     path: figure.displayPath,
+    sha256: figure.sha256,
     caption: figure.caption || `图 ${index + 1}`,
     metadata: {
       ...(figure.metadata || {}),
@@ -177,6 +178,7 @@ function toTemplateMarkdownImage(image, index, sectionById, figureIdBySourceImag
   return {
     figureId,
     path: image.displayPath,
+    sha256: image.sha256,
     caption: image.caption || `图片 ${index + 1}`,
     metadata: {
       ...(image.metadata || {}),

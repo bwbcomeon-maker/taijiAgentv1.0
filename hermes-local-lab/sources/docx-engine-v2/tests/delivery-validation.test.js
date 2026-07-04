@@ -410,6 +410,21 @@ test('validateDeliveryPackage fails when render plan images do not point inside 
   assert.match(imageCoverage?.message || '', /assets/);
 });
 
+test('validateDeliveryPackage fails when a render plan image asset is modified', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlan = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'render-plan.json'), 'utf8'));
+  const imagePath = renderPlan.templateData.images.find((image) => image.path.endsWith('.png'))?.path;
+  assert.ok(imagePath, 'fixture must include a packaged PNG image');
+  fs.writeFileSync(path.join(deliveryDir, imagePath), Buffer.from('tampered image asset'));
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const imageCoverage = report.checks.find((check) => check.id === 'image_coverage');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(imageCoverage?.status, 'failed');
+  assert.match(imageCoverage?.message || '', /sha256|changed|modified/i);
+});
+
 test('validateDeliveryPackage fails when delivery package manifest maps a role to the wrong path', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const manifestPath = path.join(deliveryDir, 'delivery-package.json');

@@ -400,6 +400,25 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan 
     addCheck('image_coverage', 'failed', `Missing delivery image assets: ${missingImages.join(', ')}`);
     return;
   }
+  const missingHashes = images
+    .filter((image) => !/^[a-f0-9]{64}$/.test(String(image?.sha256 || '')))
+    .map((image) => image.path || image.figureId || 'unknown');
+  if (missingHashes.length > 0) {
+    addCheck('image_coverage', 'failed', `Render plan image sha256 is required: ${missingHashes.join(', ')}`);
+    return;
+  }
+  const changedImages = images.filter((image) => {
+    const imagePath = path.join(deliveryDir, normalizeRelativePackagePath(image.path));
+    return fs.existsSync(imagePath) && sha256File(imagePath) !== image.sha256;
+  });
+  if (changedImages.length > 0) {
+    addCheck(
+      'image_coverage',
+      'failed',
+      `Delivery image asset sha256 changed: ${changedImages.map((image) => image.path).join(', ')}`
+    );
+    return;
+  }
 
   if (hasTemplateMarkers(documentXml)) {
     addCheck(

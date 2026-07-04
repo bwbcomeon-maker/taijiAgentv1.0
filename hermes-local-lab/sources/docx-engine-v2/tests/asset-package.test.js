@@ -72,6 +72,8 @@ test('packageAssets writes editable figure assets and copies qualified image fil
     true
   );
   assert.equal(fs.existsSync(path.join(workspace, assetPackage.images[0].displayPath)), true);
+  assert.match(assetPackage.figures[0].sha256, /^[a-f0-9]{64}$/);
+  assert.match(assetPackage.images[0].sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(
     fs.readFileSync(path.join(workspace, assetPackage.images[0].displayPath)),
     ONE_BY_ONE_PNG

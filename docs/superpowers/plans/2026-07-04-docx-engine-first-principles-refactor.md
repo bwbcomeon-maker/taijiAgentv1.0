@@ -51,3 +51,4 @@
 - 已让 WebUI/API 透传 v2 引擎失败作业的 `stage`、`job_manifest_path`、`failure_report_path` 和 `failure_report`，避免浏览器工作台/API 丢失可复盘证据。
 - 已让浏览器文档模板工作台在生成失败时显示失败阶段、失败报告、作业清单和失败原因，避免结构化失败证据只停留在 API 响应中。
 - 已让交付包复验拒绝 `render-plan.json` 中不指向包内 `assets/` 的图片路径，避免渲染计划把图片绑定到 `document.docx` 等错误角色文件却仍被判定为图片资产完整。
+- 已让资产包和 `render-plan.json` 记录每张渲染图片的 SHA-256，并在交付包复验时比对实际 `assets/` 文件，避免图片资产被替换后仍通过质量门。

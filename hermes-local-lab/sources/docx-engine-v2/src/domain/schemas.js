@@ -56,6 +56,8 @@ const sourceRefSchema = {
   },
 };
 
+const sha256Schema = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+
 const pathEntrySchema = {
   type: 'object',
   additionalProperties: false,
@@ -173,6 +175,7 @@ const figureSchema = {
     sourceType: { type: 'string', minLength: 1 },
     editable: metadataSchema,
     displayPath: { type: 'string', minLength: 1 },
+    sha256: sha256Schema,
     dimensions: dimensionsSchema,
     quality: qualitySchema,
     metadata: metadataSchema,
@@ -201,6 +204,7 @@ const assetImageSchema = {
     imageId: { type: 'string', minLength: 1 },
     sourcePath: { type: 'string', minLength: 1 },
     displayPath: { type: 'string', minLength: 1 },
+    sha256: sha256Schema,
     caption: { type: 'string' },
     sectionId: { type: 'string' },
     metadata: metadataSchema,
@@ -240,10 +244,11 @@ const renderFigureSchema = {
 const templateDataImageSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['figureId', 'path'],
+  required: ['figureId', 'path', 'sha256'],
   properties: {
     figureId: { type: 'string', minLength: 1 },
     path: { type: 'string', minLength: 1 },
+    sha256: sha256Schema,
     caption: { type: 'string' },
     metadata: metadataSchema,
   },

@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
@@ -80,6 +81,7 @@ function packageFigure({
         sourcePath: toRelativePath(workspace, sourcePath),
       },
       displayPath: toRelativePath(workspace, displayPath),
+      sha256: sha256File(displayPath),
       metadata: { ...(figure.metadata || {}) },
     };
   }
@@ -109,6 +111,7 @@ function packageFigure({
       sourcePath: toRelativePath(workspace, sourceDisplayPath),
     },
     displayPath: toRelativePath(workspace, displayPath),
+    sha256: sha256File(displayPath),
     metadata: { ...(figure.metadata || {}) },
   };
 }
@@ -138,6 +141,7 @@ function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sour
     imageId: image.imageId,
     sourcePath: toRelativePath(workspace, sourcePath),
     displayPath: toRelativePath(workspace, outputPath),
+    sha256: sha256File(outputPath),
     caption: image.caption || '',
     sectionId: image.sectionId || '',
     metadata: { ...(image.metadata || {}) },
@@ -225,6 +229,10 @@ function assertValidDomainObject(schemaName, value) {
 function toRelativePath(baseDir, targetPath) {
   const relative = path.relative(baseDir, targetPath) || path.basename(targetPath);
   return relative.split(path.sep).join('/');
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function nextId(prefix, value) {
