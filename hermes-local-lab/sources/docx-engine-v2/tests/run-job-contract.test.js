@@ -360,6 +360,7 @@ test('run-job promotes unmarked DOCX drawings into traceable figure assets', asy
 
   const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
   const plannedFigure = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedFigure?.caption, '系统总体架构图');
   assert.equal(plannedFigure?.metadata?.sourceType, 'figure');
   assert.equal(plannedFigure?.metadata?.relationshipId, 'rIdUnmarkedImage');
   assert.equal(plannedFigure?.metadata?.sectionId, 'sec-001');
@@ -557,7 +558,7 @@ async function writeDocxSourceWithUnmarkedDrawing(filePath) {
       <w:r>
         <w:drawing>
           <wp:inline>
-            <wp:docPr id="7" name="普通插图"/>
+            <wp:docPr id="7" name="Picture 7" descr="系统总体架构图"/>
             <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdUnmarkedImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
           </wp:inline>
         </w:drawing>

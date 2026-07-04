@@ -186,7 +186,7 @@ function extractBodyStructure(documentXml, drawingBindings = []) {
           sectionTitle: currentSection?.title || '',
           anchorText: drawing.figureId ? `figureId=${drawing.figureId}` : `docx-drawing:${drawing.relationshipId}`,
           path: `word/document.xml#block-${blocks.length + 1}`,
-          caption: `图 ${drawing.drawingIndex}`,
+          caption: drawing.caption || `图 ${drawing.drawingIndex}`,
           metadata: {
             sourceIndex,
             drawingIndex: drawing.drawingIndex,
@@ -392,6 +392,7 @@ function extractDrawingBindings(documentXml, relationshipsXml) {
     bindings.push({
       drawingIndex,
       figureId: drawingXml.match(/\bfigureId=([A-Za-z0-9_-]+)/)?.[1] || '',
+      caption: drawingCaption(drawingXml, drawingIndex),
       relationshipId,
       mediaPath,
     });
@@ -406,6 +407,27 @@ function extractParagraphDrawingBindings(paragraphXml, drawingBindingByRelations
     .filter(Boolean)
     .map((relationshipId) => drawingBindingByRelationshipId.get(relationshipId))
     .filter(Boolean);
+}
+
+function drawingCaption(drawingXml, drawingIndex) {
+  const docPrMatch = String(drawingXml || '').match(/<wp:docPr\b([^>]*)\/?>/);
+  const attributes = docPrMatch ? parseAttributes(docPrMatch[1]) : {};
+  return [attributes.title, attributes.descr, attributes.name]
+    .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
+    .find(isMeaningfulDrawingCaption) || `图 ${drawingIndex}`;
+}
+
+function isMeaningfulDrawingCaption(value) {
+  if (!value) {
+    return false;
+  }
+  if (/\bfigureId=[A-Za-z0-9_-]+\b/.test(value)) {
+    return false;
+  }
+  if (/^(picture|image)\s*\d*$/i.test(value)) {
+    return false;
+  }
+  return true;
 }
 
 function relationshipByTargetPath(relationshipsXml) {
