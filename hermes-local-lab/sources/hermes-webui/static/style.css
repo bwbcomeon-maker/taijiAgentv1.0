@@ -4848,6 +4848,9 @@ main.main > #mainPlugin{display:none;}
 .docx-engine-field input,.docx-engine-field select{width:100%;min-height:38px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface);color:var(--text);font-size:12px;padding:0 10px;outline:none;}
 .docx-engine-field input:focus,.docx-engine-field select:focus{border-color:var(--accent-bg-strong);box-shadow:0 0 0 2px var(--accent-bg);}
 .docx-engine-field input[aria-invalid="true"],.docx-engine-field select[aria-invalid="true"]{border-color:rgba(180,35,24,.65);box-shadow:0 0 0 2px rgba(180,35,24,.10);}
+.docx-engine-checkbox{display:inline-flex;align-items:center;gap:8px;margin-top:10px;color:var(--muted);font-size:12px;font-weight:700;line-height:1.35;}
+.docx-engine-checkbox input{width:16px;height:16px;margin:0;accent-color:var(--accent-bg-strong);}
+.docx-engine-checkbox:focus-within{outline:2px solid var(--accent-bg-strong);outline-offset:3px;border-radius:6px;}
 .docx-engine-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
 .docx-engine-actions button,.docx-engine-secondary{min-height:38px;border:1px solid var(--accent-bg-strong);border-radius:8px;background:var(--accent-bg);color:var(--accent-text);padding:0 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;}
 .docx-engine-actions button.secondary,.docx-engine-secondary{border-color:var(--border-subtle);background:var(--surface);color:var(--text);}

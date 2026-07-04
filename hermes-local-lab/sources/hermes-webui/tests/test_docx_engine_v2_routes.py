@@ -169,6 +169,52 @@ def test_docx_engine_v2_install_template_validates_path_and_returns_templates(mo
     assert str(package_dir.resolve()) in calls[0]
 
 
+def test_docx_engine_v2_install_template_passes_explicit_replace_flag(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+    import subprocess
+    import json
+
+    package_dir = tmp_path / "templates" / "custom-proposal"
+    package_dir.mkdir(parents=True)
+    calls = []
+
+    def fake_run_engine(args):
+        calls.append(args)
+        if str(args[0]).endswith("install-template.js"):
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "action": "replaced",
+                        "templateId": "custom-proposal",
+                        "registryEntry": {"templateId": "custom-proposal", "path": "installed/custom-proposal"},
+                    }
+                )
+                + "\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"ok": True, "templates": [{"id": "custom-proposal"}]}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(docx_engine_v2, "run_engine", fake_run_engine)
+
+    payload, status = docx_engine_v2.install_template(
+        {"package_path": "templates/custom-proposal", "replace_existing": True},
+        tmp_path,
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["action"] == "replaced"
+    assert "--replace" in calls[0]
+
+
 def test_docx_engine_v2_install_template_rejects_outside_package_path(tmp_path):
     from api import docx_engine_v2
 

@@ -19,9 +19,11 @@ function main() {
     const result = installTemplatePackage({
       rootDir: engineRoot,
       packageDir: path.resolve(args.packageDir),
+      replace: args.replace,
     });
     const payload = {
       ok: true,
+      action: result.action,
       templateId: result.templateId,
       packageDir: result.packageDir,
       registryPath: result.registryPath,
@@ -30,7 +32,7 @@ function main() {
     if (args.json) {
       writeJsonStdout(payload);
     } else {
-      process.stdout.write(`install-template-ok\t${result.templateId}\t${result.registryEntry.path}\n`);
+      process.stdout.write(`install-template-${result.action || 'installed'}\t${result.templateId}\t${result.registryEntry.path}\n`);
     }
     process.exitCode = EXIT_CODES.success;
   } catch (error) {
@@ -53,12 +55,17 @@ function parseArgs(argv) {
     packageDir: '',
     rootDir: '',
     json: false,
+    replace: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--json') {
       parsed.json = true;
+      continue;
+    }
+    if (arg === '--replace') {
+      parsed.replace = true;
       continue;
     }
 

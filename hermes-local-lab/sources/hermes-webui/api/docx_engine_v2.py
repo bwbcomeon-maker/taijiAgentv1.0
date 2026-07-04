@@ -63,6 +63,7 @@ def install_template(payload: dict, workspace: Path) -> tuple[dict[str, Any], in
         "--package",
         str(package_dir),
         "--json",
+        *([] if not _first_bool(payload, "replace_existing", "replaceExisting", "replace") else ["--replace"]),
     ])
     engine_payload = _payload_from_completed(completed, default_code="template_install_failed")
     if completed.returncode != 0:
@@ -78,6 +79,7 @@ def install_template(payload: dict, workspace: Path) -> tuple[dict[str, Any], in
 
     result: dict[str, Any] = {
         "ok": True,
+        "action": engine_payload.get("action", "installed"),
         "template_id": engine_payload.get("templateId", engine_payload.get("template_id", "")),
         "package_dir": engine_payload.get("packageDir", engine_payload.get("package_dir", str(package_dir))),
         "registry_path": engine_payload.get("registryPath", engine_payload.get("registry_path", "")),
@@ -316,6 +318,19 @@ def _first_text(payload: dict, *keys: str) -> str:
         if value is not None:
             return str(value).strip()
     return ""
+
+
+def _first_bool(payload: dict, *keys: str) -> bool:
+    for key in keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _payload_from_completed(completed: subprocess.CompletedProcess[str], *, default_code: str) -> dict[str, Any]:

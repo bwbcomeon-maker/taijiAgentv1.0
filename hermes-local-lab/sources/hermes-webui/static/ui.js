@@ -9870,6 +9870,11 @@ function renderDocxEngineWorkbench(workbench){
     '<div class="docx-engine-grid">',
     inputHtml('template_package_path','模板包目录','例如：templates/custom-proposal'),
     '</div>',
+    '<label class="docx-engine-checkbox">',
+    '<input type="checkbox" data-docx-engine-field="replace_existing" aria-label="覆盖已安装模板">',
+    '<span>覆盖已安装模板</span>',
+    '</label>',
+    '<div class="docx-engine-help">仅用于更新已安装模板；内置模板不会被覆盖。</div>',
     '<div class="docx-engine-actions">',
     '<button type="button" class="secondary" onclick="installDocxEngineTemplate(this);event.stopPropagation()" aria-label="安装模板包">安装模板包</button>',
     '</div>',
@@ -9935,6 +9940,11 @@ function _docxEngineField(root,name){
 function _docxEngineValue(root,name){
   const input=_docxEngineField(root,name);
   return input?String(input.value||'').trim():'';
+}
+
+function _docxEngineChecked(root,name){
+  const input=_docxEngineField(root,name);
+  return !!(input&&input.checked);
 }
 
 function _setDocxEngineValue(root,name,value){
@@ -10109,18 +10119,26 @@ async function installDocxEngineTemplate(button){
     _markDocxEngineRequiredFields(root,['template_package_path'],'请填写模板包目录。');
     return null;
   }
+  const replaceExisting=_docxEngineChecked(root,'replace_existing');
+  if(replaceExisting&&typeof confirm==='function'&&!confirm('确定要覆盖已安装模板吗？覆盖后旧模板文件会被新模板包替换。')){
+    _setDocxEngineStatus(root,'已取消覆盖已安装模板。','info');
+    return null;
+  }
   _docxEngineSetBusy(root,true);
-  _setDocxEngineStatus(root,'正在安装模板包...','busy');
+  _setDocxEngineStatus(root,replaceExisting?'正在更新已安装模板...':'正在安装模板包...','busy');
   try{
     const payload=await api('/api/docx-engine-v2/templates/install',{method:'POST',body:JSON.stringify({
       session_id:sid,
       package_path:packagePath,
+      replace_existing:replaceExisting,
     })});
     const templateId=String(payload&&payload.template_id||payload&&payload.templateId||'').trim();
+    const action=String(payload&&payload.action||'installed');
     const templates=Array.isArray(payload&&payload.templates)?payload.templates:[];
     _updateDocxEngineTemplateOptions(root,templates,templateId);
-    _setDocxEngineStatus(root,`模板包已安装${templateId?`：${templateId}`:''}。`,'success');
-    if(typeof showToast==='function')showToast('模板包已安装。');
+    const doneText=action==='replaced'?'模板包已更新':'模板包已安装';
+    _setDocxEngineStatus(root,`${doneText}${templateId?`：${templateId}`:''}。`,'success');
+    if(typeof showToast==='function')showToast(`${doneText}。`);
     return payload;
   }catch(err){
     const message=err&&err.message?err.message:String(err||'安装失败');

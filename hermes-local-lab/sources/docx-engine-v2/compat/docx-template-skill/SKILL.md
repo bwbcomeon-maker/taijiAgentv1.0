@@ -38,6 +38,10 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    ```bash
    node scripts/install-template.js --package <template-package-dir> --json
    ```
+   To update a template that was previously installed, use an explicit replace flag:
+   ```bash
+   node scripts/install-template.js --package <template-package-dir> --replace --json
+   ```
 
 ## Acceptance
 

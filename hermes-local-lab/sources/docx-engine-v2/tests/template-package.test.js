@@ -156,6 +156,110 @@ test('installTemplatePackage rejects duplicate template ids before copying files
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
 
+test('installTemplatePackage replaces an existing installed template only when requested', (t) => {
+  const tempRoot = makeTempDir(t);
+  const installedDir = path.join(tempRoot, 'installed', 'custom-proposal');
+  const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), installedDir, { recursive: true });
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  for (const [dir, name] of [
+    [installedDir, 'Old Custom Proposal'],
+    [packageDir, 'Updated Custom Proposal'],
+  ]) {
+    const manifestPath = path.join(dir, 'manifest.json');
+    const manifest = readJson(manifestPath);
+    fs.writeFileSync(
+      manifestPath,
+      `${JSON.stringify({ ...manifest, id: 'custom-proposal', name }, null, 2)}\n`,
+      'utf8'
+    );
+  }
+  fs.writeFileSync(path.join(installedDir, 'old-only.txt'), 'stale file', 'utf8');
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [{ templateId: 'custom-proposal', path: 'installed/custom-proposal' }],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  const result = installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'replaced');
+  assert.equal(result.templateId, 'custom-proposal');
+  assert.equal(readJson(path.join(installedDir, 'manifest.json')).name, 'Updated Custom Proposal');
+  assert.equal(fs.existsSync(path.join(installedDir, 'old-only.txt')), false);
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
+    { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
+  ]);
+  assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Updated Custom Proposal');
+});
+
+test('installTemplatePackage refuses to replace builtin templates', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'general-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  assert.throws(
+    () => installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true }),
+    /Cannot replace builtin template: general-proposal/
+  );
+  assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'general-proposal')), false);
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
+});
+
+test('installTemplatePackage refuses to replace an unsafe installed registry path', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [],
+        installed: [{ templateId: 'custom-proposal', path: '.' }],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  assert.throws(
+    () => installTemplatePackage({ rootDir: tempRoot, packageDir, replace: true }),
+    /Installed template path is outside the managed installed directory/
+  );
+  assert.equal(fs.existsSync(path.join(tempRoot, 'template-registry.json')), true);
+});
+
 test('migrated template packages expose required files and manifest metadata', () => {
   for (const templateId of expectedTemplateIds) {
     const template = getTemplatePackage(templateId, { rootDir });

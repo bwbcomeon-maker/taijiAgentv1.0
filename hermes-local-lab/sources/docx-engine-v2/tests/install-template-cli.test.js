@@ -95,3 +95,48 @@ test('install-template CLI reports validation failure without mutating registry'
   assert.match(payload.message, /Template already exists: general-proposal/);
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
+
+test('install-template CLI replaces an installed template only with explicit flag', (t) => {
+  const tempRoot = makeTempDir(t);
+  makeRegistry(tempRoot);
+  const firstPackageDir = makeTemplatePackage(tempRoot, 'custom-proposal');
+  const firstResult = runInstallTemplate([
+    '--root-dir',
+    tempRoot,
+    '--package',
+    firstPackageDir,
+    '--json',
+  ]);
+  assert.equal(firstResult.status, 0, firstResult.stderr);
+
+  const replacementPackageDir = makeTemplatePackage(tempRoot, 'custom-proposal');
+  const manifestPath = path.join(replacementPackageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, name: 'Updated Installed Template' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const result = runInstallTemplate([
+    '--root-dir',
+    tempRoot,
+    '--package',
+    replacementPackageDir,
+    '--replace',
+    '--json',
+  ]);
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim());
+  assert.equal(payload.ok, true);
+  assert.equal(payload.action, 'replaced');
+  assert.equal(payload.templateId, 'custom-proposal');
+  assert.equal(
+    readJson(path.join(tempRoot, 'installed', 'custom-proposal', 'manifest.json')).name,
+    'Updated Installed Template'
+  );
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
+    { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
+  ]);
+});
