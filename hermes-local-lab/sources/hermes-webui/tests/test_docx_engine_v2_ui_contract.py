@@ -29,9 +29,11 @@ def test_docx_engine_workbench_has_visible_controls_and_actions():
     assert "/api/docx-engine-v2/templates" in ui_js
     assert "/api/docx-engine-v2/templates/install" in ui_js
     assert "/api/docx-engine-v2/jobs" in ui_js
+    assert "/api/docx-engine-v2/drafts/package" in ui_js
     assert "/api/docx-engine-v2/quality/wps-visual" in ui_js
     assert "/api/docx-engine-v2/assets/rerender" in ui_js
     assert "/api/docx-engine-v2/assets/replace" in ui_js
+    assert "/api/docx-template/figure-adjust" not in ui_js
     assert "/api/file/open" in ui_js
     assert "renderDocxEngineWorkbenchMessage" in messages_js
 

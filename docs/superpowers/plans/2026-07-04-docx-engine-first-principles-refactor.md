@@ -31,6 +31,7 @@
 - 已抽出 `runDocumentJob` 统一作业流水线，CLI 退回参数适配层。
 - 已让交付包写入完整 `job.manifest.json`，并保持 WPS/Word 视觉验收为显式 `not_verified` gate。
 - 已把 WebUI 旧图片调整接口收敛为 v2 服务兼容层，不再执行旧 `docx-template-skill` 脚本。
+- 已新增 WebUI v2 草稿打包路由 `/api/docx-engine-v2/drafts/package`，并让图片调整工作台主动调用 v2 API；旧 `docx-template/figure-adjust` 路由仅保留为后端兼容层。
 - 已支持 registry 同时读取 `builtin` 和 `installed`，并拒绝重复模板 ID。
 - 已补齐模板安装器：外部模板包必须通过校验后才会复制到 `installed/<templateId>` 并写入 registry；copyable skill 也暴露 `scripts/install-template.js`。
 - 已支持显式更新已安装模板：用户必须传 `--replace` 或在工作台勾选“覆盖已安装模板”，内置模板仍拒绝覆盖，避免把模板维护能力变成隐式破坏操作。

@@ -10438,7 +10438,7 @@ async function runDocxDraftPackage(button){
     _setDocxFigureAdjustmentStatus(root,'请填写 Markdown 初稿路径和初稿包输出目录。','error');
     return null;
   }
-  return _postDocxFigureAdjustment(root,'/api/docx-template/figure-adjust/package',{
+  return _postDocxFigureAdjustment(root,'/api/docx-engine-v2/drafts/package',{
     session_id:sid,
     source_path:sourcePath,
     out_dir:outDir,
@@ -10456,7 +10456,7 @@ async function runDocxFigureRerender(button){
     _setDocxFigureAdjustmentStatus(root,'请填写 draft.manifest.json 路径和图示 ID。','error');
     return null;
   }
-  return _postDocxFigureAdjustment(root,'/api/docx-template/figure-adjust/rerender',{
+  return _postDocxFigureAdjustment(root,'/api/docx-engine-v2/assets/rerender',{
     session_id:sid,
     manifest_path:manifestPath,
     figure_id:figureId,
@@ -10475,7 +10475,7 @@ async function runDocxFigureReplace(button){
     _setDocxFigureAdjustmentStatus(root,'请填写 DOCX、图示 ID、替换图片和新 DOCX 输出路径。','error');
     return null;
   }
-  return _postDocxFigureAdjustment(root,'/api/docx-template/figure-adjust/replace',{
+  return _postDocxFigureAdjustment(root,'/api/docx-engine-v2/assets/replace',{
     session_id:sid,
     docx_path:docxPath,
     figure_id:figureId,

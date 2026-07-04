@@ -20,6 +20,7 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/docx-engine-v2/templates" in routes_py
     assert "/api/docx-engine-v2/templates/install" in routes_py
     assert "/api/docx-engine-v2/jobs" in routes_py
+    assert "/api/docx-engine-v2/drafts/package" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
@@ -120,6 +121,27 @@ def test_docx_engine_v2_install_template_routes_to_service(monkeypatch, tmp_path
     assert result["status"] == 200
     assert result["payload"]["template_id"] == "custom-proposal"
     assert result["payload"]["templates"][0]["id"] == "custom-proposal"
+
+
+def test_docx_engine_v2_package_draft_routes_to_service(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+
+    def fake_package_rich_draft(payload, workspace):
+        assert payload["source_path"] == "source.md"
+        assert payload["out_dir"] == "draft-package"
+        assert workspace == tmp_path.resolve()
+        return {"ok": True, "action": "package", "out_dir": "draft-package"}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "package_rich_draft", fake_package_rich_draft)
+
+    result = routes._handle_docx_engine_v2_package_draft(
+        object(),
+        {"session_id": "sid-docx", "source_path": "source.md", "out_dir": "draft-package"},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["action"] == "package"
+    assert result["payload"]["out_dir"] == "draft-package"
 
 
 def test_docx_engine_v2_install_template_validates_path_and_returns_templates(monkeypatch, tmp_path):

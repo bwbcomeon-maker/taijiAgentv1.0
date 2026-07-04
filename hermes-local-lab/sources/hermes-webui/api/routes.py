@@ -10749,6 +10749,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/docx-engine-v2/templates/install":
         return _handle_docx_engine_v2_install_template(handler, body)
 
+    if parsed.path == "/api/docx-engine-v2/drafts/package":
+        return _handle_docx_engine_v2_package_draft(handler, body)
+
     if parsed.path == "/api/docx-engine-v2/quality/wps-visual":
         return _handle_docx_engine_v2_wps_visual_acceptance(handler, body)
 
@@ -16449,6 +16452,17 @@ def _handle_docx_engine_v2_install_template(handler, body):
     try:
         workspace = _docx_engine_v2_workspace(body)
         payload, status = docx_engine_v2.install_template(body, workspace)
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+    except subprocess.TimeoutExpired as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_docx_engine_v2_package_draft(handler, body):
+    try:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.package_rich_draft(body, workspace)
         return j(handler, payload, status=status)
     except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
