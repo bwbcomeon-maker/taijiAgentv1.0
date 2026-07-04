@@ -71,3 +71,4 @@
 - 已让 DOCX 来源中的内嵌媒体从 SourcePackage 进入 AssetPackage，并作为标准 `assets/<figureId>/figure.*` 参与 RenderPlan、DOCX 后处理和质量门校验，避免“归一化识别到图片但最终交付丢图”。
 - 已把图片资产生命周期扩展到 JPEG/JPG：DOCX 来源内嵌 JPEG、渲染后处理 content type、以及按 `figureId` 替换 DOCX 图片都能走同一条质量门，避免真实 Word 文档常见照片格式被 PNG-only 路径拒绝。
 - 已让 DOCX 来源归一化按正文 `<w:drawing>` 的 `r:embed` relationship 绑定 `figureId` 与内嵌媒体，而不是按 zip 里的 `word/media/*` 顺序猜测，避免多图文档中 A/B 图片互换后仍进入后续交付链路。
+- 已让普通 Word/WPS DOCX 中没有预埋 `figureId` 的图片段落自动生成稳定 `fig-###`、source block 和媒体绑定，确保真实用户文档里的常规插图也能进入 AssetPackage、RenderPlan、最终 DOCX 和质量门，而不是因为缺少内部锚点被当作 0 张图丢弃。

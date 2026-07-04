@@ -16,7 +16,8 @@ async function normalizeDocxSource({ sourcePath } = {}) {
   const documentXml = zipEntries.get('word/document.xml').toString('utf8');
   const relationshipsXml = zipEntries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
   const embeddedMedia = extractEmbeddedMedia(zipEntries, relationshipsXml);
-  const { title, sections, blocks, tables } = extractBodyStructure(documentXml);
+  const drawingBindings = extractDrawingBindings(documentXml, relationshipsXml);
+  const { title, sections, blocks, tables } = extractBodyStructure(documentXml, drawingBindings);
   const figures = extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, blocks);
   bindFigureMarkersToBlocks(blocks, figures);
 
@@ -105,12 +106,17 @@ function readZip(sourcePath) {
   });
 }
 
-function extractBodyStructure(documentXml) {
+function extractBodyStructure(documentXml, drawingBindings = []) {
   const sections = [];
   const blocks = [];
   const tables = [];
   let title = '';
   let currentSection = null;
+  const drawingBindingByRelationshipId = new Map(
+    drawingBindings
+      .filter((binding) => binding.relationshipId)
+      .map((binding) => [binding.relationshipId, binding])
+  );
 
   for (const match of documentXml.matchAll(/<w:(p|tbl)\b[\s\S]*?<\/w:\1>/g)) {
     const elementType = match[1];
@@ -119,49 +125,81 @@ function extractBodyStructure(documentXml) {
 
     if (elementType === 'p') {
       const paragraph = extractText(xml);
-      if (!paragraph) {
+      const paragraphDrawings = extractParagraphDrawingBindings(xml, drawingBindingByRelationshipId);
+      if (!paragraph && paragraphDrawings.length === 0) {
         continue;
       }
 
-      const isTitle = !title;
-      const isSectionHeading = !isTitle && looksLikeSectionHeading(paragraph);
-      const block = {
-        id: nextId('block', blocks.length + 1),
-        type: isTitle || isSectionHeading ? 'heading' : 'paragraph',
-        text: paragraph,
-        content: { text: paragraph },
-        level: isTitle ? 1 : isSectionHeading ? 2 : currentSection?.level || 1,
-        sectionId: currentSection?.sectionId || '',
-        sectionTitle: currentSection?.title || '',
-        anchorText: anchorText(paragraph),
-        path: `word/document.xml#block-${blocks.length + 1}`,
-        caption: '',
-        metadata: { sourceIndex },
-      };
-
-      if (isTitle) {
-        title = paragraph;
-      }
-
-      if (isSectionHeading) {
-        currentSection = {
-          sectionId: nextId('sec', sections.length + 1),
-          title: paragraph,
-          level: 2,
-          blockIds: [block.id],
+      if (paragraph) {
+        const isTitle = !title;
+        const isSectionHeading = !isTitle && looksLikeSectionHeading(paragraph);
+        const block = {
+          id: nextId('block', blocks.length + 1),
+          type: isTitle || isSectionHeading ? 'heading' : 'paragraph',
+          text: paragraph,
+          content: { text: paragraph },
+          level: isTitle ? 1 : isSectionHeading ? 2 : currentSection?.level || 1,
+          sectionId: currentSection?.sectionId || '',
+          sectionTitle: currentSection?.title || '',
+          anchorText: anchorText(paragraph),
+          path: `word/document.xml#block-${blocks.length + 1}`,
+          caption: '',
           metadata: { sourceIndex },
         };
-        sections.push(currentSection);
-        block.sectionId = currentSection.sectionId;
-        block.sectionTitle = currentSection.title;
-        block.level = currentSection.level;
-      } else if (currentSection) {
-        block.sectionId = currentSection.sectionId;
-        block.sectionTitle = currentSection.title;
-        currentSection.blockIds.push(block.id);
+
+        if (isTitle) {
+          title = paragraph;
+        }
+
+        if (isSectionHeading) {
+          currentSection = {
+            sectionId: nextId('sec', sections.length + 1),
+            title: paragraph,
+            level: 2,
+            blockIds: [block.id],
+            metadata: { sourceIndex },
+          };
+          sections.push(currentSection);
+          block.sectionId = currentSection.sectionId;
+          block.sectionTitle = currentSection.title;
+          block.level = currentSection.level;
+        } else if (currentSection) {
+          block.sectionId = currentSection.sectionId;
+          block.sectionTitle = currentSection.title;
+          currentSection.blockIds.push(block.id);
+        }
+
+        blocks.push(block);
       }
 
-      blocks.push(block);
+      for (const drawing of paragraphDrawings) {
+        const block = {
+          id: nextId('block', blocks.length + 1),
+          type: 'figure',
+          text: drawing.figureId ? `figureId=${drawing.figureId}` : `DOCX 图片 ${drawing.drawingIndex}`,
+          content: {
+            relationshipId: drawing.relationshipId,
+            mediaPath: drawing.mediaPath,
+          },
+          level: currentSection?.level || 1,
+          sectionId: currentSection?.sectionId || '',
+          sectionTitle: currentSection?.title || '',
+          anchorText: drawing.figureId ? `figureId=${drawing.figureId}` : `docx-drawing:${drawing.relationshipId}`,
+          path: `word/document.xml#block-${blocks.length + 1}`,
+          caption: `图 ${drawing.drawingIndex}`,
+          metadata: {
+            sourceIndex,
+            drawingIndex: drawing.drawingIndex,
+            figureId: drawing.figureId || '',
+            relationshipId: drawing.relationshipId,
+            mediaPath: drawing.mediaPath,
+          },
+        };
+        blocks.push(block);
+        if (currentSection) {
+          currentSection.blockIds.push(block.id);
+        }
+      }
       continue;
     }
 
@@ -246,16 +284,23 @@ function extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, bloc
   ];
   const drawingBindingByFigureId = extractDrawingFigureBindings(documentXml, relationshipsXml);
   const mediaByPath = new Map(embeddedMedia.map((media) => [media.path, media]));
+  const usedFigureIds = new Set(figureIds);
+  const figures = [];
 
-  return figureIds.map((figureId, index) => {
+  for (const figureId of figureIds) {
     const marker = `figureId=${figureId}`;
-    const drawingBinding = drawingBindingByFigureId.get(figureId) || {};
-    const media = mediaByPath.get(drawingBinding.mediaPath) || embeddedMedia[index] || embeddedMedia[0] || {};
-    const markerBlock = blocks.find((block) => block.text.includes(marker));
+    const markerBlock = blocks.find(
+      (block) => block.metadata?.figureId === figureId || block.text.includes(marker)
+    );
+    const drawingBinding = drawingBindingByFigureId.get(figureId) || {
+      relationshipId: markerBlock?.metadata?.relationshipId || '',
+      mediaPath: markerBlock?.metadata?.mediaPath || '',
+    };
+    const media = mediaByPath.get(drawingBinding.mediaPath) || embeddedMedia[figures.length] || embeddedMedia[0] || {};
 
-    return {
+    figures.push({
       figureId,
-      caption: `图 ${index + 1}`,
+      caption: markerBlock?.caption || `图 ${figures.length + 1}`,
       sectionId: markerBlock?.sectionId || '',
       anchorText: marker,
       sourceType: 'docx-embedded',
@@ -272,34 +317,95 @@ function extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, bloc
         mediaPath: media.path || '',
         relationshipId: drawingBinding.relationshipId || media.relationshipId || '',
       },
-    };
-  });
-}
+    });
+  }
 
-function extractDrawingFigureBindings(documentXml, relationshipsXml) {
-  const relationshipById = relationshipByRelationshipId(relationshipsXml);
-  const bindings = new Map();
-
-  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
-    const drawingXml = drawingMatch[0];
-    const figureMatch = drawingXml.match(/\bfigureId=([A-Za-z0-9_-]+)/);
-    const relationshipMatch = drawingXml.match(/\br:embed="([^"]+)"/);
-    if (!figureMatch || !relationshipMatch) {
+  for (const block of blocks || []) {
+    if (block.type !== 'figure' || !block.metadata?.relationshipId || block.metadata.figureId) {
       continue;
     }
 
-    const figureId = figureMatch[1];
+    const figureId = nextAvailableFigureId(usedFigureIds);
+    usedFigureIds.add(figureId);
+    block.metadata.figureId = figureId;
+    block.anchorText = block.anchorText || `docx-drawing:${block.metadata.relationshipId}`;
+    const media = mediaByPath.get(block.metadata.mediaPath) || {};
+    figures.push({
+      figureId,
+      caption: block.caption || `图 ${figures.length + 1}`,
+      sectionId: block.sectionId || '',
+      anchorText: block.anchorText,
+      sourceType: 'docx-embedded',
+      editable: {
+        format: 'docx-embedded',
+        sourcePath: media.path || block.metadata.mediaPath || '',
+      },
+      displayPath: media.path || block.metadata.mediaPath || `assets/${figureId}/figure`,
+      dimensions: {},
+      quality: { status: 'not_verified', warnings: [] },
+      metadata: {
+        generatedFrom: 'docx-drawing',
+        mediaId: media.mediaId || '',
+        mediaPath: media.path || block.metadata.mediaPath || '',
+        relationshipId: block.metadata.relationshipId || media.relationshipId || '',
+        drawingIndex: block.metadata.drawingIndex || 0,
+      },
+    });
+  }
+
+  return figures;
+}
+
+function extractDrawingFigureBindings(documentXml, relationshipsXml) {
+  const bindings = new Map();
+  for (const drawing of extractDrawingBindings(documentXml, relationshipsXml)) {
+    if (drawing.figureId) {
+      bindings.set(drawing.figureId, drawing);
+    }
+  }
+  return bindings;
+}
+
+function extractDrawingBindings(documentXml, relationshipsXml) {
+  const relationshipById = relationshipByRelationshipId(relationshipsXml);
+  const bindings = [];
+  let drawingIndex = 0;
+
+  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+    drawingIndex += 1;
+    const drawingXml = drawingMatch[0];
+    const relationshipMatch = drawingXml.match(/\br:embed="([^"]+)"/);
+    if (!relationshipMatch) {
+      continue;
+    }
+
     const relationshipId = relationshipMatch[1];
     const relationship = relationshipById.get(relationshipId) || {};
+    if (!isImageRelationship(relationship.Type)) {
+      continue;
+    }
     const mediaPath = normalizeRelationshipTarget(relationship.Target || '');
     if (!mediaPath) {
       continue;
     }
 
-    bindings.set(figureId, { relationshipId, mediaPath });
+    bindings.push({
+      drawingIndex,
+      figureId: drawingXml.match(/\bfigureId=([A-Za-z0-9_-]+)/)?.[1] || '',
+      relationshipId,
+      mediaPath,
+    });
   }
 
   return bindings;
+}
+
+function extractParagraphDrawingBindings(paragraphXml, drawingBindingByRelationshipId) {
+  return [...String(paragraphXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)]
+    .map((drawingMatch) => drawingMatch[0].match(/\br:embed="([^"]+)"/)?.[1] || '')
+    .filter(Boolean)
+    .map((relationshipId) => drawingBindingByRelationshipId.get(relationshipId))
+    .filter(Boolean);
 }
 
 function relationshipByTargetPath(relationshipsXml) {
@@ -325,6 +431,10 @@ function relationshipEntries(relationshipsXml) {
   );
 }
 
+function isImageRelationship(type) {
+  return String(type || '').endsWith('/image');
+}
+
 function bindFigureMarkersToBlocks(blocks, figures) {
   for (const figure of figures || []) {
     const marker = figure.metadata?.marker;
@@ -343,8 +453,19 @@ function bindFigureMarkersToBlocks(blocks, figures) {
       figureId: figure.figureId,
       mediaId: figure.metadata?.mediaId || '',
       mediaPath: figure.metadata?.mediaPath || '',
+      relationshipId: figure.metadata?.relationshipId || '',
     };
   }
+}
+
+function nextAvailableFigureId(usedFigureIds) {
+  let index = 1;
+  let figureId = nextId('fig', index);
+  while (usedFigureIds.has(figureId)) {
+    index += 1;
+    figureId = nextId('fig', index);
+  }
+  return figureId;
 }
 
 function normalizeRelationshipTarget(target) {

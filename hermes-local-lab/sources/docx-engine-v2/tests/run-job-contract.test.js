@@ -324,6 +324,54 @@ test('run-job preserves embedded media from DOCX sources in the delivery package
   assert.equal(findQualityCheck(qualityReport, 'figure_id_metadata')?.status, 'passed');
 });
 
+test('run-job promotes unmarked DOCX drawings into traceable figure assets', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithUnmarkedDrawing(sourcePath);
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 0);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, true);
+
+  const assetPackage = readJsonFile(path.join(deliveryDir, 'asset-package.json'));
+  assert.equal(assetPackage.figures.length, 1);
+  assert.equal(assetPackage.figures[0].figureId, 'fig-001');
+  assert.equal(assetPackage.figures[0].sourceType, 'docx-embedded');
+  assert.equal(assetPackage.figures[0].metadata.relationshipId, 'rIdUnmarkedImage');
+  assert.equal(assetPackage.figures[0].metadata.mediaPath, 'word/media/unmarked.png');
+  assert.equal(assetPackage.figures[0].displayPath, 'assets/fig-001/figure.png');
+  assert.equal(
+    fs.readFileSync(path.join(deliveryDir, assetPackage.figures[0].displayPath)).subarray(0, 4).toString('hex'),
+    '89504e47'
+  );
+
+  const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
+  const plannedFigure = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedFigure?.metadata?.sourceType, 'figure');
+  assert.equal(plannedFigure?.metadata?.relationshipId, 'rIdUnmarkedImage');
+  assert.equal(plannedFigure?.metadata?.sectionId, 'sec-001');
+  assert.ok(plannedFigure?.metadata?.blockId, 'unmarked DOCX drawing must remain anchored to a source block');
+
+  const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
+  assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+  assert.equal(findQualityCheck(qualityReport, 'image_coverage')?.status, 'passed');
+  assert.equal(findQualityCheck(qualityReport, 'figure_id_metadata')?.status, 'passed');
+  assert.equal(findQualityCheck(qualityReport, 'figure_placement')?.status, 'passed');
+});
+
 test('run-job preserves embedded JPEG media from DOCX sources in the delivery package', async (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.docx');
@@ -464,6 +512,67 @@ test('run-job reports non-empty delivery directories as validation failure', (t)
   assert.equal(fs.existsSync(path.join(deliveryDir, 'job.manifest.json')), false);
   assert.equal(fs.existsSync(path.join(deliveryDir, 'failure-report.json')), false);
 });
+
+async function writeDocxSourceWithUnmarkedDrawing(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdUnmarkedImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/unmarked.png"/>
+</Relationships>`),
+    'word/_rels/document.xml.rels'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>DOCX 来源方案</w:t></w:r></w:p>
+    <w:p><w:r><w:t>一、总体架构</w:t></w:r></w:p>
+    <w:p><w:r><w:t>DOCX 原文中的普通插图也必须进入最终交付资产包。</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>模块</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>状态</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>无标记图片</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>应保留</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:docPr id="7" name="普通插图"/>
+            <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdUnmarkedImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
+  zip.addEmptyDirectory('word/media');
+  zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/unmarked.png');
+  zip.end();
+
+  await once(output, 'close');
+}
 
 async function writeDocxSourceWithEmbeddedImage(filePath, options = {}) {
   const {
