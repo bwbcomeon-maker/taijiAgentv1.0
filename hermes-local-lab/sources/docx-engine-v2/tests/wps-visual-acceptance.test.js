@@ -116,6 +116,30 @@ test('recordWpsVisualAcceptance rejects WPS pass when automated package validati
   assert.notEqual(wpsVisual?.status, 'passed');
 });
 
+test('recordWpsVisualAcceptance rejects WPS pass when replay-report.json is missing', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryManifest = readDeliveryManifest(deliveryDir);
+
+  fs.rmSync(path.join(deliveryDir, 'replay-report.json'));
+  delete deliveryManifest.files.replayReport;
+  delete deliveryManifest.fileSha256.replayReport;
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  assert.throws(
+    () => recordWpsVisualAcceptance({
+      deliveryDir,
+      status: 'passed',
+      reviewedAt: '2026-07-05T10:03:30.000Z',
+      reviewedBy: 'user',
+      note: '不能把缺少重放证据的包标记为人工通过。',
+    }),
+    /automated validation.*replay-report\.json/i
+  );
+  const wpsVisual = readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual');
+  assert.notEqual(wpsVisual?.status, 'passed');
+});
+
 test('recordWpsVisualAcceptance can record WPS failure when automated package validation fails', async (t) => {
   const deliveryDir = await makeDelivery(t);
   fs.rmSync(path.join(deliveryDir, 'render-plan.json'));

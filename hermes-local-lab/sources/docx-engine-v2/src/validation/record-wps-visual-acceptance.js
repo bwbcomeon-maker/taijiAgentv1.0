@@ -130,7 +130,7 @@ function uniqueStrings(items) {
 }
 
 function assertAutomatedDeliveryGatesPassed(deliveryDir) {
-  const report = validateDeliveryPackage({ deliveryDir });
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
   const failedChecks = (report.checks || []).filter(
     (check) => check.id !== 'wps_visual' && check.status === 'failed'
   );

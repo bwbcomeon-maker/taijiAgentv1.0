@@ -59,7 +59,11 @@ const DELIVERY_MANIFEST_FIXED_FILES = {
   imageInstructions: 'README-图片调整说明.md',
 };
 
-function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified' } = {}) {
+function validateDeliveryPackage({
+  deliveryDir,
+  wpsVisualStatus = 'not_verified',
+  requireReplayReport = false,
+} = {}) {
   const checksById = new Map();
   const failures = [];
   const warnings = [];
@@ -123,6 +127,13 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   }
 
   addSchemaCheck({ addCheck, jsonFiles });
+  addReplayReportCheck({
+    addCheck,
+    deliveryDir,
+    deliveryPackage: jsonFiles.deliveryPackage,
+    replayReport: jsonFiles.replayReport,
+    requireReplayReport,
+  });
   addDeliveryManifestFilesCheck({
     addCheck,
     deliveryDir,
@@ -178,6 +189,40 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   });
 
   return buildReport(checksById, warnings, failures);
+}
+
+function addReplayReportCheck({ addCheck, deliveryDir, deliveryPackage, replayReport, requireReplayReport }) {
+  if (!requireReplayReport && !replayReport && !deliveryPackage?.files?.replayReport) {
+    return;
+  }
+
+  const relativePath = normalizeRelativePackagePath(deliveryPackage?.files?.replayReport);
+  const expectedHash = deliveryPackage?.fileSha256?.replayReport || '';
+  if (!relativePath) {
+    addCheck('replay_report', 'failed', 'replay-report.json is required for final delivery validation.');
+    return;
+  }
+  if (!expectedHash) {
+    addCheck('replay_report', 'failed', 'delivery-package.json fileSha256.replayReport is required for final delivery validation.');
+    return;
+  }
+
+  const replayReportPath = path.join(deliveryDir, relativePath);
+  if (!fs.existsSync(replayReportPath) || !fs.statSync(replayReportPath).isFile()) {
+    addCheck('replay_report', 'failed', `replay-report.json is required for final delivery validation: missing ${relativePath}`);
+    return;
+  }
+
+  if (replayReport?.status === 'failed') {
+    addCheck(
+      'replay_report',
+      'failed',
+      `replay-report.json records a failed delivery replay: ${(replayReport.failures || []).join('; ') || 'unknown failure'}`
+    );
+    return;
+  }
+
+  addCheck('replay_report', 'passed');
 }
 
 function addSchemaCheck({ addCheck, jsonFiles }) {
@@ -2402,7 +2447,12 @@ function bodyEndIndex(documentXml) {
 }
 
 function buildReport(checksById, warnings, failures) {
-  const checks = CHECK_IDS.map((id) => checksById.get(id) || { id, status: 'failed' });
+  const checks = [
+    ...CHECK_IDS.map((id) => checksById.get(id) || { id, status: 'failed' }),
+    ...[...checksById.entries()]
+      .filter(([id]) => !CHECK_IDS.includes(id))
+      .map(([, check]) => check),
+  ];
   const hasFailure = checks.some((check) => check.status === 'failed') || failures.length > 0;
   const hasWarning = checks.some(
     (check) => check.status === 'passed_with_warnings' || check.status === 'not_verified'

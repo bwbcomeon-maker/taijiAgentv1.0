@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildDeliveryFileSha256 } = require('../delivery/file-hashes');
+const { buildDeliveryFileSha256, refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { packageAssets } = require('../assets/package-assets');
 const { writeDeliveryPackage } = require('../delivery/write-delivery-package');
 const { createDocumentJob, transitionJob } = require('../domain/document-job');
@@ -191,6 +191,16 @@ async function runDocumentJob({
       manifestDeliveryDir: absoluteDeliveryDir,
       replayReport,
     });
+    const replayBoundQualityReport = validateDeliveryPackage({
+      deliveryDir: finalDeliveryDir,
+      requireReplayReport: true,
+    });
+    fs.writeFileSync(
+      path.join(finalDeliveryDir, 'quality-report.json'),
+      `${JSON.stringify(replayBoundQualityReport, null, 2)}\n`,
+      'utf8'
+    );
+    refreshDeliveryPackageFileHashes({ deliveryDir: finalDeliveryDir, roles: ['qualityReport'] });
 
     moveVerifiedDelivery({ fromDir: finalDeliveryDir, toDir: absoluteDeliveryDir });
 
@@ -200,8 +210,8 @@ async function runDocumentJob({
       jobId: job.jobId,
       deliveryDir: absoluteDeliveryDir,
       documentPath: path.join(absoluteDeliveryDir, 'document.docx'),
-      qualityReport: finalQualityReport,
-      qualityStatus: finalQualityReport.status,
+      qualityReport: replayBoundQualityReport,
+      qualityStatus: replayBoundQualityReport.status,
       replayReport: finalReplayReport,
       replayStatus: finalReplayReport.status,
     };

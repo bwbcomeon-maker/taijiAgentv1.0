@@ -46,6 +46,10 @@ node src/cli/validate-delivery.js --delivery-dir <delivery-dir> --json
 node src/cli/validate-delivery.js --delivery-dir <delivery-dir> --write-report --json
 ```
 
+The CLI validates final delivery packages and requires the package to include a
+hash-bound `replay-report.json`. Internal pre-replay staging validation is kept
+inside the workflow API.
+
 Replay a delivery package from its packaged original source:
 
 ```bash
@@ -115,6 +119,7 @@ A successful render writes a delivery directory containing:
 - `template.manifest.json`
 - `render-plan.json`
 - `quality-report.json`
+- `replay-report.json`
 - `README-图片调整说明.md`
 
 CLI success and package validation are not final visual approval. The

@@ -16,7 +16,10 @@ main();
 function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
-    const qualityReport = validateDeliveryPackage({ deliveryDir: args.deliveryDir });
+    const qualityReport = validateDeliveryPackage({
+      deliveryDir: args.deliveryDir,
+      requireReplayReport: true,
+    });
     const qualityReportPath = path.join(args.deliveryDir, 'quality-report.json');
     if (args.writeReport) {
       writeJson(qualityReportPath, qualityReport);

@@ -134,6 +134,28 @@ async function makeDeliveryPackage(t, sourceLines = defaultSourceLines()) {
   return { deliveryDir };
 }
 
+function attachReplayReport(deliveryDir, overrides = {}) {
+  const replayReportPath = path.join(deliveryDir, 'replay-report.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+  const replayReport = {
+    schemaVersion: 'docx-engine-v2/replay-report',
+    status: 'passed',
+    replayedAt: '2026-07-05T00:00:00.000Z',
+    deliveryDir,
+    checks: [{ id: 'document_replay', status: 'passed' }],
+    warnings: [],
+    failures: [],
+    ...overrides,
+  };
+
+  fs.writeFileSync(replayReportPath, `${JSON.stringify(replayReport, null, 2)}\n`, 'utf8');
+  deliveryManifest.files.replayReport = 'replay-report.json';
+  deliveryManifest.fileSha256.replayReport = sha256File(replayReportPath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+  return replayReport;
+}
+
 function buildValidatedJob({
   workspace,
   sourcePackage,
@@ -239,6 +261,28 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
 });
 
+test('validateDeliveryPackage final mode fails when replay-report.json is missing', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const replayReportCheck = report.checks.find((check) => check.id === 'replay_report');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(replayReportCheck?.status, 'failed');
+  assert.match(replayReportCheck?.message || '', /replay-report\.json.*required/i);
+});
+
+test('validateDeliveryPackage final mode accepts a hash-bound replay-report.json', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const replayReportCheck = report.checks.find((check) => check.id === 'replay_report');
+
+  assert.ok(['passed', 'passed_with_warnings'].includes(report.status));
+  assert.equal(replayReportCheck?.status, 'passed');
+});
+
 test('validateDeliveryPackage fails when image instructions no longer list editable assets', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   fs.writeFileSync(
@@ -259,6 +303,7 @@ test('validateDeliveryPackage fails when image instructions no longer list edita
 
 test('validate-delivery CLI emits a delivery quality report as JSON', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
 
   const result = spawnSync(process.execPath, [
     VALIDATE_DELIVERY,
@@ -276,8 +321,26 @@ test('validate-delivery CLI emits a delivery quality report as JSON', async (t) 
   assert.ok(payload.qualityReport.checks.some((check) => check.id === 'wps_visual'));
 });
 
+test('validate-delivery CLI exits nonzero when the final package is missing replay-report.json', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  const result = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 3, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.qualityReport.status, 'failed');
+  assert.ok(payload.failures.some((failure) => /replay-report\.json.*required/i.test(failure)));
+});
+
 test('validate-delivery CLI exits nonzero when the delivery package is invalid', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
   fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
 
   const result = spawnSync(process.execPath, [
@@ -297,6 +360,7 @@ test('validate-delivery CLI exits nonzero when the delivery package is invalid',
 
 test('validate-delivery CLI writes the refreshed quality report when requested', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
   fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
 
   const result = spawnSync(process.execPath, [
@@ -856,6 +920,7 @@ test('validateDeliveryPackage fails when asset package source image files disagr
 
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
   recordWpsVisualAcceptance({
     deliveryDir,
     status: 'passed',
@@ -878,6 +943,7 @@ test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence'
 
 test('validateDeliveryPackage fails when recorded WPS visual acceptance belongs to a different document', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
   recordWpsVisualAcceptance({
     deliveryDir,
     status: 'passed',

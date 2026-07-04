@@ -246,6 +246,12 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
 
   const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
   assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+  assert.ok(
+    qualityReport.checks.some(
+      (check) => check.id === 'replay_report' && check.status === 'passed'
+    ),
+    'final quality-report.json must record the delivery replay report gate'
+  );
   const replayReport = readJsonFile(path.join(deliveryDir, 'replay-report.json'));
   assert.match(replayReport.status, /^(passed|passed_with_warnings)$/);
   assert.equal(replayReport.deliveryDir, deliveryDir);
