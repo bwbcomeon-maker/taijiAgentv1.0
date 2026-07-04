@@ -299,7 +299,8 @@ function buildImageInstructions({ assetPackage }) {
         id: image.imageId,
         caption: image.caption,
         displayPath: image.displayPath,
-        sourcePath: image.sourcePath,
+        sourcePath: image.displayPath,
+        originPath: image.sourcePath,
         sectionId: image.sectionId,
       }));
     }
@@ -308,7 +309,7 @@ function buildImageInstructions({ assetPackage }) {
   return `${lines.join('\n')}\n`;
 }
 
-function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, sectionId }) {
+function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, originPath, sectionId }) {
   const lines = [
     `- ${idLabel}: \`${id || 'unknown'}\``,
     `  - 标题: ${caption || '未命名图片'}`,
@@ -316,6 +317,9 @@ function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, 
   ];
   if (sourcePath) {
     lines.push(`  - 可编辑/原始文件: \`${sourcePath}\``);
+  }
+  if (originPath && originPath !== sourcePath) {
+    lines.push(`  - 来源路径: \`${originPath}\``);
   }
   if (sectionId) {
     lines.push(`  - 章节锚点: \`${sectionId}\``);

@@ -1971,6 +1971,10 @@ function addImageInstructionsCheck({ addCheck, deliveryDir, assetPackage }) {
       ],
     }));
   }
+  const missingEditableFiles = missingEditableInstructionFiles({ deliveryDir, instructions });
+  if (missingEditableFiles.length > 0) {
+    failures.push(`missing editable instruction files: ${missingEditableFiles.join(', ')}`);
+  }
 
   if (failures.length > 0) {
     addCheck(
@@ -1982,6 +1986,20 @@ function addImageInstructionsCheck({ addCheck, deliveryDir, assetPackage }) {
   }
 
   addCheck('image_instructions', 'passed');
+}
+
+function missingEditableInstructionFiles({ deliveryDir, instructions }) {
+  return [...String(instructions || '').matchAll(/可编辑\/原始文件: `([^`]+)`/g)]
+    .map((match) => match[1])
+    .filter(Boolean)
+    .filter((relativePath) => {
+      const normalizedPath = normalizeRelativePackagePath(relativePath);
+      if (!normalizedPath) {
+        return true;
+      }
+      const filePath = path.join(deliveryDir, normalizedPath);
+      return !fs.existsSync(filePath) || !fs.statSync(filePath).isFile();
+    });
 }
 
 function missingInstructionTokens({ assetLabel, instructions, tokens }) {

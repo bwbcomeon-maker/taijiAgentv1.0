@@ -411,6 +411,36 @@ test('validateDeliveryPackage fails when image instructions no longer list edita
   assert.ok(report.failures.some((failure) => /README-图片调整说明\.md/.test(failure)));
 });
 
+test('delivery image instructions only mark package files as editable originals', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const instructions = fs.readFileSync(path.join(deliveryDir, 'README-图片调整说明.md'), 'utf8');
+  const editablePaths = [...instructions.matchAll(/可编辑\/原始文件: `([^`]+)`/g)].map((match) => match[1]);
+
+  assert.ok(editablePaths.length > 0, 'fixture must include editable asset instruction paths');
+  for (const editablePath of editablePaths) {
+    assert.equal(
+      fs.existsSync(path.join(deliveryDir, editablePath)),
+      true,
+      `${editablePath} must exist inside the delivery package`
+    );
+  }
+});
+
+test('validateDeliveryPackage fails when image instructions mark missing editable files', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const instructionsPath = path.join(deliveryDir, 'README-图片调整说明.md');
+  fs.appendFileSync(instructionsPath, '\n- 可编辑/原始文件: `source.assets/missing.png`\n', 'utf8');
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['imageInstructions'] });
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const imageInstructions = report.checks.find((check) => check.id === 'image_instructions');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(imageInstructions?.status, 'failed');
+  assert.match(imageInstructions?.message || '', /missing editable instruction files/i);
+  assert.match(imageInstructions?.message || '', /source\.assets\/missing\.png/);
+});
+
 test('validateDeliveryPackage fails when delivery assets contain untracked files', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   fs.writeFileSync(path.join(deliveryDir, 'assets', '.DS_Store'), 'finder metadata', 'utf8');
