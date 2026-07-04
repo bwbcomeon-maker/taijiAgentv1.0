@@ -119,7 +119,10 @@ test('install-template CLI installs a validated package and emits JSON', (t) => 
   assert.equal(payload.ok, true);
   assert.equal(payload.templateId, 'custom-proposal');
   assert.equal(payload.registryEntry.path, 'installed/custom-proposal');
+  assert.equal(payload.installReportPath, path.join(tempRoot, 'installed', 'custom-proposal', 'template-install-report.json'));
   assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'custom-proposal', 'manifest.json')), true);
+  assert.equal(fs.existsSync(payload.installReportPath), true);
+  assert.equal(readJson(payload.installReportPath).ok, true);
 });
 
 test('install-template CLI reports validation failure without mutating registry', (t) => {
@@ -179,10 +182,12 @@ test('install-template CLI replaces an installed template only with explicit fla
   assert.equal(payload.ok, true);
   assert.equal(payload.action, 'replaced');
   assert.equal(payload.templateId, 'custom-proposal');
+  assert.equal(payload.installReportPath, path.join(tempRoot, 'installed', 'custom-proposal', 'template-install-report.json'));
   assert.equal(
     readJson(path.join(tempRoot, 'installed', 'custom-proposal', 'manifest.json')).name,
     'Updated Installed Template'
   );
+  assert.equal(readJson(payload.installReportPath).action, 'replaced');
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
     { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
   ]);

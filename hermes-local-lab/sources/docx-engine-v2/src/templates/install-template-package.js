@@ -55,7 +55,7 @@ async function installTemplatePackage({
   if (!validation.ok) {
     throw new Error(`Template package validation failed: ${JSON.stringify(validation.errors)}`);
   }
-  await assertTemplateSampleRenders(absolutePackageDir);
+  const sampleRender = await assertTemplateSampleRenders(absolutePackageDir);
 
   if (installedIndex >= 0) {
     replaceDirectory(absolutePackageDir, targetDir);
@@ -73,23 +73,93 @@ async function installTemplatePackage({
   registry.installed = installedEntries;
   writeJson(registryPath, registry);
 
+  const action = installedIndex >= 0 ? 'replaced' : 'installed';
+  const installReportPath = path.join(targetDir, 'template-install-report.json');
+  const installReport = buildInstallReport({
+    action,
+    templateId,
+    targetDir,
+    sourcePackageDir: absolutePackageDir,
+    registryPath,
+    registryEntry,
+    validation,
+    sampleRender,
+  });
+  writeJson(installReportPath, installReport);
+
   return {
     ok: true,
-    action: installedIndex >= 0 ? 'replaced' : 'installed',
+    action,
     templateId,
     packageDir: targetDir,
     registryPath,
     registryEntry,
+    installReportPath,
   };
 }
 
 async function assertTemplateSampleRenders(packageDir) {
   const smokeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-install-smoke-'));
   try {
-    await renderTemplateSample({ packageDir, outDir: smokeDir });
+    const result = await renderTemplateSample({ packageDir, outDir: smokeDir });
+    return sanitizeSampleRender(result.report);
   } finally {
     fs.rmSync(smokeDir, { recursive: true, force: true });
   }
+}
+
+function buildInstallReport({
+  action,
+  templateId,
+  targetDir,
+  sourcePackageDir,
+  registryPath,
+  registryEntry,
+  validation,
+  sampleRender,
+}) {
+  return {
+    schemaVersion: 'docx-engine-v2/template-install-report',
+    ok: true,
+    status: 'passed',
+    action,
+    templateId,
+    packageDir: targetDir,
+    sourcePackageDir,
+    registryPath,
+    registryEntry,
+    checks: [
+      { id: 'template_package', status: 'passed' },
+      { id: 'sample_render', status: sampleRender.status || 'passed' },
+      { id: 'registry_entry', status: 'passed' },
+    ],
+    validation,
+    sampleRender,
+  };
+}
+
+function sanitizeSampleRender(report = {}) {
+  return {
+    ok: report.ok === true,
+    status: report.status || (report.ok === true ? 'passed' : 'failed'),
+    templateId: report.templateId,
+    checks: sanitizeChecks(report.checks),
+    failures: Array.isArray(report.failures) ? report.failures : [],
+    validation: report.validation,
+  };
+}
+
+function sanitizeChecks(checks) {
+  return (Array.isArray(checks) ? checks : []).map((check) => {
+    const sanitized = {
+      id: check.id,
+      status: check.status,
+    };
+    if (check.message) {
+      sanitized.message = check.message;
+    }
+    return sanitized;
+  });
 }
 
 function loadPackageFromDir({ packageDir, registryPath = '', registrySource = 'installed' }) {

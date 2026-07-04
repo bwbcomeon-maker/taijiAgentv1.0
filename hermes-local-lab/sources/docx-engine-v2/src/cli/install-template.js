@@ -28,6 +28,7 @@ async function main() {
       packageDir: result.packageDir,
       registryPath: result.registryPath,
       registryEntry: result.registryEntry,
+      installReportPath: result.installReportPath,
     };
     if (args.json) {
       writeJsonStdout(payload);

@@ -121,7 +121,17 @@ test('installTemplatePackage validates, smoke-renders, copies, and registers a n
   assert.equal(result.ok, true);
   assert.equal(result.templateId, 'custom-proposal');
   assert.equal(result.registryEntry.path, 'installed/custom-proposal');
+  assert.equal(result.installReportPath, path.join(tempRoot, 'installed', 'custom-proposal', 'template-install-report.json'));
   assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'custom-proposal', 'template.docx')), true);
+  assert.equal(fs.existsSync(result.installReportPath), true);
+  const installReport = readJson(result.installReportPath);
+  assert.equal(installReport.schemaVersion, 'docx-engine-v2/template-install-report');
+  assert.equal(installReport.ok, true);
+  assert.equal(installReport.action, 'installed');
+  assert.equal(installReport.templateId, 'custom-proposal');
+  assert.ok(installReport.checks.some((check) => check.id === 'template_package' && check.status === 'passed'));
+  assert.ok(installReport.checks.some((check) => check.id === 'sample_render' && check.status === 'passed'));
+  assert.ok(installReport.checks.some((check) => check.id === 'registry_entry' && check.status === 'passed'));
   assert.deepEqual(
     listTemplates({ rootDir: tempRoot }).map((template) => template.id),
     ['general-proposal', 'custom-proposal']
@@ -194,8 +204,10 @@ test('installTemplatePackage replaces an existing installed template only when r
   assert.equal(result.ok, true);
   assert.equal(result.action, 'replaced');
   assert.equal(result.templateId, 'custom-proposal');
+  assert.equal(result.installReportPath, path.join(installedDir, 'template-install-report.json'));
   assert.equal(readJson(path.join(installedDir, 'manifest.json')).name, 'Updated Custom Proposal');
   assert.equal(fs.existsSync(path.join(installedDir, 'old-only.txt')), false);
+  assert.equal(readJson(result.installReportPath).action, 'replaced');
   assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
     { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
   ]);
