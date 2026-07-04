@@ -44,6 +44,7 @@
 - 已把原始输入文件复制到 `source/original/` 并新增 `source_original` 质量检查，避免只保留归一化 `source.md` 而丢失真实来源。
 - 已把 `DeliveryPackage` 领域对象持久化为 `delivery-package.json`，并纳入交付包 schema gate；最终清单记录用户目标目录，避免指向临时构建路径。
 - 已校验 `delivery-package.json` 内每个文件角色的包内相对路径与真实文件存在性，避免清单 schema 合格但指向错误文档、错误角色或缺失文件。
+- 已让 `delivery-package.json files.originalSource` 必须指向 `job.manifest.json sourceRef` 对应的真实原始源副本，避免清单角色被指到另一个包内诱饵文件后仍误导后续追源。
 - 已把 `document.docx` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免交付后文档被替换却仍被清单误判为同一交付物。
 - 已把 `source.md` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免人工查看/后续处理入口被改动却仍通过质量门。
 - 已把归一化后的 `SourcePackage` 持久化为 `source-package.json` 并纳入交付包 schema、文件角色和 `fileSha256`，避免最终包只能查看 Markdown/原始文件却无法追溯引擎实际理解到的章节、表格、图片和块级锚点。

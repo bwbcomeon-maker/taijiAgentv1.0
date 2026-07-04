@@ -115,7 +115,12 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   }
 
   addSchemaCheck({ addCheck, jsonFiles });
-  addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage: jsonFiles.deliveryPackage });
+  addDeliveryManifestFilesCheck({
+    addCheck,
+    deliveryDir,
+    deliveryPackage: jsonFiles.deliveryPackage,
+    jobManifest: jsonFiles.jobManifest,
+  });
   addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest: jsonFiles.jobManifest });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addTemplateMarkersCheck({ addCheck, documentXml });
@@ -843,7 +848,7 @@ function displayValue(value) {
   return value === '' ? 'missing' : value;
 }
 
-function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage }) {
+function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage, jobManifest }) {
   const files = deliveryPackage?.files;
   if (!files || typeof files !== 'object') {
     return;
@@ -862,6 +867,12 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
   if (!originalSource || !originalSource.startsWith('source/original/')) {
     failures.push(
       `delivery-package.json files.originalSource must be inside source/original/, got ${files.originalSource || ''}`
+    );
+  }
+  const expectedOriginalSource = expectedOriginalSourcePath(jobManifest?.sourceRef);
+  if (expectedOriginalSource && originalSource && originalSource !== expectedOriginalSource) {
+    failures.push(
+      `delivery-package.json files.originalSource must be ${expectedOriginalSource}, got ${files.originalSource || ''}`
     );
   }
 
@@ -913,6 +924,13 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
   if (failures.length > 0) {
     addCheck('delivery_files', 'failed', `Invalid delivery package file references: ${failures.join('; ')}`);
   }
+}
+
+function expectedOriginalSourcePath(sourceRef = {}) {
+  if (!sourceRef || typeof sourceRef !== 'object') {
+    return '';
+  }
+  return `source/original/${originalSourceFileName(sourceRef)}`;
 }
 
 function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, fallbackStatus }) {

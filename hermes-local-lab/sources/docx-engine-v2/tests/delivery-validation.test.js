@@ -709,6 +709,25 @@ test('validateDeliveryPackage fails when the original source copy hash differs f
   assert.match(sourceCheck?.message || '', /hash/i);
 });
 
+test('validateDeliveryPackage fails when delivery manifest originalSource points at the wrong source copy', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const manifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const decoyPath = path.join(deliveryDir, 'source', 'original', 'decoy.md');
+
+  fs.writeFileSync(decoyPath, '# Decoy source\n', 'utf8');
+  manifest.files.originalSource = 'source/original/decoy.md';
+  manifest.fileSha256.originalSource = sha256File(decoyPath);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const filesCheck = report.checks.find((check) => check.id === 'delivery_files');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(filesCheck?.status, 'failed');
+  assert.match(filesCheck?.message || '', /originalSource.*source\/original\/source\.md/);
+});
+
 test('validateDeliveryPackage fails when a required delivery file is missing', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
 
