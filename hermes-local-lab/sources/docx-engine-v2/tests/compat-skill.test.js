@@ -80,7 +80,9 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/list-templates.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/replace-asset.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/record-wps-visual.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'scripts/validate-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/record-wps-visual.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/validate-delivery.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'runtime')), false);
 });
@@ -109,6 +111,18 @@ test('copyable apply-template wrapper renders a delivery package through v2', (t
   assert.equal(fs.existsSync(path.join(deliveryDir, 'document.docx')), true);
   assert.equal(fs.existsSync(path.join(deliveryDir, 'render-plan.json')), true);
   assert.equal(fs.existsSync(path.join(deliveryDir, 'quality-report.json')), true);
+
+  const validateResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/validate-delivery.js'),
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(validateResult.status, 0, validateResult.stderr || validateResult.stdout);
+  const validationPayload = JSON.parse(validateResult.stdout);
+  assert.equal(validationPayload.ok, true);
+  assert.ok(['passed', 'passed_with_warnings'].includes(validationPayload.qualityReport.status));
 });
 
 test('copyable apply-template wrapper keeps the legacy --out docx path working', (t) => {

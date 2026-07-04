@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 const test = require('node:test');
 const yauzl = require('yauzl');
@@ -18,6 +19,8 @@ const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
 const { validateDeliveryPackage } = require('../src/validation/validate-delivery-package');
 
+const ENGINE_ROOT = path.join(__dirname, '..');
+const VALIDATE_DELIVERY = path.join(ENGINE_ROOT, 'src', 'cli', 'validate-delivery.js');
 const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
@@ -25,6 +28,14 @@ const ONE_BY_ONE_PNG = Buffer.from(
 
 function sha256File(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+function parseStdoutJson(result) {
+  try {
+    return JSON.parse(result.stdout.trim());
+  } catch (error) {
+    assert.fail(`stdout is not JSON:\n${result.stdout}\nstderr:\n${result.stderr}\nerror: ${error.message}`);
+  }
 }
 
 function makeWorkspace(t) {
@@ -178,6 +189,44 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'wps_visual',
     ]
   );
+});
+
+test('validate-delivery CLI emits a delivery quality report as JSON', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  const result = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.deliveryDir, deliveryDir);
+  assert.ok(['passed', 'passed_with_warnings'].includes(payload.qualityReport.status));
+  assert.ok(payload.qualityReport.checks.some((check) => check.id === 'delivery_files'));
+  assert.ok(payload.qualityReport.checks.some((check) => check.id === 'wps_visual'));
+});
+
+test('validate-delivery CLI exits nonzero when the delivery package is invalid', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
+
+  const result = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 3, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'delivery_validation_failed');
+  assert.equal(payload.qualityReport.status, 'failed');
+  assert.ok(payload.failures.some((failure) => /render-plan\.json/.test(failure)));
 });
 
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
