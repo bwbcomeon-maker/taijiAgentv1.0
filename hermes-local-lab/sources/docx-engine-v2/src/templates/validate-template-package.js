@@ -20,6 +20,122 @@ function toDomainTemplatePackage(template) {
   };
 }
 
+function validateTemplateDocx(templatePath) {
+  if (!fileExists(templatePath)) {
+    return [];
+  }
+
+  try {
+    const stat = fs.statSync(templatePath);
+    if (!stat.isFile()) {
+      return [
+        {
+          code: 'template_docx_invalid',
+          path: templatePath,
+          message: 'Template DOCX path is not a file.',
+        },
+      ];
+    }
+
+    const entries = readZipEntryNames(fs.readFileSync(templatePath));
+    const requiredEntries = ['[Content_Types].xml', 'word/document.xml'];
+    return requiredEntries
+      .filter((entryName) => !entries.includes(entryName))
+      .map((entryName) => ({
+        code: 'template_docx_invalid',
+        path: templatePath,
+        message: `Template DOCX is missing ${entryName}.`,
+      }));
+  } catch (error) {
+    return [
+      {
+        code: 'template_docx_invalid',
+        path: templatePath,
+        message: `Template DOCX cannot be inspected: ${error.message}`,
+      },
+    ];
+  }
+}
+
+function readZipEntryNames(buffer) {
+  const eocdOffset = findEndOfCentralDirectory(buffer);
+  if (eocdOffset < 0) {
+    throw new Error('missing ZIP end of central directory');
+  }
+
+  const centralDirectorySize = buffer.readUInt32LE(eocdOffset + 12);
+  const centralDirectoryOffset = buffer.readUInt32LE(eocdOffset + 16);
+  const centralDirectoryEnd = centralDirectoryOffset + centralDirectorySize;
+  if (centralDirectoryOffset < 0 || centralDirectoryEnd > buffer.length) {
+    throw new Error('invalid ZIP central directory bounds');
+  }
+
+  const entries = [];
+  let offset = centralDirectoryOffset;
+  while (offset < centralDirectoryEnd) {
+    if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== 0x02014b50) {
+      throw new Error('invalid ZIP central directory entry');
+    }
+
+    const fileNameLength = buffer.readUInt16LE(offset + 28);
+    const extraFieldLength = buffer.readUInt16LE(offset + 30);
+    const fileCommentLength = buffer.readUInt16LE(offset + 32);
+    const fileNameStart = offset + 46;
+    const fileNameEnd = fileNameStart + fileNameLength;
+    if (fileNameEnd > buffer.length) {
+      throw new Error('invalid ZIP file name bounds');
+    }
+
+    entries.push(buffer.subarray(fileNameStart, fileNameEnd).toString('utf8'));
+    offset = fileNameEnd + extraFieldLength + fileCommentLength;
+  }
+
+  return entries;
+}
+
+function findEndOfCentralDirectory(buffer) {
+  const minOffset = Math.max(0, buffer.length - 65557);
+  for (let offset = buffer.length - 22; offset >= minOffset; offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) {
+      return offset;
+    }
+  }
+  return -1;
+}
+
+function validateSchemaSample(template) {
+  if (!fileExists(template?.schemaPath) || !fileExists(template?.samplePath)) {
+    return [];
+  }
+
+  try {
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    const validate = ajv.compile(readJson(template.schemaPath));
+    const ok = validate(readJson(template.samplePath));
+
+    if (!ok) {
+      return [
+        {
+          code: 'sample_schema_invalid',
+          path: template.samplePath,
+          message: 'Template sample does not match schema.',
+          details: validate.errors || [],
+        },
+      ];
+    }
+  } catch (error) {
+    return [
+      {
+        code: 'template_schema_validation_failed',
+        path: template.schemaPath,
+        message: `Template schema/sample validation failed: ${error.message}`,
+      },
+    ];
+  }
+
+  return [];
+}
+
 function validateTemplatePackage(template) {
   const errors = [];
   const domainTemplate = toDomainTemplatePackage(template);
@@ -60,20 +176,8 @@ function validateTemplatePackage(template) {
     }
   }
 
-  if (fileExists(template?.schemaPath) && fileExists(template?.samplePath)) {
-    const ajv = new Ajv2020({ allErrors: true, strict: false });
-    const validate = ajv.compile(readJson(template.schemaPath));
-    const ok = validate(readJson(template.samplePath));
-
-    if (!ok) {
-      errors.push({
-        code: 'sample_schema_invalid',
-        path: template.samplePath,
-        message: 'Template sample does not match schema.',
-        details: validate.errors || [],
-      });
-    }
-  }
+  errors.push(...validateTemplateDocx(template?.templatePath));
+  errors.push(...validateSchemaSample(template));
 
   if (errors.length > 0) {
     return { ok: false, errors };
