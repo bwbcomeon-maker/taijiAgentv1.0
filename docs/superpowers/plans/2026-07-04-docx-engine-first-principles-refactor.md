@@ -48,3 +48,4 @@
 - 已新增 `validate-delivery` 交付包复验 CLI，并在 copyable skill 暴露 `scripts/validate-delivery.js`，让用户拿到交付包后可独立重新验证质量报告。
 - 已为 `validate-delivery` 增加显式 `--write-report`，复验后可把最新质量报告写回交付包，避免 `quality-report.json` 与当前文件状态脱节。
 - 已让失败作业在安全输出目录中写入 `job.manifest.json` 和 `failure-report.json`，CLI 同步返回路径；非空输出目录仍不写入，避免污染用户已有文件。
+- 已让 WebUI/API 透传 v2 引擎失败作业的 `stage`、`job_manifest_path`、`failure_report_path` 和 `failure_report`，避免浏览器工作台/API 丢失可复盘证据。

@@ -313,6 +313,57 @@ def test_docx_engine_v2_create_job_returns_delivery_package(monkeypatch, tmp_pat
     assert payload["quality_report"]["checks"][0]["id"] == "wps_visual"
 
 
+def test_docx_engine_v2_create_job_preserves_traceable_failure_paths(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+    import subprocess
+    import json
+
+    source_path = tmp_path / "source.md"
+    source_path.write_text("# Proposal\n", encoding="utf-8")
+    failure_payload = {
+        "ok": False,
+        "code": "validation_failed",
+        "stage": "validation",
+        "message": "模板输入不满足要求。",
+        "failures": ["模板输入不满足要求。"],
+        "jobManifestPath": str(tmp_path / "delivery" / "job.manifest.json"),
+        "failureReportPath": str(tmp_path / "delivery" / "failure-report.json"),
+        "failureReport": {
+            "schemaVersion": "docx-engine-v2/failure-report",
+            "ok": False,
+            "code": "validation_failed",
+            "stage": "validation",
+            "message": "模板输入不满足要求。",
+            "failures": ["模板输入不满足要求。"],
+            "jobId": "job-failed",
+            "jobManifest": "job.manifest.json",
+        },
+    }
+
+    def fake_run_engine(args):
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=3,
+            stdout=json.dumps(failure_payload) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(docx_engine_v2, "run_engine", fake_run_engine)
+
+    payload, status = docx_engine_v2.create_job(
+        {"template_id": "general-proposal", "source_path": "source.md", "out_dir": "delivery"},
+        tmp_path,
+    )
+
+    assert status == 400
+    assert payload["ok"] is False
+    assert payload["code"] == "validation_failed"
+    assert payload["stage"] == "validation"
+    assert payload["job_manifest_path"].endswith("job.manifest.json")
+    assert payload["failure_report_path"].endswith("failure-report.json")
+    assert payload["failure_report"]["schemaVersion"] == "docx-engine-v2/failure-report"
+
+
 def test_docx_engine_v2_records_wps_visual_acceptance(monkeypatch, tmp_path):
     routes = _patch_route_json(monkeypatch, tmp_path)
 

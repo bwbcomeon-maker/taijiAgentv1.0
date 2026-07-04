@@ -401,7 +401,7 @@ def _safe_process_message(completed: subprocess.CompletedProcess[str]) -> str:
 
 
 def _known_failure_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "ok": False,
         "code": str(payload.get("code") or "validation_failed"),
         "message": str(payload.get("message") or ""),
@@ -409,6 +409,19 @@ def _known_failure_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "templates": payload.get("templates", []),
         "delivery_dir": payload.get("deliveryDir", payload.get("delivery_dir", "")),
     }
+    optional_fields = {
+        "stage": ("stage",),
+        "job_manifest_path": ("jobManifestPath", "job_manifest_path"),
+        "failure_report_path": ("failureReportPath", "failure_report_path"),
+        "failure_report": ("failureReport", "failure_report"),
+    }
+    for output_key, input_keys in optional_fields.items():
+        for input_key in input_keys:
+            value = payload.get(input_key)
+            if value:
+                result[output_key] = value
+                break
+    return result
 
 
 def _read_quality_report(report_path: Path) -> dict[str, Any]:
