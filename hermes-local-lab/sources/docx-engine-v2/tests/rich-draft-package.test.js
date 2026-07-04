@@ -7,6 +7,11 @@ const test = require('node:test');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const PACKAGE_RICH_DRAFT = path.join(ENGINE_ROOT, 'src', 'cli', 'package-rich-draft.js');
+const RENDER_FIGURE_ASSET = path.join(ENGINE_ROOT, 'src', 'cli', 'render-figure-asset.js');
+const ONE_BY_ONE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+  'base64'
+);
 
 function makeWorkspace(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-rich-draft-'));
@@ -16,6 +21,13 @@ function makeWorkspace(t) {
 
 function runPackage(args) {
   return spawnSync(process.execPath, [PACKAGE_RICH_DRAFT, ...args], {
+    cwd: ENGINE_ROOT,
+    encoding: 'utf8',
+  });
+}
+
+function runRenderFigureAsset(args) {
+  return spawnSync(process.execPath, [RENDER_FIGURE_ASSET, ...args], {
     cwd: ENGINE_ROOT,
     encoding: 'utf8',
   });
@@ -146,6 +158,70 @@ test('package-rich-draft preserves a qualified display image while saving Mermai
   assert.equal(fs.existsSync(path.join(outDir, manifest.figures[0].editable.sourcePath)), true);
 });
 
+test('render-figure-asset rerenders a rich draft figure from editable source and updates package links', (t) => {
+  const workspace = makeWorkspace(t);
+  const assetDir = path.join(workspace, 'assets');
+  const sourcePath = path.join(workspace, 'source.md');
+  const outDir = path.join(workspace, 'package');
+  fs.mkdirSync(assetDir, { recursive: true });
+  fs.writeFileSync(path.join(assetDir, 'qualified.png'), ONE_BY_ONE_PNG);
+  fs.writeFileSync(
+    sourcePath,
+    [
+      '# 可编辑图片回写方案',
+      '',
+      '## 二、实施流程',
+      '',
+      '```mermaid',
+      'flowchart TD',
+      '  A["启动"] --> B["旧节点"]',
+      '```',
+      '',
+      '![实施流程图](assets/qualified.png)',
+      '',
+    ].join('\n')
+  );
+
+  const packageResult = runPackage([
+    '--source',
+    sourcePath,
+    '--out-dir',
+    outDir,
+    '--asset-dir',
+    assetDir,
+  ]);
+
+  assert.equal(packageResult.status, 0, packageResult.stderr || packageResult.stdout);
+  const manifestPath = path.join(outDir, 'draft.manifest.json');
+  const manifest = readJson(manifestPath);
+  const figure = manifest.figures[0];
+  assert.match(figure.displayPath, /figure\.png$/);
+  assert.match(fs.readFileSync(path.join(outDir, manifest.files.markdown), 'utf8'), /figure\.png/);
+
+  fs.writeFileSync(
+    path.join(outDir, figure.editable.sourcePath),
+    ['flowchart TD', '  A["启动"] --> B["人工调整后节点"]', ''].join('\n'),
+    'utf8'
+  );
+
+  const renderResult = runRenderFigureAsset(['--manifest', manifestPath, '--figure-id', figure.figureId]);
+
+  assert.equal(renderResult.status, 0, renderResult.stderr || renderResult.stdout);
+  assert.match(renderResult.stdout, /render-figure-assets-ok/);
+
+  const updatedManifest = readJson(manifestPath);
+  const updatedFigure = updatedManifest.figures[0];
+  assert.equal(updatedFigure.displayPath, `${figure.assetDir}/figure.svg`);
+  assert.equal(updatedFigure.sourcePath, updatedFigure.displayPath);
+  assert.match(
+    fs.readFileSync(path.join(outDir, updatedFigure.displayPath), 'utf8'),
+    /人工调整后节点/
+  );
+  const packagedMarkdown = fs.readFileSync(path.join(outDir, updatedManifest.files.markdown), 'utf8');
+  assert.match(packagedMarkdown, new RegExp(`!\\[实施流程图\\]\\(${escapeRegExp(updatedFigure.displayPath)}\\)`));
+  assert.doesNotMatch(packagedMarkdown, /figure\.png/);
+});
+
 test('package-rich-draft refuses to write into a non-empty output directory', (t) => {
   const workspace = makeWorkspace(t);
   const sourcePath = path.join(workspace, 'source.md');
@@ -176,3 +252,7 @@ test('package-rich-draft refuses to write into a non-empty output directory', (t
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stderr, /输出目录.*非空|非空.*输出目录/);
 });
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

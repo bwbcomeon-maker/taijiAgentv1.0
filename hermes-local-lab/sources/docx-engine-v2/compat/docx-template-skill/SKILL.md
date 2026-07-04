@@ -21,11 +21,16 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    ```bash
    node scripts/apply-template.js --template-id general-proposal --source <source.md> --asset-dir <asset-dir> --out <output.docx>
    ```
-4. Rerender an editable Mermaid figure from a v2 delivery package:
+4. Package a rich draft before template rendering when the user needs editable picture assets:
    ```bash
+   node scripts/package-rich-draft.js --source <source.md> --asset-dir <asset-dir> --out-dir <package-dir>
+   ```
+5. Rerender an editable Mermaid figure from either a rich draft package or a v2 delivery package:
+   ```bash
+   node scripts/render-figure-assets.js --manifest <package-dir>/draft.manifest.json --figure-id fig-001
    node scripts/render-figure-assets.js --manifest <delivery-dir>/render-plan.json --figure-id fig-001
    ```
-5. Replace a DOCX image by stable figure id:
+6. Replace a DOCX image by stable figure id:
    ```bash
    node scripts/replace-docx-image.js --docx <input.docx> --figure-id fig-001 --image <replacement.png|svg> --out <updated.docx>
    ```
@@ -33,6 +38,8 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
 ## Acceptance
 
 A usable delivery package contains `document.docx`, `source.md`, `assets/`, `job.manifest.json`, `template.manifest.json`, `render-plan.json`, `quality-report.json`, and `README-图片调整说明.md`.
+
+A usable rich draft package contains `draft.manifest.json`, `source.md`, `assets/`, `图片清单.md`, and editable Mermaid sources such as `source.mmd`. The package keeps `figureId` stable so a later DOCX replacement can target the exact picture.
 
 `quality-report.json` keeps WPS/Word visual inspection as `not_verified` until a human opens and checks the document. Do not describe CLI success as final visual approval.
 
