@@ -39,6 +39,7 @@
 - 已支持把 WPS/Word 人工视觉验收写回 `quality-report.json`：CLI、copyable skill、WebUI API 和工作台按钮都能记录 `wps_visual` reviewer 证据，并清除“未人工验收”警告。
 - 已把交付包 schema gate 扩展到 `job.manifest.json` 和 `template.manifest.json`，避免“追溯文件存在但内容不可用”的假通过。
 - 已在交付包写入前校验 `DocumentJob` 与 `TemplateManifest`，坏追溯证据会被源头拒绝且不会留下半成品交付目录。
+- 已让成功交付后的 `job.manifest.json.workspace` 指向最终交付目录，不再保留已删除的临时构建目录作为工作区追溯路径。
 - 已把原始输入文件复制到 `source/original/` 并新增 `source_original` 质量检查，避免只保留归一化 `source.md` 而丢失真实来源。
 - 已把 `DeliveryPackage` 领域对象持久化为 `delivery-package.json`，并纳入交付包 schema gate；最终清单记录用户目标目录，避免指向临时构建路径。
 - 已校验 `delivery-package.json` 内每个文件角色的包内相对路径与真实文件存在性，避免清单 schema 合格但指向错误文档、错误角色或缺失文件。

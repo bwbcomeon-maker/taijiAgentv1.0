@@ -127,6 +127,7 @@ async function runDocumentJob({
     });
     job = transitionJob(job, 'delivered', {
       deliveredAt: new Date().toISOString(),
+      workspace: absoluteDeliveryDir,
       outputs: [
         { type: 'document', path: path.join(absoluteDeliveryDir, 'document.docx') },
         { type: 'delivery_package', path: absoluteDeliveryDir },

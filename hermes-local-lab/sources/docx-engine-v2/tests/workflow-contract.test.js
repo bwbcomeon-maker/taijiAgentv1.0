@@ -83,6 +83,8 @@ test('runDocumentJob drives the canonical job lifecycle and writes a complete ma
   assert.ok(result.job.inputs.some((input) => input.type === 'asset_dir' && input.path === assetDir));
   assert.ok(result.job.outputs.some((output) => output.type === 'document'));
   assert.ok(result.job.outputs.some((output) => output.type === 'delivery_package'));
+  assert.equal(result.job.workspace, deliveryDir);
+  assert.equal(fs.existsSync(result.job.workspace), true);
   assert.deepEqual(result.job.failures, []);
 
   const manifest = readJson(path.join(deliveryDir, 'job.manifest.json'));

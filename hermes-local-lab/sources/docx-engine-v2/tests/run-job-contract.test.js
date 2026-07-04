@@ -234,7 +234,8 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(jobManifest.jobId, payload.jobId);
   assert.equal(jobManifest.status, 'delivered');
   assert.match(jobManifest.createdAt, /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(typeof jobManifest.workspace, 'string');
+  assert.equal(jobManifest.workspace, deliveryDir);
+  assert.equal(fs.existsSync(jobManifest.workspace), true);
   assert.ok(jobManifest.inputs.some((input) => input.type === 'source' && input.path === sourcePath));
   assert.ok(jobManifest.inputs.some((input) => input.type === 'asset_dir' && input.path === assetDir));
   assert.ok(
