@@ -81,7 +81,8 @@ checks. `document_opened`, `layout_reviewed`, and `content_order_reviewed` are
 always required. `figures_reviewed` is required when the render plan contains
 images, and `tables_reviewed` is required when it contains tables. At least one
 `--evidence-file` is also required; evidence files are copied into the delivery
-package and rebound by sha256.
+package and rebound by sha256. Evidence must be a PNG/JPEG screenshot or a PDF
+export from the WPS/Word review.
 
 ## Template Packages
 

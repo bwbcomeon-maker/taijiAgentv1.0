@@ -45,6 +45,9 @@ node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed 
 node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
 ```
 
+The visual evidence file must be a PNG/JPEG screenshot or a PDF export from the
+WPS/Word review.
+
 ## Template Maintenance
 
 Do not edit engine/template-registry.json by hand. Do not copy only

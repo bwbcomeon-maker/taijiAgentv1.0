@@ -9,6 +9,10 @@ const yauzl = require('yauzl');
 
 const rootDir = path.join(__dirname, '..');
 const BUILD_SKILL = path.join(rootDir, 'scripts', 'build-copyable-skill.js');
+const WPS_EVIDENCE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+  'base64'
+);
 
 function makeWorkspace(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-compat-'));
@@ -67,7 +71,7 @@ function buildSkillPackage(t) {
 
 function recordWpsVisualAcceptance({ outDir, workspace, deliveryDir, evidenceName }) {
   const evidencePath = path.join(workspace, evidenceName);
-  fs.writeFileSync(evidencePath, 'WPS visual review evidence\n', 'utf8');
+  fs.writeFileSync(evidencePath, WPS_EVIDENCE_PNG);
   const result = spawnSync(process.execPath, [
     path.join(outDir, 'scripts/record-wps-visual.js'),
     '--delivery-dir',
@@ -172,7 +176,7 @@ test('copyable apply-template wrapper renders a delivery package through v2', (t
     outDir,
     workspace,
     deliveryDir,
-    evidenceName: 'apply-template-wps-evidence.txt',
+    evidenceName: 'apply-template-wps-evidence.png',
   });
 
   const validateResult = spawnSync(process.execPath, [
@@ -407,7 +411,7 @@ test('copyable replay-delivery wrapper can rebind replay evidence after package 
     outDir,
     workspace,
     deliveryDir,
-    evidenceName: 'replay-rebind-wps-evidence.txt',
+    evidenceName: 'replay-rebind-wps-evidence.png',
   });
 
   const validateResult = spawnSync(process.execPath, [

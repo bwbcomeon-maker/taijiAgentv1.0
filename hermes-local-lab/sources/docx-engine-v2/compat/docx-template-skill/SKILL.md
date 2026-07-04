@@ -52,7 +52,7 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
      --evidence-file <wps-screenshot-or-export> \
      --note "已检查目录、图表、图片和版式" --json
    ```
-   For `passed` or `passed_with_warnings`, include all required `--visual-check` values and at least one `--evidence-file`. `figures_reviewed` is required only when the render plan contains images, and `tables_reviewed` is required only when it contains tables. Evidence files are copied into the delivery package and rebound by sha256.
+   For `passed` or `passed_with_warnings`, include all required `--visual-check` values and at least one `--evidence-file`. `figures_reviewed` is required only when the render plan contains images, and `tables_reviewed` is required only when it contains tables. Evidence files must be PNG/JPEG screenshots or PDF exports; they are copied into the delivery package and rebound by sha256.
 9. Run final delivery validation after both replay and WPS/Word evidence are recorded:
    ```bash
    node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json

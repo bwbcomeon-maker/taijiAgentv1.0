@@ -5,6 +5,7 @@ const path = require('node:path');
 const { validateDomainObject } = require('../domain/validate');
 const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { validateDeliveryPackage } = require('./validate-delivery-package');
+const { assertVisualEvidenceFile } = require('./visual-evidence');
 
 const ACCEPTANCE_STATUSES = new Set(['passed', 'passed_with_warnings', 'failed']);
 const BASE_REQUIRED_VISUAL_CHECKS = ['document_opened', 'layout_reviewed', 'content_order_reviewed'];
@@ -149,6 +150,7 @@ function packageVisualEvidenceFiles({ deliveryDir, evidenceFiles }) {
     if (!fs.existsSync(resolvedSourcePath) || !fs.statSync(resolvedSourcePath).isFile()) {
       throw new Error(`WPS visual evidence file is missing: ${sourcePath}`);
     }
+    assertVisualEvidenceFile(resolvedSourcePath, sourcePath);
     const targetName = uniqueEvidenceFileName({
       evidenceDir,
       usedNames,

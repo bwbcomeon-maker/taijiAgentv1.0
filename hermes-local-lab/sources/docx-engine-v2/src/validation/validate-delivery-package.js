@@ -14,6 +14,7 @@ const {
   replayOriginalSourcePackage,
   sourceReplayFailures,
 } = require('../replay/source-replay');
+const { assertVisualEvidenceFile } = require('./visual-evidence');
 
 const CHECK_IDS = [
   'schema',
@@ -1326,6 +1327,14 @@ function validateWpsVisualEvidence({ deliveryDir, recordedCheck, status }) {
       return {
         ok: false,
         message: `WPS/Word visual evidence file is missing: ${relativePath}`,
+      };
+    }
+    try {
+      assertVisualEvidenceFile(evidencePath, relativePath);
+    } catch (error) {
+      return {
+        ok: false,
+        message: error.message,
       };
     }
     const actualHash = sha256File(evidencePath);

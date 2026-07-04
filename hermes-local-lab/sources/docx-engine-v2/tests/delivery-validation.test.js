@@ -49,13 +49,19 @@ function parseStdoutJson(result) {
   }
 }
 
-function writeEvidenceFile(deliveryDir, name = 'wps-visual-evidence.txt') {
+function writeEvidenceFile(deliveryDir, name = 'wps-visual-evidence.png') {
+  const evidencePath = path.join(path.dirname(deliveryDir), name);
+  fs.writeFileSync(evidencePath, ONE_BY_ONE_PNG);
+  return evidencePath;
+}
+
+function writeTextEvidenceFile(deliveryDir, name = 'wps-visual-evidence.txt') {
   const evidencePath = path.join(path.dirname(deliveryDir), name);
   fs.writeFileSync(evidencePath, 'WPS visual review evidence\n', 'utf8');
   return evidencePath;
 }
 
-function recordPassingWpsVisualAcceptance(deliveryDir, evidenceName = 'wps-visual-evidence.txt') {
+function recordPassingWpsVisualAcceptance(deliveryDir, evidenceName = 'wps-visual-evidence.png') {
   const evidencePath = writeEvidenceFile(deliveryDir, evidenceName);
   return recordWpsVisualAcceptance({
     deliveryDir,
@@ -1247,10 +1253,44 @@ test('validateDeliveryPackage fails when recorded WPS visual evidence file is mi
   assert.match(recordedWpsVisual?.message || '', /visual evidence|missing\.txt/i);
 });
 
+test('validateDeliveryPackage fails when recorded WPS visual evidence is not an image or PDF', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
+  const evidencePath = writeTextEvidenceFile(deliveryDir);
+  const evidenceDir = path.join(deliveryDir, 'evidence', 'wps-visual');
+  const packagedEvidencePath = path.join(evidenceDir, path.basename(evidencePath));
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  fs.copyFileSync(evidencePath, packagedEvidencePath);
+  const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
+  const qualityReport = JSON.parse(fs.readFileSync(qualityReportPath, 'utf8'));
+  const wpsVisual = qualityReport.checks.find((check) => check.id === 'wps_visual');
+  Object.assign(wpsVisual, {
+    status: 'passed',
+    message: 'WPS/Word visual inspection passed.',
+    reviewedAt: '2026-07-05T10:00:00.000Z',
+    reviewedBy: 'user',
+    documentSha256: sha256File(path.join(deliveryDir, 'document.docx')),
+    visualChecks: VISUAL_CHECKS,
+    visualEvidence: [{
+      path: 'evidence/wps-visual/wps-visual-evidence.txt',
+      sha256: sha256File(packagedEvidencePath),
+    }],
+  });
+  fs.writeFileSync(qualityReportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['qualityReport'] });
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const recordedWpsVisual = report.checks.find((check) => check.id === 'wps_visual');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(recordedWpsVisual?.status, 'failed');
+  assert.match(recordedWpsVisual?.message || '', /visual evidence.*image|screenshot|PDF|unsupported/i);
+});
+
 test('validateDeliveryPackage fails when recorded WPS visual acceptance belongs to a different document', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   attachReplayReport(deliveryDir);
-  const evidencePath = writeEvidenceFile(deliveryDir, 'changed-document-evidence.txt');
+  const evidencePath = writeEvidenceFile(deliveryDir, 'changed-document-evidence.png');
   recordWpsVisualAcceptance({
     deliveryDir,
     status: 'passed',

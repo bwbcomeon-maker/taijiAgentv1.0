@@ -15,6 +15,10 @@ const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
 );
+const WPS_EVIDENCE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+  'base64'
+);
 const VISUAL_CHECKS = [
   'document_opened',
   'layout_reviewed',
@@ -78,7 +82,13 @@ function readDeliveryManifest(deliveryDir) {
   return JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
 }
 
-function writeEvidenceFile(deliveryDir, name = 'wps-visual-evidence.txt') {
+function writeEvidenceFile(deliveryDir, name = 'wps-visual-evidence.png') {
+  const evidencePath = path.join(path.dirname(deliveryDir), name);
+  fs.writeFileSync(evidencePath, WPS_EVIDENCE_PNG);
+  return evidencePath;
+}
+
+function writeTextEvidenceFile(deliveryDir, name = 'wps-visual-evidence.txt') {
   const evidencePath = path.join(path.dirname(deliveryDir), name);
   fs.writeFileSync(evidencePath, 'WPS visual review evidence\n', 'utf8');
   return evidencePath;
@@ -156,9 +166,29 @@ test('recordWpsVisualAcceptance rejects passed status without visual evidence fi
   assert.notEqual(wpsVisual?.status, 'passed');
 });
 
+test('recordWpsVisualAcceptance rejects non-visual evidence files for passed status', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+  const evidencePath = writeTextEvidenceFile(deliveryDir);
+
+  assert.throws(
+    () => recordWpsVisualAcceptance({
+      deliveryDir,
+      status: 'passed',
+      reviewedAt: '2026-07-05T10:00:50.000Z',
+      reviewedBy: 'user',
+      note: '文本说明不能冒充截图或导出件。',
+      visualChecks: VISUAL_CHECKS,
+      evidenceFiles: [evidencePath],
+    }),
+    /visual evidence.*image|screenshot|PDF|unsupported/i
+  );
+  const wpsVisual = readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual');
+  assert.notEqual(wpsVisual?.status, 'passed');
+});
+
 test('recordWpsVisualAcceptance writes back the full final validation report', async (t) => {
   const deliveryDir = await makeDelivery(t);
-  const evidencePath = writeEvidenceFile(deliveryDir, 'wps-final-evidence.txt');
+  const evidencePath = writeEvidenceFile(deliveryDir, 'wps-final-evidence.png');
   const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
   const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
   const staleQualityReport = readQualityReport(deliveryDir);
@@ -300,7 +330,7 @@ test('recordWpsVisualAcceptance clears previous visual evidence when recording W
 
 test('record-wps-visual CLI updates quality-report and emits JSON', async (t) => {
   const deliveryDir = await makeDelivery(t);
-  const evidencePath = writeEvidenceFile(deliveryDir, 'cli-evidence.txt');
+  const evidencePath = writeEvidenceFile(deliveryDir, 'cli-evidence.png');
 
   const result = spawnSync(process.execPath, [
     CLI,
