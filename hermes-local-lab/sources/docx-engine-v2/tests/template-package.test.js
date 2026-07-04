@@ -8,6 +8,7 @@ const Ajv2020 = require('ajv/dist/2020');
 const yazl = require('yazl');
 
 const { listTemplates, getTemplatePackage } = require('../src/templates/registry');
+const { installTemplatePackage } = require('../src/templates/install-template-package');
 const { validateTemplatePackage } = require('../src/templates/validate-template-package');
 
 const rootDir = path.resolve(__dirname, '..');
@@ -88,6 +89,71 @@ test('template registry rejects duplicate template ids across sources', (t) => {
     () => listTemplates({ rootDir: tempRoot }),
     /Duplicate template id in registry: general-proposal/
   );
+});
+
+test('installTemplatePackage validates, copies, and registers a new installed template', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  const result = installTemplatePackage({ rootDir: tempRoot, packageDir });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.templateId, 'custom-proposal');
+  assert.equal(result.registryEntry.path, 'installed/custom-proposal');
+  assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'custom-proposal', 'template.docx')), true);
+  assert.deepEqual(
+    listTemplates({ rootDir: tempRoot }).map((template) => template.id),
+    ['general-proposal', 'custom-proposal']
+  );
+  const registry = readJson(path.join(tempRoot, 'template-registry.json'));
+  assert.deepEqual(registry.installed, [{ templateId: 'custom-proposal', path: 'installed/custom-proposal' }]);
+});
+
+test('installTemplatePackage rejects duplicate template ids before copying files', (t) => {
+  const tempRoot = makeTempDir(t);
+  const packageDir = path.join(tempRoot, 'incoming', 'general-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  assert.throws(
+    () => installTemplatePackage({ rootDir: tempRoot, packageDir }),
+    /Template already exists: general-proposal/
+  );
+  assert.equal(fs.existsSync(path.join(tempRoot, 'installed', 'general-proposal')), false);
+  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, []);
 });
 
 test('migrated template packages expose required files and manifest metadata', () => {

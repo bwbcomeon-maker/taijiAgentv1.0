@@ -74,7 +74,9 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/package-rich-draft.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/render-figure-assets.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'scripts/replace-docx-image.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'scripts/install-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/run-job.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/install-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/list-templates.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/replace-asset.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
@@ -204,6 +206,39 @@ test('copyable list-templates cli exposes migrated templates', (t) => {
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ok, true);
   assert.ok(payload.templates.some((template) => template.id === 'general-proposal'));
+});
+
+test('copyable install-template wrapper installs a validated template package into engine registry', (t) => {
+  const { workspace, outDir } = buildSkillPackage(t);
+  const packageDir = path.join(workspace, 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+
+  const result = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/install-template.js'),
+    '--package',
+    packageDir,
+    '--json',
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.templateId, 'custom-proposal');
+  assert.equal(fs.existsSync(path.join(outDir, 'engine', 'installed', 'custom-proposal', 'template.docx')), true);
+
+  const templates = spawnSync(process.execPath, [
+    path.join(outDir, 'engine/src/cli/list-templates.js'),
+    '--json',
+  ], { cwd: outDir, encoding: 'utf8' });
+  assert.equal(templates.status, 0, templates.stderr || templates.stdout);
+  assert.ok(JSON.parse(templates.stdout).templates.some((template) => template.id === 'custom-proposal'));
 });
 
 test('copyable self-test renders both smoke documents with template-appropriate sources', (t) => {

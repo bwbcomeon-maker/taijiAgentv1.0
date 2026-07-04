@@ -25,3 +25,11 @@
 3. 收口 WebUI 后端旧接口为 v2 引擎兼容层，避免继续依赖旧 skill 脚本链。
 4. 补齐 installed 模板注册读取和测试。
 5. 最后再做真实浏览器/WPS 侧验收，明确自动化通过与人工未验证边界。
+
+## 已推进进展
+
+- 已抽出 `runDocumentJob` 统一作业流水线，CLI 退回参数适配层。
+- 已让交付包写入完整 `job.manifest.json`，并保持 WPS/Word 视觉验收为显式 `not_verified` gate。
+- 已把 WebUI 旧图片调整接口收敛为 v2 服务兼容层，不再执行旧 `docx-template-skill` 脚本。
+- 已支持 registry 同时读取 `builtin` 和 `installed`，并拒绝重复模板 ID。
+- 已补齐模板安装器：外部模板包必须通过校验后才会复制到 `installed/<templateId>` 并写入 registry；copyable skill 也暴露 `scripts/install-template.js`。
