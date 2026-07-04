@@ -474,6 +474,22 @@ test('validateDeliveryPackage fails when template manifest loses quality gate me
   assert.match(schemaCheck?.message || '', /template\.manifest\.json|TemplateManifest/);
 });
 
+test('validateDeliveryPackage fails when package manifests disagree on template id', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const templateManifestPath = path.join(deliveryDir, 'template.manifest.json');
+  const templateManifest = JSON.parse(fs.readFileSync(templateManifestPath, 'utf8'));
+  templateManifest.id = 'meeting-minutes';
+  templateManifest.name = '会议纪要模板';
+  fs.writeFileSync(templateManifestPath, `${JSON.stringify(templateManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const consistencyCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(consistencyCheck?.status, 'failed');
+  assert.match(consistencyCheck?.message || '', /template id|job\.manifest|render-plan|template\.manifest/i);
+});
+
 test('validateDeliveryPackage requires figure ids to be bound to DOCX image metadata', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await removeFigureIdFromDocPr(path.join(deliveryDir, 'document.docx'), 'fig-002');

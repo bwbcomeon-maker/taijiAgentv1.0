@@ -161,6 +161,22 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     );
     return;
   }
+  const templateIds = {
+    'job.manifest.json': String(jsonFiles.jobManifest.templateId || ''),
+    'render-plan.json': String(jsonFiles.renderPlan.templateId || ''),
+    'template.manifest.json': String(jsonFiles.templateManifest.id || ''),
+  };
+  const uniqueTemplateIds = [...new Set(Object.values(templateIds).filter(Boolean))];
+  if (uniqueTemplateIds.length !== 1) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package template id mismatch: ${Object.entries(templateIds)
+        .map(([fileName, templateId]) => `${fileName}=${templateId || 'missing'}`)
+        .join(', ')}`
+    );
+    return;
+  }
 
   addCheck('schema', 'passed');
 }
