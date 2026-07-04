@@ -510,6 +510,8 @@ const schemas = {
             id: { type: 'string', minLength: 1 },
             status: { enum: STATUSES.check },
             message: { type: 'string' },
+            reviewedAt: { type: 'string' },
+            reviewedBy: { type: 'string' },
           },
         },
       },

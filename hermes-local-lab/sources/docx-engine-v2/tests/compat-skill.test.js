@@ -79,6 +79,8 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/install-template.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/list-templates.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/replace-asset.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'scripts/record-wps-visual.js')), true);
+  assert.equal(fs.existsSync(path.join(outDir, 'engine/src/cli/record-wps-visual.js')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'runtime')), false);
 });

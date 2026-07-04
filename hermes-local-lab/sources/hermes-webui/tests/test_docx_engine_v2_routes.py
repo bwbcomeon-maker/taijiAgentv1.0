@@ -20,6 +20,7 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/docx-engine-v2/templates" in routes_py
     assert "/api/docx-engine-v2/templates/install" in routes_py
     assert "/api/docx-engine-v2/jobs" in routes_py
+    assert "/api/docx-engine-v2/quality/wps-visual" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
     assert "/api/file/open" in routes_py
@@ -288,6 +289,73 @@ def test_docx_engine_v2_create_job_returns_delivery_package(monkeypatch, tmp_pat
     assert payload["quality_status"] in {"passed", "passed_with_warnings"}
     assert payload["quality_report_path"].endswith("quality-report.json")
     assert payload["quality_report"]["checks"][0]["id"] == "wps_visual"
+
+
+def test_docx_engine_v2_records_wps_visual_acceptance(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+
+    def fake_record_wps_visual_acceptance(payload, workspace):
+        assert workspace == tmp_path.resolve()
+        assert payload["delivery_dir"] == "delivery"
+        assert payload["status"] == "passed"
+        return {
+            "ok": True,
+            "delivery_dir": str(tmp_path / "delivery"),
+            "quality_status": "passed",
+            "quality_report_path": str(tmp_path / "delivery" / "quality-report.json"),
+            "quality_report": {
+                "status": "passed",
+                "checks": [{"id": "wps_visual", "status": "passed", "reviewedBy": "user"}],
+                "warnings": [],
+                "failures": [],
+            },
+        }, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "record_wps_visual_acceptance", fake_record_wps_visual_acceptance)
+
+    result = routes._handle_docx_engine_v2_wps_visual_acceptance(
+        object(),
+        {"session_id": "sid-docx", "delivery_dir": "delivery", "status": "passed"},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["quality_status"] == "passed"
+    assert result["payload"]["quality_report"]["checks"][0]["status"] == "passed"
+
+
+def test_docx_engine_v2_wps_visual_cli_validation_failure_returns_400(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+    import json
+    import subprocess
+
+    delivery_dir = tmp_path / "delivery"
+    delivery_dir.mkdir()
+
+    def fake_run_engine(args):
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=3,
+            stdout=json.dumps(
+                {
+                    "ok": False,
+                    "code": "wps_visual_record_failed",
+                    "message": "quality-report.json not found",
+                }
+            )
+            + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(docx_engine_v2, "run_engine", fake_run_engine)
+
+    payload, status = docx_engine_v2.record_wps_visual_acceptance(
+        {"delivery_dir": "delivery", "status": "passed"},
+        tmp_path,
+    )
+
+    assert status == 400
+    assert payload["ok"] is False
+    assert payload["code"] == "wps_visual_record_failed"
 
 
 def test_docx_engine_v2_rerender_asset_routes_to_service(monkeypatch, tmp_path):

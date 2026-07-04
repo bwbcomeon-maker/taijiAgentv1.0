@@ -34,7 +34,11 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    ```bash
    node scripts/replace-docx-image.js --docx <input.docx> --figure-id fig-001 --image <replacement.png|svg> --out <updated.docx>
    ```
-7. Install a validated template package into this skill's engine registry:
+7. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
+   ```bash
+   node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --note "已检查目录、图表、图片和版式" --json
+   ```
+8. Install a validated template package into this skill's engine registry:
    ```bash
    node scripts/install-template.js --package <template-package-dir> --json
    ```

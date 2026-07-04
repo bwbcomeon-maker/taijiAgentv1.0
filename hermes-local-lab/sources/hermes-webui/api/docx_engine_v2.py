@@ -156,6 +156,54 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     }, 200
 
 
+def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+    workspace = Path(workspace).expanduser().resolve()
+    try:
+        delivery_dir = _resolve_workspace_path(
+            workspace,
+            _first_text(payload, "delivery_dir", "deliveryDir"),
+            field="delivery_dir",
+            must_exist=True,
+            allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(workspace),
+        )
+        if not delivery_dir.is_dir():
+            return _error_payload("validation_failed", f"delivery_dir must be a directory: {delivery_dir}"), 400
+        status = _first_text(payload, "status") or "passed"
+        if status not in {"passed", "passed_with_warnings", "failed"}:
+            return _error_payload("validation_failed", f"Invalid WPS visual status: {status}"), 400
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("validation_failed", str(exc)), 400
+
+    args = [
+        str(_engine_cli("record-wps-visual.js")),
+        "--delivery-dir",
+        str(delivery_dir),
+        "--status",
+        status,
+        "--reviewer",
+        _first_text(payload, "reviewer", "reviewed_by", "reviewedBy") or "user",
+        "--json",
+    ]
+    note = _first_text(payload, "note", "message")
+    if note:
+        args.extend(["--note", note])
+
+    completed = run_engine(args)
+    engine_payload = _payload_from_completed(completed, default_code="wps_visual_record_failed")
+    if completed.returncode != 0:
+        return _known_failure_payload(engine_payload), _status_for_engine_failure(engine_payload)
+
+    quality_report_path = Path(str(engine_payload.get("qualityReportPath", ""))).expanduser()
+    quality_report = _read_quality_report(quality_report_path)
+    return {
+        "ok": True,
+        "delivery_dir": str(delivery_dir),
+        "quality_status": quality_report.get("status", ""),
+        "quality_report_path": str(quality_report_path),
+        "quality_report": quality_report,
+    }, 200
+
+
 def package_rich_draft(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     workspace = Path(workspace).expanduser().resolve()
     try:
@@ -390,7 +438,7 @@ def _error_payload(code: str, message: str) -> dict[str, Any]:
 
 def _status_for_engine_failure(payload: dict[str, Any]) -> int:
     code = str(payload.get("code") or "")
-    if code in {"template_selection_required", "template_install_failed", "validation_failed"}:
+    if code in {"template_selection_required", "template_install_failed", "validation_failed", "wps_visual_record_failed"}:
         return 400
     return 500
 

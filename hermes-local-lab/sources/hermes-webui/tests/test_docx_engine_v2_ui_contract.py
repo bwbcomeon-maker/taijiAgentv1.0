@@ -13,6 +13,7 @@ def test_docx_engine_workbench_has_visible_controls_and_actions():
     assert "renderDocxEngineWorkbench" in ui_js
     assert "runDocxEngineJob" in ui_js
     assert "installDocxEngineTemplate" in ui_js
+    assert "markDocxEngineWpsVisualAccepted" in ui_js
     assert "openDocxDeliveryFolder" in ui_js
     assert "replaceDocxEngineAsset" in ui_js
     assert "模板包目录" in ui_js
@@ -21,12 +22,14 @@ def test_docx_engine_workbench_has_visible_controls_and_actions():
     assert "质量报告" in ui_js
     assert "打开 DOCX" in ui_js
     assert "打开交付目录" in ui_js
+    assert "记录 WPS 验收通过" in ui_js
     assert "aria-label" in ui_js
     assert ".docx-engine-workbench" in style_css
 
     assert "/api/docx-engine-v2/templates" in ui_js
     assert "/api/docx-engine-v2/templates/install" in ui_js
     assert "/api/docx-engine-v2/jobs" in ui_js
+    assert "/api/docx-engine-v2/quality/wps-visual" in ui_js
     assert "/api/docx-engine-v2/assets/rerender" in ui_js
     assert "/api/docx-engine-v2/assets/replace" in ui_js
     assert "/api/file/open" in ui_js
@@ -42,6 +45,7 @@ def test_docx_engine_workbench_exposes_required_accessible_control_names():
         "查看质量报告",
         "打开 DOCX",
         "打开交付目录",
+        "记录 WPS 验收通过",
         "重渲染图片",
         "替换 DOCX 图片",
         "模板包目录",
@@ -62,6 +66,7 @@ def test_docx_engine_workbench_covers_feedback_and_recovery_states():
     assert "template_package_path" in ui_js
     assert "replace_existing" in ui_js
     assert "确定要覆盖已安装模板吗" in ui_js
+    assert "确认已在 WPS/Word 打开 DOCX" in ui_js
     assert "confirm(" in ui_js
     assert "旧 DOCX 需要先重新套模板" in ui_js
     assert "passed_with_warnings" in ui_js

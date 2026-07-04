@@ -9908,6 +9908,7 @@ function renderDocxEngineWorkbench(workbench){
     '<button type="button" class="secondary" data-docx-engine-action="quality" onclick="showDocxEngineQualityReport(this);event.stopPropagation()" aria-label="查看质量报告" disabled>查看质量报告</button>',
     '<button type="button" class="secondary" data-docx-engine-action="document" onclick="openDocxEngineDocument(this);event.stopPropagation()" aria-label="打开 DOCX" disabled>打开 DOCX</button>',
     '<button type="button" class="secondary" data-docx-engine-action="delivery" onclick="openDocxDeliveryFolder(this);event.stopPropagation()" aria-label="打开交付目录" disabled>打开交付目录</button>',
+    '<button type="button" class="secondary" data-docx-engine-action="wps" onclick="markDocxEngineWpsVisualAccepted(this);event.stopPropagation()" aria-label="记录 WPS 验收通过" disabled>记录 WPS 验收通过</button>',
     '</div>',
     '</div>',
     '<div class="docx-engine-section">',
@@ -10017,6 +10018,7 @@ function _syncDocxEngineActionAvailability(root){
   root.querySelectorAll('[data-docx-engine-action="quality"]').forEach((node)=>{node.disabled=!hasQuality;});
   root.querySelectorAll('[data-docx-engine-action="document"]').forEach((node)=>{node.disabled=!hasDocument;});
   root.querySelectorAll('[data-docx-engine-action="delivery"],[data-docx-engine-action="rerender"]').forEach((node)=>{node.disabled=!hasDelivery;});
+  root.querySelectorAll('[data-docx-engine-action="wps"]').forEach((node)=>{node.disabled=!hasDelivery;});
 }
 
 function _updateDocxEngineTemplateOptions(root,templates,selectedTemplateId){
@@ -10240,6 +10242,61 @@ function showDocxEngineQualityReport(button){
   _setDocxEngineStatus(root,`已展开质量报告：${quality||'状态未返回'}${reportPath?`；文件：${reportPath}`:''}`,'info');
 }
 
+function _updateDocxEngineQualityOnly(root,payload){
+  if(!root||!payload)return;
+  const quality=String(payload.quality_status||payload.qualityStatus||'').trim();
+  const qualityReportPath=String(payload.quality_report_path||payload.qualityReportPath||root.dataset.qualityReportPath||'').trim();
+  const qualityReport=_docxEngineQualityReportFromPayload(payload);
+  if(quality)root.dataset.qualityStatus=quality;
+  if(qualityReportPath)root.dataset.qualityReportPath=qualityReportPath;
+  root._docxEngineQualityReport=qualityReport;
+  const qualityNode=root.querySelector('[data-docx-engine-quality]');
+  const detailNode=root.querySelector('[data-docx-engine-quality-detail]');
+  const warningCount=qualityReport&&Array.isArray(qualityReport.warnings)?qualityReport.warnings.length:0;
+  const failureCount=qualityReport&&Array.isArray(qualityReport.failures)?qualityReport.failures.length:0;
+  if(qualityNode) qualityNode.textContent=`${quality||'未返回质量状态。'}${warningCount||failureCount?`（警告 ${warningCount}，失败 ${failureCount}）`:''}`;
+  if(detailNode){
+    detailNode.innerHTML=_renderDocxEngineQualityReportHtml(root,qualityReport);
+    detailNode.hidden=false;
+  }
+  _syncDocxEngineActionAvailability(root);
+}
+
+async function markDocxEngineWpsVisualAccepted(button){
+  const root=_docxEngineRoot(button);
+  const sid=_docxEngineSessionId(root);
+  if(!sid)return null;
+  const deliveryDir=root&&root.dataset?String(root.dataset.deliveryDir||'').trim():'';
+  if(!deliveryDir){
+    _setDocxEngineStatus(root,'请先生成交付包，再记录 WPS 验收。','error');
+    return null;
+  }
+  if(typeof confirm==='function'&&!confirm('确认已在 WPS/Word 打开 DOCX，并检查目录、图表、图片和版式？')){
+    _setDocxEngineStatus(root,'已取消记录 WPS 验收。','info');
+    return null;
+  }
+  _docxEngineSetBusy(root,true);
+  _setDocxEngineStatus(root,'正在记录 WPS 验收结果...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/quality/wps-visual',{method:'POST',body:JSON.stringify({
+      session_id:sid,
+      delivery_dir:deliveryDir,
+      status:'passed',
+    })});
+    _updateDocxEngineQualityOnly(root,payload);
+    _setDocxEngineStatus(root,'已记录 WPS 验收通过，质量报告已更新。','success');
+    if(typeof showToast==='function')showToast('已记录 WPS 验收通过。');
+    return payload;
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'记录失败');
+    _setDocxEngineStatus(root,`记录 WPS 验收失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`记录 WPS 验收失败：${message}`);
+    return null;
+  }finally{
+    _docxEngineSetBusy(root,false);
+  }
+}
+
 async function openDocxEnginePath(root,pathValue,emptyMessage,mode){
   const sid=_docxEngineSessionId(root);
   if(!sid)return null;
@@ -10452,6 +10509,7 @@ if(typeof window!=='undefined'){
   window.runDocxEngineJob=runDocxEngineJob;
   window.rerenderDocxEngineFigure=rerenderDocxEngineFigure;
   window.showDocxEngineQualityReport=showDocxEngineQualityReport;
+  window.markDocxEngineWpsVisualAccepted=markDocxEngineWpsVisualAccepted;
   window.openDocxEngineDocument=openDocxEngineDocument;
   window.openDocxDeliveryFolder=openDocxDeliveryFolder;
   window.replaceDocxEngineAsset=replaceDocxEngineAsset;

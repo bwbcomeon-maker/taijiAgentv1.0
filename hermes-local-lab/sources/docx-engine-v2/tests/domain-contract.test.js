@@ -390,6 +390,27 @@ test('ValidationReport contract preserves WPS visual acceptance as not_verified'
   );
 });
 
+test('ValidationReport contract can record WPS visual reviewer evidence', () => {
+  const validationReport = {
+    schemaVersion: 'docx-engine-v2/validation-report',
+    status: 'passed',
+    checks: [
+      {
+        id: 'wps_visual',
+        status: 'passed',
+        message: 'WPS/Word visual inspection passed.',
+        reviewedAt: '2026-07-05T10:00:00.000Z',
+        reviewedBy: 'user',
+      },
+    ],
+    warnings: [],
+    failures: [],
+  };
+
+  const result = validateDomainObject('ValidationReport', validationReport);
+  assert.equal(result.ok, true, JSON.stringify(result.errors || result));
+});
+
 test('DeliveryPackage contract requires the complete editable delivery bundle', () => {
   const deliveryPackage = {
     schemaVersion: 'docx-engine-v2/delivery-package',
