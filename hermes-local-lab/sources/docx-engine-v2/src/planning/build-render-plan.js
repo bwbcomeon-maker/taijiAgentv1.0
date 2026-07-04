@@ -111,7 +111,12 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
     const figureId = block.metadata?.figureId;
     if (figureId && figureById.has(figureId) && !usedImageKeys.has(`figure:${figureId}`)) {
       usedImageKeys.add(`figure:${figureId}`);
-      orderedImages.push(toTemplateFigureImage(figureById.get(figureId), orderedImages.length, sectionById));
+      orderedImages.push(toTemplateFigureImage(
+        figureById.get(figureId),
+        orderedImages.length,
+        sectionById,
+        placementMetadata(sourcePackage, figureById.get(figureId), block)
+      ));
       continue;
     }
 
@@ -124,7 +129,8 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
           orderedImages.length,
           sectionById,
           figureIdBySourceImageId,
-          allocateFigureId
+          allocateFigureId,
+          placementMetadata(sourcePackage, imageById.get(imageId), block)
         )
       );
     }
@@ -133,7 +139,12 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
   for (const figure of assetPackage.figures || []) {
     if (!usedImageKeys.has(`figure:${figure.figureId}`)) {
       usedImageKeys.add(`figure:${figure.figureId}`);
-      orderedImages.push(toTemplateFigureImage(figure, orderedImages.length, sectionById));
+      orderedImages.push(toTemplateFigureImage(
+        figure,
+        orderedImages.length,
+        sectionById,
+        placementMetadata(sourcePackage, figure)
+      ));
     }
   }
 
@@ -146,7 +157,8 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
           orderedImages.length,
           sectionById,
           figureIdBySourceImageId,
-          allocateFigureId
+          allocateFigureId,
+          placementMetadata(sourcePackage, image)
         )
       );
     }
@@ -155,7 +167,7 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
   return { images: orderedImages, figureIdBySourceImageId };
 }
 
-function toTemplateFigureImage(figure, index, sectionById) {
+function toTemplateFigureImage(figure, index, sectionById, placement = {}) {
   return {
     figureId: figure.figureId,
     path: figure.displayPath,
@@ -166,12 +178,22 @@ function toTemplateFigureImage(figure, index, sectionById) {
       sourceType: 'figure',
       sectionId: figure.sectionId || '',
       sectionTitle: sectionById.get(figure.sectionId)?.title || '',
+      blockId: placement.blockId || '',
+      afterBlockId: placement.afterBlockId || '',
+      anchorText: placement.anchorText || figure.anchorText || '',
       templatePath: `images.${index}`,
     },
   };
 }
 
-function toTemplateMarkdownImage(image, index, sectionById, figureIdBySourceImageId, allocateFigureId) {
+function toTemplateMarkdownImage(
+  image,
+  index,
+  sectionById,
+  figureIdBySourceImageId,
+  allocateFigureId,
+  placement = {}
+) {
   const figureId = figureIdBySourceImageId.get(image.imageId) || allocateFigureId();
   figureIdBySourceImageId.set(image.imageId, figureId);
 
@@ -188,8 +210,19 @@ function toTemplateMarkdownImage(image, index, sectionById, figureIdBySourceImag
       sourcePath: image.sourcePath,
       sectionId: image.sectionId || '',
       sectionTitle: sectionById.get(image.sectionId)?.title || '',
+      blockId: placement.blockId || '',
+      afterBlockId: placement.afterBlockId || '',
+      anchorText: placement.anchorText || image.anchorText || '',
       templatePath: `images.${index}`,
     },
+  };
+}
+
+function placementMetadata(sourcePackage, item, block = null) {
+  return {
+    blockId: block?.id || '',
+    afterBlockId: findPlacementBlockId(sourcePackage, item),
+    anchorText: block?.anchorText || item?.anchorText || '',
   };
 }
 
@@ -244,7 +277,9 @@ function findPlacementBlockId(sourcePackage, item) {
 
   const block = (sourcePackage.blocks || []).find(
     (candidate) =>
-      candidate.metadata?.figureId === item.figureId || candidate.metadata?.tableId === item.tableId
+      (item.figureId && candidate.metadata?.figureId === item.figureId) ||
+      (item.tableId && candidate.metadata?.tableId === item.tableId) ||
+      (item.imageId && candidate.metadata?.imageId === item.imageId)
   );
   if (!block) {
     return '';

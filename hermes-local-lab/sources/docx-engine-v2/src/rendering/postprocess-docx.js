@@ -76,6 +76,7 @@ function bindPlannedImages({ entries, documentXml, renderPlan, outputPath }) {
       figureId: image.figureId || `fig-${index + 1}`,
       docPrId: 9000 + index,
       title: image.caption || image.figureId || `图 ${index + 1}`,
+      metadata: image.metadata || {},
     }));
   });
 
@@ -159,16 +160,28 @@ function hasDocPrFigureMetadata(documentXml, figureIds) {
   return figureIds.every((figureId) => presentFigureIds.has(figureId));
 }
 
-function updateDrawingTemplate({ drawingXml, relationshipId, figureId, docPrId, title }) {
+function updateDrawingTemplate({ drawingXml, relationshipId, figureId, docPrId, title, metadata = {} }) {
+  const docPrMetadata = figureDocPrMetadata(figureId, metadata);
   let next = String(drawingXml || '').replace(/\br:embed="[^"]+"/, `r:embed="${relationshipId}"`);
   next = next.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
     let nextAttributes = upsertXmlAttribute(attributes, 'id', String(docPrId));
     nextAttributes = upsertXmlAttribute(nextAttributes, 'name', title || figureId);
-    nextAttributes = upsertXmlAttribute(nextAttributes, 'descr', `docx-engine-v2 figureId=${figureId}`);
-    nextAttributes = upsertXmlAttribute(nextAttributes, 'title', `docx-engine-v2 figureId=${figureId}`);
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'descr', docPrMetadata);
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
     return `<wp:docPr${nextAttributes}/>`;
   });
   return next;
+}
+
+function figureDocPrMetadata(figureId, metadata = {}) {
+  const tokens = ['docx-engine-v2', `figureId=${safeMetadataValue(figureId)}`];
+  for (const key of ['sectionId', 'blockId', 'afterBlockId', 'sourceImageId']) {
+    const value = safeMetadataValue(metadata[key]);
+    if (value) {
+      tokens.push(`${key}=${value}`);
+    }
+  }
+  return tokens.join(' ');
 }
 
 function collectRelationshipIds(relationshipsXml) {
@@ -232,6 +245,10 @@ function resolvePackagePath(baseDir, relativePath) {
 
 function safeFileName(value) {
   return String(value || '').replace(/[^A-Za-z0-9_-]/g, '_') || 'image';
+}
+
+function safeMetadataValue(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
 function escapeRegExp(value) {

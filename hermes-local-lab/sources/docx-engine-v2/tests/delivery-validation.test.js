@@ -611,6 +611,25 @@ test('validateDeliveryPackage requires figure ids to be bound to DOCX image meta
   assert.match(metadataCheck?.message || '', /fig-002/);
 });
 
+test('validateDeliveryPackage fails when DOCX figure section metadata drifts from render plan', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlan = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'render-plan.json'), 'utf8'));
+  const plannedImage = renderPlan.templateData.images.find((image) => image.figureId === 'fig-001');
+  assert.equal(plannedImage?.metadata?.sectionId, 'sec-001');
+
+  await rewriteDocPrForFigure(path.join(deliveryDir, 'document.docx'), 'fig-001', (tag) =>
+    tag.replace(/\bsectionId=sec-001\b/g, 'sectionId=sec-tampered')
+  );
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const metadataCheck = report.checks.find((check) => check.id === 'figure_id_metadata');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(metadataCheck?.status, 'failed');
+  assert.match(metadataCheck?.message || '', /fig-001|sectionId|render-plan/i);
+});
+
 test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
@@ -624,13 +643,32 @@ test('validateDeliveryPackage fails when template data markers remain in DOCX', 
 });
 
 async function removeFigureIdFromDocPr(docxPath, figureId) {
-  const entries = await readZipEntries(docxPath);
-  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
-  const updatedXml = documentXml.replace(/<wp:docPr\b[^>]*>/g, (tag) =>
+  await rewriteDocPrForFigure(docxPath, figureId, (tag) =>
     tag.replace(new RegExp(`\\s?figureId=${figureId}`, 'g'), '')
   );
+}
+
+async function rewriteDocPrForFigure(docxPath, figureId, rewriteTag) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const updatedXml = documentXml.replace(/<wp:docPr\b[^>]*>/g, (tag) => {
+    if (!new RegExp(`\\bfigureId=${figureId}\\b`).test(tag)) {
+      return tag;
+    }
+    return rewriteTag(tag);
+  });
   entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
   await writeZipEntries(entries, docxPath);
+}
+
+function refreshDeliveryDocumentHash(deliveryDir) {
+  const documentPath = path.join(deliveryDir, 'document.docx');
+  const manifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const documentHash = sha256File(documentPath);
+  deliveryManifest.documentSha256 = documentHash;
+  deliveryManifest.fileSha256.document = documentHash;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
 }
 
 async function injectTemplateMarker(docxPath) {

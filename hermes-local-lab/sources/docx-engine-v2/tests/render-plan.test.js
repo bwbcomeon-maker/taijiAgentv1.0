@@ -78,8 +78,14 @@ test('buildRenderPlan binds sections, assets, and template data in source order'
   assert.equal(renderPlan.tables[0].tableId, 'tbl-001');
   assert.equal(renderPlan.templateData.images[0].figureId, 'fig-001');
   assert.equal(renderPlan.templateData.images[1].figureId, 'fig-002');
+  assert.equal(renderPlan.templateData.images[0].metadata.sectionId, 'sec-001');
+  assert.equal(renderPlan.templateData.images[0].metadata.blockId, 'block-005');
+  assert.equal(renderPlan.templateData.images[0].metadata.afterBlockId, 'block-004');
   assert.equal(renderPlan.templateData.images[1].metadata.sourceType, 'image');
   assert.equal(renderPlan.templateData.images[1].metadata.sourceImageId, 'image-001');
+  assert.equal(renderPlan.templateData.images[1].metadata.sectionId, 'sec-001');
+  assert.equal(renderPlan.templateData.images[1].metadata.blockId, 'block-006');
+  assert.equal(renderPlan.templateData.images[1].metadata.afterBlockId, 'block-005');
   assert.ok(renderPlan.templateData.images[1].path.endsWith('architecture.png'));
   assert.match(renderPlan.templateData.images[0].sha256, /^[a-f0-9]{64}$/);
   assert.match(renderPlan.templateData.images[1].sha256, /^[a-f0-9]{64}$/);

@@ -739,6 +739,16 @@ function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
     return;
   }
 
+  const bindingFailures = figureBindingMetadataFailures({ documentXml, renderPlan });
+  if (bindingFailures.length > 0) {
+    addCheck(
+      'figure_id_metadata',
+      'failed',
+      `DOCX figure metadata does not match render-plan: ${bindingFailures.join(', ')}`
+    );
+    return;
+  }
+
   addCheck('figure_id_metadata', 'passed');
 }
 
@@ -754,6 +764,71 @@ function extractDocPrFigureIds(documentXml) {
     }
   }
   return figureIds;
+}
+
+function figureBindingMetadataFailures({ documentXml, renderPlan }) {
+  const failures = [];
+  const docPrMetadataByFigureId = extractDocPrFigureMetadata(documentXml);
+  const expectedBindings = expectedFigureBindings(renderPlan);
+
+  for (const [figureId, expected] of expectedBindings) {
+    const actual = docPrMetadataByFigureId.get(figureId);
+    if (!actual) {
+      continue;
+    }
+
+    for (const key of ['sectionId', 'blockId', 'afterBlockId']) {
+      if (!expected[key]) {
+        continue;
+      }
+      if (actual[key] !== expected[key]) {
+        failures.push(
+          `${figureId} ${key} expected ${expected[key]} from render-plan, got ${actual[key] || 'missing'}`
+        );
+      }
+    }
+  }
+
+  return failures;
+}
+
+function expectedFigureBindings(renderPlan) {
+  const bindings = new Map();
+  const figuresById = new Map((renderPlan?.figures || []).map((figure) => [figure.figureId, figure]));
+  for (const image of renderPlan?.templateData?.images || []) {
+    const figureId = String(image?.figureId || '').trim();
+    if (!figureId) {
+      continue;
+    }
+    const metadata = image.metadata || {};
+    const figure = figuresById.get(figureId) || {};
+    bindings.set(figureId, {
+      sectionId: String(metadata.sectionId || figure.sectionId || '').trim(),
+      blockId: String(metadata.blockId || '').trim(),
+      afterBlockId: String(metadata.afterBlockId || figure.afterBlockId || '').trim(),
+    });
+  }
+  return bindings;
+}
+
+function extractDocPrFigureMetadata(documentXml) {
+  const metadataByFigureId = new Map();
+  for (const match of String(documentXml || '').matchAll(/<wp:docPr\b[^>]*>/g)) {
+    const metadata = parseDocPrMetadata(match[0]);
+    if (!metadata.figureId) {
+      continue;
+    }
+    metadataByFigureId.set(metadata.figureId, metadata);
+  }
+  return metadataByFigureId;
+}
+
+function parseDocPrMetadata(tag) {
+  const metadata = {};
+  for (const match of String(tag || '').matchAll(/\b([A-Za-z][A-Za-z0-9_]*)=([A-Za-z0-9_-]+)/g)) {
+    metadata[match[1]] = match[2];
+  }
+  return metadata;
 }
 
 function buildReport(checksById, warnings, failures) {
