@@ -38,3 +38,4 @@
 - 已把交付包 schema gate 扩展到 `job.manifest.json` 和 `template.manifest.json`，避免“追溯文件存在但内容不可用”的假通过。
 - 已在交付包写入前校验 `DocumentJob` 与 `TemplateManifest`，坏追溯证据会被源头拒绝且不会留下半成品交付目录。
 - 已把原始输入文件复制到 `source/original/` 并新增 `source_original` 质量检查，避免只保留归一化 `source.md` 而丢失真实来源。
+- 已把 `DeliveryPackage` 领域对象持久化为 `delivery-package.json`，并纳入交付包 schema gate；最终清单记录用户目标目录，避免指向临时构建路径。

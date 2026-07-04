@@ -210,6 +210,23 @@ test('validateDeliveryPackage fails when a required delivery file is missing', a
   assert.ok(report.failures.some((item) => item.includes('render-plan.json')));
 });
 
+test('validateDeliveryPackage fails when delivery package manifest is not traceable', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  fs.writeFileSync(
+    path.join(deliveryDir, 'delivery-package.json'),
+    JSON.stringify({ schemaVersion: 'docx-engine-v2/delivery-package', files: {} }, null, 2),
+    'utf8'
+  );
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /delivery-package\.json|DeliveryPackage/);
+});
+
 test('validateDeliveryPackage fails when job manifest is not traceable', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
 

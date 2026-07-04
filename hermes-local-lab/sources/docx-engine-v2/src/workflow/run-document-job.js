@@ -140,6 +140,7 @@ async function runDocumentJob({
       renderPlan,
       documentPath,
       qualityReport,
+      manifestDeliveryDir: absoluteDeliveryDir,
     });
     const finalQualityReport = validateDeliveryPackage({ deliveryDir: finalDeliveryDir });
     fs.writeFileSync(

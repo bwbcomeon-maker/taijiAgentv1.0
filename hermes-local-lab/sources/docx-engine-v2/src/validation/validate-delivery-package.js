@@ -19,6 +19,7 @@ const CHECK_IDS = [
 
 const REQUIRED_ENTRIES = [
   'document.docx',
+  'delivery-package.json',
   'source.md',
   'source/original',
   'assets',
@@ -68,6 +69,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   }
 
   for (const [key, fileName] of [
+    ['deliveryPackage', 'delivery-package.json'],
     ['jobManifest', 'job.manifest.json'],
     ['templateManifest', 'template.manifest.json'],
     ['renderPlan', 'render-plan.json'],
@@ -103,24 +105,38 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
 }
 
 function addSchemaCheck({ addCheck, jsonFiles }) {
-  if (!jsonFiles.jobManifest || !jsonFiles.templateManifest || !jsonFiles.renderPlan || !jsonFiles.qualityReport) {
+  if (
+    !jsonFiles.deliveryPackage ||
+    !jsonFiles.jobManifest ||
+    !jsonFiles.templateManifest ||
+    !jsonFiles.renderPlan ||
+    !jsonFiles.qualityReport
+  ) {
     addCheck(
       'schema',
       'failed',
-      'job.manifest.json, template.manifest.json, render-plan.json and quality-report.json are required for schema validation.'
+      'delivery-package.json, job.manifest.json, template.manifest.json, render-plan.json and quality-report.json are required for schema validation.'
     );
     return;
   }
 
+  const deliveryPackageResult = validateDomainObject('DeliveryPackage', jsonFiles.deliveryPackage);
   const jobManifestResult = validateDomainObject('DocumentJob', jsonFiles.jobManifest);
   const templateManifestResult = validateDomainObject('TemplateManifest', jsonFiles.templateManifest);
   const renderPlanResult = validateDomainObject('RenderPlan', jsonFiles.renderPlan);
   const qualityReportResult = validateDomainObject('ValidationReport', jsonFiles.qualityReport);
-  if (!jobManifestResult.ok || !templateManifestResult.ok || !renderPlanResult.ok || !qualityReportResult.ok) {
+  if (
+    !deliveryPackageResult.ok ||
+    !jobManifestResult.ok ||
+    !templateManifestResult.ok ||
+    !renderPlanResult.ok ||
+    !qualityReportResult.ok
+  ) {
     addCheck(
       'schema',
       'failed',
       `Delivery schema validation failed: ${JSON.stringify([
+        ...tagValidationErrors('delivery-package.json', deliveryPackageResult.errors),
         ...tagValidationErrors('job.manifest.json', jobManifestResult.errors),
         ...tagValidationErrors('template.manifest.json', templateManifestResult.errors),
         ...tagValidationErrors('render-plan.json', renderPlanResult.errors),

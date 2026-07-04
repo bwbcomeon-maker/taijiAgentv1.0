@@ -9,6 +9,7 @@ const IMAGE_INSTRUCTIONS = [
   '本交付包保留了可编辑资产和生成后的 DOCX：',
   '',
   '- `document.docx` 是生成文档。',
+  '- `delivery-package.json` 是交付包清单，记录文档、源文件、模板清单、渲染计划和质量报告的位置。',
   '- `source/original/` 保存原始输入文件，`source.md` 是用于人工查看的 Markdown 副本。',
   '- `assets/` 保存图片、图形源文件和展示文件。',
   '- `render-plan.json` 记录图表与模板位置绑定关系。',
@@ -25,6 +26,7 @@ function writeDeliveryPackage({
   renderPlan,
   documentPath,
   qualityReport,
+  manifestDeliveryDir,
 } = {}) {
   if (!deliveryDir) {
     throw new Error('deliveryDir is required.');
@@ -68,7 +70,7 @@ function writeDeliveryPackage({
 
   const deliveryPackage = {
     schemaVersion: 'docx-engine-v2/delivery-package',
-    deliveryDir,
+    deliveryDir: manifestDeliveryDir || deliveryDir,
     files: {
       document: 'document.docx',
       source: 'source.md',
@@ -86,6 +88,7 @@ function writeDeliveryPackage({
   if (!validation.ok) {
     throw new Error(`DeliveryPackage validation failed: ${JSON.stringify(validation.errors)}`);
   }
+  writeJson(path.join(deliveryDir, 'delivery-package.json'), deliveryPackage);
 
   return deliveryPackage;
 }

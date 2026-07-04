@@ -9,6 +9,7 @@ const ENGINE_ROOT = path.join(__dirname, '..');
 const RUN_JOB = path.join(ENGINE_ROOT, 'src', 'cli', 'run-job.js');
 const REQUIRED_DELIVERY_ENTRIES = [
   'document.docx',
+  'delivery-package.json',
   'source.md',
   'source/original',
   'assets',
@@ -185,6 +186,20 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
 
   const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
   assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+
+  const deliveryManifest = readJsonFile(path.join(deliveryDir, 'delivery-package.json'));
+  assert.equal(deliveryManifest.schemaVersion, 'docx-engine-v2/delivery-package');
+  assert.equal(deliveryManifest.deliveryDir, deliveryDir);
+  assert.equal(deliveryManifest.files.document, 'document.docx');
+  assert.equal(deliveryManifest.files.source, 'source.md');
+  assert.equal(deliveryManifest.files.originalSource, `source/original/${path.basename(sourcePath)}`);
+  assert.equal(deliveryManifest.files.assetsDir, 'assets');
+  assert.equal(deliveryManifest.files.jobManifest, 'job.manifest.json');
+  assert.equal(deliveryManifest.files.templateManifest, 'template.manifest.json');
+  assert.equal(deliveryManifest.files.renderPlan, 'render-plan.json');
+  assert.equal(deliveryManifest.files.qualityReport, 'quality-report.json');
+  assert.equal(deliveryManifest.files.imageInstructions, 'README-图片调整说明.md');
+  assert.equal(deliveryManifest.status, 'delivered');
 
   const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
   assert.equal(renderPlan.templateData.metadata.assetDir, 'assets');
