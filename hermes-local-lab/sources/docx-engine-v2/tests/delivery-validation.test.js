@@ -18,6 +18,7 @@ const { createDocumentJob, transitionJob } = require('../src/domain/document-job
 const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
 const { validateDeliveryPackage } = require('../src/validation/validate-delivery-package');
+const { recordWpsVisualAcceptance } = require('../src/validation/record-wps-visual-acceptance');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const VALIDATE_DELIVERY = path.join(ENGINE_ROOT, 'src', 'cli', 'validate-delivery.js');
@@ -244,11 +245,13 @@ test('validate-delivery CLI writes the refreshed quality report when requested',
   assert.equal(result.status, 3, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   const payload = parseStdoutJson(result);
   const writtenReport = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
 
   assert.equal(payload.ok, false);
   assert.equal(payload.qualityReport.status, 'failed');
   assert.equal(writtenReport.status, 'failed');
   assert.ok(writtenReport.failures.some((failure) => /render-plan\.json/.test(failure)));
+  assert.equal(deliveryManifest.fileSha256.qualityReport, sha256File(path.join(deliveryDir, 'quality-report.json')));
 });
 
 test('validateDeliveryPackage fails when document.docx no longer matches the delivery manifest hash', async (t) => {
@@ -279,26 +282,32 @@ test('validateDeliveryPackage fails when source.md no longer matches the deliver
   assert.ok(report.failures.some((failure) => /source\.md sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when render-plan.json no longer matches the delivery manifest hash', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+
+  assert.ok(deliveryManifest.fileSha256?.renderPlan, 'delivery manifest must bind render-plan.json sha256');
+  assert.equal(deliveryManifest.fileSha256.renderPlan, sha256File(renderPlanPath));
+
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  renderPlan.warnings = [...(renderPlan.warnings || []), 'tampered after delivery'];
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  assert.ok(report.failures.some((failure) => /render-plan\.json sha256 mismatch/.test(failure)));
+});
+
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
-  const reportPath = path.join(deliveryDir, 'quality-report.json');
-  const qualityReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-  qualityReport.status = 'passed';
-  qualityReport.checks = qualityReport.checks.map((check) =>
-    check.id === 'wps_visual'
-      ? {
-          id: 'wps_visual',
-          status: 'passed',
-          message: 'WPS/Word visual inspection passed. 目录、图片和表格已检查。',
-          reviewedAt: '2026-07-05T10:00:00.000Z',
-          reviewedBy: 'user',
-          documentSha256: sha256File(path.join(deliveryDir, 'document.docx')),
-        }
-      : check
-  );
-  qualityReport.warnings = [];
-  qualityReport.failures = [];
-  fs.writeFileSync(reportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+  recordWpsVisualAcceptance({
+    deliveryDir,
+    status: 'passed',
+    reviewedAt: '2026-07-05T10:00:00.000Z',
+    reviewedBy: 'user',
+    note: '目录、图片和表格已检查。',
+  });
 
   const report = validateDeliveryPackage({ deliveryDir });
   const wpsVisual = report.checks.find((check) => check.id === 'wps_visual');
@@ -314,24 +323,13 @@ test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence'
 
 test('validateDeliveryPackage fails when recorded WPS visual acceptance belongs to a different document', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
-  const reportPath = path.join(deliveryDir, 'quality-report.json');
-  const qualityReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-  qualityReport.status = 'passed';
-  qualityReport.checks = qualityReport.checks.map((check) =>
-    check.id === 'wps_visual'
-      ? {
-          id: 'wps_visual',
-          status: 'passed',
-          message: 'WPS/Word visual inspection passed.',
-          reviewedAt: '2026-07-05T10:00:00.000Z',
-          reviewedBy: 'user',
-          documentSha256: sha256File(path.join(deliveryDir, 'document.docx')),
-        }
-      : check
-  );
-  qualityReport.warnings = [];
-  qualityReport.failures = [];
-  fs.writeFileSync(reportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+  recordWpsVisualAcceptance({
+    deliveryDir,
+    status: 'passed',
+    reviewedAt: '2026-07-05T10:00:00.000Z',
+    reviewedBy: 'user',
+    note: 'WPS/Word visual inspection passed.',
+  });
   fs.appendFileSync(path.join(deliveryDir, 'document.docx'), 'changed after review');
 
   const report = validateDeliveryPackage({ deliveryDir });

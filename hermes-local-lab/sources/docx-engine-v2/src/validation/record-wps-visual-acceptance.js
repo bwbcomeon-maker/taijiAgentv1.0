@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
+const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { validateDeliveryPackage } = require('./validate-delivery-package');
 
 const ACCEPTANCE_STATUSES = new Set(['passed', 'passed_with_warnings', 'failed']);
@@ -67,6 +68,7 @@ function recordWpsVisualAcceptance({
     throw new Error(`ValidationReport update failed: ${JSON.stringify(validation.errors)}`);
   }
   writeJson(qualityReportPath, nextReport);
+  refreshDeliveryPackageFileHashes({ deliveryDir: path.resolve(deliveryDir), roles: ['qualityReport'] });
   return {
     ok: true,
     deliveryDir: path.resolve(deliveryDir),

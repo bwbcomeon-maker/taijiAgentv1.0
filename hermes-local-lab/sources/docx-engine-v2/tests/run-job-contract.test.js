@@ -216,6 +216,14 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.deliveryDir, deliveryDir);
   assert.equal(deliveryManifest.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.equal(deliveryManifest.sourceSha256, sha256File(path.join(deliveryDir, 'source.md')));
+  assert.equal(deliveryManifest.fileSha256.document, sha256File(path.join(deliveryDir, 'document.docx')));
+  assert.equal(deliveryManifest.fileSha256.source, sha256File(path.join(deliveryDir, 'source.md')));
+  assert.equal(deliveryManifest.fileSha256.originalSource, sha256File(path.join(deliveryDir, 'source', 'original', path.basename(sourcePath))));
+  assert.equal(deliveryManifest.fileSha256.jobManifest, sha256File(path.join(deliveryDir, 'job.manifest.json')));
+  assert.equal(deliveryManifest.fileSha256.templateManifest, sha256File(path.join(deliveryDir, 'template.manifest.json')));
+  assert.equal(deliveryManifest.fileSha256.renderPlan, sha256File(path.join(deliveryDir, 'render-plan.json')));
+  assert.equal(deliveryManifest.fileSha256.qualityReport, sha256File(path.join(deliveryDir, 'quality-report.json')));
+  assert.equal(deliveryManifest.fileSha256.imageInstructions, sha256File(path.join(deliveryDir, 'README-图片调整说明.md')));
   assert.equal(deliveryManifest.files.document, 'document.docx');
   assert.equal(deliveryManifest.files.source, 'source.md');
   assert.equal(deliveryManifest.files.originalSource, `source/original/${path.basename(sourcePath)}`);

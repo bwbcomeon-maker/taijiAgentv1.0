@@ -67,13 +67,12 @@ function readQualityReport(deliveryDir) {
   return JSON.parse(fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8'));
 }
 
+function readDeliveryManifest(deliveryDir) {
+  return JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+}
+
 test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-verified warning', async (t) => {
   const deliveryDir = await makeDelivery(t);
-  const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
-  const report = JSON.parse(fs.readFileSync(qualityReportPath, 'utf8'));
-  report.warnings.push('WPS visual acceptance has not been verified by a human reviewer.');
-  report.warnings.push('WPS visual inspection has not been performed.');
-  fs.writeFileSync(qualityReportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
   const result = recordWpsVisualAcceptance({
     deliveryDir,
@@ -93,6 +92,10 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   assert.equal(wpsVisual.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.match(wpsVisual.message, /目录、图表、图片和版式/);
   assert.equal(readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual').status, 'passed');
+  assert.equal(
+    readDeliveryManifest(deliveryDir).fileSha256.qualityReport,
+    sha256File(path.join(deliveryDir, 'quality-report.json'))
+  );
 });
 
 test('recordWpsVisualAcceptance rejects WPS pass when automated package validation fails', async (t) => {

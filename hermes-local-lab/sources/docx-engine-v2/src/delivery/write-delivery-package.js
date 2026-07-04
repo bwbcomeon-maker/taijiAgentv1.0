@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
+const { buildDeliveryFileSha256 } = require('./file-hashes');
 
 const IMAGE_INSTRUCTIONS = [
   '# 图片调整说明',
@@ -88,6 +89,12 @@ function writeDeliveryPackage({
     },
     status: 'delivered',
   };
+  deliveryPackage.fileSha256 = buildDeliveryFileSha256({
+    deliveryDir,
+    files: deliveryPackage.files,
+  });
+  deliveryPackage.documentSha256 = deliveryPackage.fileSha256.document;
+  deliveryPackage.sourceSha256 = deliveryPackage.fileSha256.source;
   const validation = validateDomainObject('DeliveryPackage', deliveryPackage);
   if (!validation.ok) {
     throw new Error(`DeliveryPackage validation failed: ${JSON.stringify(validation.errors)}`);

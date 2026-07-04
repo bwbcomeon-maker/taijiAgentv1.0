@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const { validateDeliveryPackage } = require('../validation/validate-delivery-package');
+const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 
 const EXIT_CODES = {
   success: 0,
@@ -19,6 +20,7 @@ function main() {
     const qualityReportPath = path.join(args.deliveryDir, 'quality-report.json');
     if (args.writeReport) {
       writeJson(qualityReportPath, qualityReport);
+      refreshDeliveryPackageFileHashes({ deliveryDir: args.deliveryDir, roles: ['qualityReport'] });
     }
     const payload = {
       ok: qualityReport.status !== 'failed',

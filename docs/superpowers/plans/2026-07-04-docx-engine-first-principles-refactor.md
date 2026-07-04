@@ -46,6 +46,7 @@
 - 已校验 `delivery-package.json` 内每个文件角色的包内相对路径与真实文件存在性，避免清单 schema 合格但指向错误文档、错误角色或缺失文件。
 - 已把 `document.docx` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免交付后文档被替换却仍被清单误判为同一交付物。
 - 已把 `source.md` 的 SHA-256 写入 `delivery-package.json` 并在复验时比对，避免人工查看/后续处理入口被改动却仍通过质量门。
+- 已把 `job.manifest.json`、`template.manifest.json`、`render-plan.json`、`quality-report.json` 等交付证据文件纳入 `fileSha256`，并让复验写回和 WPS/Word 验收写回同步刷新质量报告哈希，避免清单文件被改动后仍被误判为同一交付包。
 - 已让交付包校验器读取并保留 `quality-report.json` 中已记录的 `wps_visual` 人工验收状态与 reviewer 证据，避免重新校验时把已验收包降回 `not_verified`。
 - 已把 `wps_visual` 人工验收证据绑定到 `document.docx` 的 SHA-256；记录验收时写入文档哈希，重新校验时若文档被替换或改动则验收门失败。
 - 已让记录 WPS/Word 人工验收前先执行当前交付包自动校验；除 `wps_visual` 本身外，只要任一自动门失败就拒绝写入“人工通过”。

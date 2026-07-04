@@ -4,6 +4,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 
 const { validateDomainObject } = require('../domain/validate');
+const { deliveryFileHashFailures } = require('../delivery/file-hashes');
 
 const CHECK_IDS = [
   'schema',
@@ -270,6 +271,14 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
       );
     }
   }
+
+  failures.push(
+    ...deliveryFileHashFailures({
+      deliveryDir,
+      files,
+      fileSha256: deliveryPackage.fileSha256,
+    })
+  );
 
   if (failures.length > 0) {
     addCheck('delivery_files', 'failed', `Invalid delivery package file references: ${failures.join('; ')}`);
