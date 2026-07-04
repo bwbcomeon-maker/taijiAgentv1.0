@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
@@ -71,6 +72,7 @@ function writeDeliveryPackage({
   const deliveryPackage = {
     schemaVersion: 'docx-engine-v2/delivery-package',
     deliveryDir: manifestDeliveryDir || deliveryDir,
+    documentSha256: sha256File(deliveryDocumentPath),
     files: {
       document: 'document.docx',
       source: 'source.md',
@@ -229,6 +231,10 @@ function emptyQualityReport() {
 
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 module.exports = { writeDeliveryPackage };

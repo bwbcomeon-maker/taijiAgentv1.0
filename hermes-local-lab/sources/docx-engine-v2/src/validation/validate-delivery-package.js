@@ -198,6 +198,19 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
     }
   }
 
+  const expectedDocumentHash = String(deliveryPackage.documentSha256 || '').trim();
+  const documentPath = path.join(deliveryDir, normalizeRelativePackagePath(files.document) || 'document.docx');
+  if (!expectedDocumentHash) {
+    failures.push('delivery-package.json documentSha256 is required.');
+  } else if (fs.existsSync(documentPath)) {
+    const actualDocumentHash = sha256File(documentPath);
+    if (actualDocumentHash !== expectedDocumentHash) {
+      failures.push(
+        `document.docx sha256 mismatch: expected ${expectedDocumentHash}, got ${actualDocumentHash}`
+      );
+    }
+  }
+
   if (failures.length > 0) {
     addCheck('delivery_files', 'failed', `Invalid delivery package file references: ${failures.join('; ')}`);
   }

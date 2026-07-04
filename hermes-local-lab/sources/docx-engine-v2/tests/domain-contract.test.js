@@ -415,6 +415,7 @@ test('DeliveryPackage contract requires the complete editable delivery bundle', 
   const deliveryPackage = {
     schemaVersion: 'docx-engine-v2/delivery-package',
     deliveryDir: path.join(os.tmpdir(), 'delivery'),
+    documentSha256: 'a'.repeat(64),
     files: {
       document: 'document.docx',
       source: 'source.md',

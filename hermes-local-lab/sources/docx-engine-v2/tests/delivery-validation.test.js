@@ -251,6 +251,20 @@ test('validate-delivery CLI writes the refreshed quality report when requested',
   assert.ok(writtenReport.failures.some((failure) => /render-plan\.json/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when document.docx no longer matches the delivery manifest hash', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const documentPath = path.join(deliveryDir, 'document.docx');
+  const deliveryManifest = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+
+  assert.equal(deliveryManifest.documentSha256, sha256File(documentPath));
+
+  fs.appendFileSync(documentPath, 'tampered-after-delivery');
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  assert.ok(report.failures.some((failure) => /document\.docx sha256 mismatch/.test(failure)));
+});
+
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const reportPath = path.join(deliveryDir, 'quality-report.json');

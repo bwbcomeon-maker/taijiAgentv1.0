@@ -528,10 +528,11 @@ const schemas = {
   DeliveryPackage: {
     type: 'object',
     additionalProperties: false,
-    required: ['schemaVersion', 'deliveryDir', 'files', 'status'],
+    required: ['schemaVersion', 'deliveryDir', 'documentSha256', 'files', 'status'],
     properties: {
       schemaVersion: { const: 'docx-engine-v2/delivery-package' },
       deliveryDir: { type: 'string', minLength: 1 },
+      documentSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
       files: {
         type: 'object',
         additionalProperties: false,

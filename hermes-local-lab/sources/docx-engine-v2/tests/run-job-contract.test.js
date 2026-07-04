@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -71,6 +72,10 @@ function readJsonFile(filePath) {
       `failed to parse JSON file: ${filePath}\ncontents:\n${raw}\nerror: ${error.message}`
     );
   }
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function findQualityCheck(report, checkId) {
@@ -190,6 +195,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   const deliveryManifest = readJsonFile(path.join(deliveryDir, 'delivery-package.json'));
   assert.equal(deliveryManifest.schemaVersion, 'docx-engine-v2/delivery-package');
   assert.equal(deliveryManifest.deliveryDir, deliveryDir);
+  assert.equal(deliveryManifest.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.equal(deliveryManifest.files.document, 'document.docx');
   assert.equal(deliveryManifest.files.source, 'source.md');
   assert.equal(deliveryManifest.files.originalSource, `source/original/${path.basename(sourcePath)}`);
