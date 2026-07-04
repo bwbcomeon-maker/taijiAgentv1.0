@@ -1,0 +1,18 @@
+{
+  "name": "docx-template-skill",
+  "displayName": "套用文档模板",
+  "description": "将 Markdown、文本或 DOCX 来源套用内置模板，生成可交付的 DOCX 包。",
+  "entry": "SKILL.md",
+  "commands": [
+    "/docx-template-skill",
+    "/套用文档模板",
+    "/套用模板",
+    "docx-template-skill",
+    "套用文档模板",
+    "套用模板"
+  ],
+  "requiredRuntime": {
+    "node": ">=20"
+  },
+  "selfTest": "scripts/self-test.js"
+}

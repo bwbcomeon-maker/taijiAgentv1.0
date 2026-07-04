@@ -240,4 +240,4 @@ function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
-module.exports = { packageAssets };
+module.exports = { packageAssets, renderDeterministicMermaidSvg };
