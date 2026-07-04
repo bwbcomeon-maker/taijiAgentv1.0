@@ -271,9 +271,13 @@ function assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage 
   const tableCount = (sourcePackage.tables || []).length;
   const visualCount = (sourcePackage.figures || []).length + (sourcePackage.images || []).length;
   const failures = [];
+  const fatalWarnings = sourceFatalWarnings(sourcePackage);
 
   if (requirements.richContentRequired && sourceHasRichContentWarning(sourcePackage)) {
     failures.push('需要富内容初稿，不能直接使用纯文本来源');
+  }
+  for (const warning of fatalWarnings) {
+    failures.push(warning.message || warning.code || '来源文档包含无法安全渲染的内容');
   }
   if (tableCount < minTables) {
     failures.push(`至少需要 ${minTables} 个表格，当前为 ${tableCount} 个`);
@@ -287,6 +291,12 @@ function assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage 
       `模板 ${templatePackage.id} 的输入不满足要求：${failures.join('；')}。请先补齐表格和图示，再套用该模板。`
     );
   }
+}
+
+function sourceFatalWarnings(sourcePackage) {
+  return (sourcePackage.warnings || []).filter(
+    (warning) => warning && typeof warning === 'object' && warning.severity === 'error'
+  );
 }
 
 function sourceHasRichContentWarning(sourcePackage) {

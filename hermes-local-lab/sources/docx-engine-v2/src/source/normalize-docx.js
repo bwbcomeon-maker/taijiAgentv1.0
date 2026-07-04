@@ -17,6 +17,7 @@ async function normalizeDocxSource({ sourcePath } = {}) {
   const relationshipsXml = zipEntries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
   const embeddedMedia = extractEmbeddedMedia(zipEntries, relationshipsXml);
   const drawingBindings = extractDrawingBindings(documentXml, relationshipsXml);
+  const warnings = extractUnsupportedImageWarnings(documentXml, relationshipsXml);
   const { title, sections, blocks, tables } = extractBodyStructure(documentXml, drawingBindings);
   const figures = extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, blocks);
   bindFigureMarkersToBlocks(blocks, figures);
@@ -36,7 +37,7 @@ async function normalizeDocxSource({ sourcePath } = {}) {
     figures,
     images: [],
     embeddedMedia,
-    warnings: [],
+    warnings,
   };
 }
 
@@ -459,6 +460,48 @@ function extractParagraphDrawingBindings(paragraphXml, drawingBindingByRelations
     .filter(Boolean)
     .map((relationshipId) => drawingBindingByRelationshipId.get(relationshipId))
     .filter(Boolean);
+}
+
+function extractUnsupportedImageWarnings(documentXml, relationshipsXml) {
+  const relationshipById = relationshipByRelationshipId(relationshipsXml);
+  const seenRelationshipIds = new Set();
+  const warnings = [];
+
+  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+    const drawingXml = drawingMatch[0];
+    for (const relationshipMatch of drawingXml.matchAll(/\br:(?:embed|link)="([^"]+)"/g)) {
+      const relationshipId = relationshipMatch[1];
+      if (seenRelationshipIds.has(relationshipId)) {
+        continue;
+      }
+      seenRelationshipIds.add(relationshipId);
+
+      const relationship = relationshipById.get(relationshipId) || {};
+      if (!isImageRelationship(relationship.Type)) {
+        continue;
+      }
+      if (!isUnsupportedImageRelationship(relationship)) {
+        continue;
+      }
+
+      warnings.push({
+        code: 'unsupported_external_docx_image',
+        severity: 'error',
+        message: `DOCX 外链图片暂不支持: ${relationship.Target || relationshipId}。请先在 Word/WPS 中将图片嵌入文档后再渲染。`,
+        relationshipId,
+        target: relationship.Target || '',
+        targetMode: relationship.TargetMode || '',
+      });
+    }
+  }
+
+  return warnings;
+}
+
+function isUnsupportedImageRelationship(relationship) {
+  const target = String(relationship?.Target || '').trim();
+  const targetMode = String(relationship?.TargetMode || '').trim().toLowerCase();
+  return targetMode === 'external' || /^[a-z][a-z0-9+.-]*:/i.test(target) || !normalizeRelationshipTarget(target);
 }
 
 function drawingCaption(drawingXml, drawingIndex) {

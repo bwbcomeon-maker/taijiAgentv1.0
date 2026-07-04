@@ -446,6 +446,36 @@ test('run-job preserves embedded JPEG media from DOCX sources in the delivery pa
   assert.equal(findQualityCheck(qualityReport, 'image_coverage')?.status, 'passed');
 });
 
+test('run-job rejects DOCX sources with external linked images before rendering', async (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.docx');
+  const deliveryDir = path.join(root, 'delivery');
+  await writeDocxSourceWithExternalLinkedImage(sourcePath);
+
+  const result = runJob([
+    '--template-id',
+    'meeting-minutes',
+    '--source',
+    sourcePath,
+    '--source-type',
+    'docx',
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 3);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'validation_failed');
+  assert.match(payload.message, /外链图片|unsupported_external_docx_image/);
+  assertFailureArtifacts({
+    deliveryDir,
+    payload,
+    messagePattern: /外链图片|unsupported_external_docx_image/,
+  });
+});
+
 test('run-job reports missing source assets as validation failure before rendering', (t) => {
   const root = makeTempWorkspace(t);
   const sourcePath = path.join(root, 'source.md');
@@ -610,6 +640,53 @@ async function writeDocxSourceWithUnmarkedDrawing(filePath, options = {}) {
   );
   zip.addEmptyDirectory('word/media');
   zip.addBuffer(ONE_BY_ONE_PNG, 'word/media/unmarked.png');
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxSourceWithExternalLinkedImage(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdExternalImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.com/source-image.png" TargetMode="External"/>
+</Relationships>`),
+    'word/_rels/document.xml.rels'
+  );
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>会议纪要</w:t></w:r></w:p>
+    <w:p><w:r><w:t>一、会议内容</w:t></w:r></w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:docPr id="9" name="Picture 9"/>
+            <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:link="rIdExternalImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`),
+    'word/document.xml'
+  );
   zip.end();
 
   await once(output, 'close');
