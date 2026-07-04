@@ -18,6 +18,7 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     routes_py = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
     assert "/api/docx-engine-v2/templates" in routes_py
+    assert "/api/docx-engine-v2/templates/install" in routes_py
     assert "/api/docx-engine-v2/jobs" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
@@ -93,6 +94,95 @@ def test_docx_engine_v2_lists_templates(monkeypatch, tmp_path):
 
     assert result["status"] == 200
     assert result["payload"]["templates"][0]["id"] == "general-proposal"
+
+
+def test_docx_engine_v2_install_template_routes_to_service(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+
+    def fake_install_template(payload, workspace):
+        assert payload["package_path"] == "templates/custom-proposal"
+        assert workspace == tmp_path.resolve()
+        return {
+            "ok": True,
+            "template_id": "custom-proposal",
+            "registry_entry": {"templateId": "custom-proposal", "path": "installed/custom-proposal"},
+            "templates": [{"id": "custom-proposal"}],
+        }, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "install_template", fake_install_template)
+
+    result = routes._handle_docx_engine_v2_install_template(
+        object(),
+        {"session_id": "sid-docx", "package_path": "templates/custom-proposal"},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["template_id"] == "custom-proposal"
+    assert result["payload"]["templates"][0]["id"] == "custom-proposal"
+
+
+def test_docx_engine_v2_install_template_validates_path_and_returns_templates(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+    import subprocess
+    import json
+
+    package_dir = tmp_path / "templates" / "custom-proposal"
+    package_dir.mkdir(parents=True)
+    calls = []
+
+    def fake_run_engine(args):
+        calls.append(args)
+        if str(args[0]).endswith("install-template.js"):
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "templateId": "custom-proposal",
+                        "registryEntry": {"templateId": "custom-proposal", "path": "installed/custom-proposal"},
+                    }
+                )
+                + "\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"ok": True, "templates": [{"id": "custom-proposal"}]}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(docx_engine_v2, "run_engine", fake_run_engine)
+
+    payload, status = docx_engine_v2.install_template(
+        {"package_path": "templates/custom-proposal"},
+        tmp_path,
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["template_id"] == "custom-proposal"
+    assert payload["registry_entry"]["path"] == "installed/custom-proposal"
+    assert payload["templates"] == [{"id": "custom-proposal"}]
+    assert "--package" in calls[0]
+    assert str(package_dir.resolve()) in calls[0]
+
+
+def test_docx_engine_v2_install_template_rejects_outside_package_path(tmp_path):
+    from api import docx_engine_v2
+
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside-package"
+
+    payload, status = docx_engine_v2.install_template(
+        {"package_path": str(outside_dir)},
+        tmp_path,
+    )
+
+    assert status == 400
+    assert payload["ok"] is False
+    assert payload["code"] == "validation_failed"
+    assert "package_path" in payload["message"]
 
 
 def test_docx_engine_v2_create_job_requires_template_selection(monkeypatch, tmp_path):

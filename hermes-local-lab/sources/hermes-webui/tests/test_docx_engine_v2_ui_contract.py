@@ -12,8 +12,11 @@ def test_docx_engine_workbench_has_visible_controls_and_actions():
     assert "docx-engine-workbench" in ui_js
     assert "renderDocxEngineWorkbench" in ui_js
     assert "runDocxEngineJob" in ui_js
+    assert "installDocxEngineTemplate" in ui_js
     assert "openDocxDeliveryFolder" in ui_js
     assert "replaceDocxEngineAsset" in ui_js
+    assert "模板包目录" in ui_js
+    assert "安装模板包" in ui_js
     assert "质量报告" in ui_js
     assert "打开 DOCX" in ui_js
     assert "打开交付目录" in ui_js
@@ -21,6 +24,7 @@ def test_docx_engine_workbench_has_visible_controls_and_actions():
     assert ".docx-engine-workbench" in style_css
 
     assert "/api/docx-engine-v2/templates" in ui_js
+    assert "/api/docx-engine-v2/templates/install" in ui_js
     assert "/api/docx-engine-v2/jobs" in ui_js
     assert "/api/docx-engine-v2/assets/rerender" in ui_js
     assert "/api/docx-engine-v2/assets/replace" in ui_js
@@ -39,6 +43,8 @@ def test_docx_engine_workbench_exposes_required_accessible_control_names():
         "打开交付目录",
         "重渲染图片",
         "替换 DOCX 图片",
+        "模板包目录",
+        "安装模板包",
         "从源包重新生成",
         "刷新模板列表",
     ]:
@@ -51,6 +57,7 @@ def test_docx_engine_workbench_covers_feedback_and_recovery_states():
     assert "role=\"status\"" in ui_js
     assert "aria-live=\"polite\"" in ui_js
     assert "data-docx-engine-status" in ui_js
+    assert "template_package_path" in ui_js
     assert "旧 DOCX 需要先重新套模板" in ui_js
     assert "passed_with_warnings" in ui_js
     assert "quality_status" in ui_js

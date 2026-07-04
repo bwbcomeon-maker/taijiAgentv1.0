@@ -9866,6 +9866,15 @@ function renderDocxEngineWorkbench(workbench){
     '<button type="button" class="docx-engine-secondary" onclick="refreshDocxEngineTemplates(this);event.stopPropagation()" aria-label="刷新模板列表">刷新模板</button>',
     '</div>',
     '<div class="docx-engine-section">',
+    '<div class="docx-engine-section-title">安装模板包</div>',
+    '<div class="docx-engine-grid">',
+    inputHtml('template_package_path','模板包目录','例如：templates/custom-proposal'),
+    '</div>',
+    '<div class="docx-engine-actions">',
+    '<button type="button" class="secondary" onclick="installDocxEngineTemplate(this);event.stopPropagation()" aria-label="安装模板包">安装模板包</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-engine-section">',
     '<div class="docx-engine-section-title">生成文档包</div>',
     '<div class="docx-engine-grid">',
     '<label class="docx-engine-field">',
@@ -10000,6 +10009,18 @@ function _syncDocxEngineActionAvailability(root){
   root.querySelectorAll('[data-docx-engine-action="delivery"],[data-docx-engine-action="rerender"]').forEach((node)=>{node.disabled=!hasDelivery;});
 }
 
+function _updateDocxEngineTemplateOptions(root,templates,selectedTemplateId){
+  const select=_docxEngineField(root,'template_id');
+  if(!select||!Array.isArray(templates)||!templates.length)return;
+  const current=String(selectedTemplateId||select.value||'');
+  select.innerHTML=templates.map((template)=>{
+    const id=String(template&&template.id||template&&template.templateId||'').trim();
+    const name=String(template&&template.name||id||'未命名模板').trim();
+    const selected=id===current?' selected':'';
+    return `<option value="${esc(id)}"${selected}>${esc(name)}</option>`;
+  }).join('');
+}
+
 function _docxEngineQualityReportFromPayload(payload){
   const report=payload&&(payload.quality_report||payload.qualityReport);
   return report&&typeof report==='object'?report:null;
@@ -10070,20 +10091,44 @@ async function refreshDocxEngineTemplates(button){
   try{
     const payload=await api('/api/docx-engine-v2/templates');
     const templates=Array.isArray(payload&&payload.templates)?payload.templates:[];
-    const select=_docxEngineField(root,'template_id');
-    if(select&&templates.length){
-      const current=String(select.value||'');
-      select.innerHTML=templates.map((template)=>{
-        const id=String(template&&template.id||'').trim();
-        const name=String(template&&template.name||id||'未命名模板').trim();
-        const selected=id===current?' selected':'';
-        return `<option value="${esc(id)}"${selected}>${esc(name)}</option>`;
-      }).join('');
-    }
+    _updateDocxEngineTemplateOptions(root,templates);
     _setDocxEngineStatus(root,'模板列表已更新。','success');
   }catch(err){
     const message=err&&err.message?err.message:String(err||'读取模板失败');
     _setDocxEngineStatus(root,`读取模板失败：${message}`,'error');
+  }
+}
+
+async function installDocxEngineTemplate(button){
+  const root=_docxEngineRoot(button);
+  const sid=_docxEngineSessionId(root);
+  if(!sid)return null;
+  _clearDocxEngineFieldErrors(root);
+  const packagePath=_docxEngineValue(root,'template_package_path');
+  if(!packagePath){
+    _markDocxEngineRequiredFields(root,['template_package_path'],'请填写模板包目录。');
+    return null;
+  }
+  _docxEngineSetBusy(root,true);
+  _setDocxEngineStatus(root,'正在安装模板包...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/templates/install',{method:'POST',body:JSON.stringify({
+      session_id:sid,
+      package_path:packagePath,
+    })});
+    const templateId=String(payload&&payload.template_id||payload&&payload.templateId||'').trim();
+    const templates=Array.isArray(payload&&payload.templates)?payload.templates:[];
+    _updateDocxEngineTemplateOptions(root,templates,templateId);
+    _setDocxEngineStatus(root,`模板包已安装${templateId?`：${templateId}`:''}。`,'success');
+    if(typeof showToast==='function')showToast('模板包已安装。');
+    return payload;
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'安装失败');
+    _setDocxEngineStatus(root,`安装模板包失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`安装模板包失败：${message}`);
+    return null;
+  }finally{
+    _docxEngineSetBusy(root,false);
   }
 }
 
@@ -10385,6 +10430,7 @@ async function revealDocxFigurePath(button,fieldName){
 
 if(typeof window!=='undefined'){
   window.refreshDocxEngineTemplates=refreshDocxEngineTemplates;
+  window.installDocxEngineTemplate=installDocxEngineTemplate;
   window.runDocxEngineJob=runDocxEngineJob;
   window.rerenderDocxEngineFigure=rerenderDocxEngineFigure;
   window.showDocxEngineQualityReport=showDocxEngineQualityReport;

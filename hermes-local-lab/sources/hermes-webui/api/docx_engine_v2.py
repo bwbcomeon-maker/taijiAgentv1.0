@@ -43,6 +43,52 @@ def list_templates() -> dict[str, Any]:
     return payload
 
 
+def install_template(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+    workspace = Path(workspace).expanduser().resolve()
+    try:
+        package_dir = _resolve_workspace_path(
+            workspace,
+            _first_text(payload, "package_path", "packagePath", "package_dir", "packageDir", "package"),
+            field="package_path",
+            must_exist=True,
+            allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(workspace),
+        )
+        if not package_dir.is_dir():
+            return _error_payload("validation_failed", f"package_path must be a directory: {package_dir}"), 400
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("validation_failed", str(exc)), 400
+
+    completed = run_engine([
+        str(_engine_cli("install-template.js")),
+        "--package",
+        str(package_dir),
+        "--json",
+    ])
+    engine_payload = _payload_from_completed(completed, default_code="template_install_failed")
+    if completed.returncode != 0:
+        return _known_failure_payload(engine_payload), _status_for_engine_failure(engine_payload)
+
+    templates: list[dict[str, Any]] = []
+    template_list_warning = ""
+    try:
+        templates_payload = list_templates()
+        templates = templates_payload.get("templates", []) if isinstance(templates_payload.get("templates"), list) else []
+    except (FileNotFoundError, subprocess.TimeoutExpired, DocxEngineV2Error) as exc:
+        template_list_warning = str(exc)
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "template_id": engine_payload.get("templateId", engine_payload.get("template_id", "")),
+        "package_dir": engine_payload.get("packageDir", engine_payload.get("package_dir", str(package_dir))),
+        "registry_path": engine_payload.get("registryPath", engine_payload.get("registry_path", "")),
+        "registry_entry": engine_payload.get("registryEntry", engine_payload.get("registry_entry", {})),
+        "templates": templates,
+    }
+    if template_list_warning:
+        result["template_list_warning"] = template_list_warning
+    return result, 200
+
+
 def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     workspace = Path(workspace).expanduser().resolve()
     template_id = _first_text(payload, "template_id", "templateId")
@@ -329,7 +375,7 @@ def _error_payload(code: str, message: str) -> dict[str, Any]:
 
 def _status_for_engine_failure(payload: dict[str, Any]) -> int:
     code = str(payload.get("code") or "")
-    if code in {"template_selection_required", "validation_failed"}:
+    if code in {"template_selection_required", "template_install_failed", "validation_failed"}:
         return 400
     return 500
 
