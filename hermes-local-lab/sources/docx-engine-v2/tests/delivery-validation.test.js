@@ -22,6 +22,7 @@ const { recordWpsVisualAcceptance } = require('../src/validation/record-wps-visu
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const VALIDATE_DELIVERY = path.join(ENGINE_ROOT, 'src', 'cli', 'validate-delivery.js');
+const REPLAY_DELIVERY = path.join(ENGINE_ROOT, 'src', 'cli', 'replay-delivery.js');
 const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
@@ -296,6 +297,74 @@ test('validate-delivery CLI writes the refreshed quality report when requested',
   assert.equal(writtenReport.status, 'failed');
   assert.ok(writtenReport.failures.some((failure) => /render-plan\.json/.test(failure)));
   assert.equal(deliveryManifest.fileSha256.qualityReport, sha256File(path.join(deliveryDir, 'quality-report.json')));
+});
+
+test('replay-delivery CLI rebuilds the source package and render plan from a delivery package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  const result = spawnSync(process.execPath, [
+    REPLAY_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.deliveryDir, deliveryDir);
+  assert.ok(['passed', 'passed_with_warnings'].includes(payload.replayReport.status));
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'source_replay' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'template_replay' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'render_plan_replay' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'document_rebuild' && check.status === 'passed'
+    )
+  );
+});
+
+test('replay-delivery CLI fails when a render plan no longer matches deterministic replay', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  renderPlan.warnings = [...(renderPlan.warnings || []), 'tampered after delivery'];
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.renderPlan = sha256File(renderPlanPath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const result = spawnSync(process.execPath, [
+    REPLAY_DELIVERY,
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 3, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'delivery_replay_failed');
+  assert.ok(
+    payload.replayReport.checks.some(
+      (check) => check.id === 'render_plan_replay' && check.status === 'failed'
+    )
+  );
+  assert.ok(payload.failures.some((failure) => /render-plan\.json/.test(failure)));
 });
 
 test('validateDeliveryPackage fails when document.docx no longer matches the delivery manifest hash', async (t) => {

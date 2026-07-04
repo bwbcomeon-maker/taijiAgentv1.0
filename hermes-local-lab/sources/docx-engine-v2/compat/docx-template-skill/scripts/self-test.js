@@ -94,6 +94,14 @@ function runTemplate({ templateId, outDir, sourcePath, assetDir }) {
   if (result.status !== 0) {
     throw new Error(result.stderr || result.stdout || `template failed: ${templateId}`);
   }
+  const replayResult = runEngine('replay-delivery.js', [
+    '--delivery-dir',
+    deliveryDir,
+    '--json',
+  ]);
+  if (replayResult.status !== 0) {
+    throw new Error(replayResult.stderr || replayResult.stdout || `delivery replay failed: ${templateId}`);
+  }
   fs.copyFileSync(path.join(deliveryDir, 'document.docx'), outputDocx);
 }
 

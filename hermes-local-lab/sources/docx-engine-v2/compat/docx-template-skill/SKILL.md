@@ -39,11 +39,16 @@ This compatibility package is a thin shell over DOCX Engine V2. The maintained b
    node scripts/validate-delivery.js --delivery-dir <delivery-dir> --json
    node scripts/validate-delivery.js --delivery-dir <delivery-dir> --write-report --json
    ```
-8. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
+8. Replay a delivery package from its original source copy, template manifest, and packaged assets:
+   ```bash
+   node scripts/replay-delivery.js --delivery-dir <delivery-dir> --json
+   node scripts/replay-delivery.js --delivery-dir <delivery-dir> --out-dir <replay-output-dir> --json
+   ```
+9. Record WPS/Word visual acceptance after a human opens and checks `document.docx`:
    ```bash
    node scripts/record-wps-visual.js --delivery-dir <delivery-dir> --status passed --note "已检查目录、图表、图片和版式" --json
    ```
-9. Install a validated template package into this skill's engine registry:
+10. Install a validated template package into this skill's engine registry:
    ```bash
    node scripts/install-template.js --package <template-package-dir> --json
    ```
