@@ -200,7 +200,18 @@ test('run-job reports missing source assets as validation failure before renderi
 
   fs.writeFileSync(
     sourcePath,
-    ['# Missing asset proposal', '', '## Architecture', '', '![Architecture](missing.png)', ''].join('\n')
+    [
+      '# Missing asset proposal',
+      '',
+      '## Architecture',
+      '',
+      '| Component | Status |',
+      '| --- | --- |',
+      '| Required image | Missing |',
+      '',
+      '![Architecture](missing.png)',
+      '',
+    ].join('\n')
   );
 
   const result = runJob([
@@ -220,6 +231,31 @@ test('run-job reports missing source assets as validation failure before renderi
   assert.equal(payload.ok, false);
   assert.equal(payload.code, 'validation_failed');
   assert.match(payload.message, /缺少必需图片资产/);
+  assert.equal(fs.existsSync(deliveryDir), false);
+});
+
+test('run-job rejects text-only sources for rich proposal templates before rendering', (t) => {
+  const root = makeTempWorkspace(t);
+  const sourcePath = path.join(root, 'source.txt');
+  const deliveryDir = path.join(root, 'delivery');
+
+  fs.writeFileSync(sourcePath, '项目建设方案\n需要整理为标准通用方案。\n');
+
+  const result = runJob([
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--out-dir',
+    deliveryDir,
+    '--json',
+  ]);
+
+  assertExitCode(result, 3);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'validation_failed');
+  assert.match(payload.message, /富内容初稿|表格|图示|图片/);
   assert.equal(fs.existsSync(deliveryDir), false);
 });
 

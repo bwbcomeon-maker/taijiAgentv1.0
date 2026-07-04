@@ -10,6 +10,11 @@
   "outputFormat": "docx",
   "documentTypes": ["proposal", "technical-proposal", "implementation-plan"],
   "capabilities": ["sections", "tables", "images"],
+  "sourceRequirements": {
+    "richContentRequired": true,
+    "minTables": 1,
+    "minVisuals": 1
+  },
   "requiredAssets": [],
   "qualityGates": ["schema_valid", "sample_valid", "docx_template_present", "wps_visual"],
   "compatibility": {

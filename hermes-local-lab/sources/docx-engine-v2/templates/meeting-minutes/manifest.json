@@ -10,6 +10,11 @@
   "outputFormat": "docx",
   "documentTypes": ["meeting-minutes"],
   "capabilities": ["sections", "tables"],
+  "sourceRequirements": {
+    "richContentRequired": false,
+    "minTables": 0,
+    "minVisuals": 0
+  },
   "requiredAssets": [],
   "qualityGates": ["schema_valid", "sample_valid", "docx_template_present", "wps_visual"],
   "compatibility": {

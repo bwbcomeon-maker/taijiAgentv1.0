@@ -58,6 +58,7 @@ async function main() {
     const sourceType = args.sourceType || inferSourceType(sourcePath);
     const sourcePackage = await normalizeSource({ sourceType, sourcePath });
     const templatePackage = getTemplatePackage(args.templateId, { rootDir: engineRoot });
+    assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage });
     const assetPackage = packageAssets({
       sourcePackage,
       assetDir: args.assetDir || '',
@@ -234,6 +235,40 @@ function initialQualityReport() {
     warnings: ['Delivery package validation has not run yet.'],
     failures: [],
   };
+}
+
+function assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage }) {
+  const requirements = templatePackage?.manifest?.sourceRequirements || {};
+  const minTables = Number(requirements.minTables || 0);
+  const minVisuals = Number(requirements.minVisuals || 0);
+  const tableCount = (sourcePackage.tables || []).length;
+  const visualCount = (sourcePackage.figures || []).length + (sourcePackage.images || []).length;
+  const failures = [];
+
+  if (requirements.richContentRequired && sourceHasRichContentWarning(sourcePackage)) {
+    failures.push('需要富内容初稿，不能直接使用纯文本来源');
+  }
+  if (tableCount < minTables) {
+    failures.push(`至少需要 ${minTables} 个表格，当前为 ${tableCount} 个`);
+  }
+  if (visualCount < minVisuals) {
+    failures.push(`至少需要 ${minVisuals} 个图示或图片，当前为 ${visualCount} 个`);
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `模板 ${templatePackage.id} 的输入不满足要求：${failures.join('；')}。请先补齐表格和图示，再套用该模板。`
+    );
+  }
+}
+
+function sourceHasRichContentWarning(sourcePackage) {
+  return (sourcePackage.warnings || []).some((warning) => {
+    if (typeof warning === 'string') {
+      return /rich_content_missing|缺少.*富内容/.test(warning);
+    }
+    return warning?.code === 'rich_content_missing';
+  });
 }
 
 function writeJsonStdout(payload) {

@@ -122,6 +122,27 @@ test('template validation returns structured errors for invalid schema json', (t
   );
 });
 
+test('template validation rejects invalid source requirement metadata', () => {
+  const template = getTemplatePackage('general-proposal', { rootDir });
+  const result = validateTemplatePackage({
+    ...template,
+    manifest: {
+      ...template.manifest,
+      sourceRequirements: {
+        richContentRequired: true,
+        minTables: -1,
+        minVisuals: 1.5,
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((error) => error.code === 'source_requirements_invalid'),
+    JSON.stringify(result.errors)
+  );
+});
+
 async function writeZipWithoutDocumentXml(filePath) {
   const zip = new yazl.ZipFile();
   const output = fs.createWriteStream(filePath);

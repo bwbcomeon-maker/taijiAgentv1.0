@@ -178,12 +178,53 @@ function validateTemplatePackage(template) {
 
   errors.push(...validateTemplateDocx(template?.templatePath));
   errors.push(...validateSchemaSample(template));
+  errors.push(...validateSourceRequirements(template?.manifest?.sourceRequirements));
 
   if (errors.length > 0) {
     return { ok: false, errors };
   }
 
   return { ok: true };
+}
+
+function validateSourceRequirements(sourceRequirements) {
+  if (sourceRequirements === undefined) {
+    return [];
+  }
+  if (!sourceRequirements || typeof sourceRequirements !== 'object' || Array.isArray(sourceRequirements)) {
+    return [
+      {
+        code: 'source_requirements_invalid',
+        message: 'Template sourceRequirements must be an object when present.',
+      },
+    ];
+  }
+
+  const errors = [];
+  if (
+    sourceRequirements.richContentRequired !== undefined &&
+    typeof sourceRequirements.richContentRequired !== 'boolean'
+  ) {
+    errors.push({
+      code: 'source_requirements_invalid',
+      field: 'richContentRequired',
+      message: 'sourceRequirements.richContentRequired must be a boolean.',
+    });
+  }
+  for (const field of ['minTables', 'minVisuals']) {
+    const value = sourceRequirements[field];
+    if (value === undefined) {
+      continue;
+    }
+    if (!Number.isInteger(value) || value < 0) {
+      errors.push({
+        code: 'source_requirements_invalid',
+        field,
+        message: `sourceRequirements.${field} must be a non-negative integer.`,
+      });
+    }
+  }
+  return errors;
 }
 
 module.exports = { validateTemplatePackage };
