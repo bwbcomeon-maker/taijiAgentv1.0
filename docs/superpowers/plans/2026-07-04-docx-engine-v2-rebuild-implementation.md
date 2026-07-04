@@ -475,7 +475,7 @@ Run:
 
 ```bash
 cd /Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/sources/docx-engine-v2
-npm test
+node --test tests/domain-contract.test.js
 ```
 
 Expected:
@@ -483,6 +483,8 @@ Expected:
 ```text
 pass
 ```
+
+`tests/run-job-contract.test.js` remains RED until Task 6 creates `src/cli/run-job.js`; do not treat that future-stage RED as a Task 2 failure.
 
 - [ ] **Step 6: Commit**
 
@@ -572,7 +574,7 @@ Run:
 
 ```bash
 cd /Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/sources/docx-engine-v2
-npm test
+node --test tests/domain-contract.test.js tests/source-normalization.test.js
 ```
 
 Expected:
@@ -580,6 +582,8 @@ Expected:
 ```text
 pass
 ```
+
+`tests/run-job-contract.test.js` remains RED until Task 6 creates `src/cli/run-job.js`.
 
 - [ ] **Step 5: Commit**
 
@@ -666,7 +670,7 @@ Run:
 
 ```bash
 cd /Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/sources/docx-engine-v2
-npm test
+node --test tests/domain-contract.test.js tests/source-normalization.test.js tests/template-package.test.js
 ```
 
 Expected:
@@ -674,6 +678,8 @@ Expected:
 ```text
 pass
 ```
+
+`tests/run-job-contract.test.js` remains RED until Task 6 creates `src/cli/run-job.js`.
 
 - [ ] **Step 5: Commit**
 
@@ -768,7 +774,7 @@ Run:
 
 ```bash
 cd /Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/sources/docx-engine-v2
-npm test
+node --test tests/domain-contract.test.js tests/source-normalization.test.js tests/template-package.test.js tests/asset-package.test.js tests/render-plan.test.js
 ```
 
 Expected:
@@ -776,6 +782,8 @@ Expected:
 ```text
 pass
 ```
+
+`tests/run-job-contract.test.js` remains RED until Task 6 creates `src/cli/run-job.js`.
 
 - [ ] **Step 6: Commit**
 
