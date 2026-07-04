@@ -171,7 +171,7 @@ function normalizeJob(job, renderPlan, sourcePackage) {
     sourceRef: job?.sourceRef || sourcePackage.sourceRef,
     templateId: job?.templateId || renderPlan.templateId,
     status: job?.status || 'delivered',
-    deliveredAt: new Date().toISOString(),
+    deliveredAt: job?.deliveredAt || new Date().toISOString(),
   };
 }
 

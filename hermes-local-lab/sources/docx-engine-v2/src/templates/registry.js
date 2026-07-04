@@ -34,6 +34,7 @@ function loadTemplatePackage({ rootDir, registryPath, registryEntry }) {
     packageDir,
     registryPath,
     registryEntry,
+    registrySource: registryEntry.registrySource || 'builtin',
     files,
     manifest,
     manifestPath,
@@ -47,9 +48,13 @@ function loadTemplatePackage({ rootDir, registryPath, registryEntry }) {
 function listTemplates({ rootDir = path.resolve(__dirname, '../..') } = {}) {
   const registryPath = path.join(rootDir, 'template-registry.json');
   const registry = readJson(registryPath);
-  const builtinTemplates = Array.isArray(registry.builtin) ? registry.builtin : [];
+  const registryEntries = [
+    ...sourceEntries(registry.builtin, 'builtin'),
+    ...sourceEntries(registry.installed, 'installed'),
+  ];
+  assertUniqueTemplateIds(registryEntries);
 
-  return builtinTemplates.map((registryEntry) =>
+  return registryEntries.map((registryEntry) =>
     loadTemplatePackage({ rootDir, registryPath, registryEntry })
   );
 }
@@ -61,6 +66,27 @@ function getTemplatePackage(templateId, options = {}) {
   }
 
   return template;
+}
+
+function sourceEntries(entries, registrySource) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  return entries.map((entry) => ({ ...entry, registrySource }));
+}
+
+function assertUniqueTemplateIds(entries) {
+  const seen = new Set();
+  for (const entry of entries) {
+    const id = entry.templateId || entry.id;
+    if (!id) {
+      continue;
+    }
+    if (seen.has(id)) {
+      throw new Error(`Duplicate template id in registry: ${id}`);
+    }
+    seen.add(id);
+  }
 }
 
 module.exports = { listTemplates, getTemplatePackage };

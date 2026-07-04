@@ -32,6 +32,64 @@ test('template registry lists migrated packages in stable order', () => {
   );
 });
 
+test('template registry includes installed templates after builtin templates', (t) => {
+  const tempRoot = makeTempDir(t);
+  const installedDir = path.join(tempRoot, 'installed', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), installedDir, { recursive: true });
+  const manifestPath = path.join(installedDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [{ templateId: 'custom-proposal', path: 'installed/custom-proposal' }],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  const templates = listTemplates({ rootDir: tempRoot });
+
+  assert.deepEqual(
+    templates.map((template) => template.id),
+    ['general-proposal', 'custom-proposal']
+  );
+  assert.equal(templates[0].registrySource, 'builtin');
+  assert.equal(templates[1].registrySource, 'installed');
+  assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Custom Proposal');
+});
+
+test('template registry rejects duplicate template ids across sources', (t) => {
+  const tempRoot = makeTempDir(t);
+  fs.writeFileSync(
+    path.join(tempRoot, 'template-registry.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        builtin: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'general-proposal') }],
+        installed: [{ templateId: 'general-proposal', path: path.join(rootDir, 'templates', 'meeting-minutes') }],
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+
+  assert.throws(
+    () => listTemplates({ rootDir: tempRoot }),
+    /Duplicate template id in registry: general-proposal/
+  );
+});
+
 test('migrated template packages expose required files and manifest metadata', () => {
   for (const templateId of expectedTemplateIds) {
     const template = getTemplatePackage(templateId, { rootDir });

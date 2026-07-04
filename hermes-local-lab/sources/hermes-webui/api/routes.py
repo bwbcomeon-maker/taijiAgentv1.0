@@ -16461,186 +16461,34 @@ def _handle_docx_engine_v2_replace_asset(handler, body):
         return bad(handler, _sanitize_error(e), 500)
 
 
-def _docx_template_skill_dir() -> Path:
-    runtime_home = os.getenv("TAIJI_RUNTIME_HOME", "").strip()
-    candidates = []
-    if runtime_home:
-        candidates.append(Path(runtime_home).expanduser() / "skills" / "productivity" / "docx-template-skill")
-    candidates.append(Path.home() / ".local" / "share" / "taiji-agent" / "runtime-home" / "skills" / "productivity" / "docx-template-skill")
-    candidates.append(Path(__file__).resolve().parents[4] / "docx-template-skill")
-    for candidate in candidates:
-        if (candidate / "scripts" / "apply-template.js").exists():
-            return candidate
-    return candidates[0]
-
-
-def _docx_template_run_script(script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    skill_dir = _docx_template_skill_dir()
-    script_path = skill_dir / "scripts" / script_name
-    if not script_path.exists():
-        raise FileNotFoundError(f"docx-template-skill script not found: {script_path}")
-    node = shutil.which("node")
-    if not node:
-        raise FileNotFoundError("Node.js is not available for docx-template-skill scripts")
-    return subprocess.run(
-        [node, str(script_path), *args],
-        cwd=str(skill_dir),
-        text=True,
-        capture_output=True,
-        timeout=180,
-        check=False,
-    )
-
-
-def _docx_adjustment_workspace(body) -> Path:
-    require(body, "session_id")
-    s = get_session_for_file_ops(body["session_id"])
-    return Path(s.workspace).expanduser().resolve()
-
-
-def _docx_adjustment_path_is_within(candidate: Path, root: Path) -> bool:
-    try:
-        candidate.resolve().relative_to(root.expanduser().resolve())
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _docx_adjustment_allowed_absolute_roots(workspace: Path) -> list[Path]:
-    roots = [workspace]
-    try:
-        home = Path.home().expanduser().resolve()
-        roots.append(home)
-    except OSError:
-        pass
-    return roots
-
-
-def _docx_adjustment_display_path(workspace: Path, target: Path) -> str:
-    try:
-        return str(target.resolve().relative_to(workspace.resolve()))
-    except (OSError, ValueError):
-        return str(target)
-
-
-def _docx_adjustment_path(workspace: Path, body, field: str, *, must_exist: bool = False) -> Path:
-    raw = str(body.get(field) or "").strip()
-    if not raw:
-        raise ValueError(f"{field} is required")
-    requested = Path(os.path.expandvars(raw)).expanduser()
-    if requested.is_absolute():
-        target = requested.resolve()
-        if not any(_docx_adjustment_path_is_within(target, root) for root in _docx_adjustment_allowed_absolute_roots(workspace)):
-            raise ValueError(f"{field} is outside the allowed local roots: {target}")
-    else:
-        target = safe_resolve(workspace, raw)
-    if must_exist and not target.exists():
-        raise FileNotFoundError(f"{field} not found: {target}")
-    return target
-
-
-def _docx_adjustment_run_payload(
-    handler,
-    *,
-    action: str,
-    script_name: str,
-    args: list[str],
-    extra: dict | None = None,
-):
-    try:
-        completed = _docx_template_run_script(script_name, args)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return bad(handler, _sanitize_error(e), 500)
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
-    if completed.returncode != 0:
-        return bad(handler, stderr or stdout or f"{script_name} failed", 400)
-    payload = {
-        "ok": True,
-        "action": action,
-        "stdout": stdout,
-        "stderr": stderr,
-    }
-    if extra:
-        payload.update(extra)
-    return j(handler, payload)
-
-
 def _handle_docx_figure_adjustment_package(handler, body):
     try:
-        require(body, "session_id", "source_path", "out_dir")
-        workspace = _docx_adjustment_workspace(body)
-        source = _docx_adjustment_path(workspace, body, "source_path", must_exist=True)
-        out_dir = _docx_adjustment_path(workspace, body, "out_dir")
-        out_dir.parent.mkdir(parents=True, exist_ok=True)
-        args = ["--source", str(source), "--out-dir", str(out_dir)]
-        asset_dir_raw = str(body.get("asset_dir") or "").strip()
-        if asset_dir_raw:
-            asset_dir = _docx_adjustment_path(workspace, body, "asset_dir", must_exist=True)
-            args.extend(["--asset-dir", str(asset_dir)])
-        return _docx_adjustment_run_payload(
-            handler,
-            action="package",
-            script_name="package-rich-draft.js",
-            args=args,
-            extra={"out_dir": _docx_adjustment_display_path(workspace, out_dir)},
-        )
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.package_rich_draft(body, workspace)
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as e:
         return bad(handler, _sanitize_error(e))
 
 
 def _handle_docx_figure_adjustment_rerender(handler, body):
     try:
-        require(body, "session_id", "manifest_path", "figure_id")
-        workspace = _docx_adjustment_workspace(body)
-        manifest = _docx_adjustment_path(workspace, body, "manifest_path", must_exist=True)
-        figure_id = str(body.get("figure_id") or "").strip()
-        if not re.fullmatch(r"fig-[0-9]{3,}", figure_id):
-            return bad(handler, "figure_id must look like fig-001")
-        return _docx_adjustment_run_payload(
-            handler,
-            action="rerender",
-            script_name="render-figure-assets.js",
-            args=["--manifest", str(manifest), "--figure-id", figure_id],
-            extra={"manifest_path": _docx_adjustment_display_path(workspace, manifest), "figure_id": figure_id},
-        )
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.rerender_asset(body, workspace)
+        if payload.get("ok"):
+            payload = {"action": "rerender", **payload}
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as e:
         return bad(handler, _sanitize_error(e))
 
 
 def _handle_docx_figure_adjustment_replace(handler, body):
     try:
-        require(body, "session_id", "docx_path", "figure_id", "image_path", "out_path")
-        workspace = _docx_adjustment_workspace(body)
-        docx = _docx_adjustment_path(workspace, body, "docx_path", must_exist=True)
-        image = _docx_adjustment_path(workspace, body, "image_path", must_exist=True)
-        out_path = _docx_adjustment_path(workspace, body, "out_path")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        figure_id = str(body.get("figure_id") or "").strip()
-        if not re.fullmatch(r"fig-[0-9]{3,}", figure_id):
-            return bad(handler, "figure_id must look like fig-001")
-        return _docx_adjustment_run_payload(
-            handler,
-            action="replace",
-            script_name="replace-docx-image.js",
-            args=[
-                "--docx",
-                str(docx),
-                "--figure-id",
-                figure_id,
-                "--image",
-                str(image),
-                "--out",
-                str(out_path),
-            ],
-            extra={
-                "docx_path": _docx_adjustment_display_path(workspace, docx),
-                "image_path": _docx_adjustment_display_path(workspace, image),
-                "out_path": _docx_adjustment_display_path(workspace, out_path),
-                "figure_id": figure_id,
-            },
-        )
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.replace_asset(body, workspace)
+        if payload.get("ok"):
+            payload = {"action": "replace", **payload}
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired) as e:
         return bad(handler, _sanitize_error(e))
 
 

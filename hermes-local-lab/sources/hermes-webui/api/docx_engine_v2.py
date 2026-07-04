@@ -108,6 +108,59 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     }, 200
 
 
+def package_rich_draft(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+    workspace = Path(workspace).expanduser().resolve()
+    try:
+        roots = _figure_adjustment_allowed_absolute_roots(workspace)
+        source_path = _resolve_workspace_path(
+            workspace,
+            _first_text(payload, "source_path", "sourcePath", "source"),
+            field="source_path",
+            must_exist=True,
+            allowed_absolute_roots=roots,
+        )
+        out_dir = _resolve_workspace_path(
+            workspace,
+            _first_text(payload, "out_dir", "outDir"),
+            field="out_dir",
+            allowed_absolute_roots=roots,
+        )
+        out_dir.parent.mkdir(parents=True, exist_ok=True)
+        args = [
+            str(_engine_cli("package-rich-draft.js")),
+            "--source",
+            str(source_path),
+            "--out-dir",
+            str(out_dir),
+        ]
+        asset_dir_raw = _first_text(payload, "asset_dir", "assetDir")
+        if asset_dir_raw:
+            asset_dir = _resolve_workspace_path(
+                workspace,
+                asset_dir_raw,
+                field="asset_dir",
+                must_exist=True,
+                allowed_absolute_roots=roots,
+            )
+            args.extend(["--asset-dir", str(asset_dir)])
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("validation_failed", str(exc)), 400
+
+    completed = run_engine(args)
+    if completed.returncode != 0:
+        engine_payload = _payload_from_completed(completed, default_code="validation_failed")
+        return _known_failure_payload(engine_payload), 400
+
+    return {
+        "ok": True,
+        "action": "package",
+        "stdout": (completed.stdout or "").strip(),
+        "stderr": (completed.stderr or "").strip(),
+        "source_path": _display_path(workspace, source_path),
+        "out_dir": _display_path(workspace, out_dir),
+    }, 200
+
+
 def rerender_asset(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     workspace = Path(workspace).expanduser().resolve()
     figure_id = _first_text(payload, "figure_id", "figureId")
@@ -314,6 +367,13 @@ def _path_is_within(target: Path, root: Path) -> bool:
         return True
     except (OSError, ValueError):
         return False
+
+
+def _display_path(workspace: Path, target: Path) -> str:
+    try:
+        return str(target.resolve().relative_to(workspace.resolve()))
+    except (OSError, ValueError):
+        return str(target)
 
 
 def _figure_adjustment_allowed_absolute_roots(workspace: Path) -> list[Path]:

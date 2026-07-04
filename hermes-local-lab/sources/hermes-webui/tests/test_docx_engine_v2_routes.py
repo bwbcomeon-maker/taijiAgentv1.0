@@ -24,6 +24,13 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/file/open" in routes_py
 
 
+def test_legacy_figure_adjustment_routes_do_not_keep_skill_script_runner():
+    routes_py = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+
+    assert "def _docx_template_run_script(" not in routes_py
+    assert "docx-template-skill script not found" not in routes_py
+
+
 def test_explicit_template_selection_returns_visible_workbench_payload():
     from api import routes
 
@@ -190,3 +197,131 @@ def test_docx_engine_v2_replace_asset_rejects_bad_figure_id(tmp_path):
     assert status == 400
     assert payload["ok"] is False
     assert "figure_id" in payload["message"]
+
+
+def test_docx_engine_v2_package_rich_draft_returns_delivery_assets(tmp_path):
+    from api import docx_engine_v2
+
+    source = tmp_path / "draft.md"
+    out_dir = tmp_path / "draft-package"
+    source.write_text(
+        "\n".join(
+            [
+                "# 初稿",
+                "",
+                "| 项目 | 状态 |",
+                "| --- | --- |",
+                "| 文档模板渲染 | 进行中 |",
+                "",
+                "```mermaid",
+                "flowchart LR",
+                "  A[初稿] --> B[图示资产]",
+                "```",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    payload, status = docx_engine_v2.package_rich_draft(
+        {"source_path": "draft.md", "out_dir": "draft-package"},
+        tmp_path,
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["action"] == "package"
+    assert payload["out_dir"] == "draft-package"
+    assert (out_dir / "draft.manifest.json").exists()
+    assert (out_dir / "图片清单.md").exists()
+
+
+def test_legacy_figure_adjustment_package_delegates_to_v2(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+    (tmp_path / "source.md").write_text("# 初稿\n\n```mermaid\nflowchart LR\nA-->B\n```\n", encoding="utf-8")
+    called = {}
+
+    def fake_package_rich_draft(payload, workspace):
+        called["workspace"] = workspace
+        called["payload"] = payload
+        return {"ok": True, "action": "package", "out_dir": "draft-package"}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "package_rich_draft", fake_package_rich_draft)
+    monkeypatch.setattr(
+        routes,
+        "_docx_template_run_script",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy skill script must not run")),
+        raising=False,
+    )
+
+    result = routes._handle_docx_figure_adjustment_package(
+        object(),
+        {"session_id": "sid-docx", "source_path": "source.md", "out_dir": "draft-package"},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["action"] == "package"
+    assert called["workspace"] == tmp_path.resolve()
+    assert called["payload"]["source_path"] == "source.md"
+
+
+def test_legacy_figure_adjustment_rerender_delegates_to_v2(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+    called = {}
+
+    def fake_rerender_asset(payload, workspace):
+        called["workspace"] = workspace
+        called["payload"] = payload
+        return {"ok": True, "figure_id": "fig-001", "display_path": "assets/fig-001/figure.svg"}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "rerender_asset", fake_rerender_asset)
+    monkeypatch.setattr(
+        routes,
+        "_docx_template_run_script",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy skill script must not run")),
+        raising=False,
+    )
+
+    result = routes._handle_docx_figure_adjustment_rerender(
+        object(),
+        {"session_id": "sid-docx", "manifest_path": "draft.manifest.json", "figure_id": "fig-001"},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["action"] == "rerender"
+    assert called["workspace"] == tmp_path.resolve()
+    assert called["payload"]["figure_id"] == "fig-001"
+
+
+def test_legacy_figure_adjustment_replace_delegates_to_v2(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+    called = {}
+
+    def fake_replace_asset(payload, workspace):
+        called["workspace"] = workspace
+        called["payload"] = payload
+        return {"ok": True, "figure_id": "fig-001", "output_path": str(tmp_path / "updated.docx")}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "replace_asset", fake_replace_asset)
+    monkeypatch.setattr(
+        routes,
+        "_docx_template_run_script",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy skill script must not run")),
+        raising=False,
+    )
+
+    result = routes._handle_docx_figure_adjustment_replace(
+        object(),
+        {
+            "session_id": "sid-docx",
+            "docx_path": "delivery/document.docx",
+            "figure_id": "fig-001",
+            "image_path": "replacement.png",
+            "out_path": "delivery/updated.docx",
+        },
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["action"] == "replace"
+    assert called["workspace"] == tmp_path.resolve()
+    assert called["payload"]["out_path"] == "delivery/updated.docx"

@@ -34,6 +34,32 @@ test('DocumentJob contract accepts a complete render job', () => {
   assert.equal(result.ok, true, JSON.stringify(result.errors || result));
 });
 
+test('DocumentJob contract accepts deliveredAt after final delivery', () => {
+  const documentJob = createDocumentJob({
+    jobId: 'job-20260704-delivered',
+    sourceRef: {
+      type: 'markdown',
+      path: 'source.md',
+      sha256: '3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7',
+    },
+    templateId: 'general-proposal',
+    workspace: path.join(os.tmpdir(), 'docx-engine-v2', 'job-20260704-delivered'),
+    inputs: [{ type: 'source', path: 'source.md' }],
+  });
+  const sourceNormalized = transitionJob(documentJob, 'source_normalized');
+  const templateSelected = transitionJob(sourceNormalized, 'template_selected');
+  const assetsPackaged = transitionJob(templateSelected, 'assets_packaged');
+  const renderPlanned = transitionJob(assetsPackaged, 'render_planned');
+  const rendered = transitionJob(renderPlanned, 'rendered');
+  const validated = transitionJob(rendered, 'validated');
+  const delivered = transitionJob(validated, 'delivered', {
+    deliveredAt: '2026-07-04T09:45:00.000Z',
+  });
+
+  const result = validateDomainObject('DocumentJob', delivered);
+  assert.equal(result.ok, true, JSON.stringify(result.errors || result));
+});
+
 test('createDocumentJob returns a created job that matches DocumentJob schema', () => {
   const documentJob = createDocumentJob({
     jobId: 'job-20260704-helper',
