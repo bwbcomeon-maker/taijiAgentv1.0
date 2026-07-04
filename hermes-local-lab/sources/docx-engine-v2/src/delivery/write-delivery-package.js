@@ -47,6 +47,10 @@ function writeDeliveryPackage({
     throw new Error('renderPlan is required.');
   }
 
+  const normalizedJob = normalizeJob(job, renderPlan, sourcePackage);
+  assertDomainObject('DocumentJob', normalizedJob, 'DocumentJob manifest');
+  assertDomainObject('TemplateManifest', templatePackage.manifest || {}, 'TemplateManifest');
+
   assertEmptyOutputDirectory(deliveryDir);
   fs.mkdirSync(deliveryDir, { recursive: true });
 
@@ -54,7 +58,7 @@ function writeDeliveryPackage({
   fs.copyFileSync(documentPath, deliveryDocumentPath);
   fs.writeFileSync(path.join(deliveryDir, 'source.md'), sourceMarkdown(sourcePackage), 'utf8');
   copyAssets({ deliveryDir, sourcePackage, assetPackage });
-  writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizeJob(job, renderPlan, sourcePackage));
+  writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizedJob);
   writeJson(path.join(deliveryDir, 'template.manifest.json'), templatePackage.manifest || {});
   writeJson(path.join(deliveryDir, 'render-plan.json'), renderPlan);
   writeJson(path.join(deliveryDir, 'quality-report.json'), qualityReport || emptyQualityReport());
@@ -81,6 +85,13 @@ function writeDeliveryPackage({
   }
 
   return deliveryPackage;
+}
+
+function assertDomainObject(schemaName, value, label) {
+  const validation = validateDomainObject(schemaName, value);
+  if (!validation.ok) {
+    throw new Error(`${label} validation failed: ${JSON.stringify(validation.errors)}`);
+  }
 }
 
 function assertEmptyOutputDirectory(deliveryDir) {
