@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const path = require('node:path');
 const Ajv2020 = require('ajv/dist/2020');
 
 const { validateDomainObject } = require('../domain/validate');
@@ -179,6 +180,7 @@ function validateTemplatePackage(template) {
   errors.push(...validateTemplateDocx(template?.templatePath));
   errors.push(...validateSchemaSample(template));
   errors.push(...validateSourceRequirements(template?.manifest?.sourceRequirements));
+  errors.push(...validatePackageCleanliness(template?.packageDir));
 
   if (errors.length > 0) {
     return { ok: false, errors };
@@ -225,6 +227,42 @@ function validateSourceRequirements(sourceRequirements) {
     }
   }
   return errors;
+}
+
+function validatePackageCleanliness(packageDir) {
+  if (!packageDir || !fs.existsSync(packageDir)) {
+    return [];
+  }
+
+  return collectJunkFiles(packageDir).map((filePath) => ({
+    code: 'template_package_junk_file',
+    path: filePath,
+    message: `Template package contains WPS/Word or macOS temporary file: ${path.relative(packageDir, filePath)}`,
+  }));
+}
+
+function collectJunkFiles(dir) {
+  const junkFiles = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (isJunkFileName(entry.name)) {
+      junkFiles.push(entryPath);
+      continue;
+    }
+    if (entry.isDirectory()) {
+      junkFiles.push(...collectJunkFiles(entryPath));
+    }
+  }
+  return junkFiles;
+}
+
+function isJunkFileName(fileName) {
+  return (
+    fileName === '.DS_Store' ||
+    fileName.startsWith('._') ||
+    fileName.startsWith('.~') ||
+    fileName.startsWith('~')
+  );
 }
 
 module.exports = { validateTemplatePackage };

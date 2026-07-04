@@ -35,6 +35,7 @@
 - 已支持 registry 同时读取 `builtin` 和 `installed`，并拒绝重复模板 ID。
 - 已补齐模板安装器：外部模板包必须通过校验后才会复制到 `installed/<templateId>` 并写入 registry；copyable skill 也暴露 `scripts/install-template.js`。
 - 已支持显式更新已安装模板：用户必须传 `--replace` 或在工作台勾选“覆盖已安装模板”，内置模板仍拒绝覆盖，避免把模板维护能力变成隐式破坏操作。
+- 已让模板包校验拒绝 WPS/Word/macOS 临时文件（如 `.DS_Store`、`._*`、`~*`、`.~lock*`），避免脏模板包进入 installed registry。
 - 已支持把 WPS/Word 人工视觉验收写回 `quality-report.json`：CLI、copyable skill、WebUI API 和工作台按钮都能记录 `wps_visual` reviewer 证据，并清除“未人工验收”警告。
 - 已把交付包 schema gate 扩展到 `job.manifest.json` 和 `template.manifest.json`，避免“追溯文件存在但内容不可用”的假通过。
 - 已在交付包写入前校验 `DocumentJob` 与 `TemplateManifest`，坏追溯证据会被源头拒绝且不会留下半成品交付目录。

@@ -8,7 +8,7 @@ const Ajv2020 = require('ajv/dist/2020');
 const yazl = require('yazl');
 
 const { listTemplates, getTemplatePackage } = require('../src/templates/registry');
-const { installTemplatePackage } = require('../src/templates/install-template-package');
+const { installTemplatePackage, loadPackageFromDir } = require('../src/templates/install-template-package');
 const { validateTemplatePackage } = require('../src/templates/validate-template-package');
 
 const rootDir = path.resolve(__dirname, '..');
@@ -368,6 +368,32 @@ test('template validation rejects invalid source requirement metadata', () => {
   assert.ok(
     result.errors.some((error) => error.code === 'source_requirements_invalid'),
     JSON.stringify(result.errors)
+  );
+});
+
+test('template validation rejects WPS and macOS temporary files in package directory', (t) => {
+  const tempDir = makeTempDir(t);
+  const packageDir = path.join(tempDir, 'incoming', 'custom-proposal');
+  fs.cpSync(path.join(rootDir, 'templates', 'general-proposal'), packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, 'manifest.json');
+  const manifest = readJson(manifestPath);
+  fs.writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, id: 'custom-proposal', name: 'Custom Proposal' }, null, 2)}\n`,
+    'utf8'
+  );
+  fs.writeFileSync(path.join(packageDir, '.DS_Store'), 'finder metadata', 'utf8');
+  fs.writeFileSync(path.join(packageDir, '._template.docx'), 'appledouble metadata', 'utf8');
+  fs.writeFileSync(path.join(packageDir, '~$template.docx'), 'word temp file', 'utf8');
+  fs.writeFileSync(path.join(packageDir, '.~lock.template.docx#'), 'wps lock file', 'utf8');
+
+  const result = validateTemplatePackage(loadPackageFromDir({ packageDir }));
+
+  assert.equal(result.ok, false);
+  const junkFileErrors = result.errors.filter((error) => error.code === 'template_package_junk_file');
+  assert.deepEqual(
+    junkFileErrors.map((error) => path.basename(error.path)).sort(),
+    ['.DS_Store', '.~lock.template.docx#', '._template.docx', '~$template.docx'].sort()
   );
 });
 
