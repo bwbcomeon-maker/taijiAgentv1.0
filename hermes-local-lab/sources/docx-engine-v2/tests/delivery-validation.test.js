@@ -469,6 +469,39 @@ test('validateDeliveryPackage fails when an editable figure source changes witho
   assert.match(imageCoverage?.message || '', /editable source|source\.mmd|sha256/i);
 });
 
+test('validateDeliveryPackage fails when DOCX embedded media no longer matches the delivery image asset', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  const image = renderPlan.templateData.images.find((item) => item.figureId === 'fig-001');
+  assert.equal(image?.path, 'assets/fig-001/figure.svg');
+
+  fs.writeFileSync(
+    path.join(deliveryDir, image.path),
+    '<svg xmlns="http://www.w3.org/2000/svg"><text>RERENDERED_BUT_NOT_WRITTEN_TO_DOCX</text></svg>\n',
+    'utf8'
+  );
+  const updatedImageHash = sha256File(path.join(deliveryDir, image.path));
+  image.sha256 = updatedImageHash;
+  assetPackage.figures[0].sha256 = updatedImageHash;
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+  deliveryManifest.fileSha256.renderPlan = sha256File(renderPlanPath);
+  deliveryManifest.fileSha256.assetPackage = sha256File(assetPackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const imageCoverage = report.checks.find((check) => check.id === 'image_coverage');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(imageCoverage?.status, 'failed');
+  assert.match(imageCoverage?.message || '', /DOCX embedded media|fig-001|sha256/i);
+});
+
 test('validateDeliveryPackage fails when delivery package manifest maps a role to the wrong path', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const manifestPath = path.join(deliveryDir, 'delivery-package.json');

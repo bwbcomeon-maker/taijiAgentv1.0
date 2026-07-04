@@ -427,6 +427,10 @@ function sha256File(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
+function sha256Buffer(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
 function addDocxZipCheck({ addCheck, deliveryDir }) {
   const documentPath = path.join(deliveryDir, 'document.docx');
   if (!fs.existsSync(documentPath)) {
@@ -525,6 +529,15 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan,
     );
     return;
   }
+  const embeddedMediaFailures = docxEmbeddedMediaFailures({ deliveryDir, documentXml, images });
+  if (embeddedMediaFailures.length > 0) {
+    addCheck(
+      'image_coverage',
+      'failed',
+      `DOCX embedded media sha256 mismatch: ${embeddedMediaFailures.join(', ')}`
+    );
+    return;
+  }
 
   if (hasTemplateMarkers(documentXml)) {
     addCheck(
@@ -561,6 +574,116 @@ function editableFigureSourceFailures({ deliveryDir, assetPackage }) {
     }
   }
   return failures;
+}
+
+function docxEmbeddedMediaFailures({ deliveryDir, documentXml, images }) {
+  const failures = [];
+  if (!documentXml) {
+    return failures;
+  }
+
+  let entries;
+  try {
+    entries = readZipEntries(path.join(deliveryDir, 'document.docx'));
+  } catch (error) {
+    return [`document.docx media cannot be inspected: ${error.message}`];
+  }
+  const relationshipsXml = entries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
+  if (!relationshipsXml) {
+    return ['word/_rels/document.xml.rels is missing'];
+  }
+
+  for (const image of images || []) {
+    const figureId = String(image?.figureId || '').trim();
+    const expectedHash = String(image?.sha256 || '').trim();
+    if (!figureId || !/^[a-f0-9]{64}$/.test(expectedHash)) {
+      continue;
+    }
+
+    const relationshipId = findFigureRelationshipId(documentXml, figureId);
+    if (!relationshipId) {
+      failures.push(`${figureId} missing DOCX image relationship`);
+      continue;
+    }
+
+    const relationship = findRelationshipById(relationshipsXml, relationshipId);
+    if (!relationship) {
+      failures.push(`${figureId} missing DOCX relationship ${relationshipId}`);
+      continue;
+    }
+    if (relationship.attrs.TargetMode === 'External' || !isImageRelationship(relationship.attrs.Type)) {
+      failures.push(`${figureId} relationship ${relationshipId} is not an embedded image`);
+      continue;
+    }
+
+    const entryName = relationshipTargetEntryName(relationship.attrs.Target);
+    const media = entryName ? entries.get(entryName) : null;
+    if (!media) {
+      failures.push(`${figureId} missing DOCX media ${entryName || relationship.attrs.Target || ''}`);
+      continue;
+    }
+
+    const actualHash = sha256Buffer(media);
+    if (actualHash !== expectedHash) {
+      failures.push(`${figureId} ${entryName} expected ${expectedHash}, got ${actualHash}`);
+    }
+  }
+  return failures;
+}
+
+function findFigureRelationshipId(documentXml, figureId) {
+  const figurePattern = new RegExp(`\\bfigureId=${escapeRegExp(figureId)}\\b`);
+  for (const drawingMatch of String(documentXml || '').matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)) {
+    const drawingXml = drawingMatch[0];
+    const docPrTags = drawingXml.match(/<wp:docPr\b[^>]*>/g) || [];
+    if (!docPrTags.some((tag) => figurePattern.test(tag))) {
+      continue;
+    }
+    const relationshipMatch = drawingXml.match(/\br:embed="([^"]+)"/);
+    if (relationshipMatch) {
+      return relationshipMatch[1];
+    }
+  }
+  return '';
+}
+
+function findRelationshipById(relationshipsXml, relationshipId) {
+  for (const match of String(relationshipsXml || '').matchAll(/<Relationship\b[^>]*\/?>/g)) {
+    const raw = match[0];
+    const attrs = parseXmlAttributes(raw);
+    if (attrs.Id === relationshipId) {
+      return { raw, attrs };
+    }
+  }
+  return null;
+}
+
+function parseXmlAttributes(tag) {
+  const attrs = {};
+  for (const match of String(tag || '').matchAll(/\s([A-Za-z_:][\w:.-]*)="([^"]*)"/g)) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+}
+
+function isImageRelationship(type) {
+  return String(type || '').endsWith('/image');
+}
+
+function relationshipTargetEntryName(target) {
+  const rawTarget = String(target || '').trim();
+  if (!rawTarget || /^[a-z][a-z0-9+.-]*:/i.test(rawTarget)) {
+    return '';
+  }
+  if (rawTarget.startsWith('/')) {
+    return path.posix.normalize(rawTarget.replace(/^\/+/, ''));
+  }
+  const entryName = path.posix.normalize(path.posix.join('word', rawTarget.replace(/\\/g, '/')));
+  return entryName.startsWith('../') ? '' : entryName;
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function addTableCoverageCheck({ addCheck, documentXml, renderPlan }) {

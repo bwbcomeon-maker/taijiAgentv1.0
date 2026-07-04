@@ -43,7 +43,7 @@ async function replaceDocxAsset({ docxPath, figureId, imagePath, outputPath } = 
     throw new Error(`未在 DOCX 中找到图片关系: ${binding.relationshipId}`);
   }
 
-  const replacement = chooseReplacementMediaPath(entries, figureId, imageExtension);
+  const replacement = chooseReplacementMediaPath(entries, figureId, imageExtension, relationship.attrs.Target);
   const updatedRelationshipsXml = updateRelationshipTarget(
     relationshipsXml,
     relationship.raw,
@@ -133,12 +133,28 @@ function isImageRelationship(type) {
   return String(type || '').endsWith('/image');
 }
 
-function chooseReplacementMediaPath(entries, figureId, imageExtension) {
+function chooseReplacementMediaPath(entries, figureId, imageExtension, currentTarget) {
   const safeFigureId = String(figureId).replace(/[^A-Za-z0-9_-]/g, '_');
+  const preferredFileName = `${safeFigureId}${imageExtension}`;
+  const preferredEntryName = `word/media/${preferredFileName}`;
+  if (relationshipTargetEntryName(currentTarget) === preferredEntryName) {
+    return {
+      entryName: preferredEntryName,
+      target: `media/${preferredFileName}`,
+    };
+  }
+
+  if (!entries.has(preferredEntryName)) {
+    return {
+      entryName: preferredEntryName,
+      target: `media/${preferredFileName}`,
+    };
+  }
+
   let index = 0;
 
   while (true) {
-    const suffix = index === 0 ? '' : `-${index}`;
+    const suffix = `-${index + 1}`;
     const fileName = `${safeFigureId}${suffix}${imageExtension}`;
     const entryName = `word/media/${fileName}`;
     if (!entries.has(entryName)) {
@@ -149,6 +165,18 @@ function chooseReplacementMediaPath(entries, figureId, imageExtension) {
     }
     index += 1;
   }
+}
+
+function relationshipTargetEntryName(target) {
+  const rawTarget = String(target || '').trim();
+  if (!rawTarget || /^[a-z][a-z0-9+.-]*:/i.test(rawTarget)) {
+    return '';
+  }
+  if (rawTarget.startsWith('/')) {
+    return path.posix.normalize(rawTarget.replace(/^\/+/, ''));
+  }
+  const entryName = path.posix.normalize(path.posix.join('word', rawTarget.replace(/\\/g, '/')));
+  return entryName.startsWith('../') ? '' : entryName;
 }
 
 function updateRelationshipTarget(relationshipsXml, relationshipTag, nextTarget) {

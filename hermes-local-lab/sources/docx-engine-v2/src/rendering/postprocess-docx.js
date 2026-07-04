@@ -21,13 +21,70 @@ async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
     throw new Error('DOCX is missing word/document.xml.');
   }
 
-  entries.set(
-    'word/document.xml',
-    Buffer.from(injectFigureMetadata(documentXml.toString('utf8'), renderPlan), 'utf8')
-  );
+  bindPlannedImages({ entries, documentXml: documentXml.toString('utf8'), renderPlan, outputPath });
 
   await writeZipEntries(entries, outputPath);
   return { status: 'postprocessed', documentPath: outputPath };
+}
+
+function bindPlannedImages({ entries, documentXml, renderPlan, outputPath }) {
+  const images = renderPlan.templateData?.images || [];
+  if (images.length === 0) {
+    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(documentXml, renderPlan), 'utf8'));
+    return;
+  }
+
+  const relationshipsEntry = 'word/_rels/document.xml.rels';
+  const contentTypesEntry = '[Content_Types].xml';
+  let relationshipsXml = entries.get(relationshipsEntry)?.toString('utf8') || '';
+  let contentTypesXml = entries.get(contentTypesEntry)?.toString('utf8') || '';
+  if (!relationshipsXml || !contentTypesXml) {
+    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(documentXml, renderPlan), 'utf8'));
+    return;
+  }
+
+  const drawingTemplate = firstDrawingXml(documentXml);
+  if (!drawingTemplate) {
+    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(documentXml, renderPlan), 'utf8'));
+    return;
+  }
+
+  const outputDir = path.dirname(path.resolve(outputPath));
+  const relationshipIds = collectRelationshipIds(relationshipsXml);
+  const boundDrawings = [];
+  images.forEach((image, index) => {
+    const imagePath = resolvePackagePath(outputDir, image.path || '');
+    if (!imagePath || !fs.existsSync(imagePath)) {
+      return;
+    }
+    const extension = path.extname(imagePath).toLowerCase();
+    const contentType = imageContentType(extension);
+    if (!contentType) {
+      return;
+    }
+
+    const mediaFileName = `${safeFileName(image.figureId || `fig-${index + 1}`)}${extension}`;
+    const mediaEntry = `word/media/${mediaFileName}`;
+    const relationshipId = nextRelationshipId(relationshipIds);
+    relationshipIds.add(relationshipId);
+    entries.set(mediaEntry, fs.readFileSync(imagePath));
+    relationshipsXml = appendImageRelationship(relationshipsXml, relationshipId, `media/${mediaFileName}`);
+    contentTypesXml = ensureContentType(contentTypesXml, extension, contentType);
+    boundDrawings.push(updateDrawingTemplate({
+      drawingXml: drawingTemplate,
+      relationshipId,
+      figureId: image.figureId || `fig-${index + 1}`,
+      docPrId: 9000 + index,
+      title: image.caption || image.figureId || `图 ${index + 1}`,
+    }));
+  });
+
+  entries.set(relationshipsEntry, Buffer.from(relationshipsXml, 'utf8'));
+  entries.set(contentTypesEntry, Buffer.from(contentTypesXml, 'utf8'));
+  const nextDocumentXml = boundDrawings.length
+    ? replaceFirstDrawing(documentXml, boundDrawings.join(''))
+    : documentXml;
+  entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
 }
 
 function collectFigureIds(renderPlan) {
@@ -59,12 +116,14 @@ function injectFigureMetadata(documentXml, renderPlan) {
   }
 
   let updatedXml = documentXml;
-  const docPrMetadata = `docx-engine-v2 ${figureIds.map((figureId) => `figureId=${figureId}`).join(' ')}`;
-  updatedXml = updatedXml.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
-    let nextAttributes = upsertXmlAttribute(attributes, 'descr', docPrMetadata);
-    nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
-    return `<wp:docPr${nextAttributes}/>`;
-  });
+  if (!hasDocPrFigureMetadata(updatedXml, figureIds)) {
+    const docPrMetadata = `docx-engine-v2 ${figureIds.map((figureId) => `figureId=${figureId}`).join(' ')}`;
+    updatedXml = updatedXml.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
+      let nextAttributes = upsertXmlAttribute(attributes, 'descr', docPrMetadata);
+      nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
+      return `<wp:docPr${nextAttributes}/>`;
+    });
+  }
 
   const paragraph = [
     '<w:p>',
@@ -80,6 +139,103 @@ function injectFigureMetadata(documentXml, renderPlan) {
   }
 
   return `${updatedXml}${paragraph}`;
+}
+
+function firstDrawingXml(documentXml) {
+  return String(documentXml || '').match(/<w:drawing\b[\s\S]*?<\/w:drawing>/)?.[0] || '';
+}
+
+function replaceFirstDrawing(documentXml, drawingsXml) {
+  return String(documentXml || '').replace(/<w:drawing\b[\s\S]*?<\/w:drawing>/, drawingsXml);
+}
+
+function hasDocPrFigureMetadata(documentXml, figureIds) {
+  const presentFigureIds = new Set();
+  for (const match of String(documentXml || '').matchAll(/<wp:docPr\b[^>]*>/g)) {
+    for (const figureMatch of match[0].matchAll(/\bfigureId=([A-Za-z0-9_-]+)/g)) {
+      presentFigureIds.add(figureMatch[1]);
+    }
+  }
+  return figureIds.every((figureId) => presentFigureIds.has(figureId));
+}
+
+function updateDrawingTemplate({ drawingXml, relationshipId, figureId, docPrId, title }) {
+  let next = String(drawingXml || '').replace(/\br:embed="[^"]+"/, `r:embed="${relationshipId}"`);
+  next = next.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
+    let nextAttributes = upsertXmlAttribute(attributes, 'id', String(docPrId));
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'name', title || figureId);
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'descr', `docx-engine-v2 figureId=${figureId}`);
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'title', `docx-engine-v2 figureId=${figureId}`);
+    return `<wp:docPr${nextAttributes}/>`;
+  });
+  return next;
+}
+
+function collectRelationshipIds(relationshipsXml) {
+  const ids = new Set();
+  for (const match of String(relationshipsXml || '').matchAll(/\bId="([^"]+)"/g)) {
+    ids.add(match[1]);
+  }
+  return ids;
+}
+
+function nextRelationshipId(existingIds) {
+  let index = 9000;
+  while (existingIds.has(`rId${index}`)) {
+    index += 1;
+  }
+  return `rId${index}`;
+}
+
+function appendImageRelationship(relationshipsXml, relationshipId, target) {
+  const relationship = `<Relationship Id="${escapeXmlAttribute(relationshipId)}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${escapeXmlAttribute(target)}"/>`;
+  if (!relationshipsXml.includes('</Relationships>')) {
+    return relationshipsXml;
+  }
+  return relationshipsXml.replace('</Relationships>', `${relationship}</Relationships>`);
+}
+
+function ensureContentType(contentTypesXml, extension, contentType) {
+  const normalizedExtension = extension.replace(/^\./, '');
+  const defaultPattern = new RegExp(`<Default\\b[^>]*\\bExtension="${escapeRegExp(normalizedExtension)}"[^>]*>`, 'i');
+  if (defaultPattern.test(contentTypesXml)) {
+    return contentTypesXml;
+  }
+  if (!contentTypesXml.includes('</Types>')) {
+    return contentTypesXml;
+  }
+  return contentTypesXml.replace(
+    '</Types>',
+    `<Default Extension="${escapeXmlAttribute(normalizedExtension)}" ContentType="${escapeXmlAttribute(contentType)}"/></Types>`
+  );
+}
+
+function imageContentType(extension) {
+  return {
+    '.png': 'image/png',
+    '.svg': 'image/svg+xml',
+  }[extension] || '';
+}
+
+function resolvePackagePath(baseDir, relativePath) {
+  const normalizedPath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalizedPath || normalizedPath.split('/').includes('..')) {
+    return '';
+  }
+  const resolvedPath = path.join(baseDir, normalizedPath);
+  const relative = path.relative(baseDir, resolvedPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return '';
+  }
+  return resolvedPath;
+}
+
+function safeFileName(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '_') || 'image';
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function readZipEntries(docxPath) {
