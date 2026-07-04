@@ -82,6 +82,19 @@ test('packageAssets writes editable figure assets and copies qualified image fil
   assert.throws(() => packageAssets({ sourcePackage, assetDir, outDir }), /输出目录非空/);
 });
 
+test('packageAssets resolves relative assetDir beside the source document', async (t) => {
+  const workspace = makeWorkspace(t);
+  const { sourcePackage } = await makeSourcePackage(workspace);
+
+  const assetPackage = packageAssets({
+    sourcePackage,
+    assetDir: 'source.assets',
+    outDir: path.join(workspace, 'assets'),
+  });
+
+  assert.equal(fs.existsSync(path.join(workspace, assetPackage.images[0].displayPath)), true);
+});
+
 test('packageAssets fails before rendering when a required image asset is missing', async (t) => {
   const workspace = makeWorkspace(t);
   const sourcePackage = await normalizeMarkdownSource({
@@ -104,5 +117,21 @@ test('packageAssets fails before rendering when a required image asset is missin
         outDir: path.join(workspace, 'assets'),
       }),
     /缺少.*资产/
+  );
+});
+
+test('packageAssets rejects unsafe asset identifiers before writing output paths', async (t) => {
+  const workspace = makeWorkspace(t);
+  const { sourcePackage, assetDir } = await makeSourcePackage(workspace);
+  sourcePackage.images[0].imageId = '../escape';
+
+  assert.throws(
+    () =>
+      packageAssets({
+        sourcePackage,
+        assetDir,
+        outDir: path.join(workspace, 'assets'),
+      }),
+    /不安全的资产标识/
   );
 });

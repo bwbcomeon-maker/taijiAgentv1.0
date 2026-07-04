@@ -10,6 +10,11 @@ const { buildRenderPlan } = require('../src/planning/build-render-plan');
 const { normalizeMarkdownSource } = require('../src/source/normalize-markdown');
 const { getTemplatePackage } = require('../src/templates/registry');
 
+const ONE_BY_ONE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+  'base64'
+);
+
 function makeWorkspace(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-plan-'));
   t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
@@ -17,6 +22,10 @@ function makeWorkspace(t) {
 }
 
 async function makeSourcePackage(workspace) {
+  const assetDir = path.join(workspace, 'source.assets');
+  fs.mkdirSync(assetDir);
+  fs.writeFileSync(path.join(assetDir, 'architecture.png'), ONE_BY_ONE_PNG);
+
   return normalizeMarkdownSource({
     sourcePath: path.join(workspace, 'source.md'),
     markdownText: [
@@ -37,6 +46,8 @@ async function makeSourcePackage(workspace) {
       '  B --> C[模板渲染]',
       '```',
       '',
+      '![系统总体架构](architecture.png)',
+      '',
       '## 二、实施安排',
       '',
       '按试点、推广、验收分阶段推进。',
@@ -50,7 +61,7 @@ test('buildRenderPlan binds sections, assets, and template data in source order'
   const sourcePackage = await makeSourcePackage(workspace);
   const assetPackage = packageAssets({
     sourcePackage,
-    assetDir: '',
+    assetDir: 'source.assets',
     outDir: path.join(workspace, 'assets'),
   });
   const templatePackage = getTemplatePackage('general-proposal');
@@ -66,8 +77,56 @@ test('buildRenderPlan binds sections, assets, and template data in source order'
   assert.equal(renderPlan.figures[0].sectionTitle, '一、总体架构');
   assert.equal(renderPlan.tables[0].tableId, 'tbl-001');
   assert.equal(renderPlan.templateData.images[0].figureId, 'fig-001');
+  assert.equal(renderPlan.templateData.images[1].figureId, 'image-001');
+  assert.equal(renderPlan.templateData.images[1].metadata.sourceType, 'image');
+  assert.ok(renderPlan.templateData.images[1].path.endsWith('architecture.png'));
   assert.equal(renderPlan.templateData.tables[0].tableId, 'tbl-001');
+  assert.equal(
+    renderPlan.templateData.sections[0].blocks.some(
+      (block) => block.type === 'figure' && block.figureId === 'image-001'
+    ),
+    true
+  );
 
   const result = validateDomainObject('RenderPlan', renderPlan);
   assert.equal(result.ok, true, JSON.stringify(result.errors || result));
+});
+
+test('buildRenderPlan orders template images by source block order across image types', async (t) => {
+  const workspace = makeWorkspace(t);
+  const assetDir = path.join(workspace, 'source.assets');
+  fs.mkdirSync(assetDir);
+  fs.writeFileSync(path.join(assetDir, 'architecture.png'), ONE_BY_ONE_PNG);
+  const sourcePackage = await normalizeMarkdownSource({
+    sourcePath: path.join(workspace, 'source.md'),
+    markdownText: [
+      '# 太极 Agent 企业知识助手建设方案',
+      '',
+      '## 一、总体架构',
+      '',
+      '![系统总体架构](architecture.png)',
+      '',
+      '```mermaid',
+      'flowchart LR',
+      '  A[用户资料] --> B[结构化草稿]',
+      '```',
+      '',
+    ].join('\n'),
+  });
+  const assetPackage = packageAssets({
+    sourcePackage,
+    assetDir: 'source.assets',
+    outDir: path.join(workspace, 'assets'),
+  });
+
+  const renderPlan = buildRenderPlan({
+    sourcePackage,
+    templatePackage: getTemplatePackage('general-proposal'),
+    assetPackage,
+  });
+
+  assert.deepEqual(
+    renderPlan.templateData.images.map((image) => image.figureId),
+    ['image-001', 'fig-001']
+  );
 });

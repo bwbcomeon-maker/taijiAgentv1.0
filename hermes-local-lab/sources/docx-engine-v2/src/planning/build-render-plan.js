@@ -12,6 +12,7 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
   }
 
   const sectionById = new Map((sourcePackage.sections || []).map((section) => [section.sectionId, section]));
+  const templateImages = buildTemplateImages(sourcePackage, assetPackage, sectionById);
   const renderPlan = {
     schemaVersion: 'docx-engine-v2/render-plan',
     jobId: sourcePackage.sourceRef?.sha256
@@ -56,17 +57,7 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
     templateData: {
       title: sourcePackage.title || '',
       sections: buildTemplateSections(sourcePackage, assetPackage),
-      images: (assetPackage.figures || []).map((figure, index) => ({
-        figureId: figure.figureId,
-        path: figure.displayPath,
-        caption: figure.caption || `图 ${index + 1}`,
-        metadata: {
-          ...(figure.metadata || {}),
-          sectionId: figure.sectionId || '',
-          sectionTitle: sectionById.get(figure.sectionId)?.title || '',
-          templatePath: `images.${index}`,
-        },
-      })),
+      images: templateImages,
       tables: (assetPackage.tables || []).map((table, index) => ({
         tableId: table.tableId,
         title: table.title || `表格 ${index + 1}`,
@@ -93,6 +84,7 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
 function buildTemplateSections(sourcePackage, assetPackage) {
   const tableIds = new Set((assetPackage.tables || []).map((table) => table.tableId));
   const figureIds = new Set((assetPackage.figures || []).map((figure) => figure.figureId));
+  const imageIds = new Set((assetPackage.images || []).map((image) => image.imageId));
 
   return (sourcePackage.sections || []).map((section) => ({
     sectionId: section.sectionId,
@@ -100,12 +92,82 @@ function buildTemplateSections(sourcePackage, assetPackage) {
     level: section.level,
     blocks: (sourcePackage.blocks || [])
       .filter((block) => block.sectionId === section.sectionId)
-      .map((block) => toTemplateBlock(block, tableIds, figureIds))
+      .map((block) => toTemplateBlock(block, tableIds, figureIds, imageIds))
       .filter(Boolean),
   }));
 }
 
-function toTemplateBlock(block, tableIds, figureIds) {
+function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
+  const figureById = new Map((assetPackage.figures || []).map((figure) => [figure.figureId, figure]));
+  const imageById = new Map((assetPackage.images || []).map((image) => [image.imageId, image]));
+  const usedImageKeys = new Set();
+  const orderedImages = [];
+
+  for (const block of sourcePackage.blocks || []) {
+    const figureId = block.metadata?.figureId;
+    if (figureId && figureById.has(figureId) && !usedImageKeys.has(`figure:${figureId}`)) {
+      usedImageKeys.add(`figure:${figureId}`);
+      orderedImages.push(toTemplateFigureImage(figureById.get(figureId), orderedImages.length, sectionById));
+      continue;
+    }
+
+    const imageId = block.metadata?.imageId;
+    if (imageId && imageById.has(imageId) && !usedImageKeys.has(`image:${imageId}`)) {
+      usedImageKeys.add(`image:${imageId}`);
+      orderedImages.push(toTemplateMarkdownImage(imageById.get(imageId), orderedImages.length, sectionById));
+    }
+  }
+
+  for (const figure of assetPackage.figures || []) {
+    if (!usedImageKeys.has(`figure:${figure.figureId}`)) {
+      usedImageKeys.add(`figure:${figure.figureId}`);
+      orderedImages.push(toTemplateFigureImage(figure, orderedImages.length, sectionById));
+    }
+  }
+
+  for (const image of assetPackage.images || []) {
+    if (!usedImageKeys.has(`image:${image.imageId}`)) {
+      usedImageKeys.add(`image:${image.imageId}`);
+      orderedImages.push(toTemplateMarkdownImage(image, orderedImages.length, sectionById));
+    }
+  }
+
+  return orderedImages;
+}
+
+function toTemplateFigureImage(figure, index, sectionById) {
+  return {
+    figureId: figure.figureId,
+    path: figure.displayPath,
+    caption: figure.caption || `图 ${index + 1}`,
+    metadata: {
+      ...(figure.metadata || {}),
+      sourceType: 'figure',
+      sectionId: figure.sectionId || '',
+      sectionTitle: sectionById.get(figure.sectionId)?.title || '',
+      templatePath: `images.${index}`,
+    },
+  };
+}
+
+function toTemplateMarkdownImage(image, index, sectionById) {
+  return {
+    figureId: image.imageId,
+    path: image.displayPath,
+    caption: image.caption || `图片 ${index + 1}`,
+    metadata: {
+      ...(image.metadata || {}),
+      imageId: image.imageId,
+      sourceType: 'image',
+      sourcePath: image.sourcePath,
+      sectionId: image.sectionId || '',
+      sectionTitle: sectionById.get(image.sectionId)?.title || '',
+      templatePath: `images.${index}`,
+    },
+  };
+}
+
+function toTemplateBlock(block, tableIds, figureIds, imageIds) {
   const tableId = block.metadata?.tableId;
   if (tableId && tableIds.has(tableId)) {
     return {
@@ -123,6 +185,17 @@ function toTemplateBlock(block, tableIds, figureIds) {
       blockId: block.id,
       figureId,
       anchor: block.anchorText || figureId,
+    };
+  }
+
+  const imageId = block.metadata?.imageId;
+  if (imageId && imageIds.has(imageId)) {
+    return {
+      type: 'figure',
+      blockId: block.id,
+      figureId: imageId,
+      title: block.caption || block.text || imageId,
+      anchor: block.anchorText || imageId,
     };
   }
 

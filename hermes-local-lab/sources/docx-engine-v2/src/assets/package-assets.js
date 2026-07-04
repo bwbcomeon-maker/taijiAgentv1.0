@@ -18,10 +18,10 @@ function packageAssets({ sourcePackage, assetDir = '', outDir } = {}) {
   fs.mkdirSync(absoluteOutDir, { recursive: true });
 
   const workspace = path.dirname(absoluteOutDir);
-  const absoluteAssetDir = assetDir ? path.resolve(assetDir) : '';
   const sourceBaseDir = sourcePackage.sourceRef?.path
     ? path.dirname(path.resolve(sourcePackage.sourceRef.path))
     : process.cwd();
+  const absoluteAssetDir = resolveAssetDir(assetDir, sourceBaseDir);
 
   const assetPackage = {
     schemaVersion: 'docx-engine-v2/asset-package',
@@ -59,6 +59,7 @@ function packageFigure({
   sourceBaseDir,
 }) {
   const figureId = figure.figureId || nextId('fig', index + 1);
+  assertSafeAssetId(figureId, 'figureId');
   const figureDir = path.join(absoluteOutDir, figureId);
   fs.mkdirSync(figureDir, { recursive: true });
 
@@ -113,6 +114,7 @@ function packageFigure({
 }
 
 function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sourceBaseDir }) {
+  assertSafeAssetId(image.imageId, 'imageId');
   const sourcePath = resolveExistingAssetPath({
     requestedPath: image.path,
     absoluteAssetDir,
@@ -140,6 +142,28 @@ function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sour
     sectionId: image.sectionId || '',
     metadata: { ...(image.metadata || {}) },
   };
+}
+
+function resolveAssetDir(assetDir, sourceBaseDir) {
+  if (!assetDir) {
+    return '';
+  }
+  if (path.isAbsolute(assetDir)) {
+    return assetDir;
+  }
+
+  const sourceRelative = path.resolve(sourceBaseDir, assetDir);
+  if (fs.existsSync(sourceRelative)) {
+    return sourceRelative;
+  }
+
+  return path.resolve(process.cwd(), assetDir);
+}
+
+function assertSafeAssetId(assetId, fieldName) {
+  if (!/^[A-Za-z0-9_-]+$/.test(assetId || '')) {
+    throw new Error(`不安全的资产标识: ${fieldName}=${assetId || ''}`);
+  }
 }
 
 function resolveExistingAssetPath({ requestedPath, absoluteAssetDir, sourceBaseDir }) {
