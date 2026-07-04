@@ -537,6 +537,7 @@ const schemas = {
         required: [
           'document',
           'source',
+          'originalSource',
           'assetsDir',
           'jobManifest',
           'templateManifest',
@@ -547,6 +548,7 @@ const schemas = {
         properties: {
           document: { type: 'string', minLength: 1 },
           source: { type: 'string', minLength: 1 },
+          originalSource: { type: 'string', minLength: 1 },
           assetsDir: { type: 'string', minLength: 1 },
           jobManifest: { type: 'string', minLength: 1 },
           templateManifest: { type: 'string', minLength: 1 },

@@ -9,6 +9,7 @@ const IMAGE_INSTRUCTIONS = [
   '本交付包保留了可编辑资产和生成后的 DOCX：',
   '',
   '- `document.docx` 是生成文档。',
+  '- `source/original/` 保存原始输入文件，`source.md` 是用于人工查看的 Markdown 副本。',
   '- `assets/` 保存图片、图形源文件和展示文件。',
   '- `render-plan.json` 记录图表与模板位置绑定关系。',
   '- 如需替换图片，优先修改 `assets/` 中对应源文件，再按 `figureId` 回写或重渲染文档。',
@@ -57,6 +58,7 @@ function writeDeliveryPackage({
   const deliveryDocumentPath = path.join(deliveryDir, 'document.docx');
   fs.copyFileSync(documentPath, deliveryDocumentPath);
   fs.writeFileSync(path.join(deliveryDir, 'source.md'), sourceMarkdown(sourcePackage), 'utf8');
+  const originalSource = copyOriginalSource({ deliveryDir, sourcePackage });
   copyAssets({ deliveryDir, sourcePackage, assetPackage });
   writeJson(path.join(deliveryDir, 'job.manifest.json'), normalizedJob);
   writeJson(path.join(deliveryDir, 'template.manifest.json'), templatePackage.manifest || {});
@@ -70,6 +72,7 @@ function writeDeliveryPackage({
     files: {
       document: 'document.docx',
       source: 'source.md',
+      originalSource,
       assetsDir: 'assets',
       jobManifest: 'job.manifest.json',
       templateManifest: 'template.manifest.json',
@@ -85,6 +88,31 @@ function writeDeliveryPackage({
   }
 
   return deliveryPackage;
+}
+
+function copyOriginalSource({ deliveryDir, sourcePackage }) {
+  const sourcePath = sourcePackage?.sourceRef?.path || '';
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    throw new Error(`Original source file does not exist: ${sourcePath}`);
+  }
+  const originalSource = path.join('source', 'original', originalSourceFileName(sourcePackage.sourceRef));
+  const targetPath = path.join(deliveryDir, originalSource);
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.copyFileSync(sourcePath, targetPath);
+  return originalSource;
+}
+
+function originalSourceFileName(sourceRef = {}) {
+  const baseName = path.basename(String(sourceRef.path || '')).trim();
+  if (baseName && baseName !== '.' && baseName !== '..') {
+    return baseName;
+  }
+  const extensionByType = {
+    markdown: '.md',
+    text: '.txt',
+    docx: '.docx',
+  };
+  return `source${extensionByType[sourceRef.type] || ''}`;
 }
 
 function assertDomainObject(schemaName, value, label) {

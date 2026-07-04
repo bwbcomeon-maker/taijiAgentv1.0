@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const zlib = require('node:zlib');
 
@@ -6,6 +7,7 @@ const { validateDomainObject } = require('../domain/validate');
 
 const CHECK_IDS = [
   'schema',
+  'source_original',
   'docx_zip',
   'template_markers',
   'image_coverage',
@@ -18,6 +20,7 @@ const CHECK_IDS = [
 const REQUIRED_ENTRIES = [
   'document.docx',
   'source.md',
+  'source/original',
   'assets',
   'job.manifest.json',
   'template.manifest.json',
@@ -82,6 +85,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   }
 
   addSchemaCheck({ addCheck, jsonFiles });
+  addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest: jsonFiles.jobManifest });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addTemplateMarkersCheck({ addCheck, documentXml });
   addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan: jsonFiles.renderPlan });
@@ -131,6 +135,47 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
 
 function tagValidationErrors(source, errors) {
   return (errors || []).map((error) => ({ source, ...error }));
+}
+
+function addSourceOriginalCheck({ addCheck, deliveryDir, jobManifest }) {
+  const sourceRef = jobManifest?.sourceRef || {};
+  const expectedHash = String(sourceRef.sha256 || '').trim();
+  const originalSourcePath = path.join(deliveryDir, 'source', 'original', originalSourceFileName(sourceRef));
+  if (!expectedHash) {
+    addCheck('source_original', 'failed', 'job.manifest.json sourceRef.sha256 is required for original source validation.');
+    return;
+  }
+  if (!fs.existsSync(originalSourcePath)) {
+    addCheck('source_original', 'failed', `Original source copy is missing: ${path.relative(deliveryDir, originalSourcePath)}`);
+    return;
+  }
+  const actualHash = sha256File(originalSourcePath);
+  if (actualHash !== expectedHash) {
+    addCheck(
+      'source_original',
+      'failed',
+      `Original source hash mismatch: expected ${expectedHash}, got ${actualHash}`
+    );
+    return;
+  }
+  addCheck('source_original', 'passed');
+}
+
+function originalSourceFileName(sourceRef = {}) {
+  const baseName = path.basename(String(sourceRef.path || '')).trim();
+  if (baseName && baseName !== '.' && baseName !== '..') {
+    return baseName;
+  }
+  const extensionByType = {
+    markdown: '.md',
+    text: '.txt',
+    docx: '.docx',
+  };
+  return `source${extensionByType[sourceRef.type] || ''}`;
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function addDocxZipCheck({ addCheck, deliveryDir }) {

@@ -10,6 +10,7 @@ const RUN_JOB = path.join(ENGINE_ROOT, 'src', 'cli', 'run-job.js');
 const REQUIRED_DELIVERY_ENTRIES = [
   'document.docx',
   'source.md',
+  'source/original',
   'assets',
   'job.manifest.json',
   'template.manifest.json',
@@ -177,6 +178,10 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   for (const entry of REQUIRED_DELIVERY_ENTRIES) {
     assert.equal(fs.existsSync(path.join(deliveryDir, entry)), true, `${entry} must exist`);
   }
+  assert.equal(
+    fs.readFileSync(path.join(deliveryDir, 'source', 'original', path.basename(sourcePath)), 'utf8'),
+    fs.readFileSync(sourcePath, 'utf8')
+  );
 
   const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
   assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
@@ -208,6 +213,9 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   const wpsVisualCheck = findQualityCheck(qualityReport, 'wps_visual');
   assert.ok(wpsVisualCheck, 'quality-report.json must include a wps_visual check');
   assert.equal(wpsVisualCheck.status, 'not_verified');
+  const originalSourceCheck = findQualityCheck(qualityReport, 'source_original');
+  assert.ok(originalSourceCheck, 'quality-report.json must include a source_original check');
+  assert.equal(originalSourceCheck.status, 'passed');
   const templateMarkersCheck = findQualityCheck(qualityReport, 'template_markers');
   assert.ok(templateMarkersCheck, 'quality-report.json must include a template_markers check');
   assert.equal(templateMarkersCheck.status, 'passed');

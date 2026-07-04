@@ -163,6 +163,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
     report.checks.map((check) => check.id),
     [
       'schema',
+      'source_original',
       'docx_zip',
       'template_markers',
       'image_coverage',
@@ -172,6 +173,31 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'wps_visual',
     ]
   );
+});
+
+test('validateDeliveryPackage fails when the original source copy is missing', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  fs.rmSync(path.join(deliveryDir, 'source', 'original'), { recursive: true, force: true });
+  const report = validateDeliveryPackage({ deliveryDir });
+  const sourceCheck = report.checks.find((check) => check.id === 'source_original');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(sourceCheck?.status, 'failed');
+  assert.match(sourceCheck?.message || '', /original source/i);
+});
+
+test('validateDeliveryPackage fails when the original source copy hash differs from sourceRef', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+
+  const sourceCopy = path.join(deliveryDir, 'source', 'original', 'source.md');
+  fs.writeFileSync(sourceCopy, '# Tampered source\n', 'utf8');
+  const report = validateDeliveryPackage({ deliveryDir });
+  const sourceCheck = report.checks.find((check) => check.id === 'source_original');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(sourceCheck?.status, 'failed');
+  assert.match(sourceCheck?.message || '', /hash/i);
 });
 
 test('validateDeliveryPackage fails when a required delivery file is missing', async (t) => {

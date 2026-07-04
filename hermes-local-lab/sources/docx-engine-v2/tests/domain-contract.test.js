@@ -418,6 +418,7 @@ test('DeliveryPackage contract requires the complete editable delivery bundle', 
     files: {
       document: 'document.docx',
       source: 'source.md',
+      originalSource: 'source/original/source.md',
       assetsDir: 'assets',
       jobManifest: 'job.manifest.json',
       templateManifest: 'template.manifest.json',
