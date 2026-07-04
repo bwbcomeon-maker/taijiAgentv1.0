@@ -536,6 +536,34 @@ const schemas = {
     },
   },
 
+  ReplayReport: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['schemaVersion', 'status', 'replayedAt', 'deliveryDir', 'checks', 'warnings', 'failures'],
+    properties: {
+      schemaVersion: { const: 'docx-engine-v2/replay-report' },
+      status: { enum: STATUSES.check },
+      replayedAt: { type: 'string', minLength: 1 },
+      deliveryDir: { type: 'string', minLength: 1 },
+      replayedDocumentPath: { type: 'string' },
+      checks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          required: ['id', 'status'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+            status: { enum: STATUSES.check },
+            message: { type: 'string' },
+          },
+        },
+      },
+      warnings: stringArraySchema,
+      failures: stringArraySchema,
+    },
+  },
+
   FailureReport: {
     type: 'object',
     additionalProperties: false,

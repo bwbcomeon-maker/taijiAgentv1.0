@@ -697,6 +697,37 @@ test('validateDeliveryPackage fails when replay-report.json no longer matches th
   assert.ok(report.failures.some((failure) => /replay-report\.json sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when replay-report.json records a failed replay', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const replayReportPath = path.join(deliveryDir, 'replay-report.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  fs.writeFileSync(
+    replayReportPath,
+    `${JSON.stringify({
+      schemaVersion: 'docx-engine-v2/replay-report',
+      status: 'failed',
+      replayedAt: '2026-07-05T00:00:00.000Z',
+      deliveryDir,
+      checks: [{ id: 'document_replay', status: 'failed', message: 'document.docx drifted' }],
+      warnings: [],
+      failures: ['document.docx drifted'],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  deliveryManifest.files.replayReport = 'replay-report.json';
+  deliveryManifest.fileSha256.replayReport = sha256File(replayReportPath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /replay-report\.json.*failed/i);
+});
+
 test('validateDeliveryPackage fails when asset package tables disagree with the source package', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const assetPackagePath = path.join(deliveryDir, 'asset-package.json');

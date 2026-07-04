@@ -109,6 +109,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
     ['templateManifest', 'template.manifest.json'],
     ['renderPlan', 'render-plan.json'],
     ['qualityReport', 'quality-report.json'],
+    ['replayReport', 'replay-report.json'],
   ]) {
     const filePath = path.join(deliveryDir, fileName);
     if (!fs.existsSync(filePath)) {
@@ -204,6 +205,9 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
   const templateManifestResult = validateDomainObject('TemplateManifest', jsonFiles.templateManifest);
   const renderPlanResult = validateDomainObject('RenderPlan', jsonFiles.renderPlan);
   const qualityReportResult = validateDomainObject('ValidationReport', jsonFiles.qualityReport);
+  const replayReportResult = jsonFiles.replayReport
+    ? validateDomainObject('ReplayReport', jsonFiles.replayReport)
+    : { ok: true, errors: [] };
   if (
     !deliveryPackageResult.ok ||
     !sourcePackageResult.ok ||
@@ -211,7 +215,8 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     !jobManifestResult.ok ||
     !templateManifestResult.ok ||
     !renderPlanResult.ok ||
-    !qualityReportResult.ok
+    !qualityReportResult.ok ||
+    !replayReportResult.ok
   ) {
     addCheck(
       'schema',
@@ -224,7 +229,17 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
         ...tagValidationErrors('template.manifest.json', templateManifestResult.errors),
         ...tagValidationErrors('render-plan.json', renderPlanResult.errors),
         ...tagValidationErrors('quality-report.json', qualityReportResult.errors),
+        ...tagValidationErrors('replay-report.json', replayReportResult.errors),
       ])}`
+    );
+    return;
+  }
+
+  if (jsonFiles.replayReport?.status === 'failed') {
+    addCheck(
+      'schema',
+      'failed',
+      `replay-report.json records a failed delivery replay: ${(jsonFiles.replayReport.failures || []).join('; ') || 'unknown failure'}`
     );
     return;
   }
