@@ -411,6 +411,20 @@ test('validateDeliveryPackage fails when image instructions no longer list edita
   assert.ok(report.failures.some((failure) => /README-图片调整说明\.md/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when delivery assets contain untracked files', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  fs.writeFileSync(path.join(deliveryDir, 'assets', '.DS_Store'), 'finder metadata', 'utf8');
+  fs.writeFileSync(path.join(deliveryDir, 'assets', 'secret.txt'), 'untracked file', 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const imageCoverage = report.checks.find((check) => check.id === 'image_coverage');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(imageCoverage?.status, 'failed');
+  assert.match(imageCoverage?.message || '', /untracked delivery asset files/i);
+  assert.match(imageCoverage?.message || '', /\.DS_Store|secret\.txt/);
+});
+
 test('validate-delivery CLI emits a delivery quality report as JSON', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   attachReplayReport(deliveryDir);

@@ -148,7 +148,19 @@ function copyAssets({ deliveryDir, sourcePackage, assetPackage }) {
     return;
   }
 
-  copyDirectoryContents(sourceAssetsDir, targetAssetsDir);
+  for (const relativePath of declaredAssetFilePaths(assetPackage)) {
+    const normalizedPath = normalizeRelativePackagePath(relativePath);
+    if (!normalizedPath || !normalizedPath.startsWith('assets/')) {
+      continue;
+    }
+    const sourcePath = path.join(sourceAssetsDir, normalizedPath.slice('assets/'.length));
+    if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+      continue;
+    }
+    const targetPath = path.join(deliveryDir, normalizedPath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(sourcePath, targetPath);
+  }
 }
 
 function resolveAssetPackageDir({ sourcePackage, assetPackage, deliveryDir }) {
@@ -168,19 +180,26 @@ function resolveAssetPackageDir({ sourcePackage, assetPackage, deliveryDir }) {
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0] || '';
 }
 
-function copyDirectoryContents(sourceDir, targetDir) {
-  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-    const sourcePath = path.join(sourceDir, entry.name);
-    const targetPath = path.join(targetDir, entry.name);
-    if (entry.isDirectory()) {
-      fs.mkdirSync(targetPath, { recursive: true });
-      copyDirectoryContents(sourcePath, targetPath);
-      continue;
-    }
-    if (entry.isFile()) {
-      fs.copyFileSync(sourcePath, targetPath);
-    }
+function declaredAssetFilePaths(assetPackage) {
+  const paths = [];
+  for (const figure of assetPackage.figures || []) {
+    paths.push(figure.displayPath, figure.editable?.sourcePath);
   }
+  for (const image of assetPackage.images || []) {
+    paths.push(image.displayPath, image.sourcePath);
+  }
+  return paths.filter(Boolean);
+}
+
+function normalizeRelativePackagePath(value) {
+  if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value)) {
+    return '';
+  }
+  const normalized = path.normalize(value).replaceAll(path.sep, '/');
+  if (normalized === '..' || normalized.startsWith('../')) {
+    return '';
+  }
+  return normalized;
 }
 
 function sourceMarkdown(sourcePackage) {

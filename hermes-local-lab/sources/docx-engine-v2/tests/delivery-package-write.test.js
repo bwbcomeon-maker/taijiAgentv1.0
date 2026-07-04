@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -129,6 +130,10 @@ function createValidatedJob({ sourcePackage, renderPlan, templatePackage, worksp
   return transitionJob(job, 'validated');
 }
 
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
 test('writeDeliveryPackage rejects an untraceable job manifest before writing files', (t) => {
   const input = makePackageInput(t);
 
@@ -137,6 +142,32 @@ test('writeDeliveryPackage rejects an untraceable job manifest before writing fi
     /DocumentJob manifest validation failed/
   );
   assert.equal(fs.existsSync(input.deliveryDir), false);
+});
+
+test('writeDeliveryPackage copies only asset-package declared files', (t) => {
+  const input = makePackageInput(t);
+  const imagePath = path.join(input.workspace, 'assets', 'image-001', 'architecture.png');
+  fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+  fs.writeFileSync(imagePath, 'declared image asset', 'utf8');
+  fs.writeFileSync(path.join(input.workspace, 'assets', '.DS_Store'), 'finder metadata', 'utf8');
+  fs.writeFileSync(path.join(input.workspace, 'assets', 'secret.txt'), 'untracked file', 'utf8');
+  input.assetPackage.images = [
+    {
+      imageId: 'image-001',
+      sourcePath: 'assets/image-001/architecture.png',
+      displayPath: 'assets/image-001/architecture.png',
+      sha256: sha256File(imagePath),
+      caption: 'Architecture',
+      sectionId: '',
+      metadata: {},
+    },
+  ];
+
+  writeDeliveryPackage(input);
+
+  assert.equal(fs.existsSync(path.join(input.deliveryDir, 'assets', 'image-001', 'architecture.png')), true);
+  assert.equal(fs.existsSync(path.join(input.deliveryDir, 'assets', '.DS_Store')), false);
+  assert.equal(fs.existsSync(path.join(input.deliveryDir, 'assets', 'secret.txt')), false);
 });
 
 test('writeDeliveryPackage rejects an incomplete template manifest before writing files', (t) => {

@@ -1463,6 +1463,15 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan,
     addCheck('image_coverage', 'failed', `Missing delivery image assets: ${missingImages.join(', ')}`);
     return;
   }
+  const untrackedAssetFiles = untrackedDeliveryAssetFiles({ deliveryDir, assetPackage, renderPlan });
+  if (untrackedAssetFiles.length > 0) {
+    addCheck(
+      'image_coverage',
+      'failed',
+      `Untracked delivery asset files are not declared in asset-package.json or render-plan.json: ${untrackedAssetFiles.join(', ')}`
+    );
+    return;
+  }
   const missingHashes = images
     .filter((image) => !/^[a-f0-9]{64}$/.test(String(image?.sha256 || '')))
     .map((image) => image.path || image.figureId || 'unknown');
@@ -1511,6 +1520,48 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan,
   }
 
   addCheck('image_coverage', 'passed');
+}
+
+function untrackedDeliveryAssetFiles({ deliveryDir, assetPackage, renderPlan }) {
+  const assetsDir = path.join(deliveryDir, 'assets');
+  if (!fs.existsSync(assetsDir)) {
+    return [];
+  }
+  const allowedPaths = declaredDeliveryAssetPathSet({ assetPackage, renderPlan });
+  return listPackageFiles(assetsDir, 'assets')
+    .filter((filePath) => !allowedPaths.has(filePath));
+}
+
+function declaredDeliveryAssetPathSet({ assetPackage, renderPlan }) {
+  const values = [];
+  for (const image of renderPlan?.templateData?.images || []) {
+    values.push(image.path);
+  }
+  for (const figure of assetPackage?.figures || []) {
+    values.push(figure.displayPath, figure.editable?.sourcePath);
+  }
+  for (const image of assetPackage?.images || []) {
+    values.push(image.displayPath, image.sourcePath);
+  }
+  return new Set(
+    values
+      .map(normalizeRelativePackagePath)
+      .filter((filePath) => filePath && filePath.startsWith('assets/'))
+  );
+}
+
+function listPackageFiles(rootDir, packagePrefix) {
+  const files = [];
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    const absolutePath = path.join(rootDir, entry.name);
+    const packagePath = `${packagePrefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...listPackageFiles(absolutePath, packagePath));
+      continue;
+    }
+    files.push(packagePath.replaceAll(path.sep, '/'));
+  }
+  return files.sort();
 }
 
 function editableFigureSourceFailures({ deliveryDir, assetPackage }) {
