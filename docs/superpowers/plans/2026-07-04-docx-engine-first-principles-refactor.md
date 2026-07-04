@@ -53,3 +53,4 @@
 - 已让交付包复验拒绝 `render-plan.json` 中不指向包内 `assets/` 的图片路径，避免渲染计划把图片绑定到 `document.docx` 等错误角色文件却仍被判定为图片资产完整。
 - 已让资产包和 `render-plan.json` 记录每张渲染图片的 SHA-256，并在交付包复验时比对实际 `assets/` 文件，避免图片资产被替换后仍通过质量门。
 - 已让交付包复验校验 `job.manifest.json`、`render-plan.json`、`template.manifest.json` 的模板 ID 一致性，避免多个清单各自合法但指向不同模板。
+- 已让交付包复验校验 `job.manifest.json` 与 `render-plan.json` 的 jobId 一致性，避免作业清单和渲染计划各自合法但来自不同作业。

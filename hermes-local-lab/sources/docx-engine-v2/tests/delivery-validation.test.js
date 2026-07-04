@@ -490,6 +490,21 @@ test('validateDeliveryPackage fails when package manifests disagree on template 
   assert.match(consistencyCheck?.message || '', /template id|job\.manifest|render-plan|template\.manifest/i);
 });
 
+test('validateDeliveryPackage fails when job and render plan disagree on job id', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  renderPlan.jobId = 'job-other-render-plan';
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const consistencyCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(consistencyCheck?.status, 'failed');
+  assert.match(consistencyCheck?.message || '', /job id|job\.manifest|render-plan/i);
+});
+
 test('validateDeliveryPackage requires figure ids to be bound to DOCX image metadata', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await removeFigureIdFromDocPr(path.join(deliveryDir, 'document.docx'), 'fig-002');

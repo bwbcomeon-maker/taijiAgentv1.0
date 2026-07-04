@@ -178,6 +178,22 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     return;
   }
 
+  const jobIds = {
+    'job.manifest.json': String(jsonFiles.jobManifest.jobId || ''),
+    'render-plan.json': String(jsonFiles.renderPlan.jobId || ''),
+  };
+  const uniqueJobIds = [...new Set(Object.values(jobIds).filter(Boolean))];
+  if (uniqueJobIds.length !== 1) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package job id mismatch: ${Object.entries(jobIds)
+        .map(([fileName, jobId]) => `${fileName}=${jobId || 'missing'}`)
+        .join(', ')}`
+    );
+    return;
+  }
+
   addCheck('schema', 'passed');
 }
 
