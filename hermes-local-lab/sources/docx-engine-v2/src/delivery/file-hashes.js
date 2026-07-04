@@ -17,6 +17,15 @@ const HASHED_FILE_ROLES = [
 const OPTIONAL_HASHED_FILE_ROLES = [
   'replayReport',
 ];
+const REPLAY_INPUT_FILE_ROLES = [
+  'document',
+  'sourcePackage',
+  'originalSource',
+  'assetPackage',
+  'jobManifest',
+  'templateManifest',
+  'renderPlan',
+];
 
 function buildDeliveryFileSha256({ deliveryDir, files, roles = HASHED_FILE_ROLES } = {}) {
   const hashes = {};
@@ -120,6 +129,7 @@ function writeJson(filePath, value) {
 module.exports = {
   HASHED_FILE_ROLES,
   OPTIONAL_HASHED_FILE_ROLES,
+  REPLAY_INPUT_FILE_ROLES,
   buildDeliveryFileSha256,
   deliveryFileHashFailures,
   refreshDeliveryPackageFileHashes,

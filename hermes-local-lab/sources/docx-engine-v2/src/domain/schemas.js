@@ -545,6 +545,19 @@ const schemas = {
       status: { enum: STATUSES.check },
       replayedAt: { type: 'string', minLength: 1 },
       deliveryDir: { type: 'string', minLength: 1 },
+      inputFileSha256: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          document: sha256Schema,
+          sourcePackage: sha256Schema,
+          originalSource: sha256Schema,
+          assetPackage: sha256Schema,
+          jobManifest: sha256Schema,
+          templateManifest: sha256Schema,
+          renderPlan: sha256Schema,
+        },
+      },
       replayedDocumentPath: { type: 'string' },
       checks: {
         type: 'array',

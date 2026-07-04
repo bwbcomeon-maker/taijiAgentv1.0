@@ -20,6 +20,7 @@ const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
 const { validateDeliveryPackage } = require('../src/validation/validate-delivery-package');
 const { recordWpsVisualAcceptance } = require('../src/validation/record-wps-visual-acceptance');
+const { REPLAY_INPUT_FILE_ROLES } = require('../src/delivery/file-hashes');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const VALIDATE_DELIVERY = path.join(ENGINE_ROOT, 'src', 'cli', 'validate-delivery.js');
@@ -143,6 +144,7 @@ function attachReplayReport(deliveryDir, overrides = {}) {
     status: 'passed',
     replayedAt: '2026-07-05T00:00:00.000Z',
     deliveryDir,
+    inputFileSha256: replayInputFileSha256(deliveryManifest),
     checks: [{ id: 'document_replay', status: 'passed' }],
     warnings: [],
     failures: [],
@@ -154,6 +156,13 @@ function attachReplayReport(deliveryDir, overrides = {}) {
   deliveryManifest.fileSha256.replayReport = sha256File(replayReportPath);
   fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
   return replayReport;
+}
+
+function replayInputFileSha256(deliveryManifest) {
+  const fileSha256 = deliveryManifest.fileSha256 || {};
+  return Object.fromEntries(
+    REPLAY_INPUT_FILE_ROLES.map((role) => [role, fileSha256[role]]).filter(([, hash]) => hash)
+  );
 }
 
 function buildValidatedJob({
@@ -281,6 +290,18 @@ test('validateDeliveryPackage final mode accepts a hash-bound replay-report.json
 
   assert.ok(['passed', 'passed_with_warnings'].includes(report.status));
   assert.equal(replayReportCheck?.status, 'passed');
+});
+
+test('validateDeliveryPackage final mode fails when replay-report.json is not bound to package file hashes', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir, { inputFileSha256: undefined });
+
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const replayReportCheck = report.checks.find((check) => check.id === 'replay_report');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(replayReportCheck?.status, 'failed');
+  assert.match(replayReportCheck?.message || '', /inputFileSha256|file hashes/i);
 });
 
 test('validateDeliveryPackage final mode fails when replay-report.json is not verified', async (t) => {

@@ -3,7 +3,11 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
-const { deliveryFileHashFailures } = require('../delivery/file-hashes');
+const {
+  buildDeliveryFileSha256,
+  deliveryFileHashFailures,
+  REPLAY_INPUT_FILE_ROLES,
+} = require('../delivery/file-hashes');
 const { resolveSectionAnchors } = require('../domain/section-anchors');
 const {
   readZipEntriesFromBuffer,
@@ -219,6 +223,20 @@ function addReplayReportCheck({ addCheck, deliveryDir, deliveryPackage, replayRe
   }
 
   const replayStatus = String(replayReport.status || '').trim();
+  const inputHashFailures = replayReportInputFileSha256Failures({
+    deliveryDir,
+    deliveryPackage,
+    replayReport,
+  });
+  if (inputHashFailures.length > 0) {
+    addCheck(
+      'replay_report',
+      'failed',
+      `replay-report.json inputFileSha256 no longer matches current delivery package file hashes: ${inputHashFailures.join('; ')}`
+    );
+    return;
+  }
+
   const failedReplayChecks = replayReportChecksWithStatus(replayReport, 'failed');
   if (replayStatus === 'failed' || failedReplayChecks.length > 0 || (replayReport.failures || []).length > 0) {
     addCheck(
@@ -252,6 +270,35 @@ function addReplayReportCheck({ addCheck, deliveryDir, deliveryPackage, replayRe
   }
 
   addCheck('replay_report', 'passed');
+}
+
+function replayReportInputFileSha256Failures({ deliveryDir, deliveryPackage, replayReport }) {
+  const recorded = replayReport.inputFileSha256;
+  if (!recorded || typeof recorded !== 'object') {
+    return ['inputFileSha256 is required'];
+  }
+  const current = buildDeliveryFileSha256({
+    deliveryDir,
+    files: deliveryPackage?.files || {},
+    roles: REPLAY_INPUT_FILE_ROLES,
+  });
+  const failures = [];
+  for (const role of REPLAY_INPUT_FILE_ROLES) {
+    const recordedHash = String(recorded[role] || '').trim();
+    const currentHash = String(current[role] || '').trim();
+    if (!recordedHash) {
+      failures.push(`${role} hash is missing`);
+      continue;
+    }
+    if (!currentHash) {
+      failures.push(`${role} current hash is missing`);
+      continue;
+    }
+    if (recordedHash !== currentHash) {
+      failures.push(`${role} expected ${recordedHash}, got ${currentHash}`);
+    }
+  }
+  return failures;
 }
 
 function replayReportChecksWithStatus(replayReport, status) {

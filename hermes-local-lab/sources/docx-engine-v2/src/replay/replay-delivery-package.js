@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { buildRenderPlan } = require('../planning/build-render-plan');
+const { buildDeliveryFileSha256, REPLAY_INPUT_FILE_ROLES } = require('../delivery/file-hashes');
 const { postprocessDocx } = require('../rendering/postprocess-docx');
 const { renderDocx } = require('../rendering/render-docx');
 const { readZipEntriesFromBuffer, replayOriginalSourcePackage, sourceReplayFailures } = require('./source-replay');
@@ -23,6 +24,7 @@ async function replayDeliveryPackage({
   let replayedSourcePackage = null;
   let replayedRenderPlan = null;
   let replayedDocumentPath = '';
+  let inputFileSha256 = {};
   let replayOutputWritable = !replayOutputDir;
 
   const addCheck = (id, status, message = '', extra = {}) => {
@@ -61,6 +63,11 @@ async function replayDeliveryPackage({
   let files;
   try {
     files = readDeliveryFiles(absoluteDeliveryDir);
+    inputFileSha256 = buildDeliveryFileSha256({
+      deliveryDir: absoluteDeliveryDir,
+      files: files.deliveryPackage.files,
+      roles: REPLAY_INPUT_FILE_ROLES,
+    });
   } catch (error) {
     addCheck('delivery_files', 'failed', error.message);
     return finalizeReport({
@@ -72,6 +79,7 @@ async function replayDeliveryPackage({
       replayedSourcePackage,
       replayedRenderPlan,
       replayedDocumentPath,
+      inputFileSha256,
       replayOutputWritable,
     });
   }
@@ -152,6 +160,7 @@ async function replayDeliveryPackage({
     replayedSourcePackage,
     replayedRenderPlan,
     replayedDocumentPath,
+    inputFileSha256,
     replayOutputWritable,
   });
 }
@@ -320,6 +329,7 @@ function addReplayResultCheck({ addCheck, result, passedId }) {
 
 function readDeliveryFiles(deliveryDir) {
   return {
+    deliveryPackage: readJson(path.join(deliveryDir, 'delivery-package.json')),
     sourcePackage: readJson(path.join(deliveryDir, 'source-package.json')),
     assetPackage: readJson(path.join(deliveryDir, 'asset-package.json')),
     jobManifest: readJson(path.join(deliveryDir, 'job.manifest.json')),
@@ -380,9 +390,10 @@ function finalizeReport({
   replayedSourcePackage,
   replayedRenderPlan,
   replayedDocumentPath,
+  inputFileSha256 = {},
   replayOutputWritable,
 }) {
-  const report = buildReport({ absoluteDeliveryDir, checks, warnings, failures, replayedDocumentPath });
+  const report = buildReport({ absoluteDeliveryDir, checks, warnings, failures, replayedDocumentPath, inputFileSha256 });
   if (replayOutputDir && replayOutputWritable) {
     fs.mkdirSync(replayOutputDir, { recursive: true });
     if (replayedSourcePackage) {
@@ -396,7 +407,7 @@ function finalizeReport({
   return report;
 }
 
-function buildReport({ absoluteDeliveryDir, checks, warnings, failures, replayedDocumentPath = '' }) {
+function buildReport({ absoluteDeliveryDir, checks, warnings, failures, replayedDocumentPath = '', inputFileSha256 = {} }) {
   const uniqueFailures = uniqueStrings(failures);
   const uniqueWarnings = uniqueStrings(warnings);
   let status = 'passed';
@@ -414,6 +425,7 @@ function buildReport({ absoluteDeliveryDir, checks, warnings, failures, replayed
     status,
     replayedAt: new Date().toISOString(),
     deliveryDir: absoluteDeliveryDir,
+    inputFileSha256,
     replayedDocumentPath: replayedDocumentPath || undefined,
     checks,
     warnings: uniqueWarnings,
