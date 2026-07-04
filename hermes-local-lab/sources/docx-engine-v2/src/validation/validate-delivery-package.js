@@ -48,8 +48,12 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   const jsonFiles = {};
   let documentXml = '';
 
-  const addCheck = (id, status, message = '') => {
-    checksById.set(id, message ? { id, status, message } : { id, status });
+  const addCheck = (id, status, message = '', extra = {}) => {
+    const check = { ...extra, id, status };
+    if (message) {
+      check.message = message;
+    }
+    checksById.set(id, check);
     if (status === 'failed' && message) {
       failures.push(message);
     }
@@ -106,12 +110,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
-  const wpsStatus = normalizeWpsStatus(wpsVisualStatus);
-  addCheck(
-    'wps_visual',
-    wpsStatus,
-    wpsStatus === 'not_verified' ? 'WPS/Word visual inspection has not been performed.' : ''
-  );
+  addWpsVisualCheck({ addCheck, qualityReport: jsonFiles.qualityReport, fallbackStatus: wpsVisualStatus });
 
   return buildReport(checksById, warnings, failures);
 }
@@ -197,6 +196,35 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
   if (failures.length > 0) {
     addCheck('delivery_files', 'failed', `Invalid delivery package file references: ${failures.join('; ')}`);
   }
+}
+
+function addWpsVisualCheck({ addCheck, qualityReport, fallbackStatus }) {
+  const recordedCheck = Array.isArray(qualityReport?.checks)
+    ? qualityReport.checks.find((check) => check?.id === 'wps_visual')
+    : null;
+  const recordedStatus = normalizeOptionalWpsStatus(recordedCheck?.status);
+  const status = recordedStatus || normalizeWpsStatus(fallbackStatus);
+  const message = recordedCheck?.message ||
+    (status === 'not_verified' ? 'WPS/Word visual inspection has not been performed.' : '');
+  addCheck('wps_visual', status, message, wpsVisualEvidence(recordedCheck));
+}
+
+function normalizeOptionalWpsStatus(status) {
+  const normalized = String(status || '').trim();
+  return normalized ? normalizeWpsStatus(normalized) : '';
+}
+
+function wpsVisualEvidence(check) {
+  if (!check || typeof check !== 'object') {
+    return {};
+  }
+  const evidence = {};
+  for (const key of ['reviewedAt', 'reviewedBy']) {
+    if (check[key]) {
+      evidence[key] = check[key];
+    }
+  }
+  return evidence;
 }
 
 function normalizeRelativePackagePath(value) {

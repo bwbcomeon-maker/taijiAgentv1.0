@@ -175,6 +175,37 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
 });
 
+test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const reportPath = path.join(deliveryDir, 'quality-report.json');
+  const qualityReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  qualityReport.status = 'passed';
+  qualityReport.checks = qualityReport.checks.map((check) =>
+    check.id === 'wps_visual'
+      ? {
+          id: 'wps_visual',
+          status: 'passed',
+          message: 'WPS/Word visual inspection passed. 目录、图片和表格已检查。',
+          reviewedAt: '2026-07-05T10:00:00.000Z',
+          reviewedBy: 'user',
+        }
+      : check
+  );
+  qualityReport.warnings = [];
+  qualityReport.failures = [];
+  fs.writeFileSync(reportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const wpsVisual = report.checks.find((check) => check.id === 'wps_visual');
+
+  assert.equal(report.status, 'passed');
+  assert.equal(wpsVisual?.status, 'passed');
+  assert.equal(wpsVisual?.reviewedAt, '2026-07-05T10:00:00.000Z');
+  assert.equal(wpsVisual?.reviewedBy, 'user');
+  assert.match(wpsVisual?.message || '', /目录、图片和表格/);
+  assert.deepEqual(report.warnings, []);
+});
+
 test('validateDeliveryPackage fails when the original source copy is missing', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
 

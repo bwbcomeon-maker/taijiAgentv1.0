@@ -40,3 +40,4 @@
 - 已把原始输入文件复制到 `source/original/` 并新增 `source_original` 质量检查，避免只保留归一化 `source.md` 而丢失真实来源。
 - 已把 `DeliveryPackage` 领域对象持久化为 `delivery-package.json`，并纳入交付包 schema gate；最终清单记录用户目标目录，避免指向临时构建路径。
 - 已校验 `delivery-package.json` 内每个文件角色的包内相对路径与真实文件存在性，避免清单 schema 合格但指向错误文档、错误角色或缺失文件。
+- 已让交付包校验器读取并保留 `quality-report.json` 中已记录的 `wps_visual` 人工验收状态与 reviewer 证据，避免重新校验时把已验收包降回 `not_verified`。
