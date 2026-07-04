@@ -250,6 +250,7 @@ function initialQualityReport() {
       { id: 'template_markers', status: 'not_verified' },
       { id: 'image_coverage', status: 'not_verified' },
       { id: 'table_coverage', status: 'not_verified' },
+      { id: 'table_placement', status: 'not_verified' },
       { id: 'figure_id_metadata', status: 'not_verified' },
       { id: 'figure_placement', status: 'not_verified' },
       { id: 'delivery_files', status: 'not_verified' },

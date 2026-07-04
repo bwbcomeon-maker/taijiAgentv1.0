@@ -13,6 +13,7 @@ const CHECK_IDS = [
   'template_markers',
   'image_coverage',
   'table_coverage',
+  'table_placement',
   'figure_id_metadata',
   'figure_placement',
   'delivery_files',
@@ -119,6 +120,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
     assetPackage: jsonFiles.assetPackage,
   });
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addTablePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigurePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
@@ -714,6 +716,35 @@ function addTableCoverageCheck({ addCheck, documentXml, renderPlan }) {
   addCheck('table_coverage', 'passed');
 }
 
+function addTablePlacementCheck({ addCheck, documentXml, renderPlan }) {
+  if (!documentXml) {
+    addCheck('table_placement', 'failed', 'Cannot inspect table placement without word/document.xml.');
+    return;
+  }
+  if (!renderPlan) {
+    addCheck('table_placement', 'failed', 'render-plan.json is required for table placement validation.');
+    return;
+  }
+
+  const tables = renderPlan.tables || [];
+  if (tables.length === 0) {
+    addCheck('table_placement', 'passed_with_warnings', 'No tables were present in render-plan.json.');
+    return;
+  }
+
+  const placementFailures = tablePlacementFailures({ documentXml, renderPlan });
+  if (placementFailures.length > 0) {
+    addCheck(
+      'table_placement',
+      'failed',
+      `DOCX table placement does not match render-plan sections: ${placementFailures.join(', ')}`
+    );
+    return;
+  }
+
+  addCheck('table_placement', 'passed');
+}
+
 function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
   if (!documentXml) {
     addCheck('figure_id_metadata', 'failed', 'Cannot inspect figure metadata without word/document.xml.');
@@ -886,7 +917,7 @@ function figurePlacementFailures({ documentXml, renderPlan }) {
       continue;
     }
 
-    if (position <= range.start || position >= range.end) {
+    if (position < range.start || position >= range.end) {
       failures.push(
         `${figureId} appears outside section ${sectionId} placement range`
       );
@@ -894,6 +925,49 @@ function figurePlacementFailures({ documentXml, renderPlan }) {
   }
 
   return failures;
+}
+
+function tablePlacementFailures({ documentXml, renderPlan }) {
+  const failures = [];
+  const sectionRanges = figureSectionRanges(documentXml, renderPlan);
+  const tablePositions = tableMarkerPositions(documentXml);
+
+  for (const table of renderPlan.tables || []) {
+    const tableId = String(table?.tableId || '').trim();
+    const sectionId = String(table?.sectionId || '').trim();
+    if (!tableId || !sectionId) {
+      continue;
+    }
+
+    const position = tablePositions.get(tableId);
+    if (!Number.isInteger(position)) {
+      failures.push(`${tableId} missing DOCX table marker for placement check`);
+      continue;
+    }
+
+    const range = sectionRanges.get(sectionId);
+    if (!range) {
+      failures.push(`${tableId} missing render-plan section anchor ${sectionId}`);
+      continue;
+    }
+
+    if (position < range.start || position >= range.end) {
+      failures.push(`${tableId} appears outside section ${sectionId} placement range`);
+    }
+  }
+
+  return failures;
+}
+
+function tableMarkerPositions(documentXml) {
+  const positions = new Map();
+  for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+    const marker = parseDocPrMetadata(paragraphText(match[0]));
+    if (marker.tableId && !positions.has(marker.tableId)) {
+      positions.set(marker.tableId, match.index);
+    }
+  }
+  return positions;
 }
 
 function figureSectionRanges(documentXml, renderPlan) {

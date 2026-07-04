@@ -113,6 +113,7 @@ async function makeDeliveryPackage(t) {
         { id: 'template_markers', status: 'passed' },
         { id: 'image_coverage', status: 'passed' },
         { id: 'table_coverage', status: 'passed' },
+        { id: 'table_placement', status: 'passed' },
         { id: 'figure_id_metadata', status: 'passed' },
         { id: 'figure_placement', status: 'passed' },
         { id: 'delivery_files', status: 'passed' },
@@ -179,6 +180,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
   assert.ok(
     report.checks.some(
+      (check) => check.id === 'table_placement' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    report.checks.some(
       (check) => check.id === 'figure_placement' && check.status === 'passed'
     )
   );
@@ -191,6 +197,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'template_markers',
       'image_coverage',
       'table_coverage',
+      'table_placement',
       'figure_id_metadata',
       'figure_placement',
       'delivery_files',
@@ -650,6 +657,22 @@ test('validateDeliveryPackage fails when a DOCX figure appears before its render
   assert.match(placementCheck?.message || '', /fig-001|section|placement/i);
 });
 
+test('validateDeliveryPackage fails when a DOCX table appears before its render-plan section', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlan = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'render-plan.json'), 'utf8'));
+  const table = renderPlan.tables.find((item) => item.tableId === 'tbl-001');
+  assert.ok(table?.title, 'fixture must include table title for tbl-001');
+  await moveTableBlockBeforeBody(path.join(deliveryDir, 'document.docx'), 'tbl-001', table.title);
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const placementCheck = report.checks.find((check) => check.id === 'table_placement');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(placementCheck?.status, 'failed');
+  assert.match(placementCheck?.message || '', /tbl-001|section|placement/i);
+});
+
 test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
@@ -700,6 +723,37 @@ function findDrawingForFigure(documentXml, figureId) {
     if (figurePattern.test(match[0])) {
       return match[0];
     }
+  }
+  return '';
+}
+
+async function moveTableBlockBeforeBody(docxPath, tableId, tableTitle) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const tableBlock = findTableBlock(documentXml, tableId, tableTitle);
+  assert.ok(tableBlock, `fixture must include table block for ${tableId}`);
+  const withoutTableBlock = documentXml.replace(tableBlock, '');
+  entries.set(
+    'word/document.xml',
+    Buffer.from(withoutTableBlock.replace('<w:body>', `<w:body>${tableBlock}`), 'utf8')
+  );
+  await writeZipEntries(entries, docxPath);
+}
+
+function findTableBlock(documentXml, tableId, tableTitle) {
+  const markerPattern = new RegExp(`docx-engine-v2 tableId=${tableId}\\b`);
+  const title = String(tableTitle || '').trim();
+  const paragraphs = [...String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
+  for (const paragraph of paragraphs) {
+    const paragraphText = paragraph[0].replace(/<[^>]+>/g, '');
+    if (!markerPattern.test(paragraph[0]) && (!title || !paragraphText.includes(title))) {
+      continue;
+    }
+    const tableMatch = String(documentXml || '').slice(paragraph.index + paragraph[0].length).match(/^[\s\S]*?<w:tbl\b[\s\S]*?<\/w:tbl>/);
+    if (!tableMatch) {
+      return paragraph[0];
+    }
+    return paragraph[0] + tableMatch[0];
   }
   return '';
 }

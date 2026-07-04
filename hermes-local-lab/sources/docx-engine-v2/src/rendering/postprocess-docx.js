@@ -21,16 +21,17 @@ async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
     throw new Error('DOCX is missing word/document.xml.');
   }
 
-  bindPlannedImages({ entries, documentXml: documentXml.toString('utf8'), renderPlan, outputPath });
+  bindPlannedContent({ entries, documentXml: documentXml.toString('utf8'), renderPlan, outputPath });
 
   await writeZipEntries(entries, outputPath);
   return { status: 'postprocessed', documentPath: outputPath };
 }
 
-function bindPlannedImages({ entries, documentXml, renderPlan, outputPath }) {
+function bindPlannedContent({ entries, documentXml, renderPlan, outputPath }) {
   const images = renderPlan.templateData?.images || [];
   if (images.length === 0) {
-    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(documentXml, renderPlan), 'utf8'));
+    const nextDocumentXml = insertTablesBySection(documentXml, renderPlan);
+    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
     return;
   }
 
@@ -39,13 +40,15 @@ function bindPlannedImages({ entries, documentXml, renderPlan, outputPath }) {
   let relationshipsXml = entries.get(relationshipsEntry)?.toString('utf8') || '';
   let contentTypesXml = entries.get(contentTypesEntry)?.toString('utf8') || '';
   if (!relationshipsXml || !contentTypesXml) {
-    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(documentXml, renderPlan), 'utf8'));
+    const nextDocumentXml = insertTablesBySection(documentXml, renderPlan);
+    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
     return;
   }
 
   const drawingTemplate = firstDrawingXml(documentXml);
   if (!drawingTemplate) {
-    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(documentXml, renderPlan), 'utf8'));
+    const nextDocumentXml = insertTablesBySection(documentXml, renderPlan);
+    entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
     return;
   }
 
@@ -85,9 +88,10 @@ function bindPlannedImages({ entries, documentXml, renderPlan, outputPath }) {
 
   entries.set(relationshipsEntry, Buffer.from(relationshipsXml, 'utf8'));
   entries.set(contentTypesEntry, Buffer.from(contentTypesXml, 'utf8'));
-  const nextDocumentXml = boundDrawings.length
+  let nextDocumentXml = boundDrawings.length
     ? insertDrawingsBySection(documentXml, boundDrawings, renderPlan)
     : documentXml;
+  nextDocumentXml = insertTablesBySection(nextDocumentXml, renderPlan);
   entries.set('word/document.xml', Buffer.from(injectFigureMetadata(nextDocumentXml, renderPlan), 'utf8'));
 }
 
@@ -178,6 +182,122 @@ function insertDrawingsBySection(documentXml, boundDrawings, renderPlan) {
     nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
   }
   return nextXml;
+}
+
+function insertTablesBySection(documentXml, renderPlan) {
+  const tables = renderPlan.tables || [];
+  if (tables.length === 0) {
+    return documentXml;
+  }
+
+  const templateTablesById = new Map((renderPlan.templateData?.tables || []).map((table) => [table.tableId, table]));
+  const tableBlocks = [];
+  const consumedRanges = [];
+  for (const table of tables) {
+    const templateTable = templateTablesById.get(table.tableId) || {};
+    const tableBlock = findRenderedTableBlock({
+      documentXml,
+      title: templateTable.title || table.title,
+      consumedRanges,
+    });
+    if (!tableBlock) {
+      continue;
+    }
+    consumedRanges.push({ start: tableBlock.start, end: tableBlock.end });
+    tableBlocks.push({
+      table,
+      start: tableBlock.start,
+      end: tableBlock.end,
+      xml: `${tableMarkerParagraph(table)}${tableBlock.xml}`,
+    });
+  }
+
+  if (tableBlocks.length === 0) {
+    return documentXml;
+  }
+
+  let withoutTables = documentXml;
+  for (const block of [...tableBlocks].sort((left, right) => right.start - left.start)) {
+    withoutTables = `${withoutTables.slice(0, block.start)}${withoutTables.slice(block.end)}`;
+  }
+
+  const sectionsById = new Map((renderPlan.templateData?.sections || renderPlan.sections || []).map((section) => [
+    section.sectionId,
+    section,
+  ]));
+  const groups = new Map();
+  for (const block of tableBlocks) {
+    const sectionId = block.table.sectionId || '';
+    if (!groups.has(sectionId)) {
+      groups.set(sectionId, []);
+    }
+    groups.get(sectionId).push(block.xml);
+  }
+
+  const insertions = [];
+  for (const [sectionId, blocks] of groups) {
+    const section = sectionsById.get(sectionId);
+    const insertionIndex = section ? sectionInsertionIndex(withoutTables, section.title) : -1;
+    insertions.push({
+      index: insertionIndex >= 0 ? insertionIndex : fallbackInsertionIndex(withoutTables),
+      xml: blocks.join(''),
+    });
+  }
+
+  let nextXml = withoutTables;
+  for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
+    nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
+  }
+  return nextXml;
+}
+
+function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
+  const normalizedTitle = String(title || '').trim();
+  if (!normalizedTitle) {
+    return null;
+  }
+
+  for (const paragraph of paragraphRanges(documentXml)) {
+    if (!paragraph.text.includes(normalizedTitle) || rangeOverlaps(paragraph, consumedRanges)) {
+      continue;
+    }
+    const afterParagraph = String(documentXml || '').slice(paragraph.end);
+    const tableMatch = afterParagraph.match(/^[\s\S]*?<w:tbl\b[\s\S]*?<\/w:tbl>/);
+    if (!tableMatch) {
+      continue;
+    }
+    return {
+      start: paragraph.start,
+      end: paragraph.end + tableMatch[0].length,
+      xml: String(documentXml || '').slice(paragraph.start, paragraph.end + tableMatch[0].length),
+    };
+  }
+  return null;
+}
+
+function rangeOverlaps(range, consumedRanges) {
+  return consumedRanges.some((consumed) => range.start < consumed.end && range.end > consumed.start);
+}
+
+function tableMarkerParagraph(table) {
+  const tokens = [
+    'docx-engine-v2',
+    `tableId=${safeMetadataValue(table.tableId)}`,
+  ];
+  for (const key of ['sectionId', 'afterBlockId']) {
+    const value = safeMetadataValue(table[key]);
+    if (value) {
+      tokens.push(`${key}=${value}`);
+    }
+  }
+  return [
+    '<w:p>',
+    '<w:r>',
+    '<w:rPr><w:vanish/></w:rPr>',
+    `<w:t>${escapeXmlText(tokens.join(' '))}</w:t>`,
+    '</w:r>',
+    '</w:p>',
+  ].join('');
 }
 
 function sectionInsertionIndex(documentXml, sectionTitle) {
