@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
@@ -19,6 +20,10 @@ function recordWpsVisualAcceptance({
   if (!fs.existsSync(qualityReportPath)) {
     throw new Error(`quality-report.json not found: ${qualityReportPath}`);
   }
+  const documentPath = path.join(path.resolve(deliveryDir), 'document.docx');
+  if (!fs.existsSync(documentPath)) {
+    throw new Error(`document.docx not found: ${documentPath}`);
+  }
   const normalizedStatus = normalizeAcceptanceStatus(status);
   const report = readJson(qualityReportPath);
   const checks = Array.isArray(report.checks) ? [...report.checks] : [];
@@ -29,6 +34,7 @@ function recordWpsVisualAcceptance({
     message: buildWpsMessage(normalizedStatus, note),
     reviewedAt,
     reviewedBy: String(reviewedBy || 'user'),
+    documentSha256: sha256File(documentPath),
   };
   if (wpsCheckIndex >= 0) {
     checks[wpsCheckIndex] = { ...checks[wpsCheckIndex], ...nextWpsCheck };
@@ -115,6 +121,10 @@ function reportStatus({ checks, warnings, failures }) {
 
 function uniqueStrings(items) {
   return [...new Set((items || []).map((item) => String(item || '')).filter(Boolean))];
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function readJson(filePath) {

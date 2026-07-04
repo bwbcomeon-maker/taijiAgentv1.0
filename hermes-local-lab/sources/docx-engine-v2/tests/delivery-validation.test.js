@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,6 +22,10 @@ const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
 );
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
 
 function makeWorkspace(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-delivery-'));
@@ -188,6 +193,7 @@ test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence'
           message: 'WPS/Word visual inspection passed. 目录、图片和表格已检查。',
           reviewedAt: '2026-07-05T10:00:00.000Z',
           reviewedBy: 'user',
+          documentSha256: sha256File(path.join(deliveryDir, 'document.docx')),
         }
       : check
   );
@@ -202,8 +208,39 @@ test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence'
   assert.equal(wpsVisual?.status, 'passed');
   assert.equal(wpsVisual?.reviewedAt, '2026-07-05T10:00:00.000Z');
   assert.equal(wpsVisual?.reviewedBy, 'user');
+  assert.equal(wpsVisual?.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.match(wpsVisual?.message || '', /目录、图片和表格/);
   assert.deepEqual(report.warnings, []);
+});
+
+test('validateDeliveryPackage fails when recorded WPS visual acceptance belongs to a different document', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const reportPath = path.join(deliveryDir, 'quality-report.json');
+  const qualityReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  qualityReport.status = 'passed';
+  qualityReport.checks = qualityReport.checks.map((check) =>
+    check.id === 'wps_visual'
+      ? {
+          id: 'wps_visual',
+          status: 'passed',
+          message: 'WPS/Word visual inspection passed.',
+          reviewedAt: '2026-07-05T10:00:00.000Z',
+          reviewedBy: 'user',
+          documentSha256: sha256File(path.join(deliveryDir, 'document.docx')),
+        }
+      : check
+  );
+  qualityReport.warnings = [];
+  qualityReport.failures = [];
+  fs.writeFileSync(reportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+  fs.appendFileSync(path.join(deliveryDir, 'document.docx'), 'changed after review');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const wpsVisual = report.checks.find((check) => check.id === 'wps_visual');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(wpsVisual?.status, 'failed');
+  assert.match(wpsVisual?.message || '', /document\.docx.*changed/i);
 });
 
 test('validateDeliveryPackage fails when the original source copy is missing', async (t) => {

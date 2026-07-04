@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -13,6 +14,7 @@ const CLI = path.join(ENGINE_ROOT, 'src', 'cli', 'record-wps-visual.js');
 function makeDelivery(t) {
   const deliveryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-wps-'));
   t.after(() => fs.rmSync(deliveryDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(deliveryDir, 'document.docx'), 'reviewed document bytes');
   writeQualityReport(deliveryDir, {
     schemaVersion: 'docx-engine-v2/validation-report',
     status: 'passed_with_warnings',
@@ -30,6 +32,10 @@ function makeDelivery(t) {
     failures: [],
   });
   return deliveryDir;
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function writeQualityReport(deliveryDir, report) {
@@ -63,6 +69,7 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   assert.equal(wpsVisual.status, 'passed');
   assert.equal(wpsVisual.reviewedAt, '2026-07-05T10:00:00.000Z');
   assert.equal(wpsVisual.reviewedBy, 'user');
+  assert.equal(wpsVisual.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.match(wpsVisual.message, /目录、图表、图片和版式/);
   assert.equal(readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual').status, 'passed');
 });

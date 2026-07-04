@@ -516,6 +516,7 @@ const schemas = {
             message: { type: 'string' },
             reviewedAt: { type: 'string' },
             reviewedBy: { type: 'string' },
+            documentSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
           },
         },
       },

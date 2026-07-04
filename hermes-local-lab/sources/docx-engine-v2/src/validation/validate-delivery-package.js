@@ -110,7 +110,12 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
 
-  addWpsVisualCheck({ addCheck, qualityReport: jsonFiles.qualityReport, fallbackStatus: wpsVisualStatus });
+  addWpsVisualCheck({
+    addCheck,
+    deliveryDir,
+    qualityReport: jsonFiles.qualityReport,
+    fallbackStatus: wpsVisualStatus,
+  });
 
   return buildReport(checksById, warnings, failures);
 }
@@ -198,15 +203,44 @@ function addDeliveryManifestFilesCheck({ addCheck, deliveryDir, deliveryPackage 
   }
 }
 
-function addWpsVisualCheck({ addCheck, qualityReport, fallbackStatus }) {
+function addWpsVisualCheck({ addCheck, deliveryDir, qualityReport, fallbackStatus }) {
   const recordedCheck = Array.isArray(qualityReport?.checks)
     ? qualityReport.checks.find((check) => check?.id === 'wps_visual')
     : null;
   const recordedStatus = normalizeOptionalWpsStatus(recordedCheck?.status);
-  const status = recordedStatus || normalizeWpsStatus(fallbackStatus);
-  const message = recordedCheck?.message ||
+  let status = recordedStatus || normalizeWpsStatus(fallbackStatus);
+  let message = recordedCheck?.message ||
     (status === 'not_verified' ? 'WPS/Word visual inspection has not been performed.' : '');
+  if (recordedStatus && recordedStatus !== 'not_verified') {
+    const hashValidation = validateWpsVisualDocumentHash({ deliveryDir, recordedCheck });
+    if (!hashValidation.ok) {
+      status = 'failed';
+      message = hashValidation.message;
+    }
+  }
   addCheck('wps_visual', status, message, wpsVisualEvidence(recordedCheck));
+}
+
+function validateWpsVisualDocumentHash({ deliveryDir, recordedCheck }) {
+  const expectedHash = String(recordedCheck?.documentSha256 || '').trim();
+  if (!expectedHash) {
+    return {
+      ok: false,
+      message: 'WPS/Word visual acceptance is not bound to document.docx sha256.',
+    };
+  }
+  const documentPath = path.join(deliveryDir, 'document.docx');
+  if (!fs.existsSync(documentPath)) {
+    return { ok: false, message: 'WPS/Word visual acceptance cannot be checked because document.docx is missing.' };
+  }
+  const actualHash = sha256File(documentPath);
+  if (actualHash !== expectedHash) {
+    return {
+      ok: false,
+      message: `WPS/Word visual acceptance document.docx changed since review: expected ${expectedHash}, got ${actualHash}.`,
+    };
+  }
+  return { ok: true };
 }
 
 function normalizeOptionalWpsStatus(status) {
@@ -219,7 +253,7 @@ function wpsVisualEvidence(check) {
     return {};
   }
   const evidence = {};
-  for (const key of ['reviewedAt', 'reviewedBy']) {
+  for (const key of ['reviewedAt', 'reviewedBy', 'documentSha256']) {
     if (check[key]) {
       evidence[key] = check[key];
     }
