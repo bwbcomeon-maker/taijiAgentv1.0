@@ -64,5 +64,6 @@
 - 已让 DOCX 后处理按 `sectionId` 把图片插回所属章节标题之后，并新增 `figure_placement` 自动质量门校验图片对象位于所属章节边界内，避免图片实际落在封面、全局占位区或文末时仍被 metadata/hash 门误判通过。
 - 已让 DOCX 后处理把渲染后的表题+表格块抽出、写入隐藏 `tableId/sectionId/afterBlockId` metadata 并插回所属章节，新增 `table_placement` 质量门，避免表格数据存在但实际集中在全局表格区或错误章节时仍通过复验。
 - 已让 DOCX 后处理为每张计划图片生成“图片段落 + 紧邻图题段落”，图题包含隐藏 `figureCaption/figureId/sectionId` 锚点和 Word `SEQ 图` 域；新增 `figure_caption` 质量门，避免图片存在但图目录无法刷新、题注漂移或模板旧图题混入时仍假通过。
+- 已让 DOCX 后处理把计划表格的隐藏锚点写入表题段落本身，并清理模板残留的未绑定 `SEQ 表` 占位表题/表格；新增 `table_caption` 质量门，避免表格存在但表目录刷新混入旧表题、漏表题或题注漂移时仍假通过。
 - 已让交付包复验校验 `job.manifest.json`、`render-plan.json`、`template.manifest.json` 的模板 ID 一致性，避免多个清单各自合法但指向不同模板。
 - 已让交付包复验校验 `job.manifest.json` 与 `render-plan.json` 的 jobId 一致性，避免作业清单和渲染计划各自合法但来自不同作业。

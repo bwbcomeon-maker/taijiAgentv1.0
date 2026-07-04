@@ -114,6 +114,7 @@ async function makeDeliveryPackage(t) {
         { id: 'image_coverage', status: 'passed' },
         { id: 'table_coverage', status: 'passed' },
         { id: 'table_placement', status: 'passed' },
+        { id: 'table_caption', status: 'passed' },
         { id: 'figure_id_metadata', status: 'passed' },
         { id: 'figure_placement', status: 'passed' },
         { id: 'figure_caption', status: 'passed' },
@@ -186,6 +187,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
   assert.ok(
     report.checks.some(
+      (check) => check.id === 'table_caption' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    report.checks.some(
       (check) => check.id === 'figure_placement' && check.status === 'passed'
     )
   );
@@ -204,6 +210,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'image_coverage',
       'table_coverage',
       'table_placement',
+      'table_caption',
       'figure_id_metadata',
       'figure_placement',
       'figure_caption',
@@ -693,6 +700,32 @@ test('validateDeliveryPackage fails when a DOCX table appears before its render-
   assert.match(placementCheck?.message || '', /tbl-001|section|placement/i);
 });
 
+test('validateDeliveryPackage fails when a DOCX table caption is missing', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await removeTableCaptionForTable(path.join(deliveryDir, 'document.docx'), 'tbl-001');
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const captionCheck = report.checks.find((check) => check.id === 'table_caption');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(captionCheck?.status, 'failed');
+  assert.match(captionCheck?.message || '', /tbl-001|caption|SEQ|tableId/i);
+});
+
+test('validateDeliveryPackage fails when DOCX contains an unbound table caption', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await injectUnboundTableCaption(path.join(deliveryDir, 'document.docx'));
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const captionCheck = report.checks.find((check) => check.id === 'table_caption');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(captionCheck?.status, 'failed');
+  assert.match(captionCheck?.message || '', /unbound|SEQ 表|table caption/i);
+});
+
 test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
@@ -753,6 +786,46 @@ async function removeFigureCaptionForFigure(docxPath, figureId) {
     return paragraph;
   });
   entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
+  await writeZipEntries(entries, docxPath);
+}
+
+async function removeTableCaptionForTable(docxPath, tableId) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  let removed = false;
+  const updatedXml = documentXml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (paragraph) => {
+    if (
+      !removed &&
+      /\btableCaption\b/.test(paragraph) &&
+      new RegExp(`\\btableId=${tableId}\\b`).test(paragraph)
+    ) {
+      removed = true;
+      return '';
+    }
+    return paragraph;
+  });
+  entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
+  await writeZipEntries(entries, docxPath);
+}
+
+async function injectUnboundTableCaption(docxPath) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const caption = [
+    '<w:p>',
+    '<w:r><w:t xml:space="preserve">表 </w:t></w:r>',
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> SEQ 表 \\* ARABIC </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    '<w:r><w:t>99</w:t></w:r>',
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+    '<w:r><w:t xml:space="preserve"> 未绑定表题</w:t></w:r>',
+    '</w:p>',
+  ].join('');
+  entries.set(
+    'word/document.xml',
+    Buffer.from(documentXml.replace('</w:body>', `${caption}</w:body>`), 'utf8')
+  );
   await writeZipEntries(entries, docxPath);
 }
 

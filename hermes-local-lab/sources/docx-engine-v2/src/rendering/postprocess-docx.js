@@ -293,7 +293,7 @@ function insertTablesBySection(documentXml, renderPlan) {
       table,
       start: tableBlock.start,
       end: tableBlock.end,
-      xml: `${tableMarkerParagraph(table)}${tableBlock.xml}`,
+      xml: tableBlockXml(table, tableBlock.xml),
     });
   }
 
@@ -305,6 +305,7 @@ function insertTablesBySection(documentXml, renderPlan) {
   for (const block of [...tableBlocks].sort((left, right) => right.start - left.start)) {
     withoutTables = `${withoutTables.slice(0, block.start)}${withoutTables.slice(block.end)}`;
   }
+  withoutTables = removeUnboundTableBlocks(withoutTables);
 
   const sectionsById = new Map((renderPlan.templateData?.sections || renderPlan.sections || []).map((section) => [
     section.sectionId,
@@ -336,6 +337,10 @@ function insertTablesBySection(documentXml, renderPlan) {
   return nextXml;
 }
 
+function tableBlockXml(table, blockXml) {
+  return injectTableCaptionMetadata(blockXml, table);
+}
+
 function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
   const normalizedTitle = String(title || '').trim();
   if (!normalizedTitle) {
@@ -364,9 +369,23 @@ function rangeOverlaps(range, consumedRanges) {
   return consumedRanges.some((consumed) => range.start < consumed.end && range.end > consumed.start);
 }
 
-function tableMarkerParagraph(table) {
+function injectTableCaptionMetadata(blockXml, table) {
+  return String(blockXml || '').replace(/(<w:p\b[^>]*>)/, `$1${tableCaptionMarkerRun(table)}`);
+}
+
+function tableCaptionMarkerRun(table) {
+  return [
+    '<w:r>',
+    '<w:rPr><w:vanish/></w:rPr>',
+    `<w:t>${escapeXmlText(tableCaptionMetadata(table))}</w:t>`,
+    '</w:r>',
+  ].join('');
+}
+
+function tableCaptionMetadata(table) {
   const tokens = [
     'docx-engine-v2',
+    'tableCaption',
     `tableId=${safeMetadataValue(table.tableId)}`,
   ];
   for (const key of ['sectionId', 'afterBlockId']) {
@@ -375,14 +394,33 @@ function tableMarkerParagraph(table) {
       tokens.push(`${key}=${value}`);
     }
   }
-  return [
-    '<w:p>',
-    '<w:r>',
-    '<w:rPr><w:vanish/></w:rPr>',
-    `<w:t>${escapeXmlText(tokens.join(' '))}</w:t>`,
-    '</w:r>',
-    '</w:p>',
-  ].join('');
+  return tokens.join(' ');
+}
+
+function removeUnboundTableBlocks(documentXml) {
+  const removals = [];
+  const paragraphs = paragraphRanges(documentXml);
+  for (const paragraph of paragraphs) {
+    if (!hasTableSequenceField(paragraph.xml) || /\btableCaption\b/.test(paragraph.text)) {
+      continue;
+    }
+    const afterParagraph = String(documentXml || '').slice(paragraph.end);
+    const tableMatch = afterParagraph.match(/^\s*<w:tbl\b[\s\S]*?<\/w:tbl>/);
+    removals.push({
+      start: paragraph.start,
+      end: paragraph.end + (tableMatch ? tableMatch[0].length : 0),
+    });
+  }
+
+  let nextXml = documentXml;
+  for (const removal of removals.sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, removal.start)}${nextXml.slice(removal.end)}`;
+  }
+  return nextXml;
+}
+
+function hasTableSequenceField(paragraphXml) {
+  return /<w:instrText\b[^>]*>[^<]*SEQ\s+表(?:\s|<|$)/.test(String(paragraphXml || ''));
 }
 
 function sectionInsertionIndex(documentXml, sectionTitle) {

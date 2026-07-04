@@ -14,6 +14,7 @@ const CHECK_IDS = [
   'image_coverage',
   'table_coverage',
   'table_placement',
+  'table_caption',
   'figure_id_metadata',
   'figure_placement',
   'figure_caption',
@@ -122,6 +123,7 @@ function validateDeliveryPackage({ deliveryDir, wpsVisualStatus = 'not_verified'
   });
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addTablePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
+  addTableCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigurePlacementCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addFigureCaptionCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
@@ -747,6 +749,35 @@ function addTablePlacementCheck({ addCheck, documentXml, renderPlan }) {
   addCheck('table_placement', 'passed');
 }
 
+function addTableCaptionCheck({ addCheck, documentXml, renderPlan }) {
+  if (!documentXml) {
+    addCheck('table_caption', 'failed', 'Cannot inspect table captions without word/document.xml.');
+    return;
+  }
+  if (!renderPlan) {
+    addCheck('table_caption', 'failed', 'render-plan.json is required for table caption validation.');
+    return;
+  }
+
+  const tables = renderPlan.tables || [];
+  if (tables.length === 0) {
+    addCheck('table_caption', 'passed_with_warnings', 'No tables were present in render-plan.json.');
+    return;
+  }
+
+  const captionFailures = tableCaptionFailures({ documentXml, renderPlan });
+  if (captionFailures.length > 0) {
+    addCheck(
+      'table_caption',
+      'failed',
+      `DOCX table captions are not bound to render-plan tables: ${captionFailures.join(', ')}`
+    );
+    return;
+  }
+
+  addCheck('table_caption', 'passed');
+}
+
 function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
   if (!documentXml) {
     addCheck('figure_id_metadata', 'failed', 'Cannot inspect figure metadata without word/document.xml.');
@@ -988,6 +1019,82 @@ function tablePlacementFailures({ documentXml, renderPlan }) {
   }
 
   return failures;
+}
+
+function tableCaptionFailures({ documentXml, renderPlan }) {
+  const failures = [];
+  const sectionRanges = figureSectionRanges(documentXml, renderPlan);
+  const paragraphs = paragraphRanges(documentXml);
+  const captionParagraphs = tableCaptionParagraphs(paragraphs);
+
+  for (const table of renderPlan.tables || []) {
+    const tableId = String(table?.tableId || '').trim();
+    const sectionId = String(table?.sectionId || '').trim();
+    if (!tableId) {
+      continue;
+    }
+
+    const caption = captionParagraphs.get(tableId);
+    if (!caption) {
+      failures.push(`${tableId} missing local table caption with tableId marker`);
+      continue;
+    }
+
+    if (!hasTableSequenceField(caption.xml)) {
+      failures.push(`${tableId} caption missing Word SEQ 表 field`);
+    }
+    if (!tableBodyImmediatelyFollowsCaption(documentXml, caption)) {
+      failures.push(`${tableId} caption must immediately precede its table body`);
+    }
+    if (sectionId) {
+      const range = sectionRanges.get(sectionId);
+      if (!range) {
+        failures.push(`${tableId} missing render-plan section anchor ${sectionId} for caption`);
+      } else if (caption.start < range.start || caption.start >= range.end) {
+        failures.push(`${tableId} caption appears outside section ${sectionId}`);
+      }
+      if (caption.metadata.sectionId !== sectionId) {
+        failures.push(
+          `${tableId} caption sectionId expected ${sectionId}, got ${caption.metadata.sectionId || 'missing'}`
+        );
+      }
+    }
+
+    const expectedTitle = String(table.title || '').trim();
+    if (expectedTitle && !visibleParagraphText(caption.xml).includes(expectedTitle)) {
+      failures.push(`${tableId} caption text missing ${expectedTitle}`);
+    }
+  }
+
+  const unboundSeqParagraphs = paragraphs
+    .filter((paragraph) => hasTableSequenceField(paragraph.xml) && !/\btableCaption\b/.test(paragraph.text))
+    .map((paragraph) => `unbound SEQ 表 field at paragraph ${paragraph.paragraphIndex + 1}`);
+  failures.push(...unboundSeqParagraphs);
+
+  return failures;
+}
+
+function tableCaptionParagraphs(paragraphs) {
+  const positions = new Map();
+  for (const paragraph of paragraphs) {
+    if (!/\btableCaption\b/.test(paragraph.text)) {
+      continue;
+    }
+    const metadata = parseDocPrMetadata(paragraph.text);
+    if (metadata.tableId && !positions.has(metadata.tableId)) {
+      positions.set(metadata.tableId, { ...paragraph, metadata });
+    }
+  }
+  return positions;
+}
+
+function hasTableSequenceField(paragraphXml) {
+  return /<w:instrText\b[^>]*>[^<]*SEQ\s+表(?:\s|<|$)/.test(String(paragraphXml || ''));
+}
+
+function tableBodyImmediatelyFollowsCaption(documentXml, caption) {
+  const afterCaption = String(documentXml || '').slice(caption.end);
+  return /^\s*<w:tbl\b/.test(afterCaption);
 }
 
 function figureCaptionFailures({ documentXml, renderPlan }) {
