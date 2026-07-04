@@ -6,31 +6,56 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
+const { runDocumentJob } = require('../src/workflow/run-document-job');
 const { recordWpsVisualAcceptance } = require('../src/validation/record-wps-visual-acceptance');
 
 const ENGINE_ROOT = path.resolve(__dirname, '..');
 const CLI = path.join(ENGINE_ROOT, 'src', 'cli', 'record-wps-visual.js');
+const ONE_BY_ONE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+  'base64'
+);
 
-function makeDelivery(t) {
-  const deliveryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-wps-'));
-  t.after(() => fs.rmSync(deliveryDir, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(deliveryDir, 'document.docx'), 'reviewed document bytes');
-  writeQualityReport(deliveryDir, {
-    schemaVersion: 'docx-engine-v2/validation-report',
-    status: 'passed_with_warnings',
-    checks: [
-      { id: 'schema', status: 'passed' },
-      { id: 'docx_zip', status: 'passed' },
-      { id: 'template_markers', status: 'passed' },
-      { id: 'image_coverage', status: 'passed' },
-      { id: 'table_coverage', status: 'passed' },
-      { id: 'figure_id_metadata', status: 'passed' },
-      { id: 'delivery_files', status: 'passed' },
-      { id: 'wps_visual', status: 'not_verified', message: 'WPS/Word visual inspection has not been performed.' },
-    ],
-    warnings: ['WPS/Word visual inspection has not been performed.'],
-    failures: [],
+async function makeDelivery(t) {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-wps-'));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  const deliveryDir = path.join(workspace, 'delivery');
+  const assetDir = path.join(workspace, 'source.assets');
+  const sourcePath = path.join(workspace, 'source.md');
+
+  fs.mkdirSync(assetDir);
+  fs.writeFileSync(path.join(assetDir, 'architecture.png'), ONE_BY_ONE_PNG);
+  fs.writeFileSync(
+    sourcePath,
+    [
+      '# WPS visual acceptance proposal',
+      '',
+      '## Architecture',
+      '',
+      'The package must pass automated checks before a visual reviewer can accept it.',
+      '',
+      '| Item | Status |',
+      '| --- | --- |',
+      '| Render plan | Ready |',
+      '',
+      '```mermaid',
+      'flowchart LR',
+      '  A[Source] --> B[Delivery]',
+      '```',
+      '',
+      '![Architecture](architecture.png)',
+      '',
+    ].join('\n')
+  );
+
+  const result = await runDocumentJob({
+    engineRoot: ENGINE_ROOT,
+    templateId: 'general-proposal',
+    sourcePath,
+    assetDir,
+    deliveryDir,
   });
+  assert.equal(result.ok, true, JSON.stringify(result, null, 2));
   return deliveryDir;
 }
 
@@ -38,16 +63,12 @@ function sha256File(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
-function writeQualityReport(deliveryDir, report) {
-  fs.writeFileSync(path.join(deliveryDir, 'quality-report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-}
-
 function readQualityReport(deliveryDir) {
   return JSON.parse(fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8'));
 }
 
-test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-verified warning', (t) => {
-  const deliveryDir = makeDelivery(t);
+test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-verified warning', async (t) => {
+  const deliveryDir = await makeDelivery(t);
   const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
   const report = JSON.parse(fs.readFileSync(qualityReportPath, 'utf8'));
   report.warnings.push('WPS visual acceptance has not been verified by a human reviewer.');
@@ -74,8 +95,44 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   assert.equal(readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual').status, 'passed');
 });
 
-test('recordWpsVisualAcceptance records failed WPS visual inspection as report failure', (t) => {
-  const deliveryDir = makeDelivery(t);
+test('recordWpsVisualAcceptance rejects WPS pass when automated package validation fails', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+  fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
+
+  assert.throws(
+    () => recordWpsVisualAcceptance({
+      deliveryDir,
+      status: 'passed',
+      reviewedAt: '2026-07-05T10:03:00.000Z',
+      reviewedBy: 'user',
+      note: '不应允许自动校验失败后记录通过。',
+    }),
+    /automated validation.*render-plan\.json/i
+  );
+  const wpsVisual = readQualityReport(deliveryDir).checks.find((check) => check.id === 'wps_visual');
+  assert.notEqual(wpsVisual?.status, 'passed');
+});
+
+test('recordWpsVisualAcceptance can record WPS failure when automated package validation fails', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+  fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
+
+  const result = recordWpsVisualAcceptance({
+    deliveryDir,
+    status: 'failed',
+    reviewedAt: '2026-07-05T10:04:00.000Z',
+    reviewedBy: 'user',
+    note: 'WPS 中也确认图目录异常。',
+  });
+
+  assert.equal(result.qualityReport.status, 'failed');
+  const wpsVisual = result.qualityReport.checks.find((check) => check.id === 'wps_visual');
+  assert.equal(wpsVisual.status, 'failed');
+  assert.match(wpsVisual.message, /图目录异常/);
+});
+
+test('recordWpsVisualAcceptance records failed WPS visual inspection as report failure', async (t) => {
+  const deliveryDir = await makeDelivery(t);
 
   const result = recordWpsVisualAcceptance({
     deliveryDir,
@@ -91,8 +148,8 @@ test('recordWpsVisualAcceptance records failed WPS visual inspection as report f
   assert.equal(wpsVisual.status, 'failed');
 });
 
-test('record-wps-visual CLI updates quality-report and emits JSON', (t) => {
-  const deliveryDir = makeDelivery(t);
+test('record-wps-visual CLI updates quality-report and emits JSON', async (t) => {
+  const deliveryDir = await makeDelivery(t);
 
   const result = spawnSync(process.execPath, [
     CLI,

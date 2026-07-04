@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { validateDomainObject } = require('../domain/validate');
+const { validateDeliveryPackage } = require('./validate-delivery-package');
 
 const ACCEPTANCE_STATUSES = new Set(['passed', 'passed_with_warnings', 'failed']);
 
@@ -25,6 +26,9 @@ function recordWpsVisualAcceptance({
     throw new Error(`document.docx not found: ${documentPath}`);
   }
   const normalizedStatus = normalizeAcceptanceStatus(status);
+  if (normalizedStatus !== 'failed') {
+    assertAutomatedDeliveryGatesPassed(path.resolve(deliveryDir));
+  }
   const report = readJson(qualityReportPath);
   const checks = Array.isArray(report.checks) ? [...report.checks] : [];
   const wpsCheckIndex = checks.findIndex((check) => check.id === 'wps_visual');
@@ -121,6 +125,22 @@ function reportStatus({ checks, warnings, failures }) {
 
 function uniqueStrings(items) {
   return [...new Set((items || []).map((item) => String(item || '')).filter(Boolean))];
+}
+
+function assertAutomatedDeliveryGatesPassed(deliveryDir) {
+  const report = validateDeliveryPackage({ deliveryDir });
+  const failedChecks = (report.checks || []).filter(
+    (check) => check.id !== 'wps_visual' && check.status === 'failed'
+  );
+  if (failedChecks.length === 0) {
+    return;
+  }
+
+  const failedMessages = failedChecks
+    .map((check) => check.message || check.id)
+    .filter(Boolean)
+    .join('; ');
+  throw new Error(`Cannot record WPS visual acceptance while automated validation fails: ${failedMessages}`);
 }
 
 function sha256File(filePath) {
