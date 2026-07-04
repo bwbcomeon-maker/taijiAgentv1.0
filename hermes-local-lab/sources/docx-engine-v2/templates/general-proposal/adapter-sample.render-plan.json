@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "docx-engine-v2/render-plan",
+  "jobId": "job-general-proposal-adapter-sample",
+  "templateId": "general-proposal",
+  "sections": [],
+  "tables": [],
+  "figures": [],
+  "templateData": {
+    "title": "通用方案模板适配器样例",
+    "sections": [],
+    "tables": [],
+    "images": [],
+    "metadata": {
+      "templateId": "general-proposal"
+    }
+  },
+  "warnings": []
+}

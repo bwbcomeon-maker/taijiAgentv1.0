@@ -102,6 +102,7 @@ function loadPackageFromDir({ packageDir, registryPath = '', registrySource = 'i
     promptPath: path.join(packageDir, files.prompt),
     samplePath: path.join(packageDir, files.sample),
     dataAdapterPath: path.join(packageDir, files.dataAdapter),
+    adapterSamplePath: path.join(packageDir, files.adapterSample),
   };
 }
 
@@ -113,6 +114,7 @@ function resolveTemplateFiles(manifest) {
     prompt: manifest.prompt || 'prompt.md',
     sample: manifest.sample || 'sample.json',
     dataAdapter: manifest.dataAdapter || 'data-adapter.js',
+    adapterSample: manifest.adapterSample || 'adapter-sample.render-plan.json',
   };
 }
 

@@ -8,6 +8,7 @@
   "prompt": "prompt.md",
   "sample": "sample.json",
   "dataAdapter": "data-adapter.js",
+  "adapterSample": "adapter-sample.render-plan.json",
   "outputFormat": "docx",
   "documentTypes": ["proposal", "technical-proposal", "implementation-plan"],
   "capabilities": ["sections", "tables", "images"],

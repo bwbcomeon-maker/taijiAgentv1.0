@@ -270,7 +270,7 @@ test('migrated template packages expose required files and manifest metadata', (
     assert.equal(fs.existsSync(template.schemaPath), true, template.schemaPath);
     assert.equal(fs.existsSync(template.samplePath), true, template.samplePath);
 
-    for (const fileName of ['template.docx', 'schema.json', 'sample.json', 'prompt.md']) {
+    for (const fileName of ['template.docx', 'schema.json', 'sample.json', 'prompt.md', 'data-adapter.js', 'adapter-sample.render-plan.json']) {
       assert.equal(
         fs.existsSync(path.join(template.packageDir, fileName)),
         true,

@@ -167,6 +167,7 @@ function validateTemplatePackage(template) {
     ['prompt', template?.promptPath],
     ['sample', template?.samplePath],
     ['dataAdapter', template?.dataAdapterPath],
+    ['adapterSample', template?.adapterSamplePath],
   ]) {
     if (!fileExists(filePath)) {
       errors.push({
@@ -231,12 +232,72 @@ function validateDataAdapter(template) {
         },
       ];
     }
+    return validateDataAdapterSample({ template, adapter });
   } catch (error) {
     return [
       {
         code: 'template_data_adapter_invalid',
         path: adapterPath,
         message: `Template data adapter cannot be loaded: ${error.message}`,
+      },
+    ];
+  }
+}
+
+function validateDataAdapterSample({ template, adapter }) {
+  if (!fileExists(template?.adapterSamplePath) || !fileExists(template?.schemaPath)) {
+    return [];
+  }
+
+  let adapterSample;
+  try {
+    adapterSample = readJson(template.adapterSamplePath);
+  } catch (error) {
+    return [
+      {
+        code: 'template_data_adapter_sample_invalid',
+        path: template.adapterSamplePath,
+        message: `Template adapter sample cannot be read: ${error.message}`,
+      },
+    ];
+  }
+
+  const renderPlanValidation = validateDomainObject('RenderPlan', adapterSample);
+  if (!renderPlanValidation.ok) {
+    return [
+      {
+        code: 'template_data_adapter_sample_invalid',
+        path: template.adapterSamplePath,
+        message: 'Template adapter sample must be a valid RenderPlan.',
+        details: renderPlanValidation.errors,
+      },
+    ];
+  }
+
+  try {
+    const templateData = adapter.buildTemplateData({
+      templatePackage: template,
+      renderPlan: adapterSample,
+    });
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    const validate = ajv.compile(readJson(template.schemaPath));
+    const ok = validate(templateData);
+    if (!ok) {
+      return [
+        {
+          code: 'template_data_adapter_sample_invalid',
+          path: template.dataAdapterPath,
+          message: 'Template data adapter sample output does not match schema.',
+          details: validate.errors || [],
+        },
+      ];
+    }
+  } catch (error) {
+    return [
+      {
+        code: 'template_data_adapter_sample_invalid',
+        path: template.dataAdapterPath,
+        message: `Template data adapter sample execution failed: ${error.message}`,
       },
     ];
   }

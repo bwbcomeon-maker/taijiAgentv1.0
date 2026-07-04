@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "docx-engine-v2/render-plan",
+  "jobId": "job-meeting-minutes-adapter-sample",
+  "templateId": "meeting-minutes",
+  "sections": [],
+  "tables": [],
+  "figures": [],
+  "templateData": {
+    "title": "会议纪要模板适配器样例",
+    "sections": [],
+    "tables": [],
+    "images": [],
+    "metadata": {
+      "templateId": "meeting-minutes"
+    }
+  },
+  "warnings": []
+}

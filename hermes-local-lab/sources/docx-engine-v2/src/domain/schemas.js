@@ -287,6 +287,7 @@ const templateManifestSchema = {
     'version',
     'description',
     'dataAdapter',
+    'adapterSample',
     'documentTypes',
     'capabilities',
     'requiredAssets',
@@ -299,6 +300,7 @@ const templateManifestSchema = {
     version: { type: 'string', minLength: 1 },
     description: { type: 'string' },
     dataAdapter: { type: 'string', minLength: 1 },
+    adapterSample: { type: 'string', minLength: 1 },
     documentTypes: {
       type: 'array',
       items: { type: 'string', minLength: 1 },
@@ -421,7 +423,7 @@ const schemas = {
       files: {
         type: 'object',
         additionalProperties: false,
-        required: ['manifest', 'template', 'schema', 'prompt', 'sample', 'dataAdapter'],
+        required: ['manifest', 'template', 'schema', 'prompt', 'sample', 'dataAdapter', 'adapterSample'],
         properties: {
           manifest: { type: 'string', minLength: 1 },
           template: { type: 'string', minLength: 1 },
@@ -429,6 +431,7 @@ const schemas = {
           prompt: { type: 'string', minLength: 1 },
           sample: { type: 'string', minLength: 1 },
           dataAdapter: { type: 'string', minLength: 1 },
+          adapterSample: { type: 'string', minLength: 1 },
         },
       },
       manifest: templateManifestSchema,
