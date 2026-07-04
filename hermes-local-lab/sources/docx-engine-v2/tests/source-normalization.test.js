@@ -19,7 +19,7 @@ function assertSourcePackage(source) {
 test('normalizeMarkdownSource preserves rich Markdown structure for rendering', async () => {
   const source = await normalizeMarkdownSource({
     sourcePath: 'proposal.md',
-    markdown: `# 太极 Agent 企业知识助手建设方案
+    markdownText: `# 太极 Agent 企业知识助手建设方案
 
 ## 一、总体架构
 
@@ -55,9 +55,15 @@ flowchart LR
     ['一、总体架构', '二、实施安排']
   );
   assert.equal(source.tables.length, 2);
+  assert.equal(source.tables[0].tableId, 'tbl-001');
   assert.equal(source.figures.length, 1);
+  assert.equal(source.figures[0].figureId, 'fig-001');
   assert.equal(source.images[0].caption, '系统总体架构');
   assert.equal(source.blocks[0].type, 'heading');
+  assert.equal(
+    source.blocks.find((block) => block.metadata.figureId === 'fig-001')?.type,
+    'mermaid'
+  );
   for (const section of source.sections) {
     for (const blockId of section.blockIds) {
       const block = source.blocks.find((candidate) => candidate.id === blockId);
@@ -79,6 +85,17 @@ test('normalizeTextSource reports missing rich content while keeping paragraphs'
   assert.ok(source.warnings.some((warning) => warning.code === 'rich_content_missing'));
 });
 
+test('normalizeMarkdownSource gives markdownText precedence over legacy markdown input', async () => {
+  const source = await normalizeMarkdownSource({
+    sourcePath: 'proposal.md',
+    markdownText: '# 正式参数标题',
+    markdown: '# 兼容参数标题',
+  });
+
+  assertSourcePackage(source);
+  assert.equal(source.title, '正式参数标题');
+});
+
 test('normalizeDocxSource extracts basic text and embedded media from docx zip', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-'));
   const sourcePath = path.join(tempDir, 'source.docx');
@@ -94,6 +111,25 @@ test('normalizeDocxSource extracts basic text and embedded media from docx zip',
     JSON.stringify(source.blocks)
   );
   assert.equal(source.embeddedMedia.length, 1);
+  assert.equal(source.embeddedMedia[0].path, 'word/media/image1.png');
+  assert.equal(source.tables.length, 1);
+  assert.equal(source.tables[0].tableId, 'tbl-001');
+  assert.deepEqual(source.tables[0].headers, ['阶段', '交付物']);
+  assert.deepEqual(source.tables[0].rows, [['试点', '方案文档']]);
+  assert.equal(source.figures.length, 1);
+  assert.equal(source.figures[0].figureId, 'fig-001');
+  assert.equal(source.figures[0].metadata.mediaPath, 'word/media/image1.png');
+});
+
+test('normalizeDocxSource rejects zip files that are missing the Word document body', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-missing-'));
+  const sourcePath = path.join(tempDir, 'source.docx');
+  await writeDocxFixtureWithoutDocument(sourcePath);
+
+  await assert.rejects(
+    () => normalizeDocxSource({ sourcePath }),
+    /missing word\/document\.xml/
+  );
 });
 
 async function writeDocxFixture(filePath) {
@@ -123,11 +159,40 @@ async function writeDocxFixture(filePath) {
     <w:p><w:r><w:t>太极 Agent 企业知识助手建设方案</w:t></w:r></w:p>
     <w:p><w:r><w:t>一、总体架构</w:t></w:r></w:p>
     <w:p><w:r><w:t>围绕 source package 保留基础段落。</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>阶段</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>交付物</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>试点</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>方案文档</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p><w:r><w:t>figureId=fig-001</w:t></w:r></w:p>
   </w:body>
 </w:document>`),
     'word/document.xml'
   );
+  zip.addEmptyDirectory('word/media');
   zip.addBuffer(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'word/media/image1.png');
+  zip.end();
+
+  await once(output, 'close');
+}
+
+async function writeDocxFixtureWithoutDocument(filePath) {
+  const zip = new yazl.ZipFile();
+  const output = fs.createWriteStream(filePath);
+  zip.outputStream.pipe(output);
+
+  zip.addBuffer(
+    Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+</Types>`),
+    '[Content_Types].xml'
+  );
   zip.end();
 
   await once(output, 'close');

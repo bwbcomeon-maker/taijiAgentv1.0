@@ -2,8 +2,20 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
-async function normalizeMarkdownSource({ sourcePath = 'inline.md', markdown } = {}) {
-  const sourceText = markdown ?? (await fs.readFile(sourcePath, 'utf8'));
+async function normalizeMarkdownSource(options = {}) {
+  const { sourcePath = 'inline.md', markdownText = '', markdown } = options;
+  const hasMarkdownText = Object.prototype.hasOwnProperty.call(options, 'markdownText');
+  const hasLegacyMarkdown = Object.prototype.hasOwnProperty.call(options, 'markdown');
+  const hasSourcePath = Object.prototype.hasOwnProperty.call(options, 'sourcePath');
+  let sourceText = '';
+  if (hasMarkdownText) {
+    sourceText = markdownText ?? '';
+  } else if (hasLegacyMarkdown) {
+    sourceText = markdown ?? '';
+  } else if (hasSourcePath) {
+    sourceText = await fs.readFile(sourcePath, 'utf8');
+  }
+
   const context = createContext({
     sourceType: 'markdown',
     sourcePath,
@@ -157,7 +169,7 @@ function addImage(context, caption, imagePath, markdown, sourceLine) {
 }
 
 function addTable(context, headers, rows, markdown, sourceLine) {
-  const tableId = nextId('table', context.tables.length + 1);
+  const tableId = nextId('tbl', context.tables.length + 1);
   const block = addBlock(context, {
     type: 'table',
     text: headers.join(' | '),
@@ -196,7 +208,7 @@ function addCodeBlock(context, language, sourceText, sourceLine) {
     });
 
     addBlock(context, {
-      type: 'figure',
+      type: 'mermaid',
       text: sourceText,
       content: { language, sourceText },
       level: context.currentSection?.level || 1,

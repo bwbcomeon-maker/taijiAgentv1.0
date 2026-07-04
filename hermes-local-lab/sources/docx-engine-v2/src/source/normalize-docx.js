@@ -9,49 +9,14 @@ async function normalizeDocxSource({ sourcePath } = {}) {
   }
 
   const [sourceBuffer, zipEntries] = await Promise.all([fs.readFile(sourcePath), readZip(sourcePath)]);
-  const documentXml = zipEntries.get('word/document.xml')?.toString('utf8') || '';
+  if (!zipEntries.has('word/document.xml')) {
+    throw new Error('DOCX source is missing word/document.xml.');
+  }
+
+  const documentXml = zipEntries.get('word/document.xml').toString('utf8');
   const relationshipsXml = zipEntries.get('word/_rels/document.xml.rels')?.toString('utf8') || '';
-  const paragraphs = extractParagraphs(documentXml);
-  const sections = [];
-  let currentSection = null;
-
-  const blocks = paragraphs.map((paragraph, index) => {
-    const isTitle = index === 0;
-    const isSectionHeading = !isTitle && looksLikeSectionHeading(paragraph);
-    const block = {
-      id: nextId('block', index + 1),
-      type: isTitle || isSectionHeading ? 'heading' : 'paragraph',
-      text: paragraph,
-      content: { text: paragraph },
-      level: isTitle ? 1 : isSectionHeading ? 2 : currentSection?.level || 1,
-      sectionId: currentSection?.sectionId || '',
-      sectionTitle: currentSection?.title || '',
-      anchorText: anchorText(paragraph),
-      path: `word/document.xml#p-${index + 1}`,
-      caption: '',
-      metadata: { sourceIndex: index },
-    };
-
-    if (isSectionHeading) {
-      currentSection = {
-        sectionId: nextId('sec', sections.length + 1),
-        title: paragraph,
-        level: 2,
-        blockIds: [block.id],
-        metadata: { sourceIndex: index },
-      };
-      sections.push(currentSection);
-      block.sectionId = currentSection.sectionId;
-      block.sectionTitle = currentSection.title;
-      block.level = currentSection.level;
-    } else if (currentSection) {
-      block.sectionId = currentSection.sectionId;
-      block.sectionTitle = currentSection.title;
-      currentSection.blockIds.push(block.id);
-    }
-
-    return block;
-  });
+  const embeddedMedia = extractEmbeddedMedia(zipEntries, relationshipsXml);
+  const { title, sections, blocks, tables } = extractBodyStructure(documentXml);
 
   return {
     schemaVersion: 'docx-engine-v2/source-package',
@@ -61,13 +26,13 @@ async function normalizeDocxSource({ sourcePath } = {}) {
       path: sourcePath,
       sha256: sha256(sourceBuffer),
     },
-    title: paragraphs[0] || path.basename(sourcePath),
+    title: title || path.basename(sourcePath),
     sections,
     blocks,
-    tables: [],
-    figures: [],
+    tables,
+    figures: extractFigureMarkers(documentXml, embeddedMedia, blocks),
     images: [],
-    embeddedMedia: extractEmbeddedMedia(zipEntries, relationshipsXml),
+    embeddedMedia,
     warnings: [],
   };
 }
@@ -81,38 +46,174 @@ function readZip(sourcePath) {
       }
 
       const entries = new Map();
-      zipfile.readEntry();
+      let settled = false;
+
+      const fail = (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          zipfile.close();
+        } catch (_closeError) {
+          // Best effort only; preserve the original zip error for the caller.
+        }
+        reject(error);
+      };
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(entries);
+      };
+
       zipfile.on('entry', (entry) => {
+        if (settled) {
+          return;
+        }
+        if (entry.fileName.endsWith('/')) {
+          zipfile.readEntry();
+          return;
+        }
+
         zipfile.openReadStream(entry, (streamError, readStream) => {
           if (streamError) {
-            reject(streamError);
+            fail(streamError);
             return;
           }
 
           const chunks = [];
           readStream.on('data', (chunk) => chunks.push(chunk));
-          readStream.on('error', reject);
+          readStream.on('error', fail);
           readStream.on('end', () => {
+            if (settled) {
+              return;
+            }
             entries.set(entry.fileName, Buffer.concat(chunks));
             zipfile.readEntry();
           });
         });
       });
-      zipfile.on('error', reject);
-      zipfile.on('end', () => resolve(entries));
+      zipfile.on('error', fail);
+      zipfile.on('end', finish);
+      zipfile.readEntry();
     });
   });
 }
 
-function extractParagraphs(documentXml) {
-  return [...documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
-    .map((match) =>
-      [...match[0].matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
-        .map((textMatch) => decodeXml(textMatch[1]))
-        .join('')
-        .trim()
+function extractBodyStructure(documentXml) {
+  const sections = [];
+  const blocks = [];
+  const tables = [];
+  let title = '';
+  let currentSection = null;
+
+  for (const match of documentXml.matchAll(/<w:(p|tbl)\b[\s\S]*?<\/w:\1>/g)) {
+    const elementType = match[1];
+    const xml = match[0];
+    const sourceIndex = blocks.length + tables.length;
+
+    if (elementType === 'p') {
+      const paragraph = extractText(xml);
+      if (!paragraph) {
+        continue;
+      }
+
+      const isTitle = !title;
+      const isSectionHeading = !isTitle && looksLikeSectionHeading(paragraph);
+      const block = {
+        id: nextId('block', blocks.length + 1),
+        type: isTitle || isSectionHeading ? 'heading' : 'paragraph',
+        text: paragraph,
+        content: { text: paragraph },
+        level: isTitle ? 1 : isSectionHeading ? 2 : currentSection?.level || 1,
+        sectionId: currentSection?.sectionId || '',
+        sectionTitle: currentSection?.title || '',
+        anchorText: anchorText(paragraph),
+        path: `word/document.xml#block-${blocks.length + 1}`,
+        caption: '',
+        metadata: { sourceIndex },
+      };
+
+      if (isTitle) {
+        title = paragraph;
+      }
+
+      if (isSectionHeading) {
+        currentSection = {
+          sectionId: nextId('sec', sections.length + 1),
+          title: paragraph,
+          level: 2,
+          blockIds: [block.id],
+          metadata: { sourceIndex },
+        };
+        sections.push(currentSection);
+        block.sectionId = currentSection.sectionId;
+        block.sectionTitle = currentSection.title;
+        block.level = currentSection.level;
+      } else if (currentSection) {
+        block.sectionId = currentSection.sectionId;
+        block.sectionTitle = currentSection.title;
+        currentSection.blockIds.push(block.id);
+      }
+
+      blocks.push(block);
+      continue;
+    }
+
+    const rows = extractTableRows(xml);
+    const tableId = nextId('tbl', tables.length + 1);
+    const block = {
+      id: nextId('block', blocks.length + 1),
+      type: 'table',
+      text: rows[0]?.join(' | ') || `表格 ${tables.length + 1}`,
+      content: { headers: rows[0] || [], rows: rows.slice(1) },
+      level: currentSection?.level || 1,
+      sectionId: currentSection?.sectionId || '',
+      sectionTitle: currentSection?.title || '',
+      anchorText: rows[0]?.join(' | ') || tableId,
+      path: `word/document.xml#block-${blocks.length + 1}`,
+      caption: '',
+      metadata: { sourceIndex, tableId },
+    };
+    const previousBlockId = blocks.at(-1)?.id || '';
+    blocks.push(block);
+    if (currentSection) {
+      currentSection.blockIds.push(block.id);
+    }
+
+    tables.push({
+      tableId,
+      title: `表格 ${tables.length + 1}`,
+      sectionId: currentSection?.sectionId || '',
+      afterBlockId: previousBlockId,
+      anchorText: block.anchorText,
+      headers: rows[0] || [],
+      rows: rows.slice(1),
+      metadata: { sourceIndex },
+    });
+  }
+
+  return { title, sections, blocks, tables };
+}
+
+function extractTableRows(tableXml) {
+  return [...tableXml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)]
+    .map((rowMatch) =>
+      [...rowMatch[0].matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)]
+        .map((cellMatch) => extractText(cellMatch[0]))
+        .filter((cell) => cell !== '')
     )
-    .filter(Boolean);
+    .filter((row) => row.length > 0);
+}
+
+function extractText(xml) {
+  return [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((textMatch) => decodeXml(textMatch[1]))
+    .join('')
+    .trim();
 }
 
 function extractEmbeddedMedia(zipEntries, relationshipsXml) {
@@ -138,6 +239,40 @@ function extractEmbeddedMedia(zipEntries, relationshipsXml) {
         sha256: sha256(buffer),
       };
     });
+}
+
+function extractFigureMarkers(documentXml, embeddedMedia, blocks) {
+  const decodedXml = decodeXml(documentXml);
+  const figureIds = [
+    ...new Set([...decodedXml.matchAll(/\bfigureId=(fig-\d{3,})\b/g)].map((match) => match[1])),
+  ];
+
+  return figureIds.map((figureId, index) => {
+    const marker = `figureId=${figureId}`;
+    const media = embeddedMedia[index] || embeddedMedia[0] || {};
+    const markerBlock = blocks.find((block) => block.text.includes(marker));
+
+    return {
+      figureId,
+      caption: `图 ${index + 1}`,
+      sectionId: markerBlock?.sectionId || '',
+      anchorText: marker,
+      sourceType: 'docx-embedded',
+      editable: {
+        format: 'docx-embedded',
+        sourcePath: media.path || '',
+      },
+      displayPath: media.path || `assets/${figureId}/figure`,
+      dimensions: {},
+      quality: { status: 'not_verified', warnings: [] },
+      metadata: {
+        marker,
+        mediaId: media.mediaId || '',
+        mediaPath: media.path || '',
+        relationshipId: media.relationshipId || '',
+      },
+    };
+  });
 }
 
 function normalizeRelationshipTarget(target) {

@@ -124,7 +124,7 @@ test('SourcePackage contract models normalized source structure', () => {
     ],
     tables: [
       {
-        tableId: 'table-001',
+        tableId: 'tbl-001',
         title: '重点任务表',
         sectionId: 'sec-001',
         afterBlockId: 'block-001',
@@ -242,7 +242,7 @@ test('AssetPackage contract separates figures and tables as first-class assets',
     ],
     tables: [
       {
-        tableId: 'table-001',
+        tableId: 'tbl-001',
         title: '重点任务表',
         sectionId: 'sec-001',
         afterBlockId: 'block-001',
@@ -283,7 +283,7 @@ test('RenderPlan contract carries sections, assets, and template data bindings',
     ],
     tables: [
       {
-        tableId: 'table-001',
+        tableId: 'tbl-001',
         title: '重点任务表',
         sectionId: 'sec-001',
         afterBlockId: 'block-001',
@@ -315,7 +315,7 @@ test('RenderPlan contract carries sections, assets, and template data bindings',
       ],
       tables: [
         {
-          tableId: 'table-001',
+          tableId: 'tbl-001',
           title: '重点任务表',
           rows: [{ Task: 'Template-based DOCX delivery', Owner: 'Document team' }],
           metadata: { templatePath: 'tables.0' },
@@ -328,7 +328,7 @@ test('RenderPlan contract carries sections, assets, and template data bindings',
 
   assert.equal(renderPlan.figures[0].figureId, 'fig-001');
   assert.equal(renderPlan.templateData.images[0].figureId, 'fig-001');
-  assert.equal(renderPlan.templateData.tables[0].tableId, 'table-001');
+  assert.equal(renderPlan.templateData.tables[0].tableId, 'tbl-001');
   const result = validateDomainObject('RenderPlan', renderPlan);
   assert.equal(result.ok, true, JSON.stringify(result.errors || result));
 });
