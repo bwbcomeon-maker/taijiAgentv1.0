@@ -328,6 +328,24 @@ test('validateDeliveryPackage final mode fails when quality-report.json records 
   assert.match(qualityReportCheck?.message || '', /stale automated failure/i);
 });
 
+test('validateDeliveryPackage final mode reports invalid quality-report.json schema instead of throwing', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
+  const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
+  const qualityReport = JSON.parse(fs.readFileSync(qualityReportPath, 'utf8'));
+  qualityReport.checks = { schema: 'passed' };
+  fs.writeFileSync(qualityReportPath, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['qualityReport'] });
+
+  assert.doesNotThrow(() => validateDeliveryPackage({ deliveryDir, requireReplayReport: true }));
+  const report = validateDeliveryPackage({ deliveryDir, requireReplayReport: true });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /quality-report\.json/);
+});
+
 test('validateDeliveryPackage final mode fails when replay-report.json is not verified', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   attachReplayReport(deliveryDir, {

@@ -306,7 +306,7 @@ function addQualityReportCheck({ addCheck, qualityReport, enforceStoredQualityRe
     return;
   }
 
-  const unverifiedChecks = (qualityReport.checks || [])
+  const unverifiedChecks = qualityReportChecks(qualityReport)
     .filter((check) => check?.id !== 'wps_visual' && check?.status === 'not_verified');
   if (unverifiedChecks.length > 0) {
     addCheck(
@@ -322,12 +322,20 @@ function addQualityReportCheck({ addCheck, qualityReport, enforceStoredQualityRe
 
 function recordedQualityReportFailures(qualityReport) {
   return [
-    ...(qualityReport.failures || []),
-    ...(qualityReport.checks || [])
+    ...qualityReportFailures(qualityReport),
+    ...qualityReportChecks(qualityReport)
       .filter((check) => check?.status === 'failed')
       .map(qualityReportCheckMessage),
     String(qualityReport.status || '').trim() === 'failed' ? 'quality-report.json status=failed' : '',
   ].filter(Boolean);
+}
+
+function qualityReportChecks(qualityReport) {
+  return Array.isArray(qualityReport.checks) ? qualityReport.checks : [];
+}
+
+function qualityReportFailures(qualityReport) {
+  return Array.isArray(qualityReport.failures) ? qualityReport.failures : [];
 }
 
 function qualityReportCheckMessage(check) {
