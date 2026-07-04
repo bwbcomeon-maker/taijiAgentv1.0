@@ -668,6 +668,35 @@ test('validateDeliveryPackage fails when asset-package.json no longer matches th
   assert.ok(report.failures.some((failure) => /asset-package\.json sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when replay-report.json no longer matches the delivery manifest hash', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const replayReportPath = path.join(deliveryDir, 'replay-report.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  fs.writeFileSync(
+    replayReportPath,
+    `${JSON.stringify({
+      schemaVersion: 'docx-engine-v2/replay-report',
+      status: 'passed',
+      replayedAt: '2026-07-05T00:00:00.000Z',
+      deliveryDir,
+      checks: [],
+      warnings: [],
+      failures: [],
+    }, null, 2)}\n`,
+    'utf8'
+  );
+  deliveryManifest.files.replayReport = 'replay-report.json';
+  deliveryManifest.fileSha256.replayReport = '0'.repeat(64);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+
+  assert.equal(report.status, 'failed');
+  assert.ok(report.failures.some((failure) => /replay-report\.json sha256 mismatch/.test(failure)));
+});
+
 test('validateDeliveryPackage fails when asset package tables disagree with the source package', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const assetPackagePath = path.join(deliveryDir, 'asset-package.json');

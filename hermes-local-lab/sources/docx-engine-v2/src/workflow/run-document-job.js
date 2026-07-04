@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const { buildDeliveryFileSha256 } = require('../delivery/file-hashes');
 const { packageAssets } = require('../assets/package-assets');
 const { writeDeliveryPackage } = require('../delivery/write-delivery-package');
 const { createDocumentJob, transitionJob } = require('../domain/document-job');
@@ -185,10 +186,11 @@ async function runDocumentJob({
         }),
       });
     }
-    const finalReplayReport = {
-      ...replayReport,
-      deliveryDir: absoluteDeliveryDir,
-    };
+    const finalReplayReport = writeReplayReportIntoDeliveryPackage({
+      deliveryDir: finalDeliveryDir,
+      manifestDeliveryDir: absoluteDeliveryDir,
+      replayReport,
+    });
 
     moveVerifiedDelivery({ fromDir: finalDeliveryDir, toDir: absoluteDeliveryDir });
 
@@ -406,6 +408,33 @@ function buildFailureReport(result) {
     jobId: result.job.jobId,
     jobManifest: 'job.manifest.json',
   };
+}
+
+function writeReplayReportIntoDeliveryPackage({ deliveryDir, manifestDeliveryDir, replayReport }) {
+  const finalReplayReport = {
+    ...replayReport,
+    deliveryDir: manifestDeliveryDir,
+  };
+  writeJson(path.join(deliveryDir, 'replay-report.json'), finalReplayReport);
+
+  const deliveryPackagePath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryPackage = JSON.parse(fs.readFileSync(deliveryPackagePath, 'utf8'));
+  deliveryPackage.files = {
+    ...(deliveryPackage.files || {}),
+    replayReport: 'replay-report.json',
+  };
+  deliveryPackage.fileSha256 = {
+    ...(deliveryPackage.fileSha256 || {}),
+    ...buildDeliveryFileSha256({
+      deliveryDir,
+      files: deliveryPackage.files,
+      roles: ['replayReport'],
+    }),
+  };
+
+  assertDomainObject('DeliveryPackage', deliveryPackage, 'DeliveryPackage manifest');
+  writeJson(deliveryPackagePath, deliveryPackage);
+  return finalReplayReport;
 }
 
 function transitionFailedJob(job, failures) {

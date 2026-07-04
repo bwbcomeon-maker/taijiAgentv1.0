@@ -23,6 +23,7 @@ const REQUIRED_DELIVERY_ENTRIES = [
   'template.manifest.json',
   'render-plan.json',
   'quality-report.json',
+  'replay-report.json',
   'README-图片调整说明.md',
 ];
 const ONE_BY_ONE_PNG = Buffer.from(
@@ -245,6 +246,9 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
 
   const qualityReport = readJsonFile(path.join(deliveryDir, 'quality-report.json'));
   assert.match(qualityReport.status, /^(passed|passed_with_warnings)$/);
+  const replayReport = readJsonFile(path.join(deliveryDir, 'replay-report.json'));
+  assert.match(replayReport.status, /^(passed|passed_with_warnings)$/);
+  assert.equal(replayReport.deliveryDir, deliveryDir);
 
   const deliveryManifest = readJsonFile(path.join(deliveryDir, 'delivery-package.json'));
   assert.equal(deliveryManifest.schemaVersion, 'docx-engine-v2/delivery-package');
@@ -260,6 +264,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.fileSha256.templateManifest, sha256File(path.join(deliveryDir, 'template.manifest.json')));
   assert.equal(deliveryManifest.fileSha256.renderPlan, sha256File(path.join(deliveryDir, 'render-plan.json')));
   assert.equal(deliveryManifest.fileSha256.qualityReport, sha256File(path.join(deliveryDir, 'quality-report.json')));
+  assert.equal(deliveryManifest.fileSha256.replayReport, sha256File(path.join(deliveryDir, 'replay-report.json')));
   assert.equal(deliveryManifest.fileSha256.imageInstructions, sha256File(path.join(deliveryDir, 'README-图片调整说明.md')));
   assert.equal(deliveryManifest.files.document, 'document.docx');
   assert.equal(deliveryManifest.files.source, 'source.md');
@@ -271,6 +276,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(deliveryManifest.files.templateManifest, 'template.manifest.json');
   assert.equal(deliveryManifest.files.renderPlan, 'render-plan.json');
   assert.equal(deliveryManifest.files.qualityReport, 'quality-report.json');
+  assert.equal(deliveryManifest.files.replayReport, 'replay-report.json');
   assert.equal(deliveryManifest.files.imageInstructions, 'README-图片调整说明.md');
   assert.equal(deliveryManifest.status, 'delivered');
 

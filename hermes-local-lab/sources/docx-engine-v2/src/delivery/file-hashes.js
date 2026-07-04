@@ -14,6 +14,9 @@ const HASHED_FILE_ROLES = [
   'qualityReport',
   'imageInstructions',
 ];
+const OPTIONAL_HASHED_FILE_ROLES = [
+  'replayReport',
+];
 
 function buildDeliveryFileSha256({ deliveryDir, files, roles = HASHED_FILE_ROLES } = {}) {
   const hashes = {};
@@ -59,22 +62,37 @@ function deliveryFileHashFailures({ deliveryDir, files, fileSha256 }) {
   }
 
   for (const role of HASHED_FILE_ROLES) {
-    const relativePath = normalizeRelativePackagePath(files?.[role]);
-    const expectedHash = String(fileSha256[role] || '').trim();
-    const displayPath = files?.[role] || role;
-    if (!expectedHash) {
-      failures.push(`delivery-package.json fileSha256.${role} is required.`);
-      continue;
-    }
-    if (!relativePath) {
-      continue;
-    }
-    const filePath = path.join(deliveryDir, relativePath);
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-      const actualHash = sha256File(filePath);
-      if (actualHash !== expectedHash) {
-        failures.push(`${displayPath} sha256 mismatch: expected ${expectedHash}, got ${actualHash}`);
-      }
+    failures.push(...deliveryFileHashRoleFailures({ deliveryDir, files, fileSha256, role, required: true }));
+  }
+  for (const role of OPTIONAL_HASHED_FILE_ROLES) {
+    failures.push(...deliveryFileHashRoleFailures({ deliveryDir, files, fileSha256, role, required: false }));
+  }
+  return failures;
+}
+
+function deliveryFileHashRoleFailures({ deliveryDir, files, fileSha256, role, required }) {
+  const failures = [];
+  const relativePath = normalizeRelativePackagePath(files?.[role]);
+  const expectedHash = String(fileSha256[role] || '').trim();
+  const displayPath = files?.[role] || role;
+
+  if (!relativePath && !expectedHash && !required) {
+    return failures;
+  }
+  if (!expectedHash) {
+    failures.push(`delivery-package.json fileSha256.${role} is required.`);
+    return failures;
+  }
+  if (!relativePath) {
+    failures.push(`delivery-package.json files.${role} is required.`);
+    return failures;
+  }
+
+  const filePath = path.join(deliveryDir, relativePath);
+  if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    const actualHash = sha256File(filePath);
+    if (actualHash !== expectedHash) {
+      failures.push(`${displayPath} sha256 mismatch: expected ${expectedHash}, got ${actualHash}`);
     }
   }
   return failures;
@@ -101,6 +119,7 @@ function writeJson(filePath, value) {
 
 module.exports = {
   HASHED_FILE_ROLES,
+  OPTIONAL_HASHED_FILE_ROLES,
   buildDeliveryFileSha256,
   deliveryFileHashFailures,
   refreshDeliveryPackageFileHashes,
