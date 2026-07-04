@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 const { renderDeterministicMermaidSvg } = require('../assets/package-assets');
 const { renderMermaidSvg } = require('../assets/package-rich-draft');
+const { replaceDocxAsset } = require('../assets/replace-docx-asset');
+const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
+const { validateDeliveryPackage } = require('../validation/validate-delivery-package');
 
 main();
 
-function main() {
+async function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
-    const result = renderFigureAsset(args);
+    const result = await renderFigureAsset(args);
     if (args.json) {
       process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
       return;
@@ -23,7 +27,7 @@ function main() {
   }
 }
 
-function renderFigureAsset({ manifest, figureId }) {
+async function renderFigureAsset({ manifest, figureId }) {
   const manifestPath = path.resolve(manifest);
   const manifestDoc = readJson(manifestPath);
   if (isRichDraftManifest(manifestDoc)) {
@@ -32,7 +36,7 @@ function renderFigureAsset({ manifest, figureId }) {
   return renderDeliveryFigureAsset({ manifestPath, renderPlan: manifestDoc, figureId });
 }
 
-function renderDeliveryFigureAsset({ manifestPath, renderPlan, figureId }) {
+async function renderDeliveryFigureAsset({ manifestPath, renderPlan, figureId }) {
   const deliveryDir = path.dirname(manifestPath);
   const figure = (renderPlan.figures || []).find((item) => item.figureId === figureId);
   if (!figure) {
@@ -45,12 +49,33 @@ function renderDeliveryFigureAsset({ manifestPath, renderPlan, figureId }) {
   }
 
   const displayPath = normalizeRelativePath(figure.displayPath || `assets/${figureId}/figure.svg`);
-  const outputPath = path.join(deliveryDir, displayPath);
+  const outputPath = resolvePackagePath(deliveryDir, displayPath);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const sourceText = fs.readFileSync(sourcePath, 'utf8');
   fs.writeFileSync(outputPath, renderDeterministicMermaidSvg({ figure, sourceText }), 'utf8');
+  const displaySha256 = sha256File(outputPath);
+  const sourceSha256 = sha256File(sourcePath);
 
-  return { figureId, displayPath, outputPath };
+  updateDeliveryAssetPackage({ deliveryDir, figureId, displayPath, displaySha256, sourceSha256 });
+  updateDeliveryRenderPlan({ manifestPath, renderPlan, figureId, displayPath, displaySha256 });
+  await updateDeliveryDocument({ deliveryDir, figureId, imagePath: outputPath });
+  invalidateReplayEvidence({ deliveryDir });
+  writePendingQualityReport({ deliveryDir });
+  refreshDeliveryPackageFileHashes({
+    deliveryDir,
+    roles: ['document', 'assetPackage', 'renderPlan', 'qualityReport'],
+  });
+  const qualityReport = validateDeliveryPackage({ deliveryDir, wpsVisualStatus: 'not_verified' });
+  writeJson(path.join(deliveryDir, 'quality-report.json'), qualityReport);
+  refreshDeliveryPackageFileHashes({ deliveryDir, roles: ['qualityReport'] });
+
+  return {
+    figureId,
+    displayPath,
+    outputPath,
+    packageUpdated: true,
+    qualityStatus: qualityReport.status,
+  };
 }
 
 function renderRichDraftFigureAsset({ manifestPath, manifestDoc, figureId }) {
@@ -184,6 +209,83 @@ function updateImageList({ packageDir, manifestDoc, previousDisplayPath, display
   fs.writeFileSync(imageListPath, imageList.split(previousDisplayPath).join(displayPath), 'utf8');
 }
 
+function updateDeliveryAssetPackage({ deliveryDir, figureId, displayPath, displaySha256, sourceSha256 }) {
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const assetPackage = readJson(assetPackagePath);
+  const figure = (assetPackage.figures || []).find((item) => item.figureId === figureId);
+  if (!figure) {
+    throw new Error(`asset-package.json 中找不到图片: ${figureId}`);
+  }
+  figure.displayPath = displayPath;
+  figure.sha256 = displaySha256;
+  figure.editable = {
+    ...(figure.editable || {}),
+    format: figure.editable?.format || 'mermaid',
+    sourcePath: figure.editable?.sourcePath || `assets/${figureId}/source.mmd`,
+    sourceSha256,
+  };
+  writeJson(assetPackagePath, assetPackage);
+}
+
+function updateDeliveryRenderPlan({ manifestPath, renderPlan, figureId, displayPath, displaySha256 }) {
+  const figure = (renderPlan.figures || []).find((item) => item.figureId === figureId);
+  if (figure) {
+    figure.displayPath = displayPath;
+  }
+  const image = (renderPlan.templateData?.images || []).find((item) => item.figureId === figureId);
+  if (!image) {
+    throw new Error(`render-plan.json templateData.images 中找不到图片: ${figureId}`);
+  }
+  image.path = displayPath;
+  image.sha256 = displaySha256;
+  writeJson(manifestPath, renderPlan);
+}
+
+async function updateDeliveryDocument({ deliveryDir, figureId, imagePath }) {
+  const docxPath = path.join(deliveryDir, 'document.docx');
+  if (!fs.existsSync(docxPath)) {
+    throw new Error(`找不到交付文档: ${docxPath}`);
+  }
+  const tempPath = path.join(deliveryDir, `.document.${figureId}.${process.pid}.${Date.now()}.docx`);
+  try {
+    await replaceDocxAsset({
+      docxPath,
+      figureId,
+      imagePath,
+      outputPath: tempPath,
+    });
+    fs.renameSync(tempPath, docxPath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+}
+
+function invalidateReplayEvidence({ deliveryDir }) {
+  const deliveryPackagePath = path.join(deliveryDir, 'delivery-package.json');
+  const deliveryPackage = readJson(deliveryPackagePath);
+  const replayPath = normalizeRelativePackagePath(deliveryPackage.files?.replayReport || '');
+  if (deliveryPackage.files) {
+    delete deliveryPackage.files.replayReport;
+  }
+  if (deliveryPackage.fileSha256) {
+    delete deliveryPackage.fileSha256.replayReport;
+  }
+  writeJson(deliveryPackagePath, deliveryPackage);
+  if (replayPath) {
+    fs.rmSync(path.join(deliveryDir, replayPath), { force: true });
+  }
+}
+
+function writePendingQualityReport({ deliveryDir }) {
+  writeJson(path.join(deliveryDir, 'quality-report.json'), {
+    schemaVersion: 'docx-engine-v2/validation-report',
+    status: 'not_verified',
+    checks: [],
+    warnings: ['Delivery package was rerendered and requires replay plus WPS/Word visual validation.'],
+    failures: [],
+  });
+}
+
 function resolvePackagePath(packageDir, relativePath) {
   const normalizedPath = normalizeRelativePath(relativePath);
   if (!normalizedPath || normalizedPath.split('/').includes('..')) {
@@ -199,6 +301,18 @@ function resolvePackagePath(packageDir, relativePath) {
 
 function normalizeRelativePath(value) {
   return String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function normalizeRelativePackagePath(value) {
+  const normalized = normalizeRelativePath(value);
+  if (!normalized || normalized.split('/').includes('..')) {
+    return '';
+  }
+  return normalized;
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function escapeRegExp(value) {

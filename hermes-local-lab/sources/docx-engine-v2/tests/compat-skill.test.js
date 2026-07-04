@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -250,6 +251,69 @@ test('copyable replace-docx-image wrapper delegates stable figure replacement to
   assert.match(entries.get('word/media/fig-001.svg').toString('utf8'), /COMPAT_REPLACEMENT_MARKER/);
 });
 
+test('copyable render-figure-assets wrapper keeps a delivery package internally consistent', async (t) => {
+  const { workspace, outDir } = buildSkillPackage(t);
+  const { assetDir, sourcePath } = writeRichSource(workspace);
+  const deliveryDir = path.join(workspace, 'delivery-for-rerender');
+
+  const renderResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/apply-template.js'),
+    '--template-id',
+    'general-proposal',
+    '--source',
+    sourcePath,
+    '--asset-dir',
+    assetDir,
+    '--out-dir',
+    deliveryDir,
+  ], { encoding: 'utf8' });
+  assert.equal(renderResult.status, 0, renderResult.stderr || renderResult.stdout);
+
+  const sourceMmdPath = path.join(deliveryDir, 'assets/fig-001/source.mmd');
+  fs.writeFileSync(
+    sourceMmdPath,
+    ['flowchart LR', '  A[Source] --> B[PACKAGE_RERENDER_MARKER]', ''].join('\n'),
+    'utf8'
+  );
+
+  const rerenderResult = spawnSync(process.execPath, [
+    path.join(outDir, 'scripts/render-figure-assets.js'),
+    '--manifest',
+    path.join(deliveryDir, 'render-plan.json'),
+    '--figure-id',
+    'fig-001',
+  ], { encoding: 'utf8' });
+
+  assert.equal(rerenderResult.status, 0, rerenderResult.stderr || rerenderResult.stdout);
+  assert.match(rerenderResult.stdout, /render-figure-assets-ok/);
+
+  const displayPath = path.join(deliveryDir, 'assets/fig-001/figure.svg');
+  const displayHash = sha256File(displayPath);
+  const sourceHash = sha256File(sourceMmdPath);
+  const assetPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'asset-package.json'), 'utf8'));
+  const renderPlan = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'render-plan.json'), 'utf8'));
+  const deliveryPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'delivery-package.json'), 'utf8'));
+  const figure = assetPackage.figures.find((item) => item.figureId === 'fig-001');
+  const image = renderPlan.templateData.images.find((item) => item.figureId === 'fig-001');
+
+  assert.equal(figure.sha256, displayHash);
+  assert.equal(figure.editable.sourceSha256, sourceHash);
+  assert.equal(image.sha256, displayHash);
+  assert.equal(deliveryPackage.fileSha256.assetPackage, sha256File(path.join(deliveryDir, 'asset-package.json')));
+  assert.equal(deliveryPackage.fileSha256.renderPlan, sha256File(path.join(deliveryDir, 'render-plan.json')));
+  assert.equal(deliveryPackage.fileSha256.document, sha256File(path.join(deliveryDir, 'document.docx')));
+  assert.equal(deliveryPackage.files.replayReport, undefined);
+  assert.equal(deliveryPackage.fileSha256.replayReport, undefined);
+  assert.equal(fs.existsSync(path.join(deliveryDir, 'replay-report.json')), false);
+
+  const qualityReport = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'quality-report.json'), 'utf8'));
+  assert.equal(qualityReport.checks.find((check) => check.id === 'image_coverage')?.status, 'passed');
+  assert.equal(qualityReport.checks.find((check) => check.id === 'wps_visual')?.status, 'not_verified');
+
+  const entries = await readZipEntries(path.join(deliveryDir, 'document.docx'));
+  assert.match(entries.get('word/media/fig-001.svg').toString('utf8'), /PACKAGE_RERENDER_MARKER/);
+});
+
 test('copyable list-templates cli exposes migrated templates', (t) => {
   const { outDir } = buildSkillPackage(t);
   const result = spawnSync(process.execPath, [
@@ -411,6 +475,10 @@ test('copyable self-test renders both smoke documents with template-appropriate 
   ], { encoding: 'utf8' });
   assert.equal(repeat.status, 0, repeat.stderr || repeat.stdout);
 });
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
 
 function readZipEntries(docxPath) {
   return new Promise((resolve, reject) => {
