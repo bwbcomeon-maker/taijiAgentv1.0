@@ -262,6 +262,32 @@ function addSchemaCheck({ addCheck, jsonFiles }) {
     return;
   }
 
+  const assetPackageSourceFailures = assetPackageSourceConsistencyFailures({
+    sourcePackage: jsonFiles.sourcePackage,
+    assetPackage: jsonFiles.assetPackage,
+  });
+  if (assetPackageSourceFailures.length > 0) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package asset/source package mismatch: ${assetPackageSourceFailures.join(', ')}`
+    );
+    return;
+  }
+
+  const assetPackageRenderFailures = assetPackageRenderConsistencyFailures({
+    assetPackage: jsonFiles.assetPackage,
+    renderPlan: jsonFiles.renderPlan,
+  });
+  if (assetPackageRenderFailures.length > 0) {
+    addCheck(
+      'schema',
+      'failed',
+      `Delivery package asset/render plan mismatch: ${assetPackageRenderFailures.join(', ')}`
+    );
+    return;
+  }
+
   if (
     jsonFiles.jobManifest.status === 'delivered' &&
     normalizeComparablePath(jsonFiles.jobManifest.workspace) !==
@@ -356,11 +382,107 @@ function renderPlanSourceConsistencyFailures({ sourcePackage, renderPlan }) {
   return failures;
 }
 
-function figureListConsistencyFailures({ actualFigures, expectedFigures }) {
+function assetPackageSourceConsistencyFailures({ sourcePackage, assetPackage }) {
+  const failures = [];
+  failures.push(
+    ...tableListConsistencyFailures({
+      actualTables: assetPackage?.tables || [],
+      expectedTables: sourcePackage?.tables || [],
+      actualLabel: 'asset-package.json tables',
+      expectedLabel: 'source-package.json tables',
+    })
+  );
+  failures.push(
+    ...figureListConsistencyFailures({
+      actualFigures: assetPackage?.figures || [],
+      expectedFigures: sourcePackage?.figures || [],
+      actualLabel: 'asset-package.json figures',
+      expectedLabel: 'source-package.json figures',
+    })
+  );
+  failures.push(
+    ...sourceImageListConsistencyFailures({
+      actualImages: assetPackage?.images || [],
+      expectedImages: sourcePackage?.images || [],
+      actualLabel: 'asset-package.json images',
+      expectedLabel: 'source-package.json images',
+    })
+  );
+  return failures;
+}
+
+function assetPackageRenderConsistencyFailures({ assetPackage, renderPlan }) {
+  const failures = [];
+  const renderImages = renderPlan?.templateData?.images || [];
+  const figureImagesById = new Map(
+    renderImages
+      .filter((image) => image.metadata?.sourceType === 'figure')
+      .map((image) => [image.figureId, image])
+  );
+  for (const figure of assetPackage?.figures || []) {
+    const image = figureImagesById.get(figure.figureId);
+    if (!image) {
+      failures.push(`asset-package.json figures missing render-plan.json templateData.images figureId=${figure.figureId}`);
+      continue;
+    }
+    comparePackagedImageFileFields({
+      failures,
+      packaged: figure,
+      planned: image,
+      actualLabel: `asset-package.json figures.${figure.figureId}`,
+      expectedLabel: `render-plan.json templateData.images.${figure.figureId}`,
+    });
+  }
+
+  const sourceImagesById = new Map(
+    renderImages
+      .filter((image) => image.metadata?.sourceType === 'image')
+      .map((image) => [image.metadata?.sourceImageId || image.metadata?.imageId || '', image])
+  );
+  for (const sourceImage of assetPackage?.images || []) {
+    const image = sourceImagesById.get(sourceImage.imageId);
+    if (!image) {
+      failures.push(`asset-package.json images missing render-plan.json templateData.images imageId=${sourceImage.imageId}`);
+      continue;
+    }
+    comparePackagedImageFileFields({
+      failures,
+      packaged: sourceImage,
+      planned: image,
+      actualLabel: `asset-package.json images.${sourceImage.imageId}`,
+      expectedLabel: `render-plan.json templateData.images.${image.figureId}`,
+    });
+  }
+  return failures;
+}
+
+function comparePackagedImageFileFields({ failures, packaged, planned, actualLabel, expectedLabel }) {
+  const packagedPath = String(packaged.displayPath ?? '');
+  const plannedPath = String(planned.path ?? '');
+  if (packagedPath !== plannedPath) {
+    failures.push(
+      `${actualLabel}.displayPath=${displayValue(packagedPath)} does not match ${expectedLabel}.path=${displayValue(plannedPath)}`
+    );
+  }
+  const packagedSha256 = String(packaged.sha256 ?? '');
+  const plannedSha256 = String(planned.sha256 ?? '');
+  if (packagedSha256 !== plannedSha256) {
+    failures.push(
+      `${actualLabel}.sha256=${displayValue(packagedSha256)} does not match ${expectedLabel}.sha256=${displayValue(plannedSha256)}`
+    );
+  }
+}
+
+function figureListConsistencyFailures({
+  actualFigures,
+  expectedFigures,
+  actualLabel = 'render-plan.json figures',
+  expectedLabel = 'source-package.json figures',
+}) {
   const failures = [];
   if (actualFigures.length !== expectedFigures.length) {
     failures.push(
-      `render-plan.json figures count=${actualFigures.length} does not match source-package.json figures count=${expectedFigures.length}`
+      `${actualLabel} count=${actualFigures.length} does not match ${expectedLabel} count=${expectedFigures.length}`
     );
   }
 
@@ -368,7 +490,7 @@ function figureListConsistencyFailures({ actualFigures, expectedFigures }) {
   for (const expected of expectedFigures) {
     const actual = actualById.get(expected.figureId);
     if (!actual) {
-      failures.push(`render-plan.json figures missing figureId=${expected.figureId}`);
+      failures.push(`${actualLabel} missing figureId=${expected.figureId}`);
       continue;
     }
     for (const field of ['figureId', 'caption', 'sectionId', 'anchorText']) {
@@ -376,7 +498,35 @@ function figureListConsistencyFailures({ actualFigures, expectedFigures }) {
       const expectedValue = String(expected[field] ?? '');
       if (actualValue !== expectedValue) {
         failures.push(
-          `render-plan.json figures.${expected.figureId}.${field}=${displayValue(actualValue)} does not match source-package.json figures.${expected.figureId}.${field}=${displayValue(expectedValue)}`
+          `${actualLabel}.${expected.figureId}.${field}=${displayValue(actualValue)} does not match ${expectedLabel}.${expected.figureId}.${field}=${displayValue(expectedValue)}`
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function sourceImageListConsistencyFailures({ actualImages, expectedImages, actualLabel, expectedLabel }) {
+  const failures = [];
+  if (actualImages.length !== expectedImages.length) {
+    failures.push(
+      `${actualLabel} count=${actualImages.length} does not match ${expectedLabel} count=${expectedImages.length}`
+    );
+  }
+
+  const actualById = new Map(actualImages.map((image) => [image.imageId, image]));
+  for (const expected of expectedImages) {
+    const actual = actualById.get(expected.imageId);
+    if (!actual) {
+      failures.push(`${actualLabel} missing imageId=${expected.imageId}`);
+      continue;
+    }
+    for (const field of ['imageId', 'caption', 'sectionId']) {
+      const actualValue = String(actual[field] ?? '');
+      const expectedValue = String(expected[field] ?? '');
+      if (actualValue !== expectedValue) {
+        failures.push(
+          `${actualLabel}.${expected.imageId}.${field}=${displayValue(actualValue)} does not match ${expectedLabel}.${expected.imageId}.${field}=${displayValue(expectedValue)}`
         );
       }
     }

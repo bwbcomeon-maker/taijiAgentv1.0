@@ -473,6 +473,111 @@ test('validateDeliveryPackage fails when asset-package.json no longer matches th
   assert.ok(report.failures.some((failure) => /asset-package\.json sha256 mismatch/.test(failure)));
 });
 
+test('validateDeliveryPackage fails when asset package tables disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(assetPackage.tables.length > 0, 'fixture must include packaged tables');
+  assetPackage.tables[0].title = 'Tampered asset table';
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.assetPackage = sha256File(assetPackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /asset-package\.json tables.*source-package\.json tables/);
+});
+
+test('validateDeliveryPackage fails when asset package figures disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(assetPackage.figures.length > 0, 'fixture must include packaged figures');
+  assetPackage.figures[0].caption = 'Tampered asset figure';
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.assetPackage = sha256File(assetPackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /asset-package\.json figures.*source-package\.json figures/);
+});
+
+test('validateDeliveryPackage fails when asset package source images disagree with the source package', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(assetPackage.images.length > 0, 'fixture must include packaged source images');
+  assetPackage.images[0].caption = 'Tampered asset image';
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.assetPackage = sha256File(assetPackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /asset-package\.json images.*source-package\.json images/);
+});
+
+test('validateDeliveryPackage fails when asset package figure files disagree with the render plan', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(assetPackage.figures.length > 0, 'fixture must include packaged figures');
+  assetPackage.figures[0].displayPath = 'assets/fig-001/wrong-figure.svg';
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.assetPackage = sha256File(assetPackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /asset-package\.json figures.*render-plan\.json templateData\.images/);
+});
+
+test('validateDeliveryPackage fails when asset package source image files disagree with the render plan', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
+  const deliveryManifest = JSON.parse(fs.readFileSync(deliveryManifestPath, 'utf8'));
+
+  assert.ok(assetPackage.images.length > 0, 'fixture must include packaged source images');
+  assetPackage.images[0].displayPath = 'assets/img-001/wrong-image.png';
+  fs.writeFileSync(assetPackagePath, `${JSON.stringify(assetPackage, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.assetPackage = sha256File(assetPackagePath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const schemaCheck = report.checks.find((check) => check.id === 'schema');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(schemaCheck?.status, 'failed');
+  assert.match(schemaCheck?.message || '', /asset-package\.json images.*render-plan\.json templateData\.images/);
+});
+
 test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   recordWpsVisualAcceptance({
