@@ -27,10 +27,11 @@ function recordWpsVisualAcceptance({
     throw new Error(`document.docx not found: ${documentPath}`);
   }
   const normalizedStatus = normalizeAcceptanceStatus(status);
+  let report = null;
   if (normalizedStatus !== 'failed') {
-    assertAutomatedDeliveryGatesPassed(path.resolve(deliveryDir));
+    report = assertAutomatedDeliveryGatesPassed(path.resolve(deliveryDir));
   }
-  const report = readJson(qualityReportPath);
+  report = report || readJson(qualityReportPath);
   const checks = Array.isArray(report.checks) ? [...report.checks] : [];
   const wpsCheckIndex = checks.findIndex((check) => check.id === 'wps_visual');
   const nextWpsCheck = {
@@ -135,7 +136,7 @@ function assertAutomatedDeliveryGatesPassed(deliveryDir) {
     (check) => check.id !== 'wps_visual' && check.status === 'failed'
   );
   if (failedChecks.length === 0) {
-    return;
+    return report;
   }
 
   const failedMessages = failedChecks

@@ -98,6 +98,38 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   );
 });
 
+test('recordWpsVisualAcceptance writes back the full final validation report', async (t) => {
+  const deliveryDir = await makeDelivery(t);
+  const qualityReportPath = path.join(deliveryDir, 'quality-report.json');
+  const deliveryManifestPath = path.join(deliveryDir, 'delivery-package.json');
+  const staleQualityReport = readQualityReport(deliveryDir);
+  const deliveryManifest = readDeliveryManifest(deliveryDir);
+
+  staleQualityReport.checks = staleQualityReport.checks.filter((check) => check.id !== 'replay_report');
+  fs.writeFileSync(qualityReportPath, `${JSON.stringify(staleQualityReport, null, 2)}\n`, 'utf8');
+  deliveryManifest.fileSha256.qualityReport = sha256File(qualityReportPath);
+  fs.writeFileSync(deliveryManifestPath, `${JSON.stringify(deliveryManifest, null, 2)}\n`, 'utf8');
+
+  const result = recordWpsVisualAcceptance({
+    deliveryDir,
+    status: 'passed',
+    reviewedAt: '2026-07-05T10:01:00.000Z',
+    reviewedBy: 'user',
+    note: '最终验收前先刷新质量报告。',
+  });
+
+  assert.ok(
+    result.qualityReport.checks.some(
+      (check) => check.id === 'replay_report' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    readQualityReport(deliveryDir).checks.some(
+      (check) => check.id === 'replay_report' && check.status === 'passed'
+    )
+  );
+});
+
 test('recordWpsVisualAcceptance rejects WPS pass when automated package validation fails', async (t) => {
   const deliveryDir = await makeDelivery(t);
   fs.rmSync(path.join(deliveryDir, 'render-plan.json'));
