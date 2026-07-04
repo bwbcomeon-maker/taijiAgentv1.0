@@ -19,7 +19,23 @@ def test_docx_engine_v2_routes_are_registered_in_router():
 
     assert "/api/docx-engine-v2/templates" in routes_py
     assert "/api/docx-engine-v2/jobs" in routes_py
+    assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
+    assert "/api/file/open" in routes_py
+
+
+def test_explicit_template_selection_returns_visible_workbench_payload():
+    from api import routes
+
+    result = routes._docx_template_invocation_result(
+        "/docx-template-skill 请把当前成果套用通用方案模板（templateId: general-proposal）。"
+    )
+
+    assert result is not None
+    assert result["docx_template_selected"] is True
+    assert result["template_id"] == "general-proposal"
+    assert result["template"]["id"] == "general-proposal"
+    assert result["templates"]
 
 
 def test_docx_engine_v2_lists_templates(monkeypatch, tmp_path):
@@ -66,6 +82,13 @@ def test_docx_engine_v2_create_job_returns_delivery_package(monkeypatch, tmp_pat
             "delivery_dir": str(tmp_path / "delivery"),
             "document_path": str(tmp_path / "delivery" / "document.docx"),
             "quality_status": "passed_with_warnings",
+            "quality_report_path": str(tmp_path / "delivery" / "quality-report.json"),
+            "quality_report": {
+                "status": "passed_with_warnings",
+                "checks": [{"id": "wps_visual", "status": "not_verified"}],
+                "warnings": ["WPS visual inspection has not been performed."],
+                "failures": [],
+            },
         }, 200
 
     monkeypatch.setattr(routes.docx_engine_v2, "create_job", fake_create_job)
@@ -84,6 +107,32 @@ def test_docx_engine_v2_create_job_returns_delivery_package(monkeypatch, tmp_pat
     payload = result["payload"]
     assert payload["document_path"].endswith("document.docx")
     assert payload["quality_status"] in {"passed", "passed_with_warnings"}
+    assert payload["quality_report_path"].endswith("quality-report.json")
+    assert payload["quality_report"]["checks"][0]["id"] == "wps_visual"
+
+
+def test_docx_engine_v2_rerender_asset_routes_to_service(monkeypatch, tmp_path):
+    routes = _patch_route_json(monkeypatch, tmp_path)
+
+    def fake_rerender_asset(payload, workspace):
+        assert payload["figure_id"] == "fig-001"
+        assert workspace == tmp_path.resolve()
+        return {
+            "ok": True,
+            "figure_id": "fig-001",
+            "display_path": "assets/fig-001/figure.svg",
+            "output_path": str(tmp_path / "delivery" / "assets" / "fig-001" / "figure.svg"),
+        }, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "rerender_asset", fake_rerender_asset)
+
+    result = routes._handle_docx_engine_v2_rerender_asset(
+        object(),
+        {"session_id": "sid-docx", "delivery_dir": "delivery", "figure_id": "fig-001"},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["display_path"].endswith("figure.svg")
 
 
 def test_docx_engine_v2_replace_asset_rejects_bad_figure_id(tmp_path):

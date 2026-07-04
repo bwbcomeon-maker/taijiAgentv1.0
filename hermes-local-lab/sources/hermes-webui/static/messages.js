@@ -297,6 +297,132 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   return true;
 }
 
+function isDocxTemplateInvocationText(text){
+  const value=String(text||'').trim();
+  const compact=value.replace(/\s+/g,'');
+  if(!compact) return false;
+  const examples=['将这份方案套用模板','帮我把当前方案套用模板','套用模板','套用文档模板','应用模板','应用文档模板'];
+  if(examples.some(item=>compact===item.replace(/\s+/g,''))) return true;
+  if(compact.startsWith('/docx-template-skill')) return true;
+  if(!compact.includes('模板')) return false;
+  const verbs=['套用','应用','使用','套入','生成Word','生成word','生成DOCX','生成docx','生成文档'];
+  const objects=['这份方案','当前方案','这份文档','当前文档','当前成果','方案','文档','材料'];
+  return verbs.some(item=>compact.includes(item))&&objects.some(item=>compact.includes(item));
+}
+
+function normalizeDocxTemplateInvocationText(text){
+  const value=String(text||'').trim();
+  if(!isDocxTemplateInvocationText(value)) return text;
+  if(/通用方案模板|general-proposal/i.test(value)){
+    return '/docx-template-skill 请把当前成果套用通用方案模板（templateId: general-proposal）。';
+  }
+  if(/会议纪要模板|meeting-minutes/i.test(value)){
+    return '/docx-template-skill 请把当前成果套用会议纪要模板（templateId: meeting-minutes）。';
+  }
+  return value;
+}
+
+function finishDocxTemplateNonStreamingStart(activeSid, assistantMessage){
+  delete INFLIGHT[activeSid];
+  if(typeof clearInflightState==='function') clearInflightState(activeSid);
+  stopApprovalPolling();
+  stopClarifyPolling();
+  removeThinking();
+  S.activeStreamId=null;
+  if(S.session&&S.session.session_id===activeSid){
+    S.session.active_stream_id=null;
+    S.session.pending_user_message=null;
+  }
+  S.messages.push(assistantMessage);
+  renderMessages();
+  setBusy(false);
+  setComposerStatus('');
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(typeof renderSessionList==='function') void renderSessionList();
+}
+
+function renderDocxTemplateSelectionMessage(activeSid,startData){
+  finishDocxTemplateNonStreamingStart(activeSid,{
+    role:'assistant',
+    content:startData&&startData.message||'先列出可用模板，请选择要套用的模板，不要默认选择模板。',
+    docx_template_selection:{
+      code:startData&&startData.code||'template_selection_required',
+      templates:Array.isArray(startData&&startData.templates)?startData.templates:[],
+      examples:Array.isArray(startData&&startData.examples)?startData.examples:[],
+    },
+    _ts:Date.now()/1000,
+  });
+}
+
+function renderDocxTemplateSelectedMessage(activeSid,startData){
+  const template=startData&&startData.template||{};
+  finishDocxTemplateNonStreamingStart(activeSid,{
+    role:'assistant',
+    content:startData&&startData.message||'已选择模板，请确认后继续套用模板。',
+    docx_template_selected:{
+      template_id:startData&&startData.template_id||template.id||'',
+      template,
+    },
+    _ts:Date.now()/1000,
+  });
+}
+
+function renderDocxEngineWorkbenchMessage(activeSid,startData){
+  const template=startData&&startData.template||{};
+  const templateId=startData&&startData.template_id||template.id||'general-proposal';
+  finishDocxTemplateNonStreamingStart(activeSid,{
+    role:'assistant',
+    content:startData&&startData.message||'已选择模板，请在文档模板工作台生成 DOCX 交付包。',
+    docx_engine_workbench:{
+      template_id:templateId,
+      template,
+      templates:Array.isArray(startData&&startData.templates)?startData.templates:(template&&template.id?[template]:[]),
+    },
+    _ts:Date.now()/1000,
+  });
+  setTimeout(()=>{
+    const cards=document.querySelectorAll('.docx-engine-workbench');
+    const card=cards&&cards.length?cards[cards.length-1]:null;
+    if(card&&typeof card.scrollIntoView==='function')card.scrollIntoView({block:'start'});
+  },0);
+}
+
+function renderDocxFigureAdjustmentMessage(activeSid,startData){
+  finishDocxTemplateNonStreamingStart(activeSid,{
+    role:'assistant',
+    content:startData&&startData.message||'图片调整工作台：请选择打包初稿、重渲染图示或替换 DOCX 图片。',
+    docx_figure_adjustment:{
+      code:startData&&startData.code||'docx_figure_adjustment_required',
+      actions:Array.isArray(startData&&startData.actions)?startData.actions:[],
+      examples:Array.isArray(startData&&startData.examples)?startData.examples:[],
+    },
+    _ts:Date.now()/1000,
+  });
+}
+
+function chooseDocxTemplate(button){
+  const root=button&&button.closest?button.closest('.docx-template-selection-card'):null;
+  const item=button&&button.closest?button.closest('[data-template-id]'):null;
+  const templateId=item?String(item.dataset.templateId||'').trim():'';
+  const templateName=item?String(item.dataset.templateName||'').trim():'';
+  const composer=$('msg');
+  if(composer&&templateId){
+    composer.value=`/docx-template-skill 请把当前成果套用${templateName||templateId}（templateId: ${templateId}）。`;
+    autoResize();
+    composer.focus();
+  }
+  if(root) root.classList.add('is-selected');
+  if(typeof showToast==='function') showToast('已填入模板选择，可发送后继续。',1800);
+}
+
+function dismissDocxTemplateSelection(button){
+  const root=button&&button.closest?button.closest('.docx-template-selection-card'):null;
+  if(root) root.remove();
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+  if(typeof showToast==='function') showToast('已取消模板选择。',1600);
+}
+
 async function send(){
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
@@ -466,7 +592,7 @@ async function send(){
   setComposerStatus('');
 
   const uploadedNames=uploaded.map(u=>u.name||u);
-  let msgText=text;
+  let msgText=normalizeDocxTemplateInvocationText(text);
   if(uploaded.length&&!msgText)msgText=`Uploaded files: ${uploadedNames.join(', ')}`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
@@ -565,6 +691,21 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
+
+    if(startData.docx_template_selection_required||startData.code==='template_selection_required'){
+      renderDocxTemplateSelectionMessage(activeSid,startData);
+      return;
+    }
+
+    if(startData.docx_template_selected){
+      renderDocxEngineWorkbenchMessage(activeSid,startData);
+      return;
+    }
+
+    if(startData.docx_figure_adjustment_required||startData.code==='docx_figure_adjustment_required'){
+      renderDocxFigureAdjustmentMessage(activeSid,startData);
+      return;
+    }
 
     if(startData.license_blocked){
       delete INFLIGHT[activeSid];

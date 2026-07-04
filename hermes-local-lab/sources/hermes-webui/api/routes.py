@@ -10734,6 +10734,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/file/reveal":
         return _handle_file_reveal(handler, body)
 
+    if parsed.path == "/api/file/open":
+        return _handle_file_open(handler, body)
+
     if parsed.path == "/api/file/path":
         return _handle_file_path(handler, body)
 
@@ -10743,8 +10746,20 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/docx-engine-v2/jobs":
         return _handle_docx_engine_v2_create_job(handler, body)
 
+    if parsed.path == "/api/docx-engine-v2/assets/rerender":
+        return _handle_docx_engine_v2_rerender_asset(handler, body)
+
     if parsed.path == "/api/docx-engine-v2/assets/replace":
         return _handle_docx_engine_v2_replace_asset(handler, body)
+
+    if parsed.path == "/api/docx-template/figure-adjust/package":
+        return _handle_docx_figure_adjustment_package(handler, body)
+
+    if parsed.path == "/api/docx-template/figure-adjust/rerender":
+        return _handle_docx_figure_adjustment_rerender(handler, body)
+
+    if parsed.path == "/api/docx-template/figure-adjust/replace":
+        return _handle_docx_figure_adjustment_replace(handler, body)
 
     # ── Workspace management (POST) ──
     if parsed.path == "/api/workspaces/add":
@@ -14263,6 +14278,194 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
     return title_from([{"role": "user", "content": text}], fallback) or fallback
 
 
+_PLAN_LIKE_CHAT_MATERIAL_TERMS = (
+    "方案",
+    "实施计划",
+    "工作计划",
+    "专项行动",
+    "规划",
+    "技术路线",
+    "架构设计",
+    "研究报告",
+    "调研报告",
+    "专题报告",
+)
+_PLAN_LIKE_CHAT_GENERATION_TERMS = ("编制", "起草", "生成", "制定", "撰写", "写一份", "出一份", "做一份")
+_RICH_DRAFT_CHAT_REQUIREMENT_MARKER = "富内容初稿生成要求"
+_DOCX_TEMPLATE_SELECTION_REQUIRED_CODE = "template_selection_required"
+_DOCX_FIGURE_ADJUSTMENT_REQUIRED_CODE = "docx_figure_adjustment_required"
+_DOCX_TEMPLATE_CATALOG = (
+    {
+        "id": "general-proposal",
+        "name": "通用方案模板",
+        "version": "1.0",
+        "description": "适用于实施方案、技术方案、研究报告等方案类文档。",
+    },
+    {
+        "id": "meeting-minutes",
+        "name": "会议纪要模板",
+        "version": "1.0",
+        "description": "适用于会议纪要、专题会议记录和行动项整理。",
+    },
+)
+_DOCX_TEMPLATE_NATURAL_EXAMPLES = ("将这份方案套用模板", "帮我把当前方案套用模板")
+_DOCX_FIGURE_ADJUSTMENT_EXAMPLES = (
+    "调整这份 Word 里的图片",
+    "重渲染 fig-002",
+    "替换 DOCX 中的 fig-001 图片",
+)
+_DOCX_TEMPLATE_EXPLICIT_ALIASES = {
+    "通用方案模板": "general-proposal",
+    "通用模板": "general-proposal",
+    "方案模板": "general-proposal",
+    "general-proposal": "general-proposal",
+    "会议纪要模板": "meeting-minutes",
+    "会议纪要": "meeting-minutes",
+    "meeting-minutes": "meeting-minutes",
+}
+
+
+def _docx_template_catalog() -> list[dict]:
+    return [dict(item) for item in _DOCX_TEMPLATE_CATALOG]
+
+
+def _docx_template_intent_text(prompt: str) -> str:
+    return re.sub(r"\s+", "", str(prompt or "").strip().lower())
+
+
+def _docx_template_explicit_id(prompt: str) -> str:
+    compact = _docx_template_intent_text(prompt)
+    for alias, template_id in _DOCX_TEMPLATE_EXPLICIT_ALIASES.items():
+        if alias.lower() in compact:
+            return template_id
+    explicit = re.search(r"(?:templateId|template_id)\s*[:=：]\s*([A-Za-z0-9_-]+)", str(prompt or ""), re.I)
+    return explicit.group(1) if explicit else ""
+
+
+def _is_docx_template_invocation(prompt: str) -> bool:
+    compact = _docx_template_intent_text(prompt)
+    if not compact:
+        return False
+    if compact.startswith("/docx-template-skill"):
+        return True
+    bare_template_phrases = (
+        "套用模板",
+        "/套用模板",
+        "套用文档模板",
+        "/套用文档模板",
+        "应用模板",
+        "应用文档模板",
+        "使用模板",
+    )
+    if compact in bare_template_phrases:
+        return True
+    if "模板" not in compact:
+        return False
+    template_verbs = ("套用", "应用", "使用", "套入", "套个", "生成word", "生成docx", "生成文档")
+    template_objects = ("这份方案", "当前方案", "这份文档", "当前文档", "当前成果", "方案", "文档", "材料")
+    return any(verb in compact for verb in template_verbs) and any(obj in compact for obj in template_objects)
+
+
+def _normalize_docx_template_invocation_message(prompt: str) -> str:
+    raw = str(prompt or "").strip()
+    if not _is_docx_template_invocation(raw):
+        return raw
+    template_id = _docx_template_explicit_id(raw)
+    if not template_id:
+        return raw
+    if _docx_template_intent_text(raw).startswith("/docx-template-skill"):
+        return raw
+    selected = next((item for item in _docx_template_catalog() if item.get("id") == template_id), None)
+    template_name = str((selected or {}).get("name") or template_id)
+    return f"/docx-template-skill 请把当前成果套用{template_name}（templateId: {template_id}）。"
+
+
+def _docx_template_invocation_result(prompt: str) -> dict | None:
+    if not _is_docx_template_invocation(prompt):
+        return None
+    template_id = _docx_template_explicit_id(prompt)
+    templates = _docx_template_catalog()
+    if template_id:
+        selected = next((item for item in templates if item.get("id") == template_id), None) or {
+            "id": template_id,
+            "name": template_id,
+        }
+        return {
+            "ok": True,
+            "docx_template_selected": True,
+            "template_id": template_id,
+            "template": selected,
+            "templates": templates,
+            "message": "已选择模板，请在文档模板工作台生成 DOCX 交付包。",
+        }
+    return {
+        "ok": False,
+        "docx_template_selection_required": True,
+        "code": _DOCX_TEMPLATE_SELECTION_REQUIRED_CODE,
+        "message": "请选择要套用的模板；在选择前不会生成 JSON 或渲染 DOCX。",
+        "examples": list(_DOCX_TEMPLATE_NATURAL_EXAMPLES),
+        "templates": templates,
+    }
+
+
+def _is_docx_figure_adjustment_invocation(prompt: str) -> bool:
+    compact = _docx_template_intent_text(prompt)
+    if not compact:
+        return False
+    figure_terms = ("图片调整", "调整图片", "修改图片", "更换图片", "替换图片", "重渲染图片", "重绘图片", "图片资产")
+    figure_verbs = ("调整", "修改", "更换", "替换", "重渲染", "重绘")
+    doc_terms = ("docx", "word", "文档", "方案", "初稿包", "fig-", "figure")
+    has_figure_action = (
+        any(term in compact for term in figure_terms)
+        or ("图片" in compact and any(verb in compact for verb in figure_verbs))
+        or ("fig-" in compact and any(verb in compact for verb in figure_verbs))
+    )
+    return has_figure_action and any(term in compact for term in doc_terms)
+
+
+def _docx_figure_adjustment_invocation_result(prompt: str) -> dict | None:
+    if not _is_docx_figure_adjustment_invocation(prompt):
+        return None
+    return {
+        "ok": False,
+        "docx_figure_adjustment_required": True,
+        "code": _DOCX_FIGURE_ADJUSTMENT_REQUIRED_CODE,
+        "message": "图片调整工作台：请选择打包初稿、重渲染图示或替换 DOCX 图片。",
+        "examples": list(_DOCX_FIGURE_ADJUSTMENT_EXAMPLES),
+        "actions": [
+            {"id": "package", "label": "打包富内容初稿"},
+            {"id": "rerender", "label": "重渲染图示资产"},
+            {"id": "replace", "label": "替换 DOCX 图片"},
+        ],
+    }
+
+
+def _enrich_plan_like_chat_prompt(prompt: str) -> str:
+    raw = str(prompt or "").strip()
+    if not raw:
+        return raw
+    if _RICH_DRAFT_CHAT_REQUIREMENT_MARKER in raw or ("富内容初稿" in raw and "Markdown 表格" in raw):
+        return raw
+    compact = re.sub(r"\s+", "", raw)
+    material_requested = any(term in compact for term in _PLAN_LIKE_CHAT_MATERIAL_TERMS)
+    generation_requested = any(term in compact for term in _PLAN_LIKE_CHAT_GENERATION_TERMS)
+    if not material_requested or not generation_requested:
+        return raw
+    requirements = "\n".join(
+        [
+            "",
+            "---",
+            _RICH_DRAFT_CHAT_REQUIREMENT_MARKER + "：",
+            "- 本轮直接生成可作为后续模板输入的富内容初稿，不输出纯文字方案。",
+            "- 初稿必须包含正文、至少 2 个 Markdown 表格、至少 1 个架构图、流程图、用例图或图示引用。",
+            "- 图示可以用 Markdown 图片引用、Mermaid、SVG 说明或明确的图示设计块表达；不要写成“后续再配图”。",
+            "- 如果系统支持写文件，优先生成 Markdown 初稿文件并登记相关图示资产；否则在回复中给出完整 Markdown 初稿。",
+            "- 模板套用阶段只负责套入标准模板、调整版式和少量措辞微调，不负责补图补表。",
+        ]
+    )
+    return raw + "\n" + requirements
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -14857,6 +15060,17 @@ def _handle_chat_start(handler, body, diag=None):
         msg = str(body.get("message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
+        display_msg = msg
+        docx_template_result = _docx_template_invocation_result(msg)
+        if docx_template_result is not None:
+            diag.stage("response_write") if diag else None
+            return j(handler, docx_template_result)
+        docx_figure_adjustment_result = _docx_figure_adjustment_invocation_result(msg)
+        if docx_figure_adjustment_result is not None:
+            diag.stage("response_write") if diag else None
+            return j(handler, docx_figure_adjustment_result)
+        msg = _normalize_docx_template_invocation_message(msg)
+        runtime_msg = _enrich_plan_like_chat_prompt(msg)
         diag.stage("normalize_attachments") if diag else None
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         diag.stage("resolve_workspace") if diag else None
@@ -14879,7 +15093,7 @@ def _handle_chat_start(handler, body, diag=None):
         if license_status is not None:
             response = _record_license_blocked_turn_for_session(
                 s,
-                msg=msg,
+                msg=display_msg,
                 attachments=attachments,
                 workspace=workspace,
                 model=model,
@@ -14892,12 +15106,12 @@ def _handle_chat_start(handler, body, diag=None):
             diag.stage("response_write") if diag else None
             return j(handler, response, status=status)
         if classify_brand_safety_prompt(
-            msg,
+            display_msg,
             session_tainted=bool(getattr(s, "brand_privacy_tainted", False)),
         ).action == "safe_reply":
             response = _start_brand_privacy_safe_stream_for_session(
                 s,
-                msg=msg,
+                msg=display_msg,
                 workspace=workspace,
                 model=model,
                 model_provider=model_provider,
@@ -14920,6 +15134,7 @@ def _handle_chat_start(handler, body, diag=None):
                 return _start_chat_stream_for_session(
                     s,
                     msg=request.message,
+                    display_msg=display_msg,
                     attachments=request.attachments,
                     workspace=request.workspace or workspace,
                     model=request.model or model,
@@ -14941,7 +15156,7 @@ def _handle_chat_start(handler, body, diag=None):
                 result = adapter.start_run(
                     StartRunRequest(
                         session_id=s.session_id,
-                        message=msg,
+                        message=runtime_msg,
                         attachments=attachments,
                         workspace=workspace,
                         profile=getattr(s, "profile", None),
@@ -14957,7 +15172,8 @@ def _handle_chat_start(handler, body, diag=None):
         else:
             response = _start_chat_stream_for_session(
                 s,
-                msg=msg,
+                msg=runtime_msg,
+                display_msg=display_msg,
                 attachments=attachments,
                 workspace=workspace,
                 model=model,
@@ -16068,6 +16284,33 @@ def _handle_file_reveal(handler, body):
         return bad(handler, _sanitize_error(e))
 
 
+def _handle_file_open(handler, body):
+    try:
+        require(body, "session_id", "path")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session_for_file_ops(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        target = safe_resolve(Path(s.workspace), body["path"])
+        if not target.exists():
+            return bad(handler, f"File not found: {target}", 404)
+
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", str(target)])
+        elif system == "Windows":
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+
+        return j(handler, {"ok": True, "path": body["path"]})
+    except (ValueError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
 def _handle_file_path(handler, body):
     """Resolve a relative workspace-rooted path into an absolute on-disk path.
 
@@ -16121,6 +16364,17 @@ def _handle_docx_engine_v2_create_job(handler, body):
         return bad(handler, _sanitize_error(e), 500)
 
 
+def _handle_docx_engine_v2_rerender_asset(handler, body):
+    try:
+        workspace = _docx_engine_v2_workspace(body)
+        payload, status = docx_engine_v2.rerender_asset(body, workspace)
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+    except subprocess.TimeoutExpired as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
 def _handle_docx_engine_v2_replace_asset(handler, body):
     try:
         workspace = _docx_engine_v2_workspace(body)
@@ -16130,6 +16384,189 @@ def _handle_docx_engine_v2_replace_asset(handler, body):
         return bad(handler, _sanitize_error(e))
     except subprocess.TimeoutExpired as e:
         return bad(handler, _sanitize_error(e), 500)
+
+
+def _docx_template_skill_dir() -> Path:
+    runtime_home = os.getenv("TAIJI_RUNTIME_HOME", "").strip()
+    candidates = []
+    if runtime_home:
+        candidates.append(Path(runtime_home).expanduser() / "skills" / "productivity" / "docx-template-skill")
+    candidates.append(Path.home() / ".local" / "share" / "taiji-agent" / "runtime-home" / "skills" / "productivity" / "docx-template-skill")
+    candidates.append(Path(__file__).resolve().parents[4] / "docx-template-skill")
+    for candidate in candidates:
+        if (candidate / "scripts" / "apply-template.js").exists():
+            return candidate
+    return candidates[0]
+
+
+def _docx_template_run_script(script_name: str, args: list[str]) -> subprocess.CompletedProcess:
+    skill_dir = _docx_template_skill_dir()
+    script_path = skill_dir / "scripts" / script_name
+    if not script_path.exists():
+        raise FileNotFoundError(f"docx-template-skill script not found: {script_path}")
+    node = shutil.which("node")
+    if not node:
+        raise FileNotFoundError("Node.js is not available for docx-template-skill scripts")
+    return subprocess.run(
+        [node, str(script_path), *args],
+        cwd=str(skill_dir),
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+
+
+def _docx_adjustment_workspace(body) -> Path:
+    require(body, "session_id")
+    s = get_session_for_file_ops(body["session_id"])
+    return Path(s.workspace).expanduser().resolve()
+
+
+def _docx_adjustment_path_is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root.expanduser().resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _docx_adjustment_allowed_absolute_roots(workspace: Path) -> list[Path]:
+    roots = [workspace]
+    try:
+        home = Path.home().expanduser().resolve()
+        roots.append(home)
+    except OSError:
+        pass
+    return roots
+
+
+def _docx_adjustment_display_path(workspace: Path, target: Path) -> str:
+    try:
+        return str(target.resolve().relative_to(workspace.resolve()))
+    except (OSError, ValueError):
+        return str(target)
+
+
+def _docx_adjustment_path(workspace: Path, body, field: str, *, must_exist: bool = False) -> Path:
+    raw = str(body.get(field) or "").strip()
+    if not raw:
+        raise ValueError(f"{field} is required")
+    requested = Path(os.path.expandvars(raw)).expanduser()
+    if requested.is_absolute():
+        target = requested.resolve()
+        if not any(_docx_adjustment_path_is_within(target, root) for root in _docx_adjustment_allowed_absolute_roots(workspace)):
+            raise ValueError(f"{field} is outside the allowed local roots: {target}")
+    else:
+        target = safe_resolve(workspace, raw)
+    if must_exist and not target.exists():
+        raise FileNotFoundError(f"{field} not found: {target}")
+    return target
+
+
+def _docx_adjustment_run_payload(
+    handler,
+    *,
+    action: str,
+    script_name: str,
+    args: list[str],
+    extra: dict | None = None,
+):
+    try:
+        completed = _docx_template_run_script(script_name, args)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return bad(handler, _sanitize_error(e), 500)
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    if completed.returncode != 0:
+        return bad(handler, stderr or stdout or f"{script_name} failed", 400)
+    payload = {
+        "ok": True,
+        "action": action,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if extra:
+        payload.update(extra)
+    return j(handler, payload)
+
+
+def _handle_docx_figure_adjustment_package(handler, body):
+    try:
+        require(body, "session_id", "source_path", "out_dir")
+        workspace = _docx_adjustment_workspace(body)
+        source = _docx_adjustment_path(workspace, body, "source_path", must_exist=True)
+        out_dir = _docx_adjustment_path(workspace, body, "out_dir")
+        out_dir.parent.mkdir(parents=True, exist_ok=True)
+        args = ["--source", str(source), "--out-dir", str(out_dir)]
+        asset_dir_raw = str(body.get("asset_dir") or "").strip()
+        if asset_dir_raw:
+            asset_dir = _docx_adjustment_path(workspace, body, "asset_dir", must_exist=True)
+            args.extend(["--asset-dir", str(asset_dir)])
+        return _docx_adjustment_run_payload(
+            handler,
+            action="package",
+            script_name="package-rich-draft.js",
+            args=args,
+            extra={"out_dir": _docx_adjustment_display_path(workspace, out_dir)},
+        )
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_docx_figure_adjustment_rerender(handler, body):
+    try:
+        require(body, "session_id", "manifest_path", "figure_id")
+        workspace = _docx_adjustment_workspace(body)
+        manifest = _docx_adjustment_path(workspace, body, "manifest_path", must_exist=True)
+        figure_id = str(body.get("figure_id") or "").strip()
+        if not re.fullmatch(r"fig-[0-9]{3,}", figure_id):
+            return bad(handler, "figure_id must look like fig-001")
+        return _docx_adjustment_run_payload(
+            handler,
+            action="rerender",
+            script_name="render-figure-assets.js",
+            args=["--manifest", str(manifest), "--figure-id", figure_id],
+            extra={"manifest_path": _docx_adjustment_display_path(workspace, manifest), "figure_id": figure_id},
+        )
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_docx_figure_adjustment_replace(handler, body):
+    try:
+        require(body, "session_id", "docx_path", "figure_id", "image_path", "out_path")
+        workspace = _docx_adjustment_workspace(body)
+        docx = _docx_adjustment_path(workspace, body, "docx_path", must_exist=True)
+        image = _docx_adjustment_path(workspace, body, "image_path", must_exist=True)
+        out_path = _docx_adjustment_path(workspace, body, "out_path")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        figure_id = str(body.get("figure_id") or "").strip()
+        if not re.fullmatch(r"fig-[0-9]{3,}", figure_id):
+            return bad(handler, "figure_id must look like fig-001")
+        return _docx_adjustment_run_payload(
+            handler,
+            action="replace",
+            script_name="replace-docx-image.js",
+            args=[
+                "--docx",
+                str(docx),
+                "--figure-id",
+                figure_id,
+                "--image",
+                str(image),
+                "--out",
+                str(out_path),
+            ],
+            extra={
+                "docx_path": _docx_adjustment_display_path(workspace, docx),
+                "image_path": _docx_adjustment_display_path(workspace, image),
+                "out_path": _docx_adjustment_display_path(workspace, out_path),
+                "figure_id": figure_id,
+            },
+        )
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
 
 
 def _handle_file_open_vscode(handler, body):

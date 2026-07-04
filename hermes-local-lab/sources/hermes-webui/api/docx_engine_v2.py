@@ -92,12 +92,62 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     if completed.returncode != 0:
         return _known_failure_payload(engine_payload), _status_for_engine_failure(engine_payload)
 
+    delivery_dir_raw = str(engine_payload.get("deliveryDir", "")).strip()
+    delivery_dir = Path(delivery_dir_raw).expanduser() if delivery_dir_raw else Path()
+    quality_report_path = delivery_dir / "quality-report.json" if delivery_dir_raw else Path()
+    quality_report = _read_quality_report(quality_report_path)
+
     return {
         "ok": True,
         "job_id": engine_payload.get("jobId", ""),
         "delivery_dir": engine_payload.get("deliveryDir", ""),
         "document_path": engine_payload.get("documentPath", ""),
         "quality_status": engine_payload.get("qualityStatus", ""),
+        "quality_report_path": str(quality_report_path) if str(quality_report_path) else "",
+        "quality_report": quality_report,
+    }, 200
+
+
+def rerender_asset(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+    workspace = Path(workspace).expanduser().resolve()
+    figure_id = _first_text(payload, "figure_id", "figureId")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", figure_id or ""):
+        return _error_payload("validation_failed", "figure_id must contain only letters, numbers, underscore, or dash"), 400
+
+    try:
+        manifest_raw = _first_text(payload, "manifest_path", "manifestPath")
+        if not manifest_raw:
+            delivery_raw = _first_text(payload, "delivery_dir", "deliveryDir")
+            if not delivery_raw:
+                return _error_payload("validation_failed", "delivery_dir or manifest_path is required"), 400
+            manifest_raw = str(Path(delivery_raw) / "render-plan.json")
+        manifest_path = _resolve_workspace_path(
+            workspace,
+            manifest_raw,
+            field="manifest_path",
+            must_exist=True,
+            allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(workspace),
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("validation_failed", str(exc)), 400
+
+    completed = run_engine([
+        str(_engine_cli("render-figure-asset.js")),
+        "--manifest",
+        str(manifest_path),
+        "--figure-id",
+        figure_id,
+        "--json",
+    ])
+    engine_payload = _payload_from_completed(completed, default_code="validation_failed")
+    if completed.returncode != 0:
+        return _known_failure_payload(engine_payload), 400
+
+    return {
+        "ok": True,
+        "figure_id": engine_payload.get("figureId", figure_id),
+        "display_path": engine_payload.get("displayPath", ""),
+        "output_path": engine_payload.get("outputPath", ""),
     }, 200
 
 
@@ -196,6 +246,27 @@ def _known_failure_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "failures": payload.get("failures", []),
         "templates": payload.get("templates", []),
         "delivery_dir": payload.get("deliveryDir", payload.get("delivery_dir", "")),
+    }
+
+
+def _read_quality_report(report_path: Path) -> dict[str, Any]:
+    if not report_path or not report_path.exists():
+        return {}
+    try:
+        parsed = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    checks = parsed.get("checks") if isinstance(parsed.get("checks"), list) else []
+    warnings = parsed.get("warnings") if isinstance(parsed.get("warnings"), list) else []
+    failures = parsed.get("failures") if isinstance(parsed.get("failures"), list) else []
+    return {
+        "schemaVersion": parsed.get("schemaVersion", ""),
+        "status": parsed.get("status", ""),
+        "checks": checks[:20],
+        "warnings": [str(item) for item in warnings[:20]],
+        "failures": [str(item) for item in failures[:20]],
     }
 
 

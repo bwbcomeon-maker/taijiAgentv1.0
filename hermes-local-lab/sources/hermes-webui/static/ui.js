@@ -9745,6 +9745,658 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
+function _docxTemplateSelectionHtml(selection){
+  const templates=Array.isArray(selection&&selection.templates)?selection.templates:[];
+  const templateItems=templates.map((template)=>{
+    const id=String(template&&template.id||'').trim();
+    const name=String(template&&template.name||id||'未命名模板').trim();
+    const version=String(template&&template.version||'').trim();
+    const description=String(template&&template.description||'').trim();
+    const versionHtml=version?`<span class="docx-template-selection-version">v${esc(version)}</span>`:'';
+    return [
+      `<div class="docx-template-selection-item" data-template-id="${esc(id)}" data-template-name="${esc(name)}">`,
+      '<div class="docx-template-selection-copy">',
+      `<div class="docx-template-selection-name">${esc(name)}${versionHtml}</div>`,
+      description?`<div class="docx-template-selection-desc">${esc(description)}</div>`:'',
+      '</div>',
+      `<button type="button" class="docx-template-selection-choose" aria-label="选择${esc(name)}" onclick="chooseDocxTemplate(this);event.stopPropagation()">选择</button>`,
+      '</div>',
+    ].join('');
+  }).join('');
+  return [
+    '<div class="docx-template-selection-card" role="group" aria-label="选择文档模板">',
+    '<div class="docx-template-selection-head">',
+    '<div>',
+    '<div class="docx-template-selection-title">选择要套用的模板</div>',
+    '<div class="docx-template-selection-note">选择前不会生成 JSON 或渲染 DOCX。</div>',
+    '</div>',
+    '<button type="button" class="docx-template-selection-cancel" aria-label="取消模板选择" onclick="dismissDocxTemplateSelection(this);event.stopPropagation()">取消</button>',
+    '</div>',
+    `<div class="docx-template-selection-list">${templateItems||'<div class="docx-template-selection-empty">暂无可用模板。</div>'}</div>`,
+    '</div>',
+  ].join('');
+}
+
+function _docxFigureAdjustmentHtml(adjustment){
+  const examples=Array.isArray(adjustment&&adjustment.examples)?adjustment.examples:[];
+  const exampleHtml=examples.length?`<div class="docx-figure-adjustment-examples">${examples.map(item=>`<span>${esc(item)}</span>`).join('')}</div>`:'';
+  const inputHtml=(name,label,placeholder)=>[
+    '<label class="docx-figure-adjustment-field">',
+    `<span>${esc(label)}</span>`,
+    `<input type="text" data-docx-figure-field="${esc(name)}" aria-label="${esc(label)}" placeholder="${esc(placeholder||'')}">`,
+    '</label>',
+  ].join('');
+  return [
+    '<div class="docx-figure-adjustment-card" role="region" aria-label="图片调整工作台">',
+    '<div class="docx-figure-adjustment-head">',
+    '<div>',
+    '<div class="docx-figure-adjustment-title">图片调整工作台</div>',
+    '<div class="docx-figure-adjustment-note">使用初稿包资产重渲染图示，或按稳定 figureId 替换 DOCX 中的图片。</div>',
+    '</div>',
+    '</div>',
+    exampleHtml,
+    '<div class="docx-figure-adjustment-section">',
+    '<div class="docx-figure-adjustment-section-title">打包富内容初稿</div>',
+    '<div class="docx-figure-adjustment-grid">',
+    inputHtml('package_source_path','Markdown 初稿路径','例如：信创终端配发实施方案-v1-rich.md'),
+    inputHtml('package_out_dir','初稿包输出目录','例如：信创终端配发-初稿包'),
+    inputHtml('package_asset_dir','可选图片资产目录','例如：信创终端配发-图片资产'),
+    '</div>',
+    '<div class="docx-figure-adjustment-actions">',
+    '<button type="button" onclick="runDocxDraftPackage(this);event.stopPropagation()" aria-label="打包富内容初稿">打包初稿</button>',
+    '<button type="button" class="secondary" onclick="revealDocxFigurePath(this,\'package_out_dir\');event.stopPropagation()" aria-label="打开初稿包输出目录">打开输出目录</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-figure-adjustment-section">',
+    '<div class="docx-figure-adjustment-section-title">重渲染图示资产</div>',
+    '<div class="docx-figure-adjustment-grid">',
+    inputHtml('manifest_path','draft.manifest.json 路径','例如：信创终端配发-初稿包/draft.manifest.json'),
+    inputHtml('rerender_figure_id','图示 ID','例如：fig-002'),
+    '</div>',
+    '<div class="docx-figure-adjustment-actions">',
+    '<button type="button" onclick="runDocxFigureRerender(this);event.stopPropagation()" aria-label="重渲染图示资产">重渲染图示</button>',
+    '<button type="button" class="secondary" onclick="revealDocxFigurePath(this,\'manifest_path\');event.stopPropagation()" aria-label="打开 manifest 所在位置">打开清单位置</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-figure-adjustment-section">',
+    '<div class="docx-figure-adjustment-section-title">替换 DOCX 图片</div>',
+    '<div class="docx-figure-adjustment-grid">',
+    inputHtml('docx_path','DOCX 路径','例如：信创终端配发实施方案-v1.docx'),
+    inputHtml('replace_figure_id','图示 ID','例如：fig-001'),
+    inputHtml('replacement_image_path','替换图片路径','例如：信创终端配发-初稿包/assets/fig-001/figure.svg'),
+    inputHtml('replace_out_path','新 DOCX 输出路径','例如：信创终端配发实施方案-v1-图片已调整.docx'),
+    '</div>',
+    '<div class="docx-figure-adjustment-actions">',
+    '<button type="button" onclick="runDocxFigureReplace(this);event.stopPropagation()" aria-label="替换 DOCX 图片并生成新文档">替换并生成新 DOCX</button>',
+    '<button type="button" class="secondary" onclick="revealDocxFigurePath(this,\'replace_out_path\');event.stopPropagation()" aria-label="打开新 DOCX 所在位置">打开输出位置</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-figure-adjustment-status" data-docx-figure-status role="status" aria-live="polite">等待操作。</div>',
+    '</div>',
+  ].join('');
+}
+
+function renderDocxEngineWorkbench(workbench){
+  const selectedTemplate=String(workbench&&workbench.template_id||workbench&&workbench.templateId||'general-proposal').trim()||'general-proposal';
+  const templates=Array.isArray(workbench&&workbench.templates)&&workbench.templates.length
+    ? workbench.templates
+    : [
+      {id:'general-proposal',name:'通用方案模板'},
+      {id:'meeting-minutes',name:'会议纪要模板'},
+    ];
+  const options=templates.map((template)=>{
+    const id=String(template&&template.id||'').trim();
+    const name=String(template&&template.name||id||'未命名模板').trim();
+    const selected=id===selectedTemplate?' selected':'';
+    return `<option value="${esc(id)}"${selected}>${esc(name)}</option>`;
+  }).join('');
+  const inputHtml=(name,label,placeholder,value='')=>[
+    '<label class="docx-engine-field">',
+    `<span>${esc(label)}</span>`,
+    `<input type="text" data-docx-engine-field="${esc(name)}" aria-label="${esc(label)}" placeholder="${esc(placeholder||'')}" value="${esc(value||'')}">`,
+    '</label>',
+  ].join('');
+  return [
+    '<div class="docx-engine-workbench" role="region" aria-label="文档模板工作台">',
+    '<div class="docx-engine-head">',
+    '<div>',
+    '<div class="docx-engine-title">文档模板工作台</div>',
+    '<div class="docx-engine-note">选择模板和源文件，生成包含 DOCX、资产、质量报告的交付包。</div>',
+    '</div>',
+    '<button type="button" class="docx-engine-secondary" onclick="refreshDocxEngineTemplates(this);event.stopPropagation()" aria-label="刷新模板列表">刷新模板</button>',
+    '</div>',
+    '<div class="docx-engine-section">',
+    '<div class="docx-engine-section-title">生成文档包</div>',
+    '<div class="docx-engine-grid">',
+    '<label class="docx-engine-field">',
+    '<span>选择模板</span>',
+    `<select data-docx-engine-field="template_id" aria-label="选择模板">${options}</select>`,
+    '</label>',
+    inputHtml('source_path','源文件路径','例如：方案.md'),
+    inputHtml('asset_dir','图片资产目录','可选，例如：assets'),
+    inputHtml('out_dir','交付目录','例如：方案-交付包'),
+    '</div>',
+    '<div class="docx-engine-actions">',
+    '<button type="button" onclick="runDocxEngineJob(this);event.stopPropagation()" aria-label="生成文档包">生成文档包</button>',
+    '<button type="button" class="secondary" onclick="runDocxEngineJob(this);event.stopPropagation()" aria-label="从源包重新生成">从源包重新生成</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-engine-section">',
+    '<div class="docx-engine-section-title">交付结果</div>',
+    '<div class="docx-engine-help">passed_with_warnings 表示结构检查通过但仍需打开 WPS/Word 做人工视觉验收。</div>',
+    '<div class="docx-engine-result" data-docx-engine-result>',
+    '<div><strong>质量报告</strong><span data-docx-engine-quality>尚未生成。</span></div>',
+    '<div><strong>DOCX</strong><span data-docx-engine-document>等待生成文档。</span></div>',
+    '<div><strong>交付目录</strong><span data-docx-engine-delivery>等待生成交付包。</span></div>',
+    '</div>',
+    '<div class="docx-engine-quality-detail" data-docx-engine-quality-detail hidden>生成文档包后可查看质量检查详情。</div>',
+    '<div class="docx-engine-actions">',
+    '<button type="button" class="secondary" data-docx-engine-action="quality" onclick="showDocxEngineQualityReport(this);event.stopPropagation()" aria-label="查看质量报告" disabled>查看质量报告</button>',
+    '<button type="button" class="secondary" data-docx-engine-action="document" onclick="openDocxEngineDocument(this);event.stopPropagation()" aria-label="打开 DOCX" disabled>打开 DOCX</button>',
+    '<button type="button" class="secondary" data-docx-engine-action="delivery" onclick="openDocxDeliveryFolder(this);event.stopPropagation()" aria-label="打开交付目录" disabled>打开交付目录</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-engine-section">',
+    '<div class="docx-engine-section-title">替换 DOCX 图片</div>',
+    '<div class="docx-engine-help">如果提示未找到图片标识，这份旧 DOCX 需要先重新套模板，生成带图片标记的新 DOCX。</div>',
+    '<div class="docx-engine-grid">',
+    inputHtml('docx_path','DOCX 路径','默认可填上方生成的 document.docx'),
+    inputHtml('figure_id','图示 ID','例如：fig-001 或 image-001'),
+    inputHtml('replacement_image_path','替换图片路径','例如：assets/fig-001/figure.svg'),
+    inputHtml('replace_out_path','新 DOCX 输出路径','例如：方案-图片已调整.docx'),
+    '</div>',
+    '<div class="docx-engine-actions">',
+    '<button type="button" class="secondary" data-docx-engine-action="rerender" onclick="rerenderDocxEngineFigure(this);event.stopPropagation()" aria-label="重渲染图片" disabled>重渲染图片</button>',
+    '<button type="button" onclick="replaceDocxEngineAsset(this);event.stopPropagation()" aria-label="替换 DOCX 图片">替换 DOCX 图片</button>',
+    '</div>',
+    '</div>',
+    '<div class="docx-engine-status" data-docx-engine-status role="status" aria-live="polite">等待操作。</div>',
+    '</div>',
+  ].join('');
+}
+
+function _docxEngineRoot(el){
+  return el&&el.closest?el.closest('.docx-engine-workbench'):null;
+}
+
+function _docxEngineField(root,name){
+  return root&&root.querySelector?root.querySelector(`[data-docx-engine-field="${name}"]`):null;
+}
+
+function _docxEngineValue(root,name){
+  const input=_docxEngineField(root,name);
+  return input?String(input.value||'').trim():'';
+}
+
+function _setDocxEngineValue(root,name,value){
+  const input=_docxEngineField(root,name);
+  if(input) input.value=value||'';
+}
+
+function _setDocxEngineStatus(root,message,state){
+  const status=root&&root.querySelector?root.querySelector('[data-docx-engine-status]'):null;
+  if(!status)return;
+  if(!status.id)status.id=`docx-engine-status-${Date.now()}-${Math.floor(Math.random()*10000)}`;
+  status.textContent=message||'';
+  status.dataset.state=state||'info';
+}
+
+function _clearDocxEngineFieldErrors(root){
+  if(!root||!root.querySelectorAll)return;
+  root.querySelectorAll('[data-docx-engine-field]').forEach((node)=>{
+    node.removeAttribute('aria-invalid');
+    node.removeAttribute('aria-describedby');
+  });
+}
+
+function _markDocxEngineRequiredFields(root,names,message){
+  _clearDocxEngineFieldErrors(root);
+  _setDocxEngineStatus(root,message,'error');
+  const status=root&&root.querySelector?root.querySelector('[data-docx-engine-status]'):null;
+  const describedBy=status&&status.id?status.id:'';
+  let firstMissing=null;
+  (names||[]).forEach((name)=>{
+    const field=_docxEngineField(root,name);
+    if(field&&!String(field.value||'').trim()){
+      field.setAttribute('aria-invalid','true');
+      if(describedBy)field.setAttribute('aria-describedby',describedBy);
+      if(!firstMissing)firstMissing=field;
+    }
+  });
+  if(firstMissing&&typeof firstMissing.focus==='function')firstMissing.focus();
+  return !firstMissing;
+}
+
+function _docxEngineSessionId(root){
+  const sid=S.session&&S.session.session_id;
+  if(!sid){
+    _setDocxEngineStatus(root,'没有可用会话，无法生成文档包。','error');
+    if(typeof showToast==='function')showToast('没有可用会话，无法生成文档包。');
+    return '';
+  }
+  return sid;
+}
+
+function _docxEngineSetBusy(root,busy){
+  if(!root||!root.querySelectorAll)return;
+  root.setAttribute('aria-busy',busy?'true':'false');
+  root.querySelectorAll('button,input,select').forEach((node)=>{
+    if(busy){
+      node.disabled=true;
+    }else{
+      node.disabled=false;
+    }
+  });
+  if(!busy)_syncDocxEngineActionAvailability(root);
+}
+
+function _syncDocxEngineActionAvailability(root){
+  if(!root||!root.querySelectorAll)return;
+  const hasDocument=!!(root.dataset&&root.dataset.documentPath);
+  const hasDelivery=!!(root.dataset&&root.dataset.deliveryDir);
+  const hasQuality=!!(root.dataset&&root.dataset.qualityStatus);
+  root.querySelectorAll('[data-docx-engine-action="quality"]').forEach((node)=>{node.disabled=!hasQuality;});
+  root.querySelectorAll('[data-docx-engine-action="document"]').forEach((node)=>{node.disabled=!hasDocument;});
+  root.querySelectorAll('[data-docx-engine-action="delivery"],[data-docx-engine-action="rerender"]').forEach((node)=>{node.disabled=!hasDelivery;});
+}
+
+function _docxEngineQualityReportFromPayload(payload){
+  const report=payload&&(payload.quality_report||payload.qualityReport);
+  return report&&typeof report==='object'?report:null;
+}
+
+function _renderDocxEngineQualityReportHtml(root,report){
+  const reportPath=root&&root.dataset?String(root.dataset.qualityReportPath||''):'';
+  if(!report){
+    return `<div class="docx-engine-quality-empty">尚未读取到质量报告详情${reportPath?`；报告文件：${esc(reportPath)}`:''}。</div>`;
+  }
+  const checks=Array.isArray(report.checks)?report.checks:[];
+  const warnings=Array.isArray(report.warnings)?report.warnings:[];
+  const failures=Array.isArray(report.failures)?report.failures:[];
+  const status=String(report.status||root&&root.dataset&&root.dataset.qualityStatus||'未返回').trim();
+  const checkItems=checks.length?checks.map((check)=>{
+    const id=String(check&&check.id||check&&check.code||'检查项').trim();
+    const state=String(check&&check.status||'unknown').trim();
+    const message=String(check&&check.message||'').trim();
+    return `<li><strong>${esc(id)}</strong><span>${esc(state)}${message?`：${esc(message)}`:''}</span></li>`;
+  }).join(''):'<li><strong>检查项</strong><span>未返回检查明细。</span></li>';
+  const warningItems=warnings.map((item)=>`<li>${esc(String(item||''))}</li>`).join('');
+  const failureItems=failures.map((item)=>`<li>${esc(String(item||''))}</li>`).join('');
+  return [
+    '<div class="docx-engine-quality-summary">',
+    `<strong>状态：${esc(status||'未返回')}</strong>`,
+    `<span>检查项 ${checks.length} 个，警告 ${warnings.length} 个，失败 ${failures.length} 个。</span>`,
+    reportPath?`<span>报告文件：${esc(reportPath)}</span>`:'',
+    '</div>',
+    `<ul class="docx-engine-quality-checks">${checkItems}</ul>`,
+    warnings.length?`<div class="docx-engine-quality-list"><strong>警告</strong><ul>${warningItems}</ul></div>`:'',
+    failures.length?`<div class="docx-engine-quality-list"><strong>失败</strong><ul>${failureItems}</ul></div>`:'',
+  ].join('');
+}
+
+function _updateDocxEngineResult(root,payload){
+  if(!root||!payload)return;
+  const quality=String(payload.quality_status||payload.qualityStatus||'').trim();
+  const documentPath=String(payload.document_path||payload.documentPath||'').trim();
+  const deliveryDir=String(payload.delivery_dir||payload.deliveryDir||'').trim();
+  const qualityReportPath=String(payload.quality_report_path||payload.qualityReportPath||(deliveryDir?`${deliveryDir}/quality-report.json`:'')).trim();
+  const qualityReport=_docxEngineQualityReportFromPayload(payload);
+  root.dataset.documentPath=documentPath;
+  root.dataset.deliveryDir=deliveryDir;
+  root.dataset.qualityStatus=quality;
+  root.dataset.qualityReportPath=qualityReportPath;
+  root._docxEngineQualityReport=qualityReport;
+  const qualityNode=root.querySelector('[data-docx-engine-quality]');
+  const documentNode=root.querySelector('[data-docx-engine-document]');
+  const deliveryNode=root.querySelector('[data-docx-engine-delivery]');
+  const warningCount=qualityReport&&Array.isArray(qualityReport.warnings)?qualityReport.warnings.length:0;
+  const failureCount=qualityReport&&Array.isArray(qualityReport.failures)?qualityReport.failures.length:0;
+  if(qualityNode) qualityNode.textContent=`${quality||'未返回质量状态。'}${warningCount||failureCount?`（警告 ${warningCount}，失败 ${failureCount}）`:''}`;
+  if(documentNode) documentNode.textContent=documentPath||'未返回 DOCX 路径。';
+  if(deliveryNode) deliveryNode.textContent=deliveryDir||'未返回交付目录。';
+  const detailNode=root.querySelector('[data-docx-engine-quality-detail]');
+  if(detailNode){
+    detailNode.innerHTML=_renderDocxEngineQualityReportHtml(root,qualityReport);
+    detailNode.hidden=false;
+  }
+  if(documentPath) _setDocxEngineValue(root,'docx_path',documentPath);
+  if(deliveryDir&&!_docxEngineValue(root,'out_dir')) _setDocxEngineValue(root,'out_dir',deliveryDir);
+  _syncDocxEngineActionAvailability(root);
+}
+
+async function refreshDocxEngineTemplates(button){
+  const root=_docxEngineRoot(button);
+  _setDocxEngineStatus(root,'正在读取模板列表...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/templates');
+    const templates=Array.isArray(payload&&payload.templates)?payload.templates:[];
+    const select=_docxEngineField(root,'template_id');
+    if(select&&templates.length){
+      const current=String(select.value||'');
+      select.innerHTML=templates.map((template)=>{
+        const id=String(template&&template.id||'').trim();
+        const name=String(template&&template.name||id||'未命名模板').trim();
+        const selected=id===current?' selected':'';
+        return `<option value="${esc(id)}"${selected}>${esc(name)}</option>`;
+      }).join('');
+    }
+    _setDocxEngineStatus(root,'模板列表已更新。','success');
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'读取模板失败');
+    _setDocxEngineStatus(root,`读取模板失败：${message}`,'error');
+  }
+}
+
+async function runDocxEngineJob(button){
+  const root=_docxEngineRoot(button);
+  const sid=_docxEngineSessionId(root);
+  if(!sid)return null;
+  _clearDocxEngineFieldErrors(root);
+  const templateId=_docxEngineValue(root,'template_id');
+  const sourcePath=_docxEngineValue(root,'source_path');
+  const assetDir=_docxEngineValue(root,'asset_dir');
+  const outDir=_docxEngineValue(root,'out_dir');
+  if(!templateId||!sourcePath||!outDir){
+    _markDocxEngineRequiredFields(root,['template_id','source_path','out_dir'],'请填写模板、源文件路径和交付目录。');
+    return null;
+  }
+  _docxEngineSetBusy(root,true);
+  _setDocxEngineStatus(root,'正在生成文档包...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/jobs',{method:'POST',body:JSON.stringify({
+      session_id:sid,
+      template_id:templateId,
+      source_path:sourcePath,
+      asset_dir:assetDir,
+      out_dir:outDir,
+    })});
+    _updateDocxEngineResult(root,payload);
+    const quality=String(payload&&payload.quality_status||'');
+    _setDocxEngineStatus(root,`文档包已生成。质量报告：${quality||'未返回'}`,'success');
+    if(typeof showToast==='function')showToast('文档包已生成。');
+    if(typeof loadDir==='function')loadDir(S.currentDir||'.');
+    return payload;
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'生成失败');
+    _setDocxEngineStatus(root,`生成失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`生成失败：${message}`);
+    return null;
+  }finally{
+    _docxEngineSetBusy(root,false);
+  }
+}
+
+async function rerenderDocxEngineFigure(button){
+  const root=_docxEngineRoot(button);
+  const sid=_docxEngineSessionId(root);
+  if(!sid)return null;
+  _clearDocxEngineFieldErrors(root);
+  const deliveryDir=root&&root.dataset?String(root.dataset.deliveryDir||'').trim():'';
+  const figureId=_docxEngineValue(root,'figure_id');
+  if(!deliveryDir||!figureId){
+    _markDocxEngineRequiredFields(root,['figure_id'],'请先生成交付包，并填写要重渲染的图示 ID。');
+    return null;
+  }
+  _docxEngineSetBusy(root,true);
+  _setDocxEngineStatus(root,'正在重渲染图片资产...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/assets/rerender',{method:'POST',body:JSON.stringify({
+      session_id:sid,
+      delivery_dir:deliveryDir,
+      figure_id:figureId,
+    })});
+    const outputPath=String(payload&&payload.output_path||'');
+    if(outputPath)_setDocxEngineValue(root,'replacement_image_path',outputPath);
+    _setDocxEngineStatus(root,`已重渲染图片${outputPath?`：${outputPath}`:''}。如需写回 DOCX，请继续点击“替换 DOCX 图片”。`,'success');
+    if(typeof showToast==='function')showToast('已重渲染图片。');
+    return payload;
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'重渲染失败');
+    _setDocxEngineStatus(root,`重渲染失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`重渲染失败：${message}`);
+    return null;
+  }finally{
+    _docxEngineSetBusy(root,false);
+  }
+}
+
+function showDocxEngineQualityReport(button){
+  const root=_docxEngineRoot(button);
+  const quality=root&&root.dataset?root.dataset.qualityStatus:'';
+  const reportPath=root&&root.dataset?root.dataset.qualityReportPath:'';
+  const detailNode=root&&root.querySelector?root.querySelector('[data-docx-engine-quality-detail]'):null;
+  if(!quality&&!reportPath){
+    _setDocxEngineStatus(root,'请先生成文档包，再查看质量报告。','error');
+    return;
+  }
+  if(detailNode){
+    detailNode.hidden=false;
+    if(!detailNode.innerHTML.trim())detailNode.innerHTML=_renderDocxEngineQualityReportHtml(root,root._docxEngineQualityReport||null);
+    if(typeof detailNode.scrollIntoView==='function')detailNode.scrollIntoView({block:'nearest'});
+  }
+  _setDocxEngineStatus(root,`已展开质量报告：${quality||'状态未返回'}${reportPath?`；文件：${reportPath}`:''}`,'info');
+}
+
+async function openDocxEnginePath(root,pathValue,emptyMessage,mode){
+  const sid=_docxEngineSessionId(root);
+  if(!sid)return null;
+  if(!pathValue){
+    _setDocxEngineStatus(root,emptyMessage,'error');
+    return null;
+  }
+  try{
+    const endpoint=mode==='open'?'/api/file/open':'/api/file/reveal';
+    await api(endpoint,{method:'POST',body:JSON.stringify({session_id:sid,path:pathValue})});
+    _setDocxEngineStatus(root,mode==='open'?'已打开文件或目录。':'已在文件管理器中打开位置。','success');
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'打开失败');
+    _setDocxEngineStatus(root,`打开失败：${message}`,'error');
+  }
+  return null;
+}
+
+function openDocxEngineDocument(button){
+  const root=_docxEngineRoot(button);
+  return openDocxEnginePath(root,root&&root.dataset?root.dataset.documentPath:'','请先生成 DOCX。','open');
+}
+
+function openDocxDeliveryFolder(button){
+  const root=_docxEngineRoot(button);
+  return openDocxEnginePath(root,root&&root.dataset?root.dataset.deliveryDir:'','请先生成交付目录。','open');
+}
+
+async function replaceDocxEngineAsset(button){
+  const root=_docxEngineRoot(button);
+  const sid=_docxEngineSessionId(root);
+  if(!sid)return null;
+  _clearDocxEngineFieldErrors(root);
+  const docxPath=_docxEngineValue(root,'docx_path');
+  const figureId=_docxEngineValue(root,'figure_id');
+  const imagePath=_docxEngineValue(root,'replacement_image_path');
+  const outPath=_docxEngineValue(root,'replace_out_path');
+  if(!docxPath||!figureId||!imagePath||!outPath){
+    _markDocxEngineRequiredFields(root,['docx_path','figure_id','replacement_image_path','replace_out_path'],'请填写 DOCX、图示 ID、替换图片和新 DOCX 输出路径。');
+    return null;
+  }
+  _docxEngineSetBusy(root,true);
+  _setDocxEngineStatus(root,'正在替换 DOCX 图片...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/assets/replace',{method:'POST',body:JSON.stringify({
+      session_id:sid,
+      docx_path:docxPath,
+      figure_id:figureId,
+      image_path:imagePath,
+      out_path:outPath,
+    })});
+    const outputPath=String(payload&&payload.output_path||outPath);
+    root.dataset.documentPath=outputPath;
+    _setDocxEngineValue(root,'docx_path',outputPath);
+    const documentNode=root.querySelector('[data-docx-engine-document]');
+    if(documentNode)documentNode.textContent=outputPath;
+    _syncDocxEngineActionAvailability(root);
+    _setDocxEngineStatus(root,`已替换 DOCX 图片：${outputPath}`,'success');
+    if(typeof showToast==='function')showToast('已替换 DOCX 图片。');
+    return payload;
+  }catch(err){
+    let message=err&&err.message?err.message:String(err||'替换失败');
+    if(message.includes('未在 DOCX 中找到图片标识')||message.includes('figure_id')){
+      message+='。这份旧 DOCX 需要先重新套模板，生成带图片标记的新 DOCX。';
+    }
+    _setDocxEngineStatus(root,`替换失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`替换失败：${message}`);
+    return null;
+  }finally{
+    _docxEngineSetBusy(root,false);
+  }
+}
+
+function _docxFigureAdjustmentRoot(el){
+  return el&&el.closest?el.closest('.docx-figure-adjustment-card'):null;
+}
+
+function _docxFigureAdjustmentValue(root,name){
+  const input=root&&root.querySelector?root.querySelector(`[data-docx-figure-field="${name}"]`):null;
+  return input?String(input.value||'').trim():'';
+}
+
+function _setDocxFigureAdjustmentStatus(root,message,state){
+  const status=root&&root.querySelector?root.querySelector('[data-docx-figure-status]'):null;
+  if(!status)return;
+  status.textContent=message||'';
+  status.dataset.state=state||'info';
+}
+
+function _docxFigureAdjustmentSessionId(root){
+  const sid=S.session&&S.session.session_id;
+  if(!sid){
+    _setDocxFigureAdjustmentStatus(root,'没有可用会话，无法执行图片调整。','error');
+    if(typeof showToast==='function')showToast('没有可用会话，无法执行图片调整。');
+    return '';
+  }
+  return sid;
+}
+
+function _docxFigureAdjustmentSetBusy(root,busy){
+  if(!root||!root.querySelectorAll)return;
+  root.setAttribute('aria-busy',busy?'true':'false');
+  root.querySelectorAll('button,input').forEach((node)=>{
+    node.disabled=!!busy;
+  });
+}
+
+async function _postDocxFigureAdjustment(root,url,payload,successMessage){
+  _docxFigureAdjustmentSetBusy(root,true);
+  _setDocxFigureAdjustmentStatus(root,'处理中...','busy');
+  try{
+    const result=await api(url,{method:'POST',body:JSON.stringify(payload)});
+    const suffix=result&&result.stdout?` ${String(result.stdout).slice(0,180)}`:'';
+    _setDocxFigureAdjustmentStatus(root,`${successMessage}${suffix}`,'success');
+    if(typeof showToast==='function')showToast(successMessage);
+    if(typeof loadDir==='function')loadDir(S.currentDir||'.');
+    return result;
+  }catch(err){
+    let message=err&&err.message?err.message:String(err||'操作失败');
+    if(message.includes('未在 DOCX 中找到图片标识')){
+      message+='。请使用富内容模板生成且包含 figureId 的 DOCX；旧 DOCX 需要先重新套模板后再替换图片。';
+    }
+    _setDocxFigureAdjustmentStatus(root,`操作失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`操作失败：${message}`);
+    return null;
+  }finally{
+    _docxFigureAdjustmentSetBusy(root,false);
+  }
+}
+
+async function runDocxDraftPackage(button){
+  const root=_docxFigureAdjustmentRoot(button);
+  const sid=_docxFigureAdjustmentSessionId(root);
+  if(!sid)return null;
+  const sourcePath=_docxFigureAdjustmentValue(root,'package_source_path');
+  const outDir=_docxFigureAdjustmentValue(root,'package_out_dir');
+  const assetDir=_docxFigureAdjustmentValue(root,'package_asset_dir');
+  if(!sourcePath||!outDir){
+    _setDocxFigureAdjustmentStatus(root,'请填写 Markdown 初稿路径和初稿包输出目录。','error');
+    return null;
+  }
+  return _postDocxFigureAdjustment(root,'/api/docx-template/figure-adjust/package',{
+    session_id:sid,
+    source_path:sourcePath,
+    out_dir:outDir,
+    asset_dir:assetDir,
+  },'已打包富内容初稿。');
+}
+
+async function runDocxFigureRerender(button){
+  const root=_docxFigureAdjustmentRoot(button);
+  const sid=_docxFigureAdjustmentSessionId(root);
+  if(!sid)return null;
+  const manifestPath=_docxFigureAdjustmentValue(root,'manifest_path');
+  const figureId=_docxFigureAdjustmentValue(root,'rerender_figure_id');
+  if(!manifestPath||!figureId){
+    _setDocxFigureAdjustmentStatus(root,'请填写 draft.manifest.json 路径和图示 ID。','error');
+    return null;
+  }
+  return _postDocxFigureAdjustment(root,'/api/docx-template/figure-adjust/rerender',{
+    session_id:sid,
+    manifest_path:manifestPath,
+    figure_id:figureId,
+  },'已重渲染图示资产。');
+}
+
+async function runDocxFigureReplace(button){
+  const root=_docxFigureAdjustmentRoot(button);
+  const sid=_docxFigureAdjustmentSessionId(root);
+  if(!sid)return null;
+  const docxPath=_docxFigureAdjustmentValue(root,'docx_path');
+  const figureId=_docxFigureAdjustmentValue(root,'replace_figure_id');
+  const imagePath=_docxFigureAdjustmentValue(root,'replacement_image_path');
+  const outPath=_docxFigureAdjustmentValue(root,'replace_out_path');
+  if(!docxPath||!figureId||!imagePath||!outPath){
+    _setDocxFigureAdjustmentStatus(root,'请填写 DOCX、图示 ID、替换图片和新 DOCX 输出路径。','error');
+    return null;
+  }
+  return _postDocxFigureAdjustment(root,'/api/docx-template/figure-adjust/replace',{
+    session_id:sid,
+    docx_path:docxPath,
+    figure_id:figureId,
+    image_path:imagePath,
+    out_path:outPath,
+  },'已替换 DOCX 图片并生成新文档。');
+}
+
+async function revealDocxFigurePath(button,fieldName){
+  const root=_docxFigureAdjustmentRoot(button);
+  const sid=_docxFigureAdjustmentSessionId(root);
+  if(!sid)return null;
+  const path=_docxFigureAdjustmentValue(root,fieldName);
+  if(!path){
+    _setDocxFigureAdjustmentStatus(root,'请先填写要打开的位置。','error');
+    return null;
+  }
+  try{
+    await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:sid,path})});
+    _setDocxFigureAdjustmentStatus(root,'已在文件管理器中打开位置。','success');
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'打开失败');
+    _setDocxFigureAdjustmentStatus(root,`打开失败：${message}`,'error');
+  }
+  return null;
+}
+
+if(typeof window!=='undefined'){
+  window.refreshDocxEngineTemplates=refreshDocxEngineTemplates;
+  window.runDocxEngineJob=runDocxEngineJob;
+  window.rerenderDocxEngineFigure=rerenderDocxEngineFigure;
+  window.showDocxEngineQualityReport=showDocxEngineQualityReport;
+  window.openDocxEngineDocument=openDocxEngineDocument;
+  window.openDocxDeliveryFolder=openDocxDeliveryFolder;
+  window.replaceDocxEngineAsset=replaceDocxEngineAsset;
+  window.runDocxDraftPackage=runDocxDraftPackage;
+  window.runDocxFigureRerender=runDocxFigureRerender;
+  window.runDocxFigureReplace=runDocxFigureReplace;
+  window.revealDocxFigurePath=revealDocxFigurePath;
+}
+
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
   const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
@@ -10009,6 +10661,9 @@ function renderMessages(options){
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
     }
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
+    const docxTemplateSelectionHtml=(!isUser&&m.docx_template_selection)?_docxTemplateSelectionHtml(m.docx_template_selection):'';
+    const docxEngineWorkbenchHtml=(!isUser&&m.docx_engine_workbench)?renderDocxEngineWorkbench(m.docx_engine_workbench):'';
+    const docxFigureAdjustmentHtml=(!isUser&&m.docx_figure_adjustment)?_docxFigureAdjustmentHtml(m.docx_figure_adjustment):'';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -10085,11 +10740,12 @@ function renderMessages(options){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||docxTemplateSelectionHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      const bodyBlock=String(content||'').trim()?`<div class="msg-body">${bodyHtml}</div>`:'';
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${docxTemplateSelectionHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
