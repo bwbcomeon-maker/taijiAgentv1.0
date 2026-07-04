@@ -395,6 +395,21 @@ test('validateDeliveryPackage fails when delivery package manifest points at mis
   assert.match(filesCheck?.message || '', /files\.document|missing-document\.docx/);
 });
 
+test('validateDeliveryPackage fails when render plan images do not point inside assets', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const renderPlanPath = path.join(deliveryDir, 'render-plan.json');
+  const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
+  renderPlan.templateData.images[0].path = 'document.docx';
+  fs.writeFileSync(renderPlanPath, `${JSON.stringify(renderPlan, null, 2)}\n`, 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const imageCoverage = report.checks.find((check) => check.id === 'image_coverage');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(imageCoverage?.status, 'failed');
+  assert.match(imageCoverage?.message || '', /assets/);
+});
+
 test('validateDeliveryPackage fails when delivery package manifest maps a role to the wrong path', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   const manifestPath = path.join(deliveryDir, 'delivery-package.json');

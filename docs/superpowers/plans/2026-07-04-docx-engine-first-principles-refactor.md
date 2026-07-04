@@ -50,3 +50,4 @@
 - 已让失败作业在安全输出目录中写入 `job.manifest.json` 和 `failure-report.json`，CLI 同步返回路径；非空输出目录仍不写入，避免污染用户已有文件。
 - 已让 WebUI/API 透传 v2 引擎失败作业的 `stage`、`job_manifest_path`、`failure_report_path` 和 `failure_report`，避免浏览器工作台/API 丢失可复盘证据。
 - 已让浏览器文档模板工作台在生成失败时显示失败阶段、失败报告、作业清单和失败原因，避免结构化失败证据只停留在 API 响应中。
+- 已让交付包复验拒绝 `render-plan.json` 中不指向包内 `assets/` 的图片路径，避免渲染计划把图片绑定到 `document.docx` 等错误角色文件却仍被判定为图片资产完整。

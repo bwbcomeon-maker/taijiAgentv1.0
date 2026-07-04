@@ -377,10 +377,25 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan 
   }
 
   const images = renderPlan.templateData?.images || [];
+  const invalidImagePaths = images
+    .map((image) => String(image?.path || '').trim())
+    .filter(Boolean)
+    .filter((imagePath) => {
+      const normalizedPath = normalizeRelativePackagePath(imagePath);
+      return !normalizedPath || !normalizedPath.startsWith('assets/');
+    });
+  if (invalidImagePaths.length > 0) {
+    addCheck(
+      'image_coverage',
+      'failed',
+      `Render plan image paths must be package-relative assets paths: ${invalidImagePaths.join(', ')}`
+    );
+    return;
+  }
   const missingImages = images
     .map((image) => image.path)
     .filter(Boolean)
-    .filter((imagePath) => !fs.existsSync(path.resolve(deliveryDir, imagePath)));
+    .filter((imagePath) => !fs.existsSync(path.join(deliveryDir, normalizeRelativePackagePath(imagePath))));
   if (missingImages.length > 0) {
     addCheck('image_coverage', 'failed', `Missing delivery image assets: ${missingImages.join(', ')}`);
     return;
