@@ -45,7 +45,30 @@ function makeWorkspace(t) {
   return workspace;
 }
 
-async function makeDeliveryPackage(t) {
+function defaultSourceLines() {
+  return [
+    '# Enterprise AI rollout proposal',
+    '',
+    '## Architecture',
+    '',
+    'The delivery package must keep source, assets, render plan, and quality checks together.',
+    '',
+    '| Item | Status |',
+    '| --- | --- |',
+    '| Render plan | Ready |',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A[Source] --> B[Render plan]',
+    '  B --> C[Delivery package]',
+    '```',
+    '',
+    '![Architecture](architecture.png)',
+    '',
+  ];
+}
+
+async function makeDeliveryPackage(t, sourceLines = defaultSourceLines()) {
   const workspace = makeWorkspace(t);
   const assetDir = path.join(workspace, 'source.assets');
   const sourcePath = path.join(workspace, 'source.md');
@@ -56,29 +79,7 @@ async function makeDeliveryPackage(t) {
 
   fs.mkdirSync(assetDir);
   fs.writeFileSync(path.join(assetDir, 'architecture.png'), ONE_BY_ONE_PNG);
-  fs.writeFileSync(
-    sourcePath,
-    [
-      '# Enterprise AI rollout proposal',
-      '',
-      '## Architecture',
-      '',
-      'The delivery package must keep source, assets, render plan, and quality checks together.',
-      '',
-      '| Item | Status |',
-      '| --- | --- |',
-      '| Render plan | Ready |',
-      '',
-      '```mermaid',
-      'flowchart LR',
-      '  A[Source] --> B[Render plan]',
-      '  B --> C[Delivery package]',
-      '```',
-      '',
-      '![Architecture](architecture.png)',
-      '',
-    ].join('\n')
-  );
+  fs.writeFileSync(sourcePath, sourceLines.join('\n'));
 
   const sourcePackage = await normalizeMarkdownSource({ sourcePath });
   const templatePackage = getTemplatePackage('general-proposal');
@@ -746,6 +747,51 @@ test('validateDeliveryPackage fails when DOCX rich content no longer follows sou
   assert.match(orderCheck?.message || '', /fig-001|block order|afterBlockId|source/i);
 });
 
+test('postprocessDocx keeps rich blocks before the next repeated section title', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t, [
+    '# Duplicate sections',
+    '',
+    '## Overview',
+    '',
+    'First overview intro.',
+    '',
+    '| Item | Status |',
+    '| --- | --- |',
+    '| Render plan | Ready |',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A[Source] --> B[Render plan]',
+    '```',
+    '',
+    '![Architecture](architecture.png)',
+    '',
+    '## Overview',
+    '',
+    'Second overview intro.',
+    '',
+  ]);
+  const documentXml = await readDocumentXml(path.join(deliveryDir, 'document.docx'));
+  const paragraphs = paragraphRanges(documentXml);
+  const firstIntro = paragraphs.find((paragraph) => paragraph.text.trim() === 'First overview intro.');
+  const secondIntroIndex = paragraphs.findIndex((paragraph) => paragraph.text.trim() === 'Second overview intro.');
+  const nextRepeatedTitle = paragraphs
+    .slice((firstIntro?.paragraphIndex || 0) + 1, secondIntroIndex)
+    .find((paragraph) => paragraph.text.trim() === 'Overview');
+
+  assert.ok(firstIntro, 'fixture must include first section body text');
+  assert.ok(nextRepeatedTitle, 'fixture must include the next repeated section title');
+
+  const tablePosition = documentXml.indexOf('tableId=tbl-001');
+  const mermaidFigurePosition = documentXml.indexOf('figureId=fig-001');
+  const sourceImagePosition = documentXml.indexOf('figureId=fig-002');
+
+  assert.ok(tablePosition > firstIntro.end, 'table should follow its source paragraph');
+  assert.ok(tablePosition < nextRepeatedTitle.start, 'table should stay before the next repeated section');
+  assert.ok(mermaidFigurePosition < nextRepeatedTitle.start, 'mermaid figure should stay before the next repeated section');
+  assert.ok(sourceImagePosition < nextRepeatedTitle.start, 'source image should stay before the next repeated section');
+});
+
 test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
   await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
@@ -943,6 +989,26 @@ function paragraphText(paragraphXml) {
       .replace(/&apos;/g, "'")
       .replace(/&amp;/g, '&'))
     .join('');
+}
+
+async function readDocumentXml(docxPath) {
+  const entries = await readZipEntries(docxPath);
+  return entries.get('word/document.xml')?.toString('utf8') || '';
+}
+
+function paragraphRanges(documentXml) {
+  const ranges = [];
+  let paragraphIndex = 0;
+  for (const match of String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+    ranges.push({
+      paragraphIndex,
+      start: match.index,
+      end: match.index + match[0].length,
+      text: paragraphText(match[0]),
+    });
+    paragraphIndex += 1;
+  }
+  return ranges;
 }
 
 function refreshDeliveryDocumentHash(deliveryDir) {

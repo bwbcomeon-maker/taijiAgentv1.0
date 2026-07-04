@@ -5,6 +5,7 @@ const zlib = require('node:zlib');
 
 const { validateDomainObject } = require('../domain/validate');
 const { deliveryFileHashFailures } = require('../delivery/file-hashes');
+const { resolveSectionAnchors } = require('../domain/section-anchors');
 
 const CHECK_IDS = [
   'schema',
@@ -1127,11 +1128,14 @@ function blockOrderFailures({ documentXml, renderPlan }) {
   const paragraphs = paragraphRanges(documentXml);
   const tableCaptions = tableCaptionParagraphs(paragraphs);
   const figureDrawings = figureDrawingParagraphs(paragraphs);
+  const sections = renderPlan.templateData?.sections || renderPlan.sections || [];
+  const sectionAnchors = resolveSectionAnchors(paragraphs, sections);
 
-  for (const section of renderPlan.templateData?.sections || renderPlan.sections || []) {
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const section = sections[sectionIndex];
     let previous = {
       blockId: '',
-      position: sectionInsertionIndexForOrder(documentXml, section.title),
+      position: sectionAnchors[sectionIndex]?.end ?? sectionInsertionIndexForOrder(documentXml, section.title),
     };
     for (const block of section.blocks || []) {
       if (block.type === 'paragraph' && isSectionTitleBlock(block, section)) {
@@ -1312,15 +1316,11 @@ function figureSectionRanges(documentXml, renderPlan) {
   const ranges = new Map();
   const paragraphs = paragraphRanges(documentXml);
   const sections = renderPlan.templateData?.sections || renderPlan.sections || [];
-  const anchors = sections
-    .map((section) => {
-      const title = String(section?.title || '').trim();
-      if (!section?.sectionId || !title) {
-        return null;
-      }
-      const candidates = sectionAnchorParagraphs(paragraphs, title);
-      const anchor = candidates[candidates.length - 1];
-      return anchor ? { sectionId: section.sectionId, start: anchor.end } : null;
+  const sectionAnchors = resolveSectionAnchors(paragraphs, sections);
+  const anchors = sectionAnchors
+    .map((anchor, index) => {
+      const sectionId = sections[index]?.sectionId;
+      return anchor && sectionId ? { sectionId, start: anchor.end } : null;
     })
     .filter(Boolean)
     .sort((left, right) => left.start - right.start);
@@ -1332,16 +1332,6 @@ function figureSectionRanges(documentXml, renderPlan) {
     });
   }
   return ranges;
-}
-
-function sectionAnchorParagraphs(paragraphs, title) {
-  const exact = paragraphs.filter((paragraph) => paragraph.text.trim() === title);
-  if (exact.length > 0) {
-    return exact;
-  }
-  return paragraphs.filter(
-    (paragraph) => paragraph.text.includes(title) && !/\b(docx-engine-v2|figureCaption|tableId)\b/.test(paragraph.text)
-  );
 }
 
 function docPrFigurePositions(documentXml) {

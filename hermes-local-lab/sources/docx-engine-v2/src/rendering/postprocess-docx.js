@@ -4,6 +4,8 @@ const path = require('node:path');
 const yauzl = require('yauzl');
 const yazl = require('yazl');
 
+const { resolveSectionAnchors } = require('../domain/section-anchors');
+
 async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
   if (!docxPath) {
     throw new Error('docxPath is required.');
@@ -207,8 +209,11 @@ function extractPlannedTableBlocks(documentXml, renderPlan) {
 
 function richBlockInsertions(documentXml, renderPlan, richBlockXmlByBlockId) {
   const insertionsByIndex = new Map();
-  for (const section of renderPlan.templateData?.sections || renderPlan.sections || []) {
-    let insertionIndex = sectionInsertionIndex(documentXml, section.title);
+  const sections = renderPlan.templateData?.sections || renderPlan.sections || [];
+  const sectionAnchors = resolveSectionAnchors(paragraphRanges(documentXml), sections);
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const section = sections[sectionIndex];
+    let insertionIndex = sectionAnchors[sectionIndex]?.end ?? sectionInsertionIndex(documentXml, section.title);
     if (insertionIndex < 0) {
       insertionIndex = fallbackInsertionIndex(documentXml);
     }
