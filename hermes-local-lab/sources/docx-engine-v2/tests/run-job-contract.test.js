@@ -188,6 +188,9 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   const wpsVisualCheck = findQualityCheck(qualityReport, 'wps_visual');
   assert.ok(wpsVisualCheck, 'quality-report.json must include a wps_visual check');
   assert.equal(wpsVisualCheck.status, 'not_verified');
+  const templateMarkersCheck = findQualityCheck(qualityReport, 'template_markers');
+  assert.ok(templateMarkersCheck, 'quality-report.json must include a template_markers check');
+  assert.equal(templateMarkersCheck.status, 'passed');
 });
 
 test('run-job reports missing source assets as validation failure before rendering', (t) => {

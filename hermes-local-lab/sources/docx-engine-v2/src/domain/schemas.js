@@ -256,6 +256,7 @@ const templateDataTableSchema = {
   properties: {
     tableId: { type: 'string', minLength: 1 },
     title: { type: 'string' },
+    headers: metadataSchema,
     rows: {
       type: 'array',
       items: {

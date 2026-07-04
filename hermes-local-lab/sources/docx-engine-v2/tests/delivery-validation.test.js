@@ -119,12 +119,12 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   );
   assert.ok(
     report.checks.some(
-      (check) => check.id === 'image_coverage' && check.status === 'passed_with_warnings'
+      (check) => check.id === 'image_coverage' && check.status === 'passed'
     )
   );
   assert.ok(
     report.checks.some(
-      (check) => check.id === 'table_coverage' && check.status === 'passed_with_warnings'
+      (check) => check.id === 'table_coverage' && check.status === 'passed'
     )
   );
   assert.deepEqual(
@@ -154,14 +154,26 @@ test('validateDeliveryPackage fails when a required delivery file is missing', a
 
 test('validateDeliveryPackage requires figure ids to be bound to DOCX image metadata', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
-  await removeFigureIdFromDocPr(path.join(deliveryDir, 'document.docx'), 'image-001');
+  await removeFigureIdFromDocPr(path.join(deliveryDir, 'document.docx'), 'fig-002');
 
   const report = validateDeliveryPackage({ deliveryDir });
   const metadataCheck = report.checks.find((check) => check.id === 'figure_id_metadata');
 
   assert.equal(report.status, 'failed');
   assert.equal(metadataCheck?.status, 'failed');
-  assert.match(metadataCheck?.message || '', /image-001/);
+  assert.match(metadataCheck?.message || '', /fig-002/);
+});
+
+test('validateDeliveryPackage fails when template data markers remain in DOCX', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await injectTemplateMarker(path.join(deliveryDir, 'document.docx'));
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const markerCheck = report.checks.find((check) => check.id === 'template_markers');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(markerCheck?.status, 'failed');
+  assert.match(markerCheck?.message || '', /markers remain/);
 });
 
 async function removeFigureIdFromDocPr(docxPath, figureId) {
@@ -171,6 +183,16 @@ async function removeFigureIdFromDocPr(docxPath, figureId) {
     tag.replace(new RegExp(`\\s?figureId=${figureId}`, 'g'), '')
   );
   entries.set('word/document.xml', Buffer.from(updatedXml, 'utf8'));
+  await writeZipEntries(entries, docxPath);
+}
+
+async function injectTemplateMarker(docxPath) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  entries.set(
+    'word/document.xml',
+    Buffer.from(documentXml.replace('</w:body>', '<w:p><w:r><w:t>{d.cover.title}</w:t></w:r></w:p></w:body>'), 'utf8')
+  );
   await writeZipEntries(entries, docxPath);
 }
 

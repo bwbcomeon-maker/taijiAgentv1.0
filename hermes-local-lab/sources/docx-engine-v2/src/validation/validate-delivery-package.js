@@ -152,8 +152,8 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
   if (hasTemplateMarkers(documentXml)) {
     addCheck(
       'template_markers',
-      'passed_with_warnings',
-      'Template data markers remain in document.xml; full Carbone rendering is not implemented in Task 6.'
+      'failed',
+      'Template data markers remain in document.xml; DOCX template rendering did not complete.'
     );
     return;
   }

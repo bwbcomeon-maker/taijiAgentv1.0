@@ -77,13 +77,14 @@ test('buildRenderPlan binds sections, assets, and template data in source order'
   assert.equal(renderPlan.figures[0].sectionTitle, '一、总体架构');
   assert.equal(renderPlan.tables[0].tableId, 'tbl-001');
   assert.equal(renderPlan.templateData.images[0].figureId, 'fig-001');
-  assert.equal(renderPlan.templateData.images[1].figureId, 'image-001');
+  assert.equal(renderPlan.templateData.images[1].figureId, 'fig-002');
   assert.equal(renderPlan.templateData.images[1].metadata.sourceType, 'image');
+  assert.equal(renderPlan.templateData.images[1].metadata.sourceImageId, 'image-001');
   assert.ok(renderPlan.templateData.images[1].path.endsWith('architecture.png'));
   assert.equal(renderPlan.templateData.tables[0].tableId, 'tbl-001');
   assert.equal(
     renderPlan.templateData.sections[0].blocks.some(
-      (block) => block.type === 'figure' && block.figureId === 'image-001'
+      (block) => block.type === 'figure' && block.figureId === 'fig-002' && block.sourceImageId === 'image-001'
     ),
     true
   );
@@ -127,6 +128,7 @@ test('buildRenderPlan orders template images by source block order across image 
 
   assert.deepEqual(
     renderPlan.templateData.images.map((image) => image.figureId),
-    ['image-001', 'fig-001']
+    ['fig-002', 'fig-001']
   );
+  assert.equal(renderPlan.templateData.images[0].metadata.sourceImageId, 'image-001');
 });

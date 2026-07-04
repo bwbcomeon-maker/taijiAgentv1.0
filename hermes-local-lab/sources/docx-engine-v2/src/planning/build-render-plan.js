@@ -12,7 +12,8 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
   }
 
   const sectionById = new Map((sourcePackage.sections || []).map((section) => [section.sectionId, section]));
-  const templateImages = buildTemplateImages(sourcePackage, assetPackage, sectionById);
+  const templateImageBindings = buildTemplateImages(sourcePackage, assetPackage, sectionById);
+  const templateImages = templateImageBindings.images;
   const renderPlan = {
     schemaVersion: 'docx-engine-v2/render-plan',
     jobId: sourcePackage.sourceRef?.sha256
@@ -56,11 +57,12 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
     }),
     templateData: {
       title: sourcePackage.title || '',
-      sections: buildTemplateSections(sourcePackage, assetPackage),
+      sections: buildTemplateSections(sourcePackage, assetPackage, templateImageBindings.figureIdBySourceImageId),
       images: templateImages,
       tables: (assetPackage.tables || []).map((table, index) => ({
         tableId: table.tableId,
         title: table.title || `表格 ${index + 1}`,
+        headers: headersToTemplateObject(table.headers || []),
         rows: rowsToTemplateObjects(table.headers || [], table.rows || []),
         metadata: {
           ...(table.metadata || {}),
@@ -81,7 +83,7 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
   return renderPlan;
 }
 
-function buildTemplateSections(sourcePackage, assetPackage) {
+function buildTemplateSections(sourcePackage, assetPackage, figureIdBySourceImageId = new Map()) {
   const tableIds = new Set((assetPackage.tables || []).map((table) => table.tableId));
   const figureIds = new Set((assetPackage.figures || []).map((figure) => figure.figureId));
   const imageIds = new Set((assetPackage.images || []).map((image) => image.imageId));
@@ -92,7 +94,7 @@ function buildTemplateSections(sourcePackage, assetPackage) {
     level: section.level,
     blocks: (sourcePackage.blocks || [])
       .filter((block) => block.sectionId === section.sectionId)
-      .map((block) => toTemplateBlock(block, tableIds, figureIds, imageIds))
+      .map((block) => toTemplateBlock(block, tableIds, figureIds, imageIds, figureIdBySourceImageId))
       .filter(Boolean),
   }));
 }
@@ -101,6 +103,8 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
   const figureById = new Map((assetPackage.figures || []).map((figure) => [figure.figureId, figure]));
   const imageById = new Map((assetPackage.images || []).map((image) => [image.imageId, image]));
   const usedImageKeys = new Set();
+  const figureIdBySourceImageId = new Map();
+  const allocateFigureId = createFigureIdAllocator(new Set((assetPackage.figures || []).map((figure) => figure.figureId)));
   const orderedImages = [];
 
   for (const block of sourcePackage.blocks || []) {
@@ -114,7 +118,15 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
     const imageId = block.metadata?.imageId;
     if (imageId && imageById.has(imageId) && !usedImageKeys.has(`image:${imageId}`)) {
       usedImageKeys.add(`image:${imageId}`);
-      orderedImages.push(toTemplateMarkdownImage(imageById.get(imageId), orderedImages.length, sectionById));
+      orderedImages.push(
+        toTemplateMarkdownImage(
+          imageById.get(imageId),
+          orderedImages.length,
+          sectionById,
+          figureIdBySourceImageId,
+          allocateFigureId
+        )
+      );
     }
   }
 
@@ -128,11 +140,19 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
   for (const image of assetPackage.images || []) {
     if (!usedImageKeys.has(`image:${image.imageId}`)) {
       usedImageKeys.add(`image:${image.imageId}`);
-      orderedImages.push(toTemplateMarkdownImage(image, orderedImages.length, sectionById));
+      orderedImages.push(
+        toTemplateMarkdownImage(
+          image,
+          orderedImages.length,
+          sectionById,
+          figureIdBySourceImageId,
+          allocateFigureId
+        )
+      );
     }
   }
 
-  return orderedImages;
+  return { images: orderedImages, figureIdBySourceImageId };
 }
 
 function toTemplateFigureImage(figure, index, sectionById) {
@@ -150,14 +170,18 @@ function toTemplateFigureImage(figure, index, sectionById) {
   };
 }
 
-function toTemplateMarkdownImage(image, index, sectionById) {
+function toTemplateMarkdownImage(image, index, sectionById, figureIdBySourceImageId, allocateFigureId) {
+  const figureId = figureIdBySourceImageId.get(image.imageId) || allocateFigureId();
+  figureIdBySourceImageId.set(image.imageId, figureId);
+
   return {
-    figureId: image.imageId,
+    figureId,
     path: image.displayPath,
     caption: image.caption || `图片 ${index + 1}`,
     metadata: {
       ...(image.metadata || {}),
       imageId: image.imageId,
+      sourceImageId: image.imageId,
       sourceType: 'image',
       sourcePath: image.sourcePath,
       sectionId: image.sectionId || '',
@@ -167,7 +191,7 @@ function toTemplateMarkdownImage(image, index, sectionById) {
   };
 }
 
-function toTemplateBlock(block, tableIds, figureIds, imageIds) {
+function toTemplateBlock(block, tableIds, figureIds, imageIds, figureIdBySourceImageId) {
   const tableId = block.metadata?.tableId;
   if (tableId && tableIds.has(tableId)) {
     return {
@@ -193,7 +217,8 @@ function toTemplateBlock(block, tableIds, figureIds, imageIds) {
     return {
       type: 'figure',
       blockId: block.id,
-      figureId: imageId,
+      figureId: figureIdBySourceImageId.get(imageId) || imageId,
+      sourceImageId: imageId,
       title: block.caption || block.text || imageId,
       anchor: block.anchorText || imageId,
     };
@@ -238,14 +263,44 @@ function rowsToTemplateObjects(headers, rows) {
   if (!headers.length) {
     return rows;
   }
+  const keys = headers.map((_, index) => `c${index + 1}`);
 
   return rows.map((row) => {
-    if (!Array.isArray(row)) {
-      return row;
+    if (Array.isArray(row)) {
+      return Object.fromEntries(keys.map((key, index) => [key, row[index] ?? '']));
+    }
+    if (row && typeof row === 'object') {
+      return Object.fromEntries(
+        keys.map((key, index) => [key, row[key] ?? row[headers[index]] ?? ''])
+      );
     }
 
-    return Object.fromEntries(headers.map((header, index) => [header || `c${index + 1}`, row[index] ?? '']));
+    return { c1: String(row ?? '') };
   });
+}
+
+function headersToTemplateObject(headers) {
+  return Object.fromEntries((headers || []).map((header, index) => [`c${index + 1}`, header || `列${index + 1}`]));
+}
+
+function createFigureIdAllocator(usedIds) {
+  let nextIndex = 1;
+
+  return () => {
+    let figureId = nextFigureId(nextIndex);
+    while (usedIds.has(figureId)) {
+      nextIndex += 1;
+      figureId = nextFigureId(nextIndex);
+    }
+
+    usedIds.add(figureId);
+    nextIndex += 1;
+    return figureId;
+  };
+}
+
+function nextFigureId(index) {
+  return `fig-${String(index).padStart(3, '0')}`;
 }
 
 function assertValidDomainObject(schemaName, value) {
