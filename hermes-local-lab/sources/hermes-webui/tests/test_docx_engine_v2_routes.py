@@ -34,7 +34,7 @@ def test_legacy_figure_adjustment_routes_do_not_keep_skill_script_runner():
     assert "docx-template-skill script not found" not in routes_py
 
 
-def test_explicit_template_selection_returns_visible_workbench_payload():
+def test_explicit_template_selection_still_returns_template_metadata():
     from api import routes
 
     result = routes._docx_template_invocation_result(
@@ -46,6 +46,121 @@ def test_explicit_template_selection_returns_visible_workbench_payload():
     assert result["template_id"] == "general-proposal"
     assert result["template"]["id"] == "general-proposal"
     assert result["templates"]
+
+
+def test_docx_template_selected_auto_generates_from_latest_chat_result(monkeypatch, tmp_path):
+    from api import routes
+
+    session = SimpleNamespace(
+        session_id="sid-docx",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "生成一份方案"},
+            {"role": "assistant", "content": "# 项目方案\n\n这里是需要套模板的正文内容。" * 4},
+        ],
+    )
+    seen = {}
+
+    def fake_create_job(payload, workspace):
+        seen["payload"] = dict(payload)
+        source_path = Path(payload["source_path"])
+        assert source_path.exists()
+        return {
+            "ok": True,
+            "job_id": "job-auto",
+            "delivery_dir": str(tmp_path / "项目方案-模板交付包"),
+            "document_path": str(tmp_path / "项目方案-模板交付包" / "document.docx"),
+            "quality_status": "passed_with_warnings",
+            "quality_report_path": str(tmp_path / "项目方案-模板交付包" / "quality-report.json"),
+            "quality_report": {"checks": [{"id": "wps_visual", "status": "not_verified"}]},
+        }, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "create_job", fake_create_job)
+
+    result = routes._docx_template_invocation_result_for_session(
+        "/docx-template-skill 请把当前成果套用通用方案模板（templateId: general-proposal）。",
+        session,
+    )
+
+    assert result["ok"] is True
+    assert result["docx_template_applied"] is True
+    assert result["delivery_result"]["document_path"].endswith("document.docx")
+    assert result["delivery_result"]["quality_status"] == "passed_with_warnings"
+    assert seen["payload"]["template_id"] == "general-proposal"
+    assert seen["payload"]["source_path"].endswith(".md")
+    assert "docx-engine-v2-current-results" in seen["payload"]["source_path"]
+    assert "docx_engine_workbench" not in routes._docx_non_streaming_assistant_message(result, 1)
+
+
+def test_docx_template_selected_asks_for_source_when_context_is_unclear(tmp_path):
+    from api import routes
+
+    session = SimpleNamespace(
+        session_id="sid-docx",
+        workspace=str(tmp_path),
+        messages=[{"role": "assistant", "content": "好的。"}],
+    )
+
+    result = routes._docx_template_invocation_result_for_session(
+        "/docx-template-skill 请把当前成果套用通用方案模板（templateId: general-proposal）。",
+        session,
+    )
+    assistant = routes._docx_non_streaming_assistant_message(result, 1)
+
+    assert result["ok"] is False
+    assert result["docx_source_required"] is True
+    assert result["template_id"] == "general-proposal"
+    assert "源文件" in result["message"]
+    assert assistant["docx_source_request"]["template_id"] == "general-proposal"
+    assert "docx_engine_workbench" not in assistant
+
+
+def test_pending_docx_source_request_uses_next_user_path(monkeypatch, tmp_path):
+    from api import routes
+
+    source_path = tmp_path / "Desktop" / "ERP国产化替代详细设计方案.md"
+    source_path.parent.mkdir()
+    source_path.write_text("# ERP 国产化替代详细设计方案\n", encoding="utf-8")
+    session = SimpleNamespace(
+        session_id="sid-docx",
+        workspace=str(tmp_path / "workspace"),
+        messages=[
+            {
+                "role": "assistant",
+                "content": "请把源文件路径发给我。",
+                "docx_source_request": {"template_id": "general-proposal", "template": {"id": "general-proposal"}},
+            },
+        ],
+    )
+    seen = {}
+
+    def fake_create_job(payload, workspace):
+        seen["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "delivery_dir": str(source_path.parent / "ERP国产化替代详细设计方案-模板交付包"),
+            "document_path": str(source_path.parent / "ERP国产化替代详细设计方案-模板交付包" / "document.docx"),
+            "quality_status": "passed_with_warnings",
+        }, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "create_job", fake_create_job)
+
+    result = routes._docx_template_pending_source_result_for_session(
+        f"源文件在 {source_path}",
+        session,
+        [],
+    )
+
+    assert result["docx_template_applied"] is True
+    assert seen["payload"]["source_path"] == str(source_path)
+    assert seen["payload"]["out_dir"].endswith("ERP国产化替代详细设计方案-模板交付包")
+
+
+def test_docx_template_source_path_from_text_accepts_relative_path_in_sentence():
+    from api import routes
+
+    assert routes._docx_template_source_path_from_text("源文件：方案.md") == "方案.md"
+    assert routes._docx_template_source_path_from_text("源文件在 docs/方案正文.docx") == "docs/方案正文.docx"
 
 
 def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
@@ -69,7 +184,7 @@ def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason: published.append(reason))
     monkeypatch.setattr(routes, "stamp_turn_duration_on_latest_assistant", lambda *args, **kwargs: None)
 
-    result = routes._docx_template_invocation_result("套用通用方案模板")
+    result = routes._docx_template_invocation_result("套用模板")
     routes._record_docx_non_streaming_turn_for_session(session, "套用通用方案模板", result)
 
     assert saved == ["saved"]
@@ -79,8 +194,8 @@ def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
     assert session.messages[0]["role"] == "user"
     assert session.messages[0]["content"] == "套用通用方案模板"
     assert session.messages[1]["role"] == "assistant"
-    assert session.messages[1]["docx_engine_workbench"]["template_id"] == "general-proposal"
-    assert session.context_messages[-1]["content"] == "已选择模板，可直接套用当前结果生成 DOCX；如需改用文件，也可以填写源文件路径。"
+    assert session.messages[1]["docx_template_selection"]["code"] == "template_selection_required"
+    assert session.context_messages[-1]["content"] == "请选择要套用的模板；在选择前不会生成 JSON 或渲染 DOCX。"
     assert session.title != "Untitled"
 
 
@@ -356,6 +471,55 @@ def test_docx_engine_v2_create_job_returns_delivery_package(monkeypatch, tmp_pat
     assert payload["quality_status"] in {"passed", "passed_with_warnings"}
     assert payload["quality_report_path"].endswith("quality-report.json")
     assert payload["quality_report"]["checks"][0]["id"] == "wps_visual"
+
+
+def test_docx_engine_v2_create_job_allows_user_absolute_source_paths(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+    import subprocess
+    import json
+
+    user_home = tmp_path / "home"
+    desktop = user_home / "Desktop"
+    workspace = tmp_path / "workspace"
+    source_path = desktop / "ERP国产化替代详细设计方案.md"
+    source_path.parent.mkdir(parents=True)
+    workspace.mkdir()
+    source_path.write_text("# ERP 国产化替代详细设计方案\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(user_home))
+    calls = []
+
+    def fake_run_engine(args):
+        calls.append(args)
+        out_dir = Path(args[args.index("--out-dir") + 1])
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "jobId": "job-desktop",
+                    "deliveryDir": str(out_dir),
+                    "documentPath": str(out_dir / "document.docx"),
+                    "qualityStatus": "passed_with_warnings",
+                }
+            ) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(docx_engine_v2, "run_engine", fake_run_engine)
+
+    payload, status = docx_engine_v2.create_job(
+        {
+            "template_id": "general-proposal",
+            "source_path": str(source_path),
+            "out_dir": str(desktop / "ERP国产化替代详细设计方案-模板交付包"),
+        },
+        workspace,
+    )
+
+    assert status == 200
+    assert payload["document_path"].endswith("document.docx")
+    assert str(source_path) in calls[0]
 
 
 def test_docx_engine_v2_create_job_preserves_traceable_failure_paths(monkeypatch, tmp_path):

@@ -103,16 +103,19 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
         }, 400
 
     try:
+        roots = _figure_adjustment_allowed_absolute_roots(workspace)
         source_path = _resolve_workspace_path(
             workspace,
             _first_text(payload, "source_path", "sourcePath", "source"),
             field="source_path",
             must_exist=True,
+            allowed_absolute_roots=roots,
         )
         out_dir = _resolve_workspace_path(
             workspace,
             _first_text(payload, "out_dir", "outDir") or f".docx-engine-v2/{uuid.uuid4().hex}",
             field="out_dir",
+            allowed_absolute_roots=roots,
         )
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         args = [
@@ -130,7 +133,13 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
             args.extend(["--source-type", source_type])
         asset_dir_raw = _first_text(payload, "asset_dir", "assetDir")
         if asset_dir_raw:
-            asset_dir = _resolve_workspace_path(workspace, asset_dir_raw, field="asset_dir", must_exist=True)
+            asset_dir = _resolve_workspace_path(
+                workspace,
+                asset_dir_raw,
+                field="asset_dir",
+                must_exist=True,
+                allowed_absolute_roots=roots,
+            )
             args.extend(["--asset-dir", str(asset_dir)])
     except (FileNotFoundError, OSError, ValueError) as exc:
         return _error_payload("validation_failed", str(exc)), 400

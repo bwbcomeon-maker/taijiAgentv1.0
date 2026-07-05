@@ -14417,6 +14417,165 @@ def _docx_template_invocation_result(prompt: str) -> dict | None:
     }
 
 
+def _docx_template_selected_result(prompt: str) -> dict | None:
+    result = _docx_template_invocation_result(prompt)
+    if not result or not result.get("docx_template_selected"):
+        return None
+    return result
+
+
+def _docx_template_source_required_result(template_id: str, template: dict | None = None) -> dict:
+    template = template if isinstance(template, dict) else {}
+    return {
+        "ok": False,
+        "docx_source_required": True,
+        "template_id": template_id,
+        "template": template,
+        "message": "我还没找到要套模板的源文件。请把 Markdown/DOCX 源文件路径发给我，或直接上传源文件。",
+    }
+
+
+def _docx_template_default_delivery_dir(source_path: str, workspace: Path) -> str:
+    raw = str(source_path or "").strip()
+    requested = Path(os.path.expandvars(raw)).expanduser()
+    resolved = requested.resolve() if requested.is_absolute() else (Path(workspace).expanduser().resolve() / requested).resolve()
+    parent = resolved.parent if resolved.parent.exists() else Path(workspace).expanduser().resolve()
+    stem = resolved.stem.strip() or "文档"
+    candidate = parent / f"{stem}-模板交付包"
+    if not candidate.exists() or (candidate.is_dir() and not any(candidate.iterdir())):
+        return str(candidate)
+    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return str(parent / f"{stem}-模板交付包-{suffix}")
+
+
+def _docx_template_asset_dir_for_source(source_path: str, workspace: Path) -> str:
+    raw = str(source_path or "").strip()
+    if not raw:
+        return ""
+    requested = Path(os.path.expandvars(raw)).expanduser()
+    resolved = requested.resolve() if requested.is_absolute() else (Path(workspace).expanduser().resolve() / requested).resolve()
+    sibling_assets = resolved.parent / "assets"
+    return str(sibling_assets) if sibling_assets.is_dir() else ""
+
+
+def _docx_template_apply_source_for_session(
+    session,
+    *,
+    template_id: str,
+    template: dict,
+    source_path: str,
+) -> dict:
+    workspace = Path(getattr(session, "workspace", "")).expanduser().resolve()
+    out_dir = _docx_template_default_delivery_dir(source_path, workspace)
+    payload = {
+        "template_id": template_id,
+        "source_path": source_path,
+        "out_dir": out_dir,
+    }
+    asset_dir = _docx_template_asset_dir_for_source(source_path, workspace)
+    if asset_dir:
+        payload["asset_dir"] = asset_dir
+    delivery, status = docx_engine_v2.create_job(payload, workspace)
+    if status < 300 and isinstance(delivery, dict) and delivery.get("ok") is not False:
+        template_name = str((template or {}).get("name") or template_id)
+        document_path = str(delivery.get("document_path") or "")
+        delivery_dir = str(delivery.get("delivery_dir") or out_dir)
+        return {
+            "ok": True,
+            "docx_template_applied": True,
+            "template_id": template_id,
+            "template": template,
+            "delivery_result": delivery,
+            "message": f"已套用{template_name}，DOCX 已生成。交付目录里包含 DOCX、质量报告和可修改的图片资产。",
+            "document_path": document_path,
+            "delivery_dir": delivery_dir,
+        }
+    message = str((delivery or {}).get("message") or (delivery or {}).get("error") or "生成失败")
+    return {
+        "ok": False,
+        "docx_template_failed": True,
+        "template_id": template_id,
+        "template": template,
+        "delivery_result": delivery if isinstance(delivery, dict) else {},
+        "message": f"套用模板失败：{message}",
+    }
+
+
+def _docx_template_invocation_result_for_session(prompt: str, session, attachments=None) -> dict | None:
+    selected = _docx_template_selected_result(prompt)
+    if selected is None:
+        return _docx_template_invocation_result(prompt)
+    template_id = str(selected.get("template_id") or "").strip()
+    template = selected.get("template") if isinstance(selected.get("template"), dict) else {"id": template_id}
+    explicit_source = _docx_template_source_path_from_text(prompt) or _docx_template_source_path_from_attachments(attachments)
+    if explicit_source:
+        return _docx_template_apply_source_for_session(session, template_id=template_id, template=template, source_path=explicit_source)
+    workspace = Path(getattr(session, "workspace", "")).expanduser().resolve()
+    try:
+        source_path = _docx_engine_v2_materialize_current_result_source(session, workspace)
+    except ValueError:
+        return _docx_template_source_required_result(template_id, template)
+    return _docx_template_apply_source_for_session(session, template_id=template_id, template=template, source_path=source_path)
+
+
+_DOCX_TEMPLATE_SOURCE_PATH_RE = re.compile(r"(?:^|[\s:：\"'“”‘’])((?:~|/)[^\n\r，,；;]+?\.(?:md|markdown|docx|txt))", re.I)
+_DOCX_TEMPLATE_RELATIVE_SOURCE_PATH_RE = re.compile(r"(?:^|[\s:：\"'“”‘’])([^\s\n\r:：\"'“”‘’，,；;]+?\.(?:md|markdown|docx|txt))", re.I)
+_DOCX_TEMPLATE_SOURCE_SUFFIXES = {".md", ".markdown", ".docx", ".txt"}
+
+
+def _docx_template_source_path_from_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    direct = Path(os.path.expandvars(raw)).expanduser()
+    if direct.suffix.lower() in _DOCX_TEMPLATE_SOURCE_SUFFIXES and not re.search(r"[\s:：\"'“”‘’，,；;]", raw):
+        return raw
+    match = _DOCX_TEMPLATE_SOURCE_PATH_RE.search(raw)
+    if match:
+        return match.group(1).strip()
+    match = _DOCX_TEMPLATE_RELATIVE_SOURCE_PATH_RE.search(raw)
+    return match.group(1).strip() if match else ""
+
+
+def _docx_template_source_path_from_attachments(attachments) -> str:
+    if not isinstance(attachments, list):
+        return ""
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("path") or item.get("name") or "").strip()
+        if Path(candidate).suffix.lower() in _DOCX_TEMPLATE_SOURCE_SUFFIXES:
+            return candidate
+    return ""
+
+
+def _latest_docx_source_request(session) -> dict | None:
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            return None
+        request = message.get("docx_source_request")
+        if isinstance(request, dict) and str(request.get("template_id") or "").strip():
+            return request
+    return None
+
+
+def _docx_template_pending_source_result_for_session(prompt: str, session, attachments=None) -> dict | None:
+    request = _latest_docx_source_request(session)
+    if not request:
+        return None
+    source_path = _docx_template_source_path_from_text(prompt) or _docx_template_source_path_from_attachments(attachments)
+    template_id = str(request.get("template_id") or "").strip()
+    template = request.get("template") if isinstance(request.get("template"), dict) else {"id": template_id}
+    if not source_path:
+        return _docx_template_source_required_result(template_id, template)
+    return _docx_template_apply_source_for_session(session, template_id=template_id, template=template, source_path=source_path)
+
+
 def _is_docx_figure_adjustment_invocation(prompt: str) -> bool:
     compact = _docx_template_intent_text(prompt)
     if not compact:
@@ -14469,6 +14628,22 @@ def _docx_non_streaming_assistant_message(result: dict, now: float) -> dict:
             "template_id": template_id,
             "template": dict(template),
             "templates": list(result.get("templates") or ([template] if template else [])),
+        }
+    elif result.get("docx_template_applied"):
+        delivery_result = result.get("delivery_result") if isinstance(result.get("delivery_result"), dict) else {}
+        assistant["docx_template_delivery"] = {
+            "template_id": str(result.get("template_id") or ""),
+            "template": dict(result.get("template") or {}),
+            "document_path": str(result.get("document_path") or delivery_result.get("document_path") or ""),
+            "delivery_dir": str(result.get("delivery_dir") or delivery_result.get("delivery_dir") or ""),
+            "quality_status": str(delivery_result.get("quality_status") or ""),
+            "quality_report_path": str(delivery_result.get("quality_report_path") or ""),
+        }
+    elif result.get("docx_source_required"):
+        template = result.get("template") if isinstance(result.get("template"), dict) else {}
+        assistant["docx_source_request"] = {
+            "template_id": str(result.get("template_id") or template.get("id") or ""),
+            "template": dict(template),
         }
     elif result.get("docx_figure_adjustment_required") or result.get("code") == _DOCX_FIGURE_ADJUSTMENT_REQUIRED_CODE:
         assistant["docx_figure_adjustment"] = {
@@ -15143,7 +15318,13 @@ def _handle_chat_start(handler, body, diag=None):
         if not msg:
             return bad(handler, "message is required")
         display_msg = msg
-        docx_template_result = _docx_template_invocation_result(msg)
+        attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
+        docx_pending_source_result = _docx_template_pending_source_result_for_session(msg, s, attachments)
+        if docx_pending_source_result is not None:
+            _record_docx_non_streaming_turn_for_session(s, display_msg, docx_pending_source_result)
+            diag.stage("response_write") if diag else None
+            return j(handler, docx_pending_source_result)
+        docx_template_result = _docx_template_invocation_result_for_session(msg, s, attachments)
         if docx_template_result is not None:
             _record_docx_non_streaming_turn_for_session(s, display_msg, docx_template_result)
             diag.stage("response_write") if diag else None
@@ -15156,7 +15337,6 @@ def _handle_chat_start(handler, body, diag=None):
         msg = _normalize_docx_template_invocation_message(msg)
         runtime_msg = _enrich_plan_like_chat_prompt(msg)
         diag.stage("normalize_attachments") if diag else None
-        attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         diag.stage("resolve_workspace") if diag else None
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
@@ -16344,7 +16524,7 @@ def _handle_file_reveal(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = _resolve_workspace_or_user_file_path(Path(s.workspace), body["path"])
         if not target.exists():
             # Include the resolved server-side path in the error message so
             # the frontend toast can show *which* file the system expected.
@@ -16378,7 +16558,7 @@ def _handle_file_open(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = _resolve_workspace_or_user_file_path(Path(s.workspace), body["path"])
         if not target.exists():
             return bad(handler, f"File not found: {target}", 404)
 
@@ -16393,6 +16573,30 @@ def _handle_file_open(handler, body):
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
+
+
+def _resolve_workspace_or_user_file_path(workspace: Path, raw_path) -> Path:
+    text = str(raw_path or "").strip()
+    requested = Path(os.path.expandvars(text)).expanduser()
+    if not requested.is_absolute():
+        return safe_resolve(Path(workspace), text)
+    target = requested.resolve()
+    allowed_roots = [Path(workspace).expanduser().resolve()]
+    try:
+        allowed_roots.append(Path.home().expanduser().resolve())
+    except OSError:
+        pass
+    if not any(_path_is_within_root(target, root) for root in allowed_roots):
+        raise ValueError(f"path is outside the allowed local roots: {target}")
+    return target
+
+
+def _path_is_within_root(target: Path, root: Path) -> bool:
+    try:
+        target.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _handle_file_path(handler, body):

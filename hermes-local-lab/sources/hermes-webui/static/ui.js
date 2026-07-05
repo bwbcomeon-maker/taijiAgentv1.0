@@ -9836,6 +9836,42 @@ function _docxFigureAdjustmentHtml(adjustment){
   ].join('');
 }
 
+function _docxTemplateDeliveryHtml(delivery){
+  const template=delivery&&delivery.template||{};
+  const templateName=String(template.name||delivery&&delivery.template_id||'模板').trim();
+  const documentPath=String(delivery&&delivery.document_path||'').trim();
+  const deliveryDir=String(delivery&&delivery.delivery_dir||'').trim();
+  const qualityStatus=String(delivery&&delivery.quality_status||'').trim()||'待验收';
+  const qualityReportPath=String(delivery&&delivery.quality_report_path||'').trim();
+  return [
+    `<div class="docx-template-delivery-card" role="region" aria-label="DOCX 模板套用结果" data-document-path="${esc(documentPath)}" data-delivery-dir="${esc(deliveryDir)}" data-quality-report-path="${esc(qualityReportPath)}">`,
+    '<div class="docx-template-delivery-title">DOCX 已生成</div>',
+    `<div class="docx-template-delivery-note">已套用${esc(templateName)}。交付文件夹包含 DOCX、质量报告和可修改的图片资产。</div>`,
+    '<div class="docx-template-delivery-result">',
+    `<div><strong>DOCX</strong><span>${esc(documentPath||'未返回路径')}</span></div>`,
+    `<div><strong>交付文件夹</strong><span>${esc(deliveryDir||'未返回路径')}</span></div>`,
+    `<div><strong>质量状态</strong><span>${esc(qualityStatus)}</span></div>`,
+    '</div>',
+    '<div class="docx-template-delivery-actions">',
+    '<button type="button" onclick="openDocxTemplateDeliveryPath(this,\'document\');event.stopPropagation()" aria-label="打开生成的 DOCX">打开 DOCX</button>',
+    '<button type="button" class="secondary" onclick="openDocxTemplateDeliveryPath(this,\'delivery\');event.stopPropagation()" aria-label="打开交付文件夹">打开交付文件夹</button>',
+    '</div>',
+    '<div class="docx-template-delivery-status" data-docx-template-delivery-status role="status" aria-live="polite">等待你打开检查。</div>',
+    '</div>',
+  ].join('');
+}
+
+function _docxSourceRequestHtml(request){
+  const template=request&&request.template||{};
+  const templateName=String(template.name||request&&request.template_id||'已选模板').trim();
+  return [
+    '<div class="docx-source-request-card" role="region" aria-label="需要源文件">',
+    '<div class="docx-source-request-title">需要源文件</div>',
+    `<div class="docx-source-request-note">已选择${esc(templateName)}，但我还没找到要套模板的源文件。请把 Markdown/DOCX 源文件路径发给我，或直接上传源文件，我会继续生成结果。</div>`,
+    '</div>',
+  ].join('');
+}
+
 function renderDocxEngineWorkbench(workbench){
   const selectedTemplate=String(workbench&&workbench.template_id||workbench&&workbench.templateId||'general-proposal').trim()||'general-proposal';
   const templates=Array.isArray(workbench&&workbench.templates)&&workbench.templates.length
@@ -9936,6 +9972,39 @@ function renderDocxEngineWorkbench(workbench){
 
 function _docxEngineRoot(el){
   return el&&el.closest?el.closest('.docx-engine-workbench'):null;
+}
+
+function _docxTemplateDeliveryRoot(el){
+  return el&&el.closest?el.closest('.docx-template-delivery-card'):null;
+}
+
+function _setDocxTemplateDeliveryStatus(root,message,state){
+  const status=root&&root.querySelector?root.querySelector('[data-docx-template-delivery-status]'):null;
+  if(!status)return;
+  status.textContent=message||'';
+  if(state)status.dataset.state=state;
+  else status.removeAttribute('data-state');
+}
+
+async function openDocxTemplateDeliveryPath(button,kind){
+  const root=_docxTemplateDeliveryRoot(button);
+  const sid=S&&S.session&&S.session.session_id;
+  if(!root||!sid)return null;
+  const pathValue=kind==='delivery'?(root.dataset.deliveryDir||''):(root.dataset.documentPath||'');
+  if(!pathValue){
+    _setDocxTemplateDeliveryStatus(root,kind==='delivery'?'没有交付文件夹路径。':'没有 DOCX 路径。','error');
+    return null;
+  }
+  try{
+    await api('/api/file/open',{method:'POST',body:JSON.stringify({session_id:sid,path:pathValue})});
+    _setDocxTemplateDeliveryStatus(root,kind==='delivery'?'已打开交付文件夹。':'已打开 DOCX。','success');
+    if(typeof showToast==='function')showToast(kind==='delivery'?'已打开交付文件夹。':'已打开 DOCX。');
+  }catch(err){
+    const message=err&&err.message?err.message:String(err||'打开失败');
+    _setDocxTemplateDeliveryStatus(root,`打开失败：${message}`,'error');
+    if(typeof showToast==='function')showToast(`打开失败：${message}`);
+  }
+  return null;
 }
 
 function _docxEngineField(root,name){
@@ -10550,6 +10619,7 @@ if(typeof window!=='undefined'){
   window.markDocxEngineWpsVisualAccepted=markDocxEngineWpsVisualAccepted;
   window.openDocxEngineDocument=openDocxEngineDocument;
   window.openDocxDeliveryFolder=openDocxDeliveryFolder;
+  window.openDocxTemplateDeliveryPath=openDocxTemplateDeliveryPath;
   window.replaceDocxEngineAsset=replaceDocxEngineAsset;
   window.runDocxDraftPackage=runDocxDraftPackage;
   window.runDocxFigureRerender=runDocxFigureRerender;
@@ -10822,6 +10892,8 @@ function renderMessages(options){
     }
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const docxTemplateSelectionHtml=(!isUser&&m.docx_template_selection)?_docxTemplateSelectionHtml(m.docx_template_selection):'';
+    const docxTemplateDeliveryHtml=(!isUser&&m.docx_template_delivery)?_docxTemplateDeliveryHtml(m.docx_template_delivery):'';
+    const docxSourceRequestHtml=(!isUser&&m.docx_source_request)?_docxSourceRequestHtml(m.docx_source_request):'';
     const docxEngineWorkbenchHtml=(!isUser&&m.docx_engine_workbench)?renderDocxEngineWorkbench(m.docx_engine_workbench):'';
     const docxFigureAdjustmentHtml=(!isUser&&m.docx_figure_adjustment)?_docxFigureAdjustmentHtml(m.docx_figure_adjustment):'';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
@@ -10900,12 +10972,12 @@ function renderMessages(options){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||docxTemplateSelectionHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||docxTemplateSelectionHtml||docxTemplateDeliveryHtml||docxSourceRequestHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
       const bodyBlock=String(content||'').trim()?`<div class="msg-body">${bodyHtml}</div>`:'';
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${docxTemplateSelectionHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${footHtml}`);
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${docxTemplateSelectionHtml}${docxTemplateDeliveryHtml}${docxSourceRequestHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }

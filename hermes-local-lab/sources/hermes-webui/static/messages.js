@@ -387,6 +387,37 @@ function renderDocxEngineWorkbenchMessage(activeSid,startData){
   },0);
 }
 
+function renderDocxTemplateAppliedMessage(activeSid,startData){
+  const delivery=startData&&startData.delivery_result||{};
+  const template=startData&&startData.template||{};
+  finishDocxTemplateNonStreamingStart(activeSid,{
+    role:'assistant',
+    content:startData&&startData.message||'DOCX 已生成。',
+    docx_template_delivery:{
+      template_id:startData&&startData.template_id||template.id||'',
+      template,
+      document_path:startData&&startData.document_path||delivery.document_path||'',
+      delivery_dir:startData&&startData.delivery_dir||delivery.delivery_dir||'',
+      quality_status:delivery.quality_status||'',
+      quality_report_path:delivery.quality_report_path||'',
+    },
+    _ts:Date.now()/1000,
+  });
+}
+
+function renderDocxSourceRequestMessage(activeSid,startData){
+  const template=startData&&startData.template||{};
+  finishDocxTemplateNonStreamingStart(activeSid,{
+    role:'assistant',
+    content:startData&&startData.message||'请把 Markdown/DOCX 源文件路径发给我，或直接上传源文件。',
+    docx_source_request:{
+      template_id:startData&&startData.template_id||template.id||'',
+      template,
+    },
+    _ts:Date.now()/1000,
+  });
+}
+
 function renderDocxFigureAdjustmentMessage(activeSid,startData){
   finishDocxTemplateNonStreamingStart(activeSid,{
     role:'assistant',
@@ -702,8 +733,18 @@ async function send(){
       return;
     }
 
+    if(startData.docx_template_applied){
+      renderDocxTemplateAppliedMessage(activeSid,startData);
+      return;
+    }
+
+    if(startData.docx_source_required){
+      renderDocxSourceRequestMessage(activeSid,startData);
+      return;
+    }
+
     if(startData.docx_template_selected){
-      renderDocxEngineWorkbenchMessage(activeSid,startData);
+      renderDocxSourceRequestMessage(activeSid,startData);
       return;
     }
 

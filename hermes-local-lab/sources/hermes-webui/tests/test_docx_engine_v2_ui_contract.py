@@ -55,6 +55,22 @@ def test_docx_engine_workbench_prioritizes_one_click_template_application():
     assert "正在套用模板" in messages_js
 
 
+def test_docx_template_selection_flow_uses_result_or_source_request_cards():
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    messages_js = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "docx-template-delivery-card" in ui_js
+    assert "docx-source-request-card" in ui_js
+    assert "renderDocxTemplateAppliedMessage" in messages_js
+    assert "renderDocxSourceRequestMessage" in messages_js
+    assert "startData.docx_template_applied" in messages_js
+    assert "startData.docx_source_required" in messages_js
+    assert "renderDocxEngineWorkbenchMessage(activeSid,startData);" not in messages_js
+    assert ".docx-template-delivery-card" in style_css
+    assert ".docx-source-request-card" in style_css
+
+
 def test_docx_engine_workbench_exposes_required_accessible_control_names():
     ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
