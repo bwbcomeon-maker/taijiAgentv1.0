@@ -38,12 +38,30 @@ def test_docx_engine_workbench_has_visible_controls_and_actions():
     assert "renderDocxEngineWorkbenchMessage" in messages_js
 
 
+def test_docx_engine_workbench_prioritizes_one_click_template_application():
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    messages_js = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "套用模板生成 DOCX" in ui_js
+    assert "套用当前结果生成 DOCX" in ui_js
+    assert "use_current_result" in ui_js
+    assert "交付目录（可不填）" in ui_js
+    assert "请选择方案文件，或点击“套用当前结果生成 DOCX”。" in ui_js
+    assert "请填写模板、源文件路径和交付目录。" not in ui_js
+    assert "docx-engine-advanced" in ui_js
+    assert "<summary>高级操作" in ui_js
+    assert ".docx-engine-advanced" in style_css
+    assert "正在套用模板" in messages_js
+
+
 def test_docx_engine_workbench_exposes_required_accessible_control_names():
     ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
     for label in [
         "选择模板",
-        "生成文档包",
+        "套用当前结果生成 DOCX",
+        "从源文件生成 DOCX",
         "查看质量报告",
         "打开 DOCX",
         "打开交付目录",
@@ -53,7 +71,7 @@ def test_docx_engine_workbench_exposes_required_accessible_control_names():
         "模板包目录",
         "安装模板包",
         "覆盖已安装模板",
-        "从源包重新生成",
+        "从源文件生成 DOCX",
         "刷新模板列表",
     ]:
         assert label in ui_js

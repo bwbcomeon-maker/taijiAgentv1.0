@@ -80,7 +80,7 @@ def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
     assert session.messages[0]["content"] == "套用通用方案模板"
     assert session.messages[1]["role"] == "assistant"
     assert session.messages[1]["docx_engine_workbench"]["template_id"] == "general-proposal"
-    assert session.context_messages[-1]["content"] == "已选择模板，请在文档模板工作台生成 DOCX 交付包。"
+    assert session.context_messages[-1]["content"] == "已选择模板，可直接套用当前结果生成 DOCX；如需改用文件，也可以填写源文件路径。"
     assert session.title != "Untitled"
 
 
@@ -270,6 +270,51 @@ def test_docx_engine_v2_create_job_requires_template_selection(monkeypatch, tmp_
 
     assert result["status"] == 400
     assert result["payload"]["code"] == "template_selection_required"
+
+
+def test_docx_engine_v2_create_job_can_use_latest_chat_result(monkeypatch, tmp_path):
+    from api import routes
+
+    session = SimpleNamespace(
+        session_id="sid-docx",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "生成一份方案"},
+            {"role": "assistant", "content": "# 项目方案\n\n这里是可套用模板的正文内容。" * 4},
+            {
+                "role": "assistant",
+                "content": "已选择模板，请在文档模板工作台生成 DOCX 交付包。",
+                "docx_engine_workbench": {"template_id": "general-proposal"},
+            },
+        ],
+    )
+    monkeypatch.setattr(routes, "get_session_for_file_ops", lambda session_id: session)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+    monkeypatch.setattr(routes, "bad", lambda handler, message, status=400, **kwargs: {"status": status, "payload": {"error": str(message)}})
+
+    seen = {}
+
+    def fake_create_job(payload, workspace):
+        seen["payload"] = dict(payload)
+        source_path = Path(payload["source_path"])
+        assert source_path.exists()
+        assert source_path.read_text(encoding="utf-8").startswith("# 项目方案")
+        return {"ok": True, "document_path": str(tmp_path / "delivery" / "document.docx")}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "create_job", fake_create_job)
+
+    result = routes._handle_docx_engine_v2_create_job(
+        object(),
+        {
+            "session_id": "sid-docx",
+            "template_id": "general-proposal",
+            "use_current_result": True,
+        },
+    )
+
+    assert result["status"] == 200
+    assert seen["payload"]["source_path"].endswith(".md")
+    assert "docx-engine-v2-current-results" in seen["payload"]["source_path"]
 
 
 def test_docx_engine_v2_create_job_returns_delivery_package(monkeypatch, tmp_path):

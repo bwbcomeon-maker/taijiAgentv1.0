@@ -372,7 +372,7 @@ function renderDocxEngineWorkbenchMessage(activeSid,startData){
   const templateId=startData&&startData.template_id||template.id||'general-proposal';
   finishDocxTemplateNonStreamingStart(activeSid,{
     role:'assistant',
-    content:startData&&startData.message||'已选择模板，请在文档模板工作台生成 DOCX 交付包。',
+    content:startData&&startData.message||'已选择模板，可直接套用当前结果生成 DOCX；如需改用文件，也可以填写源文件路径。',
     docx_engine_workbench:{
       template_id:templateId,
       template,
@@ -412,7 +412,12 @@ function chooseDocxTemplate(button){
     composer.focus();
   }
   if(root) root.classList.add('is-selected');
-  if(typeof showToast==='function') showToast('已填入模板选择，可发送后继续。',1800);
+  if(button){
+    button.disabled=true;
+    button.textContent='正在套用模板';
+  }
+  if(typeof showToast==='function') showToast('正在套用模板...',1600);
+  if(composer&&templateId&&typeof send==='function') setTimeout(()=>send(),0);
 }
 
 function dismissDocxTemplateSelection(button){

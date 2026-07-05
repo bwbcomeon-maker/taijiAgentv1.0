@@ -14405,7 +14405,7 @@ def _docx_template_invocation_result(prompt: str) -> dict | None:
             "template_id": template_id,
             "template": selected,
             "templates": templates,
-            "message": "已选择模板，请在文档模板工作台生成 DOCX 交付包。",
+            "message": "已选择模板，可直接套用当前结果生成 DOCX；如需改用文件，也可以填写源文件路径。",
         }
     return {
         "ok": False,
@@ -16424,10 +16424,75 @@ def _handle_file_path(handler, body):
         return bad(handler, _sanitize_error(e))
 
 
-def _docx_engine_v2_workspace(body) -> Path:
+_DOCX_ENGINE_V2_CURRENT_RESULT_DIR = ".docx-engine-v2-current-results"
+_DOCX_ENGINE_V2_CONTROL_MESSAGE_KEYS = {
+    "docx_template_selection",
+    "docx_template_selected",
+    "docx_engine_workbench",
+    "docx_figure_adjustment",
+}
+
+
+def _docx_engine_v2_session_and_workspace(body):
     require(body, "session_id")
     s = get_session_for_file_ops(body["session_id"])
-    return Path(s.workspace).expanduser().resolve()
+    return s, Path(s.workspace).expanduser().resolve()
+
+
+def _docx_engine_v2_workspace(body) -> Path:
+    return _docx_engine_v2_session_and_workspace(body)[1]
+
+
+def _docx_engine_v2_wants_current_result(body) -> bool:
+    value = (body or {}).get("use_current_result")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _docx_engine_v2_has_explicit_source(body) -> bool:
+    return bool(str((body or {}).get("source_path") or (body or {}).get("sourcePath") or (body or {}).get("source") or "").strip())
+
+
+def _docx_engine_v2_is_control_message(message: dict) -> bool:
+    if any(key in message for key in _DOCX_ENGINE_V2_CONTROL_MESSAGE_KEYS):
+        return True
+    text = _message_content_text(message.get("content")).strip()
+    return text.startswith((
+        "已选择模板",
+        "请选择要套用的模板",
+        "先列出可用模板",
+        "图片调整工作台",
+    ))
+
+
+def _docx_engine_v2_latest_chat_result_text(session) -> str:
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list) or not messages:
+        messages = getattr(session, "context_messages", None)
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if _docx_engine_v2_is_control_message(message):
+            continue
+        text = _message_content_text(message.get("content")).strip()
+        if len(text) >= 40:
+            return text
+    return ""
+
+
+def _docx_engine_v2_materialize_current_result_source(session, workspace: Path) -> str:
+    text = _docx_engine_v2_latest_chat_result_text(session)
+    if not text:
+        raise ValueError("当前对话里没有可套用的正文，请先生成方案，或填写源文件路径。")
+    source_dir = workspace / _DOCX_ENGINE_V2_CURRENT_RESULT_DIR
+    source_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"current-result-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.md"
+    source_path = source_dir / filename
+    source_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+    return str(source_path)
 
 
 def _handle_docx_engine_v2_templates(handler):
@@ -16439,8 +16504,11 @@ def _handle_docx_engine_v2_templates(handler):
 
 def _handle_docx_engine_v2_create_job(handler, body):
     try:
-        workspace = _docx_engine_v2_workspace(body)
-        payload, status = docx_engine_v2.create_job(body, workspace)
+        session, workspace = _docx_engine_v2_session_and_workspace(body)
+        job_body = dict(body or {})
+        if _docx_engine_v2_wants_current_result(job_body) and not _docx_engine_v2_has_explicit_source(job_body):
+            job_body["source_path"] = _docx_engine_v2_materialize_current_result_source(session, workspace)
+        payload, status = docx_engine_v2.create_job(job_body, workspace)
         return j(handler, payload, status=status)
     except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))

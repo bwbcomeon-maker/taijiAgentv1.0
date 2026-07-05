@@ -4872,6 +4872,11 @@ main.main > #mainPlugin{display:none;}
 .docx-engine-quality-list{margin-top:10px;}
 .docx-engine-quality-list strong{display:block;color:var(--text);margin-bottom:4px;}
 .docx-engine-quality-empty{color:var(--muted);}
+.docx-engine-advanced{border-top:1px solid var(--border-subtle);background:var(--surface-subtle-hover);}
+.docx-engine-advanced summary{min-height:42px;display:flex;align-items:center;padding:0 16px;color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;list-style-position:inside;}
+.docx-engine-advanced summary:focus-visible{outline:2px solid var(--accent-bg-strong);outline-offset:-2px;}
+.docx-engine-advanced[open] summary{border-bottom:1px solid var(--border-subtle);color:var(--text);}
+.docx-engine-advanced .docx-engine-section{background:var(--surface-subtle);}
 .docx-engine-status{margin:0 16px 14px;padding:10px 12px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;line-height:1.45;}
 .docx-engine-status[data-state="busy"]{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
 .docx-engine-status[data-state="success"]{color:var(--success-text,var(--text));border-color:var(--success-border,var(--border-subtle));background:var(--success-bg,var(--surface));}

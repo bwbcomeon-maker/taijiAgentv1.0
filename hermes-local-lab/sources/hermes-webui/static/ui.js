@@ -9759,7 +9759,7 @@ function _docxTemplateSelectionHtml(selection){
       `<div class="docx-template-selection-name">${esc(name)}${versionHtml}</div>`,
       description?`<div class="docx-template-selection-desc">${esc(description)}</div>`:'',
       '</div>',
-      `<button type="button" class="docx-template-selection-choose" aria-label="选择${esc(name)}" onclick="chooseDocxTemplate(this);event.stopPropagation()">选择</button>`,
+      `<button type="button" class="docx-template-selection-choose" aria-label="套用${esc(name)}模板" onclick="chooseDocxTemplate(this);event.stopPropagation()">套用此模板</button>`,
       '</div>',
     ].join('');
   }).join('');
@@ -9768,7 +9768,7 @@ function _docxTemplateSelectionHtml(selection){
     '<div class="docx-template-selection-head">',
     '<div>',
     '<div class="docx-template-selection-title">选择要套用的模板</div>',
-    '<div class="docx-template-selection-note">选择前不会生成 JSON 或渲染 DOCX。</div>',
+    '<div class="docx-template-selection-note">选择后会打开生成 DOCX，不会改动原文。</div>',
     '</div>',
     '<button type="button" class="docx-template-selection-cancel" aria-label="取消模板选择" onclick="dismissDocxTemplateSelection(this);event.stopPropagation()">取消</button>',
     '</div>',
@@ -9857,42 +9857,29 @@ function renderDocxEngineWorkbench(workbench){
     '</label>',
   ].join('');
   return [
-    '<div class="docx-engine-workbench" role="region" aria-label="文档模板工作台">',
+    '<div class="docx-engine-workbench" role="region" aria-label="套用模板生成 DOCX">',
     '<div class="docx-engine-head">',
     '<div>',
-    '<div class="docx-engine-title">文档模板工作台</div>',
-    '<div class="docx-engine-note">选择模板和源文件，生成包含 DOCX、资产、质量报告的交付包。</div>',
+    '<div class="docx-engine-title">套用模板生成 DOCX</div>',
+    '<div class="docx-engine-note">直接把当前聊天结果套进模板；如需使用本地文件，可填写源文件路径。</div>',
     '</div>',
     '<button type="button" class="docx-engine-secondary" onclick="refreshDocxEngineTemplates(this);event.stopPropagation()" aria-label="刷新模板列表">刷新模板</button>',
     '</div>',
     '<div class="docx-engine-section">',
-    '<div class="docx-engine-section-title">安装模板包</div>',
-    '<div class="docx-engine-grid">',
-    inputHtml('template_package_path','模板包目录','例如：templates/custom-proposal'),
-    '</div>',
-    '<label class="docx-engine-checkbox">',
-    '<input type="checkbox" data-docx-engine-field="replace_existing" aria-label="覆盖已安装模板">',
-    '<span>覆盖已安装模板</span>',
-    '</label>',
-    '<div class="docx-engine-help">仅用于更新已安装模板；内置模板不会被覆盖。</div>',
-    '<div class="docx-engine-actions">',
-    '<button type="button" class="secondary" onclick="installDocxEngineTemplate(this);event.stopPropagation()" aria-label="安装模板包">安装模板包</button>',
-    '</div>',
-    '</div>',
-    '<div class="docx-engine-section">',
-    '<div class="docx-engine-section-title">生成文档包</div>',
+    '<div class="docx-engine-section-title">生成 DOCX</div>',
+    '<div class="docx-engine-help">默认使用当前对话里最近生成的正文。只有要改用文件时，才填写源文件路径。</div>',
     '<div class="docx-engine-grid">',
     '<label class="docx-engine-field">',
     '<span>选择模板</span>',
     `<select data-docx-engine-field="template_id" aria-label="选择模板">${options}</select>`,
     '</label>',
-    inputHtml('source_path','源文件路径','例如：方案.md'),
-    inputHtml('asset_dir','图片资产目录','可选，例如：assets'),
-    inputHtml('out_dir','交付目录','例如：方案-交付包'),
+    inputHtml('source_path','源文件路径（可不填）','可选，例如：方案.md'),
+    inputHtml('asset_dir','图片资产目录（可不填）','可选，例如：assets'),
+    inputHtml('out_dir','交付目录（可不填）','可不填，系统自动生成'),
     '</div>',
     '<div class="docx-engine-actions">',
-    '<button type="button" onclick="runDocxEngineJob(this);event.stopPropagation()" aria-label="生成文档包">生成文档包</button>',
-    '<button type="button" class="secondary" onclick="runDocxEngineJob(this);event.stopPropagation()" aria-label="从源包重新生成">从源包重新生成</button>',
+    '<button type="button" data-docx-engine-use-current="true" onclick="runDocxEngineJob(this);event.stopPropagation()" aria-label="套用当前结果生成 DOCX">套用当前结果生成 DOCX</button>',
+    '<button type="button" class="secondary" data-docx-engine-use-current="false" onclick="runDocxEngineJob(this);event.stopPropagation()" aria-label="从源文件生成 DOCX">从源文件生成 DOCX</button>',
     '</div>',
     '</div>',
     '<div class="docx-engine-section">',
@@ -9911,6 +9898,22 @@ function renderDocxEngineWorkbench(workbench){
     '<button type="button" class="secondary" data-docx-engine-action="wps" onclick="markDocxEngineWpsVisualAccepted(this);event.stopPropagation()" aria-label="记录 WPS 验收通过" disabled>记录 WPS 验收通过</button>',
     '</div>',
     '</div>',
+    '<details class="docx-engine-advanced">',
+    '<summary>高级操作（安装模板、替换图片）</summary>',
+    '<div class="docx-engine-section">',
+    '<div class="docx-engine-section-title">安装模板包</div>',
+    '<div class="docx-engine-grid">',
+    inputHtml('template_package_path','模板包目录','例如：templates/custom-proposal'),
+    '</div>',
+    '<label class="docx-engine-checkbox">',
+    '<input type="checkbox" data-docx-engine-field="replace_existing" aria-label="覆盖已安装模板">',
+    '<span>覆盖已安装模板</span>',
+    '</label>',
+    '<div class="docx-engine-help">仅用于更新已安装模板；内置模板不会被覆盖。</div>',
+    '<div class="docx-engine-actions">',
+    '<button type="button" class="secondary" onclick="installDocxEngineTemplate(this);event.stopPropagation()" aria-label="安装模板包">安装模板包</button>',
+    '</div>',
+    '</div>',
     '<div class="docx-engine-section">',
     '<div class="docx-engine-section-title">替换 DOCX 图片</div>',
     '<div class="docx-engine-help">如果提示未找到图片标识，这份旧 DOCX 需要先重新套模板，生成带图片标记的新 DOCX。</div>',
@@ -9925,6 +9928,7 @@ function renderDocxEngineWorkbench(workbench){
     '<button type="button" onclick="replaceDocxEngineAsset(this);event.stopPropagation()" aria-label="替换 DOCX 图片">替换 DOCX 图片</button>',
     '</div>',
     '</div>',
+    '</details>',
     '<div class="docx-engine-status" data-docx-engine-status role="status" aria-live="polite">等待操作。</div>',
     '</div>',
   ].join('');
@@ -10184,16 +10188,21 @@ async function runDocxEngineJob(button){
   const sid=_docxEngineSessionId(root);
   if(!sid)return null;
   _clearDocxEngineFieldErrors(root);
+  const useCurrent=!!(button&&button.dataset&&button.dataset.docxEngineUseCurrent==='true');
   const templateId=_docxEngineValue(root,'template_id');
   const sourcePath=_docxEngineValue(root,'source_path');
   const assetDir=_docxEngineValue(root,'asset_dir');
   const outDir=_docxEngineValue(root,'out_dir');
-  if(!templateId||!sourcePath||!outDir){
-    _markDocxEngineRequiredFields(root,['template_id','source_path','out_dir'],'请填写模板、源文件路径和交付目录。');
+  if(!templateId){
+    _markDocxEngineRequiredFields(root,['template_id'],'请选择要套用的模板。');
+    return null;
+  }
+  if(!useCurrent&&!sourcePath){
+    _markDocxEngineRequiredFields(root,['source_path'],'请选择方案文件，或点击“套用当前结果生成 DOCX”。');
     return null;
   }
   _docxEngineSetBusy(root,true);
-  _setDocxEngineStatus(root,'正在生成文档包...','busy');
+  _setDocxEngineStatus(root,useCurrent&&!sourcePath?'正在把当前结果套用模板...':'正在生成 DOCX...','busy');
   try{
     const payload=await api('/api/docx-engine-v2/jobs',{method:'POST',body:JSON.stringify({
       session_id:sid,
@@ -10201,11 +10210,12 @@ async function runDocxEngineJob(button){
       source_path:sourcePath,
       asset_dir:assetDir,
       out_dir:outDir,
+      use_current_result:useCurrent&&!sourcePath,
     })});
     _updateDocxEngineResult(root,payload);
     const quality=String(payload&&payload.quality_status||'');
-    _setDocxEngineStatus(root,`文档包已生成。质量报告：${quality||'未返回'}`,'success');
-    if(typeof showToast==='function')showToast('文档包已生成。');
+    _setDocxEngineStatus(root,`DOCX 已生成。质量报告：${quality||'未返回'}`,'success');
+    if(typeof showToast==='function')showToast('DOCX 已生成。');
     if(typeof loadDir==='function')loadDir(S.currentDir||'.');
     return payload;
   }catch(err){
