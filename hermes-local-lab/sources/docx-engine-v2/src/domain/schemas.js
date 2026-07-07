@@ -250,7 +250,31 @@ const templateDataImageSchema = {
     path: { type: 'string', minLength: 1 },
     sha256: sha256Schema,
     caption: { type: 'string' },
+    dimensions: metadataSchema,
+    layoutIntent: { type: 'string' },
     metadata: metadataSchema,
+  },
+};
+
+const templateDataColumnSchema = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['key', 'text'],
+  properties: {
+    key: { type: 'string', minLength: 1 },
+    index: { type: 'integer', minimum: 1 },
+    text: { type: 'string' },
+  },
+};
+
+const templateDataCellSchema = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['key', 'text'],
+  properties: {
+    key: { type: 'string', minLength: 1 },
+    index: { type: 'integer', minimum: 1 },
+    text: { type: 'string' },
   },
 };
 
@@ -262,6 +286,10 @@ const templateDataTableSchema = {
     tableId: { type: 'string', minLength: 1 },
     title: { type: 'string' },
     headers: metadataSchema,
+    columns: {
+      type: 'array',
+      items: templateDataColumnSchema,
+    },
     rows: {
       type: 'array',
       items: {
@@ -270,7 +298,16 @@ const templateDataTableSchema = {
             type: 'array',
             items: true,
           },
-          metadataSchema,
+          {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              cells: {
+                type: 'array',
+                items: templateDataCellSchema,
+              },
+            },
+          },
         ],
       },
     },

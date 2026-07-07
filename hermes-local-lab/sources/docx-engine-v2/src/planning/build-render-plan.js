@@ -25,24 +25,28 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
       blockIds: [...(section.blockIds || [])],
       metadata: { ...(section.metadata || {}) },
     })),
-    tables: (assetPackage.tables || []).map((table, index) => ({
-      tableId: table.tableId,
-      title: table.title || `表格 ${index + 1}`,
-      sectionId: table.sectionId || '',
-      afterBlockId: table.afterBlockId || findPlacementBlockId(sourcePackage, table),
-      anchorText: table.anchorText || table.title || table.tableId,
-      metadata: {
-        ...(table.metadata || {}),
-        sectionTitle: sectionById.get(table.sectionId)?.title || '',
-        templatePath: `tables.${index}`,
-      },
-    })),
+    tables: (assetPackage.tables || []).map((table, index) => {
+      const sectionTitle = sectionById.get(table.sectionId)?.title || '';
+      const title = readableTableTitle(table, index, sectionTitle);
+      return {
+        tableId: table.tableId,
+        title,
+        sectionId: table.sectionId || '',
+        afterBlockId: table.afterBlockId || findPlacementBlockId(sourcePackage, table),
+        anchorText: table.anchorText || title || table.tableId,
+        metadata: {
+          ...(table.metadata || {}),
+          sectionTitle,
+          templatePath: `tables.${index}`,
+        },
+      };
+    }),
     figures: (assetPackage.figures || []).map((figure, index) => {
       const sectionTitle = sectionById.get(figure.sectionId)?.title || '';
 
       return {
         figureId: figure.figureId,
-        caption: figure.caption || `图 ${index + 1}`,
+        caption: readableFigureCaption(figure, index, sectionTitle),
         sectionId: figure.sectionId || '',
         sectionTitle,
         afterBlockId: findPlacementBlockId(sourcePackage, figure),
@@ -59,18 +63,22 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
       title: sourcePackage.title || '',
       sections: buildTemplateSections(sourcePackage, assetPackage, templateImageBindings.figureIdBySourceImageId),
       images: templateImages,
-      tables: (assetPackage.tables || []).map((table, index) => ({
-        tableId: table.tableId,
-        title: table.title || `表格 ${index + 1}`,
-        headers: headersToTemplateObject(table.headers || []),
-        rows: rowsToTemplateObjects(table.headers || [], table.rows || []),
-        metadata: {
-          ...(table.metadata || {}),
-          sectionId: table.sectionId || '',
-          sectionTitle: sectionById.get(table.sectionId)?.title || '',
-          templatePath: `tables.${index}`,
-        },
-      })),
+      tables: (assetPackage.tables || []).map((table, index) => {
+        const sectionTitle = sectionById.get(table.sectionId)?.title || '';
+        return {
+          tableId: table.tableId,
+          title: readableTableTitle(table, index, sectionTitle),
+          headers: headersToTemplateObject(table.headers || []),
+          columns: columnsToTemplateObjects(table.headers || []),
+          rows: rowsToTemplateObjects(table.headers || [], table.rows || []),
+          metadata: {
+            ...(table.metadata || {}),
+            sectionId: table.sectionId || '',
+            sectionTitle,
+            templatePath: `tables.${index}`,
+          },
+        };
+      }),
       metadata: {
         templateId: templatePackage.templateId || templatePackage.id,
         assetDir: assetPackage.assetDir,
@@ -90,8 +98,9 @@ function buildTemplateSections(sourcePackage, assetPackage, figureIdBySourceImag
 
   return (sourcePackage.sections || []).map((section) => ({
     sectionId: section.sectionId,
-    title: section.title,
+    title: cleanSectionTitle(section.title) || section.title,
     level: section.level,
+    metadata: { originalTitle: section.title || '' },
     blocks: (sourcePackage.blocks || [])
       .filter((block) => block.sectionId === section.sectionId)
       .map((block) => toTemplateBlock(block, tableIds, figureIds, imageIds, figureIdBySourceImageId))
@@ -172,7 +181,9 @@ function toTemplateFigureImage(figure, index, sectionById, placement = {}) {
     figureId: figure.figureId,
     path: figure.displayPath,
     sha256: figure.sha256,
-    caption: figure.caption || `图 ${index + 1}`,
+    caption: readableFigureCaption(figure, index, sectionById.get(figure.sectionId)?.title || ''),
+    dimensions: figure.dimensions || {},
+    layoutIntent: inferFigureLayoutIntent(figure),
     metadata: {
       ...(figure.metadata || {}),
       sourceType: 'figure',
@@ -201,7 +212,9 @@ function toTemplateMarkdownImage(
     figureId,
     path: image.displayPath,
     sha256: image.sha256,
-    caption: image.caption || `图片 ${index + 1}`,
+    caption: readableFigureCaption(image, index, sectionById.get(image.sectionId)?.title || ''),
+    dimensions: image.dimensions || {},
+    layoutIntent: inferFigureLayoutIntent(image),
     metadata: {
       ...(image.metadata || {}),
       imageId: image.imageId,
@@ -216,6 +229,23 @@ function toTemplateMarkdownImage(
       templatePath: `images.${index}`,
     },
   };
+}
+
+function inferFigureLayoutIntent(item = {}) {
+  const text = `${item.caption || ''} ${item.anchorText || ''} ${item.sourceType || ''}`.toLowerCase();
+  if (/gantt|甘特/.test(text)) {
+    return 'gantt';
+  }
+  if (/topo|network|网络|拓扑|vlan|交换机/.test(text)) {
+    return 'network';
+  }
+  if (/flowchart|流程|时序|sequence/.test(text)) {
+    return 'flowchart';
+  }
+  if (/架构|architecture|c4context/.test(text)) {
+    return 'architecture';
+  }
+  return 'normal';
 }
 
 function placementMetadata(sourcePackage, item, block = null) {
@@ -259,9 +289,17 @@ function toTemplateBlock(block, tableIds, figureIds, imageIds, figureIdBySourceI
     };
   }
 
-  if (block.type === 'paragraph' || block.type === 'heading') {
+  if (block.type === 'paragraph') {
     return {
       type: 'paragraph',
+      blockId: block.id,
+      text: block.text || '',
+    };
+  }
+
+  if (block.type === 'heading') {
+    return {
+      type: 'heading',
       blockId: block.id,
       text: block.text || '',
     };
@@ -298,26 +336,63 @@ function findPlacementBlockId(sourcePackage, item) {
 
 function rowsToTemplateObjects(headers, rows) {
   if (!headers.length) {
-    return rows;
+    return (rows || []).map((row) => {
+      if (Array.isArray(row)) {
+        return rowToTemplateObject([], row);
+      }
+      if (row && typeof row === 'object') {
+        const keys = Object.keys(row).filter((key) => /^c\d+$/.test(key));
+        const values = keys
+          .sort((left, right) => Number(left.slice(1)) - Number(right.slice(1)))
+          .map((key) => row[key]);
+        return {
+          ...row,
+          cells: values.map((value, index) => ({ key: `c${index + 1}`, text: value ?? '' })),
+        };
+      }
+      return { c1: String(row ?? ''), cells: [{ key: 'c1', text: String(row ?? '') }] };
+    });
   }
   const keys = headers.map((_, index) => `c${index + 1}`);
 
   return rows.map((row) => {
     if (Array.isArray(row)) {
-      return Object.fromEntries(keys.map((key, index) => [key, row[index] ?? '']));
+      return rowToTemplateObject(keys, row);
     }
     if (row && typeof row === 'object') {
-      return Object.fromEntries(
-        keys.map((key, index) => [key, row[key] ?? row[headers[index]] ?? ''])
+      return rowToTemplateObject(
+        keys,
+        keys.map((key, index) => row[key] ?? row[headers[index]] ?? '')
       );
     }
 
-    return { c1: String(row ?? '') };
+    return { c1: String(row ?? ''), cells: [{ key: 'c1', text: String(row ?? '') }] };
   });
 }
 
 function headersToTemplateObject(headers) {
   return Object.fromEntries((headers || []).map((header, index) => [`c${index + 1}`, header || `列${index + 1}`]));
+}
+
+function columnsToTemplateObjects(headers) {
+  return (headers || []).map((header, index) => ({
+    key: `c${index + 1}`,
+    index: index + 1,
+    text: header || `列${index + 1}`,
+  }));
+}
+
+function rowToTemplateObject(keys, values) {
+  const effectiveKeys = keys.length ? keys : values.map((_, index) => `c${index + 1}`);
+  const entries = effectiveKeys.map((key, index) => [key, values[index] ?? '']);
+  return {
+    ...Object.fromEntries(entries),
+    cells: entries.map(([key, value], index) => ({
+      key,
+      index: index + 1,
+      text: value,
+    })),
+  };
 }
 
 function createFigureIdAllocator(usedIds) {
@@ -338,6 +413,70 @@ function createFigureIdAllocator(usedIds) {
 
 function nextFigureId(index) {
   return `fig-${String(index).padStart(3, '0')}`;
+}
+
+function readableTableTitle(table = {}, index = 0, sectionTitle = '') {
+  const explicit = String(table.title || table.caption || '').trim();
+  if (explicit && !isGenericTableTitle(explicit, index)) {
+    return stripTableNumberPrefix(explicit);
+  }
+
+  const context = cleanSectionTitle(sectionTitle);
+  if (context) {
+    return /表$/.test(context) ? context : `${context}表`;
+  }
+
+  const headers = (table.headers || [])
+    .map((header) => String(header || '').trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  if (headers.length > 0) {
+    return `${headers.join('、')}表`;
+  }
+
+  return `表格 ${index + 1}`;
+}
+
+function readableFigureCaption(figure = {}, index = 0, sectionTitle = '') {
+  const explicit = String(figure.caption || figure.title || '').trim();
+  if (explicit && !isGenericFigureCaption(explicit, index)) {
+    return stripFigureNumberPrefix(explicit);
+  }
+
+  const context = cleanSectionTitle(sectionTitle);
+  if (context) {
+    return context;
+  }
+
+  return `图示 ${index + 1}`;
+}
+
+function isGenericTableTitle(value, index = 0) {
+  const text = String(value || '').trim();
+  return new RegExp(`^表格\\s*${index + 1}$`).test(text) || /^表格\s*\d+$/.test(text) || /^表\s*\d+$/.test(text);
+}
+
+function isGenericFigureCaption(value, index = 0) {
+  const text = String(value || '').trim();
+  return new RegExp(`^(图|图片|图示)\\s*${index + 1}$`).test(text) || /^(图|图片|图示)\s*\d+$/.test(text);
+}
+
+function stripTableNumberPrefix(value) {
+  return String(value || '').trim().replace(/^表\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+}
+
+function stripFigureNumberPrefix(value) {
+  return String(value || '').trim().replace(/^图\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+}
+
+function cleanSectionTitle(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^第[一二三四五六七八九十百千万0-9]+[章节篇部分]\s*[、:：.]?\s*/, '')
+    .replace(/^[一二三四五六七八九十百千万]+[、.．]\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[、.．]?\s+/, '')
+    .replace(/[（(]\s*(?:C4Context|flowchart|graph|sequenceDiagram|Mermaid|SVG|PNG)[^)）]*[)）]/gi, '')
+    .trim();
 }
 
 function assertValidDomainObject(schemaName, value) {

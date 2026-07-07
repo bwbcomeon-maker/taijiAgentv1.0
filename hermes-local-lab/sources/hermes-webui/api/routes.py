@@ -14386,6 +14386,9 @@ def _normalize_docx_template_invocation_message(prompt: str) -> str:
         return raw
     selected = next((item for item in _docx_template_catalog() if item.get("id") == template_id), None)
     template_name = str((selected or {}).get("name") or template_id)
+    source_path = _docx_template_source_path_from_text(raw)
+    if source_path:
+        return f'/docx-template-skill 请将源文件 "{source_path}" 套用{template_name}（templateId: {template_id}）。'
     return f"/docx-template-skill 请把当前成果套用{template_name}（templateId: {template_id}）。"
 
 
@@ -14393,6 +14396,7 @@ def _docx_template_invocation_result(prompt: str) -> dict | None:
     if not _is_docx_template_invocation(prompt):
         return None
     template_id = _docx_template_explicit_id(prompt)
+    source_path = _docx_template_source_path_from_text(prompt)
     templates = _docx_template_catalog()
     if template_id:
         selected = next((item for item in templates if item.get("id") == template_id), None) or {
@@ -14405,13 +14409,20 @@ def _docx_template_invocation_result(prompt: str) -> dict | None:
             "template_id": template_id,
             "template": selected,
             "templates": templates,
+            "source_path": source_path,
             "message": "已选择模板，可直接套用当前结果生成 DOCX；如需改用文件，也可以填写源文件路径。",
         }
+    message = (
+        f"请选择要套用的模板；选择前不会生成 JSON 或渲染 DOCX。源文件：{source_path}"
+        if source_path
+        else "请选择要套用的模板；在选择前不会生成 JSON 或渲染 DOCX。"
+    )
     return {
         "ok": False,
         "docx_template_selection_required": True,
         "code": _DOCX_TEMPLATE_SELECTION_REQUIRED_CODE,
-        "message": "请选择要套用的模板；在选择前不会生成 JSON 或渲染 DOCX。",
+        "message": message,
+        "source_path": source_path,
         "examples": list(_DOCX_TEMPLATE_NATURAL_EXAMPLES),
         "templates": templates,
     }
@@ -14466,6 +14477,18 @@ def _docx_template_apply_source_for_session(
     source_path: str,
 ) -> dict:
     workspace = Path(getattr(session, "workspace", "")).expanduser().resolve()
+    raw_source = str(source_path or "").strip()
+    requested = Path(os.path.expandvars(raw_source)).expanduser()
+    resolved_source = requested.resolve() if requested.is_absolute() else (workspace / requested).resolve()
+    if not resolved_source.exists():
+        return {
+            "ok": False,
+            "docx_source_required": True,
+            "template_id": template_id,
+            "template": template,
+            "source_path": raw_source,
+            "message": f"未读取到源文件：{raw_source}。请确认文件存在，或重新上传 Markdown/DOCX 源文件。",
+        }
     out_dir = _docx_template_default_delivery_dir(source_path, workspace)
     payload = {
         "template_id": template_id,
@@ -14518,7 +14541,8 @@ def _docx_template_invocation_result_for_session(prompt: str, session, attachmen
     return _docx_template_apply_source_for_session(session, template_id=template_id, template=template, source_path=source_path)
 
 
-_DOCX_TEMPLATE_SOURCE_PATH_RE = re.compile(r"(?:^|[\s:：\"'“”‘’])((?:~|/)[^\n\r，,；;]+?\.(?:md|markdown|docx|txt))", re.I)
+_DOCX_TEMPLATE_QUOTED_SOURCE_PATH_RE = re.compile(r"[\"“'‘]((?:~|/)[^\"”'’\n\r]+?\.(?:md|markdown|docx|txt))[\"”'’]?", re.I)
+_DOCX_TEMPLATE_SOURCE_PATH_RE = re.compile(r"(?:^|[\s:：\"'“”‘’])((?:~|/)[^\s\"'“”‘’\n\r，,；;]+?\.(?:md|markdown|docx|txt))", re.I)
 _DOCX_TEMPLATE_RELATIVE_SOURCE_PATH_RE = re.compile(r"(?:^|[\s:：\"'“”‘’])([^\s\n\r:：\"'“”‘’，,；;]+?\.(?:md|markdown|docx|txt))", re.I)
 _DOCX_TEMPLATE_SOURCE_SUFFIXES = {".md", ".markdown", ".docx", ".txt"}
 
@@ -14530,10 +14554,14 @@ def _docx_template_source_path_from_text(text: str) -> str:
     direct = Path(os.path.expandvars(raw)).expanduser()
     if direct.suffix.lower() in _DOCX_TEMPLATE_SOURCE_SUFFIXES and not re.search(r"[\s:：\"'“”‘’，,；;]", raw):
         return raw
-    match = _DOCX_TEMPLATE_SOURCE_PATH_RE.search(raw)
+    searchable = re.sub(r"^/docx-template-skill\b", " ", raw, flags=re.I).strip()
+    match = _DOCX_TEMPLATE_QUOTED_SOURCE_PATH_RE.search(searchable)
     if match:
         return match.group(1).strip()
-    match = _DOCX_TEMPLATE_RELATIVE_SOURCE_PATH_RE.search(raw)
+    match = _DOCX_TEMPLATE_SOURCE_PATH_RE.search(searchable)
+    if match:
+        return match.group(1).strip()
+    match = _DOCX_TEMPLATE_RELATIVE_SOURCE_PATH_RE.search(searchable)
     return match.group(1).strip() if match else ""
 
 
@@ -14620,6 +14648,7 @@ def _docx_non_streaming_assistant_message(result: dict, now: float) -> dict:
             "code": result.get("code") or _DOCX_TEMPLATE_SELECTION_REQUIRED_CODE,
             "templates": list(result.get("templates") or []),
             "examples": list(result.get("examples") or []),
+            "source_path": str(result.get("source_path") or ""),
         }
     elif result.get("docx_template_selected"):
         template = result.get("template") if isinstance(result.get("template"), dict) else {}

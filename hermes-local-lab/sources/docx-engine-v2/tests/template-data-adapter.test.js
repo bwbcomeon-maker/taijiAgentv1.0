@@ -73,6 +73,82 @@ test('buildTemplateData delegates render-plan mapping to the selected template p
   });
 });
 
+test('general proposal adapter exposes table columns and row cells dynamically', () => {
+  const templatePackage = getTemplatePackage('general-proposal', { rootDir: ENGINE_ROOT });
+  const renderPlan = {
+    templateData: {
+      title: 'Dynamic table proposal',
+      sections: [
+        {
+          sectionId: 'sec-001',
+          title: '1. Dynamic Tables',
+          blocks: [],
+        },
+      ],
+      tables: [
+        {
+          tableId: 'tbl-001',
+          title: 'Six column table',
+          headers: {
+            c1: '列1',
+            c2: '列2',
+            c3: '列3',
+            c4: '列4',
+            c5: '列5',
+            c6: '列6',
+          },
+          columns: [
+            { key: 'c1', text: '列1' },
+            { key: 'c2', text: '列2' },
+            { key: 'c3', text: '列3' },
+            { key: 'c4', text: '列4' },
+            { key: 'c5', text: '列5' },
+            { key: 'c6', text: '列6' },
+          ],
+          rows: [
+            {
+              c1: '值1',
+              c2: '值2',
+              c3: '值3',
+              c4: '值4',
+              c5: '值5',
+              c6: '值6',
+              cells: [
+                { key: 'c1', text: '值1' },
+                { key: 'c2', text: '值2' },
+                { key: 'c3', text: '值3' },
+                { key: 'c4', text: '值4' },
+                { key: 'c5', text: '值5' },
+                { key: 'c6', text: '值6' },
+              ],
+            },
+          ],
+          metadata: {},
+        },
+      ],
+      images: [],
+      metadata: { templateId: 'general-proposal' },
+    },
+    tables: [],
+    figures: [],
+  };
+
+  const templateData = buildTemplateData({ templatePackage, renderPlan });
+
+  assert.equal(templateData.chapters[0].title, 'Dynamic Tables');
+  assert.equal(templateData.chapters[0].sections[0].title, 'Dynamic Tables');
+  assert.deepEqual(
+    templateData.tables[0].columns.map((column) => column.text),
+    ['列1', '列2', '列3', '列4', '列5', '列6']
+  );
+  assert.deepEqual(
+    templateData.tables[0].rows[0].cells.map((cell) => cell.text),
+    ['值1', '值2', '值3', '值4', '值5', '值6']
+  );
+  assert.equal(templateData.tables[0].headers.c6, '列6');
+  assert.equal(templateData.tables[0].rows[0].c6, '值6');
+});
+
 test('template validation rejects packages without a usable data adapter', (t) => {
   const packageDir = path.join(makeTempDir(t), 'custom-template');
   fs.cpSync(path.join(ENGINE_ROOT, 'templates', 'general-proposal'), packageDir, { recursive: true });

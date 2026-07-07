@@ -7,6 +7,7 @@ const path = require('node:path');
 const { renderDeterministicMermaidSvg } = require('../assets/package-assets');
 const { renderMermaidSvg } = require('../assets/package-rich-draft');
 const { replaceDocxAsset } = require('../assets/replace-docx-asset');
+const { rasterizeSvgToPng, svgDimensions } = require('../assets/svg-rasterizer');
 const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { validateDeliveryPackage } = require('../validation/validate-delivery-package');
 
@@ -48,16 +49,38 @@ async function renderDeliveryFigureAsset({ manifestPath, renderPlan, figureId })
     throw new Error(`找不到可编辑源: ${sourcePath}`);
   }
 
-  const displayPath = normalizeRelativePath(figure.displayPath || `assets/${figureId}/figure.svg`);
+  const figureAssetDir = normalizeRelativePath(path.posix.dirname(figure.displayPath || `assets/${figureId}/figure.png`));
+  const displayPath = normalizeRelativePath(path.posix.join(figureAssetDir, 'figure.png'));
   const outputPath = resolvePackagePath(deliveryDir, displayPath);
+  const vectorDisplayPath = normalizeRelativePath(path.posix.join(figureAssetDir, 'figure.svg'));
+  const vectorOutputPath = resolvePackagePath(deliveryDir, vectorDisplayPath);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const sourceText = fs.readFileSync(sourcePath, 'utf8');
-  fs.writeFileSync(outputPath, renderDeterministicMermaidSvg({ figure, sourceText }), 'utf8');
+  const svgText = renderDeterministicMermaidSvg({ figure, sourceText });
+  const dimensions = svgDimensions(svgText);
+  fs.writeFileSync(vectorOutputPath, svgText, 'utf8');
+  const raster = rasterizeSvgToPng({ svgText, pngPath: outputPath, width: dimensions.width });
   const displaySha256 = sha256File(outputPath);
   const sourceSha256 = sha256File(sourcePath);
 
-  updateDeliveryAssetPackage({ deliveryDir, figureId, displayPath, displaySha256, sourceSha256 });
-  updateDeliveryRenderPlan({ manifestPath, renderPlan, figureId, displayPath, displaySha256 });
+  updateDeliveryAssetPackage({
+    deliveryDir,
+    figureId,
+    displayPath,
+    displaySha256,
+    sourceSha256,
+    vectorDisplayPath,
+    dimensions,
+    raster,
+  });
+  updateDeliveryRenderPlan({
+    manifestPath,
+    renderPlan,
+    figureId,
+    displayPath,
+    displaySha256,
+    dimensions,
+  });
   await updateDeliveryDocument({ deliveryDir, figureId, imagePath: outputPath });
   invalidateReplayEvidence({ deliveryDir });
   writePendingQualityReport({ deliveryDir });
@@ -95,18 +118,27 @@ function renderRichDraftFigureAsset({ manifestPath, manifestDoc, figureId }) {
 
   const previousDisplayPath = normalizeRelativePath(figure.displayPath || '');
   const assetDir = normalizeRelativePath(figure.assetDir || path.posix.dirname(normalizeRelativePath(figure.editable.sourcePath)));
-  const displayPath = normalizeRelativePath(path.posix.join(assetDir, 'figure.svg'));
+  const vectorDisplayPath = normalizeRelativePath(path.posix.join(assetDir, 'figure.svg'));
+  const displayPath = normalizeRelativePath(path.posix.join(assetDir, 'figure.png'));
   const outputPath = resolvePackagePath(packageDir, displayPath);
+  const vectorOutputPath = resolvePackagePath(packageDir, vectorDisplayPath);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const sourceText = fs.readFileSync(sourcePath, 'utf8');
-  fs.writeFileSync(
-    outputPath,
-    `${renderMermaidSvg({ title: figure.caption || figure.figureId, mermaidText: sourceText })}\n`,
-    'utf8'
-  );
+  const svgText = `${renderMermaidSvg({ title: figure.caption || figure.figureId, mermaidText: sourceText })}\n`;
+  const dimensions = svgDimensions(svgText);
+  fs.writeFileSync(vectorOutputPath, svgText, 'utf8');
+  const raster = rasterizeSvgToPng({ svgText, pngPath: outputPath, width: dimensions.width });
 
   figure.displayPath = displayPath;
   figure.sourcePath = displayPath;
+  figure.metadata = {
+    ...(figure.metadata || {}),
+    vectorDisplayPath,
+    rasterizedFrom: 'svg',
+    rasterizer: '@resvg/resvg-js',
+    rasterWidth: raster.width,
+    rasterHeight: raster.height,
+  };
   writeJson(manifestPath, manifestDoc);
   updatePackagedMarkdown({ packageDir, manifestDoc, figure, previousDisplayPath, displayPath });
   updateImageList({ packageDir, manifestDoc, previousDisplayPath, displayPath });
@@ -209,7 +241,16 @@ function updateImageList({ packageDir, manifestDoc, previousDisplayPath, display
   fs.writeFileSync(imageListPath, imageList.split(previousDisplayPath).join(displayPath), 'utf8');
 }
 
-function updateDeliveryAssetPackage({ deliveryDir, figureId, displayPath, displaySha256, sourceSha256 }) {
+function updateDeliveryAssetPackage({
+  deliveryDir,
+  figureId,
+  displayPath,
+  displaySha256,
+  sourceSha256,
+  vectorDisplayPath,
+  dimensions,
+  raster,
+}) {
   const assetPackagePath = path.join(deliveryDir, 'asset-package.json');
   const assetPackage = readJson(assetPackagePath);
   const figure = (assetPackage.figures || []).find((item) => item.figureId === figureId);
@@ -218,16 +259,25 @@ function updateDeliveryAssetPackage({ deliveryDir, figureId, displayPath, displa
   }
   figure.displayPath = displayPath;
   figure.sha256 = displaySha256;
+  figure.dimensions = dimensions || figure.dimensions;
   figure.editable = {
     ...(figure.editable || {}),
     format: figure.editable?.format || 'mermaid',
     sourcePath: figure.editable?.sourcePath || `assets/${figureId}/source.mmd`,
     sourceSha256,
   };
+  figure.metadata = {
+    ...(figure.metadata || {}),
+    vectorDisplayPath,
+    rasterizedFrom: 'svg',
+    rasterizer: '@resvg/resvg-js',
+    rasterWidth: raster?.width,
+    rasterHeight: raster?.height,
+  };
   writeJson(assetPackagePath, assetPackage);
 }
 
-function updateDeliveryRenderPlan({ manifestPath, renderPlan, figureId, displayPath, displaySha256 }) {
+function updateDeliveryRenderPlan({ manifestPath, renderPlan, figureId, displayPath, displaySha256, dimensions }) {
   const figure = (renderPlan.figures || []).find((item) => item.figureId === figureId);
   if (figure) {
     figure.displayPath = displayPath;
@@ -238,6 +288,7 @@ function updateDeliveryRenderPlan({ manifestPath, renderPlan, figureId, displayP
   }
   image.path = displayPath;
   image.sha256 = displaySha256;
+  image.dimensions = dimensions || image.dimensions;
   writeJson(manifestPath, renderPlan);
 }
 

@@ -116,6 +116,9 @@ test('runDocumentJob writes traceable failure artifacts for input validation fai
   assert.equal(result.code, 'validation_failed');
   assert.equal(result.job.status, 'failed');
   assert.match(result.message, /富内容初稿|表格|图示|图片/);
+  assert.match(result.message, /本次读取到的源内容统计为：表格 0 个，图示或图片 0 个/);
+  assert.match(result.message, /源文件路径是否正确/);
+  assert.doesNotMatch(result.message, /请先补齐表格和图示，再套用该模板/);
   assert.ok(result.job.failures.some((failure) => /富内容初稿|表格|图示|图片/.test(failure)));
   assert.equal(result.jobManifestPath, path.join(deliveryDir, 'job.manifest.json'));
   assert.equal(result.failureReportPath, path.join(deliveryDir, 'failure-report.json'));

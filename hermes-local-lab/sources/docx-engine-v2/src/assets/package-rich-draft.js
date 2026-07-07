@@ -1,10 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { renderDeterministicMermaidSvg } = require('./mermaid-renderer');
+const { rasterizeSvgToPng, sanitizeSvgText, svgDimensions } = require('./svg-rasterizer');
 const { normalizeMarkdownSource } = require('../source/normalize-markdown');
-
-const TARGET_WIDTH = 1600;
-const TARGET_HEIGHT = 900;
 
 async function packageRichDraft({ source, outDir, assetDir = '' } = {}) {
   if (!source) {
@@ -52,30 +51,46 @@ async function packageRichDraft({ source, outDir, assetDir = '' } = {}) {
     });
     let displayPath = '';
     let editable = {};
+    let displayAsset = {};
 
     if (mermaidBlock) {
       const sourceMmdPath = path.join(figureDir, 'source.mmd');
       fs.writeFileSync(sourceMmdPath, `${String(mermaidBlock.text || '').trim()}\n`, 'utf8');
       if (imageQualityPasses(resolvedAssetPath)) {
-        displayPath = copyDisplayAsset({ outputDir, figureDir, sourcePath: resolvedAssetPath });
+        displayAsset = copyDisplayAsset({ outputDir, figureDir, sourcePath: resolvedAssetPath });
+        displayPath = displayAsset.displayPath;
       } else {
         const figurePath = path.join(figureDir, 'figure.svg');
+        const pngPath = path.join(figureDir, 'figure.png');
+        const svgText = sanitizeSvgText(`${renderMermaidSvg({ title: caption, mermaidText: mermaidBlock.text })}\n`);
         fs.writeFileSync(
           figurePath,
-          `${renderMermaidSvg({ title: caption, mermaidText: mermaidBlock.text })}\n`,
+          svgText,
           'utf8'
         );
-        displayPath = relativeForManifest(outputDir, figurePath);
+        const dimensions = svgDimensions(svgText);
+        const raster = rasterizeSvgToPng({ svgText, pngPath, width: dimensions.width });
+        displayAsset = {
+          displayPath: relativeForManifest(outputDir, pngPath),
+          sourcePath: relativeForManifest(outputDir, figurePath),
+          vectorDisplayPath: relativeForManifest(outputDir, figurePath),
+          rasterizedFrom: 'svg',
+          rasterizer: '@resvg/resvg-js',
+          rasterWidth: raster.width,
+          rasterHeight: raster.height,
+        };
+        displayPath = displayAsset.displayPath;
       }
       editable = {
         sourceType: 'mermaid',
         sourcePath: relativeForManifest(outputDir, sourceMmdPath),
       };
     } else {
-      displayPath = copyDisplayAsset({ outputDir, figureDir, sourcePath: resolvedAssetPath });
+      displayAsset = copyDisplayAsset({ outputDir, figureDir, sourcePath: resolvedAssetPath });
+      displayPath = displayAsset.displayPath;
       editable = {
         sourceType: 'imported-image',
-        sourcePath: displayPath,
+        sourcePath: displayAsset.sourcePath || displayPath,
       };
     }
 
@@ -100,6 +115,13 @@ async function packageRichDraft({ source, outDir, assetDir = '' } = {}) {
         assetPath: reference.path,
       }),
       editable,
+      metadata: {
+        ...(displayAsset.vectorDisplayPath ? { vectorDisplayPath: displayAsset.vectorDisplayPath } : {}),
+        ...(displayAsset.rasterizedFrom ? { rasterizedFrom: displayAsset.rasterizedFrom } : {}),
+        ...(displayAsset.rasterizer ? { rasterizer: displayAsset.rasterizer } : {}),
+        ...(displayAsset.rasterWidth ? { rasterWidth: displayAsset.rasterWidth } : {}),
+        ...(displayAsset.rasterHeight ? { rasterHeight: displayAsset.rasterHeight } : {}),
+      },
     });
   });
 
@@ -262,9 +284,27 @@ function copyDisplayAsset({ outputDir, figureDir, sourcePath }) {
     throw new Error(`图片资产不可读: ${sourcePath || 'unknown'}`);
   }
   const extension = path.extname(sourcePath).toLowerCase() || '.bin';
+  if (extension === '.svg') {
+    const vectorPath = path.join(figureDir, 'figure.svg');
+    const pngPath = path.join(figureDir, 'figure.png');
+    const svgText = sanitizeSvgText(fs.readFileSync(sourcePath, 'utf8'));
+    const dimensions = svgDimensions(svgText);
+    fs.copyFileSync(sourcePath, vectorPath);
+    const raster = rasterizeSvgToPng({ svgText, pngPath, width: dimensions.width });
+    return {
+      displayPath: relativeForManifest(outputDir, pngPath),
+      sourcePath: relativeForManifest(outputDir, vectorPath),
+      vectorDisplayPath: relativeForManifest(outputDir, vectorPath),
+      rasterizedFrom: 'svg',
+      rasterizer: '@resvg/resvg-js',
+      rasterWidth: raster.width,
+      rasterHeight: raster.height,
+    };
+  }
   const outputPath = path.join(figureDir, `figure${extension}`);
   fs.copyFileSync(sourcePath, outputPath);
-  return relativeForManifest(outputDir, outputPath);
+  const displayPath = relativeForManifest(outputDir, outputPath);
+  return { displayPath, sourcePath: displayPath };
 }
 
 function imageQualityPasses(sourcePath) {
@@ -422,147 +462,10 @@ function inferLayoutIntent({ caption = '', mermaidText = '', assetPath = '' } = 
 }
 
 function renderMermaidSvg({ title, mermaidText }) {
-  const phases = parseMermaidFlow(mermaidText);
-  const safePhases = phases.length > 0
-    ? phases.slice(0, 6)
-    : [{ title: title || '流程图', nodes: ['请根据初稿 Mermaid 内容确认流程节点'] }];
-  const marginX = 70;
-  const top = 135;
-  const gap = 24;
-  const columnWidth = (TARGET_WIDTH - marginX * 2 - gap * (safePhases.length - 1)) / safePhases.length;
-  const bodyHeight = 650;
-  const palette = ['#dff3ff', '#e7f8ef', '#fff1d6', '#f0eaff', '#ffe8ea', '#e7f1ff'];
-  const borderPalette = ['#2787b7', '#2a8d5d', '#bf8428', '#7c64b5', '#b65d69', '#4d77b4'];
-
-  const columns = safePhases.map((phase, index) => {
-    const x = marginX + index * (columnWidth + gap);
-    const nodes = (phase.nodes.length > 0 ? phase.nodes : ['待补充']).slice(0, 6);
-    const nodeGap = 18;
-    const nodeHeight = Math.min(72, (bodyHeight - 120 - nodeGap * (nodes.length - 1)) / nodes.length);
-    const nodeXml = nodes.map((node, nodeIndex) => {
-      const nodeX = x + 28;
-      const nodeY = top + 92 + nodeIndex * (nodeHeight + nodeGap);
-      return [
-        `<rect x="${nodeX}" y="${nodeY}" width="${columnWidth - 56}" height="${nodeHeight}" rx="14" fill="#ffffff" stroke="${borderPalette[index % borderPalette.length]}" stroke-width="1.6"/>`,
-        svgTextBlock(node, nodeX + (columnWidth - 56) / 2, nodeY + Math.max(32, nodeHeight / 2 - 6), {
-          fontSize: 20,
-          lineHeight: 23,
-          maxChars: 15,
-          maxLines: 2,
-          fill: '#22344d',
-        }),
-      ].join('\n');
-    }).join('\n');
-    const arrow = index < safePhases.length - 1
-      ? [
-        `<line x1="${x + columnWidth + 6}" y1="${top + bodyHeight / 2}" x2="${x + columnWidth + gap - 8}" y2="${top + bodyHeight / 2}" stroke="#5b6b7d" stroke-width="3" stroke-linecap="round"/>`,
-        `<path d="M ${x + columnWidth + gap - 8} ${top + bodyHeight / 2} l -11 -7 v 14 z" fill="#5b6b7d"/>`,
-      ].join('\n')
-      : '';
-    return [
-      `<rect x="${x}" y="${top}" width="${columnWidth}" height="${bodyHeight}" rx="24" fill="${palette[index % palette.length]}" stroke="${borderPalette[index % borderPalette.length]}" stroke-width="2"/>`,
-      svgTextBlock(phase.title || `阶段 ${index + 1}`, x + columnWidth / 2, top + 48, {
-        fontSize: 24,
-        lineHeight: 28,
-        maxChars: 13,
-        maxLines: 2,
-        weight: '700',
-        fill: borderPalette[index % borderPalette.length],
-      }),
-      nodeXml,
-      arrow,
-    ].join('\n');
-  }).join('\n');
-
-  return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${TARGET_WIDTH}" height="${TARGET_HEIGHT}" viewBox="0 0 ${TARGET_WIDTH} ${TARGET_HEIGHT}">`,
-    '<rect width="1600" height="900" fill="#f8fbff"/>',
-    '<rect x="40" y="42" width="1520" height="816" rx="30" fill="#ffffff" stroke="#d8e4f0" stroke-width="2"/>',
-    svgTextBlock(title || '流程图', 800, 88, {
-      fontSize: 34,
-      lineHeight: 38,
-      maxChars: 24,
-      maxLines: 1,
-      weight: '700',
-      fill: '#102a43',
-    }),
-    columns,
-    '</svg>',
-  ].join('\n');
-}
-
-function parseMermaidFlow(mermaidText) {
-  const phases = [];
-  let currentPhase = null;
-  for (const originalLine of String(mermaidText || '').split(/\r?\n/)) {
-    const line = originalLine.replace(/%%.*$/, '').trim();
-    if (!line || /^(flowchart|graph)\b/i.test(line)) {
-      continue;
-    }
-    const subgraphMatch = line.match(/^subgraph\s+[^\[]*\["([^"]+)"\]/i)
-      || line.match(/^subgraph\s+[^\[]*\['([^']+)'\]/i)
-      || line.match(/^subgraph\s+(.+)$/i);
-    if (subgraphMatch) {
-      currentPhase = { title: subgraphMatch[1].trim(), nodes: [] };
-      phases.push(currentPhase);
-      continue;
-    }
-    if (/^end$/i.test(line)) {
-      currentPhase = null;
-      continue;
-    }
-    const labels = [];
-    const labelRegex = /[\w.-]+\s*(?:\["([^"]+)"\]|\['([^']+)'\]|\[([^\]]+)\]|\("([^"]+)"\)|\('([^']+)'\)|\(([^)]+)\)|\{"([^"]+)"\}|\{'([^']+)'\}|\{([^}]+)\})/g;
-    let match = labelRegex.exec(line);
-    while (match) {
-      const label = match.slice(1).find((item) => item !== undefined);
-      if (label && !labels.includes(label.trim())) {
-        labels.push(label.trim());
-      }
-      match = labelRegex.exec(line);
-    }
-    if (labels.length > 0) {
-      if (!currentPhase) {
-        currentPhase = { title: phases.length === 0 ? '流程步骤' : `流程补充 ${phases.length + 1}`, nodes: [] };
-        phases.push(currentPhase);
-      }
-      for (const label of labels) {
-        if (!currentPhase.nodes.includes(label)) {
-          currentPhase.nodes.push(label);
-        }
-      }
-    }
-  }
-  return phases.filter((phase) => phase.title || phase.nodes.length > 0);
-}
-
-function svgTextBlock(text, x, y, options = {}) {
-  const lines = wrapSvgText(text, options.maxChars || 16, options.maxLines || 2);
-  const lineHeight = options.lineHeight || 24;
-  const fontSize = options.fontSize || 22;
-  const weight = options.weight ? ` font-weight="${options.weight}"` : '';
-  const fill = options.fill || '#1d3557';
-  const anchor = options.anchor || 'middle';
-  return [
-    `<text x="${x}" y="${y}" text-anchor="${anchor}" font-family="PingFang SC, Microsoft YaHei, Arial, sans-serif" font-size="${fontSize}" fill="${fill}"${weight}>`,
-    ...lines.map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`),
-    '</text>',
-  ].join('');
-}
-
-function wrapSvgText(text, maxCharsPerLine = 18, maxLines = 3) {
-  const chars = Array.from(String(text || '').trim());
-  if (chars.length === 0) {
-    return [''];
-  }
-  const lines = [];
-  for (let index = 0; index < chars.length && lines.length < maxLines; index += maxCharsPerLine) {
-    lines.push(chars.slice(index, index + maxCharsPerLine).join(''));
-  }
-  if (chars.length > maxCharsPerLine * maxLines) {
-    lines[maxLines - 1] = `${Array.from(lines[maxLines - 1]).slice(0, Math.max(1, maxCharsPerLine - 1)).join('')}...`;
-  }
-  return lines;
+  return renderDeterministicMermaidSvg({
+    figure: { caption: title || '图示' },
+    sourceText: mermaidText,
+  });
 }
 
 function slugForFileName(value) {
@@ -585,15 +488,6 @@ function textOr(value, fallback) {
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function escapeXml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
 }
 
 module.exports = {

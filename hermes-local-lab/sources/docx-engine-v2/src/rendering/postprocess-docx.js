@@ -24,6 +24,7 @@ async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
   }
 
   bindPlannedContent({ entries, documentXml: documentXml.toString('utf8'), renderPlan, outputPath });
+  normalizePortableFooters(entries);
 
   await writeZipEntries(entries, outputPath);
   return { status: 'postprocessed', documentPath: outputPath };
@@ -84,6 +85,7 @@ function bindPlannedContent({ entries, documentXml, renderPlan, outputPath }) {
         figureId: image.figureId || `fig-${index + 1}`,
         docPrId: 9000 + index,
         title: image.caption || image.figureId || `图 ${index + 1}`,
+        image,
         metadata: image.metadata || {},
       }),
     });
@@ -158,6 +160,7 @@ function insertRichBlocksBySourceOrder(documentXml, { boundDrawings = [], render
   let cleanDocumentXml = removeRanges(documentXml, extractedTables.map((table) => table.range));
   cleanDocumentXml = removeUnboundTableBlocks(cleanDocumentXml);
   cleanDocumentXml = removeUnboundFigureCaptionBlocks(cleanDocumentXml);
+  cleanDocumentXml = compactCoverPageSpacing(cleanDocumentXml);
 
   const richBlockXmlByBlockId = new Map();
   for (const table of extractedTables) {
@@ -179,7 +182,79 @@ function insertRichBlocksBySourceOrder(documentXml, { boundDrawings = [], render
   for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
     nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
   }
-  return nextXml;
+  return replaceStaticDirectories(nextXml, renderPlan);
+}
+
+function compactCoverPageSpacing(documentXml) {
+  const firstSectionIndex = String(documentXml || '').indexOf('<w:sectPr');
+  if (firstSectionIndex < 0) {
+    return documentXml;
+  }
+
+  const coverXml = documentXml.slice(0, firstSectionIndex);
+  const restXml = documentXml.slice(firstSectionIndex);
+  const compactedCoverXml = coverXml.replace(/<w:spacing\b([^>]*)\/>/g, compactCoverSpacingTag);
+  return `${compactedCoverXml}${restXml}`;
+}
+
+function compactCoverSpacingTag(match, attributes = '') {
+  const beforeMatch = String(attributes || '').match(/\bw:before="(\d+)"/);
+  const before = beforeMatch ? Number(beforeMatch[1]) : 0;
+  const hasBeforeLines = /\bw:beforeLines="/.test(String(attributes || ''));
+  if (!hasBeforeLines && (!before || before <= 1200)) {
+    return match;
+  }
+
+  const restAttributes = String(attributes || '')
+    .replace(/\s*w:before="[^"]*"/g, '')
+    .replace(/\s*w:beforeLines="[^"]*"/g, '')
+    .trim();
+  const compactBefore = Math.min(before || 1200, 1200);
+  const nextAttributes = [`w:before="${compactBefore}"`, restAttributes].filter(Boolean).join(' ');
+  return `<w:spacing ${nextAttributes}/>`;
+}
+
+function normalizePortableFooters(entries) {
+  for (const [entryName, entryBuffer] of entries) {
+    if (!/^word\/footer\d+\.xml$/.test(entryName)) {
+      continue;
+    }
+    const footerXml = entryBuffer.toString('utf8');
+    if (!isNonPortablePageFooter(footerXml)) {
+      continue;
+    }
+    entries.set(entryName, Buffer.from(portablePageFooterXml(), 'utf8'));
+  }
+}
+
+function isNonPortablePageFooter(footerXml) {
+  const source = String(footerXml || '');
+  return /NUMPAGES/.test(source) || /<(?:wps:txbx|v:textbox|wp:anchor)\b/.test(source);
+}
+
+function portablePageFooterXml() {
+  const runProperties = [
+    '<w:rPr>',
+    '<w:rFonts w:hint="eastAsia" w:eastAsia="宋体" w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>',
+    '<w:sz w:val="18"/>',
+    '<w:szCs w:val="18"/>',
+    '</w:rPr>',
+  ].join('');
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    '<w:p>',
+    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    `<w:r>${runProperties}<w:t xml:space="preserve">第 </w:t></w:r>`,
+    `<w:r>${runProperties}<w:fldChar w:fldCharType="begin"/></w:r>`,
+    `<w:r>${runProperties}<w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>`,
+    `<w:r>${runProperties}<w:fldChar w:fldCharType="separate"/></w:r>`,
+    `<w:r>${runProperties}<w:t>1</w:t></w:r>`,
+    `<w:r>${runProperties}<w:fldChar w:fldCharType="end"/></w:r>`,
+    `<w:r>${runProperties}<w:t xml:space="preserve"> 页</w:t></w:r>`,
+    '</w:p>',
+    '</w:ftr>',
+  ].join('');
 }
 
 function extractPlannedTableBlocks(documentXml, renderPlan) {
@@ -187,7 +262,7 @@ function extractPlannedTableBlocks(documentXml, renderPlan) {
   const blockIdByTableId = tableBlockIdByTableIdMap(renderPlan);
   const tableBlocks = [];
   const consumedRanges = [];
-  for (const table of renderPlan.tables || []) {
+  (renderPlan.tables || []).forEach((table, index) => {
     const templateTable = templateTablesById.get(table.tableId) || {};
     const tableBlock = findRenderedTableBlock({
       documentXml,
@@ -195,15 +270,15 @@ function extractPlannedTableBlocks(documentXml, renderPlan) {
       consumedRanges,
     });
     if (!tableBlock) {
-      continue;
+      return;
     }
     consumedRanges.push({ start: tableBlock.start, end: tableBlock.end });
     tableBlocks.push({
       blockId: blockIdByTableId.get(table.tableId) || '',
       range: { start: tableBlock.start, end: tableBlock.end },
-      xml: tableBlockXml(table, tableBlock.xml, blockIdByTableId.get(table.tableId) || ''),
+      xml: tableBlockXml(table, templateTable, tableBlock.xml, blockIdByTableId.get(table.tableId) || '', index + 1),
     });
-  }
+  });
   return tableBlocks;
 }
 
@@ -333,20 +408,14 @@ function figureCaptionParagraph(image = {}, index = 1) {
     '<w:rPr><w:vanish/></w:rPr>',
     `<w:t>${escapeXmlText(figureCaptionMetadata(image))}</w:t>`,
     '</w:r>',
-    '<w:r><w:t>图 </w:t></w:r>',
-    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
-    '<w:r><w:instrText xml:space="preserve"> SEQ 图 \\* ARABIC </w:instrText></w:r>',
-    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
-    `<w:r><w:t>${escapeXmlText(String(index))}</w:t></w:r>`,
-    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
-    `<w:r><w:t xml:space="preserve"> ${escapeXmlText(caption)}</w:t></w:r>`,
+    `<w:r><w:t>${escapeXmlText(`图 ${index} ${caption}`)}</w:t></w:r>`,
     '</w:p>',
   ].join('');
 }
 
 function figureCaptionText(value, index) {
   const raw = String(value || '').trim() || `图 ${index}`;
-  const withoutPrefix = raw.replace(/^图\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+  const withoutPrefix = raw.replace(/^(?:图|图片|图示)\s*\d+\s*[:：、.．-]?\s*/, '').trim();
   return withoutPrefix || raw;
 }
 
@@ -388,8 +457,191 @@ function hasFigureSequenceField(paragraphXml) {
   return /<w:instrText\b[^>]*>[^<]*SEQ\s+图(?:\s|<|$)/.test(String(paragraphXml || ''));
 }
 
-function tableBlockXml(table, blockXml, blockId = '') {
-  return injectTableCaptionMetadata(blockXml, table, blockId);
+function tableBlockXml(table, templateTable, blockXml, blockId = '', index = 1) {
+  const captionXml = tableCaptionXml(table, blockId, index);
+  const tableXml = dynamicTableXml(templateTable);
+  if (!tableXml) {
+    return `${captionXml}${String(blockXml || '')}`;
+  }
+  return `${captionXml}${tableXml}`;
+}
+
+function tableCaptionXml(table, blockId = '', index = 1) {
+  const caption = tableCaptionText(table.title || table.caption || `表格 ${index}`, index);
+  return [
+    '<w:p>',
+    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    '<w:r>',
+    '<w:rPr><w:vanish/></w:rPr>',
+    `<w:t>${escapeXmlText(tableCaptionMetadata(table, blockId))}</w:t>`,
+    '</w:r>',
+    `<w:r><w:t>${escapeXmlText(`表 ${index} ${caption}`)}</w:t></w:r>`,
+    '</w:p>',
+  ].join('');
+}
+
+function tableCaptionText(value, index) {
+  const raw = String(value || '').trim() || `表格 ${index}`;
+  const withoutPrefix = raw.replace(/^(?:表|表格)\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+  return withoutPrefix || raw;
+}
+
+function dynamicTableXml(templateTable = {}) {
+  const columns = templateTableColumns(templateTable);
+  const rows = templateTableRows(templateTable, columns);
+  if (columns.length === 0) {
+    return '';
+  }
+
+  const tableWidth = 8520;
+  const columnWidth = Math.max(720, Math.floor(tableWidth / columns.length));
+  const widths = columns.map(() => columnWidth);
+
+  return [
+    '<w:tbl>',
+    dynamicTableProperties(),
+    dynamicTableGrid(widths),
+    dynamicTableRow(columns.map((column) => column.text), widths, { header: true }),
+    ...rows.map((row) => dynamicTableRow(row, widths, { header: false })),
+    '</w:tbl>',
+  ].join('');
+}
+
+function dynamicTableProperties() {
+  return [
+    '<w:tblPr>',
+    '<w:tblStyle w:val="51"/>',
+    '<w:tblW w:w="0" w:type="auto"/>',
+    '<w:tblBorders>',
+    '<w:top w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
+    '<w:left w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
+    '<w:bottom w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
+    '<w:right w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
+    '<w:insideH w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
+    '<w:insideV w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
+    '</w:tblBorders>',
+    '<w:tblLayout w:type="autofit"/>',
+    '<w:tblCellMar>',
+    '<w:top w:w="80" w:type="dxa"/>',
+    '<w:left w:w="100" w:type="dxa"/>',
+    '<w:bottom w:w="80" w:type="dxa"/>',
+    '<w:right w:w="100" w:type="dxa"/>',
+    '</w:tblCellMar>',
+    '</w:tblPr>',
+  ].join('');
+}
+
+function dynamicTableGrid(widths) {
+  return [
+    '<w:tblGrid>',
+    ...widths.map((width) => `<w:gridCol w:w="${width}"/>`),
+    '</w:tblGrid>',
+  ].join('');
+}
+
+function dynamicTableRow(values, widths, { header = false } = {}) {
+  return [
+    '<w:tr>',
+    dynamicTableRowProperties({ header }),
+    ...(values || []).map((value, index) =>
+      dynamicTableCell(value, widths[index] || widths[0] || 1440, { header, columnCount: widths.length })
+    ),
+    '</w:tr>',
+  ].join('');
+}
+
+function dynamicTableRowProperties({ header = false } = {}) {
+  return [
+    '<w:trPr>',
+    ...(header ? ['<w:tblHeader/>'] : []),
+    '<w:cantSplit/>',
+    '</w:trPr>',
+  ].join('');
+}
+
+function dynamicTableCell(value, width, { header = false, columnCount = 1 } = {}) {
+  const fontSize = tableFontSize(columnCount);
+  return [
+    '<w:tc>',
+    '<w:tcPr>',
+    `<w:tcW w:w="${width}" w:type="dxa"/>`,
+    '<w:vAlign w:val="center"/>',
+    ...(header ? ['<w:shd w:val="clear" w:color="auto" w:fill="D9EAF7"/>'] : []),
+    '<w:tcMar>',
+    '<w:top w:w="80" w:type="dxa"/>',
+    '<w:left w:w="100" w:type="dxa"/>',
+    '<w:bottom w:w="80" w:type="dxa"/>',
+    '<w:right w:w="100" w:type="dxa"/>',
+    '</w:tcMar>',
+    '</w:tcPr>',
+    '<w:p>',
+    '<w:pPr>',
+    '<w:jc w:val="center"/>',
+    '</w:pPr>',
+    '<w:r>',
+    '<w:rPr>',
+    `<w:rFonts w:hint="eastAsia" w:eastAsia="${header ? '黑体' : '宋体'}" w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>`,
+    `<w:sz w:val="${fontSize}"/>`,
+    `<w:szCs w:val="${fontSize}"/>`,
+    ...(header ? ['<w:b/>', '<w:bCs/>'] : []),
+    '</w:rPr>',
+    tableCellTextXml(value),
+    '</w:r>',
+    '</w:p>',
+    '</w:tc>',
+  ].join('');
+}
+
+function tableFontSize(columnCount) {
+  if (columnCount >= 9) {
+    return 16;
+  }
+  if (columnCount >= 6) {
+    return 18;
+  }
+  return 21;
+}
+
+function tableCellTextXml(value) {
+  const parts = String(value ?? '').split(/\r?\n/);
+  return parts
+    .map((part, index) => `${index === 0 ? '' : '<w:br/>'}<w:t xml:space="preserve">${escapeXmlText(part)}</w:t>`)
+    .join('');
+}
+
+function templateTableColumns(templateTable = {}) {
+  if (Array.isArray(templateTable.columns) && templateTable.columns.length) {
+    return templateTable.columns.map((column, index) => ({
+      key: String(column?.key || `c${index + 1}`),
+      text: String(column?.text ?? column?.label ?? `列${index + 1}`),
+    }));
+  }
+
+  const headers = templateTable.headers || {};
+  const keys = Object.keys(headers)
+    .filter((key) => /^c\d+$/.test(key))
+    .sort((left, right) => Number(left.slice(1)) - Number(right.slice(1)));
+  return keys.map((key, index) => ({
+    key,
+    text: String(headers[key] ?? `列${index + 1}`),
+  }));
+}
+
+function templateTableRows(templateTable = {}, columns = []) {
+  return (templateTable.rows || []).map((row) => {
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      return columns.map((column, index) => {
+        const cell = Array.isArray(row.cells)
+          ? row.cells.find((candidate) => candidate?.key === column.key) || row.cells[index]
+          : null;
+        return String(cell?.text ?? row[column.key] ?? '');
+      });
+    }
+    if (Array.isArray(row)) {
+      return columns.map((_column, index) => String(row[index] ?? ''));
+    }
+    return columns.map((column) => (column.key === 'c1' ? String(row ?? '') : ''));
+  });
 }
 
 function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
@@ -399,8 +651,20 @@ function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
   }
 
   for (const paragraph of paragraphRanges(documentXml)) {
-    if (!paragraph.text.includes(normalizedTitle) || rangeOverlaps(paragraph, consumedRanges)) {
+    if (
+      !hasTableSequenceField(paragraph.xml) ||
+      !paragraph.text.includes(normalizedTitle) ||
+      rangeOverlaps(paragraph, consumedRanges)
+    ) {
       continue;
+    }
+    const containingTableRange = findContainingTableRange(documentXml, paragraph);
+    if (containingTableRange && !rangeOverlaps(containingTableRange, consumedRanges)) {
+      return {
+        start: containingTableRange.start,
+        end: containingTableRange.end,
+        xml: String(documentXml || '').slice(containingTableRange.start, containingTableRange.end),
+      };
     }
     const tableRange = findFirstTableRangeAfter(documentXml, paragraph.end);
     if (!tableRange) {
@@ -417,19 +681,6 @@ function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
 
 function rangeOverlaps(range, consumedRanges) {
   return consumedRanges.some((consumed) => range.start < consumed.end && range.end > consumed.start);
-}
-
-function injectTableCaptionMetadata(blockXml, table, blockId = '') {
-  return String(blockXml || '').replace(/(<w:p\b[^>]*>)/, `$1${tableCaptionMarkerRun(table, blockId)}`);
-}
-
-function tableCaptionMarkerRun(table, blockId = '') {
-  return [
-    '<w:r>',
-    '<w:rPr><w:vanish/></w:rPr>',
-    `<w:t>${escapeXmlText(tableCaptionMetadata(table, blockId))}</w:t>`,
-    '</w:r>',
-  ].join('');
 }
 
 function tableCaptionMetadata(table, blockId = '') {
@@ -465,6 +716,102 @@ function removeUnboundTableBlocks(documentXml) {
   }
 
   return removeRanges(documentXml, removals);
+}
+
+function replaceStaticDirectories(documentXml, renderPlan) {
+  const replacements = [];
+  for (const paragraph of paragraphRanges(documentXml)) {
+    if (isMainTocParagraph(paragraph.xml)) {
+      replacements.push({ start: paragraph.start, end: paragraph.end, xml: staticMainDirectoryXml(renderPlan) });
+      continue;
+    }
+    if (isTableTocParagraph(paragraph.xml)) {
+      replacements.push({ start: paragraph.start, end: paragraph.end, xml: staticTableDirectoryXml(renderPlan) });
+      continue;
+    }
+    if (isFigureTocParagraph(paragraph.xml)) {
+      replacements.push({ start: paragraph.start, end: paragraph.end, xml: staticFigureDirectoryXml(renderPlan) });
+    }
+  }
+
+  let nextXml = documentXml;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, replacement.start)}${replacement.xml}${nextXml.slice(replacement.end)}`;
+  }
+  return nextXml;
+}
+
+function isMainTocParagraph(paragraphXml) {
+  return /TOC\s+\\o\s+"1-7"/.test(String(paragraphXml || '')) || /更新主目录后显示章节条目/.test(String(paragraphXml || ''));
+}
+
+function isTableTocParagraph(paragraphXml) {
+  return /TOC\s+\\h\s+\\z\s+\\c\s+&quot;表&quot;/.test(String(paragraphXml || '')) || /TOC\s+\\h\s+\\z\s+\\c\s+"表"/.test(String(paragraphXml || '')) || /更新表目录后显示表题条目/.test(String(paragraphXml || ''));
+}
+
+function isFigureTocParagraph(paragraphXml) {
+  return /TOC\s+\\h\s+\\z\s+\\c\s+&quot;图&quot;/.test(String(paragraphXml || '')) || /TOC\s+\\h\s+\\z\s+\\c\s+"图"/.test(String(paragraphXml || '')) || /更新图目录后显示图题条目/.test(String(paragraphXml || ''));
+}
+
+function staticMainDirectoryXml(renderPlan) {
+  const sections = renderPlan?.templateData?.sections || renderPlan?.sections || [];
+  const entries = sections
+    .filter((section) => String(section?.title || '').trim())
+    .map((section, index) => ({
+      left: `${index + 1}. ${cleanDirectoryTitle(section.title)}`,
+      right: '',
+    }));
+  return staticDirectoryEntriesXml(entries, '暂无章节条目');
+}
+
+function staticTableDirectoryXml(renderPlan) {
+  const entries = (renderPlan?.tables || []).map((table, index) => ({
+    left: `表 ${index + 1} ${tableCaptionText(table.title || table.caption || `表格 ${index + 1}`, index + 1)}`,
+    right: '',
+  }));
+  return staticDirectoryEntriesXml(entries, '暂无表目录条目');
+}
+
+function staticFigureDirectoryXml(renderPlan) {
+  const entries = (renderPlan?.templateData?.images || []).map((image, index) => ({
+    left: `图 ${index + 1} ${figureCaptionText(image.caption || image.figureId || `图 ${index + 1}`, index + 1)}`,
+    right: '',
+  }));
+  return staticDirectoryEntriesXml(entries, '暂无图目录条目');
+}
+
+function cleanDirectoryTitle(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^第[一二三四五六七八九十百千万0-9]+[章节篇部分]\s*[、:：.]?\s*/, '')
+    .replace(/^[一二三四五六七八九十百千万]+[、.．]\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[、.．]?\s+/, '')
+    .trim();
+}
+
+function staticDirectoryEntriesXml(entries, emptyText) {
+  const normalizedEntries = (entries || []).filter((entry) => String(entry?.left || '').trim());
+  if (normalizedEntries.length === 0) {
+    return staticDirectoryEntryParagraph(emptyText, '');
+  }
+  return normalizedEntries
+    .map((entry) => staticDirectoryEntryParagraph(entry.left, entry.right))
+    .join('');
+}
+
+function staticDirectoryEntryParagraph(left, right = '') {
+  const rightText = String(right || '').trim();
+  return [
+    '<w:p>',
+    '<w:pPr>',
+    '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>',
+    '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs>',
+    '</w:pPr>',
+    '<w:r><w:rPr><w:vanish/></w:rPr><w:t>docx-engine-v2 directoryEntry</w:t></w:r>',
+    `<w:r><w:t>${escapeXmlText(String(left || '').trim())}</w:t></w:r>`,
+    ...(rightText ? ['<w:r><w:tab/></w:r>', `<w:r><w:t>${escapeXmlText(rightText)}</w:t></w:r>`] : []),
+    '</w:p>',
+  ].join('');
 }
 
 function hasTableSequenceField(paragraphXml) {
@@ -607,7 +954,7 @@ function hasDocPrFigureMetadata(documentXml, figureIds) {
   return figureIds.every((figureId) => presentFigureIds.has(figureId));
 }
 
-function updateDrawingTemplate({ drawingXml, relationshipId, figureId, docPrId, title, metadata = {} }) {
+function updateDrawingTemplate({ drawingXml, relationshipId, figureId, docPrId, title, image = {}, metadata = {} }) {
   const docPrMetadata = figureDocPrMetadata(figureId, metadata);
   let next = String(drawingXml || '').replace(/\br:embed="[^"]+"/, `r:embed="${relationshipId}"`);
   next = next.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
@@ -617,7 +964,50 @@ function updateDrawingTemplate({ drawingXml, relationshipId, figureId, docPrId, 
     nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
     return `<wp:docPr${nextAttributes}/>`;
   });
+  const extent = drawingExtent(image);
+  next = next.replace(/<wp:extent\b[^>]*\/>/, `<wp:extent cx="${extent.cx}" cy="${extent.cy}"/>`);
+  next = next.replace(/<a:ext\b[^>]*\/>/, `<a:ext cx="${extent.cx}" cy="${extent.cy}"/>`);
+  return normalizeGeneratedDrawingToInline(next);
+}
+
+function normalizeGeneratedDrawingToInline(drawingXml) {
+  let next = String(drawingXml || '');
+  if (!/<wp:anchor\b/.test(next)) {
+    return next;
+  }
+  next = next.replace(/<wp:anchor\b[^>]*>/, '<wp:inline distT="0" distB="0" distL="0" distR="0">');
+  next = next.replace(/<\/wp:anchor>/, '</wp:inline>');
+  next = next.replace(/<wp:simplePos\b[^>]*\/>/g, '');
+  next = next.replace(/<wp:positionH\b[\s\S]*?<\/wp:positionH>/g, '');
+  next = next.replace(/<wp:positionV\b[\s\S]*?<\/wp:positionV>/g, '');
+  next = next.replace(/<wp:wrapNone\/>/g, '');
   return next;
+}
+
+function drawingExtent(image = {}) {
+  const dimensions = image.dimensions || {};
+  const widthPx = positiveNumber(dimensions.width) || 960;
+  const heightPx = positiveNumber(dimensions.height) || 540;
+  const ratio = Math.max(0.1, Math.min(10, widthPx / heightPx));
+  const maxWidth = 5669280;
+  const maxHeight = 6858000;
+  const minWidth = image.layoutIntent === 'flowchart' ? 5000000 : 4200000;
+  let cx = maxWidth;
+  let cy = Math.round(cx / ratio);
+  if (cy > maxHeight) {
+    cy = maxHeight;
+    cx = Math.round(cy * ratio);
+  }
+  if (cx < minWidth && ratio >= 0.35) {
+    cx = minWidth;
+    cy = Math.min(maxHeight, Math.round(cx / ratio));
+  }
+  return { cx, cy };
+}
+
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
 function figureDocPrMetadata(figureId, metadata = {}) {

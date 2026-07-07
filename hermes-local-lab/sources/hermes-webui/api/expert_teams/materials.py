@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from .rich_draft import is_rich_draft_required, validate_rich_draft_text
+
 
 FORBIDDEN_TERMS = [
     "公众号长文",
@@ -171,6 +173,8 @@ def validate_stage_output(text: str, material_type: str, task_id: str, team_id: 
                 "message": "阶段计划不完整，请重新生成。",
             }
         return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+    if is_rich_draft_required(material_type, task, team_id):
+        return validate_rich_draft_text(normalized)
     if team == "deep-research-team":
         required = ["阶段", "待人工"] if task in {"research", "evidence", "outline", "draft", "review"} else []
         missing = [section for section in required if section not in normalized]

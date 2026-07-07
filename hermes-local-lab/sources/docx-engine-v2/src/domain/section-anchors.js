@@ -52,7 +52,7 @@ function findNextParagraphRun(paragraphs, searchStart, matches) {
 }
 
 function isInternalMarkerText(text) {
-  return /\b(docx-engine-v2|figureCaption|tableId|figureId)\b/.test(String(text || ''));
+  return /\b(docx-engine-v2|figureCaption|tableId|figureId|directoryEntry)\b/.test(String(text || ''));
 }
 
 module.exports = { resolveSectionAnchors };

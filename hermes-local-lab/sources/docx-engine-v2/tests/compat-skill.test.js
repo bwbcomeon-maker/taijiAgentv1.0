@@ -330,7 +330,8 @@ test('copyable render-figure-assets wrapper keeps a delivery package internally 
   assert.equal(rerenderResult.status, 0, rerenderResult.stderr || rerenderResult.stdout);
   assert.match(rerenderResult.stdout, /render-figure-assets-ok/);
 
-  const displayPath = path.join(deliveryDir, 'assets/fig-001/figure.svg');
+  const displayPath = path.join(deliveryDir, 'assets/fig-001/figure.png');
+  const vectorPath = path.join(deliveryDir, 'assets/fig-001/figure.svg');
   const displayHash = sha256File(displayPath);
   const sourceHash = sha256File(sourceMmdPath);
   const assetPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'asset-package.json'), 'utf8'));
@@ -342,6 +343,7 @@ test('copyable render-figure-assets wrapper keeps a delivery package internally 
   assert.equal(figure.sha256, displayHash);
   assert.equal(figure.editable.sourceSha256, sourceHash);
   assert.equal(image.sha256, displayHash);
+  assert.equal(fs.existsSync(vectorPath), true);
   assert.equal(deliveryPackage.fileSha256.assetPackage, sha256File(path.join(deliveryDir, 'asset-package.json')));
   assert.equal(deliveryPackage.fileSha256.renderPlan, sha256File(path.join(deliveryDir, 'render-plan.json')));
   assert.equal(deliveryPackage.fileSha256.document, sha256File(path.join(deliveryDir, 'document.docx')));
@@ -354,7 +356,8 @@ test('copyable render-figure-assets wrapper keeps a delivery package internally 
   assert.equal(qualityReport.checks.find((check) => check.id === 'wps_visual')?.status, 'not_verified');
 
   const entries = await readZipEntries(path.join(deliveryDir, 'document.docx'));
-  assert.match(entries.get('word/media/fig-001.svg').toString('utf8'), /PACKAGE_RERENDER_MARKER/);
+  assert.equal(entries.has('word/media/fig-001.png'), true);
+  assert.match(fs.readFileSync(vectorPath, 'utf8'), /PACKAGE_RERENDER_MARKER/);
 });
 
 test('copyable replay-delivery wrapper can rebind replay evidence after package rerender', (t) => {

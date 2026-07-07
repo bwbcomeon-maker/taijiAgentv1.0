@@ -123,7 +123,7 @@ def test_chat_start_requires_template_selection_for_bare_template_command(monkey
     assert started == []
 
 
-def test_chat_start_with_explicit_template_returns_workbench_turn(monkeypatch, tmp_path):
+def test_chat_start_with_explicit_template_requires_source_when_context_is_empty(monkeypatch, tmp_path):
     started = []
     routes = _patch_chat_start_happy_path(monkeypatch, tmp_path, started)
 
@@ -134,10 +134,10 @@ def test_chat_start_with_explicit_template_returns_workbench_turn(monkeypatch, t
     )
 
     assert result["status"] == 200
-    assert result["payload"]["docx_template_selected"] is True
+    assert result["payload"]["docx_source_required"] is True
     assert result["payload"]["template_id"] == "general-proposal"
     assistant = routes._docx_non_streaming_assistant_message(result["payload"], 0)
-    assert assistant["docx_engine_workbench"]["template_id"] == "general-proposal"
+    assert assistant["docx_source_request"]["template_id"] == "general-proposal"
     assert started == []
 
 

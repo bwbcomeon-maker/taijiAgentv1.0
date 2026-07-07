@@ -51,7 +51,7 @@ CONTENT_MATERIAL_TEMPLATES = [
 CONTENT_PHASES = [
     {"id": "plan", "title": "专家团计划", "phase": "流程安排", "worker_id": "director", "worker_name": "写作总导演"},
     {"id": "materials", "title": "素材整理", "phase": "素材整理", "worker_id": "material", "worker_name": "资料整理专家"},
-    {"id": "draft", "title": "起草办公材料初稿", "phase": "初稿撰写", "worker_id": "writer", "worker_name": "文案创作专家"},
+    {"id": "draft", "title": "起草富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "文案创作专家"},
     {"id": "polish", "title": "审稿打磨", "phase": "审稿打磨", "worker_id": "reviewer", "worker_name": "审稿专家"},
     {"id": "delivery", "title": "交付确认", "phase": "交付确认", "worker_id": "delivery", "worker_name": "交付复核专家"},
 ]
@@ -61,7 +61,7 @@ DEEP_RESEARCH_PHASES = [
     {"id": "research", "title": "补充案例素材", "phase": "资料调研", "worker_id": "researcher", "worker_name": "资料研究员"},
     {"id": "evidence", "title": "事实核验", "phase": "事实核验", "worker_id": "evidence", "worker_name": "事实核验专家"},
     {"id": "outline", "title": "结构提纲", "phase": "结构提纲", "worker_id": "architect", "worker_name": "结构架构师"},
-    {"id": "draft", "title": "研究材料初稿", "phase": "材料初稿", "worker_id": "writer", "worker_name": "材料起草专家"},
+    {"id": "draft", "title": "研究富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "材料起草专家"},
     {"id": "review", "title": "复核交付", "phase": "复核交付", "worker_id": "reviewer", "worker_name": "复核专家"},
 ]
 

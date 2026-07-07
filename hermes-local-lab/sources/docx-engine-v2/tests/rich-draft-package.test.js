@@ -93,16 +93,19 @@ test('package-rich-draft creates editable figure assets and a manifest from mark
   assert.ok(manifest.blocks.some((block) => block.type === 'figure' && block.figureId === 'fig-001'));
 
   const sourceMmd = path.join(outDir, manifest.figures[0].editable.sourcePath);
-  const displaySvg = path.join(outDir, manifest.figures[0].displayPath);
+  const displayPng = path.join(outDir, manifest.figures[0].displayPath);
+  const vectorSvg = path.join(outDir, manifest.figures[0].metadata.vectorDisplayPath);
   assert.equal(fs.existsSync(sourceMmd), true);
-  assert.equal(fs.existsSync(displaySvg), true);
+  assert.equal(fs.existsSync(displayPng), true);
+  assert.equal(isPngFile(displayPng), true);
+  assert.equal(fs.existsSync(vectorSvg), true);
   assert.match(fs.readFileSync(sourceMmd, 'utf8'), /签订采购合同/);
-  assert.match(fs.readFileSync(displaySvg, 'utf8'), /width="1600"/);
-  assert.match(fs.readFileSync(displaySvg, 'utf8'), /集团中心仓验收/);
+  assert.match(fs.readFileSync(vectorSvg, 'utf8'), /width="1600"/);
+  assert.match(fs.readFileSync(vectorSvg, 'utf8'), /集团中心仓验收/);
   assert.match(fs.readFileSync(path.join(outDir, '图片清单.md'), 'utf8'), /fig-001/);
   assert.match(
     fs.readFileSync(path.join(outDir, 'source.md'), 'utf8'),
-    /!\[实施流程图\]\(assets\/fig-001-实施流程图\/figure\.svg\)/
+    /!\[实施流程图\]\(assets\/fig-001-实施流程图\/figure\.png\)/
   );
 });
 
@@ -153,8 +156,11 @@ test('package-rich-draft preserves a qualified display image while saving Mermai
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const manifest = readJson(path.join(outDir, 'draft.manifest.json'));
-  const displaySvg = fs.readFileSync(path.join(outDir, manifest.figures[0].displayPath), 'utf8');
-  assert.match(displaySvg, /ORIGINAL_QUALIFIED_DISPLAY_IMAGE/);
+  const figure = manifest.figures[0];
+  assert.match(figure.displayPath, /figure\.png$/);
+  assert.equal(isPngFile(path.join(outDir, figure.displayPath)), true);
+  const vectorSvg = fs.readFileSync(path.join(outDir, figure.metadata.vectorDisplayPath), 'utf8');
+  assert.match(vectorSvg, /ORIGINAL_QUALIFIED_DISPLAY_IMAGE/);
   assert.equal(fs.existsSync(path.join(outDir, manifest.figures[0].editable.sourcePath)), true);
 });
 
@@ -211,15 +217,16 @@ test('render-figure-asset rerenders a rich draft figure from editable source and
 
   const updatedManifest = readJson(manifestPath);
   const updatedFigure = updatedManifest.figures[0];
-  assert.equal(updatedFigure.displayPath, `${figure.assetDir}/figure.svg`);
+  assert.equal(updatedFigure.displayPath, `${figure.assetDir}/figure.png`);
   assert.equal(updatedFigure.sourcePath, updatedFigure.displayPath);
+  assert.equal(isPngFile(path.join(outDir, updatedFigure.displayPath)), true);
   assert.match(
-    fs.readFileSync(path.join(outDir, updatedFigure.displayPath), 'utf8'),
+    fs.readFileSync(path.join(outDir, updatedFigure.metadata.vectorDisplayPath), 'utf8'),
     /人工调整后节点/
   );
   const packagedMarkdown = fs.readFileSync(path.join(outDir, updatedManifest.files.markdown), 'utf8');
   assert.match(packagedMarkdown, new RegExp(`!\\[实施流程图\\]\\(${escapeRegExp(updatedFigure.displayPath)}\\)`));
-  assert.doesNotMatch(packagedMarkdown, /figure\.png/);
+  assert.doesNotMatch(packagedMarkdown, /figure\.svg/);
 });
 
 test('package-rich-draft refuses to write into a non-empty output directory', (t) => {
@@ -255,4 +262,9 @@ test('package-rich-draft refuses to write into a non-empty output directory', (t
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isPngFile(filePath) {
+  const signature = fs.readFileSync(filePath).subarray(0, 8);
+  return signature.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 }

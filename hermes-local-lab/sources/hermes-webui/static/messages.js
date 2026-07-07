@@ -310,14 +310,28 @@ function isDocxTemplateInvocationText(text){
   return verbs.some(item=>compact.includes(item))&&objects.some(item=>compact.includes(item));
 }
 
+function docxTemplateSourcePathFromText(text){
+  const raw=String(text||'').trim();
+  if(!raw)return '';
+  const searchable=raw.replace(/^\/docx-template-skill\b/i,' ').trim();
+  const quoted=searchable.match(/["“'‘]((?:~|\/)[^"”'’\n\r]+?\.(?:md|markdown|docx|txt))["”'’]?/i);
+  if(quoted&&quoted[1])return quoted[1].trim();
+  const absolute=searchable.match(/(?:^|[\s:："“'‘])((?:~|\/)[^\s"”'’\n\r，,；;]+?\.(?:md|markdown|docx|txt))/i);
+  if(absolute&&absolute[1])return absolute[1].trim();
+  const relative=searchable.match(/(?:^|[\s:："“'‘])([^\s\n\r:："“'‘，,；;]+?\.(?:md|markdown|docx|txt))/i);
+  return relative&&relative[1]?relative[1].trim():'';
+}
+
 function normalizeDocxTemplateInvocationText(text){
   const value=String(text||'').trim();
   if(!isDocxTemplateInvocationText(value)) return text;
+  const sourcePath=docxTemplateSourcePathFromText(value);
+  const sourceVerb=sourcePath?`请将源文件 "${sourcePath}" 套用`:'请把当前成果套用';
   if(/通用方案模板|general-proposal/i.test(value)){
-    return '/docx-template-skill 请把当前成果套用通用方案模板（templateId: general-proposal）。';
+    return `/docx-template-skill ${sourceVerb}通用方案模板（templateId: general-proposal）。`;
   }
   if(/会议纪要模板|meeting-minutes/i.test(value)){
-    return '/docx-template-skill 请把当前成果套用会议纪要模板（templateId: meeting-minutes）。';
+    return `/docx-template-skill ${sourceVerb}会议纪要模板（templateId: meeting-minutes）。`;
   }
   return value;
 }
@@ -349,6 +363,7 @@ function renderDocxTemplateSelectionMessage(activeSid,startData){
       code:startData&&startData.code||'template_selection_required',
       templates:Array.isArray(startData&&startData.templates)?startData.templates:[],
       examples:Array.isArray(startData&&startData.examples)?startData.examples:[],
+      source_path:String(startData&&startData.source_path||startData&&startData.sourcePath||''),
     },
     _ts:Date.now()/1000,
   });
@@ -436,9 +451,12 @@ function chooseDocxTemplate(button){
   const item=button&&button.closest?button.closest('[data-template-id]'):null;
   const templateId=item?String(item.dataset.templateId||'').trim():'';
   const templateName=item?String(item.dataset.templateName||'').trim():'';
+  const sourcePath=root?String(root.dataset.sourcePath||'').trim():'';
   const composer=$('msg');
   if(composer&&templateId){
-    composer.value=`/docx-template-skill 请把当前成果套用${templateName||templateId}（templateId: ${templateId}）。`;
+    composer.value=sourcePath
+      ? `/docx-template-skill 请将源文件 "${sourcePath}" 套用${templateName||templateId}（templateId: ${templateId}）。`
+      : `/docx-template-skill 请把当前成果套用${templateName||templateId}（templateId: ${templateId}）。`;
     autoResize();
     composer.focus();
   }

@@ -192,6 +192,14 @@ such as `继续`, `重试配图`, `跳过配图`, `导出当前产物`.
 - For the fixed `内容创作专家团` long-form article flow, the draft stage must
   produce a Markdown artifact containing title options, full body, illustration
   suggestions, and publishing suggestions.
+- For plan-like office materials and research materials, the draft output is a
+  `富内容初稿`, not a plain-text chat answer. 初稿生成阶段必须同步产出正文、
+  表格和图示说明，并把 Markdown 初稿作为后续模板套用的规范输入。
+- 每份 `富内容初稿` 至少 2 个 Markdown 表格，且至少 1 个架构图、流程图、用例图或图示引用。
+  图示可以先用 Markdown 图片引用、Mermaid/SVG 说明或明确的图示设计块表达，
+  但不能只写“后续配图”。
+- 模板套用阶段不得承担补图补表。模板阶段只负责把已有富内容初稿嵌入标准模板、
+  调整版式和做少量措辞微调；如果初稿缺表或缺图，必须回到初稿生成阶段重写。
 - For illustration work, prefer `baoyu-article-illustrator` plus the available
   `image_generate` capability only when the skill/tool and image provider are
   actually available. If they are missing or fail, write

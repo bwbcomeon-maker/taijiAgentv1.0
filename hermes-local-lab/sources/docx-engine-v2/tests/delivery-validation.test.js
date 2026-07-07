@@ -242,6 +242,9 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   assert.ok(report.checks.some((check) => check.id === 'schema' && check.status === 'passed'));
   assert.ok(report.checks.some((check) => check.id === 'docx_zip' && check.status === 'passed'));
   assert.ok(report.checks.some((check) => check.id === 'docx_xml' && check.status === 'passed'));
+  assert.ok(report.checks.some((check) => check.id === 'footer_portability' && check.status === 'passed'));
+  assert.ok(report.checks.some((check) => check.id === 'cover_layout' && check.status === 'passed'));
+  assert.ok(report.checks.some((check) => check.id === 'asset_semantics' && check.status === 'passed'));
   assert.ok(
     report.checks.some((check) => check.id === 'figure_id_metadata' && check.status === 'passed')
   );
@@ -251,6 +254,11 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
   assert.ok(
     report.checks.some(
       (check) => check.id === 'image_coverage' && check.status === 'passed'
+    )
+  );
+  assert.ok(
+    report.checks.some(
+      (check) => check.id === 'figure_dimensions' && check.status === 'passed'
     )
   );
   assert.ok(
@@ -296,8 +304,12 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'source_replay',
       'docx_zip',
       'docx_xml',
+      'footer_portability',
+      'cover_layout',
       'template_markers',
+      'asset_semantics',
       'image_coverage',
+      'figure_dimensions',
       'table_coverage',
       'table_content',
       'table_placement',
@@ -311,6 +323,74 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'wps_visual',
     ]
   );
+});
+
+test('postprocessDocx writes compact static directory entries for portable multi-entry directories', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t, [
+    '# Static directory layout proposal',
+    '',
+    '## Overview',
+    '',
+    'The first section has a table and a figure.',
+    '',
+    '| Key | Value |',
+    '| --- | --- |',
+    '| A | B |',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A[Start] --> B[End]',
+    '```',
+    '',
+    '## Delivery',
+    '',
+    '| Phase | Owner | Status |',
+    '| --- | --- | --- |',
+    '| Build | Team | Ready |',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  C[Plan] --> D[Review]',
+    '```',
+    '',
+    '## Acceptance',
+    '',
+    '| Risk | Mitigation |',
+    '| --- | --- |',
+    '| Drift | Gate |',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  E[Test] --> F[Pass]',
+    '```',
+    '',
+  ]);
+
+  const documentXml = await readDocumentXml(path.join(deliveryDir, 'document.docx'));
+  const directoryEntries = [...documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
+    .map((match) => match[0])
+    .filter((paragraph) => paragraph.includes('docx-engine-v2 directoryEntry'));
+
+  assert.ok(directoryEntries.length >= 9, `expected multiple directory entries, got ${directoryEntries.length}`);
+  for (const entry of directoryEntries) {
+    assert.match(entry, /<w:spacing\b[^>]*w:before="0"[^>]*w:after="0"[^>]*w:line="240"/);
+    assert.doesNotMatch(entry, /w:pageBreakBefore="1"|<w:pageBreakBefore\/>/);
+  }
+});
+
+test('validateDeliveryPackage fails when figure assets contain degraded semantic fallback markers', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  const assetPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'asset-package.json'), 'utf8'));
+  const vectorPath = assetPackage.figures[0]?.metadata?.vectorDisplayPath;
+  assert.ok(vectorPath, 'expected vectorDisplayPath in fixture asset package');
+  fs.appendFileSync(path.join(deliveryDir, vectorPath), '\n<!-- 通用图示渲染 -->\n', 'utf8');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const semanticsCheck = report.checks.find((check) => check.id === 'asset_semantics');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(semanticsCheck?.status, 'failed');
+  assert.match(semanticsCheck?.message || '', /Figure semantic rendering degraded/);
 });
 
 test('validateDeliveryPackage fails when DOCX document XML is malformed', async (t) => {
@@ -1505,12 +1585,11 @@ test('validateDeliveryPackage fails when DOCX embedded media no longer matches t
   const renderPlan = JSON.parse(fs.readFileSync(renderPlanPath, 'utf8'));
   const assetPackage = JSON.parse(fs.readFileSync(assetPackagePath, 'utf8'));
   const image = renderPlan.templateData.images.find((item) => item.figureId === 'fig-001');
-  assert.equal(image?.path, 'assets/fig-001/figure.svg');
+  assert.equal(image?.path, 'assets/fig-001/figure.png');
 
   fs.writeFileSync(
     path.join(deliveryDir, image.path),
-    '<svg xmlns="http://www.w3.org/2000/svg"><text>RERENDERED_BUT_NOT_WRITTEN_TO_DOCX</text></svg>\n',
-    'utf8'
+    Buffer.from('RERENDERED_BUT_NOT_WRITTEN_TO_DOCX')
   );
   const updatedImageHash = sha256File(path.join(deliveryDir, image.path));
   image.sha256 = updatedImageHash;
@@ -1752,6 +1831,32 @@ test('validateDeliveryPackage fails when DOCX rich content no longer follows sou
   assert.match(orderCheck?.message || '', /fig-001|block order|afterBlockId|source/i);
 });
 
+test('validateDeliveryPackage fails when DOCX footer keeps non-portable WPS textbox page fields', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await injectNonPortableFooter(path.join(deliveryDir, 'document.docx'));
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const footerCheck = report.checks.find((check) => check.id === 'footer_portability');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(footerCheck?.status, 'failed');
+  assert.match(footerCheck?.message || '', /footer|NUMPAGES|textbox|portable/i);
+});
+
+test('validateDeliveryPackage fails when DOCX cover keeps page-splitting spacing', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await inflateCoverSpacing(path.join(deliveryDir, 'document.docx'));
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const coverCheck = report.checks.find((check) => check.id === 'cover_layout');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(coverCheck?.status, 'failed');
+  assert.match(coverCheck?.message || '', /Cover layout|spacing|page/i);
+});
+
 test('postprocessDocx keeps rich blocks before the next repeated section title', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t, [
     '# Duplicate sections',
@@ -1813,6 +1918,38 @@ async function removeFigureIdFromDocPr(docxPath, figureId) {
   await rewriteDocPrForFigure(docxPath, figureId, (tag) =>
     tag.replace(new RegExp(`\\s?figureId=${figureId}`, 'g'), '')
   );
+}
+
+async function injectNonPortableFooter(docxPath) {
+  const entries = await readZipEntries(docxPath);
+  entries.set(
+    'word/footer2.xml',
+    Buffer.from(
+      [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">',
+        '<w:p><w:r><w:drawing><wp:anchor><wps:txbx><w:txbxContent><w:p>',
+        '<w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>',
+        '</w:p></w:txbxContent></wps:txbx></wp:anchor></w:drawing></w:r></w:p>',
+        '</w:ftr>',
+      ].join(''),
+      'utf8'
+    )
+  );
+  await writeZipEntries(entries, docxPath);
+}
+
+async function inflateCoverSpacing(docxPath) {
+  const entries = await readZipEntries(docxPath);
+  const documentXml = entries.get('word/document.xml')?.toString('utf8') || '';
+  const firstSectionIndex = documentXml.indexOf('<w:sectPr');
+  assert.ok(firstSectionIndex > 0, 'fixture must include a cover section');
+  const coverXml = documentXml.slice(0, firstSectionIndex).replace(
+    /<w:spacing\b[^>]*\bw:before="1200"[^>]*\/>/,
+    '<w:spacing w:before="2400"/>'
+  );
+  entries.set('word/document.xml', Buffer.from(`${coverXml}${documentXml.slice(firstSectionIndex)}`, 'utf8'));
+  await writeZipEntries(entries, docxPath);
 }
 
 async function rewriteDocPrForFigure(docxPath, figureId, rewriteTag) {
@@ -1968,10 +2105,13 @@ async function moveTableBlockBeforeBody(docxPath, tableId, tableTitle) {
 }
 
 function findTableBlock(documentXml, tableId, tableTitle) {
-  const markerPattern = new RegExp(`docx-engine-v2 tableId=${tableId}\\b`);
+  const markerPattern = new RegExp(`\\btableCaption\\b[\\s\\S]*\\btableId=${tableId}\\b`);
   const title = String(tableTitle || '').trim();
   const paragraphs = [...String(documentXml || '').matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
   for (const paragraph of paragraphs) {
+    if (/\bdirectoryEntry\b/.test(paragraph[0])) {
+      continue;
+    }
     const paragraphText = paragraph[0].replace(/<[^>]+>/g, '');
     if (!markerPattern.test(paragraph[0]) && (!title || !paragraphText.includes(title))) {
       continue;

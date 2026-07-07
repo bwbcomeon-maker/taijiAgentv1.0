@@ -31,6 +31,7 @@ function main(argv = process.argv.slice(2)) {
 
   const nodeModules = path.join(rootDir, 'node_modules');
   if (fs.existsSync(nodeModules)) {
+    assertPortableRasterizerDependencies(nodeModules);
     copyRecursive(nodeModules, path.join(outDir, 'engine', 'node_modules'));
   }
 
@@ -83,6 +84,29 @@ function copyRecursive(sourcePath, targetPath) {
     force: true,
     filter: (candidate) => !candidate.endsWith(`${path.sep}.DS_Store`),
   });
+}
+
+function assertPortableRasterizerDependencies(nodeModules) {
+  const requiredPackages = [
+    '@resvg/resvg-js',
+    '@resvg/resvg-js-linux-x64-gnu',
+    '@resvg/resvg-js-linux-x64-musl',
+    '@resvg/resvg-js-linux-arm64-gnu',
+    '@resvg/resvg-js-linux-arm64-musl',
+  ];
+  const missing = requiredPackages.filter((packageName) => {
+    const packagePath = path.join(nodeModules, ...packageName.split('/'), 'package.json');
+    return !fs.existsSync(packagePath);
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      [
+        '缺少跨平台 SVG 转 PNG 运行依赖，拒绝构建不可迁移的 skill 包:',
+        missing.join(', '),
+        '请补齐 @resvg/resvg-js 及 Linux x64/arm64 gnu/musl 原生包后再构建。',
+      ].join(' ')
+    );
+  }
 }
 
 function chmodScripts(dir) {

@@ -183,10 +183,10 @@ function resolveAssetPackageDir({ sourcePackage, assetPackage, deliveryDir }) {
 function declaredAssetFilePaths(assetPackage) {
   const paths = [];
   for (const figure of assetPackage.figures || []) {
-    paths.push(figure.displayPath, figure.editable?.sourcePath);
+    paths.push(figure.displayPath, figure.editable?.sourcePath, figure.metadata?.vectorDisplayPath);
   }
   for (const image of assetPackage.images || []) {
-    paths.push(image.displayPath, image.sourcePath);
+    paths.push(image.displayPath, image.sourcePath, image.metadata?.vectorDisplayPath);
   }
   return paths.filter(Boolean);
 }

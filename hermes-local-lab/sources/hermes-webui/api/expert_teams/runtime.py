@@ -15,6 +15,7 @@ from .materials import (
     structured_output_from_delivery,
     validate_stage_output,
 )
+from .rich_draft import build_rich_draft_package, is_rich_draft_required
 from .storage import latest_run_for_session, read_run, write_run
 from .view import expert_team_run_view
 
@@ -39,6 +40,21 @@ def _with_view(run: dict) -> dict:
     run["duration_seconds"] = _duration(str(run.get("created_at") or ""))
     run["view"] = expert_team_run_view(run)
     return run
+
+
+def _rich_draft_artifact(package: dict) -> dict:
+    return {
+        "id": "rich_draft",
+        "kind": "rich_draft",
+        "label": "富内容初稿",
+        "title": str(package.get("title") or "富内容初稿"),
+        "path": str(package.get("draft_path") or ""),
+        "manifest_path": str(package.get("manifest_path") or ""),
+        "assets": list(package.get("assets") or []),
+        "table_count": int(package.get("table_count") or 0),
+        "figure_count": int(package.get("figure_count") or 0),
+        "exists": True,
+    }
 
 
 def _task_statuses(tasks: list[dict], index: int, state: str) -> list[dict]:
@@ -446,6 +462,11 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         run["last_validation_error"] = str(validation.get("message") or "草稿未通过校验")
         run["validation"] = validation
         return _transition(workspace, run, "generated_invalid", "generation_invalid")
+    if is_rich_draft_required(material_type, task_id, str(run.get("team_id") or "")):
+        package = build_rich_draft_package(workspace, run, output)
+        output["rich_draft"] = package
+        stage_result["rich_draft"] = package
+        run["artifacts"].append(_rich_draft_artifact(package))
     run["last_validation_error"] = ""
     run["validation"] = validation
     return _transition(workspace, run, "awaiting_review", "generation_completed")

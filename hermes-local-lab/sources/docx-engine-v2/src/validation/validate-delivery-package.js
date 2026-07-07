@@ -23,8 +23,12 @@ const CHECK_IDS = [
   'source_replay',
   'docx_zip',
   'docx_xml',
+  'footer_portability',
+  'cover_layout',
   'template_markers',
+  'asset_semantics',
   'image_coverage',
+  'figure_dimensions',
   'table_coverage',
   'table_content',
   'table_placement',
@@ -168,7 +172,10 @@ function validateDeliveryPackage({
   });
   documentXml = addDocxZipCheck({ addCheck, deliveryDir });
   addDocxXmlCheck({ addCheck, documentXml });
+  addFooterPortabilityCheck({ addCheck, deliveryDir });
+  addCoverLayoutCheck({ addCheck, documentXml });
   addTemplateMarkersCheck({ addCheck, documentXml });
+  addAssetSemanticsCheck({ addCheck, deliveryDir, documentXml, assetPackage: jsonFiles.assetPackage });
   addImageCoverageCheck({
     addCheck,
     deliveryDir,
@@ -176,6 +183,7 @@ function validateDeliveryPackage({
     renderPlan: jsonFiles.renderPlan,
     assetPackage: jsonFiles.assetPackage,
   });
+  addFigureDimensionsCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addTableCoverageCheck({ addCheck, documentXml, renderPlan: jsonFiles.renderPlan });
   addTableContentCheck({
     addCheck,
@@ -617,6 +625,7 @@ function renderPlanSourceConsistencyFailures({ sourcePackage, renderPlan }) {
       expectedSections: sourceSections,
       actualLabel: 'render-plan.json templateData.sections',
       expectedLabel: 'source-package.json sections',
+      allowDisplayTitle: true,
     })
   );
   failures.push(
@@ -1051,7 +1060,15 @@ function expectedTemplateBlockFromSource({ block, tableIds, figureIds, sourceIma
     };
   }
 
-  if (block.type === 'paragraph' || block.type === 'heading') {
+  if (block.type === 'heading') {
+    return {
+      type: 'heading',
+      blockId: block.id,
+      text: block.text || '',
+    };
+  }
+
+  if (block.type === 'paragraph') {
     return {
       type: 'paragraph',
       blockId: block.id,
@@ -1068,6 +1085,7 @@ function sectionListConsistencyFailures({
   actualLabel,
   expectedLabel,
   compareBlockIds = false,
+  allowDisplayTitle = false,
 }) {
   const failures = [];
   if (actualSections.length !== expectedSections.length) {
@@ -1084,6 +1102,20 @@ function sectionListConsistencyFailures({
       continue;
     }
     for (const field of ['sectionId', 'title', 'level']) {
+      if (field === 'title' && allowDisplayTitle) {
+        const actualTitle = String(actual.title ?? '');
+        const originalTitle = String(actual.metadata?.originalTitle ?? actualTitle);
+        const expectedTitle = String(expected.title ?? '');
+        if (!actualTitle.trim()) {
+          failures.push(`${actualLabel}[${index}].title is empty`);
+        }
+        if (originalTitle !== expectedTitle) {
+          failures.push(
+            `${actualLabel}[${index}].metadata.originalTitle=${displayValue(originalTitle)} does not match ${expectedLabel}[${index}].title=${displayValue(expectedTitle)}`
+          );
+        }
+        continue;
+      }
       const actualValue = String(actual[field] ?? '');
       const expectedValue = String(expected[field] ?? '');
       if (actualValue !== expectedValue) {
@@ -1560,7 +1592,56 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
     return;
   }
 
+  const unresolvedArtifacts = unresolvedTemplateArtifacts(documentXml);
+  if (unresolvedArtifacts.length > 0) {
+    addCheck(
+      'template_markers',
+      'failed',
+      `Unresolved Word/template artifacts remain in document.xml: ${unresolvedArtifacts.join(', ')}`
+    );
+    return;
+  }
+
   addCheck('template_markers', 'passed');
+}
+
+function addAssetSemanticsCheck({ addCheck, deliveryDir, documentXml, assetPackage }) {
+  const forbiddenMarkers = ['通用图示渲染', 'Mermaid source'];
+  const failures = [];
+  const documentText = documentTextRuns(documentXml || '');
+  for (const marker of forbiddenMarkers) {
+    if (documentText.includes(marker)) {
+      failures.push(`document.xml contains degraded figure marker: ${marker}`);
+    }
+  }
+
+  for (const figure of assetPackage?.figures || []) {
+    const vectorPath = normalizeRelativePackagePath(figure?.metadata?.vectorDisplayPath);
+    if (!vectorPath) {
+      continue;
+    }
+    const absolutePath = path.join(deliveryDir, vectorPath);
+    if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+      continue;
+    }
+    const svgText = fs.readFileSync(absolutePath, 'utf8');
+    for (const marker of forbiddenMarkers) {
+      if (svgText.includes(marker)) {
+        failures.push(`${figure.figureId || vectorPath} contains degraded figure marker: ${marker}`);
+      }
+    }
+  }
+
+  if (failures.length > 0) {
+    addCheck(
+      'asset_semantics',
+      'failed',
+      `Figure semantic rendering degraded: ${failures.join('; ')}`
+    );
+    return;
+  }
+
+  addCheck('asset_semantics', 'passed');
 }
 
 function addDocxXmlCheck({ addCheck, documentXml }) {
@@ -1576,6 +1657,75 @@ function addDocxXmlCheck({ addCheck, documentXml }) {
   }
 
   addCheck('docx_xml', 'passed');
+}
+
+function addFooterPortabilityCheck({ addCheck, deliveryDir }) {
+  const documentPath = path.join(deliveryDir, 'document.docx');
+  if (!fs.existsSync(documentPath)) {
+    addCheck('footer_portability', 'failed', 'Cannot inspect DOCX footers because document.docx is missing.');
+    return;
+  }
+
+  let entries;
+  try {
+    entries = readZipEntries(documentPath);
+  } catch (error) {
+    addCheck('footer_portability', 'failed', `Cannot inspect DOCX footers: ${error.message}`);
+    return;
+  }
+
+  const failures = [];
+  for (const [entryName, entryBuffer] of entries) {
+    if (!/^word\/footer\d+\.xml$/.test(entryName)) {
+      continue;
+    }
+    const footerXml = entryBuffer.toString('utf8');
+    if (/NUMPAGES/.test(footerXml)) {
+      failures.push(`${entryName} contains NUMPAGES total-page field`);
+    }
+    if (/<(?:wps:txbx|v:textbox|wp:anchor)\b/.test(footerXml)) {
+      failures.push(`${entryName} uses non-portable floating/textbox page footer`);
+    }
+  }
+
+  if (failures.length > 0) {
+    addCheck('footer_portability', 'failed', `DOCX footers are not portable: ${failures.join('; ')}`);
+    return;
+  }
+
+  addCheck('footer_portability', 'passed');
+}
+
+function addCoverLayoutCheck({ addCheck, documentXml }) {
+  if (!documentXml) {
+    addCheck('cover_layout', 'failed', 'Cannot inspect cover layout without word/document.xml.');
+    return;
+  }
+
+  const firstSectionIndex = String(documentXml || '').indexOf('<w:sectPr');
+  if (firstSectionIndex < 0) {
+    addCheck('cover_layout', 'passed_with_warnings', 'DOCX has no explicit cover section to inspect.');
+    return;
+  }
+
+  const coverXml = String(documentXml || '').slice(0, firstSectionIndex);
+  const failures = [];
+  for (const spacingTag of coverXml.match(/<w:spacing\b[^>]*\/>/g) || []) {
+    const before = Number(spacingTag.match(/\bw:before="(\d+)"/)?.[1] || 0);
+    if (before >= 1600) {
+      failures.push(`cover spacing before=${before} is likely to push cover metadata onto another page`);
+    }
+    if (/\bw:beforeLines="/.test(spacingTag)) {
+      failures.push('cover spacing uses beforeLines, which is not stable across WPS/Word/LibreOffice');
+    }
+  }
+
+  if (failures.length > 0) {
+    addCheck('cover_layout', 'failed', `Cover layout is not portable: ${failures.join('; ')}`);
+    return;
+  }
+
+  addCheck('cover_layout', 'passed');
 }
 
 function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan, assetPackage }) {
@@ -1667,6 +1817,92 @@ function addImageCoverageCheck({ addCheck, deliveryDir, documentXml, renderPlan,
   addCheck('image_coverage', 'passed');
 }
 
+function addFigureDimensionsCheck({ addCheck, documentXml, renderPlan }) {
+  if (!documentXml) {
+    addCheck('figure_dimensions', 'failed', 'Cannot inspect figure dimensions without word/document.xml.');
+    return;
+  }
+  if (!renderPlan) {
+    addCheck('figure_dimensions', 'failed', 'render-plan.json is required for figure dimension validation.');
+    return;
+  }
+
+  const images = renderPlan.templateData?.images || [];
+  if (images.length === 0) {
+    addCheck('figure_dimensions', 'passed_with_warnings', 'No images were present in render-plan.json.');
+    return;
+  }
+
+  const failures = figureDimensionFailures({ documentXml, images });
+  if (failures.length > 0) {
+    addCheck('figure_dimensions', 'failed', `DOCX figure dimensions are not readable enough: ${failures.join(', ')}`);
+    return;
+  }
+
+  addCheck('figure_dimensions', 'passed');
+}
+
+function figureDimensionFailures({ documentXml, images }) {
+  const failures = [];
+  for (const image of images || []) {
+    const figureId = String(image?.figureId || '').trim();
+    if (!figureId) {
+      continue;
+    }
+    const extent = docxDrawingExtentForFigureId(documentXml, figureId);
+    if (!extent) {
+      failures.push(`${figureId} missing DOCX drawing extent`);
+      continue;
+    }
+
+    const minWidth = image.layoutIntent === 'flowchart' ? 5000000 : 4200000;
+    if (extent.cx < minWidth) {
+      failures.push(`${figureId} width ${extent.cx} below minimum ${minWidth}`);
+    }
+    if (extent.cy < 1500000) {
+      failures.push(`${figureId} height ${extent.cy} below readable minimum 1500000`);
+    }
+
+    const expectedRatio = expectedImageRatio(image);
+    if (expectedRatio) {
+      const actualRatio = extent.cx / extent.cy;
+      const delta = Math.abs(actualRatio - expectedRatio) / expectedRatio;
+      if (delta > 0.08) {
+        failures.push(
+          `${figureId} aspect ratio ${actualRatio.toFixed(3)} differs from source ${expectedRatio.toFixed(3)}`
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function docxDrawingExtentForFigureId(documentXml, figureId) {
+  const figurePattern = new RegExp(`\\bfigureId=${escapeRegExp(figureId)}\\b`);
+  for (const paragraph of paragraphRanges(documentXml)) {
+    if (!/<w:drawing\b/.test(paragraph.xml) || !figurePattern.test(paragraph.xml)) {
+      continue;
+    }
+    const extent = paragraph.xml.match(/<wp:extent\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"[^>]*\/>/);
+    if (!extent) {
+      return null;
+    }
+    return { cx: Number(extent[1]), cy: Number(extent[2]) };
+  }
+  return null;
+}
+
+function expectedImageRatio(image = {}) {
+  const width = positiveNumber(image.dimensions?.width);
+  const height = positiveNumber(image.dimensions?.height);
+  return width && height ? width / height : 0;
+}
+
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
 function untrackedDeliveryAssetFiles({ deliveryDir, assetPackage, renderPlan }) {
   const assetsDir = path.join(deliveryDir, 'assets');
   if (!fs.existsSync(assetsDir)) {
@@ -1683,7 +1919,7 @@ function declaredDeliveryAssetPathSet({ assetPackage, renderPlan }) {
     values.push(image.path);
   }
   for (const figure of assetPackage?.figures || []) {
-    values.push(figure.displayPath, figure.editable?.sourcePath);
+    values.push(figure.displayPath, figure.editable?.sourcePath, figure.metadata?.vectorDisplayPath);
   }
   for (const image of assetPackage?.images || []) {
     values.push(image.displayPath, image.sourcePath);
@@ -2162,6 +2398,23 @@ function hasTemplateMarkers(documentXml) {
   return /\{d\.[^}]+}/.test(documentXml || '');
 }
 
+function unresolvedTemplateArtifacts(documentXml) {
+  const source = String(documentXml || '');
+  const checks = [
+    [/更新主目录后显示章节条目/, 'main TOC placeholder'],
+    [/更新表目录后显示表题条目/, 'table TOC placeholder'],
+    [/更新图目录后显示图题条目/, 'figure TOC placeholder'],
+    [/错误！[^<]*未找到/, 'Word unresolved field error'],
+    [/Error![^<]*No table of figures entries found/i, 'Word table-of-figures field error'],
+    [/<w:instrText\b[^>]*>[^<]*\bTOC\b/i, 'Word TOC field'],
+    [/<w:instrText\b[^>]*>[^<]*SEQ\s+表\b/, 'Word SEQ table field'],
+    [/<w:instrText\b[^>]*>[^<]*SEQ\s+图\b/, 'Word SEQ figure field'],
+  ];
+  return checks
+    .filter(([pattern]) => pattern.test(source))
+    .map(([, label]) => label);
+}
+
 function extractDocPrFigureIds(documentXml) {
   const figureIds = new Set();
   for (const match of String(documentXml || '').matchAll(/<wp:docPr\b[^>]*>/g)) {
@@ -2520,9 +2773,6 @@ function tableCaptionFailures({ documentXml, renderPlan }) {
       continue;
     }
 
-    if (!hasTableSequenceField(caption.xml)) {
-      failures.push(`${tableId} caption missing Word SEQ 表 field`);
-    }
     if (!tableBodyImmediatelyFollowsCaption(documentXml, caption)) {
       failures.push(`${tableId} caption must immediately precede its table body`);
     }
@@ -2592,7 +2842,7 @@ function blockOrderFailures({ documentXml, renderPlan }) {
       position: sectionAnchors[sectionIndex]?.end ?? sectionInsertionIndexForOrder(documentXml, section.title),
     };
     for (const block of section.blocks || []) {
-      if (block.type === 'paragraph' && isSectionTitleBlock(block, section)) {
+      if (block.type === 'heading' || (block.type === 'paragraph' && isSectionTitleBlock(block, section))) {
         continue;
       }
       const current = blockOrderPosition({
@@ -2683,9 +2933,6 @@ function figureCaptionFailures({ documentXml, renderPlan }) {
 
     if (caption.paragraphIndex !== drawing.paragraphIndex + 1) {
       failures.push(`${figureId} caption must immediately follow its drawing paragraph`);
-    }
-    if (!hasFigureSequenceField(caption.xml)) {
-      failures.push(`${figureId} caption missing Word SEQ 图 field`);
     }
     if (sectionId) {
       const range = sectionRanges.get(sectionId);
@@ -2819,6 +3066,12 @@ function paragraphText(paragraphXml) {
   return [...String(paragraphXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
     .map((match) => unescapeXmlText(match[1]))
     .join('');
+}
+
+function documentTextRuns(documentXml) {
+  return [...String(documentXml || '').matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => unescapeXmlText(match[1]))
+    .join('\n');
 }
 
 function unescapeXmlText(value) {

@@ -40,6 +40,13 @@ class DocxTemplateSkillInvocationTests(unittest.TestCase):
         self.assertIn("dismissDocxTemplateSelection", ui_js)
         self.assertIn("aria-label", ui_js)
 
+    def test_template_selection_preserves_source_path_in_click_flow(self):
+        ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+        self.assertIn("data-source-path", ui_js)
+        self.assertIn("docx-template-selection-source", ui_js)
+        self.assertIn("sourcePath", MESSAGES_JS)
+        self.assertIn("请将源文件", MESSAGES_JS)
+
     def test_figure_adjustment_workspace_has_visible_actions(self):
         ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")

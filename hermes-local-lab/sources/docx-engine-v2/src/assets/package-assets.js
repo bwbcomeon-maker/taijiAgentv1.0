@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
 
+const { rasterizeSvgToPng, sanitizeSvgText, svgDimensions } = require('./svg-rasterizer');
+const { renderDeterministicMermaidSvg } = require('./mermaid-renderer');
 const { validateDomainObject } = require('../domain/validate');
 
 const QUALIFIED_DISPLAY_EXTENSIONS = new Set(['.png', '.svg', '.jpg', '.jpeg']);
@@ -67,14 +69,19 @@ function packageFigure({
   if (figure.sourceType === 'mermaid') {
     const sourceText = resolveMermaidSourceText(sourcePackage, figure);
     const sourcePath = path.join(figureDir, 'source.mmd');
-    const displayPath = path.join(figureDir, 'figure.svg');
+    const vectorPath = path.join(figureDir, 'figure.svg');
+    const displayPath = path.join(figureDir, 'figure.png');
+    const svgText = sanitizeSvgText(renderDeterministicMermaidSvg({ figure, sourceText }));
+    const dimensions = svgDimensions(svgText);
 
     fs.writeFileSync(sourcePath, sourceText, 'utf8');
-    fs.writeFileSync(displayPath, renderDeterministicMermaidSvg({ figure, sourceText }), 'utf8');
+    fs.writeFileSync(vectorPath, svgText, 'utf8');
+    const raster = rasterizeSvgToPng({ svgText, pngPath: displayPath, width: dimensions.width });
 
     return {
       ...figure,
       figureId,
+      dimensions,
       editable: {
         ...(figure.editable || {}),
         format: 'mermaid',
@@ -83,12 +90,23 @@ function packageFigure({
       },
       displayPath: toRelativePath(workspace, displayPath),
       sha256: sha256File(displayPath),
-      metadata: { ...(figure.metadata || {}) },
+      metadata: {
+        ...(figure.metadata || {}),
+        vectorDisplayPath: toRelativePath(workspace, vectorPath),
+        rasterizedFrom: 'svg',
+        rasterizer: '@resvg/resvg-js',
+        rasterWidth: raster.width,
+        rasterHeight: raster.height,
+      },
     };
   }
 
   if (figure.sourceType === 'docx-embedded') {
     return packageDocxEmbeddedFigure({ figure, figureId, sourcePackage, workspace, figureDir });
+  }
+
+  if (figure.sourceType === 'html') {
+    return packageHtmlFigure({ figure, figureId, workspace, figureDir, absoluteAssetDir, sourceBaseDir });
   }
 
   const sourceDisplayPath = resolveExistingAssetPath({
@@ -105,9 +123,38 @@ function packageFigure({
     throw new Error(`不支持的图形资产格式: ${sourceDisplayPath}`);
   }
 
+  if (extension === '.svg') {
+    const vectorPath = path.join(figureDir, 'figure.svg');
+    const displayPath = path.join(figureDir, 'figure.png');
+    const svgText = sanitizeSvgText(fs.readFileSync(sourceDisplayPath, 'utf8'));
+    const dimensions = svgDimensions(svgText);
+    fs.writeFileSync(vectorPath, svgText, 'utf8');
+    const raster = rasterizeSvgToPng({ svgText, pngPath: displayPath, width: dimensions.width });
+    return {
+      ...figure,
+      figureId,
+      dimensions,
+      editable: {
+        ...(figure.editable || {}),
+        sourcePath: toRelativePath(workspace, vectorPath),
+        sourceSha256: sha256File(vectorPath),
+      },
+      displayPath: toRelativePath(workspace, displayPath),
+      sha256: sha256File(displayPath),
+      metadata: {
+        ...(figure.metadata || {}),
+        originalSourcePath: toRelativePath(workspace, sourceDisplayPath),
+        vectorDisplayPath: toRelativePath(workspace, vectorPath),
+        rasterizedFrom: 'svg',
+        rasterizer: '@resvg/resvg-js',
+        rasterWidth: raster.width,
+        rasterHeight: raster.height,
+      },
+    };
+  }
+
   const displayPath = path.join(figureDir, `figure${extension}`);
   fs.copyFileSync(sourceDisplayPath, displayPath);
-
   return {
     ...figure,
     figureId,
@@ -122,6 +169,67 @@ function packageFigure({
   };
 }
 
+function packageHtmlFigure({ figure, figureId, workspace, figureDir, absoluteAssetDir, sourceBaseDir }) {
+  const sourceHtmlPath = resolveExistingAssetPath({
+    requestedPath: figure.displayPath || figure.editable?.sourcePath,
+    absoluteAssetDir,
+    sourceBaseDir,
+  });
+  if (!sourceHtmlPath || !fs.existsSync(sourceHtmlPath)) {
+    throw new Error(`缺少必需 HTML 图形资产: ${figure.displayPath || figureId}`);
+  }
+
+  const htmlText = fs.readFileSync(sourceHtmlPath, 'utf8');
+  const svgText = sanitizeSvgText(extractSvgFromHtml(htmlText));
+  if (!svgText) {
+    throw new Error(`HTML 图形资产中未找到可插入 DOCX 的 SVG: ${sourceHtmlPath}`);
+  }
+
+  const sourcePath = path.join(figureDir, 'source.html');
+  const vectorPath = path.join(figureDir, 'figure.svg');
+  const displayPath = path.join(figureDir, 'figure.png');
+  const dimensions = svgDimensions(svgText);
+  fs.copyFileSync(sourceHtmlPath, sourcePath);
+  fs.writeFileSync(vectorPath, svgText, 'utf8');
+  const raster = rasterizeSvgToPng({ svgText, pngPath: displayPath, width: dimensions.width });
+
+  return {
+    ...figure,
+    figureId,
+    dimensions,
+    editable: {
+      ...(figure.editable || {}),
+      format: 'html',
+      sourcePath: toRelativePath(workspace, sourcePath),
+      sourceSha256: sha256File(sourcePath),
+    },
+    displayPath: toRelativePath(workspace, displayPath),
+    sha256: sha256File(displayPath),
+    metadata: {
+      ...(figure.metadata || {}),
+      originalSourcePath: toRelativePath(workspace, sourceHtmlPath),
+      extractedFormat: 'svg',
+      vectorDisplayPath: toRelativePath(workspace, vectorPath),
+      rasterizedFrom: 'svg',
+      rasterizer: '@resvg/resvg-js',
+      rasterWidth: raster.width,
+      rasterHeight: raster.height,
+    },
+  };
+}
+
+function extractSvgFromHtml(htmlText) {
+  const match = String(htmlText || '').match(/<svg\b[\s\S]*?<\/svg>/i);
+  if (!match) {
+    return '';
+  }
+  let svg = match[0];
+  if (!/\sxmlns=/.test(svg)) {
+    svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  return svg;
+}
+
 function packageDocxEmbeddedFigure({ figure, figureId, sourcePackage, workspace, figureDir }) {
   const media = findEmbeddedMediaForFigure(sourcePackage, figure);
   if (!media?.contentBase64) {
@@ -131,6 +239,39 @@ function packageDocxEmbeddedFigure({ figure, figureId, sourcePackage, workspace,
   const extension = path.extname(media.fileName || media.path || figure.displayPath).toLowerCase();
   if (!QUALIFIED_DISPLAY_EXTENSIONS.has(extension)) {
     throw new Error(`不支持的 DOCX 内嵌图形资产格式: ${media.path || figure.displayPath || figureId}`);
+  }
+
+  if (extension === '.svg') {
+    const vectorPath = path.join(figureDir, 'figure.svg');
+    const displayPath = path.join(figureDir, 'figure.png');
+    const svgText = sanitizeSvgText(Buffer.from(media.contentBase64, 'base64').toString('utf8'));
+    const dimensions = svgDimensions(svgText);
+    fs.writeFileSync(vectorPath, svgText, 'utf8');
+    const raster = rasterizeSvgToPng({ svgText, pngPath: displayPath, width: dimensions.width });
+    return {
+      ...figure,
+      figureId,
+      dimensions,
+      editable: {
+        ...(figure.editable || {}),
+        format: 'docx-embedded',
+        sourcePath: toRelativePath(workspace, vectorPath),
+        sourceSha256: sha256File(vectorPath),
+      },
+      displayPath: toRelativePath(workspace, displayPath),
+      sha256: sha256File(displayPath),
+      metadata: {
+        ...(figure.metadata || {}),
+        mediaId: media.mediaId || '',
+        mediaPath: media.path || '',
+        originalContentType: media.contentType || '',
+        vectorDisplayPath: toRelativePath(workspace, vectorPath),
+        rasterizedFrom: 'svg',
+        rasterizer: '@resvg/resvg-js',
+        rasterWidth: raster.width,
+        rasterHeight: raster.height,
+      },
+    };
   }
 
   const displayPath = path.join(figureDir, `figure${extension}`);
@@ -184,6 +325,32 @@ function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sour
   const imageDir = path.join(absoluteOutDir, image.imageId);
   const outputPath = path.join(imageDir, path.basename(sourcePath));
   fs.mkdirSync(imageDir, { recursive: true });
+  if (extension === '.svg') {
+    const vectorPath = path.join(imageDir, path.basename(sourcePath));
+    const displayPath = path.join(imageDir, `${path.basename(sourcePath, extension)}.png`);
+    const svgText = sanitizeSvgText(fs.readFileSync(sourcePath, 'utf8'));
+    const dimensions = svgDimensions(svgText);
+    fs.writeFileSync(vectorPath, svgText, 'utf8');
+    const raster = rasterizeSvgToPng({ svgText, pngPath: displayPath, width: dimensions.width });
+    return {
+      imageId: image.imageId,
+      sourcePath: toRelativePath(workspace, vectorPath),
+      displayPath: toRelativePath(workspace, displayPath),
+      sha256: sha256File(displayPath),
+      caption: image.caption || '',
+      sectionId: image.sectionId || '',
+      metadata: {
+        ...(image.metadata || {}),
+        originalSourcePath: toRelativePath(workspace, sourcePath),
+        vectorDisplayPath: toRelativePath(workspace, vectorPath),
+        rasterizedFrom: 'svg',
+        rasterizer: '@resvg/resvg-js',
+        rasterWidth: raster.width,
+        rasterHeight: raster.height,
+        dimensions,
+      },
+    };
+  }
   fs.copyFileSync(sourcePath, outputPath);
 
   return {
@@ -247,138 +414,6 @@ function resolveMermaidSourceText(sourcePackage, figure) {
   return block?.content?.sourceText || block?.text || figure.anchorText || '';
 }
 
-function renderDeterministicMermaidSvg({ figure, sourceText }) {
-  const caption = escapeXml(figure.caption || figure.figureId || 'Figure');
-  const escapedSource = escapeXml(sourceText);
-  const flowchart = parseMermaidFlowchart(sourceText);
-
-  if (flowchart.nodes.length > 0) {
-    return renderFlowchartSvg({ caption, escapedSource, flowchart });
-  }
-
-  return renderMermaidSourcePreviewSvg({ caption, escapedSource });
-}
-
-function renderFlowchartSvg({ caption, escapedSource, flowchart }) {
-  const nodeWidth = 180;
-  const nodeHeight = 72;
-  const centerY = 286;
-  const left = 100;
-  const right = 860;
-  const gap = flowchart.nodes.length > 1 ? (right - left) / (flowchart.nodes.length - 1) : 0;
-  const nodeCenters = new Map();
-  const nodeElements = [];
-  flowchart.nodes.forEach((node, index) => {
-    const cx = flowchart.nodes.length > 1 ? left + gap * index : 480;
-    const cy = centerY;
-    nodeCenters.set(node.id, { x: cx, y: cy });
-    nodeElements.push(
-      `  <rect x="${cx - nodeWidth / 2}" y="${cy - nodeHeight / 2}" width="${nodeWidth}" height="${nodeHeight}" rx="10" fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>`,
-      `  <text x="${cx}" y="${cy + 6}" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">${escapeXml(node.label)}</text>`
-    );
-  });
-
-  const edgeElements = [];
-  for (const edge of flowchart.edges) {
-    const from = nodeCenters.get(edge.from);
-    const to = nodeCenters.get(edge.to);
-    if (!from || !to) {
-      continue;
-    }
-    const fromX = from.x < to.x ? from.x + nodeWidth / 2 : from.x - nodeWidth / 2;
-    const toX = from.x < to.x ? to.x - nodeWidth / 2 : to.x + nodeWidth / 2;
-    edgeElements.push(
-      `  <line x1="${fromX}" y1="${from.y}" x2="${toX}" y2="${to.y}" stroke="#0f766e" stroke-width="3" marker-end="url(#arrow)"/>`
-    );
-  }
-
-  return [
-    '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img">',
-    `  <title>${caption}</title>`,
-    `  <desc>${escapedSource}</desc>`,
-    '  <defs>',
-    '    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">',
-    '      <path d="M2,2 L10,6 L2,10 Z" fill="#0f766e"/>',
-    '    </marker>',
-    '  </defs>',
-    '  <rect width="960" height="540" fill="#ffffff"/>',
-    '  <rect x="24" y="24" width="912" height="492" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>',
-    `  <text x="48" y="74" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">${caption}</text>`,
-    ...edgeElements,
-    ...nodeElements,
-    '</svg>',
-    '',
-  ].join('\n');
-}
-
-function renderMermaidSourcePreviewSvg({ caption, escapedSource }) {
-  return [
-    '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img">',
-    `  <title>${caption}</title>`,
-    `  <desc>${escapedSource}</desc>`,
-    '  <rect width="960" height="540" fill="#ffffff"/>',
-    '  <rect x="24" y="24" width="912" height="492" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>',
-    '  <text x="48" y="72" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">Mermaid source</text>',
-    `  <text x="48" y="116" font-family="Menlo, Consolas, monospace" font-size="18" fill="#334155">${firstLine(escapedSource)}</text>`,
-    '</svg>',
-    '',
-  ].join('\n');
-}
-
-function parseMermaidFlowchart(sourceText) {
-  const nodesById = new Map();
-  const edges = [];
-  for (const rawLine of String(sourceText || '').split(/\r?\n/)) {
-    const line = rawLine.trim().replace(/;$/, '');
-    if (!line || /^(flowchart|graph)\b/i.test(line)) {
-      continue;
-    }
-    const edge = line.match(/^(.+?)\s*(-->|---|==>|-\.->)\s*(.+)$/);
-    if (!edge) {
-      continue;
-    }
-    const from = parseMermaidEndpoint(edge[1]);
-    const to = parseMermaidEndpoint(edge[3]);
-    if (!from.id || !to.id) {
-      continue;
-    }
-    upsertMermaidNode(nodesById, from);
-    upsertMermaidNode(nodesById, to);
-    edges.push({ from: from.id, to: to.id });
-  }
-
-  return { nodes: [...nodesById.values()], edges };
-}
-
-function parseMermaidEndpoint(value) {
-  const endpoint = String(value || '').trim().replace(/^\|[^|]*\|/, '').replace(/\|[^|]*\|$/, '').trim();
-  const match = endpoint.match(/^([A-Za-z0-9_-]+)\s*(?:\["([^"]+)"\]|\[([^\]]+)\]|\(([^)]+)\)|\{([^}]+)\})?$/);
-  if (!match) {
-    return { id: '', label: '' };
-  }
-  const label = match[2] || match[3] || match[4] || match[5] || match[1];
-  return { id: match[1], label: normalizeMermaidLabel(label) };
-}
-
-function upsertMermaidNode(nodesById, node) {
-  const existing = nodesById.get(node.id);
-  if (!existing) {
-    nodesById.set(node.id, node);
-    return;
-  }
-  if (existing.label === existing.id && node.label !== node.id) {
-    existing.label = node.label;
-  }
-}
-
-function normalizeMermaidLabel(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 28);
-}
-
-function firstLine(value) {
-  return String(value || '').split(/\r?\n/)[0].slice(0, 80);
-}
-
 function assertValidDomainObject(schemaName, value) {
   const result = validateDomainObject(schemaName, value);
   if (!result.ok) {
@@ -397,15 +432,6 @@ function sha256File(filePath) {
 
 function nextId(prefix, value) {
   return `${prefix}-${String(value).padStart(3, '0')}`;
-}
-
-function escapeXml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
 }
 
 module.exports = { packageAssets, renderDeterministicMermaidSvg };

@@ -9747,6 +9747,10 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 
 function _docxTemplateSelectionHtml(selection){
   const templates=Array.isArray(selection&&selection.templates)?selection.templates:[];
+  const sourcePath=String(selection&&selection.source_path||selection&&selection.sourcePath||'').trim();
+  const sourceHtml=sourcePath
+    ? `<div class="docx-template-selection-source"><strong>源文件</strong><span>${esc(sourcePath)}</span></div>`
+    : '<div class="docx-template-selection-source is-missing"><strong>源文件</strong><span>未绑定，将尝试使用当前结果。</span></div>';
   const templateItems=templates.map((template)=>{
     const id=String(template&&template.id||'').trim();
     const name=String(template&&template.name||id||'未命名模板').trim();
@@ -9764,7 +9768,7 @@ function _docxTemplateSelectionHtml(selection){
     ].join('');
   }).join('');
   return [
-    '<div class="docx-template-selection-card" role="group" aria-label="选择文档模板">',
+    `<div class="docx-template-selection-card" role="group" aria-label="选择文档模板" data-source-path="${esc(sourcePath)}">`,
     '<div class="docx-template-selection-head">',
     '<div>',
     '<div class="docx-template-selection-title">选择要套用的模板</div>',
@@ -9772,6 +9776,7 @@ function _docxTemplateSelectionHtml(selection){
     '</div>',
     '<button type="button" class="docx-template-selection-cancel" aria-label="取消模板选择" onclick="dismissDocxTemplateSelection(this);event.stopPropagation()">取消</button>',
     '</div>',
+    sourceHtml,
     `<div class="docx-template-selection-list">${templateItems||'<div class="docx-template-selection-empty">暂无可用模板。</div>'}</div>`,
     '</div>',
   ].join('');

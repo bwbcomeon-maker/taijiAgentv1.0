@@ -60,7 +60,7 @@
                     "properties": {
                       "type": {
                         "type": "string",
-                        "enum": ["paragraph", "table", "figure"]
+                        "enum": ["heading", "paragraph", "table", "figure"]
                       },
                       "blockId": { "type": "string" },
                       "text": { "type": "string" },
@@ -88,10 +88,42 @@
         "properties": {
           "title": { "type": "string" },
           "headers": { "type": "object", "minProperties": 1 },
+          "columns": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "text"],
+              "properties": {
+                "key": { "type": "string", "pattern": "^c[0-9]+$" },
+                "index": { "type": "integer", "minimum": 1 },
+                "text": { "type": "string" }
+              }
+            }
+          },
           "rows": {
             "type": "array",
             "minItems": 1,
-            "items": { "type": "object" }
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "cells": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "required": ["key", "text"],
+                    "properties": {
+                      "key": { "type": "string", "pattern": "^c[0-9]+$" },
+                      "index": { "type": "integer", "minimum": 1 },
+                      "text": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

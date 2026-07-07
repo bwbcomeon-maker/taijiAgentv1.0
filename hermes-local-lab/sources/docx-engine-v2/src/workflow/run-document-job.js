@@ -337,7 +337,9 @@ function assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage 
 
   if (failures.length > 0) {
     throw new Error(
-      `模板 ${templatePackage.id} 的输入不满足要求：${failures.join('；')}。请先补齐表格和图示，再套用该模板。`
+      `模板 ${templatePackage.id} 的输入不满足要求：${failures.join('；')}。` +
+        `本次读取到的源内容统计为：表格 ${tableCount} 个，图示或图片 ${visualCount} 个。` +
+        '如果你的源文件实际包含图表，请检查模板选择卡片中的源文件路径是否正确。'
     );
   }
 }

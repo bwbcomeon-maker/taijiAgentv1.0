@@ -48,6 +48,75 @@ def test_explicit_template_selection_still_returns_template_metadata():
     assert result["templates"]
 
 
+def test_docx_template_selection_preserves_explicit_source_path(tmp_path):
+    from api import routes
+
+    source_path = "/Users/bwb/Desktop/OA国产化替代方案/OA系统国产化替代详细设计方案.md"
+    session = SimpleNamespace(session_id="sid-docx", workspace=str(tmp_path), messages=[])
+
+    result = routes._docx_template_invocation_result_for_session(
+        f'将"{source_path}"套用模板',
+        session,
+    )
+    assistant = routes._docx_non_streaming_assistant_message(result, 1)
+
+    assert result["docx_template_selection_required"] is True
+    assert result["source_path"] == source_path
+    assert assistant["docx_template_selection"]["source_path"] == source_path
+
+
+def test_docx_template_selected_uses_explicit_source_path(monkeypatch, tmp_path):
+    from api import routes
+
+    source_file = tmp_path / "OA系统国产化替代详细设计方案.md"
+    source_file.write_text("# OA系统国产化替代详细设计方案\n\n| 项 | 值 |\n| --- | --- |\n| 范围 | 测试 |\n", encoding="utf-8")
+    source_path = str(source_file)
+    session = SimpleNamespace(session_id="sid-docx", workspace=str(tmp_path), messages=[])
+    seen = {}
+
+    def fake_create_job(payload, workspace):
+        seen["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "delivery_dir": str(tmp_path / "OA系统国产化替代详细设计方案-模板交付包"),
+            "document_path": str(tmp_path / "OA系统国产化替代详细设计方案-模板交付包" / "document.docx"),
+            "quality_status": "passed_with_warnings",
+        }, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "create_job", fake_create_job)
+
+    result = routes._docx_template_invocation_result_for_session(
+        f'/docx-template-skill 请将源文件 "{source_path}" 套用通用方案模板（templateId: general-proposal）。',
+        session,
+    )
+
+    assert result["docx_template_applied"] is True
+    assert seen["payload"]["source_path"] == source_path
+    assert seen["payload"]["template_id"] == "general-proposal"
+
+
+def test_docx_template_selected_missing_explicit_source_path_fails_before_job(monkeypatch, tmp_path):
+    from api import routes
+
+    source_path = "/Users/bwb/Desktop/OA国产化替代方案/不存在的方案.md"
+    session = SimpleNamespace(session_id="sid-docx", workspace=str(tmp_path), messages=[])
+
+    def fake_create_job(payload, workspace):
+        raise AssertionError(f"missing explicit source should not start a DOCX job: {payload}")
+
+    monkeypatch.setattr(routes.docx_engine_v2, "create_job", fake_create_job)
+
+    result = routes._docx_template_invocation_result_for_session(
+        f'/docx-template-skill 请将源文件 "{source_path}" 套用通用方案模板（templateId: general-proposal）。',
+        session,
+    )
+
+    assert result["ok"] is False
+    assert result["docx_source_required"] is True
+    assert result["source_path"] == source_path
+    assert "未读取到源文件" in result["message"]
+
+
 def test_docx_template_selected_auto_generates_from_latest_chat_result(monkeypatch, tmp_path):
     from api import routes
 

@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OA系统国产化替代 — 全景架构图</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', 'PingFang SC', 'Microsoft YaHei', monospace;
+      background: #020617;
+      min-height: 100vh;
+      padding: 2rem;
+      color: white;
+    }
+    .container { max-width: 1300px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot {
+      width: 12px; height: 12px; background: #22d3ee;
+      border-radius: 50%; animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container {
+      background: rgba(15, 23, 42, 0.5); border-radius: 1rem;
+      border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto;
+    }
+    svg { width: 100%; min-width: 1100px; display: block; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem; border: 1px solid #1e293b; padding: 1.25rem; }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>OA系统国产化替代 — 全景架构图</h1>
+      </div>
+      <p class="subtitle">麒麟V10 + 达梦DM8 + TongWeb + 深信服 | 信创全栈 · 关联系统对接 · 高可用部署</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1200 920">
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ============================================================ -->
+        <!-- BOUNDARY: 信创安全域 (Amber, large dashed) -->
+        <!-- ============================================================ -->
+        <rect x="60" y="50" width="900" height="820" rx="14" fill="rgba(251, 191, 36, 0.03)" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="8,4"/>
+        <text x="76" y="72" fill="#fbbf24" font-size="11" font-weight="700">信创安全域</text>
+        <text x="200" y="72" fill="#92400e" font-size="9">麒麟V10 · 达梦DM8 · TongWeb · 国密SSL</text>
+
+        <!-- ============================================================ -->
+        <!-- BOUNDARY: DMZ区 (Rose, dashed) -->
+        <!-- ============================================================ -->
+        <rect x="80" y="100" width="380" height="150" rx="8" fill="rgba(136, 19, 55, 0.05)" stroke="#fb7185" stroke-width="1" stroke-dasharray="5,5"/>
+        <text x="94" y="116" fill="#fb7185" font-size="9" font-weight="600">DMZ 区</text>
+
+        <!-- ============================================================ -->
+        <!-- BOUNDARY: 应用服务区 (Emerald, dashed) -->
+        <!-- ============================================================ -->
+        <rect x="80" y="280" width="860" height="210" rx="8" fill="rgba(6, 78, 59, 0.05)" stroke="#34d399" stroke-width="1" stroke-dasharray="5,5"/>
+        <text x="94" y="296" fill="#34d399" font-size="9" font-weight="600">应用服务区</text>
+
+        <!-- ============================================================ -->
+        <!-- BOUNDARY: 数据服务区 (Violet, dashed) -->
+        <!-- ============================================================ -->
+        <rect x="80" y="520" width="860" height="230" rx="8" fill="rgba(76, 29, 149, 0.05)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="5,5"/>
+        <text x="94" y="536" fill="#a78bfa" font-size="9" font-weight="600">数据服务区</text>
+
+        <!-- ============================================================ -->
+        <!-- BOUNDARY: 管理区 -->
+        <!-- ============================================================ -->
+        <rect x="80" y="770" width="860" height="85" rx="8" fill="rgba(30, 41, 59, 0.3)" stroke="#475569" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="94" y="787" fill="#64748b" font-size="9" font-weight="600">管理 & 监控区</text>
+
+        <!-- ============================================================ -->
+        <!-- ARROWS (drawn early, behind components) -->
+        <!-- ============================================================ -->
+
+        <!-- User --> Firewall -->
+        <line x1="170" y1="175" x2="110" y2="128" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="130" y="146" fill="#94a3b8" font-size="8">HTTPS</text>
+
+        <!-- Firewall --> LoadBalancer -->
+        <line x1="238" y1="135" x2="298" y2="135" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+
+        <!-- LoadBalancer --> OA Web nodes -->
+        <line x1="370" y1="142" x2="418" y2="130" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <line x1="370" y1="150" x2="418" y2="170" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="380" y="125" fill="#94a3b8" font-size="7">HTTPS :443</text>
+
+        <!-- OA Web --> SSO (auth) -->
+        <path d="M 495 170 L 495 200 Q 495 215 480 215 L 275 215 Q 260 215 260 230 L 260 248" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrow-rose)"/>
+        <text x="340" y="210" fill="#fb7185" font-size="8">OAuth2/CAS</text>
+
+        <!-- OA Web --> TongWeb App -->
+        <line x1="530" y1="235" x2="530" y2="330" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <line x1="600" y1="235" x2="600" y2="330" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="550" y="280" fill="#94a3b8" font-size="8">AJP :8009</text>
+
+        <!-- TongWeb --> DM8 Primary -->
+        <line x1="500" y1="420" x2="400" y2="550" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <text x="430" y="480" fill="#94a3b8" font-size="8">JDBC :5236</text>
+
+        <!-- TongWeb --> KingbaseES -->
+        <line x1="650" y1="420" x2="750" y2="550" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <text x="710" y="480" fill="#94a3b8" font-size="8">JDBC</text>
+
+        <!-- TongWeb --> DCP Cache -->
+        <line x1="560" y1="420" x2="560" y2="550" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <text x="575" y="485" fill="#94a3b8" font-size="7">Redis协议</text>
+
+        <!-- TongWeb --> TongLINK/Q (dashed) -->
+        <path d="M 380 395 L 340 395" fill="none" stroke="#34d399" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#arrow-emerald)"/>
+        <text x="348" y="388" fill="#94a3b8" font-size="7">JMS</text>
+
+        <!-- OA Web --> E-sign -->
+        <line x1="600" y1="220" x2="600" y2="248" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrow-rose)"/>
+        <text x="612" y="237" fill="#fb7185" font-size="7">签章API</text>
+
+        <!-- OA Web --> Email -->
+        <line x1="700" y1="190" x2="700" y2="248" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="712" y="222" fill="#94a3b8" font-size="7">IMAP/SMTP</text>
+
+        <!-- DM8 Primary <--> Standby -->
+        <line x1="370" y1="615" x2="230" y2="615" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <line x1="230" y1="625" x2="370" y2="625" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <text x="300" y="608" fill="#94a3b8" font-size="7">数据守护 / 实时同步</text>
+
+        <!-- DM8 --> EDS -->
+        <line x1="400" y1="680" x2="550" y2="680" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <text x="475" y="673" fill="#94a3b8" font-size="7">NFSv4</text>
+
+        <!-- TongWeb --> External HR -->
+        <path d="M 720 395 L 900 395 L 900 250 L 990 250" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+        <text x="830" y="388" fill="#94a3b8" font-size="7">WebService</text>
+
+        <!-- TongWeb --> External Fin -->
+        <path d="M 720 410 L 920 410 L 920 310 L 990 310" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+        <text x="850" y="403" fill="#94a3b8" font-size="7">WebService</text>
+
+        <!-- TongWeb --> External Archive -->
+        <path d="M 720 425 L 940 425 L 940 370 L 990 370" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+        <text x="860" y="418" fill="#94a3b8" font-size="7">WebService</text>
+
+        <!-- TongWeb --> External SMS -->
+        <path d="M 720 440 L 960 440 L 960 440 L 990 440" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+        <text x="870" y="433" fill="#94a3b8" font-size="7">HTTPS API</text>
+
+        <!-- DM8 --> Backup -->
+        <line x1="300" y1="680" x2="300" y2="790" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+        <text x="312" y="740" fill="#94a3b8" font-size="7">备份</text>
+
+        <!-- Monitor --> all targets (dashed) -->
+        <line x1="670" y1="790" x2="500" y2="740" stroke="#64748b" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="680" y1="790" x2="560" y2="740" stroke="#64748b" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="700" y1="790" x2="400" y2="740" stroke="#64748b" stroke-width="1" stroke-dasharray="3,3"/>
+
+        <!-- ============================================================ -->
+        <!-- LAYER 1: ACCESS LAYER -->
+        <!-- ============================================================ -->
+
+        <!-- Users (External) -->
+        <rect x="20" y="155" width="120" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="80" y="180" fill="white" font-size="12" font-weight="600" text-anchor="middle">用户</text>
+        <text x="80" y="198" fill="#94a3b8" font-size="9" text-anchor="middle">PC浏览器/移动端</text>
+
+        <!-- Firewall -->
+        <rect x="170" y="110" width="120" height="55" rx="6" fill="rgba(136, 19, 55, 0.35)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="230" y="132" fill="white" font-size="11" font-weight="600" text-anchor="middle">深信服AF</text>
+        <text x="230" y="150" fill="#fb7185" font-size="9" text-anchor="middle">下一代防火墙</text>
+
+        <!-- Load Balancer -->
+        <rect x="310" y="110" width="130" height="55" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="375" y="132" fill="white" font-size="11" font-weight="600" text-anchor="middle">深信服AD 7.0</text>
+        <text x="375" y="150" fill="#94a3b8" font-size="9" text-anchor="middle">负载均衡 · 国密SSL</text>
+
+        <!-- ============================================================ -->
+        <!-- LAYER 2: APPLICATION LAYER (DMZ + Services) -->
+        <!-- ============================================================ -->
+
+        <!-- OA Web Node 1 -->
+        <rect x="430" y="105" width="115" height="60" rx="6" fill="rgba(8, 51, 68, 0.35)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="487" y="128" fill="white" font-size="11" font-weight="600" text-anchor="middle">OA-WEB-01</text>
+        <text x="487" y="148" fill="#94a3b8" font-size="9" text-anchor="middle">麒麟V10 ARM</text>
+
+        <!-- OA Web Node 2 -->
+        <rect x="560" y="105" width="115" height="60" rx="6" fill="rgba(8, 51, 68, 0.35)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="617" y="128" fill="white" font-size="11" font-weight="600" text-anchor="middle">OA-WEB-02</text>
+        <text x="617" y="148" fill="#94a3b8" font-size="9" text-anchor="middle">麒麟V10 ARM</text>
+
+        <!-- E-sign -->
+        <rect x="700" y="110" width="140" height="70" rx="6" fill="rgba(136, 19, 55, 0.3)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="770" y="135" fill="white" font-size="11" font-weight="600" text-anchor="middle">电子签章</text>
+        <text x="770" y="153" fill="#94a3b8" font-size="9" text-anchor="middle">e签宝 信创版</text>
+        <text x="770" y="168" fill="#fb7185" font-size="8" text-anchor="middle">国密SM2/SM3/SM4</text>
+
+        <!-- SSO -->
+        <rect x="120" y="250" width="150" height="70" rx="6" fill="rgba(136, 19, 55, 0.35)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="195" y="275" fill="white" font-size="11" font-weight="600" text-anchor="middle">统一身份认证</text>
+        <text x="195" y="293" fill="#94a3b8" font-size="9" text-anchor="middle">竹云BIM 4A 6.0</text>
+        <text x="195" y="308" fill="#fb7185" font-size="8" text-anchor="middle">OAuth2.0 · CAS · LDAP</text>
+
+        <!-- Email -->
+        <rect x="300" y="250" width="140" height="70" rx="6" fill="rgba(8, 51, 68, 0.35)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="370" y="275" fill="white" font-size="11" font-weight="600" text-anchor="middle">邮件系统</text>
+        <text x="370" y="293" fill="#94a3b8" font-size="9" text-anchor="middle">Coremail 信创版</text>
+        <text x="370" y="308" fill="#22d3ee" font-size="8" text-anchor="middle">IMAP · SMTP</text>
+
+        <!-- TongLINK/Q -->
+        <rect x="120" y="380" width="160" height="60" rx="6" fill="rgba(6, 78, 59, 0.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="200" y="403" fill="white" font-size="11" font-weight="600" text-anchor="middle">消息中间件</text>
+        <text x="200" y="421" fill="#94a3b8" font-size="9" text-anchor="middle">TongLINK/Q 9.0</text>
+        <text x="200" y="434" fill="#34d399" font-size="8" text-anchor="middle">JMS 2.0 · 可靠投递</text>
+
+        <!-- TongWeb App Node 1 -->
+        <rect x="370" y="360" width="130" height="65" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="435" y="383" fill="white" font-size="11" font-weight="600" text-anchor="middle">OA-APP-01</text>
+        <text x="435" y="401" fill="#94a3b8" font-size="9" text-anchor="middle">TongWeb 7.0集群</text>
+        <text x="435" y="416" fill="#34d399" font-size="8" text-anchor="middle">麒麟V10 ARM</text>
+
+        <!-- TongWeb App Node 2 -->
+        <rect x="530" y="360" width="130" height="65" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="595" y="383" fill="white" font-size="11" font-weight="600" text-anchor="middle">OA-APP-02</text>
+        <text x="595" y="401" fill="#94a3b8" font-size="9" text-anchor="middle">TongWeb 7.0集群</text>
+        <text x="595" y="416" fill="#34d399" font-size="8" text-anchor="middle">麒麟V10 ARM</text>
+
+        <!-- DCP Cache -->
+        <rect x="700" y="360" width="130" height="65" rx="6" fill="rgba(6, 78, 59, 0.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="765" y="383" fill="white" font-size="11" font-weight="600" text-anchor="middle">缓存平台</text>
+        <text x="765" y="401" fill="#94a3b8" font-size="9" text-anchor="middle">达梦DCP 2.0</text>
+        <text x="765" y="416" fill="#34d399" font-size="8" text-anchor="middle">Redis协议兼容</text>
+
+        <!-- ============================================================ -->
+        <!-- LAYER 3: DATA LAYER -->
+        <!-- ============================================================ -->
+
+        <!-- DM8 Primary -->
+        <rect x="350" y="560" width="155" height="75" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="427" y="583" fill="white" font-size="12" font-weight="600" text-anchor="middle">达梦DM8 主库</text>
+        <text x="427" y="602" fill="#94a3b8" font-size="9" text-anchor="middle">OLTP · 1,180表 · 1.8TB</text>
+        <text x="427" y="620" fill="#a78bfa" font-size="8" text-anchor="middle">麒麟V10 ARM · 数据守护</text>
+
+        <!-- DM8 Standby -->
+        <rect x="110" y="590" width="140" height="65" rx="6" fill="rgba(76, 29, 149, 0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="180" y="613" fill="white" font-size="11" font-weight="600" text-anchor="middle">达梦DM8 备库</text>
+        <text x="180" y="631" fill="#94a3b8" font-size="9" text-anchor="middle">实时同步 · 自动故障切换</text>
+        <text x="180" y="646" fill="#a78bfa" font-size="8" text-anchor="middle">RTO ≤ 30s</text>
+
+        <!-- KingbaseES -->
+        <rect x="700" y="560" width="155" height="75" rx="6" fill="rgba(76, 29, 149, 0.35)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="777" y="583" fill="white" font-size="12" font-weight="600" text-anchor="middle">金仓KingbaseES</text>
+        <text x="777" y="602" fill="#94a3b8" font-size="9" text-anchor="middle">报表库 · SQL Server兼容</text>
+        <text x="777" y="620" fill="#a78bfa" font-size="8" text-anchor="middle">麒麟V10 ARM</text>
+
+        <!-- EDS -->
+        <rect x="530" y="640" width="170" height="65" rx="6" fill="rgba(76, 29, 149, 0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="615" y="663" fill="white" font-size="11" font-weight="600" text-anchor="middle">深信服EDS</text>
+        <text x="615" y="681" fill="#94a3b8" font-size="9" text-anchor="middle">分布式存储 · 3节点集群</text>
+        <text x="615" y="696" fill="#a78bfa" font-size="8" text-anchor="middle">452万附件 · 1.2TB · NFSv4</text>
+
+        <!-- ============================================================ -->
+        <!-- LAYER 4: MANAGEMENT -->
+        <!-- ============================================================ -->
+
+        <!-- Monitor -->
+        <rect x="600" y="785" width="150" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#64748b" stroke-width="1.5"/>
+        <text x="675" y="807" fill="white" font-size="11" font-weight="600" text-anchor="middle">北塔BTSO</text>
+        <text x="675" y="825" fill="#94a3b8" font-size="9" text-anchor="middle">统一监控 · 告警</text>
+
+        <!-- Backup -->
+        <rect x="200" y="785" width="150" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#64748b" stroke-width="1.5"/>
+        <text x="275" y="807" fill="white" font-size="11" font-weight="600" text-anchor="middle">爱数AnyBackup</text>
+        <text x="275" y="825" fill="#94a3b8" font-size="9" text-anchor="middle">备份 · RPO ≤ 1h</text>
+
+        <!-- ============================================================ -->
+        <!-- EXTERNAL SYSTEMS (right side) -->
+        <!-- ============================================================ -->
+
+        <rect x="990" y="50" width="18" height="500" rx="4" fill="rgba(100, 116, 139, 0.2)"/>
+        <text x="988" y="310" fill="#64748b" font-size="9" font-weight="600" transform="rotate(-90, 988, 310)">外部关联系统</text>
+
+        <!-- External HR -->
+        <rect x="1020" y="225" width="120" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1080" y="246" fill="white" font-size="11" font-weight="600" text-anchor="middle">人事系统</text>
+        <text x="1080" y="262" fill="#94a3b8" font-size="9" text-anchor="middle">组织/人员同步</text>
+
+        <!-- External Fin -->
+        <rect x="1020" y="285" width="120" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1080" y="306" fill="white" font-size="11" font-weight="600" text-anchor="middle">财务系统</text>
+        <text x="1080" y="322" fill="#94a3b8" font-size="9" text-anchor="middle">费用/预算对接</text>
+
+        <!-- External Archive -->
+        <rect x="1020" y="345" width="120" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1080" y="366" fill="white" font-size="11" font-weight="600" text-anchor="middle">档案管理系统</text>
+        <text x="1080" y="382" fill="#94a3b8" font-size="9" text-anchor="middle">公文归档</text>
+
+        <!-- External SMS -->
+        <rect x="1020" y="415" width="120" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1080" y="436" fill="white" font-size="11" font-weight="600" text-anchor="middle">短信网关</text>
+        <text x="1080" y="452" fill="#94a3b8" font-size="9" text-anchor="middle">华为云短信</text>
+
+        <!-- ============================================================ -->
+        <!-- LEGEND -->
+        <!-- ============================================================ -->
+        <rect x="760" y="790" width="200" height="65" rx="6" fill="rgba(15, 23, 42, 0.8)" stroke="#1e293b" stroke-width="1"/>
+        <text x="772" y="806" fill="white" font-size="9" font-weight="600">图例 Legend</text>
+
+        <rect x="772" y="814" width="14" height="8" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="790" y="821" fill="#94a3b8" font-size="7">前端接入</text>
+
+        <rect x="855" y="814" width="14" height="8" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="873" y="821" fill="#94a3b8" font-size="7">应用服务</text>
+
+        <rect x="772" y="828" width="14" height="8" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="790" y="835" fill="#94a3b8" font-size="7">数据存储</text>
+
+        <rect x="855" y="828" width="14" height="8" rx="2" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="873" y="835" fill="#94a3b8" font-size="7">安全/认证</text>
+
+        <line x1="772" y1="847" x2="786" y2="847" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="790" y="850" fill="#94a3b8" font-size="7">认证/安全流</text>
+
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>替代范围</h3>
+        </div>
+        <ul>
+          <li>• 15项技术组件全栈替代</li>
+          <li>• 操作系统: RHEL/Windows → 麒麟V10 SP3</li>
+          <li>• 数据库: Oracle+SQL Server → 达梦DM8+金仓KingbaseES</li>
+          <li>• 中间件: Tomcat+WebLogic → TongWeb+Apusic</li>
+          <li>• 消息/缓存: 全套国产化替代</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>关键指标</h3>
+        </div>
+        <ul>
+          <li>• 数据量: 1,247张表 · 1.8TB · 452万附件</li>
+          <li>• 存储过程改写: 87个(21.1%)需手动适配</li>
+          <li>• 切换窗口: 48小时 · 核心流程中断 ≤ 4h</li>
+          <li>• 系统可用性目标: ≥ 99.9% (月度)</li>
+          <li>• 性能目标: P99 ≤ 现网120%</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>关联系统</h3>
+        </div>
+        <ul>
+          <li>• 竹云BIM 4A — 统一身份认证 (OAuth2/CAS)</li>
+          <li>• e签宝信创版 — 国密电子签章</li>
+          <li>• Coremail信创版 — 邮件收发</li>
+          <li>• 深信服EDS — 文件存储 (NFSv4)</li>
+          <li>• 华为云短信 — 消息通道</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">
+      OA系统国产化替代详细设计方案 · 配套架构图 · 2026年7月 · 初稿（待评审）
+    </p>
+  </div>
+</body>
+</html>

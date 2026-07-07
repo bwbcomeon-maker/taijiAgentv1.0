@@ -96,6 +96,76 @@ test('normalizeMarkdownSource gives markdownText precedence over legacy markdown
   assert.equal(source.title, '正式参数标题');
 });
 
+test('normalizeMarkdownSource keeps rich content placeable for generic H1-only documents and trims empty table tails', async () => {
+  const source = await normalizeMarkdownSource({
+    sourcePath: 'generic.md',
+    markdownText: `# 通用业务连续性方案
+
+本段位于标题之后、首个章节之前，也必须拥有可插入图表的正文位置。
+
+| 指标 | 目标值 |  |
+| --- | --- | --- |
+| RTO | 30分钟 |  |
+
+# 现状分析
+
+这里使用一级标题作为正文章节，后续表格不能丢失章节归属。
+
+| 系统 | 责任部门 |  |  |
+| --- | --- | --- | --- |
+| OA | 综合部 |  |  |
+`,
+  });
+
+  assertSourcePackage(source);
+  assert.equal(source.title, '通用业务连续性方案');
+  assert.deepEqual(
+    source.sections.map((section) => section.title),
+    ['概述', '现状分析']
+  );
+  assert.equal(source.tables[0].sectionId, source.sections[0].sectionId);
+  assert.equal(source.tables[1].sectionId, source.sections[1].sectionId);
+  assert.deepEqual(source.tables[0].headers, ['指标', '目标值']);
+  assert.deepEqual(source.tables[0].rows, [['RTO', '30分钟']]);
+  assert.deepEqual(source.tables[1].headers, ['系统', '责任部门']);
+  assert.deepEqual(source.tables[1].rows, [['OA', '综合部']]);
+  for (const table of source.tables) {
+    assert.equal(table.headers.some((header) => !String(header).trim()), false);
+  }
+});
+
+test('normalizeMarkdownSource drops generic cover metadata before body content', async () => {
+  const source = await normalizeMarkdownSource({
+    sourcePath: 'cover-metadata.md',
+    markdownText: `# 通用方案
+
+项目名称：通用能力验收
+文档编号：TJ-001
+文档密级：内部
+客户单位：客户单位
+编制单位：北京太极信息系统技术有限公司
+---
+
+本文才是正文概述，不能混入封面元信息。
+
+# 第一章 总体方案
+
+| 项目 | 内容 |
+| --- | --- |
+| 目标 | 验收 |
+`,
+  });
+
+  assertSourcePackage(source);
+  assert.deepEqual(
+    source.blocks
+      .filter((block) => block.type === 'paragraph')
+      .map((block) => block.text),
+    ['本文才是正文概述，不能混入封面元信息。']
+  );
+  assert.equal(source.blocks.some((block) => /文档密级|客户单位|编制单位|文档编号/.test(block.text || '')), false);
+});
+
 test('normalizeDocxSource extracts basic text and embedded media from docx zip', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-engine-v2-source-'));
   const sourcePath = path.join(tempDir, 'source.docx');

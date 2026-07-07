@@ -193,6 +193,11 @@ function extractBodyStructure(documentXml, drawingBindings = [], paragraphStyleN
       }
 
       for (const drawing of paragraphDrawings) {
+        const caption = readableFigureCaption({
+          explicit: drawing.caption,
+          sectionTitle: currentSection?.title || '',
+          index: drawing.drawingIndex,
+        });
         const block = {
           id: nextId('block', blocks.length + 1),
           type: 'figure',
@@ -206,7 +211,7 @@ function extractBodyStructure(documentXml, drawingBindings = [], paragraphStyleN
           sectionTitle: currentSection?.title || '',
           anchorText: drawing.figureId ? `figureId=${drawing.figureId}` : `docx-drawing:${drawing.relationshipId}`,
           path: `word/document.xml#block-${blocks.length + 1}`,
-          caption: drawing.caption || `图 ${drawing.drawingIndex}`,
+          caption,
           metadata: {
             sourceIndex,
             drawingIndex: drawing.drawingIndex,
@@ -226,6 +231,12 @@ function extractBodyStructure(documentXml, drawingBindings = [], paragraphStyleN
 
     const rows = extractTableRows(xml);
     const tableId = nextId('tbl', tables.length + 1);
+    const tableTitle = readableTableTitle({
+      explicit: '',
+      sectionTitle: currentSection?.title || '',
+      headers: rows[0] || [],
+      index: tables.length + 1,
+    });
     const block = {
       id: nextId('block', blocks.length + 1),
       type: 'table',
@@ -247,7 +258,7 @@ function extractBodyStructure(documentXml, drawingBindings = [], paragraphStyleN
 
     tables.push({
       tableId,
-      title: `表格 ${tables.length + 1}`,
+      title: tableTitle,
       sectionId: currentSection?.sectionId || '',
       afterBlockId: previousBlockId,
       anchorText: block.anchorText,
@@ -484,7 +495,11 @@ function extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, bloc
 
     figures.push({
       figureId,
-      caption: markerBlock?.caption || `图 ${figures.length + 1}`,
+      caption: readableFigureCaption({
+        explicit: markerBlock?.caption || '',
+        sectionTitle: markerBlock?.sectionTitle || '',
+        index: figures.length + 1,
+      }),
       sectionId: markerBlock?.sectionId || '',
       anchorText: marker,
       sourceType: 'docx-embedded',
@@ -516,7 +531,11 @@ function extractFigureMarkers(documentXml, relationshipsXml, embeddedMedia, bloc
     const media = mediaByPath.get(block.metadata.mediaPath) || {};
     figures.push({
       figureId,
-      caption: block.caption || `图 ${figures.length + 1}`,
+      caption: readableFigureCaption({
+        explicit: block.caption || '',
+        sectionTitle: block.sectionTitle || '',
+        index: figures.length + 1,
+      }),
       sectionId: block.sectionId || '',
       anchorText: block.anchorText,
       sourceType: 'docx-embedded',
@@ -649,6 +668,61 @@ function drawingCaption(drawingXml, drawingIndex) {
   return [attributes.title, attributes.descr, attributes.name, imageDataAttributes['o:title'], imageDataAttributes.title]
     .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
     .find(isMeaningfulDrawingCaption) || `图 ${drawingIndex}`;
+}
+
+function readableTableTitle({ explicit = '', sectionTitle = '', headers = [], index = 1 } = {}) {
+  const explicitTitle = String(explicit || '').trim();
+  if (explicitTitle && !isGenericTableTitle(explicitTitle)) {
+    return stripTableNumberPrefix(explicitTitle);
+  }
+
+  const context = cleanSectionTitle(sectionTitle);
+  if (context) {
+    return /表$/.test(context) ? context : `${context}表`;
+  }
+
+  const headerText = (headers || [])
+    .map((header) => String(header || '').trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join('、');
+  return headerText ? `${headerText}表` : `表格 ${index}`;
+}
+
+function readableFigureCaption({ explicit = '', sectionTitle = '', index = 1 } = {}) {
+  const explicitCaption = String(explicit || '').trim();
+  if (explicitCaption && !isGenericFigureCaption(explicitCaption)) {
+    return stripFigureNumberPrefix(explicitCaption);
+  }
+
+  const context = cleanSectionTitle(sectionTitle);
+  return context || `图示 ${index}`;
+}
+
+function isGenericTableTitle(value) {
+  return /^(?:表|表格)\s*\d+$/.test(String(value || '').trim());
+}
+
+function isGenericFigureCaption(value) {
+  return /^(?:图|图片|图示)\s*\d+$/.test(String(value || '').trim());
+}
+
+function stripTableNumberPrefix(value) {
+  return String(value || '').trim().replace(/^(?:表|表格)\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+}
+
+function stripFigureNumberPrefix(value) {
+  return String(value || '').trim().replace(/^(?:图|图片|图示)\s*\d+\s*[:：、.．-]?\s*/, '').trim();
+}
+
+function cleanSectionTitle(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^第[一二三四五六七八九十百千万0-9]+[章节篇部分]\s*[、:：.]?\s*/, '')
+    .replace(/^[一二三四五六七八九十百千万]+[、.．]\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[、.．]?\s+/, '')
+    .replace(/[（(]\s*(?:C4Context|flowchart|graph|sequenceDiagram|Mermaid|SVG|PNG)[^)）]*[)）]/gi, '')
+    .trim();
 }
 
 function isMeaningfulDrawingCaption(value) {
