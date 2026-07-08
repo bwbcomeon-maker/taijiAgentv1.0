@@ -107,3 +107,23 @@ def test_idle_session_load_refreshes_pending_approvals():
     assert "showApprovalForSession(sid, data.pending" in refresh
     assert "startApprovalPolling(sid)" in refresh
     assert "refreshApprovalPendingForSession(sid)" in SESSIONS_JS
+
+
+def test_failed_approval_response_reconciles_server_pending_state():
+    """A failed approval response must not leave a stale local card/busy state."""
+    respond = _js_function_body("respondApproval")
+
+    assert "const result = await api(\"/api/approval/respond\"" in respond
+    assert "if(!result.ok)" in respond
+    assert "await refreshApprovalPendingForSession(sid)" in respond
+    assert "_settleStaleApprovalUiForSession(sid)" in respond
+
+
+def test_stale_approval_settlement_restores_idle_composer():
+    """When the server has no pending approval, the desktop composer must become usable."""
+    settle = _js_function_body("_settleStaleApprovalUiForSession")
+
+    assert "S.busy=false" in settle
+    assert "S.activeStreamId=null" in settle
+    assert "session.active_stream_id=null" in settle
+    assert "updateSendBtn()" in settle

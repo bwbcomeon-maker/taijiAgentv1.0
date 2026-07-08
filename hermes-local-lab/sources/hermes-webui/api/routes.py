@@ -17150,18 +17150,21 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     approval_payload = pending or gateway_data or {}
     remote_gateway_run_id = str(approval_payload.get("_gateway_run_id") or "").strip()
     remote_gateway_resolved = False
+    remote_gateway_inactive = False
     if remote_gateway_run_id:
         try:
-            from api.gateway_chat import resolve_gateway_run_approval
+            from api.gateway_chat import resolve_gateway_run_approval_result
 
-            remote_gateway_resolved = bool(resolve_gateway_run_approval(approval_payload, choice))
+            remote_gateway_result = resolve_gateway_run_approval_result(approval_payload, choice)
+            remote_gateway_resolved = bool(remote_gateway_result.get("resolved"))
+            remote_gateway_inactive = bool(remote_gateway_result.get("inactive"))
         except Exception:
             logger.warning("Failed to resolve gateway run approval", exc_info=True)
             remote_gateway_resolved = False
         if not remote_gateway_resolved:
             # Restore the card so the user can retry instead of losing the
             # visible approval while the Gateway run remains blocked.
-            if pending:
+            if pending and not remote_gateway_inactive:
                 with _lock:
                     queue = _pending.setdefault(sid, [])
                     if isinstance(queue, list):

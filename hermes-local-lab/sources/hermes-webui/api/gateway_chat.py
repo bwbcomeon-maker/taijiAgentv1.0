@@ -328,12 +328,23 @@ def _stop_gateway_run(base_url: str, headers: dict[str, str], run_id: str) -> No
         logger.debug("Failed to stop gateway run %s", run_id, exc_info=True)
 
 
-def resolve_gateway_run_approval(approval: dict, choice: str) -> bool:
-    """Resolve a WebUI approval card against the Gateway run that owns it."""
+def _gateway_run_approval_error_code(raw_body: str) -> str:
+    try:
+        body = json.loads(raw_body or "{}")
+    except Exception:
+        return ""
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("code") or err.get("type") or "").strip()
+    return ""
+
+
+def resolve_gateway_run_approval_result(approval: dict, choice: str) -> dict:
+    """Resolve a WebUI approval card and keep stale-vs-retryable failure detail."""
     run_id = str((approval or {}).get("_gateway_run_id") or "").strip()
     session_id = str((approval or {}).get("_session_id") or "").strip()
     if not run_id:
-        return False
+        return {"resolved": False, "inactive": True, "code": "missing_run_id"}
     from api.config import get_config
 
     cfg = get_config()
@@ -354,13 +365,37 @@ def resolve_gateway_run_approval(approval: dict, choice: str) -> bool:
             except Exception:
                 body = {}
             resolved = body.get("resolved")
-            return bool(resolved) if resolved is not None else 200 <= resp.status < 300
+            return {
+                "resolved": bool(resolved) if resolved is not None else 200 <= resp.status < 300,
+                "inactive": False,
+                "status": resp.status,
+            }
     except urllib.error.HTTPError as exc:
-        logger.warning("Gateway run approval resolve failed: HTTP %s", exc.code)
-        return False
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        code = _gateway_run_approval_error_code(err_body)
+        inactive = exc.code in {404, 409} and code in {
+            "run_not_found",
+            "approval_not_active",
+            "approval_not_pending",
+        }
+        logger.warning("Gateway run approval resolve failed: HTTP %s code=%s", exc.code, code or "unknown")
+        return {
+            "resolved": False,
+            "inactive": inactive,
+            "status": exc.code,
+            "code": code,
+        }
     except Exception:
         logger.warning("Gateway run approval resolve failed", exc_info=True)
-        return False
+        return {"resolved": False, "inactive": False, "code": "request_failed"}
+
+
+def resolve_gateway_run_approval(approval: dict, choice: str) -> bool:
+    """Backward-compatible boolean wrapper for Gateway run approval resolution."""
+    return bool(resolve_gateway_run_approval_result(approval, choice).get("resolved"))
 
 
 def _gateway_run_request_body(

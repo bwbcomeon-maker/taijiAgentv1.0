@@ -2968,6 +2968,27 @@ function _hideApprovalCardIfOwner(sid, force=false) {
   if (!sid || _approvalSessionId === sid) hideApprovalCard(force);
 }
 
+function _settleStaleApprovalUiForSession(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return;
+  if (_hasApprovalPendingForSession(sid)) return;
+  const session = S.session || {};
+  S.activeStreamId=null;
+  session.active_stream_id=null;
+  session.pending_user_message=null;
+  session.pending_started_at=null;
+  if (typeof INFLIGHT === "object" && INFLIGHT && INFLIGHT[sid]) {
+    delete INFLIGHT[sid];
+    if (typeof clearInflightState === "function") clearInflightState(sid);
+  }
+  S.busy=false;
+  if (typeof setBusy === "function") setBusy(false);
+  if (typeof clearOptimisticSessionStreaming === "function") clearOptimisticSessionStreaming(sid);
+  if (typeof setComposerStatus === "function") setComposerStatus("");
+  if (typeof setStatus === "function") setStatus("");
+  if (typeof updateSendBtn === "function") updateSendBtn();
+  if (typeof _setActivePaneIdleIfOwner === "function") _setActivePaneIdleIfOwner();
+}
+
 function _renderPendingApprovalForActiveSession() {
   const sid = _promptActiveSessionId();
   if (!sid) return;
@@ -3072,27 +3093,44 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
+  const approvalType = _approvalCurrentType;
   // Disable all buttons immediately to prevent double-submit
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id);
     if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
   });
-  _approvalSessionId = null;
-  _approvalCurrentId = null;
-  const approvalType = _approvalCurrentType;
-  _approvalCurrentType = null;
-  _approvalCurrentCapability = null;
-  _clearApprovalPendingForSession(sid);
-  hideApprovalCard(true);
   try {
-    await api("/api/approval/respond", {
+    const result = await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
     });
+    if(!result.ok) {
+      await refreshApprovalPendingForSession(sid);
+      if(!_hasApprovalPendingForSession(sid)) {
+        _settleStaleApprovalUiForSession(sid);
+      } else {
+        _renderPendingApprovalForActiveSession();
+        showToast("审批暂未生效，请再试一次。", 3200, "warning");
+      }
+      return;
+    }
+    _approvalSessionId = null;
+    _approvalCurrentId = null;
+    _approvalCurrentType = null;
+    _approvalCurrentCapability = null;
+    _clearApprovalPendingForSession(sid);
+    hideApprovalCard(true);
     if (approvalType === "capability_enable" && typeof refreshSecurityStatus === "function") {
       setTimeout(()=>{ void refreshSecurityStatus(true); }, 500);
     }
-  } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
+  } catch(e) {
+    await refreshApprovalPendingForSession(sid);
+    if(!_hasApprovalPendingForSession(sid)) _settleStaleApprovalUiForSession(sid);
+    ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+      const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
+    });
+    setStatus(t("approval_responding") + " " + e.message);
+  }
 }
 
 function startApprovalPolling(sid) {
@@ -3108,7 +3146,7 @@ function startApprovalPolling(sid) {
       if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
       else {
         _clearApprovalPendingForSession(sid);
-        _hideApprovalCardIfOwner(sid);
+        _hideApprovalCardIfOwner(sid, true);
         if (!S.busy) stopApprovalPollingForSession(sid);
       }
     });
@@ -3118,7 +3156,7 @@ function startApprovalPolling(sid) {
       if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
       else {
         _clearApprovalPendingForSession(sid);
-        _hideApprovalCardIfOwner(sid);
+        _hideApprovalCardIfOwner(sid, true);
         if (!S.busy) stopApprovalPollingForSession(sid);
       }
     });
@@ -3157,7 +3195,7 @@ async function refreshApprovalPendingForSession(sid) {
       if (!_approvalPollingSessionId) startApprovalPolling(sid);
     } else {
       _clearApprovalPendingForSession(sid);
-      _hideApprovalCardIfOwner(sid);
+      _hideApprovalCardIfOwner(sid, true);
     }
   } catch(_e) {
     // Loading a conversation should not fail just because the approval check is unavailable.
@@ -3180,7 +3218,7 @@ function _startApprovalFallbackPoll(sid) {
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else {
         _clearApprovalPendingForSession(sid);
-        _hideApprovalCardIfOwner(sid);
+        _hideApprovalCardIfOwner(sid, true);
         if (!S.busy) stopApprovalPollingForSession(sid);
       }
     } catch(e) { /* ignore poll errors */ }
