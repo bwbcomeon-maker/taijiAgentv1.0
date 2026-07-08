@@ -335,22 +335,31 @@ async function main() {
     assertState(collaborationAfterRefresh.tab === "collaboration" && collaborationAfterRefresh.panel === "collaboration", "Collaboration tab did not survive workbench refresh", collaborationAfterRefresh);
     const contentTeamLayout = await page.evaluate(() => {
       const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      const tabs = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-tabs");
       const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='collaboration']");
       const list = panel?.querySelector(".expert-team-member-list");
+      const card = panel?.querySelector(".expert-team-collaboration-card");
+      const current = panel?.querySelector(".expert-team-collaboration-current");
+      const bodyRect = body?.getBoundingClientRect();
+      const tabsRect = tabs?.getBoundingClientRect();
+      const cardRect = card?.getBoundingClientRect();
       return {
+        text: panel?.textContent.replace(/\s+/g, " ").trim() || "",
         hasVerticalList: Boolean(list),
         rowCount: panel?.querySelectorAll(".expert-team-member-row").length || 0,
         avatarCount: panel?.querySelectorAll(".expert-team-member-avatar").length || 0,
         currentCount: panel?.querySelectorAll(".expert-team-member-row.running .expert-team-member-state").length || 0,
+        currentText: current?.textContent.replace(/\s+/g, " ").trim() || "",
         noBodyOverflow: body ? body.scrollHeight <= body.clientHeight + 4 : false,
+        cardFillsAvailableSpace: bodyRect && tabsRect && cardRect ? cardRect.height >= bodyRect.height - tabsRect.height - 18 : false,
         hasHorizontalStrip: Boolean(panel?.querySelector(".expert-team-member-strip")),
         scrollWidth: list ? list.scrollWidth : 0,
         clientWidth: list ? list.clientWidth : 0,
       };
     });
     assertState(
-      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.noBodyOverflow && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1,
-      "Collaboration tab does not show the 5-person content team in one screen",
+      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && contentTeamLayout.noBodyOverflow && contentTeamLayout.cardFillsAvailableSpace && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && !contentTeamLayout.text.includes("generated_invalid"),
+      "Collaboration tab does not show the 5-person content team in one screen with Chinese states and filled layout",
       contentTeamLayout
     );
     await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-collaboration-tab-content-team.png"), fullPage: false });
@@ -428,8 +437,17 @@ async function main() {
     await renderRun(page, "generated_invalid");
     const invalid = await snapshotState(page);
     assertState(invalid.panelText.includes("草稿未通过校验") && invalid.panelText.includes("重新生成") && invalid.panelText.includes("查看草稿"), "Generated-invalid state does not expose recovery actions", invalid);
+    assertState(!invalid.panelText.includes("generated_invalid"), "Generated-invalid state leaked the raw backend state into the UI", invalid);
     assertState(!invalid.panelText.includes("专家团正在生成") && !invalid.panelText.includes("阶段成果待复核"), "Generated-invalid state is mixed with running or review state", invalid);
     assertState(invalid.dockHidden && invalid.chatConfirmButtons === 0, "Generated-invalid state leaks duplicate actions", invalid);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    const invalidCollaboration = await activeWorkbenchTab(page);
+    assertState(
+      invalidCollaboration.tab === "collaboration" && invalidCollaboration.text.includes("当前处理") && invalidCollaboration.text.includes("正在处理：") && !invalidCollaboration.text.includes("generated_invalid"),
+      "Generated-invalid collaboration tab leaked raw status or lost the current collaboration summary",
+      invalidCollaboration
+    );
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-collaboration-tab-generated-invalid.png"), fullPage: false });
 
     await renderRun(page, "awaiting_stage_input");
     const stageInput = await snapshotState(page);
@@ -508,6 +526,7 @@ async function main() {
         path.join(outDir, "expert-team-plan-a-confirmation-open.png"),
         path.join(outDir, "expert-team-plan-a-collaboration-tab-content-team.png"),
         path.join(outDir, "expert-team-plan-a-collaboration-tab-research-team.png"),
+        path.join(outDir, "expert-team-plan-a-collaboration-tab-generated-invalid.png"),
         path.join(outDir, "expert-team-plan-a-review-scroll-preserved.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),

@@ -151,6 +151,11 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "expert-team-collaboration-grid" in EXPERT_UI_JS
     assert "expert-team-collaboration-current" in EXPERT_UI_JS
     assert "当前" in EXPERT_UI_JS
+    assert "generated_invalid:'草稿未通过校验'" in EXPERT_UI_JS
+    assert "function tabStatusText" in EXPERT_UI_JS
+    assert "return status==='generated_invalid'||status==='failed'?'需处理':statusText(status)" in EXPERT_UI_JS
+    assert "const currentCollaborationState='当前处理'" in EXPERT_UI_JS
+    assert "正在处理：" in EXPERT_UI_JS
     assert "data-expert-team-workspace-mode=\"confirm\"" in EXPERT_UI_JS
     assert "window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab" in ACTIONS_JS
     assert "function normalizeExpertTeamWorkspaceTab" in ACTIONS_JS
@@ -160,6 +165,10 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "expert-team-member-row" in EXPERT_UI_JS
     assert "expert-team-member-state" in EXPERT_UI_JS
     assert ".expert-team-collaboration-grid{display:grid" in STYLE_CSS
+    assert "grid-template-columns:repeat(2,minmax(0,1fr))" in STYLE_CSS
+    assert "grid-auto-rows:minmax(74px,1fr)" in STYLE_CSS
+    assert ".expert-team-collaboration-current-copy small{min-width:0;color:var(--muted);font-size:11px;line-height:1.35;font-weight:720;white-space:normal;overflow:visible;text-overflow:clip;" in STYLE_CSS
+    assert ".expert-team-collaboration-grid .expert-team-member-row{grid-template-columns:38px minmax(0,1fr);grid-template-areas:\"avatar copy\" \"avatar state\"" in STYLE_CSS
     assert ".expert-team-collaboration-card" in STYLE_CSS
     assert ".expert-team-member-row{min-width:0;display:grid" in STYLE_CSS
 

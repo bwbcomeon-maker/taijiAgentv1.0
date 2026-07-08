@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Expert-team Collaboration tab now maps raw generated-invalid states to Chinese UI labels and stretches member cards to fill the right-side workspace without exposing backend state names.
 - Expert-team workbench refreshes now preserve the user's scroll position when the same run and stage re-render, preventing review actions from jumping back to the top during polling.
 - Expert-team plan/research draft prompts now include the rich-draft table and diagram acceptance gates, so draft stages no longer produce ordinary prose that the backend must reject as `generated_invalid`.
 - Expert-team Members tab now renders team members as a vertical list inside the existing right workspace instead of a horizontally scrolling strip.

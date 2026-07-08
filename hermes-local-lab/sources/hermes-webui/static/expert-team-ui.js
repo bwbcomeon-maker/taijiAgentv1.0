@@ -27,9 +27,14 @@
       ready_to_generate:'待启动',
       generating:'生成中',
       awaiting_stage_input:'待确认',
+      generated_invalid:'草稿未通过校验',
       completed:'已完成',
       failed:'失败'
     }[String(status||'')]||String(status||'待执行');
+  }
+  function tabStatusText(status){
+    status=String(status||'');
+    return status==='generated_invalid'||status==='failed'?'需处理':statusText(status);
   }
   function avatarHtml(src,label){
     const name=safeEsc(label||'专家');
@@ -127,6 +132,7 @@
     const currentMember=members.find(member=>
       (member.id&&String(member.id)===currentWorkerId)||(member.name&&String(member.name)===currentWorkerName)
     )||{name:currentWorkerName||currentStage.worker_name||'专家团',role:currentWorker.role||currentStage.phase||'当前阶段负责专家',image:currentWorker.image||''};
+    const currentCollaborationState='当前处理';
     const collaborationMembersHtml=members.length
       ? `<div class="expert-team-member-list expert-team-collaboration-grid" aria-label="专家团成员协作状态">${members.map(member=>{
           const task=collaborationTaskForMember(member,tasks);
@@ -215,7 +221,7 @@
               <strong>${safeEsc(progress.text)} · ${safeEsc(currentStage.phase||card&&card.phase||'当前阶段')}</strong>
               <small>${safeEsc(currentMember.name||'专家团')}正在处理：${safeEsc(currentStage.title||presentation.visibleTitle||'阶段任务')}</small>
             </span>
-            <em>${safeEsc(statusText(presentation.state))}</em>
+            <em>${safeEsc(currentCollaborationState)}</em>
           </div>
           <div class="expert-team-panel-progress expert-team-collaboration-progress" style="--expert-team-panel-progress:${progress.pct}%"><i></i><span><b>${safeEsc(progress.text)}</b> · ${safeEsc(currentStage.title||'等待阶段推进')}</span></div>
           ${collaborationMembersHtml}
@@ -256,7 +262,7 @@
       <div class="expert-team-panel-expanded-body">
         <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
         <nav class="expert-team-panel-tabs" aria-label="专家团工作台视图">
-          <button type="button" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(statusText(presentation.state))}</small></button>
+          <button type="button" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>
           <button type="button" data-expert-team-workspace-tab="collaboration" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>协作</span><small>${safeEsc(members.length?`${progress.text} · ${members.length} 人`:progress.text)}</small></button>
           <button type="button" data-expert-team-workspace-tab="result" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成果</span><small>${safeEsc(presentation.state==='completed'?'可查看':'沉淀中')}</small></button>
         </nav>
