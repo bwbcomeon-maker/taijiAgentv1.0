@@ -135,25 +135,33 @@ def test_expert_team_workspace_uses_reserved_layout_not_overlay():
 def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "expert-team-panel-tabs" in EXPERT_UI_JS
     assert "data-expert-team-workspace-tab=\"todo\"" in EXPERT_UI_JS
-    assert "data-expert-team-workspace-tab=\"flow\"" in EXPERT_UI_JS
-    assert "data-expert-team-workspace-tab=\"members\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"collaboration\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"flow\"" not in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"members\"" not in EXPERT_UI_JS
     assert "data-expert-team-workspace-tab=\"result\"" in EXPERT_UI_JS
+    assert "协作" in EXPERT_UI_JS
+    assert "专家团协作状态" in EXPERT_UI_JS
     assert "expert-team-confirmation-wizard" in EXPERT_UI_JS
     assert "需求确认 1/" in EXPERT_UI_JS
     assert "确认并下一题" in EXPERT_UI_JS
     assert "保存草稿" in EXPERT_UI_JS
     assert "稍后处理" in EXPERT_UI_JS
     assert "expert-team-primary-task-card" in EXPERT_UI_JS
-    assert "expert-team-workbench-hero" in EXPERT_UI_JS
-    assert "执行明细" in EXPERT_UI_JS
+    assert "expert-team-collaboration-card" in EXPERT_UI_JS
+    assert "expert-team-collaboration-grid" in EXPERT_UI_JS
+    assert "expert-team-collaboration-current" in EXPERT_UI_JS
+    assert "当前" in EXPERT_UI_JS
     assert "data-expert-team-workspace-mode=\"confirm\"" in EXPERT_UI_JS
     assert "window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab" in ACTIONS_JS
+    assert "function normalizeExpertTeamWorkspaceTab" in ACTIONS_JS
+    assert "tab==='flow'||tab==='members'?'collaboration':tab" in ACTIONS_JS
     assert "restoreExpertTeamWorkspaceTab(panel)" in UI_JS
     assert "expert-team-member-list" in EXPERT_UI_JS
     assert "expert-team-member-row" in EXPERT_UI_JS
     assert "expert-team-member-state" in EXPERT_UI_JS
-    assert "expert-team-member-list{display:grid" in STYLE_CSS
-    assert "expert-team-member-row{min-width:0;display:grid" in STYLE_CSS
+    assert ".expert-team-collaboration-grid{display:grid" in STYLE_CSS
+    assert ".expert-team-collaboration-card" in STYLE_CSS
+    assert ".expert-team-member-row{min-width:0;display:grid" in STYLE_CSS
 
 
 def test_expert_team_workspace_preserves_scroll_on_same_run_refresh():
@@ -219,8 +227,9 @@ def test_right_workspace_and_capsule_render_from_single_presentation():
     assert "阶段成果待复核" in EXPERT_UI_JS
     assert "expert-team-member-list" in EXPERT_UI_JS
     assert "expert-team-member-avatar" in EXPERT_UI_JS
-    assert "expert-team-timeline" in EXPERT_UI_JS
-    assert "timelineEvents" in EXPERT_UI_JS
+    assert "expert-team-collaboration-card" in EXPERT_UI_JS
+    assert "expert-team-collaboration-current" in EXPERT_UI_JS
+    assert "collaborationTaskForMember(member,tasks)" in EXPERT_UI_JS
     assert "专家团工作台" in EXPERT_UI_JS
     assert "expert-team-capsule" in EXPERT_UI_JS
     assert "Math.max(done,currentIndex+1)" not in EXPERT_UI_JS

@@ -44,6 +44,8 @@ async function prepareDesktopSession(page, workspace) {
 
 function runFixture(sessionId, state, overrides = {}) {
   const reviewItemCount = Number(overrides.reviewItemCount || 1);
+  const teamId = String(overrides.team_id || "content-creator-team");
+  const isResearchTeam = teamId === "deep-research-team";
   const stageIndex = {
     collecting_required: 0,
     collecting_optional: 0,
@@ -87,14 +89,28 @@ function runFixture(sessionId, state, overrides = {}) {
     locator: "chat",
     artifact_id: "",
   };
-  const members = [
+  const members = isResearchTeam ? [
+    { id: "director", name: "研究总导演", role: "流程编排", status: stageIndex > 0 ? "已完成" : "等待确认", image: "static/assets/writeflow/member-workflow-producer.png" },
+    { id: "research", name: "资料调研专家", role: "资料调研", status: state === "generating" ? "执行中" : stageIndex > 1 ? "已完成" : "待命", image: "static/assets/writeflow/member-research-expert.png" },
+    { id: "fact", name: "事实核验专家", role: "事实核验", status: stageIndex > 2 ? "已完成" : "待命", image: "static/assets/writeflow/member-editor-review.png" },
+    { id: "outline", name: "结构提纲专家", role: "结构提纲", status: stageIndex > 3 ? "已完成" : "待命", image: "static/assets/writeflow/member-outline-architect.png" },
+    { id: "draft", name: "材料初稿专家", role: "材料初稿", status: "待命", image: "static/assets/writeflow/member-writing-executor.png" },
+    { id: "delivery", name: "复核交付专家", role: "复核交付", status: state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-style-modeler.png" },
+  ] : [
     { id: "director", name: "写作总导演", role: "流程编排", status: stageIndex > 0 ? "已完成" : "等待确认", image: "static/assets/writeflow/member-workflow-producer.png" },
     { id: "material", name: "资料整理专家", role: "素材整理", status: state === "generating" ? "执行中" : state === "awaiting_stage_input" ? "等待确认" : stageIndex > 1 ? "已完成" : "待命", image: "static/assets/writeflow/member-research-expert.png" },
     { id: "writer", name: "文案创作专家", role: "正文写作", status: "待命", image: "static/assets/writeflow/member-writing-executor.png" },
     { id: "reviewer", name: "审稿专家", role: "审稿打磨", status: "待命", image: "static/assets/writeflow/member-editor-review.png" },
     { id: "delivery", name: "交付复核专家", role: "交付确认", status: state === "completed" ? "已完成" : "待命", image: "static/assets/writeflow/member-outline-architect.png" },
   ];
-  const tasks = [
+  const tasks = isResearchTeam ? [
+    { id: "direction", title: "研究方向确认", phase: "方向确认", status: stageIndex > 0 ? "done" : "pending", worker_id: "director", worker_name: "研究总导演" },
+    { id: "research", title: "资料调研", phase: "资料调研", status: state === "generating" ? "running" : stageIndex > 1 ? "done" : "pending", worker_id: "research", worker_name: "资料调研专家" },
+    { id: "evidence", title: "事实核验", phase: "事实核验", status: stageIndex > 2 ? "done" : "pending", worker_id: "fact", worker_name: "事实核验专家" },
+    { id: "outline", title: "结构提纲", phase: "结构提纲", status: stageIndex > 3 ? "done" : "pending", worker_id: "outline", worker_name: "结构提纲专家" },
+    { id: "draft", title: "材料初稿", phase: "材料初稿", status: "pending", worker_id: "draft", worker_name: "材料初稿专家" },
+    { id: "delivery", title: "复核交付", phase: "复核交付", status: state === "completed" ? "done" : "pending", worker_id: "delivery", worker_name: "复核交付专家" },
+  ] : [
     { id: "plan", title: "流程安排", phase: "流程安排", status: stageIndex > 0 ? "done" : "pending", worker_id: "director", worker_name: "写作总导演" },
     { id: "materials", title: "素材整理", phase: "素材整理", status: state === "generating" ? "running" : state === "awaiting_stage_input" ? "awaiting_input" : stageIndex > 1 ? "done" : "pending", worker_id: "material", worker_name: "资料整理专家" },
     { id: "draft", title: "起草工作汇报初稿", phase: "初稿撰写", status: stageIndex > 2 ? "done" : "pending", worker_id: "writer", worker_name: "文案创作专家" },
@@ -153,7 +169,7 @@ function runFixture(sessionId, state, overrides = {}) {
   const view = {
     business_context: { material_type: "work_report", visible_title: "起草工作汇报初稿", style_contract: "采用正式工作汇报口径。", forbidden_terms: [] },
     presentation: { state, visible_title: "起草工作汇报初稿", result: output, summary: output.summary, progress_text: progress.text, ...presentationByState[state] },
-    team: { id: "content-creator-team", title: "内容创作专家团", image: "", members },
+    team: { id: teamId, title: isResearchTeam ? "深度材料研究团" : "内容创作专家团", image: "", members },
     workflow: { stages: tasks, current_stage: currentStage, progress },
     workspace: {
       visible: true,
@@ -164,7 +180,7 @@ function runFixture(sessionId, state, overrides = {}) {
       phases: tasks,
       members,
       timeline: [
-        { type: "team_created", title: "内容创作专家团已创建", detail: "等待需求确认后开始协作。", member_id: "director", member_name: "写作总导演" },
+        { type: "team_created", title: `${isResearchTeam ? "深度材料研究团" : "内容创作专家团"}已创建`, detail: "等待需求确认后开始协作。", member_id: "director", member_name: isResearchTeam ? "研究总导演" : "写作总导演" },
         { type: state === "awaiting_stage_input" ? "stage_input_requested" : "generation_started", title: state === "awaiting_stage_input" ? "资料整理专家请求确认" : "专家正在处理当前阶段", detail: currentStage.phase, member_id: currentStage.worker_id, member_name: currentStage.worker_name },
       ],
       stage_result: stageResult,
@@ -183,8 +199,8 @@ function runFixture(sessionId, state, overrides = {}) {
   return {
     run_id: `electron-plan-a-${state}`,
     session_id: sessionId,
-    team_id: "content-creator-team",
-    team_title: "内容创作专家团",
+    team_id: teamId,
+    team_title: isResearchTeam ? "深度材料研究团" : "内容创作专家团",
     title: "帮我起草一份部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况",
     workflow_state: state,
     phase: currentStage.phase,
@@ -303,43 +319,67 @@ async function main() {
     await renderRun(page, "collecting_required");
     const collecting = await snapshotState(page);
     assertState(collecting.panelText.includes("必须需求待确认") && collecting.panelText.includes("去确认"), "Collecting state has no right-side confirmation action", collecting);
-    assertState(collecting.stageCount === 5 && collecting.memberCount === 5, "Content team members/stages are not dynamically rendered from fixture", collecting);
+    assertState(collecting.panelText.includes("0/5") && collecting.memberCount === 5, "Content team progress/members are not dynamically rendered from fixture", collecting);
     assertState(collecting.dockHidden && collecting.chatConfirmButtons === 0, "Collecting state still duplicates actions outside the workbench", collecting);
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']");
-    const flowBeforeRefresh = await activeWorkbenchTab(page);
-    assertState(flowBeforeRefresh.tab === "flow" && flowBeforeRefresh.panel === "flow", "Flow tab did not become active before refresh", flowBeforeRefresh);
+    const oldTabs = await page.evaluate(() => ({
+      flow: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']")),
+      members: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='members']")),
+      collaboration: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']")),
+    }));
+    assertState(!oldTabs.flow && !oldTabs.members && oldTabs.collaboration, "Workbench still exposes separate Flow/Members tabs", oldTabs);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    const collaborationBeforeRefresh = await activeWorkbenchTab(page);
+    assertState(collaborationBeforeRefresh.tab === "collaboration" && collaborationBeforeRefresh.panel === "collaboration", "Collaboration tab did not become active before refresh", collaborationBeforeRefresh);
     await renderRun(page, "collecting_required");
-    const flowAfterRefresh = await activeWorkbenchTab(page);
-    assertState(flowAfterRefresh.tab === "flow" && flowAfterRefresh.panel === "flow", "Flow tab did not survive workbench refresh", flowAfterRefresh);
-    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-flow-tab-after-refresh.png"), fullPage: false });
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='members']");
-    const membersBeforeRefresh = await activeWorkbenchTab(page);
-    assertState(membersBeforeRefresh.tab === "members" && membersBeforeRefresh.panel === "members", "Members tab did not become active before refresh", membersBeforeRefresh);
-    await renderRun(page, "collecting_required");
-    const membersAfterRefresh = await activeWorkbenchTab(page);
-    assertState(membersAfterRefresh.tab === "members" && membersAfterRefresh.panel === "members", "Members tab did not survive workbench refresh", membersAfterRefresh);
-    const membersLayout = await page.evaluate(() => {
-      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='members']");
+    const collaborationAfterRefresh = await activeWorkbenchTab(page);
+    assertState(collaborationAfterRefresh.tab === "collaboration" && collaborationAfterRefresh.panel === "collaboration", "Collaboration tab did not survive workbench refresh", collaborationAfterRefresh);
+    const contentTeamLayout = await page.evaluate(() => {
+      const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='collaboration']");
       const list = panel?.querySelector(".expert-team-member-list");
       return {
         hasVerticalList: Boolean(list),
         rowCount: panel?.querySelectorAll(".expert-team-member-row").length || 0,
+        avatarCount: panel?.querySelectorAll(".expert-team-member-avatar").length || 0,
+        currentCount: panel?.querySelectorAll(".expert-team-member-row.running .expert-team-member-state").length || 0,
+        noBodyOverflow: body ? body.scrollHeight <= body.clientHeight + 4 : false,
         hasHorizontalStrip: Boolean(panel?.querySelector(".expert-team-member-strip")),
         scrollWidth: list ? list.scrollWidth : 0,
         clientWidth: list ? list.clientWidth : 0,
       };
     });
     assertState(
-      membersLayout.hasVerticalList && membersLayout.rowCount === 5 && !membersLayout.hasHorizontalStrip && membersLayout.scrollWidth <= membersLayout.clientWidth + 1,
-      "Members tab still uses a cramped horizontal member strip",
-      membersLayout
+      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.noBodyOverflow && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1,
+      "Collaboration tab does not show the 5-person content team in one screen",
+      contentTeamLayout
     );
-    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-members-tab-after-refresh.png"), fullPage: false });
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-collaboration-tab-content-team.png"), fullPage: false });
+    await renderRun(page, "collecting_required", { run_id: "electron-plan-a-research-run", team_id: "deep-research-team" });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    const researchTeamLayout = await page.evaluate(() => {
+      const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='collaboration']");
+      const list = panel?.querySelector(".expert-team-member-list");
+      return {
+        text: panel?.textContent.replace(/\s+/g, " ").trim() || "",
+        rowCount: panel?.querySelectorAll(".expert-team-member-row").length || 0,
+        avatarCount: panel?.querySelectorAll(".expert-team-member-avatar").length || 0,
+        noBodyOverflow: body ? body.scrollHeight <= body.clientHeight + 4 : false,
+        scrollWidth: list ? list.scrollWidth : 0,
+        clientWidth: list ? list.clientWidth : 0,
+      };
+    });
+    assertState(
+      researchTeamLayout.text.includes("深度材料研究团") && researchTeamLayout.rowCount === 6 && researchTeamLayout.avatarCount >= 6 && researchTeamLayout.noBodyOverflow && researchTeamLayout.scrollWidth <= researchTeamLayout.clientWidth + 1,
+      "Collaboration tab does not dynamically render the 6-person research team in one screen",
+      researchTeamLayout
+    );
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-collaboration-tab-research-team.png"), fullPage: false });
     await renderRun(page, "collecting_required", { run_id: "electron-plan-a-stable-run" });
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
     await renderRun(page, "generating", { run_id: "electron-plan-a-stable-run" });
-    const flowAfterStateRefresh = await activeWorkbenchTab(page);
-    assertState(flowAfterStateRefresh.tab === "flow" && flowAfterStateRefresh.panel === "flow", "Flow tab did not survive same-run state refresh", flowAfterStateRefresh);
+    const collaborationAfterStateRefresh = await activeWorkbenchTab(page);
+    assertState(collaborationAfterStateRefresh.tab === "collaboration" && collaborationAfterStateRefresh.panel === "collaboration", "Collaboration tab did not survive same-run state refresh", collaborationAfterStateRefresh);
     await renderRun(page, "collecting_required", { run_id: "electron-plan-a-new-run" });
     const newRunTab = await activeWorkbenchTab(page);
     assertState(newRunTab.tab === "todo" && newRunTab.panel === "todo", "A different expert-team run inherited the previous run tab", newRunTab);
@@ -404,7 +444,7 @@ async function main() {
     assertState(collapsed.collapsed && collapsed.panelText.includes("处理") && !collapsed.panelText.includes("工作流程"), "Workbench did not collapse to the right capsule", collapsed);
     await page.click("#expertTeamWorkspacePanel .expert-team-capsule-action");
     const expanded = await snapshotState(page);
-    assertState(!expanded.collapsed && expanded.panelText.includes("专家团成员"), "Capsule action did not expand the workbench", expanded);
+    assertState(!expanded.collapsed && expanded.panelText.includes("专家团协作状态"), "Capsule action did not expand the workbench", expanded);
 
     await renderRun(page, "awaiting_review");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-result-card", { timeout: 10000 });
@@ -466,8 +506,8 @@ async function main() {
     console.log("EXPERT TEAM ELECTRON SMOKE OK", JSON.stringify({
       screenshots: [
         path.join(outDir, "expert-team-plan-a-confirmation-open.png"),
-        path.join(outDir, "expert-team-plan-a-flow-tab-after-refresh.png"),
-        path.join(outDir, "expert-team-plan-a-members-tab-after-refresh.png"),
+        path.join(outDir, "expert-team-plan-a-collaboration-tab-content-team.png"),
+        path.join(outDir, "expert-team-plan-a-collaboration-tab-research-team.png"),
         path.join(outDir, "expert-team-plan-a-review-scroll-preserved.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),

@@ -8,7 +8,12 @@
     const source=root&&root.closest?root.closest('[data-expert-team-run-id]'):root;
     return source&&source.dataset&&source.dataset.expertTeamRunId||'';
   }
+  function normalizeExpertTeamWorkspaceTab(tab){
+    tab=String(tab||'');
+    return tab==='flow'||tab==='members'?'collaboration':tab;
+  }
   function applyExpertTeamWorkspaceTab(root,tab){
+    tab=normalizeExpertTeamWorkspaceTab(tab);
     if(!root||!tab)return false;
     const target=root.querySelector&&root.querySelector(`[data-expert-team-workspace-tab="${tab}"]`);
     if(!target)return false;
@@ -23,6 +28,7 @@
     return true;
   }
   function rememberExpertTeamWorkspaceTab(root,tab){
+    tab=normalizeExpertTeamWorkspaceTab(tab);
     const runId=workspaceRunId(root);
     if(runId&&tab)workspaceTabByRun[runId]=tab;
   }
@@ -30,7 +36,7 @@
     const panel=root&&root.querySelector?root:document.getElementById('expertTeamWorkspacePanel');
     const inner=panel&&panel.querySelector?panel.querySelector('.expert-team-panel-inner'):(panel&&panel.classList&&panel.classList.contains('expert-team-panel-inner')?panel:null);
     if(!inner)return false;
-    const tab=workspaceTabByRun[workspaceRunId(inner)]||'todo';
+    const tab=normalizeExpertTeamWorkspaceTab(workspaceTabByRun[workspaceRunId(inner)]||'todo');
     return applyExpertTeamWorkspaceTab(inner,tab)||applyExpertTeamWorkspaceTab(inner,'todo');
   }
   async function refreshExpertTeamAfterAction(){
@@ -108,12 +114,13 @@
     window.handleExpertTeamPresentationAction=handleExpertTeamPresentationAction;
     window.switchExpertTeamWorkspaceTab=function(btn){
       const root=btn&&btn.closest&&btn.closest('.expert-team-panel-inner');
-      const tab=btn&&btn.dataset?btn.dataset.expertTeamWorkspaceTab:'';
+      const tab=normalizeExpertTeamWorkspaceTab(btn&&btn.dataset?btn.dataset.expertTeamWorkspaceTab:'');
       if(!root||!tab)return false;
       rememberExpertTeamWorkspaceTab(root,tab);
       return applyExpertTeamWorkspaceTab(root,tab);
     };
     window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab;
+    window.normalizeExpertTeamWorkspaceTab=normalizeExpertTeamWorkspaceTab;
     window.selectExpertTeamStageInputChoice=function(btn){
       const root=btn&&btn.closest&&btn.closest('.expert-team-stage-input-card');
       if(root&&root.querySelectorAll){

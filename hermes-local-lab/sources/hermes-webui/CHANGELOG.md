@@ -33,6 +33,7 @@
 - Writing expert-team boards now separate current-run artifacts from historical references, so same-topic old drafts or chat-mentioned paths cannot appear as downloadable results before the current task actually produces them.
 - Writing expert-team summons now stay in the current window: choosing a team creates and selects a new chat task, then shows the live team board above the composer instead of opening a separate task window.
 - Taiji chat can now hide internal Activity/tool/thinking details behind `webui.feature_visibility.chat.activity_details=false`, showing only safe public progress text and elapsed task duration.
+- Expert-team workbench Flow and Members views are now merged into one Collaboration tab that shows the current stage, owner, dynamic member avatars, and member states in a single compact panel.
 
 ### Fixed
 

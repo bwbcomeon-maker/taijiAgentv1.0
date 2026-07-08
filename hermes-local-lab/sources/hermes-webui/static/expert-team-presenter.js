@@ -74,6 +74,7 @@
       phase:str(task&&task.phase),
       status:str(task&&task.status,'pending'),
       statusText:taskStatusText(task),
+      worker_id:str(task&&task.worker_id),
       worker_name:str(task&&task.worker_name)
     }));
     const teamMembers=arr(teamView.members);
