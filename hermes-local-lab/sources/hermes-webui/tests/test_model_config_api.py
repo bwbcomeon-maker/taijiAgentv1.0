@@ -191,6 +191,72 @@ def test_image_gen_config_writes_doubao_ark_key_without_echo(monkeypatch, tmp_pa
     os.environ.pop("ARK_API_KEY", None)
 
 
+def test_vision_config_writes_auxiliary_vision_and_key_without_echo(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    result = model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "api_key": "dashscope-test-key-123456",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["auxiliary"]["vision"]["provider"] == "alibaba"
+    assert cfg["auxiliary"]["vision"]["model"] == "qwen3-vl-plus"
+    assert "api_key" not in cfg["auxiliary"]["vision"]
+    assert "DASHSCOPE_API_KEY=dashscope-test-key-123456" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    assert "dashscope-test-key-123456" not in json.dumps(result)
+    assert result["vision"]["key_status"]["env_var"] == "DASHSCOPE_API_KEY"
+    os.environ.pop("DASHSCOPE_API_KEY", None)
+
+
+def test_model_config_includes_image_understanding_config(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "auxiliary": {
+                    "vision": {
+                        "provider": "zai",
+                        "model": "glm-5v-turbo",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_model_config()
+
+    assert result["vision"]["provider"] == "zai"
+    assert result["vision"]["model"] == "glm-5v-turbo"
+    assert any(row["id"] == "alibaba" for row in result["vision_providers"])
+    assert any(row["id"] == "zai" for row in result["vision_providers"])
+
+
+def test_custom_vision_config_without_key_does_not_write_placeholder(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("AUXILIARY_VISION_API_KEY", raising=False)
+
+    model_config.set_vision_config(
+        {
+            "provider": "custom",
+            "model": "qwen-vl-private",
+            "base_url": "http://127.0.0.1:8000/v1",
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg["auxiliary"]["vision"]["provider"] == "custom"
+    assert cfg["auxiliary"]["vision"]["base_url"] == "http://127.0.0.1:8000/v1"
+    assert "api_key" not in cfg["auxiliary"]["vision"]
+
+
 def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)

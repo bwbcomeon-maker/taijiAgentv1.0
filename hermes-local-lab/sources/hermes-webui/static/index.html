@@ -1413,6 +1413,7 @@
                 </div>
                 <div class="model-config-hero-badges" id="modelConfigStatus" aria-live="polite">
                   <span class="model-config-pill" id="modelConfigMainStatusBadge">主模型 —</span>
+                  <span class="model-config-pill" id="visionConfigStatusBadge">看图识别 —</span>
                   <span class="model-config-pill" id="imageGenConfigStatusBadge">图片生成 —</span>
                   <em id="modelConfigProfile" class="model-config-sr">—</em>
                   <em id="modelConfigPath" class="model-config-sr">—</em>
@@ -1462,47 +1463,106 @@
                   </div>
                 </section>
 
-                <section class="model-config-panel model-config-summary-card model-config-image-card" id="modelConfigImageSummaryCard">
-                  <div class="model-config-card-head">
+                <section class="model-config-panel model-config-image-capabilities" id="modelConfigImageCapabilities">
+                  <div class="model-config-panel-head model-config-image-capabilities-head">
                     <div>
-                      <strong id="imageGenConfigCardTitle">待处理：图片生成密钥</strong>
-                      <span>不影响正文写作，只会影响实际出图。</span>
+                      <strong>图片能力</strong>
+                      <span>看图识别和生成图片是两套能力，分别配置，互不误伤。</span>
                     </div>
-                    <span class="model-config-warning-icon" aria-hidden="true">!</span>
+                    <button class="btn-tiny" type="button" data-model-config-toggle="modelConfigImageAdvanced" onclick="toggleModelConfigSection('modelConfigImageAdvanced')">高级图片模型</button>
                   </div>
-                  <div class="model-config-facts model-config-facts-vertical">
-                    <span><b>Provider</b><em id="imageGenConfigProviderSummary">—</em></span>
-                    <span><b>模型 ID</b><em id="imageGenConfigModelSummary">—</em></span>
-                    <span><b>密钥状态</b><em id="imageGenConfigKeyState">—</em></span>
-                  </div>
-                  <p class="model-config-muted" id="imageGenConfigSummary">只有调用 image_generate 或需要实际生成图片时才会失败。</p>
-	                  <div class="model-config-actions">
-	                    <button class="sm-btn" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴并验证</button>
-	                    <button class="btn-tiny" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">修改配置</button>
-	                    <button class="btn-tiny" id="btnAddCustomImageProvider" type="button" onclick="openCustomImageProviderEditor()">添加外部图片模型</button>
-	                    <button class="btn-tiny" id="btnManageCustomImageProviders" type="button" onclick="openImageProvidersPanel()">管理外部模型</button>
-	                    <button class="btn-tiny" id="btnGoImageProviders" type="button" onclick="openImageProvidersPanel()">去提供商配置</button>
-	                  </div>
-	                  <div class="model-config-template-row" aria-label="国产图片模型模板">
-	                    <span>通义万相</span><span>豆包 Seedream</span><span>百度千帆</span><span>腾讯混元</span><span>智谱 GLM-Image</span><span>MiniMax</span><span>讯飞 HiDream</span><span>可灵</span><span>自定义 HTTP</span>
-	                  </div>
-	                  <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
-	                    <label for="imageGenConfigProvider">Provider</label>
-	                    <select id="imageGenConfigProvider"></select>
-                    <label for="imageGenConfigModel">模型 ID</label>
-                    <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
-                    <datalist id="imageGenConfigModelOptions"></datalist>
-                    <div id="imageGenConfigApiKeyRow">
-                      <label for="imageGenConfigApiKey">API 密钥</label>
-                      <div class="model-config-secret-row">
-                        <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
-                        <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
+                  <div class="model-config-image-capability-grid">
+                    <section class="model-config-capability-card" id="modelConfigVisionSummaryCard" data-state="warn">
+                      <div class="model-config-card-head">
+                        <div>
+                          <strong>看图识别</strong>
+                          <span>用于分析上传图片、截图和表格截图。</span>
+                        </div>
+                        <span class="model-config-pill" id="visionConfigEffective">—</span>
                       </div>
-                      <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
-	                    </div>
-	                    <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存图片生成配置</button>
-	                  </div>
-	                </section>
+                      <div class="model-config-facts">
+                        <span><b>Provider</b><em id="visionConfigProviderSummary">—</em></span>
+                        <span><b>模型 ID</b><em id="visionConfigModelSummary">—</em></span>
+                        <span><b>密钥状态</b><em id="visionConfigKeyState">—</em></span>
+                      </div>
+                      <p class="model-config-muted" id="visionConfigSummary">配置后，上传图片时可以直接让 agent 理解图片内容。</p>
+                      <div class="model-config-actions">
+                        <button class="sm-btn" type="button" data-model-config-toggle="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
+                        <button class="btn-tiny" type="button" onclick="openVisionConfigKeyEditor()">粘贴密钥</button>
+                      </div>
+                      <div class="model-config-collapsible" id="visionConfigEdit" hidden>
+                        <label for="visionConfigProvider">Provider</label>
+                        <select id="visionConfigProvider"></select>
+                        <label for="visionConfigModel">模型 ID</label>
+                        <input id="visionConfigModel" list="visionConfigModelOptions" placeholder="选择或输入视觉模型 ID" autocomplete="off">
+                        <datalist id="visionConfigModelOptions"></datalist>
+                        <div id="visionConfigBaseUrlRow">
+                          <label for="visionConfigBaseUrl">Base URL</label>
+                          <input id="visionConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+                        </div>
+                        <div id="visionConfigApiKeyRow">
+                          <label for="visionConfigApiKey">API 密钥</label>
+                          <div class="model-config-secret-row">
+                            <input id="visionConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                            <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('visionConfigApiKey')">粘贴</button>
+                          </div>
+                          <div class="model-config-hint" id="visionConfigKeyHint">—</div>
+                        </div>
+                        <button class="sm-btn" id="btnSaveVisionConfig" type="button" onclick="saveVisionConfig()">保存识图配置</button>
+                      </div>
+                    </section>
+
+                    <section class="model-config-capability-card model-config-image-card" id="modelConfigImageSummaryCard" data-state="warn">
+                      <div class="model-config-card-head">
+                        <div>
+                          <strong id="imageGenConfigCardTitle">生成图片</strong>
+                          <span>只影响实际出图，不影响正文写作。</span>
+                        </div>
+                        <span class="model-config-pill" id="imageGenConfigEffective">—</span>
+                      </div>
+                      <div class="model-config-facts">
+                        <span><b>Provider</b><em id="imageGenConfigProviderSummary">—</em></span>
+                        <span><b>模型 ID</b><em id="imageGenConfigModelSummary">—</em></span>
+                        <span><b>密钥状态</b><em id="imageGenConfigKeyState">—</em></span>
+                      </div>
+                      <p class="model-config-muted" id="imageGenConfigSummary">配置后，调用 image_generate 或需要出图时会使用这里的模型。</p>
+                      <div class="model-config-actions">
+                        <button class="sm-btn" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴密钥</button>
+                        <button class="btn-tiny" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">配置生图</button>
+                      </div>
+                      <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
+                        <label for="imageGenConfigProvider">Provider</label>
+                        <select id="imageGenConfigProvider"></select>
+                        <label for="imageGenConfigModel">模型 ID</label>
+                        <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
+                        <datalist id="imageGenConfigModelOptions"></datalist>
+                        <div id="imageGenConfigApiKeyRow">
+                          <label for="imageGenConfigApiKey">API 密钥</label>
+                          <div class="model-config-secret-row">
+                            <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                            <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
+                          </div>
+                          <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
+                        </div>
+                        <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存生图配置</button>
+                      </div>
+                    </section>
+                  </div>
+                  <div class="model-config-collapsible model-config-image-advanced" id="modelConfigImageAdvanced" hidden>
+                    <div class="model-config-advanced-copy">
+                      <strong>高级图片模型</strong>
+                      <span>只有需要接入更多生图服务、维护外部端点或查看国产模板时才打开。</span>
+                    </div>
+                    <div class="model-config-actions">
+                      <button class="btn-tiny" id="btnAddCustomImageProvider" type="button" onclick="openCustomImageProviderEditor()">添加外部图片模型</button>
+                      <button class="btn-tiny" id="btnManageCustomImageProviders" type="button" onclick="openImageProvidersPanel()">管理外部模型</button>
+                      <button class="btn-tiny" id="btnGoImageProviders" type="button" onclick="openImageProvidersPanel()">去提供商配置</button>
+                    </div>
+                    <div class="model-config-template-row" aria-label="国产图片模型模板">
+                      <span>通义万相</span><span>豆包 Seedream</span><span>百度千帆</span><span>腾讯混元</span><span>智谱 GLM-Image</span><span>MiniMax</span><span>讯飞 HiDream</span><span>可灵</span><span>自定义 HTTP</span>
+                    </div>
+                  </div>
+                </section>
 	              </div>
 
               <section class="model-config-panel model-config-aux-summary" id="modelConfigAuxSummary">

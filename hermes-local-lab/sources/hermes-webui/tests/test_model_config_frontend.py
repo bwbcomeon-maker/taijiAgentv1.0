@@ -156,6 +156,48 @@ def test_providers_panel_contains_image_generation_provider_management_surface()
     assert ".provider-template-grid" in STYLE_CSS
 
 
+def test_model_config_has_clear_image_capability_cards():
+    for marker in (
+        'id="modelConfigImageCapabilities"',
+        'id="modelConfigVisionSummaryCard"',
+        'id="modelConfigImageSummaryCard"',
+        'id="visionConfigProviderSummary"',
+        'id="visionConfigModelSummary"',
+        'id="visionConfigKeyState"',
+        'id="visionConfigEdit"',
+        'id="visionConfigProvider"',
+        'id="visionConfigModel"',
+        'id="visionConfigApiKey"',
+        'id="btnSaveVisionConfig"',
+        "图片能力",
+        "看图识别",
+        "生成图片",
+    ):
+        assert marker in INDEX_HTML
+    assert "_renderVisionConfigSummary" in PANELS_JS
+    assert "saveVisionConfig" in PANELS_JS
+    assert "/api/vision/config" in PANELS_JS
+    assert ".model-config-image-capability-grid" in STYLE_CSS
+    assert ".model-config-capability-card" in STYLE_CSS
+
+
+def test_image_generation_advanced_actions_are_outside_primary_card():
+    card_start = INDEX_HTML.find('id="modelConfigImageSummaryCard"')
+    card_end = INDEX_HTML.find('</section>', card_start)
+    assert card_start >= 0 and card_end > card_start
+    card_html = INDEX_HTML[card_start:card_end]
+    for advanced_marker in (
+        'id="btnAddCustomImageProvider"',
+        'id="btnManageCustomImageProviders"',
+        'id="btnGoImageProviders"',
+        "通义万相",
+        "豆包 Seedream",
+        "自定义 HTTP",
+    ):
+        assert advanced_marker not in card_html
+    assert 'id="modelConfigImageAdvanced"' in INDEX_HTML
+
+
 def test_image_generation_custom_provider_new_form_generates_id():
     assert "_customImageProviderDraftId" in PANELS_JS
     assert "customImageProviderId" in PANELS_JS
@@ -166,6 +208,14 @@ def test_image_generation_save_forces_full_model_config_refresh():
     assert "async function saveImageGenConfig" in PANELS_JS
     assert "await loadModelConfigPanel(true)" in PANELS_JS
     assert "image_gen:data.image_gen" not in PANELS_JS
+
+
+def test_image_generation_edit_uses_selected_provider_default_model():
+    assert "const selectedImage=_modelConfigImageProviderRow" in PANELS_JS
+    assert (
+        "imageModelInput.value=imageGen.model||String((selectedImage&&selectedImage.default_model)||'')"
+        in PANELS_JS
+    )
 
 
 def test_image_generation_oauth_managed_provider_hides_key_paste_action():

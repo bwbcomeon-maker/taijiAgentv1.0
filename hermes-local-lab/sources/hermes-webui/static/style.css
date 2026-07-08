@@ -4178,6 +4178,7 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneModels .model-config-license-strip,
 #settingsPaneModels .model-config-hero,
 #settingsPaneModels .model-config-summary-card,
+#settingsPaneModels .model-config-image-capabilities,
 #settingsPaneModels .model-config-aux-summary{border:1px solid rgba(190,216,236,.9);border-radius:18px;background:rgba(255,255,255,.92);box-shadow:0 10px 24px rgba(33,96,139,.07);}
 #settingsPaneModels .model-config-license-strip{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start;padding:14px 16px;background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(246,252,255,.9));}
 #settingsPaneModels .model-config-license-main{display:grid;grid-template-columns:40px minmax(0,1fr);gap:12px;align-items:start;min-width:0;}
@@ -4231,9 +4232,23 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneModels .model-config-pill[data-state="ok"]{border-color:#98d8b2;color:#14814a;background:#f6fcf8;}
 #settingsPaneModels .model-config-pill[data-state="warn"]{border-color:#e4c36c;color:#9a6b00;background:#fff9e8;}
 #settingsPaneModels .model-config-pill[data-state="danger"]{border-color:#efaaa8;color:#bd3d3a;background:#fff2f2;}
-#settingsPaneModels .model-config-summary-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.75fr);gap:14px;align-items:start;}
+#settingsPaneModels .model-config-summary-grid{display:grid;grid-template-columns:1fr;gap:14px;align-items:start;}
 #settingsPaneModels .model-config-panel{padding:16px;gap:12px;border-radius:18px;background:#fff;}
 #settingsPaneModels .model-config-summary-card{display:grid;align-content:start;gap:13px;min-width:0;}
+#settingsPaneModels .model-config-image-capabilities{display:grid;gap:13px;min-width:0;}
+#settingsPaneModels .model-config-image-capabilities-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:0;}
+#settingsPaneModels .model-config-image-capabilities-head>div{min-width:0;}
+#settingsPaneModels .model-config-image-capabilities-head .btn-tiny{min-height:30px;padding:0 10px;border-radius:9px;font-weight:850;white-space:nowrap;}
+#settingsPaneModels .model-config-image-capability-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start;min-width:0;}
+#settingsPaneModels .model-config-capability-card{display:grid;align-content:start;gap:12px;min-width:0;border:1px solid rgba(210,228,241,.95);border-radius:14px;background:#fbfdff;padding:14px;}
+#settingsPaneModels .model-config-capability-card[data-state="warn"]{border-color:#e5c36b;background:linear-gradient(180deg,#fff9e8,#fff 44%);}
+#settingsPaneModels .model-config-capability-card[data-state="ok"]{border-color:#a9dfbf;background:#fff;}
+#settingsPaneModels .model-config-capability-card .model-config-facts{grid-template-columns:repeat(3,minmax(0,1fr));}
+#settingsPaneModels .model-config-image-advanced{border-top:1px solid rgba(222,235,245,.9);margin-top:0;}
+#settingsPaneModels .model-config-advanced-copy{display:grid;gap:4px;}
+#settingsPaneModels .model-config-advanced-copy strong{color:#0d3158;font-size:14px;line-height:1.25;font-weight:900;}
+#settingsPaneModels .model-config-advanced-copy span{color:#71869f;font-size:12px;line-height:1.35;font-weight:700;}
+#settingsPaneModels .model-config-image-advanced .model-config-actions{justify-content:flex-start;}
 #settingsPaneModels .model-config-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;}
 #settingsPaneModels .model-config-card-head strong,
 #settingsPaneModels .model-config-aux-summary>div>strong{display:block;color:#0d3158;font-size:16px;line-height:1.25;font-weight:900;}
@@ -4274,6 +4289,7 @@ main.main > #mainPlugin{display:none;}
  #settingsPaneModels .model-config-license-facts{grid-template-columns:repeat(2,minmax(0,1fr));}
  #settingsPaneModels .model-config-hero,
  #settingsPaneModels .model-config-summary-grid,
+ #settingsPaneModels .model-config-image-capability-grid,
  #settingsPaneModels .model-config-aux-summary{grid-template-columns:1fr;}
  #settingsPaneModels .model-config-hero-badges{justify-content:flex-start;}
 }

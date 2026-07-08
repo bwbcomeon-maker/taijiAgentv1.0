@@ -44,6 +44,40 @@ _IMAGE_GEN_KEY_ENV: dict[str, str] = {
     "xai": "XAI_API_KEY",
     "krea": "KREA_API_KEY",
 }
+_VISION_KEY_ENV: dict[str, str] = {
+    "alibaba": "DASHSCOPE_API_KEY",
+    "zai": "GLM_API_KEY",
+    "custom": "AUXILIARY_VISION_API_KEY",
+}
+_VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
+    "alibaba": {
+        "name": "阿里百炼 Qwen-VL",
+        "description": "用于上传图片、截图和表格截图理解",
+        "default_model": "qwen3-vl-plus",
+        "models": [
+            {"id": "qwen3-vl-plus", "label": "Qwen3 VL Plus"},
+            {"id": "qwen3-vl-flash", "label": "Qwen3 VL Flash"},
+            {"id": "qwen2.5-vl-72b-instruct", "label": "Qwen2.5 VL 72B"},
+        ],
+    },
+    "zai": {
+        "name": "智谱 GLM-V",
+        "description": "用于图片理解和视觉问答",
+        "default_model": "glm-5v-turbo",
+        "models": [
+            {"id": "glm-5v-turbo", "label": "GLM-5V Turbo"},
+            {"id": "glm-4v-plus", "label": "GLM-4V Plus"},
+            {"id": "glm-4v-flash", "label": "GLM-4V Flash"},
+        ],
+    },
+    "custom": {
+        "name": "自定义国产兼容端点",
+        "description": "适合私有化或 OpenAI 兼容视觉接口",
+        "default_model": "",
+        "models": [],
+        "requires_base_url": True,
+    },
+}
 _IMAGE_GEN_FALLBACK_META: dict[str, dict[str, Any]] = {
     "doubao": {
         "name": "Doubao Seedream",
@@ -340,6 +374,141 @@ def get_image_gen_config() -> dict[str, Any]:
     }
 
 
+def _vision_key_status(provider_id: str) -> dict[str, Any]:
+    provider = str(provider_id or "").strip().lower()
+    env_var = _VISION_KEY_ENV.get(provider)
+    if env_var:
+        return _key_status_for_env(env_var)
+    return _provider_key_status(provider)
+
+
+def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    active = str(active_provider or "").strip().lower()
+    for pid, meta in _VISION_PROVIDER_META.items():
+        key_status = _vision_key_status(pid)
+        requires_base_url = bool(meta.get("requires_base_url"))
+        active_base_url = str((vision_cfg or {}).get("base_url") or "").strip() if pid == active else ""
+        rows.append(
+            {
+                "id": pid,
+                "name": str(meta.get("name") or pid),
+                "description": str(meta.get("description") or ""),
+                "active": pid == active,
+                "available": bool(key_status.get("configured") and (not requires_base_url or active_base_url)),
+                "key_status": key_status,
+                "requires_env": [_VISION_KEY_ENV[pid]] if pid in _VISION_KEY_ENV else [],
+                "requires_base_url": requires_base_url,
+                "models": list(meta.get("models") or []),
+                "default_model": str(meta.get("default_model") or ""),
+            }
+        )
+    if active and active not in _VISION_PROVIDER_META and active != "auto":
+        key_status = _vision_key_status(active)
+        rows.append(
+            {
+                "id": active,
+                "name": _PROVIDER_DISPLAY.get(active, active),
+                "description": "当前配置中的视觉模型",
+                "active": True,
+                "available": bool(key_status.get("configured")),
+                "key_status": key_status,
+                "requires_env": [key_status.get("env_var")] if key_status.get("env_var") else [],
+                "requires_base_url": False,
+                "models": [],
+                "default_model": "",
+            }
+        )
+    return rows
+
+
+def get_vision_config() -> dict[str, Any]:
+    reload_config()
+    config_path = _get_config_path()
+    config_data = _load_yaml_config_file(config_path)
+    auxiliary = config_data.get("auxiliary")
+    vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+    if not isinstance(vision_cfg, dict):
+        vision_cfg = {}
+    provider = str(vision_cfg.get("provider") or "").strip().lower()
+    model = str(vision_cfg.get("model") or "").strip()
+    base_url = str(vision_cfg.get("base_url") or "").strip()
+    api_mode = str(vision_cfg.get("api_mode") or "").strip()
+    return {
+        "ok": True,
+        "profile": _active_profile_name(),
+        "config": _public_config_summary(config_path),
+        "vision": {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_mode": api_mode,
+            "key_status": _vision_key_status(provider),
+        },
+        "providers": _vision_provider_rows(provider, vision_cfg),
+    }
+
+
+def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
+    provider_id = str(body.get("provider") or "").strip().lower()
+    model_id = str(body.get("model") or "").strip()
+    base_url = str(body.get("base_url") or "").strip().rstrip("/")
+    api_key = body.get("api_key")
+    if not provider_id:
+        raise ValueError("provider is required")
+    if provider_id not in _VISION_PROVIDER_META:
+        raise ValueError(f"unknown vision provider: {provider_id}")
+
+    meta = _VISION_PROVIDER_META[provider_id]
+    if not model_id:
+        model_id = str(meta.get("default_model") or "").strip()
+        models = meta.get("models") if isinstance(meta.get("models"), list) else []
+        if not model_id and models:
+            model_id = str((models[0] or {}).get("id") or "").strip()
+    if not model_id:
+        raise ValueError("model is required")
+    if bool(meta.get("requires_base_url")) and not base_url:
+        raise ValueError("base_url is required for custom vision provider")
+
+    env_var = _VISION_KEY_ENV.get(provider_id)
+    if api_key is not None and str(api_key).strip():
+        if not env_var:
+            raise ValueError(f"{provider_id} does not accept an API key from WebUI")
+        _write_env_file(_get_hermes_home() / ".env", {env_var: str(api_key).strip()})
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        auxiliary = config_data.get("auxiliary")
+        if not isinstance(auxiliary, dict):
+            auxiliary = {}
+        vision_cfg = auxiliary.get("vision")
+        if not isinstance(vision_cfg, dict):
+            vision_cfg = {}
+        vision_cfg["provider"] = provider_id
+        vision_cfg["model"] = model_id
+        if provider_id == "custom":
+            vision_cfg["base_url"] = base_url
+            has_custom_key = (
+                (api_key is not None and str(api_key).strip())
+                or _key_status_for_env("AUXILIARY_VISION_API_KEY").get("configured")
+            )
+            if has_custom_key:
+                vision_cfg["api_key"] = "${AUXILIARY_VISION_API_KEY}"
+            else:
+                vision_cfg.pop("api_key", None)
+        else:
+            vision_cfg.pop("base_url", None)
+            vision_cfg.pop("api_key", None)
+            vision_cfg.pop("api_mode", None)
+        auxiliary["vision"] = vision_cfg
+        config_data["auxiliary"] = auxiliary
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    invalidate_models_cache()
+    return get_vision_config()
+
+
 def get_custom_image_provider_configs() -> dict[str, Any]:
     config_path = _get_config_path()
     config_data = _load_yaml_config_file(config_path)
@@ -511,6 +680,7 @@ def get_model_config() -> dict[str, Any]:
     model = str(model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "").strip()
     key_env = str(model_cfg.get("key_env") or model_cfg.get("api_key_env") or "").strip()
     image_gen_config = get_image_gen_config()
+    vision_config = get_vision_config()
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -524,6 +694,8 @@ def get_model_config() -> dict[str, Any]:
         },
         "providers": get_providers().get("providers", []),
         "auxiliary": get_auxiliary_models(),
+        "vision": vision_config.get("vision", {}),
+        "vision_providers": vision_config.get("providers", []),
         "image_gen": image_gen_config.get("image_gen", {}),
         "image_gen_providers": image_gen_config.get("providers", []),
         "custom": {"supported": True, "key_env": _CUSTOM_MODEL_KEY_ENV},

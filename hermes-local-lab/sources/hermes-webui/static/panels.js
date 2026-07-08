@@ -8221,6 +8221,12 @@ function _modelConfigImageProviderRow(providerId,data){
  return rows.find(p=>String(p&&p.id||'')===id)||null;
 }
 
+function _modelConfigVisionProviderRow(providerId,data){
+ const id=String(providerId||'').trim();
+ const rows=Array.isArray(data&&data.vision_providers)?data.vision_providers:[];
+ return rows.find(p=>String(p&&p.id||'')===id)||null;
+}
+
 function _modelConfigCustomImageRows(data){
  const rows=[];
  const seen=new Set();
@@ -8251,6 +8257,28 @@ function _formatModelConfigProvider(providerId,display){
  return label||id;
 }
 
+function _renderVisionConfigSummary(data){
+ const vision=(data&&data.vision)||{};
+ const provider=String(vision.provider||'').trim();
+ const model=String(vision.model||'').trim();
+ const row=_modelConfigVisionProviderRow(provider,data)||{};
+ const keyStatus=vision.key_status||row.key_status||{};
+ const keyLabel=_modelConfigKeyLabel(keyStatus);
+ const baseUrl=String(vision.base_url||'').trim();
+ const needsBase=!!(row&&row.requires_base_url);
+ const ready=!!(provider&&model&&keyStatus.configured&&(!needsBase||baseUrl));
+ _setModelConfigText('visionConfigProviderSummary',_formatModelConfigProvider(provider,row.name));
+ _setModelConfigText('visionConfigModelSummary',model||String(row.default_model||''));
+ _setModelConfigText('visionConfigKeyState',keyLabel);
+ _setModelConfigStatusBadge('visionConfigEffective',ready?'已可用':'待配置',ready?'ok':'warn');
+ _setModelConfigStatusBadge('visionConfigStatusBadge',ready?'看图识别可用':'看图识别待配置',ready?'ok':'warn');
+ const card=$('modelConfigVisionSummaryCard');
+ if(card) card.dataset.state=ready?'ok':'warn';
+ _setModelConfigText('visionConfigSummary',ready
+  ? '上传图片、截图或表格截图后，可以交给视觉模型理解内容。'
+  : '需要选择支持视觉的模型并配置密钥，否则 agent 会继续提示没有可用识图能力。');
+}
+
 function _renderModelConfigFocusSummary(data){
  const main=(data&&data.main)||{};
  const mainProvider=String(main.provider||'').trim();
@@ -8264,6 +8292,7 @@ function _renderModelConfigFocusSummary(data){
  _setModelConfigText('modelConfigKeySummary',mainKeyLabel);
  _setModelConfigStatusBadge('modelConfigMainEffective',mainReady?'已生效':'待配置',mainReady?'ok':'warn');
  _setModelConfigStatusBadge('modelConfigMainStatusBadge',mainReady?'主模型可用':'主模型待配置',mainReady?'ok':'warn');
+ _renderVisionConfigSummary(data);
 
  const hero=$('modelConfigHero');
  if(hero){
@@ -8289,6 +8318,7 @@ function _renderModelConfigFocusSummary(data){
  _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(imageProvider,imageRow.name));
  _setModelConfigText('imageGenConfigModelSummary',imageModel||String(imageRow.default_model||''));
  _setModelConfigText('imageGenConfigKeyState',imageKeyLabel);
+ _setModelConfigStatusBadge('imageGenConfigEffective',imageReady?'已可用':'待配置',imageReady?'ok':'warn');
  _setModelConfigStatusBadge('imageGenConfigStatusBadge',imageReady?'图片生成可用':'图片生成待配置',imageReady?'ok':'warn');
  const imageCard=$('modelConfigImageSummaryCard');
  if(imageCard){
@@ -8296,7 +8326,7 @@ function _renderModelConfigFocusSummary(data){
   const icon=imageCard.querySelector('.model-config-warning-icon');
   if(icon) icon.textContent=imageReady?'✓':'!';
  }
- _setModelConfigText('imageGenConfigCardTitle',imageReady?'图片生成模型已配置':(managedAuth?'待处理：图片生成授权':'待处理：图片生成密钥'));
+ _setModelConfigText('imageGenConfigCardTitle',imageReady?'生成图片已配置':(managedAuth?'生成图片待授权':'生成图片待配置'));
  _setModelConfigText('imageGenConfigSummary',imageReady
   ? '图片生成配置已可用于 image_generate；正文写作仍由主模型负责。'
   : (managedAuth?'只有调用 image_generate 或需要实际生成图片时才会失败。请完成授权后刷新状态。':'只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。'));
@@ -8310,7 +8340,9 @@ function toggleModelConfigSection(sectionId,forceOpen){
  section.dataset.expanded=open?'1':'0';
  const labels={
   modelConfigMainEdit:['修改主模型配置','收起主模型配置'],
-  imageGenConfigEdit:['修改配置','收起配置'],
+  visionConfigEdit:['配置识图','收起识图配置'],
+  imageGenConfigEdit:['配置生图','收起生图配置'],
+  modelConfigImageAdvanced:['高级图片模型','收起高级图片模型'],
   customImageProviderPanel:['管理外部模型','收起外部模型'],
   modelConfigAuxEdit:['展开辅助模型','收起辅助模型'],
  };
@@ -8339,6 +8371,11 @@ async function openImageGenKeyEditor(){
  }
  openModelConfigSecretEditor('imageGenConfigEdit','imageGenConfigApiKey');
  await pasteSecretToInput('imageGenConfigApiKey');
+}
+
+async function openVisionConfigKeyEditor(){
+ openModelConfigSecretEditor('visionConfigEdit','visionConfigApiKey');
+ await pasteSecretToInput('visionConfigApiKey');
 }
 
 function _resetCustomImageProviderForm(){
@@ -8681,6 +8718,30 @@ function _syncMainModelConfigControls(){
  }
 }
 
+function _syncVisionConfigControls(){
+ const providerSel=$('visionConfigProvider');
+ const baseRow=$('visionConfigBaseUrlRow');
+ const keyRow=$('visionConfigApiKeyRow');
+ const hint=$('visionConfigKeyHint');
+ if(!providerSel||!_modelConfigData) return;
+ const providerId=providerSel.value||'';
+ const providers=Array.isArray(_modelConfigData.vision_providers)?_modelConfigData.vision_providers:[];
+ const provider=providers.find(p=>String(p.id||'')===providerId)||null;
+ const models=(provider&&Array.isArray(provider.models))?provider.models:[];
+ _setDatalistOptions('visionConfigModelOptions',models);
+ const requiresBase=!!(provider&&provider.requires_base_url);
+ const envVar=provider&&provider.key_status&&provider.key_status.env_var;
+ if(baseRow) baseRow.style.display=requiresBase?'':'none';
+ if(keyRow) keyRow.style.display=envVar?'':'none';
+ if(hint){
+  if(envVar){
+   hint.textContent=_modelConfigKeyLabel(provider.key_status)+' · 保存后只写入本机凭据区。';
+  }else{
+   hint.textContent='此识图 Provider 暂不需要 WebUI 管理 API key。';
+  }
+ }
+}
+
 function _syncImageGenConfigControls(){
  const providerSel=$('imageGenConfigProvider');
  const keyRow=$('imageGenConfigApiKeyRow');
@@ -8739,6 +8800,37 @@ function _renderModelConfigPanel(data){
  if(keyInput) keyInput.value='';
  _syncMainModelConfigControls();
 
+ const vision=data.vision||{};
+ const visionProviderSel=$('visionConfigProvider');
+ if(visionProviderSel){
+  visionProviderSel.innerHTML='';
+  (data.vision_providers||[]).forEach(p=>{
+   const opt=document.createElement('option');
+   opt.value=p.id;
+   opt.textContent=(p.name||p.id)+(p.id?' · '+p.id:'');
+   visionProviderSel.appendChild(opt);
+  });
+  visionProviderSel.value=vision.provider||((data.vision_providers||[])[0]||{}).id||'';
+  visionProviderSel.onchange=()=>{
+   const p=(data.vision_providers||[]).find(item=>String(item.id||'')===visionProviderSel.value)||null;
+   const modelInput=$('visionConfigModel');
+   if(modelInput){
+    modelInput.value=(p&&p.default_model)||'';
+   }
+   _syncVisionConfigControls();
+  };
+ }
+ const visionModelInput=$('visionConfigModel');
+ if(visionModelInput){
+  const selected=_modelConfigVisionProviderRow((visionProviderSel&&visionProviderSel.value)||vision.provider,data);
+  visionModelInput.value=vision.model||String((selected&&selected.default_model)||'');
+ }
+ const visionBaseInput=$('visionConfigBaseUrl');
+ if(visionBaseInput) visionBaseInput.value=vision.base_url||'';
+ const visionKeyInput=$('visionConfigApiKey');
+ if(visionKeyInput) visionKeyInput.value='';
+ _syncVisionConfigControls();
+
  const imageGen=data.image_gen||{};
  const imageProviderSel=$('imageGenConfigProvider');
  if(imageProviderSel){
@@ -8760,7 +8852,10 @@ function _renderModelConfigPanel(data){
   };
  }
  const imageModelInput=$('imageGenConfigModel');
- if(imageModelInput) imageModelInput.value=imageGen.model||'';
+ if(imageModelInput){
+  const selectedImage=_modelConfigImageProviderRow((imageProviderSel&&imageProviderSel.value)||imageGen.provider,data);
+  imageModelInput.value=imageGen.model||String((selectedImage&&selectedImage.default_model)||'');
+ }
  const imageKeyInput=$('imageGenConfigApiKey');
  if(imageKeyInput) imageKeyInput.value='';
  _syncImageGenConfigControls();
@@ -8985,6 +9080,27 @@ async function saveMainModelConfig(){
   if(typeof showToast==='function') showToast('主模型配置已保存');
  }catch(e){
   if(typeof showToast==='function') showToast('保存主模型失败：'+(e.message||e),5000,'error');
+ }finally{
+  if(btn) btn.disabled=false;
+ }
+}
+
+async function saveVisionConfig(){
+ const btn=$('btnSaveVisionConfig');
+ const provider=($('visionConfigProvider')||{}).value||'';
+ const model=(($('visionConfigModel')||{}).value||'').trim();
+ const baseUrl=(($('visionConfigBaseUrl')||{}).value||'').trim();
+ const apiKey=(($('visionConfigApiKey')||{}).value||'').trim();
+ if(btn) btn.disabled=true;
+ try{
+  const payload={provider,model,base_url:baseUrl};
+  if(apiKey) payload.api_key=apiKey;
+  await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
+  await loadModelConfigPanel(true);
+  toggleModelConfigSection('visionConfigEdit',false);
+  if(typeof showToast==='function') showToast('识图配置已保存');
+ }catch(e){
+  if(typeof showToast==='function') showToast('保存识图配置失败：'+(e.message||e),5000,'error');
  }finally{
   if(btn) btn.disabled=false;
  }
