@@ -985,6 +985,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return _clarifySessionId===activeSid||(!_clarifySessionId&&_isActiveSession());
   }
   function _clearApprovalForOwner(){
+    if(_hasApprovalPendingForSession(activeSid)) return;
     _clearApprovalPendingForSession(activeSid);
     if(!_approvalBelongsToOwner()) return;
     stopApprovalPolling();
@@ -2959,6 +2960,10 @@ function _clearApprovalPendingForSession(sid) {
   if (sid) _approvalPendingBySession.delete(sid);
 }
 
+function _hasApprovalPendingForSession(sid) {
+  return !!(sid && _approvalPendingBySession.has(sid));
+}
+
 function _hideApprovalCardIfOwner(sid, force=false) {
   if (!sid || _approvalSessionId === sid) hideApprovalCard(force);
 }
@@ -3101,13 +3106,21 @@ function startApprovalPolling(sid) {
     es.addEventListener('initial', e => {
       const d = JSON.parse(e.data);
       if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
+      else {
+        _clearApprovalPendingForSession(sid);
+        _hideApprovalCardIfOwner(sid);
+        if (!S.busy) stopApprovalPollingForSession(sid);
+      }
     });
 
     es.addEventListener('approval', e => {
       const d = JSON.parse(e.data);
       if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
+      else {
+        _clearApprovalPendingForSession(sid);
+        _hideApprovalCardIfOwner(sid);
+        if (!S.busy) stopApprovalPollingForSession(sid);
+      }
     });
 
     es.onerror = () => {
@@ -3118,10 +3131,11 @@ function startApprovalPolling(sid) {
       _startApprovalFallbackPoll(sid);
     };
 
-    // If the session changes or stops being busy, close the SSE.
-    // We detect this via a periodic check (cheap — no network request).
+    // Approval is a blocking state, not a spinner state. The stream may no
+    // longer be busy while a pending approval still needs a visible response.
+    // Only close the SSE automatically when the user switches sessions.
     _approvalSSEHealthTimer = setInterval(() => {
-      if (!S.busy || !S.session || S.session.session_id !== sid) {
+      if (!S.session || S.session.session_id !== sid) {
         stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true);
       }
     }, 5000);
@@ -3133,13 +3147,30 @@ function startApprovalPolling(sid) {
   }
 }
 
+async function refreshApprovalPendingForSession(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return;
+  try {
+    const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast:false});
+    if (!S.session || S.session.session_id !== sid) return;
+    if (data.pending) {
+      showApprovalForSession(sid, data.pending, data.pending_count || 1);
+      if (!_approvalPollingSessionId) startApprovalPolling(sid);
+    } else {
+      _clearApprovalPendingForSession(sid);
+      _hideApprovalCardIfOwner(sid);
+    }
+  } catch(_e) {
+    // Loading a conversation should not fail just because the approval check is unavailable.
+  }
+}
+
 let _approvalEventSource = null;
 let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
 
 function _startApprovalFallbackPoll(sid) {
   _approvalPollTimer = setInterval(async () => {
-    if (!S.busy || !S.session || S.session.session_id !== sid) {
+    if (!S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
     if (_approvalFallbackPollInFlight) return;
@@ -3147,7 +3178,11 @@ function _startApprovalFallbackPoll(sid) {
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
+      else {
+        _clearApprovalPendingForSession(sid);
+        _hideApprovalCardIfOwner(sid);
+        if (!S.busy) stopApprovalPollingForSession(sid);
+      }
     } catch(e) { /* ignore poll errors */ }
     finally { _approvalFallbackPollInFlight = false; }
   }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness

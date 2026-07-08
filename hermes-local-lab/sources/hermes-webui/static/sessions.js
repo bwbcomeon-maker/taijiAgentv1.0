@@ -905,6 +905,7 @@ async function loadSession(sid){
     });
   }
   if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
+  if(typeof refreshApprovalPendingForSession==='function') void refreshApprovalPendingForSession(sid);
 
   // Restore server-persisted composer draft (synced across clients + survives refresh).
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards

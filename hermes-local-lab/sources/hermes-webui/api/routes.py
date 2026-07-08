@@ -6711,6 +6711,37 @@ def submit_pending(session_key: str, approval: dict) -> None:
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
 
+
+def clear_gateway_run_pending_approvals(session_key: str, gateway_run_id: str) -> int:
+    """Remove WebUI pending approvals that belong to a Gateway /v1/runs run."""
+    if not session_key or not gateway_run_id:
+        return 0
+    removed = 0
+    with _lock:
+        queue = _pending.get(session_key)
+        if isinstance(queue, list):
+            kept = [
+                entry for entry in queue
+                if not (
+                    isinstance(entry, dict)
+                    and str(entry.get("_gateway_run_id") or "") == str(gateway_run_id)
+                )
+            ]
+            removed = len(queue) - len(kept)
+            if kept:
+                _pending[session_key] = kept
+                _approval_sse_notify_locked(session_key, kept[0], len(kept))
+            else:
+                _pending.pop(session_key, None)
+                _approval_sse_notify_locked(session_key, None, 0)
+        elif isinstance(queue, dict) and str(queue.get("_gateway_run_id") or "") == str(gateway_run_id):
+            _pending.pop(session_key, None)
+            removed = 1
+            _approval_sse_notify_locked(session_key, None, 0)
+    if removed:
+        publish_session_list_changed("attention_resolved")
+    return removed
+
 # Clarify prompts (optional -- graceful fallback if agent not available)
 try:
     from api.clarify import (
@@ -17117,6 +17148,30 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
     approval_payload = pending or gateway_data or {}
+    remote_gateway_run_id = str(approval_payload.get("_gateway_run_id") or "").strip()
+    remote_gateway_resolved = False
+    if remote_gateway_run_id:
+        try:
+            from api.gateway_chat import resolve_gateway_run_approval
+
+            remote_gateway_resolved = bool(resolve_gateway_run_approval(approval_payload, choice))
+        except Exception:
+            logger.warning("Failed to resolve gateway run approval", exc_info=True)
+            remote_gateway_resolved = False
+        if not remote_gateway_resolved:
+            # Restore the card so the user can retry instead of losing the
+            # visible approval while the Gateway run remains blocked.
+            if pending:
+                with _lock:
+                    queue = _pending.setdefault(sid, [])
+                    if isinstance(queue, list):
+                        queue.insert(0, pending)
+                        _approval_sse_notify_locked(sid, queue[0], len(queue))
+                    else:
+                        _pending[sid] = [pending, queue] if queue else [pending]
+                        _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+                publish_session_list_changed("attention_pending")
+            return False
     is_capability_approval = approval_payload.get("approval_type") == "capability_enable" or approval_payload.get("kind") == "capability_enable"
     if not is_capability_approval:
         if choice in ("once", "session"):
@@ -17135,7 +17190,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
-    resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+    if remote_gateway_run_id:
+        resolved = remote_gateway_resolved
+    else:
+        resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved

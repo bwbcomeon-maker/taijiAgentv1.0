@@ -6,7 +6,9 @@ import logging
 import os
 import threading
 import time
+import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -40,7 +42,9 @@ logger = logging.getLogger(__name__)
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
+_WEBUI_GATEWAY_CHAT_TRANSPORT_ENV = "HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+_GATEWAY_RUN_FALLBACK_STATUSES = {404, 405, 501}
 
 
 def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = None) -> str:
@@ -99,6 +103,38 @@ def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
         or source.get("API_SERVER_KEY")
         or ""
     ).strip()
+
+
+def _gateway_chat_transport(config_data=None, environ: dict[str, str] | None = None) -> str:
+    source = os.environ if environ is None else environ
+    cfg = config_data if isinstance(config_data, dict) else {}
+    raw = str(
+        source.get(_WEBUI_GATEWAY_CHAT_TRANSPORT_ENV)
+        or cfg.get("webui_gateway_chat_transport")
+        or "runs"
+    ).strip().lower()
+    if raw in {"chat_completions", "chat-completions", "openai"}:
+        return "chat_completions"
+    return "runs"
+
+
+def _gateway_request_headers(
+    session_id: str,
+    api_key: str,
+    *,
+    event_stream: bool = False,
+) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Hermes-Session-Id": session_id,
+    }
+    headers["Accept"] = "text/event-stream" if event_stream else "application/json"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        # Scope Gateway long-term continuity to this WebUI conversation
+        # without exposing the browser's auth cookie or CSRF material.
+        headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+    return headers
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -224,6 +260,280 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     return ("tool_complete" if is_complete else "tool"), event_payload
 
 
+def _gateway_run_approval_payload(session_id: str, event: dict, *, run_id: str = "") -> dict:
+    """Convert a Gateway run approval event into the WebUI pending shape."""
+    payload = dict(event or {})
+    gateway_run_id = str(payload.get("run_id") or run_id or "").strip()
+    approval_id = str(payload.get("approval_id") or "").strip() or uuid.uuid4().hex
+    pattern_keys = payload.get("pattern_keys")
+    if not isinstance(pattern_keys, list):
+        pattern_key = payload.get("pattern_key")
+        pattern_keys = [pattern_key] if pattern_key else []
+    pending = {
+        "approval_id": approval_id,
+        "_session_id": session_id,
+        "_gateway_run_id": gateway_run_id,
+        "command": str(payload.get("command") or ""),
+        "description": str(payload.get("description") or ""),
+        "pattern_key": str(payload.get("pattern_key") or (pattern_keys[0] if pattern_keys else "")),
+        "pattern_keys": [str(key) for key in pattern_keys if key],
+    }
+    for key in (
+        "approval_type",
+        "kind",
+        "capability",
+        "allow_var",
+        "title",
+        "choices",
+    ):
+        if key in payload:
+            pending[key] = payload[key]
+    return pending
+
+
+def _submit_gateway_run_approval_to_webui(session_id: str, event: dict, *, run_id: str = "") -> dict:
+    """Store a Gateway approval event in the WebUI approval queue."""
+    pending = _gateway_run_approval_payload(session_id, event, run_id=run_id)
+    try:
+        from api import routes as _routes
+
+        _routes.submit_pending(session_id, pending)
+    except Exception:
+        logger.warning("Failed to submit gateway approval to WebUI queue", exc_info=True)
+    return pending
+
+
+def _clear_gateway_run_approvals_from_webui(session_id: str, run_id: str) -> None:
+    if not session_id or not run_id:
+        return
+    try:
+        from api import routes as _routes
+
+        clear_fn = getattr(_routes, "clear_gateway_run_pending_approvals", None)
+        if clear_fn is not None:
+            clear_fn(session_id, run_id)
+    except Exception:
+        logger.debug("Failed to clear gateway approval from WebUI queue", exc_info=True)
+
+
+def _stop_gateway_run(base_url: str, headers: dict[str, str], run_id: str) -> None:
+    if not run_id:
+        return
+    url = f"{base_url}/v1/runs/{urllib.parse.quote(run_id, safe='')}/stop"
+    req = urllib.request.Request(url, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        logger.debug("Failed to stop gateway run %s", run_id, exc_info=True)
+
+
+def resolve_gateway_run_approval(approval: dict, choice: str) -> bool:
+    """Resolve a WebUI approval card against the Gateway run that owns it."""
+    run_id = str((approval or {}).get("_gateway_run_id") or "").strip()
+    session_id = str((approval or {}).get("_session_id") or "").strip()
+    if not run_id:
+        return False
+    from api.config import get_config
+
+    cfg = get_config()
+    base_url = _gateway_base_url(cfg)
+    api_key = _gateway_api_key()
+    url = f"{base_url}/v1/runs/{urllib.parse.quote(run_id, safe='')}/approval"
+    headers = _gateway_request_headers(session_id, api_key)
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"choice": choice}).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            try:
+                body = json.loads(resp.read().decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            resolved = body.get("resolved")
+            return bool(resolved) if resolved is not None else 200 <= resp.status < 300
+    except urllib.error.HTTPError as exc:
+        logger.warning("Gateway run approval resolve failed: HTTP %s", exc.code)
+        return False
+    except Exception:
+        logger.warning("Gateway run approval resolve failed", exc_info=True)
+        return False
+
+
+def _gateway_run_request_body(
+    body: dict,
+    *,
+    session_id: str,
+) -> dict:
+    """Build a Gateway /v1/runs request from the existing chat-completions body."""
+    messages = list(body.get("messages") or [])
+    system_parts: list[str] = []
+    conversation_history: list[dict] = []
+    user_message: Any = ""
+    non_system = [msg for msg in messages if isinstance(msg, dict) and msg.get("role") != "system"]
+    if non_system:
+        last = non_system[-1]
+        user_message = last.get("content", "")
+        for msg in non_system[:-1]:
+            role = str(msg.get("role") or "")
+            if role in {"user", "assistant"}:
+                conversation_history.append({"role": role, "content": msg.get("content", "")})
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            content = msg.get("content")
+            if content:
+                system_parts.append(str(content))
+    run_body = {
+        "model": body.get("model") or "default",
+        "input": user_message,
+        "session_id": session_id,
+    }
+    if body.get("provider"):
+        run_body["provider"] = body.get("provider")
+    if system_parts:
+        run_body["instructions"] = "\n\n".join(system_parts)
+    if conversation_history:
+        run_body["conversation_history"] = conversation_history
+    return run_body
+
+
+def _gateway_run_error_event(payload: dict, default_message: str = "") -> dict:
+    safe = scrub_brand_leaks(_redact_text(default_message or str(payload or ""))[:500])
+    return {
+        "label": "太极本地对话服务不可用",
+        "type": "gateway_error",
+        "message": "本地对话服务暂时不可用。",
+        "hint": safe or "请稍后重试，或导出诊断报告后交给管理员排查。",
+    }
+
+
+def _stream_gateway_run_events(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    body: dict,
+    session_id: str,
+    stream_id: str,
+    cancel_event: threading.Event,
+    brand_token_tail: list[str],
+    put_gateway_event,
+) -> dict:
+    """Run a Gateway /v1/runs turn and translate structured events to WebUI SSE."""
+    run_req = urllib.request.Request(
+        f"{base_url}/v1/runs",
+        data=json.dumps(_gateway_run_request_body(body, session_id=session_id)).encode("utf-8"),
+        headers={**headers, "Accept": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(run_req, timeout=60) as resp:
+        run_start = json.loads(resp.read().decode("utf-8") or "{}")
+    run_id = str(run_start.get("run_id") or "").strip()
+    if not run_id:
+        return {
+            "final_text": "",
+            "usage": {},
+            "error_event": _gateway_run_error_event(run_start, "Gateway run did not return a run_id."),
+        }
+
+    update_active_run(stream_id, phase="gateway-run", gateway_run_id=run_id)
+    event_url = f"{base_url}/v1/runs/{urllib.parse.quote(run_id, safe='')}/events"
+    event_req = urllib.request.Request(
+        event_url,
+        headers={**headers, "Accept": "text/event-stream"},
+        method="GET",
+    )
+    final_text = ""
+    usage: dict[str, Any] = {}
+    error_event = None
+    with urllib.request.urlopen(event_req, timeout=600) as resp:
+        for raw_line in resp:
+            if cancel_event.is_set():
+                _stop_gateway_run(base_url, headers, run_id)
+                _clear_gateway_run_approvals_from_webui(session_id, run_id)
+                put_gateway_event("cancel", {"message": "Cancelled by user"})
+                return {"final_text": final_text, "usage": usage, "error_event": None}
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            event_name = str(payload.get("event") or "").strip()
+            if event_name == "message.delta":
+                delta = scrub_streaming_token_delta(str(payload.get("delta") or ""), brand_token_tail)
+                if delta:
+                    final_text += delta
+                    if stream_id in STREAM_PARTIAL_TEXT:
+                        STREAM_PARTIAL_TEXT[stream_id] += delta
+                    put_gateway_event("token", {"text": delta})
+                continue
+            if event_name == "reasoning.available":
+                text = scrub_brand_leaks(str(payload.get("text") or ""))
+                if text:
+                    put_gateway_event("reasoning", {"text": text})
+                continue
+            if event_name == "tool.started":
+                tool_name = str(payload.get("tool") or "").strip()
+                event_payload = {
+                    "event_type": "tool.started",
+                    "name": tool_name,
+                    "preview": payload.get("preview"),
+                    "args": {},
+                }
+                if stream_id in STREAM_LIVE_TOOL_CALLS:
+                    STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                        "name": tool_name,
+                        "args": {},
+                        "done": False,
+                    })
+                put_gateway_event("tool", event_payload)
+                update_active_run(stream_id, phase="gateway-tool", latest_tool=tool_name)
+                continue
+            if event_name == "tool.completed":
+                tool_name = str(payload.get("tool") or "").strip()
+                for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS.get(stream_id, [])):
+                    if not shared_tc.get("done") and shared_tc.get("name") == tool_name:
+                        shared_tc["done"] = True
+                        shared_tc["is_error"] = bool(payload.get("error"))
+                        break
+                put_gateway_event("tool_complete", {
+                    "event_type": "tool.completed",
+                    "name": tool_name,
+                    "duration": payload.get("duration"),
+                    "is_error": bool(payload.get("error")),
+                })
+                continue
+            if event_name == "approval.request":
+                pending = _submit_gateway_run_approval_to_webui(session_id, payload, run_id=run_id)
+                put_gateway_event("approval", pending)
+                update_active_run(stream_id, phase="gateway-approval", gateway_run_id=run_id)
+                continue
+            if event_name == "approval.responded":
+                _clear_gateway_run_approvals_from_webui(session_id, run_id)
+                continue
+            if event_name == "run.completed":
+                output = scrub_brand_leaks(str(payload.get("output") or "")).strip()
+                if output and not final_text:
+                    final_text = output
+                if isinstance(payload.get("usage"), dict):
+                    usage.update(payload.get("usage") or {})
+                _clear_gateway_run_approvals_from_webui(session_id, run_id)
+                break
+            if event_name in {"run.failed", "run.cancelled"}:
+                error_event = _gateway_run_error_event(payload, str(payload.get("error") or event_name))
+                break
+    if error_event is not None:
+        _clear_gateway_run_approvals_from_webui(session_id, run_id)
+    return {"final_text": final_text, "usage": usage, "error_event": error_event}
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -338,16 +648,7 @@ def _run_gateway_chat_streaming(
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "X-Hermes-Session-Id": session_id,
-        }
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            # Scope Gateway long-term continuity to this WebUI conversation
-            # without exposing the browser's auth cookie or CSRF material.
-            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        headers = _gateway_request_headers(session_id, api_key, event_stream=True)
         message_text = str(msg_text or "")
         message_content: Any = message_text
         if attachments:
@@ -392,82 +693,105 @@ def _run_gateway_chat_streaming(
         }
         if model_provider:
             body["provider"] = model_provider
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(body).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
         update_active_run(stream_id, phase="gateway-request")
         last_payload = {}
         gateway_error_event = None
         sse_event = "message"
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            for raw_line in resp:
-                if cancel_event.is_set():
-                    put_gateway_event("cancel", {"message": "Cancelled by user"})
-                    return
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    sse_event = "message"
-                    continue
-                if line.startswith("event:"):
-                    sse_event = line[6:].strip() or "message"
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    payload = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if sse_event == "hermes.tool.progress":
-                    translated = _gateway_tool_progress_event(payload)
-                    if translated:
-                        event_name, event_payload = translated
-                        if stream_id in STREAM_LIVE_TOOL_CALLS:
-                            if event_name == "tool":
-                                STREAM_LIVE_TOOL_CALLS[stream_id].append({
-                                    "name": event_payload.get("name"),
-                                    "args": event_payload.get("args") or {},
-                                    "done": False,
-                                    **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
-                                })
-                            else:
-                                for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                    if shared_tc.get("done"):
-                                        continue
-                                    if (
-                                        event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
-                                    ) or shared_tc.get("name") == event_payload.get("name"):
-                                        shared_tc["done"] = True
-                                        shared_tc["is_error"] = bool(event_payload.get("is_error"))
-                                        break
-                        put_gateway_event(event_name, event_payload)
-                        update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
-                    sse_event = "message"
-                    continue
-                last_payload = payload
-                error_event = _gateway_sse_error_event(payload)
-                if error_event:
-                    if gateway_error_event is None or error_event.get("type") == "model_configuration_error":
-                        gateway_error_event = error_event
-                    update_active_run(stream_id, phase="gateway-error")
-                    usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-                    continue
-                delta = _gateway_sse_delta(payload)
-                if delta:
-                    delta = scrub_streaming_token_delta(delta, brand_token_tail)
-                    if not delta:
+        run_result = None
+        if _gateway_chat_transport(cfg) == "runs":
+            try:
+                run_result = _stream_gateway_run_events(
+                    base_url=base_url,
+                    headers=headers,
+                    body=body,
+                    session_id=session_id,
+                    stream_id=stream_id,
+                    cancel_event=cancel_event,
+                    brand_token_tail=brand_token_tail,
+                    put_gateway_event=put_gateway_event,
+                )
+            except urllib.error.HTTPError as exc:
+                if exc.code not in _GATEWAY_RUN_FALLBACK_STATUSES:
+                    raise
+                logger.info("Gateway /v1/runs unavailable (HTTP %s), falling back to chat completions", exc.code)
+                run_result = None
+        if run_result is not None:
+            final_text = str(run_result.get("final_text") or "")
+            usage.update({k: v for k, v in (run_result.get("usage") or {}).items() if v})
+            gateway_error_event = run_result.get("error_event")
+        else:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                for raw_line in resp:
+                    if cancel_event.is_set():
+                        put_gateway_event("cancel", {"message": "Cancelled by user"})
+                        return
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        sse_event = "message"
+                        continue
+                    if line.startswith("event:"):
+                        sse_event = line[6:].strip() or "message"
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if sse_event == "hermes.tool.progress":
+                        translated = _gateway_tool_progress_event(payload)
+                        if translated:
+                            event_name, event_payload = translated
+                            if stream_id in STREAM_LIVE_TOOL_CALLS:
+                                if event_name == "tool":
+                                    STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                        "name": event_payload.get("name"),
+                                        "args": event_payload.get("args") or {},
+                                        "done": False,
+                                        **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
+                                    })
+                                else:
+                                    for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                        if shared_tc.get("done"):
+                                            continue
+                                        if (
+                                            event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
+                                        ) or shared_tc.get("name") == event_payload.get("name"):
+                                            shared_tc["done"] = True
+                                            shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                                            break
+                            put_gateway_event(event_name, event_payload)
+                            update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+                        sse_event = "message"
+                        continue
+                    last_payload = payload
+                    error_event = _gateway_sse_error_event(payload)
+                    if error_event:
+                        if gateway_error_event is None or error_event.get("type") == "model_configuration_error":
+                            gateway_error_event = error_event
+                        update_active_run(stream_id, phase="gateway-error")
                         usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                         continue
-                    final_text += delta
-                    if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] += delta
-                    put_gateway_event("token", {"text": delta})
-                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                    delta = _gateway_sse_delta(payload)
+                    if delta:
+                        delta = scrub_streaming_token_delta(delta, brand_token_tail)
+                        if not delta:
+                            usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                            continue
+                        final_text += delta
+                        if stream_id in STREAM_PARTIAL_TEXT:
+                            STREAM_PARTIAL_TEXT[stream_id] += delta
+                        put_gateway_event("token", {"text": delta})
+                    usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
         tail_delta = scrub_streaming_token_delta("", brand_token_tail, final=True)
         if tail_delta:
             final_text += tail_delta

@@ -10613,6 +10613,20 @@ main.main.showing-logs > #mainLogs{display:flex;}
     min-height:0!important;
     transform:translateX(-50%)!important;
   }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .approval-card,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .clarify-card{
+    bottom:12px!important;
+    z-index:60!important;
+    overflow:visible!important;
+  }
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .approval-inner,
+  :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .clarify-inner{
+    background:rgba(255,255,255,.98)!important;
+    border-color:rgba(151,196,223,.92)!important;
+    box-shadow:0 20px 56px rgba(36,86,132,.22),inset 0 1px 0 rgba(255,255,255,.9)!important;
+    backdrop-filter:blur(18px)!important;
+    -webkit-backdrop-filter:blur(18px)!important;
+  }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell #writeflowStatusDock{
     position:absolute!important;
     left:0!important;
