@@ -6,6 +6,12 @@ const yazl = require('yazl');
 
 const { resolveSectionAnchors } = require('../domain/section-anchors');
 
+const DIRECTORY_TAB_POS_DXA = 8306;
+const ESTIMATED_BODY_START_PAGE = 3;
+const ESTIMATED_PAGE_UNITS = 22;
+const TABLE_WIDTH_DXA = 8520;
+const TABLE_MIN_COLUMN_WIDTH_DXA = 720;
+
 async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
   if (!docxPath) {
     throw new Error('docxPath is required.');
@@ -182,7 +188,7 @@ function insertRichBlocksBySourceOrder(documentXml, { boundDrawings = [], render
   for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
     nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
   }
-  return replaceStaticDirectories(nextXml, renderPlan);
+  return addDirectoryBookmarks(replaceStaticDirectories(nextXml, renderPlan), renderPlan);
 }
 
 function compactCoverPageSpacing(documentXml) {
@@ -391,7 +397,7 @@ function figureBlockXml(binding) {
 function figureDrawingParagraph(drawingXml) {
   return [
     '<w:p>',
-    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    '<w:pPr><w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:left="0" w:right="0" w:firstLine="0" w:hanging="0"/><w:jc w:val="center"/></w:pPr>',
     '<w:r>',
     drawingXml,
     '</w:r>',
@@ -403,7 +409,7 @@ function figureCaptionParagraph(image = {}, index = 1) {
   const caption = figureCaptionText(image.caption || image.figureId || `图 ${index}`, index);
   return [
     '<w:p>',
-    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    '<w:pPr><w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:left="0" w:right="0" w:firstLine="0" w:hanging="0"/><w:jc w:val="center"/></w:pPr>',
     '<w:r>',
     '<w:rPr><w:vanish/></w:rPr>',
     `<w:t>${escapeXmlText(figureCaptionMetadata(image))}</w:t>`,
@@ -470,7 +476,7 @@ function tableCaptionXml(table, blockId = '', index = 1) {
   const caption = tableCaptionText(table.title || table.caption || `表格 ${index}`, index);
   return [
     '<w:p>',
-    '<w:pPr><w:jc w:val="center"/></w:pPr>',
+    '<w:pPr><w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:left="0" w:right="0" w:firstLine="0" w:hanging="0"/><w:jc w:val="center"/></w:pPr>',
     '<w:r>',
     '<w:rPr><w:vanish/></w:rPr>',
     `<w:t>${escapeXmlText(tableCaptionMetadata(table, blockId))}</w:t>`,
@@ -493,13 +499,12 @@ function dynamicTableXml(templateTable = {}) {
     return '';
   }
 
-  const tableWidth = 8520;
-  const columnWidth = Math.max(720, Math.floor(tableWidth / columns.length));
-  const widths = columns.map(() => columnWidth);
+  const widths = dynamicTableColumnWidths(TABLE_WIDTH_DXA, columns.length);
+  const tableWidth = widths.reduce((sum, width) => sum + width, 0);
 
   return [
     '<w:tbl>',
-    dynamicTableProperties(),
+    dynamicTableProperties(tableWidth),
     dynamicTableGrid(widths),
     dynamicTableRow(columns.map((column) => column.text), widths, { header: true }),
     ...rows.map((row) => dynamicTableRow(row, widths, { header: false })),
@@ -507,11 +512,26 @@ function dynamicTableXml(templateTable = {}) {
   ].join('');
 }
 
-function dynamicTableProperties() {
+function dynamicTableColumnWidths(tableWidth, columnCount) {
+  if (columnCount <= 0) {
+    return [];
+  }
+
+  const baseWidth = Math.floor(tableWidth / columnCount);
+  if (baseWidth < TABLE_MIN_COLUMN_WIDTH_DXA) {
+    return Array.from({ length: columnCount }, () => TABLE_MIN_COLUMN_WIDTH_DXA);
+  }
+
+  const remainder = tableWidth - baseWidth * columnCount;
+  return Array.from({ length: columnCount }, (_value, index) => baseWidth + (index < remainder ? 1 : 0));
+}
+
+function dynamicTableProperties(tableWidth = TABLE_WIDTH_DXA) {
   return [
     '<w:tblPr>',
     '<w:tblStyle w:val="51"/>',
-    '<w:tblW w:w="0" w:type="auto"/>',
+    `<w:tblW w:w="${tableWidth}" w:type="dxa"/>`,
+    '<w:jc w:val="center"/>',
     '<w:tblBorders>',
     '<w:top w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
     '<w:left w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
@@ -520,7 +540,7 @@ function dynamicTableProperties() {
     '<w:insideH w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
     '<w:insideV w:val="single" w:color="000000" w:sz="4" w:space="0"/>',
     '</w:tblBorders>',
-    '<w:tblLayout w:type="autofit"/>',
+    '<w:tblLayout w:type="fixed"/>',
     '<w:tblCellMar>',
     '<w:top w:w="80" w:type="dxa"/>',
     '<w:left w:w="100" w:type="dxa"/>',
@@ -554,6 +574,7 @@ function dynamicTableRowProperties({ header = false } = {}) {
   return [
     '<w:trPr>',
     ...(header ? ['<w:tblHeader/>'] : []),
+    `<w:trHeight w:val="${header ? 760 : 680}" w:hRule="atLeast"/>`,
     '<w:cantSplit/>',
     '</w:trPr>',
   ].join('');
@@ -576,6 +597,8 @@ function dynamicTableCell(value, width, { header = false, columnCount = 1 } = {}
     '</w:tcPr>',
     '<w:p>',
     '<w:pPr>',
+    '<w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="auto"/>',
+    '<w:ind w:left="0" w:right="0" w:firstLine="0" w:hanging="0"/>',
     '<w:jc w:val="center"/>',
     '</w:pPr>',
     '<w:r>',
@@ -755,29 +778,233 @@ function isFigureTocParagraph(paragraphXml) {
 
 function staticMainDirectoryXml(renderPlan) {
   const sections = renderPlan?.templateData?.sections || renderPlan?.sections || [];
+  const pageNumbers = estimatedSectionPageNumbers(renderPlan);
   const entries = sections
     .filter((section) => String(section?.title || '').trim())
     .map((section, index) => ({
-      left: `${index + 1}. ${cleanDirectoryTitle(section.title)}`,
-      right: '',
+      left: `${chineseChapterLabel(index + 1)}    ${cleanDirectoryTitle(section.title)}`,
+      right: String(pageNumberForSection(pageNumbers, section, index)),
+      bookmark: sectionBookmarkName(index),
     }));
   return staticDirectoryEntriesXml(entries, '暂无章节条目');
 }
 
 function staticTableDirectoryXml(renderPlan) {
+  const pageNumbers = estimatedSectionPageNumbers(renderPlan);
   const entries = (renderPlan?.tables || []).map((table, index) => ({
     left: `表 ${index + 1} ${tableCaptionText(table.title || table.caption || `表格 ${index + 1}`, index + 1)}`,
-    right: '',
+    right: String(pageNumberForSectionId(pageNumbers, table.sectionId, index)),
+    bookmark: tableBookmarkName(index),
   }));
   return staticDirectoryEntriesXml(entries, '暂无表目录条目');
 }
 
 function staticFigureDirectoryXml(renderPlan) {
+  const pageNumbers = estimatedSectionPageNumbers(renderPlan);
   const entries = (renderPlan?.templateData?.images || []).map((image, index) => ({
     left: `图 ${index + 1} ${figureCaptionText(image.caption || image.figureId || `图 ${index + 1}`, index + 1)}`,
-    right: '',
+    right: String(pageNumberForSectionId(pageNumbers, image.metadata?.sectionId || image.sectionId, index)),
+    bookmark: figureBookmarkName(index),
   }));
   return staticDirectoryEntriesXml(entries, '暂无图目录条目');
+}
+
+function addDirectoryBookmarks(documentXml, renderPlan) {
+  const targets = directoryBookmarkTargets(renderPlan);
+  if (targets.length === 0) {
+    return documentXml;
+  }
+
+  let nextBookmarkId = nextBookmarkIdStart(documentXml);
+  const usedRanges = [];
+  const replacements = [];
+  const paragraphs = paragraphRanges(documentXml);
+  for (const target of targets) {
+    const paragraph = findDirectoryBookmarkParagraph({ paragraphs, target, usedRanges });
+    if (!paragraph || paragraph.xml.includes(`w:name="${target.bookmark}"`)) {
+      continue;
+    }
+    replacements.push({
+      start: paragraph.start,
+      end: paragraph.end,
+      xml: paragraphXmlWithBookmark(paragraph.xml, nextBookmarkId, target.bookmark),
+    });
+    nextBookmarkId += 1;
+    usedRanges.push({ start: paragraph.start, end: paragraph.end });
+  }
+
+  let nextXml = documentXml;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, replacement.start)}${replacement.xml}${nextXml.slice(replacement.end)}`;
+  }
+  return nextXml;
+}
+
+function directoryBookmarkTargets(renderPlan) {
+  const sections = renderPlan?.templateData?.sections || renderPlan?.sections || [];
+  const targets = sections.map((section, index) => ({
+    type: 'section',
+    title: section.title,
+    bookmark: sectionBookmarkName(index),
+  }));
+  targets.push(
+    ...(renderPlan?.tables || []).map((table, index) => ({
+      type: 'table',
+      tableId: table.tableId,
+      title: table.title,
+      bookmark: tableBookmarkName(index),
+    }))
+  );
+  targets.push(
+    ...(renderPlan?.templateData?.images || []).map((image, index) => ({
+      type: 'figure',
+      figureId: image.figureId,
+      title: image.caption,
+      bookmark: figureBookmarkName(index),
+    }))
+  );
+  return targets.filter((target) => target.bookmark);
+}
+
+function findDirectoryBookmarkParagraph({ paragraphs, target, usedRanges }) {
+  const contentStart = lastDirectoryEntryEnd(paragraphs);
+  return paragraphs.find((paragraph) => {
+    if (paragraph.start <= contentStart || rangeOverlaps(paragraph, usedRanges)) {
+      return false;
+    }
+    if (/\bdirectoryEntry\b/.test(paragraph.text)) {
+      return false;
+    }
+    if (target.type === 'section') {
+      return paragraphMatchesDirectorySection(paragraph.text, target.title);
+    }
+    if (target.type === 'table') {
+      return /\btableCaption\b/.test(paragraph.text) && paragraph.text.includes(`tableId=${safeMetadataValue(target.tableId)}`);
+    }
+    if (target.type === 'figure') {
+      return /\bfigureCaption\b/.test(paragraph.text) && paragraph.text.includes(`figureId=${safeMetadataValue(target.figureId)}`);
+    }
+    return false;
+  }) || null;
+}
+
+function lastDirectoryEntryEnd(paragraphs) {
+  const directoryParagraphs = paragraphs.filter((paragraph) => /\bdirectoryEntry\b/.test(paragraph.text));
+  const last = directoryParagraphs[directoryParagraphs.length - 1];
+  return last ? last.end : 0;
+}
+
+function paragraphMatchesDirectorySection(paragraphTextValue, sectionTitle) {
+  const paragraphTitle = cleanDirectoryTitle(paragraphTextValue);
+  const expectedTitle = cleanDirectoryTitle(sectionTitle);
+  return Boolean(expectedTitle) && (paragraphTitle === expectedTitle || paragraphTitle.includes(expectedTitle));
+}
+
+function nextBookmarkIdStart(documentXml) {
+  const ids = [...String(documentXml || '').matchAll(/<w:bookmarkStart\b[^>]*\bw:id="(\d+)"/g)]
+    .map((match) => Number(match[1]))
+    .filter((value) => Number.isInteger(value));
+  return Math.max(7000, ...ids, 0) + 1;
+}
+
+function paragraphXmlWithBookmark(paragraphXml, bookmarkId, bookmarkName) {
+  const start = `<w:bookmarkStart w:id="${bookmarkId}" w:name="${bookmarkName}"/>`;
+  const end = `<w:bookmarkEnd w:id="${bookmarkId}"/>`;
+  return String(paragraphXml || '')
+    .replace(/(<w:p\b[^>]*>)/, `$1${start}`)
+    .replace('</w:p>', `${end}</w:p>`);
+}
+
+function sectionBookmarkName(index) {
+  return `DocxEngineV2Section${String(index + 1).padStart(3, '0')}`;
+}
+
+function tableBookmarkName(index) {
+  return `DocxEngineV2Table${String(index + 1).padStart(3, '0')}`;
+}
+
+function figureBookmarkName(index) {
+  return `DocxEngineV2Figure${String(index + 1).padStart(3, '0')}`;
+}
+
+function estimatedSectionPageNumbers(renderPlan) {
+  const sections = renderPlan?.templateData?.sections || renderPlan?.sections || [];
+  const pageNumbers = new Map();
+  let consumedUnits = 0;
+  sections.forEach((section, index) => {
+    const pageNumber = ESTIMATED_BODY_START_PAGE + Math.floor(consumedUnits / ESTIMATED_PAGE_UNITS);
+    const keys = [
+      sectionDirectoryKey(section, index),
+      section.sectionId,
+      section.id,
+      section.title,
+    ];
+    for (const key of keys) {
+      const normalizedKey = String(key || '').trim();
+      if (normalizedKey) {
+        pageNumbers.set(normalizedKey, pageNumber);
+      }
+    }
+    consumedUnits += estimatedSectionUnits(section);
+  });
+  return pageNumbers;
+}
+
+function pageNumberForSection(pageNumbers, section, index = 0) {
+  return pageNumbers.get(sectionDirectoryKey(section, index)) || ESTIMATED_BODY_START_PAGE + index;
+}
+
+function pageNumberForSectionId(pageNumbers, sectionId, index = 0) {
+  const normalizedSectionId = String(sectionId || '').trim();
+  return (normalizedSectionId && pageNumbers.get(normalizedSectionId)) || ESTIMATED_BODY_START_PAGE + index;
+}
+
+function sectionDirectoryKey(section, index = 0) {
+  return String(section?.sectionId || section?.id || section?.title || `section-${index + 1}`).trim();
+}
+
+function estimatedSectionUnits(section = {}) {
+  const blocks = Array.isArray(section.blocks) ? section.blocks : [];
+  if (blocks.length === 0) {
+    return 4;
+  }
+  return Math.max(4, blocks.reduce((sum, block) => sum + estimatedBlockUnits(block), 2));
+}
+
+function estimatedBlockUnits(block = {}) {
+  if (block.tableId || block.type === 'table') {
+    const rowCount = Number(block.rowCount || block.rows?.length || 0);
+    return 5 + Math.max(1, rowCount) * 1.2;
+  }
+  if (block.figureId || block.type === 'figure' || block.type === 'image') {
+    return 9;
+  }
+  if (block.type === 'heading') {
+    return 2;
+  }
+  const text = String(block.text || block.content?.text || '');
+  return Math.max(1, Math.ceil(text.length / 140));
+}
+
+function chineseChapterLabel(index) {
+  return `第${chineseNumber(index)}章`;
+}
+
+function chineseNumber(value) {
+  const number = Math.max(1, Math.floor(Number(value) || 1));
+  const digits = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+  if (number <= 10) {
+    return number === 10 ? '十' : digits[number];
+  }
+  if (number < 20) {
+    return `十${digits[number % 10]}`;
+  }
+  if (number < 100) {
+    const tens = Math.floor(number / 10);
+    const ones = number % 10;
+    return `${digits[tens]}十${ones ? digits[ones] : ''}`;
+  }
+  return String(number);
 }
 
 function cleanDirectoryTitle(value) {
@@ -795,23 +1022,39 @@ function staticDirectoryEntriesXml(entries, emptyText) {
     return staticDirectoryEntryParagraph(emptyText, '');
   }
   return normalizedEntries
-    .map((entry) => staticDirectoryEntryParagraph(entry.left, entry.right))
+    .map((entry) => staticDirectoryEntryParagraph(entry.left, entry.right, entry.bookmark))
     .join('');
 }
 
-function staticDirectoryEntryParagraph(left, right = '') {
+function staticDirectoryEntryParagraph(left, right = '', bookmark = '') {
   const rightText = String(right || '').trim();
   return [
     '<w:p>',
     '<w:pPr>',
     '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>',
-    '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs>',
+    '<w:ind w:left="0" w:right="0" w:firstLine="0" w:hanging="0"/>',
+    `<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="${DIRECTORY_TAB_POS_DXA}"/></w:tabs>`,
     '</w:pPr>',
     '<w:r><w:rPr><w:vanish/></w:rPr><w:t>docx-engine-v2 directoryEntry</w:t></w:r>',
     `<w:r><w:t>${escapeXmlText(String(left || '').trim())}</w:t></w:r>`,
-    ...(rightText ? ['<w:r><w:tab/></w:r>', `<w:r><w:t>${escapeXmlText(rightText)}</w:t></w:r>`] : []),
+    ...(rightText ? staticDirectoryPageRuns(rightText, bookmark) : []),
     '</w:p>',
   ].join('');
+}
+
+function staticDirectoryPageRuns(rightText, bookmark = '') {
+  const normalizedBookmark = String(bookmark || '').trim();
+  if (!normalizedBookmark) {
+    return ['<w:r><w:tab/></w:r>', `<w:r><w:t>${escapeXmlText(rightText)}</w:t></w:r>`];
+  }
+  return [
+    '<w:r><w:tab/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+    `<w:r><w:instrText xml:space="preserve"> PAGEREF ${escapeXmlText(normalizedBookmark)} \\h </w:instrText></w:r>`,
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    `<w:r><w:t>${escapeXmlText(rightText)}</w:t></w:r>`,
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ];
 }
 
 function hasTableSequenceField(paragraphXml) {

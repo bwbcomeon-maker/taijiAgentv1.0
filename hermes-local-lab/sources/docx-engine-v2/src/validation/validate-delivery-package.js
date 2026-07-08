@@ -2749,6 +2749,44 @@ function tablePlacementFailures({ documentXml, renderPlan }) {
     if (position < range.start || position >= range.end) {
       failures.push(`${tableId} appears outside section ${sectionId} placement range`);
     }
+
+    failures.push(...docxTableLayoutFailures({ documentXml, tableId }));
+  }
+
+  return failures;
+}
+
+function docxTableLayoutFailures({ documentXml, tableId }) {
+  const tableXml = docxTableXmlForTableId(documentXml, tableId);
+  if (!tableXml) {
+    return [];
+  }
+
+  const failures = [];
+  const properties = tableXml.match(/<w:tblPr\b[\s\S]*?<\/w:tblPr>/)?.[0] || '';
+  if (!/<w:tblW\b(?=[^>]*\bw:w="8520")(?=[^>]*\bw:type="dxa")[^>]*\/>/.test(properties)) {
+    failures.push(`${tableId} DOCX table layout must use fixed width 8520 dxa`);
+  }
+  if (!/<w:jc\b(?=[^>]*\bw:val="center")[^>]*\/>/.test(properties)) {
+    failures.push(`${tableId} DOCX table layout must be centered`);
+  }
+  if (!/<w:tblLayout\b(?=[^>]*\bw:type="fixed")[^>]*\/>/.test(properties)) {
+    failures.push(`${tableId} DOCX table layout must use fixed table layout`);
+  }
+
+  const cells = [...tableXml.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)].map((match) => match[0]);
+  const cellsWithoutVerticalCenter = cells.filter(
+    (cell) => !/<w:vAlign\b(?=[^>]*\bw:val="center")[^>]*\/>/.test(cell)
+  );
+  if (cellsWithoutVerticalCenter.length > 0) {
+    failures.push(`${tableId} DOCX table cells must use vertical center alignment`);
+  }
+
+  const cellsWithoutParagraphCenter = cells.filter(
+    (cell) => !/<w:pPr\b[\s\S]*?<w:jc\b(?=[^>]*\bw:val="center")[^>]*\/>[\s\S]*?<\/w:pPr>/.test(cell)
+  );
+  if (cellsWithoutParagraphCenter.length > 0) {
+    failures.push(`${tableId} DOCX table cell paragraphs must use center alignment`);
   }
 
   return failures;

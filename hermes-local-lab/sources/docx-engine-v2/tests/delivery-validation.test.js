@@ -374,8 +374,28 @@ test('postprocessDocx writes compact static directory entries for portable multi
   assert.ok(directoryEntries.length >= 9, `expected multiple directory entries, got ${directoryEntries.length}`);
   for (const entry of directoryEntries) {
     assert.match(entry, /<w:spacing\b[^>]*w:before="0"[^>]*w:after="0"[^>]*w:line="240"/);
+    assert.match(entry, /<w:tab\b[^>]*w:leader="dot"[^>]*\/>/);
+    assert.match(entry, /<w:r><w:tab\/><\/w:r>/);
+    assert.match(entry, /PAGEREF DocxEngineV2(?:Section|Table|Figure)\d{3} \\h/);
+    assert.match(entry, /<w:fldChar w:fldCharType="separate"\/><\/w:r><w:r><w:t>\d+<\/w:t><\/w:r>/);
     assert.doesNotMatch(entry, /w:pageBreakBefore="1"|<w:pageBreakBefore\/>/);
   }
+  assert.ok(
+    directoryEntries.some((entry) => entry.includes('第一章') && entry.includes('Overview')),
+    'main directory should use chapter-style labels'
+  );
+
+  const tables = [...documentXml.matchAll(/<w:tbl\b[\s\S]*?<\/w:tbl>/g)].map((match) => match[0]);
+  assert.ok(tables.length >= 3, `expected generated dynamic tables, got ${tables.length}`);
+  for (const table of tables) {
+    assert.match(table, /<w:tblPr>[\s\S]*?<w:tblW w:w="8520" w:type="dxa"\/>/);
+    assert.match(table, /<w:tblPr>[\s\S]*?<w:jc w:val="center"\/>/);
+    assert.match(table, /<w:tblLayout w:type="fixed"\/>/);
+    assert.doesNotMatch(table, /<w:tblW w:w="0" w:type="auto"\/>/);
+  }
+  assert.match(documentXml, /<w:bookmarkStart\b[^>]*w:name="DocxEngineV2Section001"/);
+  assert.match(documentXml, /<w:bookmarkStart\b[^>]*w:name="DocxEngineV2Table001"/);
+  assert.match(documentXml, /<w:bookmarkStart\b[^>]*w:name="DocxEngineV2Figure001"/);
 });
 
 test('validateDeliveryPackage fails when figure assets contain degraded semantic fallback markers', async (t) => {
@@ -1777,6 +1797,24 @@ test('validateDeliveryPackage fails when a DOCX table appears before its render-
   assert.equal(report.status, 'failed');
   assert.equal(placementCheck?.status, 'failed');
   assert.match(placementCheck?.message || '', /tbl-001|section|placement/i);
+});
+
+test('validateDeliveryPackage fails when DOCX dynamic table layout is no longer centered and fixed width', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await rewriteDocumentXml(path.join(deliveryDir, 'document.docx'), (documentXml) =>
+    documentXml
+      .replace(/<w:tblPr>([\s\S]*?)<w:jc w:val="center"\/>([\s\S]*?)<\/w:tblPr>/, '<w:tblPr>$1$2</w:tblPr>')
+      .replace(/<w:tblW w:w="8520" w:type="dxa"\/>/, '<w:tblW w:w="0" w:type="auto"/>')
+      .replace(/<w:tblLayout w:type="fixed"\/>/, '<w:tblLayout w:type="autofit"/>')
+  );
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const placementCheck = report.checks.find((check) => check.id === 'table_placement');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(placementCheck?.status, 'failed');
+  assert.match(placementCheck?.message || '', /tbl-001|center|fixed width|table layout/i);
 });
 
 test('validateDeliveryPackage fails when a DOCX table caption is missing', async (t) => {
