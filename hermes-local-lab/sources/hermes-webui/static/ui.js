@@ -1264,6 +1264,43 @@ function _restoreExpertTeamQuestionInputState(root,state){
   return restored;
 }
 
+function _expertTeamWorkspaceActiveTab(root){
+  const active=root&&root.querySelector?root.querySelector('[data-expert-team-workspace-tab].is-active'):null;
+  return active&&active.dataset?String(active.dataset.expertTeamWorkspaceTab||''):'';
+}
+
+function _captureExpertTeamWorkspaceScrollState(panel){
+  if(!panel||!panel.querySelector)return null;
+  const inner=panel.querySelector('.expert-team-panel-inner');
+  const scroller=panel.querySelector('.expert-team-panel-expanded-body');
+  if(!inner||!scroller||typeof scroller.scrollTop!=='number')return null;
+  const max=Math.max(0,scroller.scrollHeight-scroller.clientHeight);
+  return {
+    runId:_expertTeamWorkspacePanelRunId(panel),
+    state:String((inner.dataset&&inner.dataset.expertTeamPresentationState)||''),
+    mode:String((inner.getAttribute&&inner.getAttribute('data-expert-team-workspace-mode'))||(panel.dataset&&panel.dataset.expertTeamWorkspaceMode)||'summary'),
+    tab:_expertTeamWorkspaceActiveTab(inner)||'todo',
+    top:Number(scroller.scrollTop||0),
+    bottomGap:Math.max(0,max-Number(scroller.scrollTop||0)),
+  };
+}
+
+function _restoreExpertTeamWorkspaceScrollState(panel,state){
+  if(!panel||!panel.querySelector||!state)return false;
+  const inner=panel.querySelector('.expert-team-panel-inner');
+  const scroller=panel.querySelector('.expert-team-panel-expanded-body');
+  if(!inner||!scroller||typeof scroller.scrollTop!=='number')return false;
+  const runId=_expertTeamWorkspacePanelRunId(panel);
+  const presentationState=String((inner.dataset&&inner.dataset.expertTeamPresentationState)||'');
+  const mode=String((inner.getAttribute&&inner.getAttribute('data-expert-team-workspace-mode'))||(panel.dataset&&panel.dataset.expertTeamWorkspaceMode)||'summary');
+  const tab=_expertTeamWorkspaceActiveTab(inner)||'todo';
+  if(runId!==state.runId||presentationState!==state.state||mode!==state.mode||tab!==state.tab)return false;
+  const max=Math.max(0,scroller.scrollHeight-scroller.clientHeight);
+  const nextTop=state.bottomGap<=8?max:Math.min(max,Math.max(0,Number(state.top||0)));
+  scroller.scrollTop=nextTop;
+  return true;
+}
+
 function _expertTeamWorkspaceRenderKey(card){
   card=card||{};
   const compactItem=item=>({
@@ -1967,6 +2004,7 @@ function mountExpertTeamWorkspacePanel(card){
   }else if(panel.parentElement!==mainChat){
     mainChat.insertBefore(panel,messagesShell);
   }
+  const scrollState=_captureExpertTeamWorkspaceScrollState(panel);
   panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
   panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||'';
   panel.hidden=false;
@@ -1977,6 +2015,7 @@ function mountExpertTeamWorkspacePanel(card){
   const confirmOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId&&_expertTeamQuestionPopoverRunId===runId);
   _setExpertTeamWorkspaceMode(confirmOpen?'confirm':'summary');
   if(typeof restoreExpertTeamWorkspaceTab==='function')restoreExpertTeamWorkspaceTab(panel);
+  _restoreExpertTeamWorkspaceScrollState(panel,scrollState);
   _setExpertTeamWorkspaceActive(true);
   _syncExpertTeamWorkspacePanelVisibility();
   return true;

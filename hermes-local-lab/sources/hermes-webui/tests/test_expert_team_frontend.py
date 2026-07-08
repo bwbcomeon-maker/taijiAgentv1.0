@@ -156,6 +156,21 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "expert-team-member-row{min-width:0;display:grid" in STYLE_CSS
 
 
+def test_expert_team_workspace_preserves_scroll_on_same_run_refresh():
+    assert "function _captureExpertTeamWorkspaceScrollState" in UI_JS
+    assert "function _restoreExpertTeamWorkspaceScrollState" in UI_JS
+    assert ".expert-team-panel-expanded-body" in UI_JS
+    assert "bottomGap<=8?max" in UI_JS
+    mount_start = UI_JS.index("function mountExpertTeamWorkspacePanel")
+    mount_body = UI_JS[mount_start : UI_JS.index("function _expertTeamWorkspaceStorageKey", mount_start)]
+    assert "const scrollState=_captureExpertTeamWorkspaceScrollState(panel);" in mount_body
+    assert "panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation" in mount_body
+    assert "restoreExpertTeamWorkspaceTab(panel)" in mount_body
+    assert "_restoreExpertTeamWorkspaceScrollState(panel,scrollState);" in mount_body
+    assert mount_body.index("const scrollState=_captureExpertTeamWorkspaceScrollState(panel);") < mount_body.index("panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation")
+    assert mount_body.index("restoreExpertTeamWorkspaceTab(panel)") < mount_body.index("_restoreExpertTeamWorkspaceScrollState(panel,scrollState);")
+
+
 def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message():
     assert "function toggleExpertTeamWorkspacePanel" in UI_JS
     assert "window.toggleExpertTeamWorkspacePanel=toggleExpertTeamWorkspacePanel" in UI_JS

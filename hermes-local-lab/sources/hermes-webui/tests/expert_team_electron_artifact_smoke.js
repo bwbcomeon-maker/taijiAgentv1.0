@@ -43,6 +43,7 @@ async function prepareDesktopSession(page, workspace) {
 }
 
 function runFixture(sessionId, state, overrides = {}) {
+  const reviewItemCount = Number(overrides.reviewItemCount || 1);
   const stageIndex = {
     collecting_required: 0,
     collecting_optional: 0,
@@ -110,12 +111,18 @@ function runFixture(sessionId, state, overrides = {}) {
     stage_id: currentStage.id,
     worker_id: currentStage.worker_id,
   } : {};
+  const reviewItems = Array.from({ length: Math.max(1, reviewItemCount) }, (_, idx) => ({
+    id: `ri-${idx + 1}`,
+    title: idx === 0 ? "请补充具体月份、关键指标和责任部门。" : `第 ${idx + 1} 项待人工补充事项，需要复核后再进入下一阶段。`,
+    status: "pending",
+    used_in_revision: false,
+  }));
   const stageResult = state === "awaiting_review" || state === "completed" || state === "generated_invalid" ? {
     stage_id: currentStage.id,
     worker_id: currentStage.worker_id,
     summary: output.summary,
     deliverable: output.preview,
-    review_items: [{ id: "ri-1", title: "请补充具体月份、关键指标和责任部门。", status: "pending", used_in_revision: false }],
+    review_items: reviewItems,
     next_action: "请复核当前阶段成果，确认后进入下一阶段。",
     validation: state === "generated_invalid" ? { status: "fail", message: "草稿未通过办公材料口径校验。" } : { status: "pass", message: "" },
   } : {};
@@ -405,6 +412,24 @@ async function main() {
     const review = await snapshotState(page);
     assertState(review.panelText.includes("阶段成果待复核") && review.panelText.includes("查看成果") && review.panelText.includes("需要修改"), "Review state is not actionable inside the workbench", review);
     assertState(!review.panelText.includes("公众号"), "Office-material review still contains public-account wording", review);
+    await renderRun(page, "awaiting_review", { run_id: "electron-plan-a-scroll-run", reviewItemCount: 12 });
+    const scrollBeforeRefresh = await page.evaluate(() => {
+      const scroller = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      if (!scroller) return { found: false };
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTop = max;
+      return { found: true, top: scroller.scrollTop, max, height: scroller.clientHeight, scrollHeight: scroller.scrollHeight };
+    });
+    assertState(scrollBeforeRefresh.found && scrollBeforeRefresh.max > 80, "Review workbench did not create a meaningful scroll range", scrollBeforeRefresh);
+    await renderRun(page, "awaiting_review", { run_id: "electron-plan-a-scroll-run", reviewItemCount: 12 });
+    const scrollAfterRefresh = await page.evaluate(() => {
+      const scroller = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      if (!scroller) return { found: false };
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      return { found: true, top: scroller.scrollTop, max, height: scroller.clientHeight, scrollHeight: scroller.scrollHeight };
+    });
+    assertState(scrollAfterRefresh.found && scrollAfterRefresh.top >= scrollBeforeRefresh.top - 8, "Workbench refresh reset the user's scroll position", { before: scrollBeforeRefresh, after: scrollAfterRefresh });
+    await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-review-scroll-preserved.png"), fullPage: false });
     await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea", { timeout: 10000 });
     const revision = await page.evaluate(() => ({
@@ -443,6 +468,7 @@ async function main() {
         path.join(outDir, "expert-team-plan-a-confirmation-open.png"),
         path.join(outDir, "expert-team-plan-a-flow-tab-after-refresh.png"),
         path.join(outDir, "expert-team-plan-a-members-tab-after-refresh.png"),
+        path.join(outDir, "expert-team-plan-a-review-scroll-preserved.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
         path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),

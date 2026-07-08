@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Expert-team workbench refreshes now preserve the user's scroll position when the same run and stage re-render, preventing review actions from jumping back to the top during polling.
 - Expert-team plan/research draft prompts now include the rich-draft table and diagram acceptance gates, so draft stages no longer produce ordinary prose that the backend must reject as `generated_invalid`.
 - Expert-team Members tab now renders team members as a vertical list inside the existing right workspace instead of a horizontally scrolling strip.
 - Expert-team workspace tabs now preserve the selected Todo/Flow/Members/Result view across live status refreshes for the same run without leaking that selection into another run.
