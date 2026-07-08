@@ -1104,6 +1104,19 @@ def _expert_team_prompt_header(run: dict, task: dict) -> str:
     )
 
 
+def _expert_team_rich_draft_generation_contract(material_type: str, task_id: str, team_id: str) -> str:
+    from api.expert_teams.rich_draft import is_rich_draft_required
+
+    if not is_rich_draft_required(material_type, task_id, team_id):
+        return ""
+    return (
+        "富内容初稿硬性验收门槛：本阶段必须一次性输出可进入后续模板套用的 Markdown 富内容初稿，"
+        "至少 2 个 Markdown 表格，至少 1 个架构图、流程图、用例图或图示引用。"
+        "可以用“图示设计”说明应生成的图，也可以给出 Markdown 图片引用；如果关键数据缺失，"
+        "用“待人工确认”占位也要保留表格和图示结构。不得只输出普通段落或下一阶段建议。\n"
+    )
+
+
 def _content_expert_team_execution_prompt(run: dict) -> str:
     from api import expert_teams
 
@@ -1115,6 +1128,11 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
     task_id = str(task.get("id") or "")
     business_context = expert_teams._business_context_for_view(run)
     material_type = str(business_context.get("material_type") or "office_material")
+    rich_draft_contract = _expert_team_rich_draft_generation_contract(
+        material_type,
+        task_id,
+        str(run.get("team_id") or ""),
+    )
     forbidden_terms = business_context.get("forbidden_terms") if isinstance(business_context.get("forbidden_terms"), list) else []
     style_rule = str(business_context.get("style_contract") or "默认采用企业内部正式办公材料口径。")
     forbidden_rule = (
@@ -1164,6 +1182,9 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
             output_sections = "阶段目标、阶段产物（背景、事项安排、时间节点、责任分工、报送要求）、待人工补充事项、下一阶段建议"
         else:
             output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
+        if rich_draft_contract:
+            stage_instruction += rich_draft_contract
+            output_sections += "；富内容初稿必须包含至少 2 个 Markdown 表格、至少 1 个架构图、流程图、用例图或图示引用"
     return (
         "你现在作为内容创作专家团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"
@@ -1185,6 +1206,11 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
     source_boundary = answers.get("source_boundary") or "没有额外资料边界"
     task = _expert_team_current_task(run)
     task_id = str(task.get("id") or "")
+    rich_draft_contract = _expert_team_rich_draft_generation_contract(
+        "research_report",
+        task_id,
+        str(run.get("team_id") or ""),
+    )
     stage_instructions = {
         "direction": "当前只执行“确定研究方向”阶段：收敛核心问题、论证主线、使用对象、资料边界和不展开的范围。",
         "research": "当前只执行“补充案例素材”阶段：整理事实、案例线索、论据类型、可验证来源方向和待人工确认项。",
@@ -1193,6 +1219,9 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         "review": "当前只执行“复核交付”阶段：检查事实、逻辑、表达、流转风险，并形成交付建议。",
     }
     output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作" if task_id == "review" else "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
+    if rich_draft_contract:
+        stage_instructions["draft"] = stage_instructions["draft"] + rich_draft_contract
+        output_sections += "；富内容初稿必须包含至少 2 个 Markdown 表格、至少 1 个架构图、流程图、用例图或图示引用"
     return (
         "你现在作为深度材料研究团执行阶段性任务。\n\n"
         f"{_expert_team_prompt_header(run, task)}"

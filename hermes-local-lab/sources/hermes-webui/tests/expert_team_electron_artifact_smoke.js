@@ -378,6 +378,12 @@ async function main() {
     assertState(!generating.panelText.includes("阶段成果待复核") && !generating.panelText.includes("未检测到结果"), "Generating state is mixed with review or missing-result state", generating);
     assertState(generating.dockHidden && generating.chatConfirmButtons === 0, "Generating state leaks duplicate actions", generating);
 
+    await renderRun(page, "generated_invalid");
+    const invalid = await snapshotState(page);
+    assertState(invalid.panelText.includes("草稿未通过校验") && invalid.panelText.includes("重新生成") && invalid.panelText.includes("查看草稿"), "Generated-invalid state does not expose recovery actions", invalid);
+    assertState(!invalid.panelText.includes("专家团正在生成") && !invalid.panelText.includes("阶段成果待复核"), "Generated-invalid state is mixed with running or review state", invalid);
+    assertState(invalid.dockHidden && invalid.chatConfirmButtons === 0, "Generated-invalid state leaks duplicate actions", invalid);
+
     await renderRun(page, "awaiting_stage_input");
     const stageInput = await snapshotState(page);
     assertState(stageInput.panelText.includes("需要确认后继续") && stageInput.panelText.includes("本次汇报是否需要隐去项目或客户名称？"), "Stage input is not shown in the right workbench", stageInput);

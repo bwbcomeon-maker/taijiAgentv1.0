@@ -250,3 +250,42 @@ def test_expert_team_draft_completion_registers_rich_draft_artifact(tmp_path):
     assert (tmp_path / rich_artifact["manifest_path"]).exists()
     assert (tmp_path / rich_artifact["path"]).exists()
     assert (tmp_path / rich_artifact["assets"][0]["path"]).exists()
+
+    polish_ready = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": completed["run_id"]})
+    assert polish_ready["workflow_state"] == "ready_to_generate"
+    assert polish_ready["current_stage"]["task_id"] == "polish"
+
+    delivery_ready = _complete_stage(
+        expert_teams,
+        tmp_path,
+        polish_ready,
+        (
+            "阶段摘要：已完成方案说明的表达打磨和流转检查。\n"
+            "阶段产物：保留富内容初稿的两张表格和总体图示结构，补齐目标、措施、进度和责任闭环表述。\n"
+            "待人工补充事项：请最终确认数据口径和责任单位。\n"
+            "下一阶段建议：进入交付确认。"
+        ),
+        "polish-stage",
+    )
+    assert delivery_ready["current_stage"]["task_id"] == "delivery"
+
+    delivery_review = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        delivery_ready["run_id"],
+        delivery={
+            "id": "delivery-stage",
+            "kind": "chat",
+            "content": (
+                "阶段摘要：已完成交付确认。\n"
+                "阶段产物：形成可供流转的提升营业厅服务质效专项行动方案，包含总体目标、任务表、风险应对表和总体图示设计。\n"
+                "待人工补充事项：正式流转前确认责任单位名称和数据口径。\n"
+                "交付后核对事项：核对附件编号、会议口径和责任分工。"
+            ),
+        },
+    )
+    assert delivery_review["workflow_state"] == "awaiting_review"
+
+    final = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": delivery_review["run_id"]})
+    assert final["workflow_state"] == "completed"
+    assert final["view"]["presentation"]["state"] == "completed"
+    assert final["view"]["presentation"]["primary_action"]["id"] == "view_result"

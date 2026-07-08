@@ -482,6 +482,124 @@ def test_stage_approval_advances_until_final_completed(tmp_path):
     assert approved["view"]["presentation"]["primary_action"]["id"] == "view_result"
 
 
+def test_plan_like_draft_prompt_names_rich_draft_acceptance_gate(tmp_path):
+    from api import expert_teams, routes
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-rich-draft-prompt",
+            "team_id": "content-creator-team",
+            "prompt": "帮我起草一份方案说明，主题是提升营业厅服务质效专项行动。",
+        },
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "topic": "方案说明，主题是提升营业厅服务质效专项行动",
+                "audience": "公司分管领导和营销服务部门，用于专项行动部署",
+                "boundary": "正式方案口径，包含目标、任务、进度、责任分工和保障机制",
+            },
+        },
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": ready["run_id"],
+            "answers": {"optional_context": ""},
+            "skip_optional": True,
+        },
+    )
+    planned = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        ready["run_id"],
+        delivery={
+            "id": "plan-stage",
+            "kind": "chat",
+            "content": (
+                "阶段摘要：已确认方案说明的编制路径和阶段分工。\n"
+                "正文草稿：本阶段只形成执行计划，不直接起草完整正文。\n"
+                "待补充事项：请确认营业厅清单、办理量和投诉问题台账。\n"
+                "建议下一步：进入素材整理。"
+            ),
+        },
+    )
+    materials = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": planned["run_id"]})
+    material_output = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        materials["run_id"],
+        delivery={
+            "id": "materials-stage",
+            "kind": "chat",
+            "content": "阶段摘要：已整理行动目标、问题台账、责任单位和进度节点。\n待补充事项：数据口径待人工确认。",
+        },
+    )
+    draft_ready = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": material_output["run_id"]})
+
+    assert draft_ready["current_stage"]["task_id"] == "draft"
+    prompt = routes._expert_team_execution_prompt(draft_ready)
+
+    assert "富内容初稿" in prompt
+    assert "至少 2 个 Markdown 表格" in prompt
+    assert "至少 1 个架构图、流程图、用例图或图示引用" in prompt
+    assert "不得只输出普通段落或下一阶段建议" in prompt
+
+
+def test_deep_research_draft_prompt_names_rich_draft_acceptance_gate(tmp_path):
+    from api import expert_teams, routes
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-research-rich-draft-prompt",
+            "team_id": "deep-research-team",
+            "prompt": "帮我研究本地优先 AI 助理在企业内部办公场景的落地趋势",
+        },
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {
+            "run_id": run["run_id"],
+            "answers": {
+                "research_topic": "本地优先 AI 助理在企业内部办公场景的落地趋势",
+                "audience_goal": "面向企业中高层，用于判断内部办公智能体落地路径",
+                "source_boundary": "优先公开研究、企业案例和可验证数据，避免消费级 AI 科普",
+            },
+        },
+    )
+    ready = expert_teams.answer_expert_team(
+        tmp_path,
+        {"run_id": ready["run_id"], "answers": {"optional_context": ""}, "skip_optional": True},
+    )
+    data = ready
+    for stage in ("direction", "research", "evidence", "outline"):
+        generated = expert_teams.mark_expert_team_execution_complete(
+            tmp_path,
+            data["run_id"],
+            delivery={
+                "id": f"{stage}-stage",
+                "kind": "chat",
+                "content": (
+                    "阶段摘要：当前研究阶段已经完成。\n"
+                    "阶段产物：已整理核心问题、案例素材、事实核验项和结构安排。\n"
+                    "待人工补充事项：请补充内部部署样本和可披露案例。\n"
+                    "下一阶段建议：继续推进。"
+                ),
+            },
+        )
+        data = expert_teams.approve_expert_team_stage(tmp_path, {"run_id": generated["run_id"]})
+
+    assert data["current_stage"]["task_id"] == "draft"
+    prompt = routes._expert_team_execution_prompt(data)
+
+    assert "富内容初稿" in prompt
+    assert "至少 2 个 Markdown 表格" in prompt
+    assert "至少 1 个架构图、流程图、用例图或图示引用" in prompt
+    assert "不得只输出普通段落或下一阶段建议" in prompt
+
+
 def test_new_runtime_does_not_emit_legacy_confirmation_or_writeflow_fields(tmp_path):
     from api import expert_teams
 

@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Expert-team plan/research draft prompts now include the rich-draft table and diagram acceptance gates, so draft stages no longer produce ordinary prose that the backend must reject as `generated_invalid`.
 - Expert-team Members tab now renders team members as a vertical list inside the existing right workspace instead of a horizontally scrolling strip.
 - Expert-team workspace tabs now preserve the selected Todo/Flow/Members/Result view across live status refreshes for the same run without leaking that selection into another run.
 - Expert-team desktop workspace now uses a task-first summary with Todo/Flow/Members/Result tabs, and opens demand confirmation as a single-question wizard so the right panel no longer becomes a long stacked status page.
