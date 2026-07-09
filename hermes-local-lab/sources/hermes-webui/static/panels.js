@@ -8746,6 +8746,8 @@ function _syncImageGenConfigControls(){
  const providerSel=$('imageGenConfigProvider');
  const keyRow=$('imageGenConfigApiKeyRow');
  const hint=$('imageGenConfigKeyHint');
+ const imageGenConfigApiKey=$('imageGenConfigApiKey');
+ const pasteBtn=keyRow?keyRow.querySelector('.model-config-paste-btn'):null;
  if(!providerSel||!_modelConfigData) return;
  const providerId=providerSel.value||'';
  const providers=Array.isArray(_modelConfigData.image_gen_providers)?_modelConfigData.image_gen_providers:[];
@@ -8754,10 +8756,15 @@ function _syncImageGenConfigControls(){
  _setDatalistOptions('imageGenConfigModelOptions',models);
  const envVar=provider&&provider.key_status&&provider.key_status.env_var;
  const oauth=!!(provider&&provider.oauth_managed);
- if(keyRow) keyRow.style.display=envVar&&!oauth?'':'none';
+ if(keyRow) keyRow.style.display='';
+ if(imageGenConfigApiKey){
+  imageGenConfigApiKey.disabled=oauth;
+  imageGenConfigApiKey.placeholder=oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥';
+ }
+ if(pasteBtn) pasteBtn.disabled=oauth;
  if(hint){
   if(oauth){
-   hint.textContent='此图片生成服务由太极智能体授权管理，不需要在此输入 API key。';
+   hint.textContent='此服务由太极授权托管，无需填写 API 密钥。授权完成后刷新状态即可。';
   }else if(envVar){
    hint.textContent=_modelConfigKeyLabel(provider.key_status);
   }else{

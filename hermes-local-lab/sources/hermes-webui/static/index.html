@@ -1493,6 +1493,7 @@
                       <div class="model-config-collapsible" id="visionConfigEdit" hidden>
                         <label for="visionConfigProvider">Provider</label>
                         <select id="visionConfigProvider"></select>
+                        <div class="model-config-hint" id="visionProviderScopeHint">看图识别只显示视觉理解模型；它不能直接生成图片。</div>
                         <label for="visionConfigModel">模型 ID</label>
                         <input id="visionConfigModel" list="visionConfigModelOptions" placeholder="选择或输入视觉模型 ID" autocomplete="off">
                         <datalist id="visionConfigModelOptions"></datalist>
@@ -1533,6 +1534,7 @@
                       <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
                         <label for="imageGenConfigProvider">Provider</label>
                         <select id="imageGenConfigProvider"></select>
+                        <div class="model-config-hint" id="imageGenProviderScopeHint">生成图片只显示出图服务；它和看图识别的 Provider 列表不同。</div>
                         <label for="imageGenConfigModel">模型 ID</label>
                         <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
                         <datalist id="imageGenConfigModelOptions"></datalist>

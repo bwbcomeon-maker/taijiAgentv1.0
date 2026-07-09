@@ -224,6 +224,15 @@ def test_image_generation_oauth_managed_provider_hides_key_paste_action():
     assert "pasteAction.style.display=managedAuth?'none':''" in PANELS_JS
 
 
+def test_image_generation_key_row_is_visible_with_managed_auth_explanation():
+    assert 'id="imageGenProviderScopeHint"' in INDEX_HTML
+    assert 'id="visionProviderScopeHint"' in INDEX_HTML
+    assert "provider&&provider.oauth_managed" in PANELS_JS
+    assert "imageGenConfigApiKey.disabled=oauth" in PANELS_JS
+    assert "此服务由太极授权托管，无需填写 API 密钥。" in PANELS_JS
+    assert "keyRow.style.display=envVar&&!oauth?'':'none'" not in PANELS_JS
+
+
 def test_model_config_license_layout_prioritizes_customer_and_compacts_actions():
     assert 'class="model-config-license-customer"' in INDEX_HTML
     assert 'id="taijiLicenseCustomer"' in INDEX_HTML
