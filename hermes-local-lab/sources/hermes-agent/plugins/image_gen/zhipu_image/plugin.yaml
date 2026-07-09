@@ -1,0 +1,7 @@
+name: zhipu-image
+version: 1.0.0
+description: "Zhipu GLM-Image generation backend."
+author: Taiji Agent
+kind: backend
+requires_env:
+  - GLM_API_KEY

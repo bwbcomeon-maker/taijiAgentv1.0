@@ -1,0 +1,8 @@
+name: dashscope
+version: 1.0.0
+description: "Aliyun DashScope Qwen-Image text-to-image backend."
+author: Taiji Agent
+kind: backend
+requires_env:
+  - DASHSCOPE_API_KEY
+  - DASHSCOPE_WORKSPACE_ID

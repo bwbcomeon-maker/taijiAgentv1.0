@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 _CUSTOM_MODEL_KEY_ENV = "HERMES_CUSTOM_MODEL_API_KEY"
 _IMAGE_GEN_KEY_ENV: dict[str, str] = {
     "doubao": "ARK_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
+    "qianfan": "QIANFAN_API_KEY",
+    "zhipu-image": "GLM_API_KEY",
+    "minimax-image": "MINIMAX_API_KEY",
     "fal": "FAL_KEY",
     "openai": "OPENAI_API_KEY",
     "xai": "XAI_API_KEY",
@@ -87,6 +91,47 @@ _IMAGE_GEN_FALLBACK_META: dict[str, dict[str, Any]] = {
         ],
         "default_model": "doubao-seedream-5-0-260128",
     },
+    "dashscope": {
+        "name": "通义 Qwen-Image",
+        "models": [
+            {"id": "qwen-image-2.0-pro", "label": "Qwen Image 2.0 Pro"},
+            {"id": "qwen-image", "label": "Qwen Image"},
+        ],
+        "default_model": "qwen-image-2.0-pro",
+    },
+    "qianfan": {
+        "name": "百度千帆",
+        "models": [{"id": "qwen-image", "label": "Qwen Image"}],
+        "default_model": "qwen-image",
+    },
+    "zhipu-image": {
+        "name": "智谱 GLM-Image",
+        "models": [
+            {"id": "glm-image", "label": "GLM-Image"},
+            {"id": "cogview-4", "label": "CogView-4"},
+        ],
+        "default_model": "glm-image",
+    },
+    "minimax-image": {
+        "name": "MiniMax Image",
+        "models": [{"id": "image-01", "label": "MiniMax Image-01"}],
+        "default_model": "image-01",
+    },
+}
+_DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS = {
+    "doubao",
+    "dashscope",
+    "qianfan",
+    "zhipu-image",
+    "minimax-image",
+}
+_BLOCKED_IMAGE_GEN_PROVIDER_LABELS = {
+    "fal": "FAL",
+    "openai": "OpenAI",
+    "openai-codex": "OpenAI 图像生成",
+    "xai": "xAI",
+    "krea": "Krea",
+    "taiji-image": "OpenAI 图像生成",
 }
 _IMAGE_GEN_PUBLIC_PROVIDER_IDS = {
     "openai-codex": "taiji-image",
@@ -97,6 +142,10 @@ _IMAGE_GEN_INTERNAL_PROVIDER_IDS = {
 }
 _BUILTIN_IMAGE_GEN_MODULES: tuple[str, ...] = (
     "plugins.image_gen.doubao",
+    "plugins.image_gen.dashscope",
+    "plugins.image_gen.qianfan",
+    "plugins.image_gen.zhipu_image",
+    "plugins.image_gen.minimax_image",
     "plugins.image_gen.fal",
     "plugins.image_gen.openai",
     "plugins.image_gen.openai-codex",
@@ -177,7 +226,19 @@ def _ensure_image_gen_plugins_registered() -> None:
     from agent import image_gen_registry
 
     registered = {provider.name for provider in image_gen_registry.list_providers()}
-    if not {"doubao", "fal", "openai", "openai-codex", "xai", "krea"}.issubset(registered):
+    expected = {
+        "doubao",
+        "dashscope",
+        "qianfan",
+        "zhipu-image",
+        "minimax-image",
+        "fal",
+        "openai",
+        "openai-codex",
+        "xai",
+        "krea",
+    }
+    if not expected.issubset(registered):
         ctx = _ImageGenRegisterContext()
         for module_name in _BUILTIN_IMAGE_GEN_MODULES:
             try:
@@ -205,6 +266,162 @@ def _internal_image_gen_provider_id(provider_id: str) -> str:
     return _IMAGE_GEN_INTERNAL_PROVIDER_IDS.get(provider, provider)
 
 
+def _image_gen_credential_fields(
+    *,
+    schema: dict[str, Any],
+    env_var: str,
+    env_vars: list[str],
+) -> list[dict[str, Any]]:
+    raw_fields = schema.get("credential_fields")
+    fields: list[dict[str, Any]] = []
+    if isinstance(raw_fields, list):
+        for item in raw_fields:
+            if not isinstance(item, dict):
+                continue
+            field_env = str(item.get("env_var") or item.get("key") or "").strip()
+            field_name = str(item.get("name") or field_env.lower() or "").strip()
+            if not field_name and not field_env:
+                continue
+            fields.append(
+                {
+                    "name": field_name or field_env,
+                    "env_var": field_env,
+                    "label": str(item.get("label") or item.get("prompt") or field_env or field_name),
+                    "required": bool(item.get("required", True)),
+                    "secret": bool(item.get("secret", True)),
+                    "placeholder": str(item.get("placeholder") or ""),
+                }
+            )
+    if fields:
+        return fields
+    keys = env_vars or ([env_var] if env_var else [])
+    for key in keys:
+        if not key:
+            continue
+        fields.append(
+            {
+                "name": "api_key" if key.endswith("_API_KEY") or key.endswith("_KEY") else key.lower(),
+                "env_var": key,
+                "label": "API 密钥" if key.endswith("_API_KEY") or key.endswith("_KEY") else key,
+                "required": True,
+                "secret": True,
+                "placeholder": "留空保留现有密钥",
+            }
+        )
+    return fields
+
+
+def _image_gen_options_for_active(active_provider: str) -> dict[str, Any]:
+    try:
+        config_data = _load_yaml_config_file(_get_config_path())
+    except Exception:
+        return {}
+    image_cfg = config_data.get("image_gen") if isinstance(config_data, dict) else None
+    if not isinstance(image_cfg, dict):
+        return {}
+    if str(image_cfg.get("provider") or "").strip().lower() != str(active_provider or "").strip().lower():
+        return {}
+    options = image_cfg.get("options")
+    return options if isinstance(options, dict) else {}
+
+
+def _image_gen_credential_status(
+    fields: list[dict[str, Any]],
+    *,
+    active_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    statuses: list[dict[str, Any]] = []
+    missing: list[str] = []
+    options = active_options or {}
+    for field in fields:
+        env_var = str(field.get("env_var") or "").strip()
+        name = str(field.get("name") or env_var or "").strip()
+        required = bool(field.get("required", True))
+        secret = bool(field.get("secret", True))
+        status = _key_status_for_env(env_var) if env_var else {"configured": False, "source": "none", "env_var": ""}
+        if not secret and name and str(options.get(name) or "").strip():
+            status = {"configured": True, "source": "config_yaml", "env_var": env_var}
+        configured = bool(status.get("configured"))
+        statuses.append(
+            {
+                "name": name,
+                "env_var": env_var,
+                "configured": configured,
+                "source": str(status.get("source") or "none"),
+                "secret": secret,
+                "required": required,
+            }
+        )
+        if required and not configured:
+            missing.append(env_var or name)
+    return {
+        "configured": not missing if fields else True,
+        "missing": missing,
+        "fields": statuses,
+    }
+
+
+def _image_gen_primary_key_status(
+    fields: list[dict[str, Any]],
+    credential_status: dict[str, Any],
+) -> dict[str, Any]:
+    field_statuses = credential_status.get("fields") if isinstance(credential_status, dict) else []
+    if isinstance(field_statuses, list):
+        for field in field_statuses:
+            if isinstance(field, dict) and field.get("secret") and field.get("env_var"):
+                return {
+                    "configured": bool(field.get("configured")),
+                    "source": str(field.get("source") or "none"),
+                    "env_var": str(field.get("env_var") or ""),
+                }
+    for field in fields:
+        env_var = str(field.get("env_var") or "").strip()
+        if env_var:
+            return _key_status_for_env(env_var)
+    return {"configured": bool(credential_status.get("configured")), "source": "none", "env_var": ""}
+
+
+def _image_gen_policy_allowed(pid: str, schema: dict[str, Any], *, is_custom: bool) -> tuple[bool, bool, str]:
+    if is_custom:
+        return True, True, "custom"
+    domestic = bool(schema.get("domestic")) if "domestic" in schema else pid in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS
+    status = str(schema.get("integration_status") or ("stable" if pid in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS else "external")).strip().lower()
+    allowed = bool(domestic and status == "stable")
+    return allowed, domestic, status
+
+
+def _blocked_image_gen_row(
+    *,
+    provider_id: str,
+    public_id: str | None = None,
+    active: bool = True,
+    reason_code: str = "domestic_policy_required",
+    status_message: str = "当前配置不符合国产策略，请切换到中国可用的稳定生图 Provider。",
+) -> dict[str, Any]:
+    public = public_id or _public_image_gen_provider_id(provider_id)
+    return {
+        "id": public,
+        "name": _BLOCKED_IMAGE_GEN_PROVIDER_LABELS.get(public, _BLOCKED_IMAGE_GEN_PROVIDER_LABELS.get(provider_id, public)),
+        "description": "历史非国产图片生成配置，只读显示。",
+        "badge": "已阻止",
+        "available": False,
+        "active": active,
+        "requires_env": [],
+        "key_status": {"configured": False, "source": "policy_blocked", "env_var": ""},
+        "credential_fields": [],
+        "credential_status": {"configured": False, "missing": [], "fields": []},
+        "reason_code": reason_code,
+        "status_message": status_message,
+        "models": [],
+        "default_model": "",
+        "oauth_managed": provider_id == "openai-codex",
+        "custom": False,
+        "domestic": False,
+        "integration_status": "blocked",
+        "policy_blocked": True,
+    }
+
+
 def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
     readiness: dict[str, Any] = {}
     try:
@@ -225,6 +442,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    active_options = _image_gen_options_for_active(active_provider)
     for provider in providers:
         pid = str(getattr(provider, "name", "") or "").strip()
         if not pid:
@@ -259,25 +477,36 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
         env_var = _IMAGE_GEN_KEY_ENV.get(pid) or (env_vars[0] if env_vars else "")
         active = pid == active_provider
         public_pid = _public_image_gen_provider_id(pid)
-        if pid == "openai-codex":
-            key_status = {
-                "configured": bool(available),
-                "source": "taiji_auth",
-                "env_var": "",
-            }
-            display_name = "OpenAI 图像生成"
-            description = "通过太极智能体授权使用图像生成"
-            badge = "授权"
-        else:
-            key_status = _key_status_for_env(env_var)
-            if is_custom and key_status.get("configured") and default_model:
-                available = True
-            display_name = str(schema.get("name") or getattr(provider, "display_name", "") or pid)
-            description = str(schema.get("tag") or "")
-            badge = str(schema.get("badge") or "")
+        allowed, domestic, integration_status = _image_gen_policy_allowed(pid, schema, is_custom=is_custom)
+        if not allowed:
+            if active:
+                blocked = _blocked_image_gen_row(
+                    provider_id=pid,
+                    public_id=public_pid,
+                    active=True,
+                    reason_code=str(readiness.get("reason_code") or "domestic_policy_required"),
+                    status_message=str(readiness.get("public_message") or "当前配置不符合国产策略，请切换到中国可用的稳定生图 Provider。"),
+                )
+                rows.append(blocked)
+            continue
+
+        credential_fields = _image_gen_credential_fields(
+            schema=schema,
+            env_var=env_var,
+            env_vars=env_vars,
+        )
+        credential_status = _image_gen_credential_status(
+            credential_fields,
+            active_options=active_options if active else {},
+        )
+        key_status = _image_gen_primary_key_status(credential_fields, credential_status)
+        if is_custom and key_status.get("configured") and default_model:
+            available = True
+        display_name = str(schema.get("name") or getattr(provider, "display_name", "") or pid)
+        description = str(schema.get("tag") or "")
+        badge = str(schema.get("badge") or ("外部" if is_custom else "国产"))
         if active and readiness:
             available = bool(readiness.get("available"))
-            key_status["configured"] = bool(readiness.get("available"))
             reason_code = str(readiness.get("reason_code") or "")
             status_message = str(readiness.get("public_message") or "")
         else:
@@ -293,6 +522,8 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 "active": active,
                 "requires_env": env_vars or ([env_var] if env_var else []),
                 "key_status": key_status,
+                "credential_fields": credential_fields,
+                "credential_status": credential_status,
                 "reason_code": reason_code,
                 "status_message": status_message,
                 "models": [
@@ -304,50 +535,61 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                     if isinstance(item, dict) and str(item.get("id") or "").strip()
                 ],
                 "default_model": default_model,
-                "oauth_managed": pid == "openai-codex",
+                "oauth_managed": False,
                 "custom": is_custom,
+                "domestic": domestic,
+                "integration_status": integration_status,
+                "policy_blocked": False,
             }
         )
 
     for pid, env_var in _IMAGE_GEN_KEY_ENV.items():
         if pid in seen:
             continue
+        active = pid == active_provider
+        if pid not in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS:
+            if active:
+                rows.append(_blocked_image_gen_row(provider_id=pid, active=True))
+            continue
         fallback = _IMAGE_GEN_FALLBACK_META.get(pid, {})
+        credential_fields = _image_gen_credential_fields(schema={}, env_var=env_var, env_vars=[env_var])
+        credential_status = _image_gen_credential_status(
+            credential_fields,
+            active_options=active_options if active else {},
+        )
         rows.append(
             {
                 "id": pid,
                 "name": str(fallback.get("name") or pid.replace("-", " ").title()),
                 "description": "",
-                "badge": "",
+                "badge": "国产",
                 "available": bool(_key_status_for_env(env_var).get("configured")),
-                "active": pid == active_provider,
+                "active": active,
                 "requires_env": [env_var],
-                "key_status": _key_status_for_env(env_var),
+                "key_status": _image_gen_primary_key_status(credential_fields, credential_status),
+                "credential_fields": credential_fields,
+                "credential_status": credential_status,
                 "models": list(fallback.get("models") or []),
                 "default_model": str(fallback.get("default_model") or ""),
                 "oauth_managed": False,
+                "custom": False,
+                "domestic": True,
+                "integration_status": "stable",
+                "policy_blocked": False,
             }
         )
     if "openai-codex" not in seen:
         active = active_provider == "openai-codex"
-        available = bool(readiness.get("available")) if active else False
-        rows.append(
-            {
-                "id": _public_image_gen_provider_id("openai-codex"),
-                "name": "OpenAI 图像生成",
-                "description": "通过太极智能体授权使用图像生成",
-                "badge": "授权",
-                "available": available,
-                "active": active,
-                "requires_env": [],
-                "key_status": {"configured": available, "source": "taiji_auth", "env_var": ""},
-                "reason_code": str(readiness.get("reason_code") or "") if active else "",
-                "status_message": str(readiness.get("public_message") or "") if active else "",
-                "models": [],
-                "default_model": "",
-                "oauth_managed": True,
-            }
-        )
+        if active:
+            rows.append(
+                _blocked_image_gen_row(
+                    provider_id="openai-codex",
+                    public_id=_public_image_gen_provider_id("openai-codex"),
+                    active=True,
+                    reason_code=str(readiness.get("reason_code") or "domestic_policy_required"),
+                    status_message=str(readiness.get("public_message") or "当前配置不符合国产策略，请切换到中国可用的稳定生图 Provider。"),
+                )
+            )
     return sorted(rows, key=lambda row: (not row.get("active"), row.get("id") or ""))
 
 
@@ -635,24 +877,70 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     provider_id = _internal_image_gen_provider_id(requested_provider_id)
     model_id = str(body.get("model") or "").strip()
     api_key = body.get("api_key")
+    credentials = body.get("credentials")
+    if not isinstance(credentials, dict):
+        credentials = {}
     if not requested_provider_id:
         raise ValueError("provider is required")
 
     rows = _image_gen_provider_rows(provider_id)
     selected = next((row for row in rows if row.get("id") == requested_provider_id), None)
     if selected is None:
+        if requested_provider_id in _BLOCKED_IMAGE_GEN_PROVIDER_LABELS or provider_id in _BLOCKED_IMAGE_GEN_PROVIDER_LABELS:
+            raise ValueError("生成图片主配置只支持中国可用的稳定 Provider，请切换到国产生图服务。")
         raise ValueError(f"unknown image generation provider: {requested_provider_id}")
+    selected_custom = bool(selected.get("custom"))
+    selected_domestic = bool(selected.get("domestic")) if "domestic" in selected else provider_id in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS
+    selected_status = str(
+        selected.get("integration_status")
+        or ("custom" if selected_custom else ("stable" if provider_id in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS else "external"))
+    )
+    if selected.get("policy_blocked") or (
+        not selected_custom and (not selected_domestic or selected_status != "stable")
+    ):
+        raise ValueError("生成图片主配置只支持中国可用的稳定 Provider，请切换到国产生图服务。")
     if not model_id:
         model_id = str(selected.get("default_model") or "").strip()
         models = selected.get("models") if isinstance(selected.get("models"), list) else []
         if not model_id and models:
             model_id = str((models[0] or {}).get("id") or "").strip()
 
-    env_var = _IMAGE_GEN_KEY_ENV.get(provider_id)
-    if api_key is not None and str(api_key).strip():
+    credential_fields = selected.get("credential_fields") if isinstance(selected.get("credential_fields"), list) else []
+    env_updates: dict[str, str] = {}
+    option_updates: dict[str, str] = {}
+    legacy_api_key_consumed = False
+    for item in credential_fields:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        env_var = str(item.get("env_var") or "").strip()
+        secret = bool(item.get("secret", True))
+        raw_value = None
+        if name and name in credentials:
+            raw_value = credentials.get(name)
+        elif env_var and env_var in credentials:
+            raw_value = credentials.get(env_var)
+        elif api_key is not None and not legacy_api_key_consumed and secret:
+            raw_value = api_key
+            legacy_api_key_consumed = True
+        value = str(raw_value or "").strip()
+        if not value:
+            continue
+        if secret:
+            if not env_var:
+                raise ValueError(f"{provider_id} credential {name or 'api_key'} has no env_var")
+            env_updates[env_var] = value
+        elif name:
+            option_updates[name] = value
+
+    if api_key is not None and str(api_key).strip() and not legacy_api_key_consumed and not credential_fields:
+        env_var = _IMAGE_GEN_KEY_ENV.get(provider_id)
         if not env_var:
             raise ValueError(f"{provider_id} does not accept an API key from WebUI")
-        _write_env_file(_get_hermes_home() / ".env", {env_var: str(api_key).strip()})
+        env_updates[env_var] = str(api_key).strip()
+
+    if env_updates:
+        _write_env_file(_get_hermes_home() / ".env", env_updates)
 
     config_path = _get_config_path()
     with _cfg_lock:
@@ -664,6 +952,12 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
         if model_id:
             image_cfg["model"] = model_id
         image_cfg["use_gateway"] = False
+        if option_updates:
+            options = image_cfg.get("options")
+            if not isinstance(options, dict):
+                options = {}
+            options.update(option_updates)
+            image_cfg["options"] = options
         config_data["image_gen"] = image_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()

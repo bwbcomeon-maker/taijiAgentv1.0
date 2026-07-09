@@ -8221,6 +8221,80 @@ function _modelConfigImageProviderRow(providerId,data){
  return rows.find(p=>String(p&&p.id||'')===id)||null;
 }
 
+function _imageGenCredentialInputId(name){
+ return 'imageGenCredential__'+String(name||'').replace(/[^A-Za-z0-9_-]+/g,'_');
+}
+
+function _renderImageGenCredentialFields(provider){
+ const box=$('imageGenConfigCredentials');
+ if(!box) return;
+ box.innerHTML='';
+ const fields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
+ if(!fields.length){
+  box.hidden=true;
+  return;
+ }
+ box.hidden=false;
+ fields.forEach(field=>{
+  if(!field) return;
+  const name=String(field.name||field.env_var||'').trim();
+  if(!name) return;
+  const row=document.createElement('div');
+  row.className='model-config-credential-row';
+  const label=document.createElement('label');
+  const inputId=_imageGenCredentialInputId(name);
+  label.setAttribute('for',inputId);
+  label.textContent=String(field.label||field.env_var||name);
+  const secret=field.secret!==false;
+  const input=document.createElement('input');
+  input.id=inputId;
+  input.type=secret?'password':'text';
+  input.autocomplete='off';
+  input.placeholder=String(field.placeholder||(secret?'留空保留现有密钥':'留空保留现有配置'));
+  input.dataset.imageGenCredential=name;
+  input.dataset.envVar=String(field.env_var||'');
+  input.dataset.secret=secret?'1':'0';
+  if(secret) input.dataset.secretField='true';
+  const status=(provider.credential_status&&Array.isArray(provider.credential_status.fields))
+   ? provider.credential_status.fields.find(item=>String(item.name||item.env_var||'')===name||String(item.env_var||'')===String(field.env_var||''))
+   : null;
+  const configured=!!(status&&status.configured);
+  const wrap=document.createElement('div');
+  wrap.className=secret?'model-config-secret-row':'model-config-plain-row';
+  wrap.appendChild(input);
+  if(secret){
+   const btn=document.createElement('button');
+   btn.className='model-config-paste-btn';
+   btn.type='button';
+   btn.textContent='粘贴';
+   btn.onclick=()=>pasteSecretToInput(inputId);
+   wrap.appendChild(btn);
+  }
+  const hint=document.createElement('div');
+  hint.className='model-config-hint';
+  hint.textContent=configured?'已配置，留空不会覆盖。':(field.required===false?'可选，留空使用默认值。':'未配置，保存后生效。');
+  row.appendChild(label);
+  row.appendChild(wrap);
+  row.appendChild(hint);
+  box.appendChild(row);
+ });
+}
+
+function _collectImageGenCredentials(){
+ const credentials={};
+ document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
+  const key=String(input.dataset.imageGenCredential||'').trim();
+  const value=String(input.value||'').trim();
+  if(key&&value) credentials[key]=value;
+ });
+ return credentials;
+}
+
+function _firstImageGenSecretInputId(){
+ const input=document.querySelector('#imageGenConfigCredentials input[data-secret-field="true"]');
+ return input?input.id:'imageGenConfigApiKey';
+}
+
 function _modelConfigVisionProviderRow(providerId,data){
  const id=String(providerId||'').trim();
  const rows=Array.isArray(data&&data.vision_providers)?data.vision_providers:[];
@@ -8313,8 +8387,9 @@ function _renderModelConfigFocusSummary(data){
  const imageKeyLabel=_modelConfigKeyLabel(imageKeyStatus);
  const imageReady=!!(imageProvider&&imageModel&&imageRow.available===true);
  const managedAuth=!!(imageRow&&imageRow.oauth_managed);
+ const policyBlocked=!!(imageRow&&imageRow.policy_blocked);
  const pasteAction=$('modelConfigImagePasteAction');
- if(pasteAction) pasteAction.style.display=managedAuth?'none':'';
+ if(pasteAction) pasteAction.style.display=(managedAuth||policyBlocked)?'none':'';
  _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(imageProvider,imageRow.name));
  _setModelConfigText('imageGenConfigModelSummary',imageModel||String(imageRow.default_model||''));
  _setModelConfigText('imageGenConfigKeyState',imageKeyLabel);
@@ -8326,10 +8401,10 @@ function _renderModelConfigFocusSummary(data){
   const icon=imageCard.querySelector('.model-config-warning-icon');
   if(icon) icon.textContent=imageReady?'✓':'!';
  }
- _setModelConfigText('imageGenConfigCardTitle',imageReady?'生成图片已配置':(managedAuth?'生成图片待授权':'生成图片待配置'));
+ _setModelConfigText('imageGenConfigCardTitle',imageReady?'生成图片已配置':(policyBlocked?'生成图片配置需切换':(managedAuth?'生成图片待授权':'生成图片待配置')));
  _setModelConfigText('imageGenConfigSummary',imageReady
   ? '图片生成配置已可用于 image_generate；正文写作仍由主模型负责。'
-  : (managedAuth?'只有调用 image_generate 或需要实际生成图片时才会失败。请完成授权后刷新状态。':'只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。'));
+  : (policyBlocked?'当前历史配置不符合国产策略，请切换到中国可用的稳定出图服务。':(managedAuth?'只有调用 image_generate 或需要实际生成图片时才会失败。请完成授权后刷新状态。':'只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。')));
 }
 
 function toggleModelConfigSection(sectionId,forceOpen){
@@ -8364,13 +8439,19 @@ async function openImageGenKeyEditor(){
  const providerSel=$('imageGenConfigProvider');
  const providerId=providerSel?providerSel.value:((_modelConfigData&&_modelConfigData.image_gen&&_modelConfigData.image_gen.provider)||'');
  const provider=_modelConfigImageProviderRow(providerId,_modelConfigData);
+ if(provider&&provider.policy_blocked){
+  toggleModelConfigSection('imageGenConfigEdit',true);
+  if(typeof showToast==='function') showToast('当前生图配置不符合国产策略，请切换到中国可用 Provider。',5000,'warn');
+  return;
+ }
  if(provider&&provider.oauth_managed){
   toggleModelConfigSection('imageGenConfigEdit',true);
   if(typeof showToast==='function') showToast('此图片生成服务由太极智能体授权管理，请完成授权后刷新状态。',5000,'warn');
   return;
  }
- openModelConfigSecretEditor('imageGenConfigEdit','imageGenConfigApiKey');
- await pasteSecretToInput('imageGenConfigApiKey');
+ const inputId=_firstImageGenSecretInputId();
+ openModelConfigSecretEditor('imageGenConfigEdit',inputId);
+ await pasteSecretToInput(inputId);
 }
 
 async function openVisionConfigKeyEditor(){
@@ -8748,23 +8829,34 @@ function _syncImageGenConfigControls(){
  const hint=$('imageGenConfigKeyHint');
  const imageGenConfigApiKey=$('imageGenConfigApiKey');
  const pasteBtn=keyRow?keyRow.querySelector('.model-config-paste-btn'):null;
+ const saveBtn=$('btnSaveImageGenConfig');
  if(!providerSel||!_modelConfigData) return;
  const providerId=providerSel.value||'';
  const providers=Array.isArray(_modelConfigData.image_gen_providers)?_modelConfigData.image_gen_providers:[];
  const provider=providers.find(p=>String(p.id||'')===providerId)||null;
  const models=(provider&&Array.isArray(provider.models))?provider.models:[];
  _setDatalistOptions('imageGenConfigModelOptions',models);
+ _renderImageGenCredentialFields(provider);
  const envVar=provider&&provider.key_status&&provider.key_status.env_var;
+ const blocked=!!(provider&&provider.policy_blocked);
+ const fields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
  const oauth=!!(provider&&provider.oauth_managed);
- if(keyRow) keyRow.style.display='';
+ if(keyRow) keyRow.style.display=fields.length?'none':'';
  if(imageGenConfigApiKey){
-  imageGenConfigApiKey.disabled=oauth;
-  imageGenConfigApiKey.placeholder=oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥';
+  imageGenConfigApiKey.disabled=oauth||blocked;
+  imageGenConfigApiKey.placeholder=blocked?'当前配置已被国产策略阻止':(oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥');
  }
- if(pasteBtn) pasteBtn.disabled=oauth;
+ if(pasteBtn) pasteBtn.disabled=oauth||blocked;
+ if(saveBtn) saveBtn.disabled=blocked;
  if(hint){
-  if(oauth){
+  if(blocked){
+   hint.textContent='当前配置不符合国产策略，请切换到上方中国可用 Provider。';
+  }else if(provider&&provider.credential_status&&Array.isArray(provider.credential_status.missing)&&provider.credential_status.missing.length){
+   hint.textContent='缺少：'+provider.credential_status.missing.join('、')+'。密钥写入本机凭据区，Workspace/Region 等非密钥参数写入当前配置档。';
+  }else if(oauth){
    hint.textContent='此服务由太极授权托管，无需填写 API 密钥。授权完成后刷新状态即可。';
+  }else if(fields.length){
+   hint.textContent='生图 Provider 凭据已按字段拆分；留空的字段不会覆盖现有配置。';
   }else if(envVar){
    hint.textContent=_modelConfigKeyLabel(provider.key_status);
   }else{
@@ -9118,10 +9210,12 @@ async function saveImageGenConfig(){
  const provider=($('imageGenConfigProvider')||{}).value||'';
  const model=(($('imageGenConfigModel')||{}).value||'').trim();
  const apiKey=(($('imageGenConfigApiKey')||{}).value||'').trim();
+ const credentials=_collectImageGenCredentials();
  if(btn) btn.disabled=true;
  try{
   const payload={provider,model};
   if(apiKey) payload.api_key=apiKey;
+  if(Object.keys(credentials).length) payload.credentials=credentials;
   await api('/api/image-gen/config',{method:'POST',body:JSON.stringify(payload)});
   await loadModelConfigPanel(true);
   toggleModelConfigSection('imageGenConfigEdit',false);

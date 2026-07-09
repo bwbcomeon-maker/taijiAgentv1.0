@@ -35,10 +35,12 @@ def test_model_config_js_calls_expected_endpoints():
 def test_model_config_secret_inputs_start_empty():
     assert 'id="modelConfigApiKey"' in INDEX_HTML
     assert 'id="imageGenConfigApiKey"' in INDEX_HTML
+    assert 'id="imageGenConfigCredentials"' in INDEX_HTML
     assert "modelConfigApiKey')||{}).value||''" in PANELS_JS
     assert "imageGenConfigApiKey')||{}).value||''" in PANELS_JS
     assert "key_status" in PANELS_JS
     assert "payload.api_key=apiKey" in PANELS_JS
+    assert "payload.credentials=credentials" in PANELS_JS
 
 
 def test_secret_paste_uses_desktop_clipboard_bridge_when_available():
@@ -198,6 +200,20 @@ def test_image_generation_advanced_actions_are_outside_primary_card():
     assert 'id="modelConfigImageAdvanced"' in INDEX_HTML
 
 
+def test_image_generation_uses_dynamic_domestic_credential_form():
+    assert 'id="imageGenConfigCredentials"' in INDEX_HTML
+    assert "生成图片只显示中国可用的稳定出图服务" in INDEX_HTML
+    for marker in (
+        "_renderImageGenCredentialFields",
+        "credential_fields",
+        "imageGenConfigCredentials",
+        "data-image-gen-credential",
+        "payload.credentials=credentials",
+        "当前配置不符合国产策略，请切换到上方中国可用 Provider。",
+    ):
+        assert marker in PANELS_JS
+
+
 def test_image_generation_custom_provider_new_form_generates_id():
     assert "_customImageProviderDraftId" in PANELS_JS
     assert "customImageProviderId" in PANELS_JS
@@ -221,16 +237,17 @@ def test_image_generation_edit_uses_selected_provider_default_model():
 def test_image_generation_oauth_managed_provider_hides_key_paste_action():
     assert "modelConfigImagePasteAction" in INDEX_HTML
     assert "modelConfigImagePasteAction" in PANELS_JS
-    assert "pasteAction.style.display=managedAuth?'none':''" in PANELS_JS
+    assert "pasteAction.style.display=(managedAuth||policyBlocked)?'none':''" in PANELS_JS
 
 
-def test_image_generation_key_row_is_visible_with_managed_auth_explanation():
+def test_image_generation_key_row_uses_dynamic_credentials_and_policy_explanation():
     assert 'id="imageGenProviderScopeHint"' in INDEX_HTML
     assert 'id="visionProviderScopeHint"' in INDEX_HTML
     assert "provider&&provider.oauth_managed" in PANELS_JS
-    assert "imageGenConfigApiKey.disabled=oauth" in PANELS_JS
+    assert "imageGenConfigApiKey.disabled=oauth||blocked" in PANELS_JS
     assert "此服务由太极授权托管，无需填写 API 密钥。" in PANELS_JS
-    assert "keyRow.style.display=envVar&&!oauth?'':'none'" not in PANELS_JS
+    assert "keyRow.style.display=fields.length?'none':''" in PANELS_JS
+    assert "当前配置不符合国产策略，请切换到上方中国可用 Provider。" in PANELS_JS
 
 
 def test_model_config_license_layout_prioritizes_customer_and_compacts_actions():

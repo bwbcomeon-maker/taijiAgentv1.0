@@ -1,0 +1,7 @@
+name: qianfan
+version: 1.0.0
+description: "Baidu Qianfan v2 image generation backend."
+author: Taiji Agent
+kind: backend
+requires_env:
+  - QIANFAN_API_KEY

@@ -1534,10 +1534,11 @@
                       <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
                         <label for="imageGenConfigProvider">Provider</label>
                         <select id="imageGenConfigProvider"></select>
-                        <div class="model-config-hint" id="imageGenProviderScopeHint">生成图片只显示出图服务；它和看图识别的 Provider 列表不同。</div>
+                        <div class="model-config-hint" id="imageGenProviderScopeHint">生成图片只显示中国可用的稳定出图服务；外部国产兼容端点放在高级配置。</div>
                         <label for="imageGenConfigModel">模型 ID</label>
                         <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
                         <datalist id="imageGenConfigModelOptions"></datalist>
+                        <div class="model-config-credentials" id="imageGenConfigCredentials" aria-label="生图 Provider 凭据"></div>
                         <div id="imageGenConfigApiKeyRow">
                           <label for="imageGenConfigApiKey">API 密钥</label>
                           <div class="model-config-secret-row">

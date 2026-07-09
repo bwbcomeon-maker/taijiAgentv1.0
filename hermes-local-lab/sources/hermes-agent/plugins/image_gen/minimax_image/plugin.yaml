@@ -1,0 +1,7 @@
+name: minimax-image
+version: 1.0.0
+description: "MiniMax text-to-image generation backend."
+author: Taiji Agent
+kind: backend
+requires_env:
+  - MINIMAX_API_KEY
