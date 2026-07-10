@@ -1,14 +1,26 @@
 function buildTemplateData({ renderPlan }) {
   const title = textOr(renderPlan.templateData?.title, '会议纪要');
   const sections = renderPlan.templateData?.sections || [];
-  const topics = padArray(
-    sections.map((section) => ({
+  const sourceTopics = sections.map((section) => ({
       title: textOr(section.title, '会议议题'),
       summary: paragraphsFromBlocks(section.blocks).map((item) => item.text).join(' ') || textOr(section.title, '待补充'),
-    })),
-    2,
-    (index) => ({ title: `议题 ${index + 1}`, summary: '待补充' })
-  );
+    }));
+  const topics = sourceTopics.length > 2
+    ? [
+        sourceTopics[0],
+        {
+          title: sourceTopics[1].title,
+          summary: sourceTopics
+            .slice(1)
+            .map((topic) => topic.summary)
+            .join(' '),
+        },
+      ]
+    : padArray(
+        sourceTopics,
+        2,
+        (index) => ({ title: `议题 ${index + 1}`, summary: '待补充' })
+      );
 
   return {
     meeting: {

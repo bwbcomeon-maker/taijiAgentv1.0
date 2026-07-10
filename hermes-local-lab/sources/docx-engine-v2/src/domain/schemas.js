@@ -575,6 +575,8 @@ const schemas = {
                 properties: {
                   path: { type: 'string', minLength: 1 },
                   sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+                  sizeBytes: { type: 'integer', minimum: 1 },
+                  mediaType: { enum: ['image/png', 'image/jpeg', 'application/pdf'] },
                 },
               },
             },

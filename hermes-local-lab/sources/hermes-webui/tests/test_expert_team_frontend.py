@@ -81,10 +81,10 @@ def test_session_hydration_uses_tri_state_and_preserve_blocks_writeflow_fallback
     hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
     hydrate_body = SESSIONS_JS[hydrate_start : SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)]
     assert "return {status:'handled'};" in hydrate_body
-    assert "return {status:'preserved'};" in hydrate_body
-    assert "return {status:'missing'};" in hydrate_body
-    assert "shouldPreserveExpertTeamDraftDock(sid)" in hydrate_body
-    assert hydrate_body.index("shouldPreserveExpertTeamDraftDock(sid)") < hydrate_body.index("api(`/api/expert-teams/run?session_id=")
+    assert "return {status:'preserved',reason:'transient_error'};" in hydrate_body
+    assert "return {status:'missing',reason:'not_found'};" in hydrate_body
+    assert "shouldPreserveExpertTeamDraftDock(sid)" not in hydrate_body
+    assert "api(`/api/expert-teams/run?session_id=" in hydrate_body
 
     refresh_start = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession")
     refresh_body = SESSIONS_JS[refresh_start : SESSIONS_JS.index("async function refreshWriteflowStatusDockForActiveSession", refresh_start)]
@@ -180,11 +180,12 @@ def test_expert_team_workspace_preserves_scroll_on_same_run_refresh():
     assert "bottomGap<=8?max" in UI_JS
     mount_start = UI_JS.index("function mountExpertTeamWorkspacePanel")
     mount_body = UI_JS[mount_start : UI_JS.index("function _expertTeamWorkspaceStorageKey", mount_start)]
-    assert "const scrollState=_captureExpertTeamWorkspaceScrollState(panel);" in mount_body
+    assert "const popoverState=_captureExpertTeamQuestionPopoverState(panel);" in mount_body
+    assert "const scrollState=popoverState.scrollState;" in mount_body
     assert "panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation" in mount_body
     assert "restoreExpertTeamWorkspaceTab(panel)" in mount_body
     assert "_restoreExpertTeamWorkspaceScrollState(panel,scrollState);" in mount_body
-    assert mount_body.index("const scrollState=_captureExpertTeamWorkspaceScrollState(panel);") < mount_body.index("panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation")
+    assert mount_body.index("const popoverState=_captureExpertTeamQuestionPopoverState(panel);") < mount_body.index("panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation")
     assert mount_body.index("restoreExpertTeamWorkspaceTab(panel)") < mount_body.index("_restoreExpertTeamWorkspaceScrollState(panel,scrollState);")
 
 

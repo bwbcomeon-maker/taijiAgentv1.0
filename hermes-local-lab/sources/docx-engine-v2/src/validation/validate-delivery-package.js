@@ -1379,6 +1379,20 @@ function validateWpsVisualEvidence({ deliveryDir, recordedCheck, status }) {
         message: `WPS/Word visual evidence sha256 mismatch for ${relativePath}: expected ${expectedHash}, got ${actualHash}.`,
       };
     }
+    const actualSize = fs.statSync(evidencePath).size;
+    if (item?.sizeBytes !== undefined && Number(item.sizeBytes) !== actualSize) {
+      return {
+        ok: false,
+        message: `WPS/Word visual evidence size mismatch for ${relativePath}.`,
+      };
+    }
+    const actualType = assertVisualEvidenceFile(evidencePath, relativePath);
+    if (item?.mediaType && String(item.mediaType) !== actualType) {
+      return {
+        ok: false,
+        message: `WPS/Word visual evidence media type mismatch for ${relativePath}.`,
+      };
+    }
   }
   return { ok: true };
 }
@@ -2878,6 +2892,7 @@ function blockOrderFailures({ documentXml, renderPlan }) {
     let previous = {
       blockId: '',
       position: sectionAnchors[sectionIndex]?.end ?? sectionInsertionIndexForOrder(documentXml, section.title),
+      afterPosition: sectionAnchors[sectionIndex]?.end ?? sectionInsertionIndexForOrder(documentXml, section.title),
     };
     for (const block of section.blocks || []) {
       if (block.type === 'heading' || (block.type === 'paragraph' && isSectionTitleBlock(block, section))) {
@@ -2889,7 +2904,7 @@ function blockOrderFailures({ documentXml, renderPlan }) {
         paragraphs,
         tableCaptions,
         figureDrawings,
-        afterPosition: previous.position,
+        afterPosition: previous.afterPosition,
       });
       if (!current) {
         failures.push(`${block.blockId || block.tableId || block.figureId || 'unknown'} missing DOCX position for block order`);
@@ -2903,6 +2918,7 @@ function blockOrderFailures({ documentXml, renderPlan }) {
       previous = {
         blockId: block.blockId || current.label,
         position: current.position,
+        afterPosition: current.afterPosition ?? current.position,
       };
     }
   }
@@ -2912,12 +2928,32 @@ function blockOrderFailures({ documentXml, renderPlan }) {
 
 function blockOrderPosition({ block, section, paragraphs, tableCaptions, figureDrawings, afterPosition }) {
   if (block.type === 'paragraph') {
-    const paragraph = paragraphs.find(
-      (item) =>
-        item.start >= afterPosition &&
-        item.text.trim() === String(block.text || '').trim()
-    );
-    return paragraph ? { label: block.blockId, position: paragraph.start } : null;
+    const expected = String(block.text || '').trim();
+    const candidates = [expected];
+    const withoutListMarker = expected.replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, '').trim();
+    if (withoutListMarker && withoutListMarker !== expected) {
+      candidates.push(withoutListMarker);
+    }
+    for (const paragraph of paragraphs) {
+      if (paragraph.end < afterPosition) {
+        continue;
+      }
+      const actual = paragraph.text.trim();
+      const minimumTextOffset = paragraph.start < afterPosition
+        ? Math.max(0, afterPosition - paragraph.start)
+        : 0;
+      for (const candidate of candidates) {
+        const offset = actual.indexOf(candidate, minimumTextOffset);
+        if (offset >= 0) {
+          return {
+            label: block.blockId,
+            position: paragraph.start + offset,
+            afterPosition: paragraph.start + offset + candidate.length,
+          };
+        }
+      }
+    }
+    return null;
   }
   if (block.type === 'table') {
     const caption = tableCaptions.get(block.tableId);

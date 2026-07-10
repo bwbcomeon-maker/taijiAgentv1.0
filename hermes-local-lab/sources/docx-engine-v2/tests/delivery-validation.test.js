@@ -102,7 +102,7 @@ function defaultSourceLines() {
   ];
 }
 
-async function makeDeliveryPackage(t, sourceLines = defaultSourceLines()) {
+async function makeDeliveryPackage(t, sourceLines = defaultSourceLines(), templateId = 'general-proposal') {
   const workspace = makeWorkspace(t);
   const assetDir = path.join(workspace, 'source.assets');
   const sourcePath = path.join(workspace, 'source.md');
@@ -116,7 +116,7 @@ async function makeDeliveryPackage(t, sourceLines = defaultSourceLines()) {
   fs.writeFileSync(sourcePath, sourceLines.join('\n'));
 
   const sourcePackage = await normalizeMarkdownSource({ sourcePath });
-  const templatePackage = getTemplatePackage('general-proposal');
+  const templatePackage = getTemplatePackage(templateId);
   const assetPackage = packageAssets({ sourcePackage, assetDir, outDir: assetOutDir });
   const renderPlan = buildRenderPlan({ sourcePackage, templatePackage, assetPackage });
 
@@ -1313,6 +1313,8 @@ test('validateDeliveryPackage preserves recorded WPS visual acceptance evidence'
   assert.equal(wpsVisual?.documentSha256, sha256File(path.join(deliveryDir, 'document.docx')));
   assert.deepEqual(wpsVisual?.visualChecks, VISUAL_CHECKS);
   assert.equal(wpsVisual?.visualEvidence?.[0]?.sha256, sha256File(evidencePath));
+  assert.equal(wpsVisual?.visualEvidence?.[0]?.sizeBytes, fs.statSync(evidencePath).size);
+  assert.equal(wpsVisual?.visualEvidence?.[0]?.mediaType, 'image/png');
   assert.match(wpsVisual?.message || '', /目录、图片和表格/);
   assert.deepEqual(report.warnings, []);
 });
@@ -1867,6 +1869,29 @@ test('validateDeliveryPackage fails when DOCX rich content no longer follows sou
   assert.equal(report.status, 'failed');
   assert.equal(orderCheck?.status, 'failed');
   assert.match(orderCheck?.message || '', /fig-001|block order|afterBlockId|source/i);
+});
+
+test('validateDeliveryPackage accepts ordered-list source markers rendered as Word numbering', async (t) => {
+  const sourceLines = [
+    '# Service quality meeting minutes',
+    '',
+    '## Meeting overview',
+    'The team reviewed service efficiency and issue closure.',
+    '',
+    '## Decisions',
+    '1. Complete the service-flow inventory.',
+    '2. Track customer issues through closure.',
+    '',
+    '## Follow-up',
+    'The office will review every action at the next meeting.',
+    '',
+  ];
+  const { deliveryDir } = await makeDeliveryPackage(t, sourceLines, 'meeting-minutes');
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const orderCheck = report.checks.find((check) => check.id === 'block_order');
+
+  assert.notEqual(orderCheck?.status, 'failed', orderCheck?.message);
 });
 
 test('validateDeliveryPackage fails when DOCX footer keeps non-portable WPS textbox page fields', async (t) => {

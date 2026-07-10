@@ -22,9 +22,42 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/docx-engine-v2/jobs" in routes_py
     assert "/api/docx-engine-v2/drafts/package" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual" in routes_py
+    assert "/api/docx-engine-v2/quality/wps-visual/begin" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
     assert "/api/file/open" in routes_py
+
+
+def test_begin_office_review_route_uses_server_trusted_profile_identity(monkeypatch, tmp_path):
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_session_for_file_ops",
+        lambda _session_id: SimpleNamespace(workspace=str(tmp_path), profile="finance"),
+    )
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: {"status": status, "payload": payload})
+    captured = {}
+    monkeypatch.setattr(
+        routes.docx_engine_v2,
+        "begin_office_review",
+        lambda body, workspace, *, trusted_reviewer: (
+            captured.update(body=dict(body), workspace=workspace, reviewer=trusted_reviewer)
+            or ({"ok": True}, 200)
+        ),
+    )
+    monkeypatch.setattr(
+        "api.expert_teams.office_review.getpass.getuser",
+        lambda: "localuser",
+    )
+
+    result = routes._handle_docx_engine_v2_begin_office_review(
+        object(),
+        {"session_id": "sid-1", "delivery_dir": ".taiji/expert-team-deliveries/x"},
+    )
+
+    assert result["status"] == 200
+    assert captured["reviewer"] == "localuser@finance"
 
 
 def test_legacy_figure_adjustment_routes_do_not_keep_skill_script_runner():

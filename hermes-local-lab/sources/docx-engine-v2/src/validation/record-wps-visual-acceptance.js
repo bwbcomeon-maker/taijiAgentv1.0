@@ -5,7 +5,7 @@ const path = require('node:path');
 const { validateDomainObject } = require('../domain/validate');
 const { refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { validateDeliveryPackage } = require('./validate-delivery-package');
-const { assertVisualEvidenceFile } = require('./visual-evidence');
+const { assertVisualEvidenceFile, detectVisualEvidenceType } = require('./visual-evidence');
 
 const ACCEPTANCE_STATUSES = new Set(['passed', 'passed_with_warnings', 'failed']);
 const BASE_REQUIRED_VISUAL_CHECKS = ['document_opened', 'layout_reviewed', 'content_order_reviewed'];
@@ -163,6 +163,8 @@ function packageVisualEvidenceFiles({ deliveryDir, evidenceFiles }) {
     return {
       path: path.relative(deliveryDir, targetPath).replaceAll(path.sep, '/'),
       sha256: sha256File(targetPath),
+      sizeBytes: fs.statSync(targetPath).size,
+      mediaType: detectVisualEvidenceType(targetPath),
     };
   });
 }

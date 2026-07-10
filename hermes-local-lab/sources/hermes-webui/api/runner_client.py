@@ -54,18 +54,30 @@ class HttpRunnerClient:
         return cls(base_url=base_url, api_key=str(source.get(_RUNNER_API_KEY_ENV) or ""))
 
     def start_run(self, request) -> dict[str, Any]:
-        return self._post("/v1/runs", {
-            "session_id": request.session_id,
-            "message": request.message,
-            "attachments": list(request.attachments or []),
-            "workspace": request.workspace,
-            "profile": request.profile,
-            "provider": request.provider,
-            "model": request.model,
-            "toolsets": list(request.toolsets or []),
-            "source": request.source,
-            "metadata": dict(request.metadata or {}),
-        })
+        headers = {}
+        if str(getattr(request, "idempotency_key", None) or "").strip():
+            headers["Idempotency-Key"] = str(request.idempotency_key).strip()
+        return self._post(
+            "/v1/runs",
+            {
+                "session_id": request.session_id,
+                "message": request.message,
+                "attachments": list(request.attachments or []),
+                "workspace": request.workspace,
+                "profile": request.profile,
+                "provider": request.provider,
+                "model": request.model,
+                "toolsets": list(request.toolsets or []),
+                "source": request.source,
+                "metadata": dict(request.metadata or {}),
+            },
+            headers=headers,
+        )
+
+    def find_run_by_idempotency_key(self, key: str, *, session_id: str) -> dict[str, Any]:
+        encoded_key = urllib.parse.quote(str(key), safe="")
+        query = urllib.parse.urlencode({"session_id": str(session_id)})
+        return self._get(f"/v1/runs/by-idempotency-key/{encoded_key}?{query}")
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:
         query = ""
@@ -117,11 +129,19 @@ class HttpRunnerClient:
         req = urllib.request.Request(self.base_url + path, headers=self._headers(), method="GET")
         return self._request_json(req)
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        request_headers = self._headers()
+        request_headers.update(headers or {})
         req = urllib.request.Request(
             self.base_url + path,
             data=json.dumps(payload).encode("utf-8"),
-            headers=self._headers(),
+            headers=request_headers,
             method="POST",
         )
         return self._request_json(req)

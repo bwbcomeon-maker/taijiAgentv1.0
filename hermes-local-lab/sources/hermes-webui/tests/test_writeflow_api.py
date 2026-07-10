@@ -19,7 +19,14 @@ def test_writeflow_status_without_state_file(tmp_path):
         "方案说明、总结计划等内容，从需求确认、初稿撰写、打磨发布到交付确认分阶段协作。"
     )
     assert data["teams"][0]["tags"] == ["工作汇报", "通知通报", "会议纪要", "总结计划", "宣传稿件", "方案说明"]
-    assert [example["label"] for example in data["teams"][0]["examples"]] == ["工作汇报", "会议纪要"]
+    assert [example["label"] for example in data["teams"][0]["examples"]] == [
+        "工作汇报",
+        "会议纪要",
+        "通知通报",
+        "方案说明",
+        "总结计划",
+        "材料润色",
+    ]
     assert "迎峰度夏保供电重点工作推进情况" in data["teams"][0]["examples"][0]["prompt"]
     assert "优化供电服务质效提升措施" in data["teams"][0]["examples"][1]["prompt"]
     assert data["state_path"].endswith("articles/.writeflow/state.json")
@@ -81,7 +88,7 @@ def test_writeflow_status_reads_state_file(tmp_path):
     assert project["artifacts"] == {"03_outline": "articles/demo/03_outline.md"}
     assert project["display_phase"] == "确定方向"
     assert project["display_status"] == "等待确认"
-    assert project["display_artifacts"] == {"文章提纲": "articles/demo/03_outline.md"}
+    assert project["display_artifacts"] == {"结构提纲": "articles/demo/03_outline.md"}
     assert project["display_team"]["title"] == "内容创作专家团"
     assert project["display_members"][0]["status"] == "等待确认"
     assert project["updated_at"] == "2026-05-30T22:00:00+08:00"
@@ -182,10 +189,10 @@ def test_writeflow_compose_generates_stable_messages(monkeypatch, tmp_path):
             assert "素材整理" in data["message"]
             assert "审稿报告" not in data["message"]
         else:
-            assert "正文初稿" in data["message"]
+            assert "材料初稿" in data["message"]
             assert "审稿报告" in data["message"]
             assert "配图提示词" in data["message"]
-            assert "发布版" in data["message"]
+            assert "定稿材料" in data["message"]
         assert "每轮结束必须用中文返回" in data["message"]
         assert "不要把用户带进内部工具、文件路径和技术术语里" in data["message"]
         forbidden_tokens = [
@@ -259,13 +266,13 @@ def test_writeflow_compose_accepts_team_template_fields(monkeypatch, tmp_path):
     assert data["ok"] is True
     assert data["team_id"] == "deep-research-team"
     assert data["template_id"] == "market-research"
-    assert data["display_team"]["title"] == "深度文章研究团"
-    assert "请【深度文章研究团】接手这个写作任务。" in data["message"]
+    assert data["display_team"]["title"] == "深度材料研究团"
+    assert "请【深度材料研究团】接手这个写作任务。" in data["message"]
     assert "专家团成员分工：" in data["message"]
-    assert "撰稿专家（正文初稿）" in data["message"]
-    assert "审稿专家（审稿润色）" in data["message"]
-    assert "撰稿专家正在写初稿" in data["message"]
-    assert "审稿专家正在做发布前检查" in data["message"]
+    assert "材料起草专家（材料初稿）" in data["message"]
+    assert "复核专家（材料复核）" in data["message"]
+    assert "材料起草专家正在写初稿" in data["message"]
+    assert "复核专家正在做流转前检查" in data["message"]
     assert "第一版固定两项任务" not in data["message"]
     assert "生成封面和文中配图" not in data["message"]
     assert "market-research" not in data["message"]
@@ -298,7 +305,7 @@ def test_writeflow_start_creates_team_run_and_status_restores_it(monkeypatch, tm
     assert [task["id"] for task in run["display_tasks"]] == ["draft", "illustrations"]
     assert run["tasks"][0]["title"] == "确定写作方向"
     assert run["tasks"][0]["status"] == "running"
-    assert run["display_tasks"][0]["title"] == "撰写公众号长文"
+    assert run["display_tasks"][0]["title"] == "起草办公材料初稿"
     assert run["display_tasks"][0]["status"] == "running"
     assert run["display_tasks"][0]["status_label"] == "主编正在定方向"
     assert run["artifacts"] == []
@@ -393,7 +400,7 @@ def test_writeflow_runs_endpoint_does_not_materialize_missing_session_run_by_def
     assert response["payload"]["runs"] == []
 
 
-def test_writeflow_runs_endpoint_can_explicitly_recover_legacy_session_run(monkeypatch, tmp_path):
+def test_writeflow_runs_endpoint_keeps_legacy_recover_query_read_only(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -418,12 +425,10 @@ def test_writeflow_runs_endpoint_can_explicitly_recover_legacy_session_run(monke
     response = routes.handle_get(object(), urlparse("/api/writeflow/runs?session_id=new-session&recover=1"))
 
     assert response["payload"]["ok"] is True
-    assert response["payload"]["recovered_session_run"] is True
-    session_run = response["payload"]["session_run"]
-    assert session_run["session_id"] == "new-session"
-    assert session_run["team_id"] == "deep-research-team"
-    assert session_run["title"] == "企业为什么需要本地 AI Agent 工作台"
-    assert any(run["session_id"] == "new-session" for run in response["payload"]["runs"])
+    assert response["payload"]["recovered_session_run"] is False
+    assert response["payload"]["session_run"] is None
+    assert response["payload"]["runs"] == []
+    assert not routes._writeflow_runs_dir(tmp_path).exists()
 
 
 def test_writeflow_artifacts_payload_returns_relative_paths(monkeypatch, tmp_path):
@@ -645,7 +650,7 @@ def test_writeflow_image_provider_missing_uses_prompt_placeholder(monkeypatch, t
     assert any(event["type"] == "image_provider_missing" for event in run["events"])
 
 
-def test_writeflow_style_action_creates_run_and_tracks_style_model(monkeypatch, tmp_path):
+def test_legacy_writeflow_style_run_does_not_scan_new_style_files(monkeypatch, tmp_path):
     import api.routes as routes
 
     monkeypatch.setattr(routes, "_writeflow_workspace", lambda _sid=None: tmp_path)
@@ -664,27 +669,21 @@ def test_writeflow_style_action_creates_run_and_tracks_style_model(monkeypatch, 
     assert run["team_id"] == "style-modeler"
     assert [task["id"] for task in run["tasks"]] == ["style_input", "style_model", "style_apply"]
     assert run["tasks"][0]["status"] == "running"
+    before = run_path.read_bytes()
 
     style_dir = tmp_path / "articles" / "_styles"
     style_dir.mkdir(parents=True)
     (style_dir / "professional-practice.md").write_text("# 专业实战风格模型\n", encoding="utf-8")
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    tasks = {task["id"]: task for task in hydrated["tasks"]}
-    members = {member["id"]: member["status"] for member in hydrated["members"]}
-    artifact = next(item for item in hydrated["artifacts"] if item["path"] == "articles/_styles/professional-practice.md")
-
-    assert hydrated["status"] == "waiting_user"
-    assert hydrated["progress"] == {"done": 2, "total": 3}
-    assert tasks["style_input"]["status"] == "done"
-    assert tasks["style_model"]["status"] == "done"
-    assert tasks["style_apply"]["status"] == "pending"
-    assert members["workflow-producer"] == "等待确认"
-    assert artifact["label"] == "风格模型"
-    assert artifact["download_name"] == "风格模型.md"
+    assert hydrated["read_only"] is True
+    assert hydrated["status"] == run["status"]
+    assert hydrated["tasks"] == run["tasks"]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_extract_action_creates_run_and_tracks_extracted_markdown(monkeypatch, tmp_path):
+def test_legacy_writeflow_extract_run_does_not_scan_new_markdown(monkeypatch, tmp_path):
     import api.routes as routes
 
     monkeypatch.setattr(routes, "_writeflow_workspace", lambda _sid=None: tmp_path)
@@ -703,24 +702,18 @@ def test_writeflow_extract_action_creates_run_and_tracks_extracted_markdown(monk
     assert run["team_id"] == "web-article-extractor"
     assert [task["id"] for task in run["tasks"]] == ["parse", "extract", "organize"]
     assert run["tasks"][0]["status"] == "running"
+    before = run_path.read_bytes()
 
     project_dir = tmp_path / "articles" / "网页素材"
     project_dir.mkdir(parents=True)
     (project_dir / "extracted_article.md").write_text("# 提取正文\n", encoding="utf-8")
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    tasks = {task["id"]: task for task in hydrated["tasks"]}
-    members = {member["id"]: member["status"] for member in hydrated["members"]}
-    artifact = next(item for item in hydrated["artifacts"] if item["path"] == "articles/网页素材/extracted_article.md")
-
-    assert hydrated["status"] == "waiting_user"
-    assert hydrated["progress"] == {"done": 2, "total": 3}
-    assert tasks["parse"]["status"] == "done"
-    assert tasks["extract"]["status"] == "done"
-    assert tasks["organize"]["status"] == "pending"
-    assert members["research-expert"] == "等待确认"
-    assert artifact["label"] == "提取正文"
-    assert artifact["download_name"] == "提取正文.md"
+    assert hydrated["read_only"] is True
+    assert hydrated["status"] == run["status"]
+    assert hydrated["tasks"] == run["tasks"]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert run_path.read_bytes() == before
 
 
 def test_writeflow_extract_ignores_unrelated_markdown(monkeypatch, tmp_path):
@@ -750,7 +743,7 @@ def test_writeflow_extract_ignores_unrelated_markdown(monkeypatch, tmp_path):
     assert "articles/网页素材/notes.md" not in paths
 
 
-def test_writeflow_runs_materialize_session_artifacts_with_user_facing_names(monkeypatch, tmp_path):
+def test_legacy_writeflow_list_does_not_materialize_session_artifacts(monkeypatch, tmp_path):
     import api.routes as routes
 
     external_articles = tmp_path / "agent-articles"
@@ -779,29 +772,21 @@ def test_writeflow_runs_materialize_session_artifacts_with_user_facing_names(mon
         team_id="content-creator-team",
         run_id="wr-materialize",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-materialize"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-materialize")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
 
     copied = tmp_path / "articles" / "ai-tech-popular-science" / "draft_v1.md"
-    assert copied.exists()
-    assert all(item["path"] != "articles/ai-tech-popular-science/draft_v1.md" for item in hydrated["artifacts"])
-    draft = next(item for item in hydrated["reference_artifacts"] if item["path"] == "articles/ai-tech-popular-science/draft_v1.md")
-    assert draft["label"] == "正文初稿"
-    assert draft["download_name"] == "正文初稿.md"
-    assert draft["exists"] is True
-    assert draft["visible_scope"] == "reference"
-    assert "聊天文本提及" in draft["stale_reason"]
-    assert hydrated["phase"] == "确定方向"
-    assert hydrated["status"] == "running"
-    tasks = {task["id"]: task for task in hydrated["tasks"]}
-    assert tasks["draft"]["status"] == "waiting_user"
-    assert tasks["draft"]["status_label"] == "等待本轮产物"
-    assert tasks["draft"]["artifacts"] == []
-    assert hydrated["file_changes"] == []
+    assert copied.exists() is False
+    assert hydrated["read_only"] is True
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert hydrated["reference_artifacts"] == run["reference_artifacts"]
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_run_reconciles_external_artifacts_and_persists_state(monkeypatch, tmp_path):
+def test_legacy_writeflow_run_does_not_copy_or_reconcile_external_artifacts(monkeypatch, tmp_path):
     import api.routes as routes
 
     external_articles = tmp_path / "agent-articles"
@@ -843,32 +828,18 @@ def test_writeflow_run_reconciles_external_artifacts_and_persists_state(monkeypa
         team_id="content-creator-team",
         run_id="wr-reconcile",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-reconcile"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-reconcile")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    paths = {item["path"] for item in hydrated["artifacts"]}
-    reference_paths = {item["path"] for item in hydrated["reference_artifacts"]}
-
-    assert (tmp_path / "articles" / "ai-tech-popular-science" / "review_report.md").exists()
-    assert (tmp_path / "articles" / "ai-tech-popular-science" / "illustration_prompts.md").exists()
-    assert (tmp_path / "articles" / "ai-tech-popular-science" / "imgs" / "prompts" / "01-cover.md").exists()
-    assert paths == set()
-    assert "articles/ai-tech-popular-science/draft_v1.md" in reference_paths
-    assert "articles/ai-tech-popular-science/review_report.md" in reference_paths
-    assert "articles/ai-tech-popular-science/illustration_prompts.md" in reference_paths
-    assert "articles/ai-tech-popular-science/imgs/prompts/01-cover.md" in reference_paths
-    assert "articles/ai-tech-popular-science/draft_v2.md" not in paths
-    assert "articles/ai-tech-popular-science/export.md" not in paths
-    assert hydrated["status"] == "running"
-    tasks = {task["id"]: task for task in hydrated["tasks"]}
-    assert tasks["draft"]["status"] == "pending"
-    assert tasks["illustrations"]["status"] == "running"
-    assert tasks["review"]["status"] == "waiting_user"
-
-    persisted = json.loads((tmp_path / "articles" / ".writeflow" / "runs" / "wr-reconcile.json").read_text(encoding="utf-8"))
-    assert persisted["status"] == "running"
-    assert all(item["path"] != "articles/ai-tech-popular-science/review_report.md" for item in persisted["artifacts"])
-    assert any(item["path"] == "articles/ai-tech-popular-science/review_report.md" for item in persisted["reference_artifacts"])
+    assert hydrated["read_only"] is True
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert hydrated["reference_artifacts"] == run["reference_artifacts"]
+    assert not (tmp_path / "articles" / "ai-tech-popular-science" / "review_report.md").exists()
+    assert not (tmp_path / "articles" / "ai-tech-popular-science" / "illustration_prompts.md").exists()
+    assert not (tmp_path / "articles" / "ai-tech-popular-science" / "imgs" / "prompts" / "01-cover.md").exists()
+    assert run_path.read_bytes() == before
 
 
 def test_writeflow_deep_research_shows_researcher_when_research_starts(monkeypatch, tmp_path):
@@ -929,7 +900,7 @@ def test_writeflow_deep_research_shows_researcher_when_research_starts(monkeypat
     assert hydrated["artifacts"] == []
 
 
-def test_writeflow_deep_research_board_follows_session_text_and_real_files(monkeypatch, tmp_path):
+def test_legacy_writeflow_board_does_not_infer_state_from_session_or_files(monkeypatch, tmp_path):
     import api.routes as routes
 
     project_dir = tmp_path / "articles" / "qiye-bendi-ai-agent-workstation"
@@ -972,31 +943,23 @@ def test_writeflow_deep_research_board_follows_session_text_and_real_files(monke
         team_id="deep-research-team",
         run_id="wr-deep",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-deep"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-deep")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    paths = {item["path"] for item in hydrated["artifacts"]}
-    reference_paths = {item["path"] for item in hydrated["reference_artifacts"]}
 
     assert hydrated["team_id"] == "deep-research-team"
-    assert hydrated["status"] == "waiting_user"
-    assert hydrated["phase"] == "确定方向"
-    assert hydrated["progress"] == {"done": 1, "total": 5}
-    assert [task["id"] for task in hydrated["tasks"]] == ["direction", "research", "outline", "draft", "review"]
-    assert [task["status"] for task in hydrated["tasks"]] == ["done", "waiting_user", "waiting_user", "pending", "pending"]
-    assert hydrated["tasks"][3]["worker_id"] == "writing-executor"
-    assert hydrated["tasks"][3]["worker_name"] == "撰稿专家"
-    assert hydrated["tasks"][3]["status_label"] == "等待确认后开始"
-    assert paths == set()
-    assert {
-        "articles/qiye-bendi-ai-agent-workstation/01_theme.md",
-        "articles/qiye-bendi-ai-agent-workstation/02_cases.md",
-        "articles/qiye-bendi-ai-agent-workstation/03_outline.md",
-    }.issubset(reference_paths)
-    assert "articles/qiye-bendi-ai-agent-workstation/draft_v1.md" not in paths
+    assert hydrated["read_only"] is True
+    assert hydrated["status"] == run["status"]
+    assert hydrated["phase"] == run["phase"]
+    assert [task["status"] for task in hydrated["tasks"]] == [task["status"] for task in run["tasks"]]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert hydrated["reference_artifacts"] == run["reference_artifacts"]
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_deep_research_moves_to_polish_when_draft_text_and_file_exist(monkeypatch, tmp_path):
+def test_legacy_writeflow_does_not_advance_from_draft_text_and_file(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -1032,20 +995,21 @@ def test_writeflow_deep_research_moves_to_polish_when_draft_text_and_file_exist(
     (project_dir / "02_cases.md").write_text("# 素材调研库：企业为什么需要本地 AI Agent 工作台\n", encoding="utf-8")
     (project_dir / "03_outline.md").write_text("# 文章大纲：企业为什么需要本地 AI Agent 工作台\n", encoding="utf-8")
     (project_dir / "draft_v1.md").write_text("# 正文初稿：企业为什么需要本地 AI Agent 工作台\n", encoding="utf-8")
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-deep-draft"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-deep-draft")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    paths = {item["path"] for item in hydrated["artifacts"]}
 
-    assert hydrated["status"] == "waiting_user"
-    assert hydrated["phase"] == "打磨发布"
-    assert hydrated["progress"] == {"done": 4, "total": 5}
-    assert hydrated["tasks"][3]["status"] == "done"
-    assert hydrated["tasks"][4]["status"] == "pending"
-    assert f'{run["artifact_root"]}/draft_v1.md' in paths
+    assert hydrated["read_only"] is True
+    assert hydrated["status"] == run["status"]
+    assert hydrated["phase"] == run["phase"]
+    assert [task["status"] for task in hydrated["tasks"]] == [task["status"] for task in run["tasks"]]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_deep_research_draft_role_starts_from_session_text(monkeypatch, tmp_path):
+def test_legacy_writeflow_draft_role_does_not_start_from_session_text(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -1072,22 +1036,21 @@ def test_writeflow_deep_research_draft_role_starts_from_session_text(monkeypatch
         team_id="deep-research-team",
         run_id="wr-deep-drafting",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-deep-drafting"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-deep-drafting")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    members = {item["id"]: item["status"] for item in hydrated["members"]}
-    tasks = {item["id"]: item for item in hydrated["tasks"]}
 
-    assert hydrated["status"] == "running"
-    assert hydrated["phase"] == "生成初稿"
-    assert tasks["draft"]["worker_id"] == "writing-executor"
-    assert tasks["draft"]["worker_name"] == "撰稿专家"
-    assert tasks["draft"]["status"] == "running"
-    assert members["writing-executor"] == "执行中"
-    assert hydrated["artifacts"] == []
+    assert hydrated["read_only"] is True
+    assert hydrated["status"] == run["status"]
+    assert hydrated["phase"] == run["phase"]
+    assert [task["status"] for task in hydrated["tasks"]] == [task["status"] for task in run["tasks"]]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_deep_research_review_role_runs_without_fake_artifact(monkeypatch, tmp_path):
+def test_legacy_writeflow_review_role_does_not_start_from_session_text(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -1115,25 +1078,21 @@ def test_writeflow_deep_research_review_role_runs_without_fake_artifact(monkeypa
         team_id="deep-research-team",
         run_id="wr-deep-reviewing",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-deep-reviewing"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-deep-reviewing")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    members = {item["id"]: item["status"] for item in hydrated["members"]}
-    tasks = {item["id"]: item for item in hydrated["tasks"]}
 
-    assert hydrated["status"] == "running"
-    assert hydrated["phase"] == "打磨发布"
-    assert tasks["draft"]["status"] == "waiting_user"
-    assert tasks["draft"]["status_label"] == "等待本轮产物"
-    assert tasks["review"]["worker_id"] == "editor-review"
-    assert tasks["review"]["worker_name"] == "审稿专家"
-    assert tasks["review"]["status"] == "running"
-    assert members["writing-executor"] == "已交接"
-    assert members["editor-review"] == "执行中"
-    assert hydrated["artifacts"] == []
+    assert hydrated["read_only"] is True
+    assert hydrated["status"] == run["status"]
+    assert hydrated["phase"] == run["phase"]
+    assert [task["status"] for task in hydrated["tasks"]] == [task["status"] for task in run["tasks"]]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_recovers_current_run_artifacts_from_workspace_root(monkeypatch, tmp_path):
+def test_legacy_writeflow_does_not_recover_or_copy_workspace_root_artifacts(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -1161,33 +1120,25 @@ def test_writeflow_recovers_current_run_artifacts_from_workspace_root(monkeypatc
         team_id="deep-research-team",
         run_id="wr-root-recovery",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-root-recovery"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-root-recovery")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
     (tmp_path / "TTU安全分析及营销推广_素材收集.md").write_text("# 素材收集\n", encoding="utf-8")
     (tmp_path / "配变终端营销推广与安全竞争力分析_初稿V1.docx").write_bytes(b"draft")
     (tmp_path / "配变终端营销推广文章_审稿报告.docx").write_bytes(b"review")
     (tmp_path / "配变终端营销推广与安全竞争力分析_发布版V2.docx").write_bytes(b"export")
 
     hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    artifacts = {item["id"]: item for item in hydrated["artifacts"]}
-    paths = {item["path"] for item in hydrated["artifacts"]}
-
-    assert hydrated["phase"] == "打磨发布"
-    assert hydrated["progress"] == {"done": 4, "total": 5}
-    assert hydrated["tasks"][1]["status"] == "done"
-    assert hydrated["tasks"][3]["status"] == "done"
-    assert hydrated["tasks"][4]["status"] == "done"
-    assert "draft_v1" in artifacts
-    assert "review_report" in artifacts
-    assert "export" in artifacts
-    assert f'{run["artifact_root"]}/draft_v1.docx' in paths
-    assert f'{run["artifact_root"]}/review_report.docx' in paths
-    assert f'{run["artifact_root"]}/export.docx' in paths
-    assert (tmp_path / run["artifact_root"] / "draft_v1.docx").is_file()
-    assert artifacts["export"]["origin"] == "external_recovery"
-    assert artifacts["export"]["current_run_owned"] is True
+    assert hydrated["read_only"] is True
+    assert hydrated["phase"] == run["phase"]
+    assert hydrated["artifacts"] == run["artifacts"]
+    assert not (tmp_path / run["artifact_root"] / "draft_v1.docx").exists()
+    assert not (tmp_path / run["artifact_root"] / "review_report.docx").exists()
+    assert not (tmp_path / run["artifact_root"] / "export.docx").exists()
+    assert run_path.read_bytes() == before
 
 
-def test_writeflow_file_write_routes_root_artifact_to_current_run(monkeypatch, tmp_path):
+def test_legacy_writeflow_file_write_never_routes_or_registers_artifact(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -1215,7 +1166,9 @@ def test_writeflow_file_write_routes_root_artifact_to_current_run(monkeypatch, t
         team_id="deep-research-team",
         run_id="wr-file-route",
     )
-    routes._writeflow_write_json(routes._writeflow_run_path(tmp_path, "wr-file-route"), run)
+    run_path = routes._writeflow_run_path(tmp_path, "wr-file-route")
+    routes._writeflow_write_json(run_path, run)
+    before = run_path.read_bytes()
 
     routing = routes._writeflow_artifact_target_for_file_write(
         tmp_path,
@@ -1223,20 +1176,8 @@ def test_writeflow_file_write_routes_root_artifact_to_current_run(monkeypatch, t
         "配变终端营销推广与安全竞争力分析_初稿V1.docx",
     )
 
-    assert routing is not None
-    assert routing["path"] == f'{run["artifact_root"]}/draft_v1.docx'
-    target = tmp_path / routing["path"]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"draft-docx")
-    registered = routes._writeflow_register_artifact(tmp_path, routing["run"], routing["artifact"], change_type="created")
-
-    assert registered["label"] == "正文初稿"
-    hydrated = routes._writeflow_list_runs(tmp_path)[0]
-    artifacts = {item["id"]: item for item in hydrated["artifacts"]}
-    assert "draft_v1" in artifacts
-    assert artifacts["draft_v1"]["path"] == f'{run["artifact_root"]}/draft_v1.docx'
-    assert artifacts["draft_v1"]["origin"] == "current_run"
-    assert any(change["path"] == artifacts["draft_v1"]["path"] and change["change_type"] == "created" for change in hydrated["file_changes"])
+    assert routing is None
+    assert run_path.read_bytes() == before
 
 
 def test_writeflow_file_write_does_not_route_plain_workspace_file(monkeypatch, tmp_path):
@@ -1261,7 +1202,7 @@ def test_writeflow_file_write_does_not_route_plain_workspace_file(monkeypatch, t
     assert routes._writeflow_artifact_target_for_file_write(tmp_path, "sid-plain", "tmp/random.txt") is None
 
 
-def test_writeflow_tool_env_exposes_current_artifact_root(monkeypatch, tmp_path):
+def test_legacy_writeflow_tool_env_only_exposes_workspace(monkeypatch, tmp_path):
     import api.routes as routes
 
     class Session:
@@ -1281,10 +1222,7 @@ def test_writeflow_tool_env_exposes_current_artifact_root(monkeypatch, tmp_path)
 
     env = routes._writeflow_tool_env_for_session(tmp_path, "sid-env")
 
-    assert env["HERMES_WORKSPACE"] == str(tmp_path.resolve())
-    assert env["HERMES_WRITEFLOW_RUN_ID"] == "wr-env"
-    assert env["HERMES_WRITEFLOW_PROJECT_SLUG"] == "环境变量测试"
-    assert env["HERMES_WRITEFLOW_ARTIFACT_ROOT"] == str((tmp_path / run["artifact_root"]).resolve())
+    assert env == {"HERMES_WORKSPACE": str(tmp_path.resolve())}
 
 
 def test_skills_list_includes_external_writeflow_skills(monkeypatch, tmp_path):

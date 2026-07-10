@@ -153,12 +153,39 @@ def validate_office_material_output(text: str, material_type: str) -> dict:
     return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
 
 
+def validate_final_document_text(text: str, material_type: str) -> dict:
+    normalized = normalize_output_text(text)
+    missing = []
+    if not re.search(r"(?m)^#\s+\S+", normalized):
+        missing.append("Markdown 一级标题")
+    if len(normalized) < 160:
+        missing.append("完整最终正文")
+    if material_type != "meeting_minutes":
+        if "|" not in normalized or not re.search(r"(?m)^\s*\|?.*---.*\|", normalized):
+            missing.append("至少 1 个 Markdown 表格")
+        if not re.search(r"!\[[^\]]+\]\([^)]+\)|```\s*mermaid\b", normalized, flags=re.IGNORECASE):
+            missing.append("至少 1 个可追溯图片引用或 Mermaid 图源")
+    violations = [term for term in FORBIDDEN_TERMS if term in normalized]
+    if missing or violations:
+        return {
+            "status": "rewrite_required",
+            "violations": violations,
+            "missing_sections": missing,
+            "message": "最终交付必须是可直接生成 DOCX 的完整 Markdown 正文，不能只有阶段摘要或建议。",
+        }
+    return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+
+
 def validate_stage_output(text: str, material_type: str, task_id: str, team_id: str = "") -> dict:
     normalized = normalize_output_text(text)
     task = str(task_id or "")
     team = str(team_id or "")
     if material_type == "public_account":
         return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+    if (team == "content-creator-team" and task == "delivery") or (
+        team == "deep-research-team" and task == "review"
+    ):
+        return validate_final_document_text(normalized, material_type)
     if task in {"plan", "direction"}:
         missing = []
         if "阶段摘要" not in normalized and "阶段目标" not in normalized:

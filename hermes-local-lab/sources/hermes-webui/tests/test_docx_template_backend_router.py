@@ -11,9 +11,10 @@ class DocxTemplateBackendRouterTests(unittest.TestCase):
         self.assertIn("def _docx_template_invocation_result(", ROUTES_PY)
         self.assertIn("template_selection_required", ROUTES_PY)
         self.assertIn("将这份方案套用模板", ROUTES_PY)
-        self.assertIn("_docx_template_invocation_result(msg)", ROUTES_PY)
+        invocation = "_docx_template_invocation_result_for_session(msg, s, attachments)"
+        self.assertIn(invocation, ROUTES_PY)
         self.assertLess(
-            ROUTES_PY.index("_docx_template_invocation_result(msg)"),
+            ROUTES_PY.index(invocation),
             ROUTES_PY.index("_enrich_plan_like_chat_prompt(msg)"),
         )
 

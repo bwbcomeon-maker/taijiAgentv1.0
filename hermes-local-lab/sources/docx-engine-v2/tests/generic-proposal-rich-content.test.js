@@ -186,6 +186,7 @@ test('general proposal pipeline works for non-sample rich documents with dynamic
   assert.equal(result.qualityReport.checks.find((check) => check.id === 'table_content')?.status, 'passed');
   assert.equal(result.qualityReport.checks.find((check) => check.id === 'table_placement')?.status, 'passed');
   assert.equal(result.qualityReport.checks.find((check) => check.id === 'figure_placement')?.status, 'passed');
+  assert.equal(result.qualityReport.checks.find((check) => check.id === 'figure_id_metadata')?.status, 'passed');
 
   const assetPackage = JSON.parse(fs.readFileSync(path.join(deliveryDir, 'asset-package.json'), 'utf8'));
   assert.equal(assetPackage.figures.length, 2);
@@ -217,6 +218,13 @@ test('general proposal pipeline works for non-sample rich documents with dynamic
 
   const documentEntries = readZipEntriesFromBuffer(fs.readFileSync(result.documentPath));
   const documentXml = documentEntries.get('word/document.xml').toString('utf8');
+  assert.match(
+    documentXml,
+    /<\/w:sectPr>\s*<\/w:body>/,
+    'final section properties must remain the final w:body child'
+  );
+  assert.match(documentXml, /<wp:docPr\b[^>]*figureId=fig-001/);
+  assert.match(documentXml, /<wp:docPr\b[^>]*figureId=fig-002/);
   const coverXml = documentXml.slice(0, documentXml.indexOf('<w:sectPr'));
   const footerXml = [...documentEntries.entries()]
     .filter(([entryName]) => /^word\/footer\d+\.xml$/.test(entryName))

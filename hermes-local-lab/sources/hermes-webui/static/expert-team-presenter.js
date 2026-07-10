@@ -66,6 +66,10 @@
     const workflow=view.workflow||{};
     const pendingInput=view.pending_input||workspace.pendingInput||{};
     const stageResult=view.stage_result||workspace.stageResult||{};
+    const currentStage=workflow.current_stage||workspace.currentStage||run.current_stage||{};
+    const stageReview=view.stage_review||{};
+    const stageReviewOutput=stageReview.output||{};
+    const schemaVersion=Number(run.schema_version||0);
     const teamTitle=str(teamView.title||run.team_title,'专家团');
     const workflowStages=arr(workflow.stages);
     const tasks=(workflowStages.length?workflowStages:arr(run.tasks)).map(task=>({
@@ -112,20 +116,28 @@
       sessionId:str(run.run_id),
       runId:str(run.run_id),
       sourceSessionId:str(run.session_id),
+      schemaVersion,
+      version:Number(run.version||0),
+      readOnly:run.read_only===true||schemaVersion<2,
+      executionStreamId:str(run.execution_stream_id),
+      currentStageId:str(currentStage.task_id||currentStage.id),
+      pendingInputId:str(pendingInput.id||pendingInput.input_id),
+      stageReviewId:str(stageReview.review_id||stageReviewOutput.review_id||stageReviewOutput.id||stageReviewOutput.task_id),
+      cancelRequestId:str(run.cancel_request_id),
       team:{id:str(teamView.id||run.team_id),title:teamTitle,category:str((data.team||{}).category,'专家团'),image:str(teamView.image||run.team_image),members},
       status:presentation.state,
       phase:str(phaseProgress.current||run.phase,'需求确认'),
       progress:{done:Number(phaseProgress.done||0),total:Number(phaseProgress.total||tasks.length||0)},
       presentation,
       workspace,
-      workflow:{stages:tasks,currentStage:workflow.current_stage||workspace.currentStage||{},progress:phaseProgress},
+      workflow:{stages:tasks,currentStage,progress:phaseProgress},
       pendingInput,
       stageResult,
       questions,
       primaryConfirmation:view.primary_confirmation||null,
       pendingConfirmations:arr(view.pending_confirmations),
       intake:view.intake||{},
-      stageReview:view.stage_review||{},
+      stageReview,
       reviewItems:arr(view.review_items),
       timelineEvents,
       tasks,

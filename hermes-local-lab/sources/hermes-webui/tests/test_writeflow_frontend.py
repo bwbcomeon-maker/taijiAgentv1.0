@@ -287,21 +287,23 @@ def test_writeflow_status_card_is_visual_team_board():
     assert ".writeflow-status-dock" in STYLE_CSS
     assert "function _isExpertTeamStatusCard" in ui_js
     assert "renderExpertTeamWorkspacePanel(card)" in ui_js
-    assert "else clearExpertTeamWorkspacePanel();" in ui_js
+    assert "if(isExpertTeam)return renderExpertTeamStatusSurface(card);" in ui_js
+    assert "_hideExpertTeamLegacyDock();" in ui_js
     assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-writeflow.is-expanded" in STYLE_CSS
     assert ".taiji-home-shell.taiji-expert-team-active #writeflowStatusDock .status-card-expert-bottom-body" in STYLE_CSS
-    assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" in STYLE_CSS
+    assert ".taiji-home-shell.taiji-expert-team-active .expert-team-workspace-panel{display:none!important;}" not in STYLE_CSS
 
 
 def test_writeflow_status_card_hydrates_into_composer_dock_on_session_load():
     assert "async function _hydrateWriteflowStatusCardForSession" in SESSIONS_JS
-    assert "/api/writeflow/run?session_id=" in SESSIONS_JS
+    assert "/api/expert-teams/run?session_id=" in SESSIONS_JS
     assert "data&&data.run&&data.run.session_id===sid" in SESSIONS_JS
+    assert "/api/writeflow/run?session_id=" not in SESSIONS_JS
     assert "/api/writeflow/runs?session_id=" not in SESSIONS_JS
     assert "recover=1" not in SESSIONS_JS
     assert "||runs[0]" not in SESSIONS_JS
-    assert "_writeflowStatusCardFromRun(run,data)" in SESSIONS_JS
-    assert "renderWriteflowStatusDock(card)" in SESSIONS_JS
+    assert "_expertTeamStatusCardFromRun(run,data)" in SESSIONS_JS
+    assert "renderExpertTeamStatusSurface(card)" in SESSIONS_JS
     assert "const _WRITEFLOW_STATUS_REFRESH_MS = 5000" in SESSIONS_JS
     assert "function _scheduleWriteflowStatusRefresh" in SESSIONS_JS
     assert "setInterval(()=>{" in SESSIONS_JS

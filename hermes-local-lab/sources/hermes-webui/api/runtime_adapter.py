@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 _RUNTIME_ADAPTER_ENV = "HERMES_WEBUI_RUNTIME_ADAPTER"
 _RUNTIME_ADAPTER_DIRECT = "legacy-direct"
@@ -31,6 +31,7 @@ _VALID_RUNTIME_ADAPTER_MODES = {
 class StartRunRequest:
     session_id: str
     message: str
+    idempotency_key: str | None = None
     attachments: list[dict[str, Any]] = field(default_factory=list)
     workspace: str | None = None
     profile: str | None = None
@@ -56,9 +57,15 @@ class RunStartResult:
 @dataclass(frozen=True)
 class RunEventStream:
     run_id: str
+    session_id: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    request_cursor: str | None = None
     cursor: str | None = None
     last_event_id: str | None = None
+    delivered_last_event_id: str | None = None
+    delivered_through_sequence: int | None = None
+    has_more: bool | None = None
+    snapshot_complete: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class RunStatus:
     session_id: str | None = None
     status: str = "unknown"
     last_event_id: str | None = None
+    last_event_sequence: int | None = None
     terminal_state: str | None = None
     active_controls: list[str] = field(default_factory=list)
     pending_approval_id: str | None = None
@@ -88,6 +96,7 @@ class ControlResult:
 
 class RuntimeAdapter(Protocol):
     def start_run(self, request: StartRunRequest) -> RunStartResult: ...
+    def find_run_by_idempotency_key(self, key: str, *, session_id: str) -> RunStatus: ...
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream: ...
     def get_run(self, run_id: str) -> RunStatus: ...
     def cancel_run(self, run_id: str) -> ControlResult: ...
@@ -226,6 +235,24 @@ class RunnerRuntimeAdapter:
             payload=payload,
         )
 
+    def find_run_by_idempotency_key(self, key: str, *, session_id: str) -> RunStatus:
+        lookup = getattr(self._client, "find_run_by_idempotency_key", None)
+        if lookup is None:
+            return RunStatus(run_id=str(key), session_id=session_id, status="unknown")
+        result = lookup(key, session_id=session_id)
+        if isinstance(result, RunStatus):
+            return result
+        payload = dict(result or {})
+        return RunStatus(
+            run_id=str(payload.get("run_id") or key),
+            session_id=str(payload.get("session_id") or session_id),
+            status=str(payload.get("status") or "unknown"),
+            last_event_id=payload.get("last_event_id"),
+            last_event_sequence=payload.get("last_event_sequence"),
+            terminal_state=payload.get("terminal_state"),
+            active_controls=list(payload.get("active_controls") or []),
+        )
+
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream:
         observe_run = getattr(self._client, "observe_run", None)
         if observe_run is None:
@@ -241,9 +268,20 @@ class RunnerRuntimeAdapter:
             next_cursor = str(events[-1].get("seq") or "")
         return RunEventStream(
             run_id=str(payload.get("run_id") or run_id),
+            session_id=str(payload.get("session_id") or "") or None,
             events=events,
+            # Preserve the runner's page-ownership echo.  Synthesizing this
+            # from the local request would make a stale response indistinguishable
+            # from the page that was actually requested.
+            request_cursor=(payload.get("request_cursor") if "request_cursor" in payload else None),
             cursor=str(next_cursor) if next_cursor is not None else cursor,
             last_event_id=last_event_id,
+            delivered_last_event_id=payload.get("delivered_last_event_id"),
+            delivered_through_sequence=payload.get("delivered_through_sequence"),
+            has_more=payload.get("has_more") if "has_more" in payload else None,
+            snapshot_complete=(
+                payload.get("snapshot_complete") if "snapshot_complete" in payload else None
+            ),
         )
 
     def get_run(self, run_id: str) -> RunStatus:
@@ -262,6 +300,7 @@ class RunnerRuntimeAdapter:
             session_id=str(payload.get("session_id") or "") or None,
             status=str(payload.get("status") or "unknown"),
             last_event_id=payload.get("last_event_id"),
+            last_event_sequence=payload.get("last_event_sequence"),
             terminal_state=payload.get("terminal_state"),
             active_controls=active_controls,
             pending_approval_id=payload.get("pending_approval_id"),
@@ -353,6 +392,35 @@ class LegacyJournalRuntimeAdapter:
             payload=payload,
         )
 
+    def find_run_by_idempotency_key(self, key: str, *, session_id: str) -> RunStatus:
+        """Resolve deterministic legacy starts through live state or journal.
+
+        Expert-team starts use the durable reservation key as their stream id.
+        A matching live stream or run journal therefore proves that dispatch
+        crossed the local runtime boundary; absence from both is an explicit
+        ``not_found`` and is safe to retry after the reservation lease expires.
+        """
+        from api.run_journal import find_run_summary
+
+        run_id = str(key or "").strip()
+        if not run_id:
+            return RunStatus(run_id="", session_id=session_id, status="not_found")
+        live = bool(self._live_stream_lookup(run_id))
+        summary = find_run_summary(run_id, session_dir=self._session_dir)
+        if not live and not summary:
+            return RunStatus(run_id=run_id, session_id=session_id, status="not_found")
+        actual_session_id = str((summary or {}).get("session_id") or session_id)
+        terminal_state = (summary or {}).get("terminal_state")
+        return RunStatus(
+            run_id=run_id,
+            session_id=actual_session_id,
+            status="running" if live or not terminal_state else str(terminal_state),
+            last_event_id=(summary or {}).get("last_event_id"),
+            last_event_sequence=(summary or {}).get("last_seq"),
+            terminal_state=terminal_state,
+            active_controls=["cancel"] if live else [],
+        )
+
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream:
         from api.run_journal import find_run_summary, read_run_events
 
@@ -369,9 +437,15 @@ class LegacyJournalRuntimeAdapter:
         last_event_id = events[-1].get("event_id") if events else summary.get("last_event_id")
         return RunEventStream(
             run_id=run_id,
+            session_id=str(summary.get("session_id") or "") or None,
             events=events,
+            request_cursor=cursor,
             cursor=str(events[-1].get("seq")) if events else cursor,
             last_event_id=last_event_id,
+            delivered_last_event_id=(events[-1].get("event_id") if events else None),
+            delivered_through_sequence=(events[-1].get("seq") if events else None),
+            has_more=False,
+            snapshot_complete=True,
         )
 
     def get_run(self, run_id: str) -> RunStatus:
@@ -385,6 +459,7 @@ class LegacyJournalRuntimeAdapter:
                 session_id=str((summary or {}).get("session_id") or "") or None,
                 status="running",
                 last_event_id=(summary or {}).get("last_event_id"),
+                last_event_sequence=(summary or {}).get("last_seq"),
                 terminal_state=None,
                 active_controls=["cancel"],
             )
@@ -395,6 +470,7 @@ class LegacyJournalRuntimeAdapter:
                 session_id=str(summary.get("session_id") or "") or None,
                 status=str(terminal_state or "unknown"),
                 last_event_id=summary.get("last_event_id"),
+                last_event_sequence=summary.get("last_seq"),
                 terminal_state=terminal_state,
                 active_controls=[],
             )

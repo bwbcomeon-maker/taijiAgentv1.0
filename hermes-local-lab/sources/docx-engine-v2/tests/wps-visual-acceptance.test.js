@@ -119,6 +119,8 @@ test('recordWpsVisualAcceptance marks WPS visual check as passed and clears not-
   assert.deepEqual(wpsVisual.visualChecks, VISUAL_CHECKS);
   assert.equal(wpsVisual.visualEvidence.length, 1);
   assert.equal(wpsVisual.visualEvidence[0].sha256, sha256File(evidencePath));
+  assert.equal(wpsVisual.visualEvidence[0].sizeBytes, fs.statSync(evidencePath).size);
+  assert.equal(wpsVisual.visualEvidence[0].mediaType, 'image/png');
   assert.equal(
     fs.existsSync(path.join(deliveryDir, wpsVisual.visualEvidence[0].path)),
     true

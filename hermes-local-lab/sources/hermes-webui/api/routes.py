@@ -1042,6 +1042,7 @@ def _expert_team_answers_by_id(run: dict) -> dict[str, str]:
 
 
 _EXPERT_TEAM_STREAM_TEAM_IDS = {"content-creator-team", "deep-research-team"}
+_EXPERT_TEAM_OBSERVATION_CURSOR_MAX_BYTES = 4096
 
 
 def _expert_team_current_task(run: dict) -> dict:
@@ -1078,12 +1079,21 @@ def _expert_team_revision_feedback(run: dict) -> str:
     if feedback:
         return feedback
     task_id = str(current.get("task_id") or "")
-    for output in run.get("stage_outputs") or []:
+    for output in reversed(run.get("stage_outputs") or []):
         if not isinstance(output, dict) or str(output.get("task_id") or "") != task_id:
             continue
         history = output.get("feedback_history") if isinstance(output.get("feedback_history"), list) else []
         if history:
             return str((history[-1] or {}).get("feedback") or "").strip()
+    for entry in reversed(run.get("revision_feedback") or []):
+        if not isinstance(entry, dict):
+            continue
+        entry_stage_id = str(entry.get("stage_id") or "")
+        if entry_stage_id and entry_stage_id != task_id:
+            continue
+        feedback = str(entry.get("feedback") or "").strip()
+        if feedback:
+            return feedback
     return ""
 
 
@@ -1111,8 +1121,8 @@ def _expert_team_rich_draft_generation_contract(material_type: str, task_id: str
         return ""
     return (
         "富内容初稿硬性验收门槛：本阶段必须一次性输出可进入后续模板套用的 Markdown 富内容初稿，"
-        "至少 2 个 Markdown 表格，至少 1 个架构图、流程图、用例图或图示引用。"
-        "可以用“图示设计”说明应生成的图，也可以给出 Markdown 图片引用；如果关键数据缺失，"
+        "至少 2 个 Markdown 表格，至少 1 个可执行的 Mermaid 图源或指向可读本地文件的 Markdown 图片引用。"
+        "不得只写“图示设计”或图示说明；如果关键数据缺失，"
         "用“待人工确认”占位也要保留表格和图示结构。不得只输出普通段落或下一阶段建议。\n"
     )
 
@@ -1162,10 +1172,11 @@ def _content_expert_team_execution_prompt(run: dict) -> str:
         output_sections = "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     elif task_id == "delivery":
         stage_instruction = (
-            "当前只执行“交付确认”阶段：基于已确认初稿和材料打磨方案，形成最终流转版、事实核对项、流转风险和交付说明。"
-            "不要新增未确认的大方向；如仍有风险，明确列为交付前人工确认项。"
+            "当前只执行“交付确认”阶段：基于已确认初稿和材料打磨方案，输出可直接生成 DOCX 的完整最终 Markdown 正文。"
+            "必须从一级标题到完整章节全文输出，保留表格及 Mermaid 图源或可读图片引用。"
+            "不得只输出阶段摘要、交付说明或修改建议；如仍有风险，在正文中明确列为待人工确认项。"
         )
-        output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作"
+        output_sections = "完整最终 Markdown 正文（标题、正文章节、表格、Mermaid 图源或图片引用、待人工确认事项）"
     else:
         stage_instruction = (
             "当前只执行“生成初稿”阶段：输出材料定位、标题方案、一级结构和可供用户确认的办公材料初稿。"
@@ -1216,9 +1227,9 @@ def _deep_research_expert_team_execution_prompt(run: dict) -> str:
         "research": "当前只执行“补充案例素材”阶段：整理事实、案例线索、论据类型、可验证来源方向和待人工确认项。",
         "outline": "当前只执行“结构提纲”阶段：把已确认研究材料组织成一级/二级标题、段落顺序和关键观点。",
         "draft": "当前只执行“材料初稿”阶段：按已确认结构提纲起草材料初稿，保留事实待核项，不做最终复核结论。",
-        "review": "当前只执行“复核交付”阶段：检查事实、逻辑、表达、流转风险，并形成交付建议。",
+        "review": "当前只执行“复核交付”阶段：在事实、逻辑、表达和流转风险复核后，输出可直接生成 DOCX 的完整最终 Markdown 正文。必须保留表格及 Mermaid 图源或可读图片引用，不得只输出阶段摘要、交付说明或建议。",
     }
-    output_sections = "阶段目标、阶段产物、待人工补充事项、交付后核对事项、可选后续动作" if task_id == "review" else "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
+    output_sections = "完整最终 Markdown 正文（标题、正文章节、表格、Mermaid 图源或图片引用、待人工确认事项）" if task_id == "review" else "阶段目标、阶段产物、待人工补充事项、下一阶段建议"
     if rich_draft_contract:
         stage_instructions["draft"] = stage_instructions["draft"] + rich_draft_contract
         output_sections += "；富内容初稿必须包含至少 2 个 Markdown 表格、至少 1 个架构图、流程图、用例图或图示引用"
@@ -1298,31 +1309,37 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
 
 
 def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
-    started_at = 0.0
-    raw_started = str(run.get("execution_started_at") or "")
-    if raw_started:
+    messages = [message for message in getattr(session, "messages", None) or [] if isinstance(message, dict)]
+    stream_id = str(run.get("execution_stream_id") or "").strip()
+    turn_id = str(run.get("execution_turn_id") or "").strip()
+
+    # The turn journal is the strongest available identity: its completed event
+    # names both the execution stream and the exact assistant message index.
+    if stream_id:
         try:
-            started_at = datetime.fromisoformat(raw_started).timestamp()
+            from api.turn_journal import read_turn_journal
+
+            journal = read_turn_journal(str(run.get("session_id") or ""))
+            completed = [
+                event
+                for event in journal.get("events") or []
+                if isinstance(event, dict)
+                and str(event.get("event") or "") == "completed"
+                and str(event.get("stream_id") or "") == stream_id
+                and (not turn_id or str(event.get("turn_id") or "") == turn_id)
+            ]
+            if completed:
+                message_index = completed[-1].get("assistant_message_index")
+                if isinstance(message_index, int) and 0 <= message_index < len(messages):
+                    message = messages[message_index]
+                    if message.get("role") == "assistant" and not message.get("_error"):
+                        content = str(message.get("content") or "").strip()
+                        if content:
+                            return content
         except Exception:
-            started_at = 0.0
-    latest_content = ""
-    latest_ts = -1.0
-    for msg in getattr(session, "messages", None) or []:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant" or msg.get("_error"):
-            continue
-        content = str(msg.get("content") or "").strip()
-        if not content:
-            continue
-        try:
-            msg_ts = float(msg.get("timestamp") or msg.get("_ts") or 0)
-        except Exception:
-            msg_ts = 0.0
-        if started_at and msg_ts < started_at - 2:
-            continue
-        if msg_ts >= latest_ts:
-            latest_content = content
-            latest_ts = msg_ts
-    return latest_content
+            logger.debug("Failed to resolve expert team result from turn journal", exc_info=True)
+
+    return ""
 
 
 def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
@@ -1348,14 +1365,774 @@ def _expert_team_run_has_ready_result(run: dict) -> bool:
     )
 
 
+def _expert_team_runtime_adapter_for_run(run: dict):
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, RunnerRuntimeAdapter
+
+    adapter_name = str(run.get("execution_runtime_adapter") or "")
+    if adapter_name == "RunnerRuntimeAdapter":
+        return RunnerRuntimeAdapter(client=_runtime_runner_client_factory())
+    return LegacyJournalRuntimeAdapter(
+        cancel_delegate=cancel_stream,
+        live_stream_lookup=lambda run_id: str(run_id) in _active_stream_id_set(),
+    )
+
+
+def _expert_team_planned_runtime_adapter_name() -> str:
+    """Resolve the durable adapter boundary without constructing a runtime client."""
+    from api.runtime_adapter import runtime_adapter_runner_enabled
+
+    return "RunnerRuntimeAdapter" if runtime_adapter_runner_enabled() else "LegacyJournalRuntimeAdapter"
+
+
+def _require_expert_team_runtime_identity(
+    runtime_value,
+    expected_run_id: str,
+    expected_session_id: str,
+) -> None:
+    actual_run_id = str(getattr(runtime_value, "run_id", "") or "").strip()
+    actual_session_id = str(getattr(runtime_value, "session_id", "") or "").strip()
+    if (
+        actual_run_id != str(expected_run_id or "").strip()
+        or (actual_session_id and actual_session_id != str(expected_session_id or "").strip())
+    ):
+        from api import expert_teams
+
+        raise expert_teams.ExpertTeamStateConflict(
+            "runtime_identity_mismatch",
+            "runtime returned an execution identity that does not belong to this expert team",
+        )
+
+
+def _require_expert_team_event_identities(events, expected_run_id: str, expected_session_id: str) -> None:
+    from api import expert_teams
+
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        run_ids = [str(source.get("run_id") or "").strip() for source in (event, payload, data)]
+        session_ids = [str(source.get("session_id") or "").strip() for source in (event, payload, data)]
+        if any(value and value != str(expected_run_id or "") for value in run_ids) or any(
+            value and value != str(expected_session_id or "") for value in session_ids
+        ):
+            raise expert_teams.ExpertTeamStateConflict(
+                "runtime_identity_mismatch",
+                "runtime event does not belong to this expert team execution",
+            )
+
+
+def _expert_team_public_event_observation(event: dict) -> dict | None:
+    if not isinstance(event, dict):
+        return None
+    event_name = str(event.get("type") or event.get("event") or "").strip().lower()
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    private_prefixes = (
+        "reasoning",
+        "private",
+        "tool",
+        "progress",
+        "usage",
+        "approval",
+        "clarify",
+        "debug",
+        "trace",
+        "system",
+    )
+    visibility_values = {
+        str(source.get(key) or "").strip().lower()
+        for source in (event, payload, data)
+        for key in ("visibility", "channel", "content_type")
+    }
+    if event_name.startswith(private_prefixes) or visibility_values.intersection(
+        {"private", "internal", "reasoning", "tool", "hidden"}
+    ):
+        return None
+
+    delta_names = {"token", "token.delta", "delta", "message.delta", "output.delta"}
+    final_names = {
+        "",
+        "message",
+        "assistant.message",
+        "message.completed",
+        "output",
+        "output.completed",
+        "final",
+        "done",
+    }
+    is_delta = event_name in delta_names or event_name.endswith(".delta")
+    is_final = event_name in final_names or event_name.endswith(".final")
+    if not is_delta and not is_final:
+        return None
+    candidates = (
+        payload.get("text"),
+        payload.get("content"),
+        data.get("text"),
+        data.get("content"),
+        event.get("text"),
+        event.get("content"),
+        payload.get("output"),
+        data.get("output"),
+        event.get("output"),
+    )
+    text = next((str(value) for value in candidates if value not in (None, "")), "")
+    if not text:
+        return None
+    return {
+        "event_id": str(event.get("event_id") or ""),
+        "sequence": event.get("sequence", event.get("seq")),
+        "kind": "delta" if is_delta else "final",
+        "text": text,
+    }
+
+
+def _expert_team_public_event_observations(events) -> list[dict]:
+    rows = []
+    for event in events or []:
+        observation = _expert_team_public_event_observation(event)
+        if observation:
+            rows.append(observation)
+    return rows
+
+
+def _expert_team_delivered_page_marker(observed, run: dict) -> tuple[str, int | None]:
+    """Return a delivery marker proven to belong to the actual response page."""
+    from api import expert_teams
+
+    explicit_id = str(getattr(observed, "delivered_last_event_id", "") or "").strip()
+    explicit_sequence = getattr(observed, "delivered_through_sequence", None)
+    try:
+        delivered_sequence = int(explicit_sequence)
+    except (TypeError, ValueError):
+        delivered_sequence = None
+    candidates = []
+    for index, event in enumerate(getattr(observed, "events", []) or []):
+        if not isinstance(event, dict):
+            continue
+        event_id = str(event.get("event_id") or "").strip()
+        try:
+            sequence = int(event.get("sequence", event.get("seq")))
+        except (TypeError, ValueError):
+            sequence = None
+        if event_id or sequence is not None:
+            candidates.append((sequence, index, event_id))
+    if not candidates:
+        current_id = str(run.get("execution_delivered_last_event_id") or "").strip()
+        try:
+            current_sequence = int(run.get("execution_delivered_through_sequence"))
+        except (TypeError, ValueError):
+            current_sequence = None
+        if (explicit_id and explicit_id != current_id) or (
+            delivered_sequence is not None and delivered_sequence != current_sequence
+        ):
+            raise expert_teams.ExpertTeamStateConflict(
+                "runtime_protocol_error",
+                "runtime claimed a delivered marker that was absent from the response page",
+                run,
+            )
+        # An empty page may repeat the already committed marker, but it cannot
+        # advance delivery authority.
+        return "", None
+
+    sequenced = [item for item in candidates if item[0] is not None]
+    actual_sequence, _actual_index, actual_id = (
+        max(sequenced, key=lambda item: (item[0], item[1]))
+        if sequenced
+        else candidates[-1]
+    )
+    if (explicit_id and explicit_id != actual_id) or (
+        delivered_sequence is not None and delivered_sequence != actual_sequence
+    ):
+        raise expert_teams.ExpertTeamStateConflict(
+            "runtime_protocol_error",
+            "runtime claimed a delivered marker that was not the last event on the response page",
+            run,
+        )
+    return actual_id, actual_sequence
+
+
+def _require_expert_team_observation_flags(observed, run: dict) -> None:
+    from api import expert_teams
+
+    for field in ("has_more", "snapshot_complete"):
+        value = getattr(observed, field, None)
+        if value is not None and type(value) is not bool:
+            raise expert_teams.ExpertTeamStateConflict(
+                "runtime_protocol_error",
+                f"runtime observation field {field} must be a boolean",
+                run,
+            )
+
+
+def _require_expert_team_observation_cursor_size(value, run: dict) -> None:
+    from api import expert_teams
+
+    if len(str(value or "").encode("utf-8")) > _EXPERT_TEAM_OBSERVATION_CURSOR_MAX_BYTES:
+        raise expert_teams.ExpertTeamStateConflict(
+            "runtime_observation_limit",
+            "runtime observation cursor exceeded the durable metadata limit",
+            run,
+        )
+
+
+def _expert_team_remote_result_content(events) -> str:
+    deltas = []
+    final = ""
+    for observation in _expert_team_public_event_observations(events):
+        if observation["kind"] == "final":
+            final = str(observation["text"] or "").strip()
+        else:
+            deltas.append(str(observation["text"] or ""))
+    return final or "".join(deltas).strip()
+
+
+def _reconcile_expired_expert_team_start(workspace: Path, run: dict) -> dict:
+    from api import expert_teams
+
+    if str(run.get("workflow_state") or "") != "starting":
+        return run
+    if float(run.get("execution_start_deadline_at") or 0) > time.time():
+        return run
+    start_id = str(run.get("execution_start_id") or "").strip()
+    if not start_id:
+        return run
+    dispatch_state = str(run.get("execution_start_dispatch_state") or "").strip().lower()
+    if dispatch_state == "reserved":
+        return expert_teams.mark_expert_team_execution_start_failed(
+            workspace,
+            str(run.get("run_id") or ""),
+            "启动请求尚未派发，已安全释放本次预留，请重新尝试。",
+            execution_start_id=start_id,
+        )
+    if (
+        not dispatch_state
+        and str(run.get("execution_runtime_adapter") or "") == "LegacyJournalRuntimeAdapter"
+    ):
+        # Historical legacy reservations did not use the reservation key as
+        # their stream id.  Their absence cannot be upgraded retroactively to
+        # proof that dispatch never happened.
+        return run
+    # Legacy runners never persisted this key, so replaying start would risk a
+    # duplicate remote task. Only an adapter with an explicit lookup seam may
+    # resolve an expired reservation.
+    try:
+        adapter = _expert_team_runtime_adapter_for_run(run)
+    except Exception:
+        logger.debug("Failed to construct runtime adapter for expired expert-team start", exc_info=True)
+        return run
+    lookup = getattr(adapter, "find_run_by_idempotency_key", None)
+    if lookup is None:
+        return run
+    try:
+        status = lookup(start_id, session_id=str(run.get("session_id") or ""))
+    except Exception:
+        logger.debug("Expired expert-team start lookup is unavailable", exc_info=True)
+        return run
+    runtime_status = str(getattr(status, "status", "unknown") or "unknown").strip().lower()
+    if runtime_status in {"unknown", "pending", "unavailable"}:
+        return run
+    if runtime_status in {"not_found", "missing", "absent"}:
+        return expert_teams.mark_expert_team_execution_start_failed(
+            workspace,
+            str(run.get("run_id") or ""),
+            "未检测到已创建的远端执行，请重新尝试。",
+            execution_start_id=start_id,
+        )
+    remote_run_id = str(getattr(status, "run_id", "") or "").strip()
+    remote_session_id = str(getattr(status, "session_id", "") or "").strip()
+    if not remote_run_id or (remote_session_id and remote_session_id != str(run.get("session_id") or "")):
+        return run
+    return expert_teams.mark_expert_team_execution_started(
+        workspace,
+        str(run.get("run_id") or ""),
+        {
+            "stream_id": remote_run_id,
+            "runtime_run_id": remote_run_id,
+            "runtime_adapter": str(run.get("execution_runtime_adapter") or type(adapter).__name__),
+            "execution_start_id": start_id,
+        },
+    )
+
+
+def _expert_team_cancel_control_outcome(result) -> tuple[str, str]:
+    accepted = bool(
+        getattr(result, "accepted", result.get("ok", False) if isinstance(result, dict) else result)
+    )
+    message = str(getattr(result, "safe_message", None) or "")
+    status = str(
+        getattr(result, "status", result.get("status", "") if isinstance(result, dict) else "") or ""
+    ).strip().lower()
+    if accepted:
+        return "accepted", message
+    if status in {"unknown", "timeout", "pending", "unavailable"}:
+        return "unknown", message or "停止请求状态暂未确认。"
+    return "rejected", message or "runtime rejected expert team cancellation"
+
+
+def _expert_team_terminal_observation_caught_up(
+    run: dict,
+    status,
+    observed,
+    *,
+    cursor_before: str | None,
+) -> bool:
+    """Require delivered-through authority, never a run-global page hint."""
+    status_last_event_id = str(getattr(status, "last_event_id", "") or "").strip()
+    status_last_sequence = getattr(status, "last_event_sequence", None)
+    try:
+        status_sequence = int(status_last_sequence)
+    except (TypeError, ValueError):
+        status_sequence = None
+    try:
+        delivered_sequence = int(run.get("execution_delivered_through_sequence"))
+    except (TypeError, ValueError):
+        delivered_sequence = None
+    if status_last_event_id:
+        if str(run.get("execution_delivered_last_event_id") or "").strip() != status_last_event_id:
+            return False
+        return status_sequence is None or (
+            delivered_sequence is not None and delivered_sequence >= status_sequence
+        )
+    if status_sequence is not None:
+        return delivered_sequence is not None and delivered_sequence >= status_sequence
+    return getattr(observed, "snapshot_complete", None) is True or getattr(observed, "has_more", None) is False
+
+
+def _reconcile_expert_team_cancelling_runtime(
+    workspace: Path,
+    run: dict,
+    adapter,
+    status,
+    observed=None,
+    *,
+    cursor_before: str | None = None,
+) -> dict:
+    from api import expert_teams
+
+    runtime_status = str(getattr(status, "status", "unknown") or "unknown").strip().lower()
+    cancel_request_id = str(run.get("cancel_request_id") or "")
+    if runtime_status in {"cancelled", "canceled", "interrupted", "interrupted-by-user"}:
+        return expert_teams.finalize_expert_team_cancellation(
+            workspace,
+            str(run.get("run_id") or ""),
+            cancel_request_id=cancel_request_id,
+        )
+    if runtime_status in {"failed", "error", "errored"}:
+        return expert_teams.fail_expert_team_cancellation(
+            workspace,
+            str(run.get("run_id") or ""),
+            cancel_request_id=cancel_request_id,
+            message="远程专家团执行已失败，本次停止对账已结束。",
+        )
+    if runtime_status in {"completed", "done"}:
+        if not _expert_team_terminal_observation_caught_up(
+            run,
+            status,
+            observed,
+            cursor_before=cursor_before,
+        ):
+            return run
+        content = str(run.get("execution_public_output_buffer") or "") or _expert_team_remote_result_content(
+            getattr(observed, "events", []) or []
+        )
+        restored = expert_teams.restore_expert_team_after_cancel_completion(
+            workspace,
+            str(run.get("run_id") or ""),
+            cancel_request_id=cancel_request_id,
+        )
+        if not content:
+            return expert_teams.fail_expert_team_execution(
+                workspace,
+                str(restored.get("run_id") or ""),
+                "远程执行已结束，但没有可交付的公开结果，请重新尝试。",
+                stream_id=str(restored.get("execution_stream_id") or ""),
+            )
+        return expert_teams.mark_expert_team_execution_complete(
+            workspace,
+            str(restored.get("run_id") or ""),
+            {
+                "stream_id": str(restored.get("execution_stream_id") or ""),
+                "stage_id": str(restored.get("execution_stage_id") or ""),
+                "attempt": int(restored.get("execution_attempt") or 0),
+                "id": f"runtime-{str(restored.get('execution_runtime_run_id') or '')}",
+                "kind": "chat",
+                "content": content,
+            },
+        )
+    if runtime_status in {"starting", "queued", "running", "active"}:
+        now = time.time()
+        cancel_deadline = float(run.get("cancel_deadline_at") or 0)
+        if cancel_deadline and cancel_deadline <= now:
+            return expert_teams.require_expert_team_cancellation_retry(
+                workspace,
+                str(run.get("run_id") or ""),
+                cancel_request_id=cancel_request_id,
+                message="远程停止在自动重试期内未确认，请手动重试或刷新状态。",
+            )
+        next_retry_at = float(run.get("cancel_next_retry_at") or 0)
+        if next_retry_at > now:
+            return run
+        runtime_run_id = str(run.get("execution_runtime_run_id") or run.get("execution_stream_id") or "")
+        try:
+            result = adapter.cancel_run(runtime_run_id)
+            outcome, message = _expert_team_cancel_control_outcome(result)
+        except Exception as exc:
+            outcome, message = "unknown", str(exc) or "停止请求状态暂未确认。"
+        return expert_teams.reconcile_expert_team_cancellation(
+            workspace,
+            str(run.get("run_id") or ""),
+            cancel_request_id=cancel_request_id,
+            outcome=outcome,
+            message=message,
+        )
+    return run
+
+
+def _reconcile_expert_team_cancelling_unknown_start(workspace: Path, run: dict) -> dict:
+    """Resolve a cancelled start reservation before declaring local success."""
+    from api import expert_teams
+
+    if str(run.get("workflow_state") or "") != "cancelling":
+        return run
+    if str(run.get("execution_runtime_run_id") or run.get("execution_stream_id") or "").strip():
+        return run
+    start_id = str(run.get("execution_start_id") or "").strip()
+    if not start_id:
+        return run
+    try:
+        adapter = _expert_team_runtime_adapter_for_run(run)
+        status = adapter.find_run_by_idempotency_key(
+            start_id,
+            session_id=str(run.get("session_id") or ""),
+        )
+        runtime_status = str(getattr(status, "status", "unknown") or "unknown").strip().lower()
+        runtime_session_id = str(getattr(status, "session_id", "") or "").strip()
+        if runtime_session_id and runtime_session_id != str(run.get("session_id") or ""):
+            return run
+        cancel_request_id = str(run.get("cancel_request_id") or "")
+        if runtime_status in {"not_found", "missing", "absent", "cancelled", "canceled", "interrupted"}:
+            return expert_teams.finalize_expert_team_cancellation(
+                workspace,
+                str(run.get("run_id") or ""),
+                cancel_request_id=cancel_request_id,
+            )
+        if runtime_status in {"failed", "error", "errored"}:
+            return expert_teams.fail_expert_team_cancellation(
+                workspace,
+                str(run.get("run_id") or ""),
+                cancel_request_id=cancel_request_id,
+                message="远程专家团启动已失败，停止对账已结束。",
+            )
+        if runtime_status in {"completed", "done"}:
+            remote_run_id = str(getattr(status, "run_id", "") or "").strip()
+            if not remote_run_id:
+                return run
+            return expert_teams.bind_expert_team_cancellation_runtime(
+                workspace,
+                str(run.get("run_id") or ""),
+                cancel_request_id=cancel_request_id,
+                execution_start_id=start_id,
+                runtime_run_id=remote_run_id,
+                runtime_adapter=str(run.get("execution_runtime_adapter") or type(adapter).__name__),
+            )
+        if runtime_status in {"starting", "queued", "running", "active"}:
+            remote_run_id = str(getattr(status, "run_id", "") or "").strip()
+            if not remote_run_id:
+                return run
+            return expert_teams.bind_expert_team_cancellation_runtime(
+                workspace,
+                str(run.get("run_id") or ""),
+                cancel_request_id=cancel_request_id,
+                execution_start_id=start_id,
+                runtime_run_id=remote_run_id,
+                runtime_adapter=str(run.get("execution_runtime_adapter") or type(adapter).__name__),
+            )
+    except Exception:
+        logger.debug("Failed to reconcile cancelled expert-team start", exc_info=True)
+    run["view"] = expert_teams.expert_team_run_view(run)
+    return run
+
+
+def _reconcile_expert_team_orphan_cleanup(workspace: Path, run: dict) -> dict:
+    """Consume a persisted orphan cleanup without ever starting another run."""
+    from api import expert_teams
+
+    orphan_run_id = str(run.get("orphan_runtime_run_id") or "").strip()
+    cleanup_status = str(run.get("execution_cleanup_status") or "").strip().lower()
+    if not orphan_run_id or cleanup_status not in {
+        "pending",
+        "unknown",
+        "cancel_requested",
+        "retry_required",
+    }:
+        return run
+    adapter_run = dict(run)
+    adapter_run["execution_runtime_adapter"] = str(
+        run.get("orphan_runtime_adapter") or run.get("execution_runtime_adapter") or ""
+    )
+    try:
+        adapter = _expert_team_runtime_adapter_for_run(adapter_run)
+        status = adapter.get_run(orphan_run_id)
+        _require_expert_team_runtime_identity(
+            status,
+            orphan_run_id,
+            str(run.get("session_id") or ""),
+        )
+        remote_status = str(getattr(status, "status", "unknown") or "unknown").strip().lower()
+        if remote_status in {
+            "cancelled",
+            "canceled",
+            "interrupted",
+            "interrupted-by-user",
+            "completed",
+            "done",
+            "failed",
+            "error",
+            "errored",
+            "not_found",
+            "missing",
+            "absent",
+        }:
+            return expert_teams.complete_expert_team_orphan_cleanup(
+                workspace,
+                str(run.get("run_id") or ""),
+                orphan_runtime_run_id=orphan_run_id,
+                outcome=remote_status,
+            )
+        if remote_status in {"starting", "queued", "running", "active"}:
+            now = time.time()
+            manual_retry = cleanup_status == "retry_required"
+            cleanup_deadline = float(run.get("execution_cleanup_deadline_at") or 0)
+            if not manual_retry and cleanup_deadline and cleanup_deadline <= now:
+                return expert_teams.require_expert_team_orphan_cleanup_retry(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    orphan_runtime_run_id=orphan_run_id,
+                    message="远程清理在自动重试期内未确认，请手动重试或刷新状态。",
+                )
+            next_retry_at = float(run.get("execution_cleanup_next_retry_at") or 0)
+            if not manual_retry and next_retry_at > now:
+                return run
+            result = adapter.cancel_run(orphan_run_id)
+            outcome, message = _expert_team_cancel_control_outcome(result)
+            if outcome in {"accepted", "unknown"}:
+                return expert_teams.record_expert_team_orphan_cleanup_attempt(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    orphan_runtime_run_id=orphan_run_id,
+                    message=message,
+                )
+            return expert_teams.require_expert_team_orphan_cleanup_retry(
+                workspace,
+                str(run.get("run_id") or ""),
+                orphan_runtime_run_id=orphan_run_id,
+                message=message,
+            )
+    except Exception:
+        logger.debug("Failed to reconcile expert team orphan cleanup", exc_info=True)
+    run["view"] = expert_teams.expert_team_run_view(run)
+    return run
+
+
 def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> dict | None:
     if not run or str(run.get("team_id") or "") not in _EXPERT_TEAM_STREAM_TEAM_IDS:
         return run
+    from api import expert_teams
+
+    if int(run.get("schema_version") or 0) < 2:
+        run = dict(run)
+        run["read_only"] = True
+        run["view"] = expert_teams.expert_team_run_view(run)
+        run["view"]["actions"] = {
+            "can_start_generation": False,
+            "can_cancel": False,
+            "can_submit_stage_input": False,
+            "can_retry": False,
+            "can_approve_stage": False,
+            "can_request_revision": False,
+        }
+        run["view"]["presentation"]["primary_action"] = None
+        run["view"]["presentation"]["secondary_actions"] = []
+        return run
+    run = expert_teams.reconcile_expert_team_run(workspace, str(run.get("run_id") or ""))
+    run = _reconcile_expired_expert_team_start(workspace, run)
+    run = _reconcile_expert_team_orphan_cleanup(workspace, run)
+    run = _reconcile_expert_team_cancelling_unknown_start(workspace, run)
     if _expert_team_has_pending_intake_questions(run):
         return run
     if str(run.get("workflow_state") or "") == "awaiting_stage_input":
-        from api import expert_teams
-
+        run["view"] = expert_teams.expert_team_run_view(run)
+        return run
+    if str(run.get("workflow_state") or "") not in {"generating", "cancelling"}:
+        run["view"] = expert_teams.expert_team_run_view(run)
+        return run
+    runtime_adapter_name = str(run.get("execution_runtime_adapter") or "")
+    runtime_run_id = str(run.get("execution_runtime_run_id") or "")
+    if runtime_adapter_name == "RunnerRuntimeAdapter" and runtime_run_id:
+        try:
+            adapter = _expert_team_runtime_adapter_for_run(run)
+            status = adapter.get_run(runtime_run_id)
+            _require_expert_team_runtime_identity(
+                status,
+                runtime_run_id,
+                str(run.get("session_id") or ""),
+            )
+            observation_cursor_before = str(run.get("execution_cursor") or "") or None
+            _require_expert_team_observation_cursor_size(observation_cursor_before, run)
+            observed = adapter.observe_run(
+                runtime_run_id,
+                cursor=observation_cursor_before,
+            )
+            reported_request_cursor = getattr(observed, "request_cursor", None)
+            _require_expert_team_observation_cursor_size(reported_request_cursor, run)
+            _require_expert_team_observation_cursor_size(getattr(observed, "cursor", None), run)
+            if str(reported_request_cursor or "") != str(
+                observation_cursor_before or ""
+            ):
+                raise expert_teams.ExpertTeamStateConflict(
+                    "stale_observation_page",
+                    "runtime returned a page for a stale observation cursor",
+                    run,
+                )
+            _require_expert_team_runtime_identity(
+                observed,
+                runtime_run_id,
+                str(run.get("session_id") or ""),
+            )
+            _require_expert_team_event_identities(
+                observed.events,
+                runtime_run_id,
+                str(run.get("session_id") or ""),
+            )
+            _require_expert_team_observation_flags(observed, run)
+            delivered_last_event_id, delivered_through_sequence = _expert_team_delivered_page_marker(
+                observed,
+                run,
+            )
+            run = expert_teams.record_expert_team_execution_observation(
+                workspace,
+                str(run.get("run_id") or ""),
+                runtime_run_id=runtime_run_id,
+                stream_id=str(run.get("execution_stream_id") or ""),
+                stage_id=str(run.get("execution_stage_id") or ""),
+                attempt=int(run.get("execution_attempt") or 0),
+                cursor=observed.cursor,
+                last_event_id=delivered_last_event_id,
+                delivered_last_event_id=delivered_last_event_id,
+                delivered_through_sequence=delivered_through_sequence,
+                expected_cursor=observation_cursor_before,
+                observations=_expert_team_public_event_observations(observed.events),
+            )
+            runtime_status = str(status.status or "unknown").lower()
+            if str(run.get("workflow_state") or "") == "cancelling":
+                return _reconcile_expert_team_cancelling_runtime(
+                    workspace,
+                    run,
+                    adapter,
+                    status,
+                    observed,
+                    cursor_before=observation_cursor_before,
+                )
+            if runtime_status in {"starting", "queued", "running", "active"}:
+                run["workflow_state"] = "generating"
+                run["execution_status"] = "running"
+                run["view"] = expert_teams.expert_team_run_view(run)
+                return run
+            if runtime_status in {"failed", "error", "errored"}:
+                return expert_teams.fail_expert_team_execution(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    "远程专家团执行未成功完成，请重新尝试。",
+                    stream_id=str(run.get("execution_stream_id") or ""),
+                )
+            if runtime_status in {
+                "cancelled",
+                "canceled",
+                "interrupted",
+                "interrupted-by-user",
+            }:
+                return expert_teams.mark_expert_team_execution_cancelled(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    "远程专家团执行已取消。",
+                    stream_id=str(run.get("execution_stream_id") or ""),
+                )
+            if runtime_status in {"completed", "done"}:
+                if not _expert_team_terminal_observation_caught_up(
+                    run,
+                    status,
+                    observed,
+                    cursor_before=observation_cursor_before,
+                ):
+                    run["execution_status"] = "awaiting_result"
+                    run["view"] = expert_teams.expert_team_run_view(run)
+                    return run
+                content = str(run.get("execution_public_output_buffer") or "")
+                if content:
+                    return expert_teams.mark_expert_team_execution_complete(
+                        workspace,
+                        str(run.get("run_id") or ""),
+                        {
+                            "stream_id": str(run.get("execution_stream_id") or ""),
+                            "stage_id": str(run.get("execution_stage_id") or ""),
+                            "attempt": int(run.get("execution_attempt") or 0),
+                            "id": f"runtime-{runtime_run_id}",
+                            "kind": "chat",
+                            "content": content,
+                        },
+                    )
+                return expert_teams.fail_expert_team_execution(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    "远程执行已结束，但没有可交付的公开结果，请重新尝试。",
+                    stream_id=str(run.get("execution_stream_id") or ""),
+                )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            if exc.code in {"runtime_protocol_error", "runtime_observation_limit"}:
+                return expert_teams.fail_expert_team_execution_protocol(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    str(exc),
+                    stream_id=str(run.get("execution_stream_id") or ""),
+                )
+            logger.warning("Rejected expert team runtime observation: %s", exc.code)
+            current = exc.run or expert_teams.read_expert_team_run(
+                workspace,
+                str(run.get("run_id") or ""),
+            )
+            current["view"] = expert_teams.expert_team_run_view(current)
+            return current
+        except Exception:
+            logger.exception("Failed to observe remote expert team runtime run %s", runtime_run_id)
+            run["execution_status"] = "unknown"
+            run["view"] = expert_teams.expert_team_run_view(run)
+            return run
+    if str(run.get("workflow_state") or "") == "cancelling":
+        try:
+            adapter = _expert_team_runtime_adapter_for_run(run)
+            status = adapter.get_run(runtime_run_id or str(run.get("execution_stream_id") or ""))
+            _require_expert_team_runtime_identity(
+                status,
+                runtime_run_id or str(run.get("execution_stream_id") or ""),
+                str(run.get("session_id") or ""),
+            )
+            runtime_status = str(status.status or "unknown").lower()
+            observed = None
+            if runtime_status in {"completed", "done"}:
+                observed = adapter.observe_run(
+                    runtime_run_id or str(run.get("execution_stream_id") or ""),
+                    cursor=str(run.get("execution_cursor") or "") or None,
+                )
+            return _reconcile_expert_team_cancelling_runtime(
+                workspace,
+                run,
+                adapter,
+                status,
+                observed,
+            )
+        except Exception:
+            logger.debug("Failed to reconcile expert team cancellation", exc_info=True)
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
     stream_id = str(run.get("execution_stream_id") or "")
@@ -1383,6 +2160,9 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                     workspace,
                     str(run.get("run_id") or ""),
                     delivery={
+                        "stream_id": stream_id,
+                        "stage_id": str(run.get("execution_stage_id") or ""),
+                        "attempt": int(run.get("execution_attempt") or 0),
                         "id": "expert-team-chat-delivery",
                         "label": "专家团生成结果",
                         "kind": "chat",
@@ -1398,6 +2178,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                     workspace,
                     str(run.get("run_id") or ""),
                     "本轮生成已结束，但没有检测到有效结果，请重新尝试。",
+                    stream_id=stream_id,
                 )
         except Exception:
             pass
@@ -1407,45 +2188,361 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     return run
 
 
-def _start_expert_team_execution(workspace: Path, run: dict, body: dict) -> tuple[dict, int]:
-    from api import expert_teams
+def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
+    outcome = {"pending_run_id": "", "error": ""}
+    if adapter is None:
+        return outcome
+    identities = []
+    for source in sources:
+        if source is None:
+            continue
+        if isinstance(source, dict):
+            candidates = (source.get("run_id"),)
+        else:
+            candidates = (getattr(source, "run_id", None),)
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value and value not in identities:
+                identities.append(value)
+    for identity in identities:
+        try:
+            result = adapter.cancel_run(identity)
+            accepted = True if result is None else bool(
+                getattr(result, "accepted", result.get("ok", False) if isinstance(result, dict) else result)
+            )
+            if not outcome["pending_run_id"]:
+                outcome["pending_run_id"] = identity
+                outcome["error"] = (
+                    "runtime cleanup was accepted and is awaiting terminal confirmation"
+                    if accepted
+                    else str(getattr(result, "safe_message", None) or "runtime cleanup was not confirmed")
+                )
+        except Exception as exc:
+            logger.exception("Failed to cancel orphan expert team runtime run %s", identity)
+            if not outcome["pending_run_id"]:
+                outcome["pending_run_id"] = identity
+                outcome["error"] = str(exc) or "runtime cleanup was not confirmed"
+    return outcome
 
+
+def _start_expert_team_execution(
+    workspace: Path,
+    run: dict,
+    body: dict,
+    *,
+    already_reserved: bool = False,
+) -> tuple[dict, int]:
+    from api import expert_teams
+    from api.runtime_adapter import (
+        LegacyJournalRuntimeAdapter,
+        StartRunRequest,
+        build_runtime_adapter,
+    )
+
+    def _fail_known_pre_dispatch(message: str) -> dict:
+        if not already_reserved:
+            return run
+        try:
+            return expert_teams.mark_expert_team_execution_start_failed(
+                workspace,
+                str(run.get("run_id") or ""),
+                message,
+                execution_start_id=str(run.get("execution_start_id") or ""),
+            )
+        except expert_teams.ExpertTeamStateConflict as conflict:
+            return conflict.run or run
+
+    if already_reserved and (
+        str(run.get("workflow_state") or "") != "starting"
+        or not str(run.get("execution_start_id") or "").strip()
+    ):
+        return {
+            "ok": False,
+            "code": "missing_start_reservation",
+            "error": "expert team execution start is not durably reserved",
+            "run": run,
+        }, 409
     sid = str(run.get("session_id") or body.get("session_id") or "").strip()
     if not sid:
-        return {"ok": False, "error": "expert team session_id is required", "run": run}, 400
+        error = "expert team session_id is required"
+        return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 400
     try:
         session = get_session(sid)
     except KeyError:
-        return {"ok": False, "error": "Session not found", "run": run}, 404
-    requested_model = body.get("model") or getattr(session, "model", None)
-    requested_provider = (
-        body.get("model_provider")
-        if "model_provider" in body
-        else getattr(session, "model_provider", None)
-    )
-    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-        requested_model,
-        requested_provider,
-    )
-    display_msg = _expert_team_execution_display_message(run)
-    response = _start_chat_stream_for_session(
-        session,
-        msg=_expert_team_execution_prompt(run),
-        display_msg=display_msg,
-        attachments=[],
-        workspace=str(workspace),
-        model=model,
-        model_provider=model_provider,
-        normalized_model=normalized_model,
-    )
+        error = "Session not found"
+        return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 404
+    try:
+        requested_model = body.get("model") or getattr(session, "model", None)
+        requested_provider = (
+            body.get("model_provider")
+            if "model_provider" in body
+            else getattr(session, "model_provider", None)
+        )
+        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+            requested_model,
+            requested_provider,
+        )
+        display_msg = _expert_team_execution_display_message(run)
+        execution_message_start_index = len(list(getattr(session, "messages", None) or []))
+        execution_prompt = _expert_team_execution_prompt(run)
+    except Exception as exc:
+        error = str(exc) or "当前运行时启动参数无效，请检查配置后重试。"
+        return {
+            "ok": False,
+            "code": "runtime_incompatible",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }, 503
+
+    def _legacy_start(request: StartRunRequest) -> dict:
+        return _start_chat_stream_for_session(
+            session,
+            msg=request.message,
+            display_msg=display_msg,
+            attachments=request.attachments,
+            workspace=request.workspace or str(workspace),
+            model=request.model or model,
+            model_provider=request.provider or model_provider,
+            normalized_model=normalized_model,
+            stream_id=str(request.idempotency_key or "").strip() or None,
+        )
+
+    def _legacy_adapter() -> LegacyJournalRuntimeAdapter:
+        return LegacyJournalRuntimeAdapter(
+            start_run_delegate=_legacy_start,
+            cancel_delegate=cancel_stream,
+            live_stream_lookup=lambda run_id: str(run_id) in _active_stream_id_set(),
+        )
+
+    try:
+        adapter = build_runtime_adapter(
+            legacy_adapter_factory=_legacy_adapter,
+            runner_client_factory=_runtime_runner_client_factory,
+        )
+        if adapter is None:
+            adapter = _legacy_adapter()
+    except Exception as exc:
+        error = str(exc) or "当前运行时不可用，请检查配置后重试。"
+        failed_run = _fail_known_pre_dispatch(error)
+        return {"ok": False, "code": "runtime_incompatible", "error": error, "run": failed_run}, 503
+
+    planned_runtime_adapter = type(adapter).__name__
+    if already_reserved:
+        persisted_adapter = str(run.get("execution_runtime_adapter") or "").strip()
+        if persisted_adapter != planned_runtime_adapter:
+            error = "expert team runtime adapter changed after start reservation"
+            try:
+                failed_run = expert_teams.mark_expert_team_execution_start_failed(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    error,
+                    execution_start_id=str(run.get("execution_start_id") or ""),
+                )
+            except expert_teams.ExpertTeamStateConflict as conflict:
+                failed_run = conflict.run or run
+            return {
+                "ok": False,
+                "code": "runtime_incompatible",
+                "error": error,
+                "run": failed_run,
+            }, 503
+        reserved_run = run
+    else:
+        try:
+            reserved_run = expert_teams.reserve_expert_team_execution_start(
+                workspace,
+                str(run.get("run_id") or ""),
+                expected_version=int(run.get("version") or 0),
+                runtime_adapter=planned_runtime_adapter,
+            )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return {
+                "ok": False,
+                "code": exc.code,
+                "error": str(exc),
+                "run": exc.run or run,
+            }, 409
+
+    reservation_id = str(reserved_run.get("execution_start_id") or "")
+    result = None
+
+    def _fail_reserved_start(message: str, cleanup: dict | None = None) -> dict:
+        cleanup = cleanup or {}
+        try:
+            return expert_teams.mark_expert_team_execution_start_failed(
+                workspace,
+                str(run.get("run_id") or ""),
+                message,
+                execution_start_id=reservation_id,
+                orphan_runtime_run_id=str(cleanup.get("pending_run_id") or ""),
+                orphan_runtime_adapter=type(adapter).__name__ if adapter is not None else "",
+                execution_cleanup_status="pending" if cleanup.get("pending_run_id") else "",
+                execution_cleanup_error=str(cleanup.get("error") or ""),
+            )
+        except expert_teams.ExpertTeamStateConflict as conflict:
+            return conflict.run or expert_teams.read_expert_team_run(
+                workspace,
+                str(run.get("run_id") or ""),
+            )
+
+    license_status = _taiji_license_blocked_status()
+    if license_status is not None:
+        error = str(license_status.get("message") or "授权不可用，请联系服务方更新授权。")
+        failed_run = _fail_reserved_start(error)
+        return {
+            "ok": False,
+            "license_blocked": True,
+            "license": license_status,
+            "error": error,
+            "run": failed_run,
+        }, 403
+
+    if planned_runtime_adapter == "RunnerRuntimeAdapter":
+        try:
+            lookup_status = adapter.find_run_by_idempotency_key(
+                reservation_id,
+                session_id=sid,
+            )
+            lookup_outcome = str(getattr(lookup_status, "status", "unknown") or "unknown").strip().lower()
+        except Exception as exc:
+            error = str(exc) or "当前 Runner 不支持安全启动校验，未启动专家团。"
+            failed_run = _fail_reserved_start(error)
+            return {
+                "ok": False,
+                "code": "runtime_incompatible",
+                "error": error,
+                "run": failed_run,
+            }, 503
+        if lookup_outcome not in {"not_found", "missing", "absent"}:
+            error = "无法证明 Runner 中不存在同一启动请求，为避免重复执行，未启动专家团。"
+            cleanup = {}
+            remote_run_id = str(getattr(lookup_status, "run_id", "") or "").strip()
+            if lookup_outcome not in {"unknown", "pending", "unavailable", "unsupported"} and remote_run_id:
+                cleanup = {"pending_run_id": remote_run_id, "error": "existing runtime requires cleanup"}
+            failed_run = _fail_reserved_start(error, cleanup)
+            return {
+                "ok": False,
+                "code": "runtime_incompatible",
+                "error": error,
+                "run": failed_run,
+            }, 503
+
+    try:
+        reserved_run = expert_teams.mark_expert_team_execution_start_dispatching(
+            workspace,
+            str(run.get("run_id") or ""),
+            execution_start_id=reservation_id,
+        )
+    except expert_teams.ExpertTeamStateConflict as exc:
+        return {
+            "ok": False,
+            "code": exc.code,
+            "error": str(exc),
+            "run": exc.run or reserved_run,
+        }, 409
+
+    try:
+        result = adapter.start_run(
+            StartRunRequest(
+                session_id=sid,
+                message=execution_prompt,
+                idempotency_key=reservation_id,
+                attachments=[],
+                workspace=str(workspace),
+                profile=getattr(session, "profile", None),
+                provider=model_provider,
+                model=model,
+                source="expert-team",
+                metadata={
+                    "route": "expert-team",
+                    "expert_team_run_id": str(run.get("run_id") or ""),
+                    "expert_team_stage_id": str((run.get("current_stage") or {}).get("task_id") or ""),
+                    "expert_team_version": int(run.get("version") or 0),
+                    "execution_start_id": reservation_id,
+                },
+            )
+        )
+        response = _chat_start_response_from_run_start(result)
+    except Exception as exc:
+        cleanup = _cancel_expert_team_runtime_start(adapter, result, exc)
+        error = str(exc) or "当前阶段启动失败，请重新尝试。"
+        if planned_runtime_adapter == "RunnerRuntimeAdapter" and result is None and not cleanup.get(
+            "pending_run_id"
+        ):
+            try:
+                pending_run = expert_teams.mark_expert_team_execution_start_unknown(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    execution_start_id=reservation_id,
+                    message=error,
+                )
+            except expert_teams.ExpertTeamStateConflict as conflict:
+                pending_run = conflict.run or expert_teams.read_expert_team_run(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                )
+            return {
+                "ok": False,
+                "code": "start_pending",
+                "error": error,
+                "run": pending_run,
+            }, 202
+        failed_run = _fail_reserved_start(error, cleanup)
+        return {"ok": False, "error": error, "run": failed_run}, 500
+
     status = int(response.pop("_status", 200) or 200)
     if status >= 400:
-        return {"ok": False, "run": run, **response}, status
-    updated_run = expert_teams.mark_expert_team_execution_started(workspace, str(run.get("run_id") or ""), response)
+        cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
+        error = str(response.get("error") or "当前阶段启动失败，请重新尝试。")
+        failed_run = _fail_reserved_start(error, cleanup)
+        return {"ok": False, **response, "run": failed_run}, status
+    result_run_id = str(getattr(result, "run_id", "") or "").strip()
+    result_session_id = str(getattr(result, "session_id", "") or "").strip()
+    if not result_run_id or result_session_id != sid:
+        cleanup = _cancel_expert_team_runtime_start(adapter, result)
+        error = "expert team runtime returned a mismatched run identity"
+        failed_run = _fail_reserved_start(error, cleanup)
+        return {"ok": False, "error": error, "run": failed_run}, 502
+    if not str(response.get("stream_id") or "").strip():
+        cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
+        error = "expert team execution did not return a stream_id"
+        failed_run = _fail_reserved_start(error, cleanup)
+        return {"ok": False, "error": error, "run": failed_run}, 502
+    response["execution_message_start_index"] = execution_message_start_index
+    response["pending_user_message"] = display_msg
+    response["execution_start_id"] = str(reserved_run.get("execution_start_id") or "")
+    response["runtime_run_id"] = str(getattr(result, "run_id", None) or response.get("stream_id") or "")
+    response["runtime_adapter"] = type(adapter).__name__ if adapter is not None else ""
+    try:
+        updated_run = expert_teams.mark_expert_team_execution_started(
+            workspace,
+            str(run.get("run_id") or ""),
+            response,
+        )
+    except Exception as exc:
+        cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
+        error = str(exc) or "专家团执行已启动，但状态提交失败。"
+        failed_run = _fail_reserved_start(error, cleanup)
+        status = 409 if isinstance(exc, expert_teams.ExpertTeamStateConflict) else 500
+        code = getattr(exc, "code", "start_commit_failed")
+        return {"ok": False, "code": code, "error": error, "run": failed_run}, status
     response["run"] = updated_run
     response["pending_user_message"] = display_msg
     response["ok"] = True
     return response, status
+
+
+def _expert_team_conflict_response(handler, exc) -> bool:
+    status = 404 if str(getattr(exc, "code", "")) == "wrong_session" else 409
+    payload = {
+        "ok": False,
+        "code": str(getattr(exc, "code", "stale_state")),
+        "error": str(exc),
+    }
+    run = getattr(exc, "run", None)
+    if isinstance(run, dict) and status != 404:
+        payload["run"] = run
+    return j(handler, payload, status=status)
 
 
 def _writeflow_state_path(workspace: Path) -> Path:
@@ -1499,7 +2596,6 @@ def _writeflow_read_run(workspace: Path, run_id: str) -> tuple[dict | None, str 
     data.setdefault("run_id", _writeflow_safe_run_id(run_id))
     data.setdefault("run_path", str(path))
     run = _writeflow_enrich_run_from_workspace(workspace, data)
-    _writeflow_write_if_changed(path, data, run)
     run.setdefault("run_path", str(path))
     return run, None
 
@@ -3010,6 +4106,11 @@ def _writeflow_apply_state_machine(workspace: Path, run: dict, artifacts: list[d
 
 
 def _writeflow_enrich_run_from_workspace(workspace: Path, run: dict) -> dict:
+    if _writeflow_is_legacy_read_only(run):
+        view = _writeflow_apply_display_contract(_writeflow_normalize_run(dict(run or {})))
+        view["read_only"] = True
+        view["legacy"] = True
+        return view
     run = _writeflow_normalize_run(dict(run or {}))
     project_slug = _writeflow_slug(run.get("project_slug") or run.get("title") or "")
     artifacts: list[dict] = []
@@ -3122,7 +4223,6 @@ def _writeflow_list_runs(workspace: Path, project: str | None = None) -> list[di
             if not isinstance(data, dict):
                 continue
             run = _writeflow_enrich_run_from_workspace(workspace, data)
-            _writeflow_write_if_changed(path, data, run)
             run["run_path"] = str(path)
             if project_slug and run.get("project_slug") != project_slug:
                 continue
@@ -3308,6 +4408,16 @@ def _writeflow_find_session_run(workspace: Path, session_id: str | None, project
     return None
 
 
+def _writeflow_is_legacy_read_only(run: dict | None) -> bool:
+    if not isinstance(run, dict):
+        return True
+    raw_version = run.get("schema_version", run.get("schemaVersion", 1))
+    try:
+        return int(raw_version or 1) < 2
+    except (TypeError, ValueError):
+        return True
+
+
 def _writeflow_active_run_context(workspace: Path, session_id: str | None) -> dict | None:
     sid = str(session_id or "").strip()
     if not sid:
@@ -3321,6 +4431,8 @@ def _writeflow_active_run_context(workspace: Path, session_id: str | None) -> di
     if not runs:
         return None
     run = runs[0]
+    if _writeflow_is_legacy_read_only(run):
+        return None
     artifact_root = _writeflow_artifact_root_for_run(run)
     if not artifact_root:
         return None
@@ -3399,6 +4511,8 @@ def _writeflow_register_artifact(
     *,
     change_type: str = "created",
 ) -> dict | None:
+    if _writeflow_is_legacy_read_only(run):
+        return None
     run_id = str((run or {}).get("run_id") or "").strip()
     if not run_id:
         return None
@@ -9194,7 +10308,6 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
         project = qs.get("project", [""])[0].strip() or None
-        recover = qs.get("recover", [""])[0].strip().lower() in {"1", "true", "yes"}
         try:
             workspace = _writeflow_workspace(session_id)
         except Exception as exc:
@@ -9202,11 +10315,6 @@ def handle_get(handler, parsed) -> bool:
         runs = _writeflow_list_runs(workspace, project)
         session_run = _writeflow_find_session_run(workspace, session_id, project)
         recovered_session_run = False
-        if session_id and not session_run and recover:
-            session_run = _writeflow_ensure_session_run(workspace, session_id, project)
-            if session_run:
-                recovered_session_run = True
-                runs = _writeflow_list_runs(workspace, project)
         return j(
             handler,
             {
@@ -9224,7 +10332,6 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
         run_id = qs.get("run_id", [""])[0].strip()
-        recover = qs.get("recover", [""])[0].strip().lower() in {"1", "true", "yes"}
         if not run_id and not session_id:
             return bad(handler, "run_id or session_id required", 400)
         try:
@@ -9233,8 +10340,6 @@ def handle_get(handler, parsed) -> bool:
                 run, error = _writeflow_read_run(workspace, run_id)
             else:
                 run = _writeflow_find_session_run(workspace, session_id)
-                if not run and recover:
-                    run = _writeflow_ensure_session_run(workspace, session_id or "")
                 error = None
         except Exception as exc:
             return bad(handler, f"Invalid writeflow run: {_sanitize_error(exc)}", 400)
@@ -10548,21 +11653,27 @@ def handle_post(handler, parsed) -> bool:
         try:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
-            run = expert_teams.answer_expert_team(workspace, body)
+            run, reservation_created = expert_teams.answer_and_reserve_expert_team_execution_start(
+                workspace,
+                body,
+                runtime_adapter=_expert_team_planned_runtime_adapter_name(),
+            )
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
-            if (
-                str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
-                and str(run.get("status") or "") == "running"
-                and not _expert_team_has_pending_intake_questions(run)
-                and not str(run.get("execution_stream_id") or "")
-            ):
-                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            if reservation_created and str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS:
+                stream_payload, status = _start_expert_team_execution(
+                    workspace,
+                    run,
+                    body,
+                    already_reserved=True,
+                )
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
                 return j(handler, payload, status=status)
             return j(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
 
@@ -10575,9 +11686,15 @@ def handle_post(handler, parsed) -> bool:
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
-            run = expert_teams.approve_expert_team_stage(workspace, {"run_id": str(run.get("run_id") or "")})
+            run = expert_teams.approve_expert_team_stage(
+                workspace,
+                {**body, "run_id": str(run.get("run_id") or "")},
+            )
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
-            if str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS and str(run.get("status") or "") == "running":
+            if (
+                str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
+                and str(run.get("workflow_state") or "") == "ready_to_generate"
+            ):
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
@@ -10585,6 +11702,8 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to approve expert team stage: {_sanitize_error(exc)}", 400)
 
@@ -10599,13 +11718,15 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "expert team run does not belong to this session", 404)
             run = expert_teams.request_expert_team_stage_revision(
                 workspace,
-                {"run_id": str(run.get("run_id") or ""), "feedback": str(body.get("feedback") or "")},
+                {**body, "run_id": str(run.get("run_id") or ""), "feedback": str(body.get("feedback") or "")},
             )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return j(handler, stream_payload, status=status)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to revise expert team stage: {_sanitize_error(exc)}", 400)
 
@@ -10621,6 +11742,7 @@ def handle_post(handler, parsed) -> bool:
             run = expert_teams.submit_expert_team_stage_input(
                 workspace,
                 {
+                    **body,
                     "run_id": str(run.get("run_id") or ""),
                     "answer": str(body.get("answer") or ""),
                     "note": str(body.get("note") or ""),
@@ -10636,6 +11758,8 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to submit expert team stage input: {_sanitize_error(exc)}", 400)
 
@@ -10649,12 +11773,17 @@ def handle_post(handler, parsed) -> bool:
             if session_id and str(run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
             display_run = _expert_team_run_with_execution_truth(workspace, run)
-            run = expert_teams.resume_expert_team(workspace, str((display_run or run).get("run_id") or ""))
+            run = expert_teams.resume_expert_team(
+                workspace,
+                {**body, "run_id": str((display_run or run).get("run_id") or "")},
+            )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return j(handler, stream_payload, status=status)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to resume expert team: {_sanitize_error(exc)}", 400)
 
@@ -10667,30 +11796,107 @@ def handle_post(handler, parsed) -> bool:
             existing_run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(existing_run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
-            stream_id = str(existing_run.get("execution_stream_id") or "")
-            cancelled_stream = cancel_stream(stream_id) if stream_id else False
-            run = expert_teams.cancel_expert_team(workspace, str(existing_run.get("run_id") or ""))
+            adapter = _expert_team_runtime_adapter_for_run(existing_run)
+            runtime_run_id = str(
+                existing_run.get("execution_runtime_run_id")
+                or existing_run.get("execution_stream_id")
+                or ""
+            )
+            uncertain_start_outcome = ""
+            if str(existing_run.get("workflow_state") or "") == "starting" and not runtime_run_id:
+                start_id = str(existing_run.get("execution_start_id") or "").strip()
+                try:
+                    lookup_status = adapter.find_run_by_idempotency_key(
+                        start_id,
+                        session_id=str(existing_run.get("session_id") or ""),
+                    )
+                    lookup_session_id = str(getattr(lookup_status, "session_id", "") or "").strip()
+                    if lookup_session_id and lookup_session_id != str(existing_run.get("session_id") or ""):
+                        uncertain_start_outcome = "unknown"
+                    else:
+                        uncertain_start_outcome = str(
+                            getattr(lookup_status, "status", "unknown") or "unknown"
+                        ).strip().lower()
+                    if uncertain_start_outcome in {"starting", "queued", "running", "active"}:
+                        runtime_run_id = str(getattr(lookup_status, "run_id", "") or "").strip()
+                        if not runtime_run_id:
+                            uncertain_start_outcome = "unknown"
+                except Exception:
+                    logger.debug("Failed to resolve uncertain expert-team start before cancel", exc_info=True)
+                    uncertain_start_outcome = "unknown"
+
+                if uncertain_start_outcome in {"completed", "done"}:
+                    completed_run_id = str(getattr(lookup_status, "run_id", "") or "").strip()
+                    if completed_run_id:
+                        existing_run = expert_teams.mark_expert_team_execution_started(
+                            workspace,
+                            str(existing_run.get("run_id") or ""),
+                            {
+                                "stream_id": completed_run_id,
+                                "runtime_run_id": completed_run_id,
+                                "runtime_adapter": str(
+                                    existing_run.get("execution_runtime_adapter") or type(adapter).__name__
+                                ),
+                                "execution_start_id": start_id,
+                            },
+                        )
+                        return j(
+                            handler,
+                            {
+                                "ok": True,
+                                "code": "cancel_superseded_by_completion",
+                                "run": existing_run,
+                                "cancelled_stream": False,
+                                "teams": expert_teams.expert_team_catalog()["teams"],
+                            },
+                            status=202,
+                        )
+
+            def _cancel_runtime(_current_run):
+                if uncertain_start_outcome in {"unknown", "pending", "unavailable", "unsupported"}:
+                    return {
+                        "ok": False,
+                        "status": "unknown",
+                        "message": "启动结果尚未确认，正在与执行侧对账。",
+                    }
+                if not runtime_run_id:
+                    return {"ok": True, "status": "no-runtime-started"}
+                return adapter.cancel_run(runtime_run_id)
+
+            run = expert_teams.cancel_expert_team(
+                workspace,
+                {**body, "run_id": str(existing_run.get("run_id") or "")},
+                cancel_callback=_cancel_runtime,
+            )
+            pending_cancel = str(run.get("workflow_state") or "") == "cancelling"
             return j(
                 handler,
                 {
                     "ok": True,
+                    "code": "cancel_pending" if pending_cancel else "cancelled",
                     "run": run,
-                    "cancelled_stream": bool(cancelled_stream),
+                    "cancelled_stream": not pending_cancel,
                     "teams": expert_teams.expert_team_catalog()["teams"],
                 },
+                status=202 if pending_cancel else 200,
             )
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to cancel expert team: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/writeflow/compose":
-        try:
-            return j(handler, _writeflow_compose_message(body))
-        except KeyError:
-            return bad(handler, "Session not found", 404)
-        except Exception as exc:
-            return bad(handler, f"Failed to compose writeflow message: {_sanitize_error(exc)}", 400)
+        return j(
+            handler,
+            {
+                "ok": False,
+                "code": "legacy_read_only",
+                "message": "历史写作工作流仅支持查看，请从专家团中心以新任务重新发起。",
+            },
+            status=409,
+        )
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
@@ -10829,6 +12035,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/docx-engine-v2/quality/wps-visual":
         return _handle_docx_engine_v2_wps_visual_acceptance(handler, body)
+
+    if parsed.path == "/api/docx-engine-v2/quality/wps-visual/begin":
+        return _handle_docx_engine_v2_begin_office_review(handler, body)
 
     if parsed.path == "/api/docx-engine-v2/assets/rerender":
         return _handle_docx_engine_v2_rerender_asset(handler, body)
@@ -15087,97 +16296,153 @@ def _start_chat_stream_for_session(
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
+    stream_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    diag.stage("active_stream_check") if diag else None
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        diag.stage("active_stream_lock_wait") if diag else None
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
-        if current_active:
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
-
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
-
-    stream_id = uuid.uuid4().hex
+    deterministic_stream_id = str(stream_id or "").strip()
+    stream_id = deterministic_stream_id or uuid.uuid4().hex
     persisted_msg = display_msg if display_msg is not None else msg
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
-    with session_lock:
-        diag.stage("save_pending_state") if diag else None
-        was_hidden_empty_session = _is_hidden_empty_session(s)
-        _prepare_chat_start_session_for_stream(
-            s,
-            msg=msg,
-            display_msg=persisted_msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            stream_id=stream_id,
-        )
-    if was_hidden_empty_session:
-        publish_session_list_changed("session_new")
-    diag.stage("turn_journal_submitted") if diag else None
+    stale_stream_id = ""
+    while True:
+        with session_lock:
+            # Check and claim stream ownership under the same per-session lock.
+            # Keeping STREAMS registration in this critical section closes the
+            # old-start/manual-retry race where both callers observed an idle
+            # session and launched different workers.
+            diag.stage("active_stream_check") if diag else None
+            current_stream_id = str(getattr(s, "active_stream_id", None) or "")
+            if current_stream_id:
+                diag.stage("active_stream_lock_wait") if diag else None
+                current_active = current_stream_id in _active_stream_id_set()
+                if current_active:
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": current_stream_id,
+                        "_status": 409,
+                    }
+                stale_stream_id = current_stream_id
+            else:
+                # #1932: consume continuation ownership only for the caller
+                # that can actually claim this session.
+                if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+                    goal_related = True
+                    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+                diag.stage("save_pending_state") if diag else None
+                was_hidden_empty_session = _is_hidden_empty_session(s)
+                _prepare_chat_start_session_for_stream(
+                    s,
+                    msg=msg,
+                    display_msg=persisted_msg,
+                    attachments=attachments,
+                    workspace=workspace,
+                    model=model,
+                    model_provider=model_provider,
+                    stream_id=stream_id,
+                )
+                diag.stage("stream_registration") if diag else None
+                stream = create_stream_channel()
+                with STREAMS_LOCK:
+                    STREAMS[stream_id] = stream
+                break
+
+        # _clear_stale_stream_state owns the same non-reentrant session lock;
+        # run it outside our claim section, then re-check before proceeding.
+        diag.stage("stale_stream_cleanup") if diag else None
+        _clear_stale_stream_state(s)
+        with session_lock:
+            if str(getattr(s, "active_stream_id", None) or "") == stale_stream_id:
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "session stream recovery is still in progress",
+                    "active_stream_id": stale_stream_id,
+                    "_status": 409,
+                }
+        stale_stream_id = ""
+    def _rollback_unstarted_stream_claim() -> None:
+        with session_lock:
+            with STREAMS_LOCK:
+                if STREAMS.get(stream_id) is stream:
+                    STREAMS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+            if getattr(s, "active_stream_id", None) != stream_id:
+                return
+            s.active_stream_id = None
+            if hasattr(s, "pending_user_message"):
+                s.pending_user_message = None
+            if hasattr(s, "pending_attachments"):
+                s.pending_attachments = []
+            if hasattr(s, "pending_started_at"):
+                s.pending_started_at = None
+            try:
+                s.save()
+            except Exception:
+                logger.exception("Failed to roll back unstarted stream claim %s", stream_id)
+
     journal_event = {}
     try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": persisted_msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
+        if was_hidden_empty_session:
+            publish_session_list_changed("session_new")
+        diag.stage("turn_journal_submitted") if diag else None
+        try:
+            from api.turn_journal import append_turn_journal_event
+
+            journal_event = append_turn_journal_event(
+                s.session_id,
+                {
+                    "event": "submitted",
+                    "stream_id": stream_id,
+                    "role": "user",
+                    "content": persisted_msg,
+                    "attachments": attachments,
+                    "workspace": workspace,
+                    "model": model,
+                    "model_provider": model_provider,
+                    "created_at": s.pending_started_at,
+                },
+            )
+        except Exception:
+            logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        diag.stage("set_last_workspace") if diag else None
+        set_last_workspace(workspace)
+        if deterministic_stream_id:
+            # The start reservation id is also the legacy stream id. Persist a
+            # lookup marker before starting the worker so recovery can
+            # distinguish no side effect from a route crash before bind.
+            from api.run_journal import append_run_event
+
+            append_run_event(
+                s.session_id,
+                stream_id,
+                "submitted",
+                {
+                    "source": "expert-team",
+                    "idempotency_key": deterministic_stream_id,
+                },
+            )
+        # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
+        if goal_related:
+            STREAM_GOAL_RELATED[stream_id] = True
+        diag.stage("worker_thread_start") if diag else None
+        backend_is_gateway = webui_gateway_chat_enabled(get_config())
+        worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+        worker_kwargs = {"model_provider": model_provider, "display_msg": persisted_msg}
+        if not backend_is_gateway:
+            worker_kwargs["goal_related"] = goal_related
+        thr = threading.Thread(
+            target=worker_target,
+            args=(s.session_id, msg, model, workspace, stream_id, attachments),
+            kwargs=worker_kwargs,
+            daemon=True,
         )
-    except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
-    diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
-    diag.stage("stream_registration") if diag else None
-    stream = create_stream_channel()
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
-    if goal_related:
-        STREAM_GOAL_RELATED[stream_id] = True
-    diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "display_msg": persisted_msg}
-    if not backend_is_gateway:
-        worker_kwargs["goal_related"] = goal_related
-    thr = threading.Thread(
-        target=worker_target,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs=worker_kwargs,
-        daemon=True,
-    )
-    thr.start()
+        thr.start()
+    except BaseException:
+        _rollback_unstarted_stream_claim()
+        raise
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -16850,6 +18115,24 @@ def _handle_docx_engine_v2_wps_visual_acceptance(handler, body):
     try:
         workspace = _docx_engine_v2_workspace(body)
         payload, status = docx_engine_v2.record_wps_visual_acceptance(body, workspace)
+        return j(handler, payload, status=status)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+    except subprocess.TimeoutExpired as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_docx_engine_v2_begin_office_review(handler, body):
+    from api.expert_teams.office_review import trusted_local_reviewer
+
+    try:
+        session, workspace = _docx_engine_v2_session_and_workspace(body)
+        reviewer = trusted_local_reviewer(str(getattr(session, "profile", "") or ""))
+        payload, status = docx_engine_v2.begin_office_review(
+            body,
+            workspace,
+            trusted_reviewer=reviewer,
+        )
         return j(handler, payload, status=status)
     except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))

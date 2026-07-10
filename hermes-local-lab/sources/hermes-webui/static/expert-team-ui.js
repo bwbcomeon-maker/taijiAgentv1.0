@@ -7,9 +7,9 @@
     return `<button type="button" class="${cls}" data-expert-team-action="${safeEsc(action.id)}"${kind} onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()" aria-label="${safeEsc(action.label||'操作')}">${safeEsc(action.label||'操作')}</button>`;
   }
   function presentationTone(state){
-    if(state==='generating'||state==='ready_to_generate'||state==='revising')return 'running';
+    if(state==='generating'||state==='ready_to_generate'||state==='starting'||state==='revising'||state==='cancelling')return 'running';
     if(state==='awaiting_stage_input'||state==='collecting_required'||state==='collecting_optional'||state==='awaiting_review')return 'waiting';
-    if(state==='generated_invalid'||state==='failed')return 'issue';
+    if(state==='generated_invalid'||state==='start_failed'||state==='failed')return 'issue';
     if(state==='completed')return 'done';
     return 'waiting';
   }
@@ -25,7 +25,11 @@
       collecting_required:'待确认',
       collecting_optional:'待补充',
       ready_to_generate:'待启动',
+      starting:'正在启动',
+      start_failed:'启动失败',
       generating:'生成中',
+      revising:'重做中',
+      cancelling:'正在停止',
       awaiting_stage_input:'待确认',
       generated_invalid:'草稿未通过校验',
       completed:'已完成',
@@ -111,6 +115,61 @@
       </div>
     </section>`;
   }
+  function artifactStageLabel(stage,currentStage){
+    const labels={plan:'流程安排',materials:'素材整理',draft:'富内容初稿',polish:'审稿打磨',delivery:'交付确认',direction:'研究方向',research:'资料调研',evidence:'事实核验',outline:'结构提纲',review:'复核交付'};
+    const currentId=String(currentStage&&((currentStage.id||currentStage.task_id))||'');
+    if(String(stage||'')===currentId&&currentStage&&currentStage.phase)return String(currentStage.phase);
+    return labels[String(stage||'')]||String(stage||'阶段产物');
+  }
+  function renderVersionedArtifacts(card,currentStage){
+    const rows=(Array.isArray(card&&card.artifacts)?card.artifacts:[]).slice().sort((a,b)=>{
+      const priority={final_document:0,delivery_package:1,quality_report:2,final_rich_draft:3,rich_draft:4,chat:9};
+      const attemptDiff=Number(b&&b.attempt||0)-Number(a&&a.attempt||0);
+      return attemptDiff||Number(priority[String(a&&a.kind||'')]??8)-Number(priority[String(b&&b.kind||'')]??8);
+    });
+    if(!rows.length)return '<div class="expert-team-empty-result">尚无可打开的产物，阶段生成后会按版本保留在这里。</div>';
+    return `<div class="expert-team-panel-artifacts" aria-label="版本化产物">${rows.map(item=>{
+      item=item||{};
+      const kind=String(item.kind||'artifact');
+      const path=String(item.path||'');
+      const exists=item.exists!==false;
+      const attempt=Math.max(1,Number(item.attempt||1));
+      const versionText=`${artifactStageLabel(item.stage,currentStage)} · 第 ${attempt} 版`;
+      const title=String(item.label||item.title||'阶段产物');
+      const icon=kind==='final_document'?'DOCX':kind==='delivery_package'?'交付':kind==='quality_report'?'质检':kind.includes('rich_draft')?'初稿':'对话';
+      let action='';
+      if(kind==='chat'&&!path){
+        action=`<button type="button" data-expert-team-action="view_result" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()" aria-label="查看${safeEsc(title)}">查看对话成果</button>`;
+      }else if(exists&&path){
+        const label=kind==='final_document'?'打开 DOCX':(kind==='delivery_package'?'打开交付包':'打开');
+        const openButton=`<button type="button" class="expert-team-panel-artifact-open" data-expert-team-artifact-kind="${safeEsc(kind)}" data-expert-team-artifact-path="${safeEsc(path)}" data-expert-team-artifact-exists="true" onclick="openExpertTeamFileArtifact(this);event.stopPropagation()" aria-label="${safeEsc(label+' '+title)}">${safeEsc(label)}</button>`;
+        const downloadButton=kind==='delivery_package'
+          ?''
+          :`<button type="button" class="expert-team-panel-artifact-download" data-expert-team-artifact-kind="${safeEsc(kind)}" data-expert-team-artifact-path="${safeEsc(path)}" data-expert-team-artifact-exists="true" onclick="downloadExpertTeamFileArtifact(this);event.stopPropagation()" aria-label="${safeEsc('下载 '+title)}">下载</button>`;
+        action=`<span class="expert-team-panel-artifact-actions">${openButton}${downloadButton}</span>`;
+      }else{
+        action=`<button type="button" data-expert-team-artifact-kind="${safeEsc(kind)}" data-expert-team-artifact-path="${safeEsc(path)}" data-expert-team-artifact-exists="false" disabled title="文件不存在，请重新生成当前阶段">文件不存在</button>`;
+      }
+      return `<span class="expert-team-panel-artifact ${exists&&path?'ready':'missing'}" data-artifact-id="${safeEsc(item.id||'')}" data-expert-team-artifact-kind="${safeEsc(kind)}"><i>${safeEsc(icon)}</i><span><strong>${safeEsc(title)}</strong><small>${safeEsc(versionText)} · ${safeEsc(item.status||'')}</small>${action}</span></span>`;
+    }).join('')}</div>`;
+  }
+  function openExpertTeamWpsAcceptance(trigger){
+    const inner=trigger&&trigger.closest?trigger.closest('.expert-team-panel-inner'):null;
+    if(!inner)return false;
+    const resultTab=inner.querySelector('[data-expert-team-workspace-tab="result"]');
+    if(resultTab&&typeof switchExpertTeamWorkspaceTab==='function')switchExpertTeamWorkspaceTab(resultTab);
+    const form=inner.querySelector('[data-docx-wps-acceptance]');
+    if(!form){
+      if(typeof showToast==='function')showToast('尚未找到可验收的 DOCX 与交付目录。');
+      return false;
+    }
+    try{form.scrollIntoView({block:'nearest',inline:'nearest'});}catch(_){}
+    const openButton=form.querySelector('[data-docx-wps-open-document]');
+    if(openButton&&openButton.focus){
+      try{openButton.focus({preventScroll:true});}catch(_){openButton.focus();}
+    }
+    return true;
+  }
   function renderExpertTeamWorkspaceFromPresentation(card){
     const presentation=card&&card.presentation||{};
     const workspace=card&&card.workspace||{};
@@ -125,6 +184,7 @@
     const pendingInput=card&&card.pendingInput||workspace.pendingInput||{};
     const secondaryActions=Array.isArray(presentation.secondaryActions)?presentation.secondaryActions:[];
     const runId=card&&card.runId||card&&card.sessionId||'';
+    const isReadOnly=!!(card&&card.readOnly);
     const statusTone=presentationTone(presentation.state);
     const currentStageId=String(currentStage.id||currentStage.task_id||'');
     const currentWorkerId=String(currentWorker.id||currentWorker.member_id||currentStage.worker_id||'');
@@ -155,6 +215,23 @@
           </span>
         </div>`
       : `<div class="expert-team-empty-result">当前阶段产物将在生成完成后显示</div>`;
+    const versionedArtifactsHtml=renderVersionedArtifacts(card,currentStage);
+    const artifacts=Array.isArray(card&&card.artifacts)?card.artifacts:[];
+    const readyArtifactCount=artifacts.filter(item=>item&&item.exists!==false&&String(item.path||'')).length;
+    const finalDocument=artifacts.find(item=>item&&String(item.kind||'')==='final_document'&&item.exists!==false&&String(item.path||''));
+    const deliveryPackage=artifacts.find(item=>item&&String(item.kind||'')==='delivery_package'&&item.exists!==false&&String(item.path||''));
+    const qualityReportArtifact=artifacts.find(item=>item&&String(item.kind||'')==='quality_report');
+    const officeAcceptanceHtml=!isReadOnly&&finalDocument&&deliveryPackage&&typeof renderDocxWpsVisualAcceptanceForm==='function'
+      ? renderDocxWpsVisualAcceptanceForm({
+          expertTeam:true,
+          documentPath:String(finalDocument.path||''),
+          deliveryDir:String(deliveryPackage.path||''),
+          qualityStatus:String(qualityReportArtifact&&qualityReportArtifact.status||'待验收'),
+        })
+      : '';
+    const officeReviewAction=officeAcceptanceHtml
+      ? '<button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="openExpertTeamWpsAcceptance(this);event.stopPropagation()" aria-label="打开 Office 验收表单">Office 验收</button>'
+      : '';
     const stageSummary=stageResult&&stageResult.summary?stageResult.summary:(result&&result.summary||'当前阶段产物生成后会在这里沉淀。');
     const reviewActions={
       view:secondaryActions.find(action=>action&&action.id==='view_result')||{id:'view_result',label:'查看成果',kind:'ghost'},
@@ -163,7 +240,7 @@
     };
     const reviewItems=Array.isArray(card&&card.reviewItems)?card.reviewItems:[];
     const reviewItemHtml=reviewItems.length
-      ? `<div class="expert-team-review-items-list">${reviewItems.map((item,idx)=>`<span class="expert-team-review-item"><i>${idx+1}</i><b>${safeEsc(item.title||'待确认事项')}</b><small>${safeEsc(item.phase||'待人工补充')}</small><span class="expert-team-review-item-actions"><button type="button" data-expert-team-review-item-title="${safeEsc(item.title||'')}" onclick="appendExpertTeamReviewItemToRevision(this);event.stopPropagation()">加入修改意见</button><button type="button" onclick="markExpertTeamReviewItemRead(this);event.stopPropagation()">标记已阅</button></span></span>`).join('')}</div>`
+      ? `<div class="expert-team-review-items-list">${reviewItems.map((item,idx)=>`<span class="expert-team-review-item"><i>${idx+1}</i><b>${safeEsc(item.title||'待确认事项')}</b><small>${safeEsc(item.phase||'待人工补充')}</small>${isReadOnly?'':`<span class="expert-team-review-item-actions"><button type="button" data-expert-team-review-item-title="${safeEsc(item.title||'')}" onclick="appendExpertTeamReviewItemToRevision(this);event.stopPropagation()">加入修改意见</button></span>`}</span>`).join('')}</div>`
       : '';
     const stageReviewHtml=presentation.state==='awaiting_review'
       ? `<section class="expert-team-panel-section expert-team-stage-review" aria-label="阶段成果复核" data-expert-team-run-id="${safeEsc(runId)}">
@@ -171,19 +248,20 @@
           <p class="expert-team-panel-detail">${safeEsc(stageSummary||'阶段结果已生成，请查看后确认是否进入下一阶段。')}</p>
           ${resultHtml}
           ${reviewItemHtml}
-          <div class="expert-team-stage-actions">
+          ${isReadOnly?'<p class="expert-team-panel-detail">历史任务仅支持查看，请新建专家团任务后继续。</p>':`<div class="expert-team-stage-actions">
             ${actionButton(reviewActions.view,'expert-team-panel-action expert-team-secondary-action expert-team-stage-locate')}
+            ${officeReviewAction}
             ${actionButton(reviewActions.approve,'expert-team-panel-action expert-team-primary-action expert-team-stage-approve')}
             ${actionButton(reviewActions.revise,'expert-team-panel-action expert-team-secondary-action expert-team-stage-revision-toggle')}
           </div>
           <div class="expert-team-stage-feedback" hidden aria-hidden="true">
             <label><span>修改意见</span><textarea data-expert-team-stage-feedback rows="4" placeholder="请写明需要调整的内容、口径、事实或结构。"></textarea></label>
             <button type="button" class="expert-team-panel-action expert-team-primary-action" data-expert-team-stage-revise-run-id="${safeEsc(runId)}" onclick="submitExpertTeamStageRevision(this);event.stopPropagation()">提交修改意见</button>
-          </div>
+          </div>`}
         </section>`
       : '';
-    const stageInputHtml=presentation.state==='awaiting_stage_input'?renderStageInput(card,pendingInput):'';
-    const genericPrimaryAction=presentation.primaryAction&&presentation.state!=='awaiting_stage_input'&&presentation.state!=='awaiting_review';
+    const stageInputHtml=presentation.state==='awaiting_stage_input'&&!isReadOnly?renderStageInput(card,pendingInput):'';
+    const genericPrimaryAction=!isReadOnly&&presentation.primaryAction&&presentation.state!=='awaiting_stage_input'&&presentation.state!=='awaiting_review';
     const genericActionHtml=genericPrimaryAction
       ? `<section class="expert-team-panel-section expert-team-primary-task-card" aria-label="当前主操作">
           <div class="expert-team-panel-section-title"><span>当前待办</span><small>${safeEsc(statusText(presentation.state))}</small></div>
@@ -194,7 +272,9 @@
           </div>
         </section>`
       : '';
-    const questionPopoverHtml=(typeof _expertTeamQuestionPopoverHtml==='function')?_expertTeamQuestionPopoverHtml(card):'';
+    const questionPopoverHtml=!isReadOnly&&typeof _expertTeamQuestionPopoverHtml==='function'?_expertTeamQuestionPopoverHtml(card):'';
+    const recoverableDraftHintHtml=typeof _expertTeamRecoverableDraftHintHtml==='function'?_expertTeamRecoverableDraftHintHtml(card):'';
+    const readOnlyHtml=isReadOnly?`<section class="expert-team-panel-section" role="status"><strong>历史任务仅支持查看</strong><p class="expert-team-panel-detail">原任务内容不会被修改；如需继续，请以当前专家团新建任务。</p><div class="expert-team-stage-actions">${actionButton({id:'relaunch',label:'以新任务重新发起',kind:'primary'},'expert-team-panel-action expert-team-primary-action')}</div></section>`:'';
     const currentTodoLabel=presentation.state==='awaiting_review'
       ? '阶段成果待复核'
       : (presentation.state==='awaiting_stage_input'
@@ -202,7 +282,7 @@
         : (presentation.primaryAction&&presentation.primaryAction.label||statusText(presentation.state)));
     const currentTodoDetail=presentation.detail||stageSummary||'请处理当前专家团待办。';
     const hasDetailedTask=!!(genericActionHtml||stageInputHtml||stageReviewHtml);
-    const actionSummaryHtml=presentation.primaryAction&&!hasDetailedTask
+    const actionSummaryHtml=presentation.primaryAction&&!isReadOnly&&!hasDetailedTask
       ? `<button type="button" class="expert-team-panel-inline-action" data-expert-team-action="${safeEsc(presentation.primaryAction.id)}" data-expert-team-action-kind="${safeEsc(presentation.primaryAction.kind||'')}" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()">${safeEsc(presentation.primaryAction.label||'处理')}</button>`
       : `<span class="expert-team-panel-inline-note">${safeEsc(statusText(presentation.state))}</span>`;
     const todoSummaryCardHtml=hasDetailedTask?'':`<section class="expert-team-panel-section expert-team-primary-task-card" aria-label="当前待办摘要">
@@ -212,7 +292,7 @@
             ${actionSummaryHtml}
           </div>
         </section>`;
-    const todoPanelHtml=`${genericActionHtml}${stageInputHtml}${stageReviewHtml}${todoSummaryCardHtml}`;
+    const todoPanelHtml=`${readOnlyHtml}${genericActionHtml}${stageInputHtml}${stageReviewHtml}${todoSummaryCardHtml}`;
     const collaborationPanelHtml=`<section class="expert-team-panel-section expert-team-collaboration-card" aria-label="专家团协作状态">
           <div class="expert-team-panel-section-title"><span>专家团协作状态</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
           <div class="expert-team-collaboration-current">
@@ -230,11 +310,13 @@
           <div class="expert-team-panel-section-title"><span>成果状态</span><small>${safeEsc(presentation.state==='generating'?'专家团正在生成':presentation.state==='awaiting_stage_input'?'等待确认后继续':presentation.state==='generated_invalid'?'草稿未通过校验':presentation.state==='awaiting_review'?'阶段成果待复核':'当前状态')}</small></div>
           <p class="expert-team-panel-detail">${safeEsc(stageSummary)}</p>
           ${presentation.state==='awaiting_review'?'':resultHtml}
-        </section>`;
+        </section><section class="expert-team-panel-section expert-team-panel-artifacts-section ${readyArtifactCount?'is-priority':''}"><div class="expert-team-panel-section-title"><span>版本化产物</span><small>${safeEsc(readyArtifactCount?`${readyArtifactCount} 个可打开`:'待生成')}</small></div>${versionedArtifactsHtml}</section>${officeAcceptanceHtml}`;
     function tabPanel(id,html,active){
-      return `<div class="expert-team-tab-panel" data-expert-team-tab-panel="${safeEsc(id)}" ${active?'':'hidden'}>${html}</div>`;
+      const tabId=`expert-team-tab-${id}`;
+      const panelId=`expert-team-tabpanel-${id}`;
+      return `<div id="${safeEsc(panelId)}" class="expert-team-tab-panel" role="tabpanel" aria-labelledby="${safeEsc(tabId)}" data-expert-team-tab-panel="${safeEsc(id)}" ${active?'':'hidden'}>${html}</div>`;
     }
-    return `<div class="expert-team-panel-inner" data-expert-team-run-id="${safeEsc(runId)}" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}" data-expert-team-workspace-mode="summary">
+    return `<div class="expert-team-panel-inner" data-expert-team-run-id="${safeEsc(runId)}" data-expert-team-schema-version="${safeEsc(card&&card.schemaVersion||0)}" data-expert-team-version="${safeEsc(card&&card.version||0)}" data-expert-team-stage-id="${safeEsc(card&&card.currentStageId||currentStageId)}" data-expert-team-stream-id="${safeEsc(card&&card.executionStreamId||'')}" data-expert-team-input-id="${safeEsc(card&&card.pendingInputId||pendingInput.id||'')}" data-expert-team-review-id="${safeEsc(card&&card.stageReviewId||'')}" data-expert-team-read-only="${isReadOnly?'true':'false'}" data-expert-team-presentation-state="${safeEsc(presentation.state||'')}" data-expert-team-workspace-mode="summary">
       <div class="expert-team-capsule" aria-label="专家团收起状态">
         <span class="expert-team-capsule-icon">专</span>
         <strong>${safeEsc(progress.text)}</strong>
@@ -255,16 +337,17 @@
           </button>
         </div>
         <div class="expert-team-panel-overview">
-          <span class="expert-team-panel-copy"><span class="expert-team-panel-status ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span><span class="expert-team-panel-summary">${safeEsc(presentation.detail||'')}</span></span>
+          <span class="expert-team-panel-copy" role="status" aria-live="polite"><span class="expert-team-panel-status ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span><span class="expert-team-panel-summary">${safeEsc(presentation.detail||'')}</span></span>
           <span class="expert-team-panel-progress-summary"><b>${safeEsc(progress.text)}</b><i><em style="width:${progress.pct}%"></em></i><small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small></span>
         </div>
       </div>
       <div class="expert-team-panel-expanded-body">
+        ${recoverableDraftHintHtml}
         <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
-        <nav class="expert-team-panel-tabs" aria-label="专家团工作台视图">
-          <button type="button" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>
-          <button type="button" data-expert-team-workspace-tab="collaboration" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>协作</span><small>${safeEsc(members.length?`${progress.text} · ${members.length} 人`:progress.text)}</small></button>
-          <button type="button" data-expert-team-workspace-tab="result" aria-selected="false" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成果</span><small>${safeEsc(presentation.state==='completed'?'可查看':'沉淀中')}</small></button>
+        <nav class="expert-team-panel-tabs" role="tablist" aria-label="专家团工作台视图" onkeydown="handleExpertTeamWorkspaceTabKeydown(event)">
+          <button id="expert-team-tab-todo" type="button" role="tab" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" aria-controls="expert-team-tabpanel-todo" tabindex="0" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>
+          <button id="expert-team-tab-collaboration" type="button" role="tab" data-expert-team-workspace-tab="collaboration" aria-selected="false" aria-controls="expert-team-tabpanel-collaboration" tabindex="-1" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>协作</span><small>${safeEsc(members.length?`${progress.text} · ${members.length} 人`:progress.text)}</small></button>
+          <button id="expert-team-tab-result" type="button" role="tab" data-expert-team-workspace-tab="result" aria-selected="false" aria-controls="expert-team-tabpanel-result" tabindex="-1" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成果</span><small>${safeEsc(readyArtifactCount?`${readyArtifactCount} 个可打开`:(presentation.state==='completed'?'可查看':'沉淀中'))}</small></button>
         </nav>
         ${tabPanel('todo',todoPanelHtml,true)}
         ${tabPanel('collaboration',collaborationPanelHtml,false)}
@@ -275,5 +358,6 @@
   if(typeof window!=='undefined'){
     window.expertTeamDockSummaryFromPresentation=expertTeamDockSummaryFromPresentation;
     window.renderExpertTeamWorkspaceFromPresentation=renderExpertTeamWorkspaceFromPresentation;
+    window.openExpertTeamWpsAcceptance=openExpertTeamWpsAcceptance;
   }
 })();

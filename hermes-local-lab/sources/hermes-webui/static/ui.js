@@ -1264,6 +1264,153 @@ function _restoreExpertTeamQuestionInputState(root,state){
   return restored;
 }
 
+function _expertTeamWorkspaceControlKey(control,index){
+  if(!control)return '';
+  const question=control.closest&&control.closest('[data-expert-team-question-id]');
+  const inputOwner=control.closest&&control.closest('[data-expert-team-input-id]');
+  const stageOwner=control.closest&&control.closest('[data-expert-team-stage-id]');
+  const owner=(question&&question.dataset&&question.dataset.expertTeamQuestionId)
+    ||(inputOwner&&inputOwner.dataset&&inputOwner.dataset.expertTeamInputId)
+    ||(stageOwner&&stageOwner.dataset&&stageOwner.dataset.expertTeamStageId)
+    ||'';
+  const field=String(control.id||control.name
+    ||(control.getAttribute&&control.getAttribute('data-expert-team-answer-input'))
+    ||(control.getAttribute&&control.getAttribute('data-expert-team-stage-input-text'))
+    ||(control.getAttribute&&control.getAttribute('data-expert-team-stage-feedback'))
+    ||`${String(control.tagName||'control').toLowerCase()}:${String(control.type||'')}`);
+  return `${owner}::${field}::${index}`;
+}
+
+function captureExpertTeamWorkspaceFormState(root){
+  const scope=root&&root.querySelector?(root.querySelector('.expert-team-panel-inner')||root):null;
+  const state={sessionId:'',runId:'',stageId:'',questionId:'',inputId:'',activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
+  if(!scope||!scope.querySelectorAll||typeof document==='undefined')return state;
+  const panel=(scope.closest&&scope.closest('.expert-team-workspace-panel'))||(root&&root.classList&&root.classList.contains('expert-team-workspace-panel')?root:null);
+  state.sessionId=String((panel&&panel.dataset&&panel.dataset.expertTeamSourceSessionId)||(root&&root.dataset&&root.dataset.expertTeamSourceSessionId)||'');
+  state.runId=String((scope.dataset&&scope.dataset.expertTeamRunId)||'');
+  state.stageId=String((scope.dataset&&scope.dataset.expertTeamStageId)||'');
+  state.inputId=String((scope.dataset&&scope.dataset.expertTeamInputId)||'');
+  const currentQuestion=scope.querySelector('.status-card-expert-question.pending.is-current[data-expert-team-question-id]');
+  state.questionId=String((currentQuestion&&currentQuestion.dataset&&currentQuestion.dataset.expertTeamQuestionId)||'');
+  state.activeTab=_expertTeamWorkspaceActiveTab(scope)||'todo';
+  const scroller=scope.querySelector('.expert-team-panel-expanded-body');
+  if(scroller&&typeof scroller.scrollTop==='number')state.scrollTop=Number(scroller.scrollTop||0);
+  const active=document.activeElement;
+  Array.from(scope.querySelectorAll('textarea,input,select')).forEach((control,index)=>{
+    const key=_expertTeamWorkspaceControlKey(control,index);
+    if(!key)return;
+    const selected=control.multiple&&control.options
+      ? Array.from(control.options).filter(option=>option.selected).map(option=>String(option.value))
+      : null;
+    state.controls[key]={
+      value:String(control.value==null?'':control.value),
+      checked:!!control.checked,
+      selected,
+      selectionStart:typeof control.selectionStart==='number'?control.selectionStart:null,
+      selectionEnd:typeof control.selectionEnd==='number'?control.selectionEnd:null,
+    };
+    if(active===control)state.activeKey=key;
+    const isRecoverableDraft=!!(control.getAttribute&&(
+      control.getAttribute('data-expert-team-answer-input')||
+      control.getAttribute('data-expert-team-stage-input-text')||
+      control.getAttribute('data-expert-team-stage-feedback')
+    ));
+    const draftText=String(control.value==null?'':control.value).trim();
+    if(isRecoverableDraft&&!control.readOnly&&draftText){
+      const questionOwner=control.closest&&control.closest('[data-expert-team-question-id]');
+      const inputOwner=control.closest&&control.closest('[data-expert-team-input-id]');
+      const titleNode=(questionOwner&&questionOwner.querySelector&&questionOwner.querySelector('strong'))
+        ||(inputOwner&&inputOwner.querySelector&&inputOwner.querySelector('strong'));
+      const candidate={
+        text:String(control.value||''),
+        label:String(titleNode&&titleNode.textContent||state.questionId||state.inputId||'上一项确认'),
+        questionId:String((questionOwner&&questionOwner.dataset&&questionOwner.dataset.expertTeamQuestionId)||state.questionId||''),
+        inputId:String((inputOwner&&inputOwner.dataset&&inputOwner.dataset.expertTeamInputId)||state.inputId||''),
+      };
+      if(active===control||!state.draftCandidate)state.draftCandidate=candidate;
+    }
+  });
+  state.selectedStageChoices=Array.from(scope.querySelectorAll('[data-expert-team-stage-input-choice].is-selected')).map(choice=>{
+    const inputOwner=choice.closest&&choice.closest('[data-expert-team-input-id]');
+    const stageOwner=choice.closest&&choice.closest('[data-expert-team-stage-id]');
+    const owner=(inputOwner&&inputOwner.dataset&&inputOwner.dataset.expertTeamInputId)
+      ||(stageOwner&&stageOwner.dataset&&stageOwner.dataset.expertTeamStageId)
+      ||'';
+    return `${owner}::${String(choice.dataset&&choice.dataset.expertTeamStageInputChoice||'')}`;
+  });
+  return state;
+}
+
+function _expertTeamWorkspaceFormStateMatchesCard(card,state,root){
+  state=state||{};
+  const sourceSessionId=String((card&&card.sourceSessionId)||(card&&card.source_session_id)||'');
+  const runId=String((card&&card.runId)||(card&&card.sessionId)||'');
+  const stageId=String((card&&card.currentStageId)||'');
+  const inputId=String((card&&card.pendingInputId)||(card&&card.pendingInput&&card.pendingInput.id)||'');
+  if(state.sessionId&&state.sessionId!==sourceSessionId)return false;
+  if(state.runId&&state.runId!==runId)return false;
+  if(state.stageId&&state.stageId!==stageId)return false;
+  if(state.inputId&&state.inputId!==inputId)return false;
+  if(state.questionId){
+    const pendingInCard=Array.isArray(card&&card.questions)&&card.questions.some(question=>
+      String(question&&question.id||'')===state.questionId&&String(question&&question.status||'pending')==='pending'
+    );
+    if(!pendingInCard)return false;
+  }
+  return true;
+}
+
+function restoreExpertTeamWorkspaceFormState(root,state,card){
+  const scope=root&&root.querySelector?(root.querySelector('.expert-team-panel-inner')||root):null;
+  if(!scope||!scope.querySelectorAll||!state||!state.controls)return false;
+  const authorityCard=card||((typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||null);
+  if(!_expertTeamWorkspaceFormStateMatchesCard(authorityCard,state,scope))return false;
+  if(state.activeTab){
+    const tab=scope.querySelector(`[data-expert-team-workspace-tab="${String(state.activeTab).replace(/"/g,'\\"')}"]`);
+    if(tab&&typeof switchExpertTeamWorkspaceTab==='function')switchExpertTeamWorkspaceTab(tab);
+  }
+  let focusTarget=null;
+  let focusState=null;
+  Array.from(scope.querySelectorAll('textarea,input,select')).forEach((control,index)=>{
+    const key=_expertTeamWorkspaceControlKey(control,index);
+    const saved=state.controls[key];
+    if(!saved)return;
+    if(control.multiple&&control.options&&Array.isArray(saved.selected)){
+      Array.from(control.options).forEach(option=>{option.selected=saved.selected.includes(String(option.value));});
+    }else if(control.type==='checkbox'||control.type==='radio'){
+      control.checked=!!saved.checked;
+    }else{
+      control.value=String(saved.value||'');
+    }
+    if(state.activeKey===key){focusTarget=control;focusState=saved;}
+  });
+  const selectedChoices=new Set(Array.isArray(state.selectedStageChoices)?state.selectedStageChoices:[]);
+  Array.from(scope.querySelectorAll('[data-expert-team-stage-input-choice]')).forEach(choice=>{
+    const inputOwner=choice.closest&&choice.closest('[data-expert-team-input-id]');
+    const stageOwner=choice.closest&&choice.closest('[data-expert-team-stage-id]');
+    const owner=(inputOwner&&inputOwner.dataset&&inputOwner.dataset.expertTeamInputId)
+      ||(stageOwner&&stageOwner.dataset&&stageOwner.dataset.expertTeamStageId)
+      ||'';
+    const key=`${owner}::${String(choice.dataset&&choice.dataset.expertTeamStageInputChoice||'')}`;
+    if(choice.classList)choice.classList.toggle('is-selected',selectedChoices.has(key));
+  });
+  const scroller=scope.querySelector('.expert-team-panel-expanded-body');
+  if(scroller&&typeof state.scrollTop==='number')scroller.scrollTop=state.scrollTop;
+  if(focusTarget&&focusTarget.focus){
+    try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
+    if(typeof focusState.selectionStart==='number'&&typeof focusTarget.setSelectionRange==='function'){
+      try{focusTarget.setSelectionRange(focusState.selectionStart,focusState.selectionEnd);}catch(_){}
+    }
+  }
+  _syncExpertTeamQuestionInputs(scope);
+  return true;
+}
+
+if(typeof window!=='undefined'){
+  window.captureExpertTeamWorkspaceFormState=captureExpertTeamWorkspaceFormState;
+  window.restoreExpertTeamWorkspaceFormState=restoreExpertTeamWorkspaceFormState;
+}
+
 function _expertTeamWorkspaceActiveTab(root){
   const active=root&&root.querySelector?root.querySelector('[data-expert-team-workspace-tab].is-active'):null;
   return active&&active.dataset?String(active.dataset.expertTeamWorkspaceTab||''):'';
@@ -1390,6 +1537,116 @@ let _expertTeamQuestionPopoverOpen=false;
 let _expertTeamQuestionPopoverRunId='';
 let _expertTeamQuestionPopoverQuestionId='';
 let _expertTeamQuestionPopoverReturnFocus=null;
+let _expertTeamRecoverableDraft=null;
+
+function _expertTeamRememberRecoverableDraft(card,state){
+  const draft=state&&state.draftCandidate;
+  if(!draft||!String(draft.text||'').trim())return false;
+  if(_expertTeamWorkspaceFormStateMatchesCard(card,state))return false;
+  const sourceSessionId=String(card&&card.sourceSessionId||card&&card.source_session_id||'');
+  const runId=String(card&&card.runId||card&&card.sessionId||'');
+  if((state.sessionId&&sourceSessionId&&state.sessionId!==sourceSessionId)||(state.runId&&runId&&state.runId!==runId))return false;
+  _expertTeamRecoverableDraft={
+    sessionId:sourceSessionId||String(state.sessionId||''),
+    runId:runId||String(state.runId||''),
+    stageId:String(state.stageId||''),
+    questionId:String(draft.questionId||''),
+    label:String(draft.label||'上一项确认'),
+    text:String(draft.text||''),
+  };
+  return true;
+}
+
+function _expertTeamRecoverableDraftHintHtml(card){
+  if(!_expertTeamRecoverableDraft)return '';
+  const sourceSessionId=String(card&&card.sourceSessionId||card&&card.source_session_id||'');
+  const runId=String(card&&card.runId||card&&card.sessionId||'');
+  if((_expertTeamRecoverableDraft.sessionId&&sourceSessionId&&_expertTeamRecoverableDraft.sessionId!==sourceSessionId)
+    ||(_expertTeamRecoverableDraft.runId&&runId&&_expertTeamRecoverableDraft.runId!==runId)){
+    _expertTeamRecoverableDraft=null;
+    return '';
+  }
+  return `<aside class="expert-team-recoverable-draft" data-expert-team-recoverable-draft="1" role="status" aria-live="polite">
+    <span><strong>上一项未提交内容已保留</strong><small>${esc(_expertTeamRecoverableDraft.label)}已被服务端新状态取代，旧问题不会重新打开。可复制草稿后粘贴到当前阶段。</small></span>
+    <textarea readonly data-expert-team-draft-copy aria-label="未提交草稿">${esc(_expertTeamRecoverableDraft.text)}</textarea>
+    <span class="expert-team-recoverable-draft-actions"><button type="button" onclick="copyExpertTeamRecoverableDraft(this);event.stopPropagation()">复制草稿</button><button type="button" class="secondary" onclick="dismissExpertTeamRecoverableDraft(this);event.stopPropagation()">忽略草稿</button></span>
+  </aside>`;
+}
+
+async function copyExpertTeamRecoverableDraft(trigger){
+  const root=trigger&&trigger.closest?trigger.closest('[data-expert-team-recoverable-draft]'):null;
+  const field=root&&root.querySelector?root.querySelector('[data-expert-team-draft-copy]'):null;
+  const text=String(field&&field.value||_expertTeamRecoverableDraft&&_expertTeamRecoverableDraft.text||'');
+  if(!text)return false;
+  try{
+    if(typeof navigator!=='undefined'&&navigator.clipboard&&navigator.clipboard.writeText)await navigator.clipboard.writeText(text);
+    else if(field&&field.select){field.focus();field.select();}
+    if(typeof showToast==='function')showToast('草稿已复制。');
+    return true;
+  }catch(_){
+    if(field&&field.select){field.focus();field.select();}
+    if(typeof showToast==='function')showToast('已选中草稿，请手动复制。');
+    return false;
+  }
+}
+
+function dismissExpertTeamRecoverableDraft(trigger){
+  _expertTeamRecoverableDraft=null;
+  const root=trigger&&trigger.closest?trigger.closest('[data-expert-team-recoverable-draft]'):null;
+  if(root&&root.remove)root.remove();
+  if(typeof showToast==='function')showToast('已忽略旧草稿。');
+  return true;
+}
+
+function _expertTeamCanRestoreQuestionPopover(card,state){
+  card=card||{};
+  state=state||{};
+  const sourceSessionId=String(card.sourceSessionId||card.source_session_id||'');
+  const runId=String(card.runId||card.sessionId||'');
+  const stageId=String(card.currentStageId||'');
+  const workflowState=String((card.presentation&&card.presentation.state)||card.status||'');
+  if(state.sessionId&&sourceSessionId&&String(state.sessionId)!==sourceSessionId)return false;
+  if(!state.open||!state.runId||String(state.runId)!==runId)return false;
+  if(state.stageId&&stageId&&String(state.stageId)!==stageId)return false;
+  if(!['collecting_required','collecting_optional'].includes(workflowState))return false;
+  const questionId=String(state.questionId||'');
+  if(!questionId)return false;
+  return (Array.isArray(card.questions)?card.questions:[]).some(question=>
+    String(question&&question.id||'')===questionId&&String(question&&question.status||'pending')==='pending'
+  );
+}
+
+function _captureExpertTeamQuestionPopoverState(panel){
+  const inner=panel&&panel.querySelector?panel.querySelector('.expert-team-panel-inner'):null;
+  const popover=panel&&panel.querySelector?panel.querySelector('[data-expert-team-question-popover]'):null;
+  const current=popover&&popover.querySelector?popover.querySelector('.status-card-expert-question.is-current[data-expert-team-question-id]'):null;
+  const formState=captureExpertTeamWorkspaceFormState(panel);
+  const runId=String((inner&&inner.dataset&&inner.dataset.expertTeamRunId)||(panel&&panel.dataset&&panel.dataset.expertTeamRunId)||'');
+  const open=!!(popover&&!popover.hidden);
+  return {
+    open,
+    sessionId:String((formState&&formState.sessionId)||''),
+    runId,
+    stageId:String((formState&&formState.stageId)||(inner&&inner.dataset&&inner.dataset.expertTeamStageId)||''),
+    questionId:String((current&&current.dataset&&current.dataset.expertTeamQuestionId)||(_expertTeamQuestionPopoverRunId===runId?_expertTeamQuestionPopoverQuestionId:'')||''),
+    focusWithin:!!(open&&typeof document!=='undefined'&&popover.contains&&popover.contains(document.activeElement)),
+    formState,
+    scrollState:_captureExpertTeamWorkspaceScrollState(panel),
+  };
+}
+
+function _restoreExpertTeamQuestionPopoverState(panel,card,state){
+  if(!_expertTeamCanRestoreQuestionPopover(card,state))return false;
+  _expertTeamQuestionPopoverOpen=true;
+  _expertTeamQuestionPopoverRunId=String(state.runId||'');
+  _expertTeamQuestionPopoverQuestionId=String(state.questionId||'');
+  const popover=panel&&panel.querySelector?panel.querySelector('[data-expert-team-question-popover]'):null;
+  if(!popover)return false;
+  popover.hidden=false;
+  _setExpertTeamWorkspaceMode('confirm');
+  if(state.focusWithin&&!(state.formState&&state.formState.activeKey))_focusExpertTeamQuestionPopover(popover);
+  return true;
+}
 
 function _expertTeamLifecycleCardHtml(card){
   if(!_isExpertTeamStatusCard(card))return '';
@@ -1427,7 +1684,7 @@ function _expertTeamQuestionWizardState(card){
   const total=questions.length||pending.length;
   if(!total)return {runId,questions,pending,answered,requiredQuestions,optionalQuestions,total:0,answeredCount:0,currentIndex:0,currentQuestion:null,isComplete:false};
   const requestedId=(_expertTeamQuestionPopoverRunId===runId&&_expertTeamQuestionPopoverQuestionId)?_expertTeamQuestionPopoverQuestionId:'';
-  let currentQuestion=requestedId?questions.find(question=>String(question&&question.id||'')===requestedId):null;
+  let currentQuestion=requestedId?questions.find(question=>String(question&&question.id||'')===requestedId&&!_expertTeamQuestionIsTerminal(question)):null;
   if(!currentQuestion)currentQuestion=pending[0]||questions[questions.length-1]||null;
   const currentIndex=Math.max(0,questions.findIndex(question=>question===currentQuestion))+1;
   return {
@@ -1479,7 +1736,7 @@ function _expertTeamQuestionPopoverHtml(card){
   const isOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId===runId);
   const progressHtml=_expertTeamQuestionPopoverProgressHtml(state);
   if(state.isComplete){
-    return `<section class="expert-team-question-popover expert-team-confirmation-wizard is-complete" data-expert-team-question-popover="1" data-expert-team-workspace-mode="confirm" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认完成" onkeydown="trapExpertTeamQuestionPopoverKeydown(event)">
+    return `<section class="expert-team-question-popover expert-team-confirmation-wizard is-complete" data-expert-team-question-popover="1" data-expert-team-workspace-mode="confirm" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} role="dialog" aria-modal="true" aria-label="需求确认完成" onkeydown="trapExpertTeamQuestionPopoverKeydown(event)">
       <div class="expert-team-question-popover-head">
         <span><strong>需求确认完成</strong><small>已完成或跳过 ${state.answeredCount}/${state.total} 项，专家团将继续推进。</small></span>
         <button type="button" class="expert-team-question-close" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()" aria-label="关闭需求确认窗口">×</button>
@@ -1498,8 +1755,8 @@ function _expertTeamQuestionPopoverHtml(card){
   const hasInitialAnswer=!!initialAnswer.trim()||!isTextQuestion;
   const hasMoreAfter=state.pending.some(item=>String(item&&item.id||'')!==String(qid||''));
   const readyLabel=required
-    ? (hasMoreAfter?'确认并下一题':'完成确认')
-    : (hasMoreAfter?'保存补充并继续':'保存补充并生成');
+    ? (hasMoreAfter?'确认并下一题':'确认并开始生成')
+    : (hasMoreAfter?'保存补充并继续':'保存补充并开始生成');
   const emptyLabel=required?'请先填写':'请填写补充或跳过';
   const ariaLabel=_expertTeamQuestionAriaLabel(question,{index:state.currentIndex,total:state.total});
   const optionHtml=options.length?`<div class="expert-team-question-options">${options.map(option=>`<button type="button" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}" data-expert-team-answer="${esc(option)}" data-expert-team-required="${required?'1':'0'}" onclick="submitExpertTeamQuestionStep(this);event.stopPropagation()">选择“${esc(option)}”</button>`).join('')}</div>`:'';
@@ -1513,7 +1770,7 @@ function _expertTeamQuestionPopoverHtml(card){
     </div>`;
   const deferHtml=`<button type="button" class="expert-team-question-secondary" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()">稍后处理</button>`;
   const skipOptionalHtml=!required?`<button type="button" class="expert-team-question-secondary expert-team-question-skip" data-expert-team-run-id="${esc(runId)}" data-expert-team-question-id="${esc(qid)}" data-expert-team-required="0" data-expert-team-skip-optional="1" onclick="submitExpertTeamQuestionStep(this);event.stopPropagation()">跳过并开始生成</button>`:'';
-  return `<section class="expert-team-question-popover expert-team-confirmation-wizard" data-expert-team-question-popover="1" data-expert-team-workspace-mode="confirm" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} aria-label="需求确认" onkeydown="trapExpertTeamQuestionPopoverKeydown(event)">
+  return `<section class="expert-team-question-popover expert-team-confirmation-wizard" data-expert-team-question-popover="1" data-expert-team-workspace-mode="confirm" data-expert-team-run-id="${esc(runId)}" ${isOpen?'':'hidden'} role="dialog" aria-modal="true" aria-label="需求确认" onkeydown="trapExpertTeamQuestionPopoverKeydown(event)">
     <div class="expert-team-question-popover-head">
       <span><strong>需求确认 ${state.currentIndex}/${state.total}</strong><small>生成尚未开始；当前只处理这一项。</small></span>
       <button type="button" class="expert-team-question-close" onclick="closeExpertTeamQuestionPopover(this);event.stopPropagation()" aria-label="关闭需求确认窗口">×</button>
@@ -1573,10 +1830,21 @@ function trapExpertTeamQuestionPopoverKeydown(event){
 }
 
 function _expertTeamQuestionPopoverElement(trigger){
-  const root=(trigger&&trigger.closest&&(trigger.closest('.expert-team-workspace-panel')||trigger.closest('#writeflowStatusDock')||trigger.closest('.status-card-writeflow')))
-    ||document.getElementById('expertTeamWorkspacePanel')
-    ||((typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'));
-  return root&&root.querySelector?root.querySelector('[data-expert-team-question-popover]'):null;
+  const localRoots=trigger&&trigger.closest?[
+    trigger.closest('.expert-team-workspace-panel'),
+    trigger.closest('#writeflowStatusDock'),
+    trigger.closest('.status-card-writeflow'),
+  ]:[];
+  const roots=[
+    ...localRoots,
+    document.getElementById('expertTeamWorkspacePanel'),
+    (typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock'),
+  ].filter(Boolean);
+  for(const root of roots){
+    const popover=root&&root.querySelector?root.querySelector('[data-expert-team-question-popover]'):null;
+    if(popover)return popover;
+  }
+  return null;
 }
 
 function _focusExpertTeamQuestionPopover(trigger){
@@ -1852,7 +2120,6 @@ function _expertTeamWorkspacePanelHtml(card){
         <small>${esc(item&&item.phase||'复核清单')}</small>
         <span class="expert-team-review-item-actions">
           <button type="button" data-expert-team-review-item-title="${esc(item&&item.title||'待人工补充事项')}" onclick="appendExpertTeamReviewItemToRevision(this);event.stopPropagation()">加入修改意见</button>
-          <button type="button" data-expert-team-review-item-read="1" onclick="markExpertTeamReviewItemRead(this);event.stopPropagation()">${String(item&&item.status||'')==='read'?'已阅':'标记已阅'}</button>
         </span>
       </span>`).join('')}</div>
     </section>`:'';
@@ -2004,18 +2271,34 @@ function mountExpertTeamWorkspacePanel(card){
   }else if(panel.parentElement!==mainChat){
     mainChat.insertBefore(panel,messagesShell);
   }
-  const scrollState=_captureExpertTeamWorkspaceScrollState(panel);
+  const popoverState=_captureExpertTeamQuestionPopoverState(panel);
+  const formState=popoverState.formState;
+  const scrollState=popoverState.scrollState;
+  const canRestoreForm=_expertTeamWorkspaceFormStateMatchesCard(card,formState);
+  if(!canRestoreForm)_expertTeamRememberRecoverableDraft(card,formState);
   panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
   panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||'';
   panel.hidden=false;
+  if(popoverState.open){
+    if(_expertTeamCanRestoreQuestionPopover(card,popoverState)){
+      _expertTeamQuestionPopoverOpen=true;
+      _expertTeamQuestionPopoverRunId=String(popoverState.runId||'');
+      _expertTeamQuestionPopoverQuestionId=String(popoverState.questionId||'');
+    }else{
+      _expertTeamQuestionPopoverOpen=false;
+      _expertTeamQuestionPopoverQuestionId='';
+    }
+  }
   panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation==='function'
     ? renderExpertTeamWorkspaceFromPresentation(card)
     : '';
   const runId=panel.dataset.expertTeamRunId||'';
-  const confirmOpen=!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId&&_expertTeamQuestionPopoverRunId===runId);
+  const restoredPopover=_restoreExpertTeamQuestionPopoverState(panel,card,popoverState);
+  const confirmOpen=restoredPopover||!!(_expertTeamQuestionPopoverOpen&&_expertTeamQuestionPopoverRunId&&_expertTeamQuestionPopoverRunId===runId);
   _setExpertTeamWorkspaceMode(confirmOpen?'confirm':'summary');
   if(typeof restoreExpertTeamWorkspaceTab==='function')restoreExpertTeamWorkspaceTab(panel);
-  _restoreExpertTeamWorkspaceScrollState(panel,scrollState);
+  if(canRestoreForm)restoreExpertTeamWorkspaceFormState(panel,formState,card);
+  if(canRestoreForm)_restoreExpertTeamWorkspaceScrollState(panel,scrollState);
   _setExpertTeamWorkspaceActive(true);
   _syncExpertTeamWorkspacePanelVisibility();
   return true;
@@ -2535,9 +2818,32 @@ function _expertTeamResultViewerElement(){
   document.body.appendChild(viewer);
   return viewer;
 }
+let _expertTeamResultViewerReturnFocus=null;
+function trapExpertTeamResultViewerKeydown(event){
+  const viewer=event&&event.currentTarget;
+  if(!viewer||viewer.hidden)return false;
+  if(event.key==='Escape'){
+    event.preventDefault();
+    closeExpertTeamResultViewer(viewer);
+    return true;
+  }
+  if(event.key!=='Tab')return false;
+  const focusable=Array.from(viewer.querySelectorAll('button:not(:disabled),a[href],[tabindex]:not([tabindex="-1"])')).filter(item=>!item.hidden);
+  if(!focusable.length)return false;
+  const first=focusable[0];
+  const last=focusable[focusable.length-1];
+  if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();return true;}
+  if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();return true;}
+  return false;
+}
 function closeExpertTeamResultViewer(trigger){
   const viewer=(trigger&&trigger.closest&&trigger.closest('.expert-team-result-viewer'))||document.getElementById('expertTeamResultViewer');
   if(viewer)viewer.hidden=true;
+  const returnFocus=_expertTeamResultViewerReturnFocus;
+  _expertTeamResultViewerReturnFocus=null;
+  if(returnFocus&&returnFocus.focus&&document.contains(returnFocus)){
+    try{returnFocus.focus({preventScroll:true});}catch(_){returnFocus.focus();}
+  }
   return true;
 }
 function openExpertTeamResultViewer(trigger){
@@ -2545,8 +2851,9 @@ function openExpertTeamResultViewer(trigger){
   if(!info||!String(info.content||'').trim())return false;
   const viewer=_expertTeamResultViewerElement();
   if(!viewer)return false;
+  if(trigger&&trigger.focus)_expertTeamResultViewerReturnFocus=trigger;
   const rendered=(typeof renderMd==='function')?renderMd(info.content):`<pre>${esc(info.content)}</pre>`;
-  viewer.innerHTML=`<div class="expert-team-result-viewer-panel" role="dialog" aria-modal="false" aria-label="专家团完整成果预览">
+  viewer.innerHTML=`<div class="expert-team-result-viewer-panel" role="dialog" aria-modal="true" aria-label="专家团完整成果预览" onkeydown="trapExpertTeamResultViewerKeydown(event)">
     <div class="expert-team-result-viewer-head">
       <span>
         <strong>${esc(info.title||'专家团完整成果')}</strong>
@@ -2643,6 +2950,7 @@ if(typeof window!=='undefined'){
   window.openExpertTeamChatDelivery=openExpertTeamChatDelivery;
   window.openExpertTeamResultViewer=openExpertTeamResultViewer;
   window.closeExpertTeamResultViewer=closeExpertTeamResultViewer;
+  window.trapExpertTeamResultViewerKeydown=trapExpertTeamResultViewerKeydown;
   window.locateExpertTeamDeliveryMessage=locateExpertTeamDeliveryMessage;
   window.downloadWriteflowArtifact=downloadWriteflowArtifact;
   window.handleExpertTeamDockAction=handleExpertTeamDockAction;
@@ -2683,39 +2991,25 @@ async function answerExpertTeamQuestion(btn){
     syncExpertTeamQuestionInputState(input||btn);
     return;
   }
-  if(submitBtn){
-    submitBtn.disabled=true;
-    submitBtn.setAttribute('aria-busy','true');
-    submitBtn.textContent='提交中...';
-  }
   try{
-    const data=await api('/api/expert-teams/answer',{
-      method:'POST',
-      body:JSON.stringify({session_id:sid,run_id:runId,answers:{[qid]:answer},skip_optional:skipOptional})
+    const result=await runExpertTeamMutation(submitBtn||btn,{
+      action:'answer',
+      endpoint:expertTeamMutationEndpoint('answer'),
+      payload:{answers:{[qid]:answer},skip_optional:skipOptional},
+      busyLabel:'提交中...',
+      closeOnAcceptedIntake:true,
+      preserveWithoutExecution:true,
     });
-    const run=data&&data.run;
-    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    const pendingAfter=card&&_expertTeamPendingQuestions(card)||[];
-    if(card&&_expertTeamQuestionPopoverOpen){
-      _expertTeamQuestionPopoverRunId=card.runId||card.sessionId||'';
-      _expertTeamQuestionPopoverQuestionId=(pendingAfter[0]&&pendingAfter[0].id)||qid||'';
-      if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-      openExpertTeamQuestionPopover(null);
-    }else if(card){
-      if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-      if(typeof focusExpertTeamWorkspacePanel==='function')focusExpertTeamWorkspacePanel(null);
-    }
-    if(card&&Array.isArray(card.questions)&&card.questions.length&&!pendingAfter.length&&typeof showToast==='function'){
-      showToast('需求已确认，正在进入生成。');
-    }
-    _applyExpertTeamStreamResponse(data);
-    if(typeof renderSessionList==='function')renderSessionList();
+    const executionStarted=!!(result&&result.executionStarted);
+    const responseRun=result&&result.data&&result.data.run||{};
+    const continuesIntake=['collecting_required','collecting_optional'].includes(String(responseRun.workflow_state||''))
+      &&(Array.isArray(responseRun.questions)?responseRun.questions:[]).some(question=>String(question&&question.status||'pending')==='pending');
+    if(continuesIntake)openExpertTeamQuestionPopover(null);
+    if(executionStarted&&typeof showToast==='function')showToast('需求已确认，专家团已开始生成。');
+    return true;
   }catch(e){
-    if(submitBtn){
-      submitBtn.removeAttribute('aria-busy');
-      syncExpertTeamQuestionInputState(submitBtn);
-    }
     showToast('提交专家团确认失败：'+(e&&e.message||e));
+    return false;
   }
 }
 if(typeof window!=='undefined'){
@@ -2731,7 +3025,7 @@ if(typeof window!=='undefined'){
 }
 
 function _applyExpertTeamStreamResponse(data){
-  if(!(data&&data.stream_id))return false;
+  if(typeof isExpertTeamExecutionStarted!=='function'||!isExpertTeamExecutionStarted(data))return false;
   const sid=data.session_id||(data.run&&data.run.session_id)||(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
   if(!sid||typeof S==='undefined'||!S.session||S.session.session_id!==sid)return false;
   S.busy=true;
@@ -2754,21 +3048,13 @@ function _applyExpertTeamStreamResponse(data){
 }
 
 async function resumeExpertTeamRun(btn){
-  const runId=(btn&&btn.dataset&&btn.dataset.expertTeamResumeRunId)
-    ||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)
-    ||'';
-  const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
-  if(!runId||!sid)return false;
   try{
-    const data=await api('/api/expert-teams/resume',{
-      method:'POST',
-      body:JSON.stringify({session_id:sid,run_id:runId})
+    const result=await runExpertTeamMutation(btn,{
+      action:'resume',
+      endpoint:expertTeamMutationEndpoint('resume'),
+      busyLabel:'正在重新连接...',
     });
-    const run=data&&data.run;
-    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-    _applyExpertTeamStreamResponse(data);
-    if(typeof renderSessionList==='function')renderSessionList();
+    if(typeof showToast==='function')showToast(result.executionStarted?'专家团已继续生成。':'已提交重试，尚未开始生成。');
     return true;
   }catch(e){
     showToast('继续专家团任务失败：'+(e&&e.message||e));
@@ -2776,21 +3062,20 @@ async function resumeExpertTeamRun(btn){
   }
 }
 
-async function cancelExpertTeamRun(btn){
-  const runId=(btn&&btn.dataset&&btn.dataset.expertTeamCancelRunId)
-    ||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)
-    ||'';
+async function cancelExpertTeamRun(btn,options={}){
   const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
-  if(!runId||!sid)return false;
+  if(!sid)return false;
+  if(!options.skipConfirm&&typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('确定停止当前专家团生成吗？已生成的阶段成果会保留。'))return false;
   try{
-    const data=await api('/api/expert-teams/cancel',{
-      method:'POST',
-      body:JSON.stringify({session_id:sid,run_id:runId})
+    const result=await runExpertTeamMutation(btn,{
+      action:options.action||'cancel',
+      endpoint:expertTeamMutationEndpoint('cancel'),
+      busyLabel:'正在停止...',
     });
-    const run=data&&data.run;
-    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-    if(typeof S!=='undefined'&&S.session&&S.session.session_id===sid){
+    const data=result&&result.data||{};
+    const workflow_state=String(data&&data.run&&data.run.workflow_state||'');
+    const cancelled=workflow_state==='cancelled'&&!!data.cancelled_stream;
+    if(cancelled&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid){
       S.busy=false;
       S.activeStreamId=null;
       S.session.active_stream_id=null;
@@ -2801,7 +3086,7 @@ async function cancelExpertTeamRun(btn){
     if(typeof syncTopbar==='function')syncTopbar();
     if(typeof renderMessages==='function')renderMessages();
     if(typeof renderSessionList==='function')renderSessionList();
-    showToast(data&&data.cancelled_stream?'专家团已停止生成。':'专家团任务已取消。');
+    if(typeof showToast==='function')showToast(cancelled?'专家团已停止生成。':(workflow_state==='cancelling'?'停止请求已提交，正在等待执行侧确认。':'专家团停止状态已更新。'));
     return true;
   }catch(e){
     showToast('停止专家团任务失败：'+(e&&e.message||e));
@@ -2885,45 +3170,20 @@ function appendExpertTeamReviewItemToRevision(btn){
   return true;
 }
 
-function markExpertTeamReviewItemRead(btn){
-  const item=btn&&btn.closest?btn.closest('.expert-team-review-item'):null;
-  if(item)item.classList.add('is-read');
-  if(btn){
-    btn.textContent='已阅';
-    try{btn.setAttribute('aria-pressed','true');}catch(_){}
-  }
-  if(typeof showToast==='function')showToast('已标记为已阅。');
-  return true;
-}
-
 async function approveExpertTeamStage(btn){
   const runId=_expertTeamRunIdFromStageButton(btn,'Approve');
   const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
   if(!runId||!sid)return false;
-  if(btn&&btn.disabled)return false;
-  if(btn){
-    btn.disabled=true;
-    try{btn.setAttribute('aria-busy','true');}catch(_){}
-    btn.textContent=(btn.dataset&&btn.dataset.expertTeamStageApproveBusyLabel)||'正在进入下一阶段...';
-  }
   try{
-    const data=await api('/api/expert-teams/stage/approve',{
-      method:'POST',
-      body:JSON.stringify({session_id:sid,run_id:runId})
+    const result=await runExpertTeamMutation(btn,{
+      action:'approve_stage',
+      endpoint:expertTeamMutationEndpoint('approve_stage'),
+      busyLabel:(btn&&btn.dataset&&btn.dataset.expertTeamStageApproveBusyLabel)||'正在进入下一阶段...',
     });
-    const run=data&&data.run;
-    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-    _applyExpertTeamStreamResponse(data);
-    if(typeof renderSessionList==='function')renderSessionList();
-    if(typeof showToast==='function')showToast(data&&data.stream_id?'已确认，正在进入下一阶段。':'专家团任务已完成。');
+    const state=String(result&&result.data&&result.data.run&&result.data.run.workflow_state||'');
+    if(typeof showToast==='function')showToast(result.executionStarted?'已确认，下一阶段已开始生成。':(state==='completed'?'专家团任务已完成。':'阶段确认已保存，尚未开始下一阶段。'));
     return true;
   }catch(e){
-    if(btn){
-      btn.disabled=false;
-      try{btn.removeAttribute('aria-busy');}catch(_){}
-      btn.textContent=(btn.dataset&&btn.dataset.expertTeamStageApproveLabel)||'无修改，进入下一阶段';
-    }
     showToast('确认阶段产物失败：'+(e&&e.message||e));
     return false;
   }
@@ -2943,30 +3203,16 @@ async function reviseExpertTeamStage(btn){
     }
     return false;
   }
-  if(btn&&btn.disabled)return false;
-  if(btn){
-    btn.disabled=true;
-    try{btn.setAttribute('aria-busy','true');}catch(_){}
-    btn.textContent='正在提交修改意见...';
-  }
   try{
-    const data=await api('/api/expert-teams/stage/revise',{
-      method:'POST',
-      body:JSON.stringify({session_id:sid,run_id:runId,feedback})
+    const result=await runExpertTeamMutation(btn,{
+      action:'revise_stage',
+      endpoint:expertTeamMutationEndpoint('revise_stage'),
+      payload:{feedback},
+      busyLabel:'正在提交修改意见...',
     });
-    const run=data&&data.run;
-    const card=typeof _expertTeamStatusCardFromRun==='function'?_expertTeamStatusCardFromRun(run,data):null;
-    if(card&&typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-    _applyExpertTeamStreamResponse(data);
-    if(typeof renderSessionList==='function')renderSessionList();
-    if(typeof showToast==='function')showToast('已提交修改意见，正在重做当前阶段。');
+    if(typeof showToast==='function')showToast(result.executionStarted?'已提交修改意见，当前阶段已开始重做。':'修改意见已保存，尚未开始重做。');
     return true;
   }catch(e){
-    if(btn){
-      btn.disabled=false;
-      try{btn.removeAttribute('aria-busy');}catch(_){}
-      btn.textContent='提交修改意见';
-    }
     showToast('提交修改意见失败：'+(e&&e.message||e));
     return false;
   }
@@ -2984,7 +3230,6 @@ if(typeof window!=='undefined'){
   window.toggleExpertTeamStageRevision=toggleExpertTeamStageRevision;
   window.locateExpertTeamStageOutput=locateExpertTeamStageOutput;
   window.appendExpertTeamReviewItemToRevision=appendExpertTeamReviewItemToRevision;
-  window.markExpertTeamReviewItemRead=markExpertTeamReviewItemRead;
 }
 
 function _statusCardWriteflowHtml(card,copyBtn){
@@ -9916,6 +10161,86 @@ function _docxSourceRequestHtml(request){
   ].join('');
 }
 
+const _docxWpsAcceptanceFeedback=new Map();
+
+function _docxWpsMode(value){
+  if(value&&value.dataset)return value.dataset.docxWpsMode==='generic'?'generic':'expert';
+  return value&&value.expertTeam===true?'expert':'generic';
+}
+
+function _docxWpsAcceptanceFeedbackKey(deliveryDir,mode='expert'){
+  const key=String(deliveryDir||'').trim();
+  return mode==='generic'&&key?`generic:${key}`:key;
+}
+
+function renderDocxWpsVisualAcceptanceForm(context={}){
+  const mode=context.expertTeam===true?'expert':'generic';
+  const documentPath=String(context.documentPath||context.document_path||'').trim();
+  const deliveryDir=String(context.deliveryDir||context.delivery_dir||'').trim();
+  const qualityStatus=String(context.qualityStatus||context.quality_status||'待验收').trim()||'待验收';
+  const feedback=_docxWpsAcceptanceFeedback.get(_docxWpsAcceptanceFeedbackKey(deliveryDir,mode))||{};
+  const reviewSession=feedback.reviewSession&&typeof feedback.reviewSession==='object'?feedback.reviewSession:{};
+  const reviewConsumed=reviewSession.consumed===true;
+  const reviewReady=!reviewConsumed&&!!String(reviewSession.evidenceDir||'').trim()&&(
+    mode==='generic'
+      ? reviewSession.mode==='generic'&&!!String(reviewSession.openedAt||'').trim()
+      : !!String(reviewSession.reviewToken||'').trim()
+  );
+  const draft=feedback.draft&&typeof feedback.draft==='object'?feedback.draft:{};
+  const busy=feedback.state==='busy';
+  const uploadBusy=feedback.uploadState==='busy';
+  const blocked=!documentPath||!deliveryDir||busy||uploadBusy;
+  const openDisabled=blocked?' disabled':'';
+  const reviewDisabled=blocked||!reviewReady?' disabled':'';
+  const reviewReadonly=blocked||!reviewReady?' readonly':'';
+  const busyDisabled=busy||uploadBusy?' disabled':'';
+  const busyAttr=busy||uploadBusy?'true':'false';
+  const feedbackState=String(feedback.state||'info');
+  const protocolLabel=mode==='expert'?'可信复核':'本地人工验收';
+  const feedbackMessage=String(feedback.message||(reviewConsumed?`本次${protocolLabel}已成功提交；如需重新验收，请开始新一轮复核。`:reviewReady?`${protocolLabel}已开始，请逐项检查、新上传证据并确认证明。`:`请先点击“先打开 DOCX”开始本次${protocolLabel}。`));
+  const uploadState=String(feedback.uploadState||'info');
+  const uploadMessage=String(feedback.uploadMessage||(reviewConsumed?`本次${protocolLabel}证据已随成功提交锁定。`:reviewReady?'请新上传本次打开文档后生成的证据；选择文件不等于验收通过。':`${protocolLabel}尚未开始；请先打开 DOCX，再上传本次新证据。`));
+  const evidenceValue=reviewReady||reviewConsumed?(Array.isArray(feedback.evidencePaths)?feedback.evidencePaths.join('\n'):''):'';
+  const selectedStatus=['passed','passed_with_warnings','failed'].includes(String(draft.status||''))?String(draft.status):'passed';
+  const selectedChecks=new Set(Array.isArray(draft.visualChecks)?draft.visualChecks.map(String):[]);
+  const noteValue=String(draft.note||'');
+  const attested=!!((reviewReady||reviewConsumed)&&draft.attestedActualOfficeReview);
+  const reviewSummary=_docxWpsReviewSummary(reviewSession,mode);
+  const checks=[
+    ['document_opened','确认已在 WPS/Word 打开 DOCX'],
+    ['layout_reviewed','版式、分页、页眉页脚和留白完整'],
+    ['content_order_reviewed','封面、目录、标题层级与正文顺序正确'],
+    ['figures_reviewed','图片、图表和图示清晰，无拉伸、裁切或错位'],
+    ['tables_reviewed','表格完整，无越界、遮挡、断行异常或内容丢失'],
+  ];
+  return `<section class="docx-wps-acceptance" data-docx-wps-acceptance="1" data-docx-wps-mode="${mode}" data-document-path="${esc(documentPath)}" data-delivery-dir="${esc(deliveryDir)}" data-docx-wps-review-ready="${reviewReady?'true':'false'}" aria-label="Office 最终验收" aria-busy="${busyAttr}">
+    <div class="docx-wps-acceptance-head"><span><strong>Office 最终验收</strong><small>质量状态：<b data-docx-wps-quality>${esc(qualityStatus)}</b></small></span><p>${mode==='expert'?'WPS/Word 人工验收是最后一道门禁；只有服务端真实记录成功后才会更新质量状态。':'这是本地人工验收：打开文档、上传本次新证据并明确确认后，才记录验收结果；不使用专家团可信令牌。'}</p></div>
+    <div class="docx-wps-acceptance-step">
+      <div class="docx-wps-acceptance-step-title"><b>1</b><span><strong>先打开 DOCX</strong><small data-docx-wps-document-path>${esc(documentPath||'尚未生成 DOCX')}</small></span></div>
+      <button type="button" class="secondary" data-docx-wps-open-document onclick="openDocxWpsAcceptanceDocument(this);event.stopPropagation()" aria-label="先打开 DOCX 开始${mode==='expert'?'可信 Office 复核':'本地人工验收'}"${openDisabled}>${reviewConsumed?'开始新一轮复核':reviewReady?'重新打开 DOCX':'先打开 DOCX'}</button>
+    </div>
+    <div class="docx-wps-review-session" data-docx-wps-review-session role="status" aria-live="polite" data-state="${reviewConsumed?'consumed':reviewReady?'ready':'locked'}">${esc(reviewSummary)}</div>
+    <fieldset class="docx-wps-checks" data-docx-wps-checks aria-label="Office 完整视觉检查项"${reviewDisabled}>
+      <legend><b>2</b><span>勾选完整视觉检查项</span></legend>
+      <small>每项都必须在实际 WPS/Word 界面中人工确认；不要以自动化报告代替。</small>
+      ${checks.map(([value,label])=>`<label><input type="checkbox" data-docx-wps-check value="${value}" onchange="rememberDocxWpsAcceptanceDraft(this)"${selectedChecks.has(value)?' checked':''}${reviewDisabled}><span>${label}</span></label>`).join('')}
+    </fieldset>
+    <div class="docx-wps-acceptance-grid">
+      <label><span>验收结论</span><select data-docx-wps-field="status" aria-label="Office 验收结论" onchange="rememberDocxWpsAcceptanceDraft(this)"${reviewDisabled}><option value="passed"${selectedStatus==='passed'?' selected':''}>通过</option><option value="passed_with_warnings"${selectedStatus==='passed_with_warnings'?' selected':''}>带告警通过</option><option value="failed"${selectedStatus==='failed'?' selected':''}>不通过</option></select></label>
+      <label><span>${mode==='expert'?'服务端确认的审核人':'本地人工验收记录人'}</span><input type="text" data-docx-wps-field="reviewer" aria-label="Office 验收审核人" aria-readonly="true" readonly value="${esc(String(reviewSession.reviewer||''))}" placeholder="打开 DOCX 后回填"${busyDisabled}><small>${mode==='expert'?'审核人来自本次可信复核会话，不可手工修改。':'本地人工验收不使用服务端可信令牌；这里只记录本机人工复核会话。'}</small></label>
+    </div>
+    <div class="docx-wps-evidence-upload" data-docx-wps-evidence-upload aria-busy="false">
+      <label class="docx-wps-acceptance-field"><span>选择并上传本次新证据</span><input type="file" data-docx-wps-evidence-input multiple accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf" aria-label="选择并上传 Office 验收证据" onchange="uploadDocxWpsEvidenceFiles(this);event.stopPropagation()"${reviewDisabled}><small>${mode==='expert'?'begin 成功':'DOCX 打开成功'}后才可上传。PNG、JPEG 每张至少 800×500；PDF 必须包含可渲染页面。选择文件不等于验收通过。</small></label>
+      <div class="docx-wps-evidence-upload-status" data-docx-wps-upload-status role="status" aria-live="polite" data-state="${esc(uploadState)}">${esc(uploadMessage)}</div>
+    </div>
+    <label class="docx-wps-acceptance-field"><span>本次复核新上传证据（只读）</span><textarea rows="3" data-docx-wps-field="evidence_files" aria-label="Office 验收证据文件路径" aria-readonly="true" readonly placeholder="本次打开后上传的证据路径会自动显示"${busyDisabled}>${esc(evidenceValue)}</textarea><small>该列表只接受本次打开后上传接口返回的路径；手填或历史路径不能用于通过提交。</small></label>
+    <label class="docx-wps-acceptance-field"><span>验收备注（必填）</span><textarea rows="3" data-docx-wps-field="note" aria-label="Office 验收备注" aria-required="true" aria-readonly="${reviewReady?'false':'true'}" required placeholder="例如：已在 WPS 打开文档，逐页检查目录、版式、图表和分页" oninput="rememberDocxWpsAcceptanceDraft(this)"${reviewReadonly}${busyDisabled}>${esc(noteValue)}</textarea><small>所有验收结论都必须填写验收备注，同时说明 WPS/Word、打开或页面检查，以及已检查的版式、目录、图表等区域。</small></label>
+    <label class="docx-wps-attestation"><input type="checkbox" data-docx-wps-attestation onchange="rememberDocxWpsAcceptanceDraft(this)"${attested?' checked':''}${reviewDisabled}><span>我确认以上证据来自刚刚打开的本次 WPS/Word 文档并完成逐页检查</span></label>
+    <div class="docx-wps-acceptance-actions"><button type="button" data-docx-engine-action="wps" onclick="submitDocxWpsVisualAcceptance(this);event.stopPropagation()" aria-label="提交 Office 验收证据"${reviewDisabled}>提交 Office 验收证据</button></div>
+    <div class="docx-wps-acceptance-status" data-docx-wps-status role="status" aria-live="polite" data-state="${esc(feedbackState)}">${esc(feedbackMessage)}</div>
+  </section>`;
+}
+
 function renderDocxEngineWorkbench(workbench){
   const selectedTemplate=String(workbench&&workbench.template_id||workbench&&workbench.templateId||'general-proposal').trim()||'general-proposal';
   const templates=Array.isArray(workbench&&workbench.templates)&&workbench.templates.length
@@ -9964,7 +10289,7 @@ function renderDocxEngineWorkbench(workbench){
     '</div>',
     '<div class="docx-engine-section">',
     '<div class="docx-engine-section-title">交付结果</div>',
-    '<div class="docx-engine-help">passed_with_warnings 表示结构检查通过但仍需打开 WPS/Word 做人工视觉验收。</div>',
+    '<div class="docx-engine-help">passed_with_warnings 表示结构检查通过但仍需打开 WPS/Word 做人工视觉验收。请先打开 DOCX，再用下方表单提交真实检查项和证据。</div>',
     '<div class="docx-engine-result" data-docx-engine-result>',
     '<div><strong>质量报告</strong><span data-docx-engine-quality>尚未生成。</span></div>',
     '<div><strong>DOCX</strong><span data-docx-engine-document>等待生成文档。</span></div>',
@@ -9975,8 +10300,8 @@ function renderDocxEngineWorkbench(workbench){
     '<button type="button" class="secondary" data-docx-engine-action="quality" onclick="showDocxEngineQualityReport(this);event.stopPropagation()" aria-label="查看质量报告" disabled>查看质量报告</button>',
     '<button type="button" class="secondary" data-docx-engine-action="document" onclick="openDocxEngineDocument(this);event.stopPropagation()" aria-label="打开 DOCX" disabled>打开 DOCX</button>',
     '<button type="button" class="secondary" data-docx-engine-action="delivery" onclick="openDocxDeliveryFolder(this);event.stopPropagation()" aria-label="打开交付目录" disabled>打开交付目录</button>',
-    '<button type="button" class="secondary" data-docx-engine-action="wps" onclick="markDocxEngineWpsVisualAccepted(this);event.stopPropagation()" aria-label="记录 WPS 验收通过" disabled>记录 WPS 验收通过</button>',
     '</div>',
+    renderDocxWpsVisualAcceptanceForm(),
     '</div>',
     '<details class="docx-engine-advanced">',
     '<summary>高级操作（安装模板、替换图片）</summary>',
@@ -10162,7 +10487,22 @@ function _syncDocxEngineActionAvailability(root){
   root.querySelectorAll('[data-docx-engine-action="quality"]').forEach((node)=>{node.disabled=!hasQuality;});
   root.querySelectorAll('[data-docx-engine-action="document"]').forEach((node)=>{node.disabled=!hasDocument;});
   root.querySelectorAll('[data-docx-engine-action="delivery"],[data-docx-engine-action="rerender"]').forEach((node)=>{node.disabled=!hasDelivery;});
-  root.querySelectorAll('[data-docx-engine-action="wps"]').forEach((node)=>{node.disabled=!hasDelivery;});
+  const acceptance=root.querySelector('[data-docx-wps-acceptance]');
+  const reviewReady=!!(acceptance&&_docxWpsReviewReady(acceptance));
+  root.querySelectorAll('[data-docx-engine-action="wps"]').forEach((node)=>{
+    node.disabled=!hasDocument||!hasDelivery||!reviewReady;
+    if(node.disabled)node.setAttribute('aria-disabled','true');
+    else node.removeAttribute('aria-disabled');
+  });
+  if(acceptance){
+    acceptance.dataset.documentPath=root.dataset.documentPath||'';
+    acceptance.dataset.deliveryDir=root.dataset.deliveryDir||'';
+    const documentNode=acceptance.querySelector('[data-docx-wps-document-path]');
+    if(documentNode)documentNode.textContent=root.dataset.documentPath||'尚未生成 DOCX';
+    const openButton=acceptance.querySelector('[data-docx-wps-open-document]');
+    if(openButton)openButton.disabled=!hasDocument;
+    _syncDocxWpsReviewSessionUi(acceptance);
+  }
 }
 
 function _updateDocxEngineTemplateOptions(root,templates,selectedTemplateId){
@@ -10413,39 +10753,563 @@ function _updateDocxEngineQualityOnly(root,payload){
   _syncDocxEngineActionAvailability(root);
 }
 
-async function markDocxEngineWpsVisualAccepted(button){
-  const root=_docxEngineRoot(button);
-  const sid=_docxEngineSessionId(root);
-  if(!sid)return null;
-  const deliveryDir=root&&root.dataset?String(root.dataset.deliveryDir||'').trim():'';
-  if(!deliveryDir){
-    _setDocxEngineStatus(root,'请先生成交付包，再记录 WPS 验收。','error');
+function _docxWpsAcceptanceRoot(element){
+  return element&&element.closest?element.closest('[data-docx-wps-acceptance]'):null;
+}
+
+function _docxWpsAcceptanceRootsForDelivery(root){
+  const deliveryDir=String(root&&root.dataset&&root.dataset.deliveryDir||'').trim();
+  const mode=_docxWpsMode(root);
+  const roots=[];
+  if(root&&root.isConnected!==false)roots.push(root);
+  if(deliveryDir&&typeof document!=='undefined'&&document.querySelectorAll){
+    Array.from(document.querySelectorAll('[data-docx-wps-acceptance]')).forEach(item=>{
+      if(String(item&&item.dataset&&item.dataset.deliveryDir||'').trim()===deliveryDir&&_docxWpsMode(item)===mode&&!roots.includes(item))roots.push(item);
+    });
+  }
+  if(!roots.length&&root)roots.push(root);
+  return roots;
+}
+
+function _docxWpsFeedback(root){
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,_docxWpsMode(root));
+  return key?(_docxWpsAcceptanceFeedback.get(key)||{}):{};
+}
+
+function _docxWpsReviewSession(root){
+  const feedback=_docxWpsFeedback(root);
+  return feedback.reviewSession&&typeof feedback.reviewSession==='object'?feedback.reviewSession:{};
+}
+
+function _docxWpsReviewConsumed(root){
+  return _docxWpsReviewSession(root).consumed===true;
+}
+
+function _docxWpsReviewReady(root){
+  const session=_docxWpsReviewSession(root);
+  if(session.consumed===true||!String(session.evidenceDir||'').trim())return false;
+  return _docxWpsMode(root)==='generic'
+    ? session.mode==='generic'&&!!String(session.openedAt||'').trim()
+    : !!String(session.reviewToken||'').trim();
+}
+
+function rememberDocxWpsAcceptanceDraft(element){
+  const root=_docxWpsAcceptanceRoot(element)||(element&&element.dataset&&Object.prototype.hasOwnProperty.call(element.dataset,'deliveryDir')?element:null);
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,_docxWpsMode(root));
+  if(!root||!key)return false;
+  const current=_docxWpsAcceptanceFeedback.get(key)||{};
+  const attestation=root.querySelector&&root.querySelector('[data-docx-wps-attestation]');
+  _docxWpsAcceptanceFeedback.set(key,{...current,draft:{
+    status:_docxWpsAcceptanceValue(root,'status')||'passed',
+    note:_docxWpsAcceptanceValue(root,'note'),
+    visualChecks:_docxWpsVisualChecks(root),
+    attestedActualOfficeReview:!!(attestation&&attestation.checked&&_docxWpsReviewReady(root)),
+  }});
+  return true;
+}
+
+function _docxWpsReviewExpiryLabel(expiresAtNs){
+  const milliseconds=Number(expiresAtNs||0)/1e6;
+  if(!Number.isFinite(milliseconds)||milliseconds<=0)return '';
+  try{return new Date(milliseconds).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch(_){return '';}
+}
+
+function _docxWpsReviewSummary(session,mode='expert'){
+  const generic=mode==='generic'||session&&session.mode==='generic';
+  const protocol=generic?'本地人工验收':'可信复核';
+  if(session&&session.consumed===true)return `本次${protocol}已成功提交：${String(session.reviewer||'未知复核人')}${generic?'':` · 文档 ${String(session.documentSha256||'').slice(0,12)||'摘要未知'}`}`;
+  const ready=!!(session&&String(session.evidenceDir||'').trim()&&(generic?String(session.openedAt||'').trim():String(session.reviewToken||'').trim()));
+  if(!ready)return generic?'未开始本地人工验收。先打开 DOCX 后才能填写检查项和上传证据。':'未开始可信复核。审核人、打开时间和文档摘要将由服务端确认。';
+  const expiry=_docxWpsReviewExpiryLabel(session.expiresAtNs);
+  return `${protocol}已开始：${String(session.reviewer||'未知复核人')} · ${String(session.openedAt||'时间未知')}${generic?'':` · 文档 ${String(session.documentSha256||'').slice(0,12)||'摘要未知'}${expiry?` · 有效至 ${expiry}，过期需重新打开`:''}`}`;
+}
+
+function _syncDocxWpsReviewSessionUi(root){
+  if(!root||!root.querySelector)return false;
+  const session=_docxWpsReviewSession(root);
+  const consumed=session.consumed===true;
+  const ready=_docxWpsReviewReady(root);
+  const busy=!!(root.getAttribute&&root.getAttribute('aria-busy')==='true');
+  const interactive=ready&&!busy;
+  root.dataset.docxWpsReviewReady=ready?'true':'false';
+  const reviewer=_docxWpsAcceptanceField(root,'reviewer');
+  if(reviewer){reviewer.value=ready||consumed?String(session.reviewer||''):'';reviewer.readOnly=true;reviewer.disabled=busy;reviewer.setAttribute('aria-readonly','true');}
+  const reviewNode=root.querySelector('[data-docx-wps-review-session]');
+  if(reviewNode){reviewNode.textContent=_docxWpsReviewSummary(session,_docxWpsMode(root));reviewNode.dataset.state=consumed?'consumed':ready?'ready':'locked';}
+  const evidence=_docxWpsAcceptanceField(root,'evidence_files');
+  if(evidence){evidence.value=_docxWpsEvidencePaths(root).join('\n');evidence.readOnly=true;evidence.disabled=busy;evidence.setAttribute('aria-readonly','true');}
+  const checkGroup=root.querySelector('[data-docx-wps-checks]');
+  if(checkGroup)checkGroup.disabled=!interactive;
+  Array.from(root.querySelectorAll?root.querySelectorAll('[data-docx-wps-check]'):[]).forEach(item=>{item.disabled=!interactive;});
+  const statusField=_docxWpsAcceptanceField(root,'status');
+  if(statusField)statusField.disabled=!interactive;
+  const noteField=_docxWpsAcceptanceField(root,'note');
+  if(noteField){noteField.disabled=busy;noteField.readOnly=!interactive;noteField.setAttribute('aria-readonly',interactive?'false':'true');}
+  const fileInput=root.querySelector('[data-docx-wps-evidence-input]');
+  if(fileInput)fileInput.disabled=!interactive;
+  const attestation=root.querySelector('[data-docx-wps-attestation]');
+  if(attestation){attestation.disabled=!interactive;if(!ready&&!consumed)attestation.checked=false;}
+  const submit=root.querySelector('[data-docx-engine-action="wps"]');
+  if(submit){
+    const hasDocument=!!String(root.dataset&&root.dataset.documentPath||'').trim();
+    const hasDelivery=!!String(root.dataset&&root.dataset.deliveryDir||'').trim();
+    submit.disabled=!interactive||!hasDocument||!hasDelivery;
+    if(submit.disabled)submit.setAttribute('aria-disabled','true');
+    else submit.removeAttribute('aria-disabled');
+  }
+  const openButton=root.querySelector('[data-docx-wps-open-document]');
+  if(openButton)openButton.textContent=consumed?'开始新一轮复核':ready?'重新打开 DOCX':'先打开 DOCX';
+  return ready;
+}
+
+function _normalizeDocxWpsReviewSession(payload){
+  const session={
+    mode:'expert',
+    reviewToken:String(payload&&payload.review_token||'').trim(),
+    reviewer:String(payload&&payload.reviewer||'').trim(),
+    openedAt:String(payload&&payload.opened_at||'').trim(),
+    expiresAtNs:Number(payload&&payload.expires_at_ns||0),
+    documentSha256:String(payload&&payload.document_sha256||'').trim(),
+    evidenceDir:String(payload&&payload.evidence_dir||'').trim(),
+  };
+  if(!session.reviewToken||!session.reviewer||!session.openedAt||!session.expiresAtNs||!session.documentSha256||!session.evidenceDir)throw new Error('服务端未返回完整的可信复核会话。');
+  return session;
+}
+
+function _newGenericDocxWpsReviewSession(){
+  const nonce=typeof crypto!=='undefined'&&crypto&&typeof crypto.randomUUID==='function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`;
+  return {
+    mode:'generic',
+    reviewer:'本地人工验收',
+    openedAt:new Date().toISOString(),
+    evidenceDir:`.taiji/wps-evidence/generic/${nonce}`,
+  };
+}
+
+function _resetDocxWpsReviewFacts(target){
+  Array.from(target&&target.querySelectorAll?target.querySelectorAll('[data-docx-wps-check]'):[]).forEach(item=>{item.checked=false;});
+  const evidence=_docxWpsAcceptanceField(target,'evidence_files');
+  if(evidence)evidence.value='';
+  const attestation=target&&target.querySelector&&target.querySelector('[data-docx-wps-attestation]');
+  if(attestation)attestation.checked=false;
+}
+
+function _applyDocxWpsReviewSession(root,session){
+  rememberDocxWpsAcceptanceDraft(root);
+  const mode=_docxWpsMode(root);
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,mode);
+  if(!key)return false;
+  const current=_docxWpsAcceptanceFeedback.get(key)||{};
+  const draft=current.draft&&typeof current.draft==='object'?current.draft:{};
+  const protocol=mode==='expert'?'可信复核':'本地人工验收';
+  _docxWpsAcceptanceFeedback.set(key,{...current,reviewSession:{...session,mode},evidencePaths:[],uploadState:'info',uploadMessage:`${protocol}已开始；请新上传本次打开文档后生成的证据。`,draft:{status:draft.status||'passed',note:draft.note||'',visualChecks:[],attestedActualOfficeReview:false}});
+  _docxWpsAcceptanceRootsForDelivery(root).forEach(target=>{
+    _resetDocxWpsReviewFacts(target);
+    _syncDocxWpsReviewSessionUi(target);
+    _setDocxWpsEvidenceUploadStatus(target,`${protocol}已开始；请新上传本次打开文档后生成的证据。`,'info');
+  });
+  return true;
+}
+
+function _invalidateDocxWpsReviewSession(root,message){
+  rememberDocxWpsAcceptanceDraft(root);
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,_docxWpsMode(root));
+  if(!key)return false;
+  const current=_docxWpsAcceptanceFeedback.get(key)||{};
+  const draft=current.draft&&typeof current.draft==='object'?current.draft:{};
+  _docxWpsAcceptanceFeedback.set(key,{...current,reviewSession:null,evidencePaths:[],uploadState:'error',uploadMessage:'本次可信复核已失效；请重新打开 DOCX 后再上传新证据。',message,state:'error',draft:{status:draft.status||'passed',note:draft.note||'',visualChecks:[],attestedActualOfficeReview:false}});
+  _docxWpsAcceptanceRootsForDelivery(root).forEach(target=>{
+    _resetDocxWpsReviewFacts(target);
+    _syncDocxWpsReviewSessionUi(target);
+    _setDocxWpsEvidenceUploadStatus(target,'本次可信复核已失效；请重新打开 DOCX 后再上传新证据。','error');
+    _setDocxWpsAcceptanceStatus(target,message,'error');
+  });
+  return true;
+}
+
+function _completeDocxWpsReviewSession(root){
+  rememberDocxWpsAcceptanceDraft(root);
+  const mode=_docxWpsMode(root);
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,mode);
+  if(!key)return false;
+  const current=_docxWpsAcceptanceFeedback.get(key)||{};
+  const session=current.reviewSession&&typeof current.reviewSession==='object'?current.reviewSession:{};
+  const draft=current.draft&&typeof current.draft==='object'?current.draft:{};
+  const lockedMessage=`本次${mode==='expert'?'可信复核':'本地人工验收'}证据已随成功提交锁定。`;
+  _docxWpsAcceptanceFeedback.set(key,{
+    ...current,
+    reviewSession:{...session,reviewToken:'',consumed:true},
+    uploadState:'success',
+    uploadMessage:lockedMessage,
+    draft:{...draft,attestedActualOfficeReview:true},
+  });
+  _docxWpsAcceptanceRootsForDelivery(root).forEach(target=>{
+    const attestation=target.querySelector&&target.querySelector('[data-docx-wps-attestation]');
+    if(attestation)attestation.checked=true;
+    _syncDocxWpsReviewSessionUi(target);
+    _setDocxWpsEvidenceUploadStatus(target,lockedMessage,'success');
+  });
+  return true;
+}
+
+function _isDocxWpsReviewTokenError(error){
+  const code=String(error&&error.payload&&(error.payload.code||error.payload.error_code)||'').toLowerCase();
+  const message=String(error&&error.message||'').toLowerCase();
+  return /review.*token.*(?:expired|invalid|missing|stale|required|used|consumed)|token.*review.*(?:expired|invalid|missing|stale|required|used|consumed)/.test(code)
+    ||/(?:review token|复核令牌|验收令牌).*(?:expired|invalid|missing|stale|required|used|consumed|already used|过期|失效|无效|缺失|已使用)/.test(message);
+}
+
+function _docxWpsAcceptanceField(root,name){
+  return root&&root.querySelector?root.querySelector(`[data-docx-wps-field="${name}"]`):null;
+}
+
+function _docxWpsAcceptanceValue(root,name){
+  const field=_docxWpsAcceptanceField(root,name);
+  return field?String(field.value||'').trim():'';
+}
+
+function _docxWpsEvidencePaths(root){
+  if(!_docxWpsReviewReady(root)&&!_docxWpsReviewConsumed(root))return [];
+  const feedback=_docxWpsFeedback(root);
+  const paths=Array.isArray(feedback.evidencePaths)?feedback.evidencePaths:[];
+  return [...new Set(paths.map(item=>String(item||'').trim()).filter(Boolean))];
+}
+
+function _rememberDocxWpsEvidencePaths(root){
+  const paths=_docxWpsEvidencePaths(root);
+  const field=_docxWpsAcceptanceField(root,'evidence_files');
+  if(field){field.value=paths.join('\n');field.readOnly=true;}
+  return paths;
+}
+
+function _appendDocxWpsEvidencePaths(root,paths){
+  if(!_docxWpsReviewReady(root))return [];
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,_docxWpsMode(root));
+  if(!key)return [];
+  const current=_docxWpsAcceptanceFeedback.get(key)||{};
+  const additions=(Array.isArray(paths)?paths:[]).map(path=>String(path||'').trim()).filter(Boolean);
+  const merged=[...new Set([..._docxWpsEvidencePaths(root),...additions])];
+  _docxWpsAcceptanceFeedback.set(key,{...current,evidencePaths:merged});
+  const field=_docxWpsAcceptanceField(root,'evidence_files');
+  if(field){field.value=merged.join('\n');field.readOnly=true;}
+  return merged;
+}
+
+function _setDocxWpsEvidenceUploadStatus(root,message,state='info'){
+  const status=root&&root.querySelector?root.querySelector('[data-docx-wps-upload-status]'):null;
+  if(status){status.textContent=String(message||'');status.dataset.state=state;}
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,_docxWpsMode(root));
+  if(key){
+    const current=_docxWpsAcceptanceFeedback.get(key)||{};
+    _docxWpsAcceptanceFeedback.set(key,{...current,uploadMessage:String(message||''),uploadState:state});
+  }
+}
+
+function _setDocxWpsEvidenceUploadBusy(root,input,busy){
+  const box=root&&root.querySelector?root.querySelector('[data-docx-wps-evidence-upload]'):null;
+  if(box&&box.setAttribute)box.setAttribute('aria-busy',busy?'true':'false');
+  const reviewReady=_docxWpsReviewReady(root);
+  if(input)input.disabled=!!busy||!reviewReady;
+  const submit=root&&root.querySelector?root.querySelector('[data-docx-engine-action="wps"]'):null;
+  if(submit){
+    const hasDocument=!!String(root&&root.dataset&&root.dataset.documentPath||'').trim();
+    const hasDelivery=!!String(root&&root.dataset&&root.dataset.deliveryDir||'').trim();
+    submit.disabled=!!busy||!reviewReady||!hasDocument||!hasDelivery;
+    if(submit.disabled)submit.setAttribute('aria-disabled','true');
+    else submit.removeAttribute('aria-disabled');
+  }
+}
+
+function _docxWpsEvidenceFileError(file){
+  const name=String(file&&file.name||'').trim();
+  if(!name||!/(?:\.png|\.jpe?g|\.pdf)$/i.test(name))return `不支持的证据文件：${name||'未命名文件'}。仅接受 PNG、JPEG 或 PDF。`;
+  const limit=typeof MAX_UPLOAD_BYTES==='number'?MAX_UPLOAD_BYTES:20*1024*1024;
+  if(Number(file&&file.size||0)>limit)return `证据文件超过上传上限：${name}。`;
+  return '';
+}
+
+async function uploadDocxWpsEvidenceFiles(input){
+  let root=_docxWpsAcceptanceRoot(input);
+  const sid=S&&S.session&&S.session.session_id;
+  const files=Array.from(input&&input.files||[]);
+  if(!root||!files.length)return [];
+  rememberDocxWpsAcceptanceDraft(root);
+  if(!_docxWpsReviewReady(root)){
+    _setDocxWpsEvidenceUploadStatus(root,'请先打开 DOCX 获取可信复核会话，再上传本次新证据。选择文件不等于验收通过。','error');
+    _setDocxWpsAcceptanceStatus(root,'尚未开始可信复核；请先打开 DOCX。','error');
+    const openButton=root.querySelector&&root.querySelector('[data-docx-wps-open-document]');
+    if(openButton&&openButton.focus)openButton.focus();
+    if(input){input.value='';input.disabled=true;}
+    return [];
+  }
+  if(!sid){
+    _setDocxWpsEvidenceUploadStatus(root,'当前会话不可用，无法上传 Office 验收证据。','error');
+    if(input)input.value='';
+    return [];
+  }
+  const uploaded=[];
+  const failures=[];
+  const evidenceDir=String(_docxWpsReviewSession(root).evidenceDir||'').trim();
+  let preservedPaths=_docxWpsEvidencePaths(root);
+  _docxWpsAcceptanceRootsForDelivery(root).forEach(target=>{
+    const targetInput=target===root?input:(target.querySelector&&target.querySelector('[data-docx-wps-evidence-input]'));
+    _setDocxWpsEvidenceUploadBusy(target,targetInput,true);
+    _setDocxWpsEvidenceUploadStatus(target,`正在上传 Office 验收证据（0/${files.length}）...`,'busy');
+  });
+  for(let index=0;index<files.length;index+=1){
+    const file=files[index];
+    const validationError=_docxWpsEvidenceFileError(file);
+    if(validationError){failures.push(validationError);continue;}
+    try{
+      const formData=new FormData();
+      formData.append('session_id',sid);
+      formData.append('path',evidenceDir);
+      formData.append('file',file,file.name);
+      const data=await api('/api/workspace/upload',{method:'POST',body:formData,headers:{},timeoutMs:120000});
+      if(data&&data.error)throw new Error(data.error);
+      const returnedPath=String(data&&data.path||'').trim();
+      if(!returnedPath)throw new Error('服务端未返回真实文件路径');
+      if(!/(?:\.png|\.jpe?g|\.pdf)$/i.test(returnedPath))throw new Error('服务端返回的证据路径格式不受支持');
+      uploaded.push(returnedPath);
+      preservedPaths=[...new Set([...preservedPaths,returnedPath])];
+      const targets=_docxWpsAcceptanceRootsForDelivery(root);
+      targets.forEach(target=>{
+        _appendDocxWpsEvidencePaths(target,preservedPaths);
+        _setDocxWpsEvidenceUploadStatus(target,`正在上传 Office 验收证据（${index+1}/${files.length}）...`,'busy');
+      });
+      root=targets[0]||root;
+    }catch(error){
+      const message=error&&error.message?error.message:String(error||'上传失败');
+      failures.push(`${String(file&&file.name||'未命名文件')}：${message}`);
+    }
+  }
+  if(input)input.value='';
+  const finalRoots=_docxWpsAcceptanceRootsForDelivery(root);
+  finalRoots.forEach(target=>{
+    _appendDocxWpsEvidencePaths(target,preservedPaths);
+    const targetInput=target.querySelector&&target.querySelector('[data-docx-wps-evidence-input]');
+    _setDocxWpsEvidenceUploadBusy(target,targetInput||((target===root||finalRoots.length===1)?input:null),false);
+    _rememberDocxWpsEvidencePaths(target);
+    if(preservedPaths.length){
+      const evidenceField=_docxWpsAcceptanceField(target,'evidence_files');
+      if(evidenceField){evidenceField.removeAttribute('aria-invalid');evidenceField.removeAttribute('aria-describedby');}
+    }
+  });
+  if(failures.length){
+    const prefix=uploaded.length?`已上传 ${uploaded.length} 个文件并保留返回路径；`:'证据路径未变更；';
+    finalRoots.forEach(target=>_setDocxWpsEvidenceUploadStatus(target,`证据上传失败：${prefix}${failures.join('；')}可修正后重试，尚未提交验收。`,'error'));
+  }else{
+    finalRoots.forEach(target=>{
+      _setDocxWpsEvidenceUploadStatus(target,`已上传 ${uploaded.length} 个证据文件并回填服务端返回的真实路径；尚未提交验收。`,'success');
+      _setDocxWpsAcceptanceStatus(target,'本次新证据已上传，尚未提交验收；请完成检查与确认后提交。','info');
+    });
+  }
+  return uploaded;
+}
+
+function _docxWpsVisualChecks(root){
+  return Array.from(root&&root.querySelectorAll?root.querySelectorAll('[data-docx-wps-check]:checked'):[])
+    .map(item=>String(item.value||'').trim()).filter(Boolean);
+}
+
+function _setDocxWpsAcceptanceStatus(root,message,state='info'){
+  const status=root&&root.querySelector?root.querySelector('[data-docx-wps-status]'):null;
+  if(!status)return false;
+  if(!status.id)status.id=`docx-wps-status-${Date.now()}-${Math.floor(Math.random()*10000)}`;
+  status.textContent=String(message||'');
+  status.dataset.state=state;
+  const key=_docxWpsAcceptanceFeedbackKey(root&&root.dataset&&root.dataset.deliveryDir,_docxWpsMode(root));
+  if(key){
+    const current=_docxWpsAcceptanceFeedback.get(key)||{};
+    _docxWpsAcceptanceFeedback.set(key,{...current,message:String(message||''),state});
+  }
+  return true;
+}
+
+function _clearDocxWpsAcceptanceErrors(root){
+  if(!root||!root.querySelectorAll)return;
+  root.querySelectorAll('[aria-invalid="true"]').forEach(node=>{
+    node.removeAttribute('aria-invalid');
+    node.removeAttribute('aria-describedby');
+  });
+}
+
+function _markDocxWpsAcceptanceError(root,target,message){
+  _setDocxWpsAcceptanceStatus(root,message,'error');
+  const status=root&&root.querySelector?root.querySelector('[data-docx-wps-status]'):null;
+  if(target){
+    target.setAttribute('aria-invalid','true');
+    if(status&&status.id)target.setAttribute('aria-describedby',status.id);
+    const focusTarget=target.matches&&target.matches('fieldset')?target.querySelector('input'):target;
+    if(focusTarget&&focusTarget.focus){
+      try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
+    }
+  }
+  return null;
+}
+
+function _docxWpsReviewerError(reviewer){
+  const value=String(reviewer||'').trim();
+  const placeholders=new Set(['user','reviewer','test','integration-test','unknown','anonymous','匿名','系统','审核人','用户']);
+  if(value.length<2||placeholders.has(value.toLowerCase()))return '服务端返回的审核人不可识别；不能使用 user、系统、审核人、test 等占位名称。请重新打开 DOCX。';
+  return '';
+}
+
+function _docxWpsSemanticNoteError(note){
+  const value=String(note||'').trim();
+  if(!value)return '所有验收结论都必须填写验收备注。请说明 WPS/Word、打开或页面检查及已检查的版式区域。';
+  const mentionsOffice=/(?:wps|word)/i.test(value);
+  const mentionsPageReview=/(?:打开|页面|页码|逐页|分页|导出)/.test(value);
+  const mentionsCheckedArea=/(?:目录|版式|布局|图表|图片|表格|分页|页眉|页脚|字体)/.test(value);
+  if(value.length<10||!mentionsOffice||!mentionsPageReview||!mentionsCheckedArea)return '验收备注需至少 10 个字，并同时说明 WPS/Word、打开或页面检查，以及已检查的版式、目录、图表等区域。';
+  return '';
+}
+
+function _validateDocxWpsAcceptance(root){
+  _clearDocxWpsAcceptanceErrors(root);
+  const deliveryDir=String(root&&root.dataset&&root.dataset.deliveryDir||'').trim();
+  const documentPath=String(root&&root.dataset&&root.dataset.documentPath||'').trim();
+  if(!documentPath||!deliveryDir)return _markDocxWpsAcceptanceError(root,root&&root.querySelector&&root.querySelector('[data-docx-wps-open-document]'),'请先生成并打开 DOCX，确认交付目录可用。');
+  const reviewSession=_docxWpsReviewSession(root);
+  const mode=_docxWpsMode(root);
+  const reviewToken=String(reviewSession.reviewToken||'').trim();
+  if(!_docxWpsReviewReady(root))return _markDocxWpsAcceptanceError(root,root&&root.querySelector&&root.querySelector('[data-docx-wps-open-document]'),mode==='expert'?'请先打开 DOCX 获取可信复核会话，再上传证据并提交。':'请先打开 DOCX 开始本地人工验收，再上传本次证据并提交。');
+  const status=_docxWpsAcceptanceValue(root,'status');
+  const reviewer=String(reviewSession.reviewer||'').trim();
+  const note=_docxWpsAcceptanceValue(root,'note');
+  const evidenceFiles=_docxWpsEvidencePaths(root);
+  const visualChecks=_docxWpsVisualChecks(root);
+  const attestation=root&&root.querySelector&&root.querySelector('[data-docx-wps-attestation]');
+  const reviewerField=_docxWpsAcceptanceField(root,'reviewer');
+  const reviewerError=_docxWpsReviewerError(reviewer);
+  if(reviewerError)return _markDocxWpsAcceptanceError(root,reviewerField,reviewerError);
+  if(!['passed','passed_with_warnings','failed'].includes(status))return _markDocxWpsAcceptanceError(root,_docxWpsAcceptanceField(root,'status'),'请选择有效的 Office 验收结论。');
+  const noteError=_docxWpsSemanticNoteError(note);
+  if(noteError)return _markDocxWpsAcceptanceError(root,_docxWpsAcceptanceField(root,'note'),noteError);
+  if(status!=='failed'){
+    const required=['document_opened','layout_reviewed','content_order_reviewed','figures_reviewed','tables_reviewed'];
+    const missing=required.filter(item=>!visualChecks.includes(item));
+    if(missing.length){
+      const group=root.querySelector('[data-docx-wps-checks]');
+      return _markDocxWpsAcceptanceError(root,group,'请完成全部视觉检查项，再提交通过或带告警通过。');
+    }
+  }
+  if(!evidenceFiles.length)return _markDocxWpsAcceptanceError(root,_docxWpsAcceptanceField(root,'evidence_files'),'请在本次文档打开后上传至少一个真实证据文件；不通过结论也必须上传本次证据。');
+  const invalidPath=evidenceFiles.find(path=>/:\/\//.test(path)||!/(?:\.png|\.jpe?g|\.pdf)$/i.test(path));
+  if(invalidPath)return _markDocxWpsAcceptanceError(root,_docxWpsAcceptanceField(root,'evidence_files'),`证据路径格式不支持：${invalidPath}。请通过本次复核的上传控件重新上传 PNG、JPEG 或 PDF。`);
+  if(!attestation||!attestation.checked)return _markDocxWpsAcceptanceError(root,attestation,'请确认以上证据来自刚刚打开的本次 WPS/Word 文档，并已完成逐页检查。');
+  const acceptance={delivery_dir:deliveryDir,status,reviewer,note,visual_checks:visualChecks,evidence_files:evidenceFiles,attested_actual_office_review:true};
+  if(mode==='expert')acceptance.review_token=reviewToken;
+  return acceptance;
+}
+
+function _setDocxWpsAcceptanceBusy(root,busy){
+  if(!root||!root.querySelectorAll)return;
+  root.setAttribute('aria-busy',busy?'true':'false');
+  root.querySelectorAll('button,input,select,textarea').forEach(node=>{node.disabled=!!busy;});
+  if(!busy){
+    const hasDocument=!!String(root.dataset&&root.dataset.documentPath||'').trim();
+    const hasDelivery=!!String(root.dataset&&root.dataset.deliveryDir||'').trim();
+    const openButton=root.querySelector('[data-docx-wps-open-document]');
+    const submitButton=root.querySelector('[data-docx-engine-action="wps"]');
+    if(openButton)openButton.disabled=!hasDocument;
+    if(submitButton)submitButton.disabled=!hasDocument||!hasDelivery;
+    _syncDocxWpsReviewSessionUi(root);
+  }
+}
+
+function _updateDocxWpsAcceptanceQuality(root,payload){
+  const quality=String(payload&&payload.quality_status||payload&&payload.qualityStatus||'').trim();
+  const node=root&&root.querySelector?root.querySelector('[data-docx-wps-quality]'):null;
+  if(node&&quality)node.textContent=quality;
+}
+
+async function openDocxWpsAcceptanceDocument(button){
+  const root=_docxWpsAcceptanceRoot(button);
+  const sid=S&&S.session&&S.session.session_id;
+  const workbench=_docxEngineRoot(button);
+  const documentPath=String(root&&root.dataset&&root.dataset.documentPath||workbench&&workbench.dataset&&workbench.dataset.documentPath||'').trim();
+  const deliveryDir=String(root&&root.dataset&&root.dataset.deliveryDir||workbench&&workbench.dataset&&workbench.dataset.deliveryDir||'').trim();
+  if(!root||!sid||!documentPath||!deliveryDir){
+    _markDocxWpsAcceptanceError(root,button,'请先生成 DOCX，再进行 Office 视觉验收。');
     return null;
   }
-  if(typeof confirm==='function'&&!confirm('确认已在 WPS/Word 打开 DOCX，并检查目录、图表、图片和版式？')){
-    _setDocxEngineStatus(root,'已取消记录 WPS 验收。','info');
-    return null;
-  }
-  _docxEngineSetBusy(root,true);
-  _setDocxEngineStatus(root,'正在记录 WPS 验收结果...','busy');
+  rememberDocxWpsAcceptanceDraft(root);
+  _setDocxWpsAcceptanceBusy(root,true);
+  const mode=_docxWpsMode(root);
+  _setDocxWpsAcceptanceStatus(root,mode==='expert'?'正在创建可信复核会话并请求系统打开 DOCX...':'正在请求系统打开 DOCX 并创建本地人工验收会话...','busy');
   try{
-    const payload=await api('/api/docx-engine-v2/quality/wps-visual',{method:'POST',body:JSON.stringify({
-      session_id:sid,
-      delivery_dir:deliveryDir,
-      status:'passed',
-    })});
-    _updateDocxEngineQualityOnly(root,payload);
-    _setDocxEngineStatus(root,'已记录 WPS 验收通过，质量报告已更新。','success');
-    if(typeof showToast==='function')showToast('已记录 WPS 验收通过。');
-    return payload;
-  }catch(err){
-    const message=err&&err.message?err.message:String(err||'记录失败');
-    _setDocxEngineStatus(root,`记录 WPS 验收失败：${message}`,'error');
-    if(typeof showToast==='function')showToast(`记录 WPS 验收失败：${message}`);
+    let reviewSession;
+    if(_docxWpsMode(root)==='expert'){
+      const payload=await api('/api/docx-engine-v2/quality/wps-visual/begin',{method:'POST',body:JSON.stringify({session_id:sid,delivery_dir:deliveryDir,document_path:documentPath})});
+      reviewSession=_normalizeDocxWpsReviewSession(payload);
+    }else{
+      await api('/api/file/open',{method:'POST',body:JSON.stringify({session_id:sid,path:documentPath})});
+      reviewSession=_newGenericDocxWpsReviewSession();
+    }
+    _applyDocxWpsReviewSession(root,reviewSession);
+    _setDocxWpsAcceptanceStatus(root,mode==='expert'
+      ? `已由系统打开 DOCX，并创建 ${reviewSession.reviewer} 的可信复核会话。请逐页检查并新上传证据；该提示不代表已验收通过。`
+      : '已由系统打开 DOCX 并开始本地人工验收。请逐页检查并新上传证据；本地流程不使用服务端可信令牌，打开不代表已验收通过。','info');
+    const firstCheck=root.querySelector('[data-docx-wps-check][value="document_opened"]');
+    if(firstCheck&&firstCheck.focus)firstCheck.focus();
+    return reviewSession;
+  }catch(error){
+    const message=error&&error.message?error.message:String(error||'打开失败');
+    _setDocxWpsAcceptanceStatus(root,`${mode==='expert'?'可信复核':'本地人工验收'}启动失败：${message}`,'error');
     return null;
   }finally{
-    _docxEngineSetBusy(root,false);
+    _setDocxWpsAcceptanceBusy(root,false);
   }
+}
+
+async function submitDocxWpsVisualAcceptance(button){
+  let root=_docxWpsAcceptanceRoot(button);
+  if(!root)return null;
+  const sid=S&&S.session&&S.session.session_id;
+  if(!sid)return _markDocxWpsAcceptanceError(root,button,'当前会话不可用，无法记录 Office 验收证据。');
+  rememberDocxWpsAcceptanceDraft(root);
+  const acceptance=_validateDocxWpsAcceptance(root);
+  if(!acceptance)return null;
+  const mode=_docxWpsMode(root);
+  if(mode==='generic')delete acceptance.review_token;
+  const deliveryDir=acceptance.delivery_dir;
+  const workbench=_docxEngineRoot(button);
+  const expertPanel=root.closest&&root.closest('.expert-team-workspace-panel');
+  _setDocxWpsAcceptanceBusy(root,true);
+  _setDocxWpsAcceptanceStatus(root,'正在记录 WPS 验收结果...','busy');
+  try{
+    const payload=await api('/api/docx-engine-v2/quality/wps-visual',{method:'POST',body:JSON.stringify({session_id:sid,...acceptance})});
+    _updateDocxWpsAcceptanceQuality(root,payload);
+    if(workbench)_updateDocxEngineQualityOnly(workbench,payload);
+    _completeDocxWpsReviewSession(root);
+    _setDocxWpsAcceptanceStatus(root,'Office 验收证据已记录，质量状态已刷新。','success');
+    if(expertPanel&&typeof refreshWriteflowStatusDockForActiveSession==='function'){
+      await refreshWriteflowStatusDockForActiveSession();
+      root=Array.from(document.querySelectorAll('[data-docx-wps-acceptance]')).find(item=>String(item.dataset&&item.dataset.deliveryDir||'')===deliveryDir&&_docxWpsMode(item)===mode)||root;
+      _updateDocxWpsAcceptanceQuality(root,payload);
+      _setDocxWpsAcceptanceStatus(root,'Office 验收证据已记录，质量状态已刷新。','success');
+    }
+    if(typeof showToast==='function')showToast('Office 验收证据已记录。');
+    return payload;
+  }catch(error){
+    const message=error&&error.message?error.message:String(error||'提交失败');
+    if(mode==='expert'&&_isDocxWpsReviewTokenError(error)){
+      _invalidateDocxWpsReviewSession(root,'可信复核会话已过期或失效，请重新打开 DOCX 获取新会话；备注已保留，检查项、证据和确认已清空。');
+    }else{
+      _setDocxWpsAcceptanceStatus(root,`Office 验收记录失败：${message}。已保留表单内容，可修正后重试。`,'error');
+    }
+    if(typeof showToast==='function')showToast(`Office 验收记录失败：${message}`);
+    return null;
+  }finally{
+    if(root&&root.isConnected!==false)_setDocxWpsAcceptanceBusy(root,false);
+  }
+}
+
+function markDocxEngineWpsVisualAccepted(button){
+  return submitDocxWpsVisualAcceptance(button);
 }
 
 async function openDocxEnginePath(root,pathValue,emptyMessage,mode){

@@ -14,6 +14,10 @@ class DocxEngineV2Error(RuntimeError):
     pass
 
 
+class _ExpertDeliveryImmutable(DocxEngineV2Error):
+    pass
+
+
 def engine_root() -> Path:
     configured = os.getenv("TAIJI_DOCX_ENGINE_V2_ROOT", "").strip()
     if configured:
@@ -92,6 +96,15 @@ def install_template(payload: dict, workspace: Path) -> tuple[dict[str, Any], in
 
 
 def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+    return _create_job_impl(payload, workspace, allow_expert_delivery_output=False)
+
+
+def _create_job_impl(
+    payload: dict,
+    workspace: Path,
+    *,
+    allow_expert_delivery_output: bool,
+) -> tuple[dict[str, Any], int]:
     workspace = Path(workspace).expanduser().resolve()
     template_id = _first_text(payload, "template_id", "templateId")
     if not template_id:
@@ -111,12 +124,18 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
             must_exist=True,
             allowed_absolute_roots=roots,
         )
+        out_dir_raw = _first_text(payload, "out_dir", "outDir") or f".docx-engine-v2/{uuid.uuid4().hex}"
         out_dir = _resolve_workspace_path(
             workspace,
-            _first_text(payload, "out_dir", "outDir") or f".docx-engine-v2/{uuid.uuid4().hex}",
+            out_dir_raw,
             field="out_dir",
             allowed_absolute_roots=roots,
         )
+        if _path_targets_current_expert_delivery(workspace, out_dir) and not allow_expert_delivery_output:
+            return _error_payload(
+                "expert_delivery_writer_required",
+                "generic create_job cannot write into an expert-team delivery tree",
+            ), 400
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         args = [
             str(_engine_cli("run-job.js")),
@@ -165,12 +184,194 @@ def create_job(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     }, 200
 
 
-def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+def _create_expert_delivery_job(
+    payload: dict,
+    workspace: Path,
+    *,
+    run_id: str,
+    stage_id: str,
+    attempt: int,
+) -> tuple[dict[str, Any], int]:
+    """Internal writer used only while the caller holds the canonical attempt lock."""
+    from api.expert_teams.delivery_integrity import canonical_delivery_dir
+
+    root = Path(workspace).expanduser().resolve()
+    expected = canonical_delivery_dir(root, run_id, stage_id, attempt)
+    raw_out = _first_text(payload, "out_dir", "outDir")
+    try:
+        requested = _resolve_workspace_path(root, raw_out, field="out_dir")
+    except (OSError, ValueError) as exc:
+        return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
+    if requested != expected:
+        return _error_payload(
+            "expert_delivery_binding_invalid",
+            "internal expert delivery writer requires the exact canonical delivery directory",
+        ), 400
+    return _create_job_impl(payload, root, allow_expert_delivery_output=True)
+
+
+def validate_delivery(
+    payload: dict,
+    workspace: Path,
+) -> tuple[dict[str, Any], int]:
+    """Revalidate the current delivery package through the engine CLI."""
     workspace = Path(workspace).expanduser().resolve()
+    delivery_raw = _first_text(payload, "delivery_dir", "deliveryDir")
     try:
         delivery_dir = _resolve_workspace_path(
             workspace,
-            _first_text(payload, "delivery_dir", "deliveryDir"),
+            delivery_raw,
+            field="delivery_dir",
+            must_exist=True,
+            allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(workspace),
+        )
+        if not delivery_dir.is_dir():
+            return _error_payload("validation_failed", f"delivery_dir must be a directory: {delivery_dir}"), 400
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("validation_failed", str(exc)), 400
+
+    args = [
+        str(_engine_cli("validate-delivery.js")),
+        "--delivery-dir",
+        str(delivery_dir),
+        "--json",
+    ]
+    if _first_bool(payload, "write_report", "writeReport"):
+        args.append("--write-report")
+    try:
+        from api.expert_teams.delivery_integrity import (
+            delivery_attempt_lock,
+            delivery_identity_from_directory,
+            path_targets_expert_delivery_tree,
+            validated_binding_for_identity,
+        )
+
+        identity = delivery_identity_from_directory(workspace, delivery_dir)
+        if path_targets_expert_delivery_tree(workspace, delivery_raw) and identity is None:
+            raise ValueError("expert-team delivery directory is not canonical")
+        if identity is not None:
+            with delivery_attempt_lock(
+                workspace,
+                identity["run_id"],
+                identity["stage_id"],
+                identity["attempt"],
+            ):
+                binding = validated_binding_for_identity(workspace, identity)
+                if _first_bool(payload, "write_report", "writeReport"):
+                    _validate_expert_wps_run_binding(
+                        workspace,
+                        binding=binding,
+                        supplied_session_id=str(binding.get("session_id") or ""),
+                    )
+                completed = run_engine(args)
+        else:
+            completed = run_engine(args)
+    except _ExpertDeliveryImmutable as exc:
+        return _error_payload("expert_delivery_immutable", str(exc)), 409
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        return _error_payload("delivery_validation_unavailable", str(exc)), 500
+    except ValueError as exc:
+        return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
+
+    engine_payload = _payload_from_completed(completed, default_code="delivery_validation_failed")
+    quality_report = engine_payload.get("qualityReport", engine_payload.get("quality_report", {}))
+    if not isinstance(quality_report, dict):
+        quality_report = {}
+    quality_report_path = str(
+        engine_payload.get("qualityReportPath")
+        or engine_payload.get("quality_report_path")
+        or (delivery_dir / "quality-report.json")
+    )
+    raw_failures = engine_payload.get("failures") or quality_report.get("failures") or []
+    failures = raw_failures if isinstance(raw_failures, list) else [raw_failures]
+    result = {
+        "ok": completed.returncode == 0 and engine_payload.get("ok") is not False,
+        "code": str(engine_payload.get("code") or ""),
+        "message": str(engine_payload.get("message") or ""),
+        "delivery_dir": str(engine_payload.get("deliveryDir") or engine_payload.get("delivery_dir") or delivery_dir),
+        "quality_report_path": quality_report_path,
+        "quality_report": quality_report,
+        "failures": [str(item) for item in failures if str(item or "").strip()],
+    }
+    if result["ok"]:
+        return result, 200
+    if not result["code"]:
+        result["code"] = "delivery_validation_failed"
+    return result, 422 if result["code"] == "delivery_validation_failed" else 500
+
+
+def begin_office_review(
+    payload: dict,
+    workspace: Path,
+    *,
+    trusted_reviewer: str,
+    open_document=None,
+) -> tuple[dict[str, Any], int]:
+    from api.expert_teams.delivery_integrity import (
+        DeliveryIntegrityError,
+        delivery_attempt_lock,
+        delivery_identity_from_directory,
+        validated_binding_for_identity,
+        workspace_relative_path,
+    )
+    from api.expert_teams.office_review import issue_review_token, open_document_with_os
+
+    root = Path(workspace).expanduser().resolve()
+    delivery_raw = _first_text(payload, "delivery_dir", "deliveryDir")
+    try:
+        delivery_dir = _resolve_workspace_path(
+            root,
+            delivery_raw,
+            field="delivery_dir",
+            must_exist=True,
+            allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(root),
+        )
+        identity = delivery_identity_from_directory(root, delivery_dir)
+        if identity is None:
+            raise DeliveryIntegrityError("office review is only available for canonical expert-team deliveries")
+        with delivery_attempt_lock(
+            root,
+            identity["run_id"],
+            identity["stage_id"],
+            identity["attempt"],
+        ):
+            binding = validated_binding_for_identity(root, identity)
+            _validate_expert_wps_run_binding(
+                root,
+                binding=binding,
+                supplied_session_id=_first_text(payload, "session_id", "sessionId"),
+            )
+            document = delivery_dir / "document.docx"
+            token, state, _state_path = issue_review_token(
+                root,
+                binding=binding,
+                document_path=document,
+                reviewer=trusted_reviewer,
+                open_document=open_document or open_document_with_os,
+            )
+    except _ExpertDeliveryImmutable as exc:
+        return _error_payload("expert_delivery_immutable", str(exc)), 409
+    except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
+    return {
+        "ok": True,
+        "review_token": token,
+        "reviewer": state["reviewer"],
+        "opened_at": state["opened_at"],
+        "expires_at_ns": state["expires_at_ns"],
+        "document_sha256": state["document_sha256"],
+        "evidence_dir": state["evidence_dir"],
+        "document_path": workspace_relative_path(root, document),
+    }, 200
+
+
+def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+    workspace = Path(workspace).expanduser().resolve()
+    delivery_raw = _first_text(payload, "delivery_dir", "deliveryDir")
+    try:
+        delivery_dir = _resolve_workspace_path(
+            workspace,
+            delivery_raw,
             field="delivery_dir",
             must_exist=True,
             allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(workspace),
@@ -180,9 +381,37 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
         status = _first_text(payload, "status") or "passed"
         if status not in {"passed", "passed_with_warnings", "failed"}:
             return _error_payload("validation_failed", f"Invalid WPS visual status: {status}"), 400
+        raw_visual_checks = payload.get("visual_checks", payload.get("visualChecks", []))
+        visual_checks = [
+            str(item).strip()
+            for item in (raw_visual_checks if isinstance(raw_visual_checks, list) else [raw_visual_checks])
+            if str(item or "").strip()
+        ]
+        raw_evidence_files = payload.get("evidence_files", payload.get("evidenceFiles", []))
+        evidence_files = []
+        evidence_input_paths = []
+        for item in raw_evidence_files if isinstance(raw_evidence_files, list) else [raw_evidence_files]:
+            if not str(item or "").strip():
+                continue
+            lexical = Path(os.path.expandvars(str(item))).expanduser()
+            if not lexical.is_absolute():
+                lexical = workspace / lexical
+            evidence_input_paths.append(lexical.absolute())
+            evidence = _resolve_workspace_path(
+                workspace,
+                str(item),
+                field="evidence_files",
+                must_exist=True,
+                allowed_absolute_roots=_figure_adjustment_allowed_absolute_roots(workspace),
+            )
+            if not evidence.is_file():
+                return _error_payload("validation_failed", f"evidence file is not a file: {evidence}"), 400
+            evidence_files.append(evidence)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return _error_payload("validation_failed", str(exc)), 400
 
+    reviewer = _first_text(payload, "reviewer", "reviewed_by", "reviewedBy") or "user"
+    note = _first_text(payload, "note", "message")
     args = [
         str(_engine_cli("record-wps-visual.js")),
         "--delivery-dir",
@@ -190,27 +419,380 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
         "--status",
         status,
         "--reviewer",
-        _first_text(payload, "reviewer", "reviewed_by", "reviewedBy") or "user",
+        reviewer,
         "--json",
     ]
-    note = _first_text(payload, "note", "message")
     if note:
         args.extend(["--note", note])
+    for check in visual_checks:
+        args.extend(["--visual-check", check])
+    for evidence in evidence_files:
+        args.extend(["--evidence-file", str(evidence)])
 
-    completed = run_engine(args)
-    engine_payload = _payload_from_completed(completed, default_code="wps_visual_record_failed")
-    if completed.returncode != 0:
-        return _known_failure_payload(engine_payload), _status_for_engine_failure(engine_payload)
+    def record_with_engine() -> tuple[dict[str, Any], int]:
+        completed = run_engine(args)
+        engine_payload = _payload_from_completed(completed, default_code="wps_visual_record_failed")
+        if completed.returncode != 0:
+            return _known_failure_payload(engine_payload), _status_for_engine_failure(engine_payload)
 
-    quality_report_path = Path(str(engine_payload.get("qualityReportPath", ""))).expanduser()
-    quality_report = _read_quality_report(quality_report_path)
-    return {
-        "ok": True,
-        "delivery_dir": str(delivery_dir),
-        "quality_status": quality_report.get("status", ""),
-        "quality_report_path": str(quality_report_path),
-        "quality_report": quality_report,
-    }, 200
+        quality_report_path = Path(str(engine_payload.get("qualityReportPath", ""))).expanduser()
+        engine_report = engine_payload.get("qualityReport")
+        quality_report = engine_report if isinstance(engine_report, dict) else _read_quality_report(quality_report_path)
+        return {
+            "ok": True,
+            "delivery_dir": str(delivery_dir),
+            "quality_status": quality_report.get("status", ""),
+            "quality_report_path": str(quality_report_path),
+            "quality_report": quality_report,
+        }, 200
+
+    # Generic DOCX Engine V2 deliveries retain their original behavior.  Expert-team
+    # deliveries have a stronger identity contract and must be checked while holding
+    # the same attempt lock used by final approval.
+    from api.expert_teams.delivery_integrity import (
+        DeliveryIntegrityError,
+        delivery_attempt_lock,
+        delivery_identity_from_directory,
+        path_targets_expert_delivery_tree,
+        validated_binding_for_identity,
+        workspace_relative_path,
+        sha256_file,
+        validate_canonical_wps_evidence,
+        write_wps_acceptance_manifest,
+    )
+
+    expert_path_hint = path_targets_expert_delivery_tree(workspace, delivery_raw)
+    try:
+        expert_identity = delivery_identity_from_directory(workspace, delivery_dir)
+    except (DeliveryIntegrityError, OSError, ValueError) as exc:
+        return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
+    if expert_path_hint and expert_identity is None:
+        return _error_payload(
+            "expert_delivery_binding_invalid",
+            "expert-team delivery directory is not canonical",
+        ), 400
+    if expert_identity is None:
+        return record_with_engine()
+
+    with delivery_attempt_lock(
+        workspace,
+        expert_identity["run_id"],
+        expert_identity["stage_id"],
+        expert_identity["attempt"],
+    ):
+        from api.expert_teams.office_review import (
+            OfficeReviewTokenUsed,
+            consume_review_token,
+            load_review_token,
+            prepare_consumed_review_state,
+            validate_token_evidence,
+            write_office_review_proof,
+        )
+
+        try:
+            binding = validated_binding_for_identity(workspace, expert_identity)
+            _validate_expert_wps_run_binding(
+                workspace,
+                binding=binding,
+                supplied_session_id=_first_text(payload, "session_id", "sessionId"),
+            )
+        except _ExpertDeliveryImmutable as exc:
+            return _error_payload("expert_delivery_immutable", str(exc)), 409
+        except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
+            return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
+        try:
+            if payload.get("attested_actual_office_review") is not True:
+                return _error_payload(
+                    "office_review_token_required",
+                    "explicit Office review attestation is required",
+                ), 400
+            token_state, token_state_path = load_review_token(
+                workspace,
+                _first_text(payload, "review_token", "reviewToken"),
+                binding=binding,
+            )
+        except OfficeReviewTokenUsed as exc:
+            return _error_payload("office_review_token_used", str(exc)), 409
+        except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
+            return _error_payload("office_review_token_required", str(exc)), 400
+
+        reviewer = str(token_state.get("reviewer") or "").strip()
+        metadata_error = _expert_wps_metadata_error(reviewer=reviewer, note=note)
+        if metadata_error:
+            return _error_payload("wps_visual_metadata_invalid", metadata_error), 400
+        try:
+            validate_token_evidence(workspace, token_state, evidence_input_paths)
+        except (DeliveryIntegrityError, OSError, ValueError) as exc:
+            return _error_payload("office_review_evidence_invalid", str(exc)), 400
+        evidence_error = _expert_wps_evidence_error(evidence_files)
+        if evidence_error:
+            return _error_payload("wps_visual_evidence_invalid", evidence_error), 400
+        reviewer_index = args.index("--reviewer") + 1
+        args[reviewer_index] = reviewer
+
+        result, result_status = record_with_engine()
+        if result_status != 200 or result.get("ok") is not True:
+            return result, result_status
+        try:
+            refreshed_binding = validated_binding_for_identity(workspace, expert_identity)
+            if refreshed_binding != binding:
+                raise DeliveryIntegrityError("expert-team delivery changed while recording WPS acceptance")
+            checks = [
+                item
+                for item in (result.get("quality_report") or {}).get("checks") or []
+                if isinstance(item, dict)
+            ]
+            wps_check = next(
+                (item for item in checks if str(item.get("id") or "") == "wps_visual"),
+                None,
+            )
+            if not isinstance(wps_check, dict):
+                raise DeliveryIntegrityError("WPS acceptance record is missing from quality-report.json")
+            if str(wps_check.get("reviewedBy") or "").strip() != reviewer:
+                raise DeliveryIntegrityError("WPS acceptance reviewer does not match the trusted local identity")
+            if str(wps_check.get("documentSha256") or "") != binding["document_sha256"]:
+                raise DeliveryIntegrityError("WPS acceptance is bound to a different document digest")
+            canonical_evidence = validate_canonical_wps_evidence(
+                workspace,
+                expert_identity["delivery_dir"],
+                [
+                    item
+                    for item in wps_check.get("visualEvidence") or []
+                    if isinstance(item, dict)
+                ],
+            )
+            wps_check["visualEvidence"] = canonical_evidence
+            manifest_path, _manifest = write_wps_acceptance_manifest(
+                workspace,
+                binding=binding,
+                reviewer=reviewer,
+                note=note,
+                visual_checks=[
+                    str(item).strip()
+                    for item in wps_check.get("visualChecks") or []
+                    if str(item or "").strip()
+                ],
+                wps_check=wps_check,
+                office_review={
+                    "token_hash": token_state.get("token_hash"),
+                    "opened_at": token_state.get("opened_at"),
+                    "evidence_dir": token_state.get("evidence_dir"),
+                    "attested_actual_office_review": True,
+                },
+            )
+            consumed_state = prepare_consumed_review_state(
+                token_state,
+                acceptance_manifest_path=workspace_relative_path(workspace, manifest_path),
+                acceptance_manifest_sha256=sha256_file(manifest_path),
+                canonical_evidence=canonical_evidence,
+            )
+            write_office_review_proof(workspace, binding, consumed_state)
+            consume_review_token(token_state_path, consumed_state)
+        except (DeliveryIntegrityError, OSError, ValueError) as exc:
+            return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
+        result["acceptance_manifest_path"] = workspace_relative_path(workspace, manifest_path)
+        result["reviewer"] = reviewer
+        return result, result_status
+
+
+def _expert_wps_metadata_error(*, reviewer: str, note: str) -> str:
+    normalized_reviewer = str(reviewer or "").strip()
+    placeholder_reviewers = {
+        "user",
+        "reviewer",
+        "test",
+        "integration-test",
+        "unknown",
+        "anonymous",
+        "匿名",
+        "系统",
+        "审核人",
+        "用户",
+    }
+    if len(normalized_reviewer) < 2 or normalized_reviewer.lower() in placeholder_reviewers:
+        return "expert-team WPS acceptance requires an identifiable reviewer"
+    normalized_note = str(note or "").strip()
+    lowered = normalized_note.lower()
+    mentions_office = any(token in lowered for token in ("wps", "word"))
+    mentions_action = any(token in lowered for token in ("打开", "页面", "逐页", "分页", "导出"))
+    mentions_layout = any(
+        token in lowered
+        for token in ("版式", "布局", "目录", "图表", "图片", "表格", "页眉", "页脚", "字体")
+    )
+    if len(normalized_note) < 10 or not (mentions_office and mentions_action and mentions_layout):
+        return "expert-team WPS acceptance note must describe the Office review and checked layout areas"
+    return ""
+
+
+def _expert_wps_evidence_error(evidence_files: list[Path]) -> str:
+    if not evidence_files:
+        return "expert-team WPS acceptance requires screenshot or PDF evidence"
+    for evidence in evidence_files:
+        try:
+            size = evidence.stat().st_size
+            if size <= 0 or size > 50 * 1024 * 1024:
+                return f"WPS evidence must be between 1 byte and 50 MiB: {evidence}"
+            with evidence.open("rb") as handle:
+                header = handle.read(32)
+            if header.startswith(b"\x89PNG\r\n\x1a\n"):
+                if len(header) < 24:
+                    return f"invalid PNG evidence: {evidence}"
+                width = int.from_bytes(header[16:20], "big")
+                height = int.from_bytes(header[20:24], "big")
+                if width < 800 or height < 500:
+                    return f"WPS screenshot evidence is too small to show a reviewed document: {evidence}"
+                continue
+            if header.startswith(b"\xff\xd8\xff"):
+                dimensions = _jpeg_dimensions(evidence)
+                if dimensions is None or dimensions[0] < 800 or dimensions[1] < 500:
+                    return f"WPS screenshot evidence is too small or invalid: {evidence}"
+                continue
+            if header.startswith(b"%PDF-"):
+                pdf_bytes = evidence.read_bytes()
+                if len(pdf_bytes) < 1024 or b"/Type /Page" not in pdf_bytes:
+                    return f"WPS PDF evidence does not contain a plausible rendered page: {evidence}"
+                continue
+            return f"unsupported WPS evidence type: {evidence}"
+        except OSError as exc:
+            return f"cannot inspect WPS evidence {evidence}: {exc}"
+    return ""
+
+
+def _jpeg_dimensions(path: Path) -> tuple[int, int] | None:
+    data = path.read_bytes()
+    if len(data) < 4 or not data.startswith(b"\xff\xd8"):
+        return None
+    index = 2
+    start_of_frame_markers = {
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+        0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+    }
+    while index + 3 < len(data):
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        while index < len(data) and data[index] == 0xFF:
+            index += 1
+        if index >= len(data):
+            break
+        marker = data[index]
+        index += 1
+        if marker in {0xD8, 0xD9}:
+            continue
+        if index + 2 > len(data):
+            break
+        segment_length = int.from_bytes(data[index:index + 2], "big")
+        if segment_length < 2 or index + segment_length > len(data):
+            break
+        if marker in start_of_frame_markers and segment_length >= 7:
+            height = int.from_bytes(data[index + 3:index + 5], "big")
+            width = int.from_bytes(data[index + 5:index + 7], "big")
+            return width, height
+        index += segment_length
+    return None
+
+
+def _validate_expert_wps_run_binding(
+    workspace: Path,
+    *,
+    binding: dict,
+    supplied_session_id: str,
+) -> None:
+    from api.expert_teams.delivery_integrity import DeliveryIntegrityError
+    from api.expert_teams.storage import read_run
+
+    run = read_run(workspace, str(binding.get("run_id") or ""))
+    if str(run.get("workflow_state") or "") == "completed":
+        raise _ExpertDeliveryImmutable("completed expert-team delivery cannot be changed")
+    session_id = str(binding.get("session_id") or "")
+    if not supplied_session_id or supplied_session_id != session_id:
+        raise DeliveryIntegrityError("WPS acceptance session id does not match the delivery binding")
+    if str(run.get("session_id") or "") != session_id:
+        raise DeliveryIntegrityError("expert-team run session id does not match the delivery binding")
+    try:
+        current_index = int(run.get("current_stage_index"))
+        tasks = run.get("_tasks_template")
+        if not isinstance(tasks, list) or current_index < 0 or current_index >= len(tasks):
+            raise DeliveryIntegrityError("expert-team authoritative stage is missing")
+        task = tasks[current_index]
+        if not isinstance(task, dict):
+            raise DeliveryIntegrityError("expert-team authoritative stage is invalid")
+        authoritative_stage_id = str(task.get("task_id") or task.get("id") or "")
+        current_stage = run.get("current_stage")
+        if (
+            authoritative_stage_id != str(binding.get("stage_id") or "")
+            or not isinstance(current_stage, dict)
+            or str(current_stage.get("task_id") or current_stage.get("id") or "") != authoritative_stage_id
+            or int(current_stage.get("index")) != current_index
+        ):
+            raise DeliveryIntegrityError("expert-team current stage does not match the delivery binding")
+    except (TypeError, ValueError) as exc:
+        raise DeliveryIntegrityError("expert-team authoritative stage is corrupt") from exc
+    outputs = [
+        item
+        for item in run.get("stage_outputs") or []
+        if isinstance(item, dict)
+        and str(item.get("task_id") or item.get("stage_id") or "") == authoritative_stage_id
+    ]
+    if not outputs:
+        raise DeliveryIntegrityError("expert-team delivery stage output is missing")
+    latest = outputs[-1]
+    document_delivery = latest.get("document_delivery")
+    try:
+        if (
+            int(latest.get("stage_attempt")) != int(binding.get("attempt") or 0)
+            or not isinstance(document_delivery, dict)
+            or int(document_delivery.get("attempt")) != int(binding.get("attempt") or 0)
+            or str(document_delivery.get("source_sha256") or "") != str(binding.get("source_sha256") or "")
+            or str(document_delivery.get("document_sha256") or "") != str(binding.get("document_sha256") or "")
+            or str(document_delivery.get("delivery_dir") or "") != str(binding.get("delivery_dir") or "")
+        ):
+            raise DeliveryIntegrityError("expert-team stage output does not match the delivery binding")
+    except (TypeError, ValueError) as exc:
+        raise DeliveryIntegrityError("expert-team delivery attempt metadata is corrupt") from exc
+
+
+def _expert_mutation_identity(
+    workspace: Path,
+    paths: list[tuple[str, Path]],
+) -> dict | None:
+    from api.expert_teams.delivery_integrity import (
+        DeliveryIntegrityError,
+        delivery_identity_from_path,
+        path_targets_expert_delivery_tree,
+    )
+
+    identities = []
+    for raw, resolved in paths:
+        hinted = path_targets_expert_delivery_tree(workspace, raw)
+        identity = delivery_identity_from_path(workspace, resolved)
+        if hinted and identity is None:
+            raise DeliveryIntegrityError("expert-team mutation path is not canonical")
+        if identity is not None:
+            identities.append(identity)
+    if not identities:
+        return None
+    expected = {
+        key: identities[0][key]
+        for key in ("run_id", "stage_id", "attempt")
+    }
+    if any(
+        any(identity[key] != value for key, value in expected.items())
+        for identity in identities[1:]
+    ):
+        raise DeliveryIntegrityError("expert-team mutation paths belong to different delivery attempts")
+    return identities[0]
+
+
+def _assert_expert_delivery_mutable(workspace: Path, identity: dict) -> None:
+    from api.expert_teams.delivery_integrity import validated_binding_for_identity
+
+    binding = validated_binding_for_identity(workspace, identity)
+    _validate_expert_wps_run_binding(
+        workspace,
+        binding=binding,
+        supplied_session_id=str(binding.get("session_id") or ""),
+    )
 
 
 def package_rich_draft(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
@@ -224,12 +806,18 @@ def package_rich_draft(payload: dict, workspace: Path) -> tuple[dict[str, Any], 
             must_exist=True,
             allowed_absolute_roots=roots,
         )
+        out_dir_raw = _first_text(payload, "out_dir", "outDir")
         out_dir = _resolve_workspace_path(
             workspace,
-            _first_text(payload, "out_dir", "outDir"),
+            out_dir_raw,
             field="out_dir",
             allowed_absolute_roots=roots,
         )
+        if _path_targets_current_expert_delivery(workspace, out_dir):
+            return _error_payload(
+                "expert_delivery_writer_required",
+                "generic package_rich_draft cannot write into an expert-team delivery tree",
+            ), 400
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         args = [
             str(_engine_cli("package-rich-draft.js")),
@@ -289,14 +877,33 @@ def rerender_asset(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]
     except (FileNotFoundError, OSError, ValueError) as exc:
         return _error_payload("validation_failed", str(exc)), 400
 
-    completed = run_engine([
+    args = [
         str(_engine_cli("render-figure-asset.js")),
         "--manifest",
         str(manifest_path),
         "--figure-id",
         figure_id,
         "--json",
-    ])
+    ]
+    from api.expert_teams.delivery_integrity import DeliveryIntegrityError, delivery_attempt_lock
+
+    try:
+        identity = _expert_mutation_identity(workspace, [(manifest_raw, manifest_path)])
+        if identity is None:
+            completed = run_engine(args)
+        else:
+            with delivery_attempt_lock(
+                workspace,
+                identity["run_id"],
+                identity["stage_id"],
+                identity["attempt"],
+            ):
+                _assert_expert_delivery_mutable(workspace, identity)
+                completed = run_engine(args)
+    except _ExpertDeliveryImmutable as exc:
+        return _error_payload("expert_delivery_immutable", str(exc)), 409
+    except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
     engine_payload = _payload_from_completed(completed, default_code="validation_failed")
     if completed.returncode != 0:
         return _known_failure_payload(engine_payload), 400
@@ -317,23 +924,26 @@ def replace_asset(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
 
     try:
         roots = _figure_adjustment_allowed_absolute_roots(workspace)
+        docx_raw = _first_text(payload, "docx_path", "docxPath", "docx")
+        image_raw = _first_text(payload, "image_path", "imagePath", "image")
+        out_raw = _first_text(payload, "out_path", "outPath", "out")
         docx_path = _resolve_workspace_path(
             workspace,
-            _first_text(payload, "docx_path", "docxPath", "docx"),
+            docx_raw,
             field="docx_path",
             must_exist=True,
             allowed_absolute_roots=roots,
         )
         image_path = _resolve_workspace_path(
             workspace,
-            _first_text(payload, "image_path", "imagePath", "image"),
+            image_raw,
             field="image_path",
             must_exist=True,
             allowed_absolute_roots=roots,
         )
         out_path = _resolve_workspace_path(
             workspace,
-            _first_text(payload, "out_path", "outPath", "out"),
+            out_raw,
             field="out_path",
             allowed_absolute_roots=roots,
         )
@@ -341,7 +951,7 @@ def replace_asset(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     except (FileNotFoundError, OSError, ValueError) as exc:
         return _error_payload("validation_failed", str(exc)), 400
 
-    completed = run_engine([
+    args = [
         str(_engine_cli("replace-asset.js")),
         "--docx",
         str(docx_path),
@@ -351,7 +961,29 @@ def replace_asset(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
         str(image_path),
         "--out",
         str(out_path),
-    ])
+    ]
+    from api.expert_teams.delivery_integrity import DeliveryIntegrityError, delivery_attempt_lock
+
+    try:
+        identity = _expert_mutation_identity(
+            workspace,
+            [(docx_raw, docx_path), (out_raw, out_path)],
+        )
+        if identity is None:
+            completed = run_engine(args)
+        else:
+            with delivery_attempt_lock(
+                workspace,
+                identity["run_id"],
+                identity["stage_id"],
+                identity["attempt"],
+            ):
+                _assert_expert_delivery_mutable(workspace, identity)
+                completed = run_engine(args)
+    except _ExpertDeliveryImmutable as exc:
+        return _error_payload("expert_delivery_immutable", str(exc)), 409
+    except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
+        return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
     engine_payload = _payload_from_completed(completed, default_code="validation_failed")
     if completed.returncode != 0:
         return _known_failure_payload(engine_payload), 400
@@ -482,6 +1114,11 @@ def _resolve_workspace_path(
     else:
         target = (root / requested).resolve()
 
+    if _path_has_expert_delivery_semantics(requested) or _path_has_expert_delivery_semantics(target):
+        expert_root = root / ".taiji" / "expert-team-deliveries"
+        if not _path_is_within(target, expert_root):
+            raise ValueError(f"{field} targets an expert-team delivery outside the current workspace")
+
     allowed_roots = [root]
     if allowed_absolute_roots:
         allowed_roots.extend(Path(item).expanduser().resolve() for item in allowed_absolute_roots)
@@ -493,11 +1130,24 @@ def _resolve_workspace_path(
 
 
 def _path_is_within(target: Path, root: Path) -> bool:
+    from api.expert_teams.delivery_integrity import path_is_within_filesystem
+
     try:
-        target.resolve().relative_to(root.resolve())
-        return True
-    except (OSError, ValueError):
+        return path_is_within_filesystem(target, root)
+    except OSError:
         return False
+
+
+def _path_has_expert_delivery_semantics(path: Path | str) -> bool:
+    from api.expert_teams.delivery_integrity import path_has_expert_delivery_semantics
+
+    return path_has_expert_delivery_semantics(path)
+
+
+def _path_targets_current_expert_delivery(workspace: Path, path: Path) -> bool:
+    from api.expert_teams.delivery_integrity import path_targets_expert_delivery_tree
+
+    return path_targets_expert_delivery_tree(workspace, str(path))
 
 
 def _display_path(workspace: Path, target: Path) -> str:

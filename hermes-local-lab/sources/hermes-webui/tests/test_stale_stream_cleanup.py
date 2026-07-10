@@ -75,10 +75,17 @@ def test_session_load_clears_stale_stream_before_response():
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():
-    stale_comment_pos = ROUTES_SRC.index("# Stale stream id from a previous run; clear and continue.")
+    claim_pos = ROUTES_SRC.index("# Check and claim stream ownership under the same per-session lock.")
+    stale_comment_pos = ROUTES_SRC.index(
+        "# _clear_stale_stream_state owns the same non-reentrant session lock;",
+        claim_pos,
+    )
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", stale_comment_pos)
-    stream_id_pos = ROUTES_SRC.index("stream_id = uuid.uuid4().hex", cleanup_pos)
-    assert stale_comment_pos < cleanup_pos < stream_id_pos
+    recheck_pos = ROUTES_SRC.index(
+        'if str(getattr(s, "active_stream_id", None) or "") == stale_stream_id:',
+        cleanup_pos,
+    )
+    assert claim_pos < stale_comment_pos < cleanup_pos < recheck_pos
 
 
 def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch):

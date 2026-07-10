@@ -124,37 +124,16 @@ function injectFigureMetadata(documentXml, renderPlan) {
     return documentXml;
   }
 
-  const markerText = `docx-engine-v2 metadata ${figureIds
-    .map((figureId) => `figureId=${figureId}`)
-    .join(' ')}`;
-  if (documentXml.includes(markerText)) {
+  if (hasDocPrFigureMetadata(documentXml, figureIds)) {
     return documentXml;
   }
 
-  let updatedXml = documentXml;
-  if (!hasDocPrFigureMetadata(updatedXml, figureIds)) {
-    const docPrMetadata = `docx-engine-v2 ${figureIds.map((figureId) => `figureId=${figureId}`).join(' ')}`;
-    updatedXml = updatedXml.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
-      let nextAttributes = upsertXmlAttribute(attributes, 'descr', docPrMetadata);
-      nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
-      return `<wp:docPr${nextAttributes}/>`;
-    });
-  }
-
-  const paragraph = [
-    '<w:p>',
-    '<w:r>',
-    '<w:rPr><w:vanish/></w:rPr>',
-    `<w:t>${escapeXmlText(markerText)}</w:t>`,
-    '</w:r>',
-    '</w:p>',
-  ].join('');
-
-  if (updatedXml.includes('</w:body>')) {
-    return updatedXml.replace('</w:body>', `${paragraph}</w:body>`);
-  }
-
-  return `${updatedXml}${paragraph}`;
+  const docPrMetadata = `docx-engine-v2 ${figureIds.map((figureId) => `figureId=${figureId}`).join(' ')}`;
+  return documentXml.replace(/<wp:docPr\b([^>]*?)\/>/, (match, attributes) => {
+    let nextAttributes = upsertXmlAttribute(attributes, 'descr', docPrMetadata);
+    nextAttributes = upsertXmlAttribute(nextAttributes, 'title', docPrMetadata);
+    return `<wp:docPr${nextAttributes}/>`;
+  });
 }
 
 function firstDrawingXml(documentXml) {

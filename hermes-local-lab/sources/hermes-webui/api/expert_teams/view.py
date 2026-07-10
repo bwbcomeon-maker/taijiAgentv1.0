@@ -11,7 +11,10 @@ STATE_LABELS = {
     "collecting_required": "必须需求待确认",
     "collecting_optional": "可选补充待处理",
     "ready_to_generate": "准备开始生成",
+    "starting": "正在启动专家团",
+    "start_failed": "启动失败",
     "generating": "专家团正在生成",
+    "cancelling": "正在停止专家团",
     "awaiting_stage_input": "需要确认后继续",
     "generated_invalid": "草稿未通过校验",
     "awaiting_review": "阶段成果待复核",
@@ -19,7 +22,16 @@ STATE_LABELS = {
     "completed": "专家团任务已完成",
     "failed": "生成失败",
     "cancelled": "已取消",
+    "completed_invalid": "已完成交付异常",
 }
+
+
+def _effective_state(run: dict) -> str:
+    state = str(run.get("workflow_state") or "collecting_required")
+    integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
+    if state == "completed" and str(integrity.get("status") or "") in {"drifted", "unverified"}:
+        return "completed_invalid"
+    return state
 
 
 def _primary_action(state: str) -> dict | None:
@@ -27,14 +39,15 @@ def _primary_action(state: str) -> dict | None:
         "collecting_required": {"id": "answer_required", "label": "去确认", "kind": "question_popover"},
         "collecting_optional": {"id": "answer_optional", "label": "补充或跳过", "kind": "question_popover"},
         "ready_to_generate": {"id": "start_generation", "label": "开始生成", "kind": "primary"},
+        "starting": {"id": "cancel", "label": "停止启动", "kind": "danger"},
+        "start_failed": {"id": "regenerate", "label": "重新尝试", "kind": "primary"},
         "generating": {"id": "cancel", "label": "停止生成", "kind": "danger"},
         "awaiting_stage_input": {"id": "submit_stage_input", "label": "确认并继续生成", "kind": "primary"},
         "generated_invalid": {"id": "regenerate", "label": "重新生成", "kind": "primary"},
         "awaiting_review": {"id": "review_stage", "label": "去复核", "kind": "primary"},
         "revising": {"id": "cancel", "label": "停止生成", "kind": "danger"},
         "completed": {"id": "view_result", "label": "查看成果", "kind": "primary"},
-        "failed": {"id": "regenerate", "label": "重新尝试", "kind": "primary"},
-        "cancelled": {"id": "regenerate", "label": "重新开始本阶段", "kind": "primary"},
+        "completed_invalid": {"id": "view_result", "label": "查看异常交付", "kind": "primary"},
     }.get(state)
 
 
@@ -46,6 +59,21 @@ def _is_final_stage(run: dict) -> bool:
 
 
 def _secondary_actions(state: str, run: dict | None = None) -> list[dict]:
+    run = run or {}
+    cleanup_status = str(run.get("execution_cleanup_status") or "").strip().lower()
+    if str(run.get("orphan_runtime_run_id") or "").strip() and cleanup_status in {
+        "pending",
+        "unknown",
+        "cancel_requested",
+        "retry_required",
+    }:
+        if cleanup_status in {"unknown", "retry_required"}:
+            return [{"id": "refresh", "label": "刷新清理状态", "kind": "ghost"}]
+        return [{"id": "retry_cleanup", "label": "重试清理", "kind": "ghost"}]
+    if state == "cancelling":
+        if str(run.get("cancel_outcome") or "").strip().lower() in {"unknown", "retry_required"}:
+            return [{"id": "refresh", "label": "刷新停止状态", "kind": "ghost"}]
+        return [{"id": "retry_cancel", "label": "重试停止", "kind": "ghost"}]
     if state == "awaiting_review":
         approve_label = "无修改，完成任务" if _is_final_stage(run or {}) else "无修改，进入下一阶段"
         return [
@@ -102,7 +130,9 @@ def _stage_result(run: dict) -> dict:
 def _stage_review(run: dict, state: str) -> dict:
     output = _stage_output(run)
     actionable = state == "awaiting_review"
-    display_state = "awaiting_review" if actionable else ("running" if state in {"ready_to_generate", "generating", "revising"} else state)
+    display_state = "awaiting_review" if actionable else (
+        "running" if state in {"ready_to_generate", "generating", "revising", "cancelling"} else state
+    )
     return {
         "display_state": display_state,
         "actionable": actionable,
@@ -111,31 +141,65 @@ def _stage_review(run: dict, state: str) -> dict:
 
 
 def _presentation(run: dict, business_context: dict) -> dict:
-    state = str(run.get("workflow_state") or "collecting_required")
+    state = _effective_state(run)
     output = _stage_output(run)
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     detail = ""
     if state in {"collecting_required", "collecting_optional"}:
         detail = "请先补充需求信息，专家团再继续推进。"
-    elif state in {"ready_to_generate", "generating", "revising"}:
+    elif state == "ready_to_generate":
+        detail = str(run.get("last_execution_error") or "已准备好生成当前阶段内容。")
+    elif state == "starting":
+        detail = "正在建立当前阶段执行连接。"
+    elif state == "start_failed":
+        detail = str(run.get("last_execution_error") or "当前阶段启动失败，请重新尝试。")
+    elif state in {"generating", "revising"}:
         detail = "后台正在按当前阶段生成内容。"
+    elif state == "cancelling":
+        detail = "停止请求已提交，正在等待执行侧确认。"
     elif state == "awaiting_stage_input":
         pending = _pending_input(run)
         detail = str(pending.get("description") or pending.get("question") or "当前专家需要你确认后继续生成。")
     elif state == "generated_invalid":
         detail = str(run.get("last_validation_error") or "草稿未通过办公材料口径校验。")
     elif state == "awaiting_review":
-        detail = "阶段结果已生成，请查看后确认是否进入下一阶段。"
+        validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
+        if str(validation.get("status") or "") == "office_acceptance_required":
+            detail = str(run.get("last_validation_error") or "请完成 WPS/Word 验收后再确认交付。")
+        else:
+            detail = "阶段结果已生成，请查看后确认是否进入下一阶段。"
     elif state == "completed":
         detail = "所有阶段已完成，结果已写入当前对话。"
+    elif state == "completed_invalid":
+        integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
+        detail = str(integrity.get("message") or "已完成交付文件缺失或摘要已变化，请勿继续按已验收结果使用。")
     elif state in {"failed", "cancelled"}:
         detail = str(run.get("last_execution_error") or STATE_LABELS.get(state) or "")
+    primary_action = _primary_action(state)
+    cleanup_status = str(run.get("execution_cleanup_status") or "").strip().lower()
+    if str(run.get("orphan_runtime_run_id") or "").strip() and cleanup_status in {
+        "pending",
+        "unknown",
+        "cancel_requested",
+        "retry_required",
+    }:
+        primary_action = (
+            {"id": "retry_cleanup", "label": "重试清理", "kind": "primary"}
+            if cleanup_status in {"unknown", "retry_required"}
+            else {"id": "refresh", "label": "刷新清理状态", "kind": "primary"}
+        )
+    elif state == "cancelling":
+        primary_action = (
+            {"id": "retry_cancel", "label": "重试停止", "kind": "danger"}
+            if str(run.get("cancel_outcome") or "").strip().lower() in {"unknown", "retry_required"}
+            else {"id": "refresh", "label": "刷新停止状态", "kind": "primary"}
+        )
     return {
         "state": state,
         "title": STATE_LABELS.get(state, "专家团状态"),
         "visible_title": str(business_context.get("visible_title") or run.get("title") or "专家团任务"),
         "detail": detail,
-        "primary_action": _primary_action(state),
+        "primary_action": primary_action,
         "secondary_actions": _secondary_actions(state, run),
         "result": output,
         "summary": content_summary(str(output.get("content") or output.get("summary") or run.get("title") or "")),
@@ -195,7 +259,7 @@ def _workspace(run: dict) -> dict:
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     tasks = [deepcopy(task) for task in run.get("tasks") or [] if isinstance(task, dict)]
     members = [deepcopy(member) for member in run.get("members") or [] if isinstance(member, dict)]
-    state = str(run.get("workflow_state") or "collecting_required")
+    state = _effective_state(run)
     return {
         "visible": True,
         "title": "专家团工作台",
@@ -230,7 +294,7 @@ def _team(run: dict) -> dict:
 def _workflow(run: dict) -> dict:
     tasks = [deepcopy(task) for task in run.get("tasks") or [] if isinstance(task, dict)]
     progress = _progress(run)
-    progress["text"] = _progress_text(run)
+    progress["text"] = _progress_text(run, _effective_state(run))
     return {
         "stages": tasks,
         "current_stage": deepcopy(run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}),
@@ -292,7 +356,7 @@ def _timeline_events(run: dict) -> list[dict]:
 
 def expert_team_run_view(run: dict) -> dict:
     business_context = business_context_for_run(run)
-    state = str(run.get("workflow_state") or "collecting_required")
+    state = _effective_state(run)
     intake = _question_state(run)
     stage_review = _stage_review(run, state)
     presentation = _presentation(run, business_context)
@@ -343,7 +407,7 @@ def expert_team_run_view(run: dict) -> dict:
             "can_start_generation": state == "ready_to_generate",
             "can_cancel": state in {"generating", "revising"},
             "can_submit_stage_input": state == "awaiting_stage_input",
-            "can_retry": state in {"generated_invalid", "failed", "cancelled"},
+            "can_retry": state in {"start_failed", "generated_invalid"},
             "can_approve_stage": state == "awaiting_review",
             "can_request_revision": state == "awaiting_review",
         },

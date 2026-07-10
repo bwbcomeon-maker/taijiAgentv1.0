@@ -1010,23 +1010,22 @@ function _scheduleWriteflowStatusRefresh(sid,run){
 }
 
 async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
-  if(!sid||!_isWriteflowHydrationForActiveSession(sid)){
-    return {status:'missing'};
-  }
-  if(options.silent&&typeof shouldPreserveExpertTeamDraftDock==='function'&&shouldPreserveExpertTeamDraftDock(sid))return {status:'preserved'};
+  if(!sid)return {status:'preserved',reason:'no_session'};
+  if(!_isWriteflowHydrationForActiveSession(sid))return {status:'preserved',reason:'stale_session'};
   let data;
   try{
     data=await api(`/api/expert-teams/run?session_id=${encodeURIComponent(sid)}`);
-  }catch(_){
-    return {status:'missing'};
+  }catch(error){
+    if(error&&error.status===404)return {status:'missing',reason:'not_found'};
+    return {status:'preserved',reason:'transient_error'};
   }
-  if(!_isWriteflowHydrationForActiveSession(sid))return {status:'missing'};
+  if(!_isWriteflowHydrationForActiveSession(sid))return {status:'preserved',reason:'stale_session'};
   const run=(data&&data.run&&data.run.session_id===sid)?data.run:null;
-  if(!run||!run.run_id)return {status:'missing'};
+  if(!run||!run.run_id)return {status:'preserved',reason:'invalid_response'};
   const card=typeof _expertTeamStatusCardFromRun==='function'
     ? _expertTeamStatusCardFromRun(run,data)
     : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);
-  if(!card)return {status:'missing'};
+  if(!card)return {status:'preserved',reason:'invalid_response'};
   if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
   _scheduleWriteflowStatusRefresh(sid,run);
   _removeWriteflowStatusCardsFromMessages();
