@@ -7,6 +7,8 @@ const DEFAULT_ENGINE_ROOT = path.resolve(__dirname, '../..');
 const REGISTRY_FILE_NAME = 'template-registry.json';
 const LOCK_WAIT_MS = 25;
 const LOCK_TIMEOUT_MS = 5000;
+const LOCK_OWNER_FILE_NAME = 'owner.json';
+const LOCK_OWNER_SCHEMA = 'taiji.docx.registry-lock.v1';
 
 function resolveTemplateStore({
   rootDir,
@@ -559,27 +561,20 @@ function isPathWithin(rootDir, targetPath) {
 function withRegistryLock(store, operation) {
   const lockPath = `${store.registryPath}.lock`;
   const startedAt = Date.now();
-  let descriptor;
-  while (descriptor === undefined) {
-    try {
-      descriptor = fs.openSync(
-        lockPath,
-        fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollowFlag(),
-        0o600
-      );
-    } catch (error) {
-      if (error.code !== 'EEXIST') {
-        throw error;
-      }
-      try {
-        assertSafeRegularFile(lockPath, 'Template registry lock');
-      } catch (lockError) {
-        if (lockError.code === 'ENOENT' || !fs.existsSync(lockPath)) {
-          continue;
+  const candidate = prepareRegistryLockCandidate(lockPath);
+  let acquired = false;
+
+  try {
+    while (!acquired) {
+      const existingOwner = readRegistryLockOwner(lockPath);
+      if (existingOwner === null) {
+        acquired = publishRegistryLockCandidate(candidate, lockPath);
+        if (acquired) {
+          break;
         }
-        throw lockError;
+        continue;
       }
-      if (removeDeadProcessLock(lockPath)) {
+      if (!isProcessAlive(existingOwner.pid) && quarantineStaleRegistryLock(lockPath, existingOwner)) {
         continue;
       }
       if (Date.now() - startedAt >= LOCK_TIMEOUT_MS) {
@@ -587,45 +582,189 @@ function withRegistryLock(store, operation) {
       }
       waitSynchronously(LOCK_WAIT_MS);
     }
-  }
 
-  try {
-    fs.writeFileSync(descriptor, `${process.pid}\n`, 'utf8');
     return operation();
   } finally {
-    fs.closeSync(descriptor);
-    fs.rmSync(lockPath, { force: true });
+    try {
+      if (acquired) {
+        releaseRegistryLock(lockPath, candidate.owner);
+      }
+    } finally {
+      fs.rmSync(candidate.path, { recursive: true, force: true });
+    }
   }
 }
 
-function removeDeadProcessLock(lockPath) {
-  let initialStat;
-  let ownerPid;
+function prepareRegistryLockCandidate(lockPath) {
+  const token = crypto.randomBytes(16).toString('hex');
+  const candidatePath = path.join(
+    path.dirname(lockPath),
+    `.${path.basename(lockPath)}.candidate-${process.pid}-${token}`
+  );
+  const owner = {
+    schema: LOCK_OWNER_SCHEMA,
+    pid: process.pid,
+    token,
+  };
+  let descriptor;
   try {
-    initialStat = fs.lstatSync(lockPath);
-    const ownerText = fs.readFileSync(lockPath, 'utf8').trim();
-    if (!/^\d+$/.test(ownerText)) {
+    fs.mkdirSync(candidatePath, { mode: 0o700 });
+    const ownerPath = path.join(candidatePath, LOCK_OWNER_FILE_NAME);
+    descriptor = fs.openSync(
+      ownerPath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollowFlag(),
+      0o600
+    );
+    fs.writeFileSync(descriptor, stableJson(owner), 'utf8');
+    fs.fchmodSync(descriptor, 0o600);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    syncDirectory(candidatePath);
+    return { path: candidatePath, owner };
+  } catch (error) {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+    fs.rmSync(candidatePath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function publishRegistryLockCandidate(candidate, lockPath) {
+  try {
+    fs.renameSync(candidate.path, lockPath);
+    syncDirectory(path.dirname(lockPath));
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') {
       return false;
     }
-    ownerPid = Number(ownerText);
-  } catch (error) {
-    return error.code === 'ENOENT';
+    throw error;
   }
-  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0 || isProcessAlive(ownerPid)) {
-    return false;
-  }
+}
 
-  let currentStat;
+function readRegistryLockOwner(lockPath, label = 'Template registry lock') {
+  let lockStat;
   try {
-    currentStat = fs.lstatSync(lockPath);
+    lockStat = fs.lstatSync(lockPath);
   } catch (error) {
-    return error.code === 'ENOENT';
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
   }
-  if (currentStat.dev !== initialStat.dev || currentStat.ino !== initialStat.ino) {
+  if (lockStat.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symbolic link: ${lockPath}`);
+  }
+  if (!lockStat.isDirectory()) {
+    throw new Error(`${label} must be a directory: ${lockPath}`);
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(lockPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+  if (entries.length !== 1 || entries[0] !== LOCK_OWNER_FILE_NAME) {
+    throw new Error(`${label} must contain only ${LOCK_OWNER_FILE_NAME}: ${lockPath}`);
+  }
+  const ownerPath = path.join(lockPath, LOCK_OWNER_FILE_NAME);
+  try {
+    assertSafeRegularFile(ownerPath, `${label} owner`);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+  let ownerText;
+  try {
+    ownerText = fs.readFileSync(ownerPath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+  let owner;
+  try {
+    owner = JSON.parse(ownerText);
+  } catch {
+    throw new Error(`${label} owner is not valid JSON: ${ownerPath}`);
+  }
+  const keys = owner && typeof owner === 'object' && !Array.isArray(owner)
+    ? Object.keys(owner).sort()
+    : [];
+  if (keys.join(',') !== 'pid,schema,token') {
+    throw new Error(`${label} owner fields are invalid: ${ownerPath}`);
+  }
+  if (owner.schema !== LOCK_OWNER_SCHEMA) {
+    throw new Error(`${label} owner schema is invalid: ${ownerPath}`);
+  }
+  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
+    throw new Error(`${label} owner pid is invalid: ${ownerPath}`);
+  }
+  if (!/^[a-f0-9]{32}$/.test(owner.token)) {
+    throw new Error(`${label} owner token is invalid: ${ownerPath}`);
+  }
+  return owner;
+}
+
+function quarantineStaleRegistryLock(lockPath, expectedOwner) {
+  const currentOwner = readRegistryLockOwner(lockPath);
+  if (currentOwner === null) {
+    return true;
+  }
+  if (!sameRegistryLockOwner(currentOwner, expectedOwner)) {
     return false;
   }
-  fs.unlinkSync(lockPath);
+  const tombstonePath = `${lockPath}.stale-${expectedOwner.token}`;
+  try {
+    fs.renameSync(lockPath, tombstonePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return true;
+    }
+    if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') {
+      return false;
+    }
+    throw error;
+  }
+  const quarantinedOwner = readRegistryLockOwner(tombstonePath, 'Stale template registry lock');
+  if (!sameRegistryLockOwner(quarantinedOwner, expectedOwner)) {
+    throw new Error(`Stale template registry lock owner changed during quarantine: ${lockPath}`);
+  }
+  syncDirectory(path.dirname(lockPath));
   return true;
+}
+
+function releaseRegistryLock(lockPath, expectedOwner) {
+  const currentOwner = readRegistryLockOwner(lockPath);
+  if (!sameRegistryLockOwner(currentOwner, expectedOwner)) {
+    throw new Error(`Template registry lock ownership changed before release: ${lockPath}`);
+  }
+  const releasePath = `${lockPath}.release-${expectedOwner.token}`;
+  fs.renameSync(lockPath, releasePath);
+  const releasedOwner = readRegistryLockOwner(releasePath, 'Released template registry lock');
+  if (!sameRegistryLockOwner(releasedOwner, expectedOwner)) {
+    throw new Error(`Template registry lock ownership changed during release: ${lockPath}`);
+  }
+  fs.rmSync(releasePath, { recursive: true });
+  syncDirectory(path.dirname(lockPath));
+}
+
+function sameRegistryLockOwner(actual, expected) {
+  return Boolean(
+    actual &&
+    expected &&
+    actual.schema === expected.schema &&
+    actual.pid === expected.pid &&
+    actual.token === expected.token
+  );
 }
 
 function isProcessAlive(pid) {
@@ -699,7 +838,10 @@ module.exports = {
   assertSafeRegularFile,
   computeTemplateContentDigest,
   loadTemplateRegistry,
+  quarantineStaleRegistryLock,
   readJsonRegularFile,
+  readRegistryLockOwner,
+  releaseRegistryLock,
   resolveContainedFilePath,
   resolveRegistryPackageDir,
   resolveTemplateStore,

@@ -8,6 +8,11 @@ const test = require('node:test');
 
 const { installTemplatePackage } = require('../src/templates/install-template-package');
 const { listTemplates } = require('../src/templates/registry');
+const {
+  quarantineStaleRegistryLock,
+  readRegistryLockOwner,
+  releaseRegistryLock,
+} = require('../src/templates/template-store');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const LIST_TEMPLATES = path.join(ENGINE_ROOT, 'src', 'cli', 'list-templates.js');
@@ -29,6 +34,21 @@ function readJson(filePath) {
 
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function writeRegistryLockDirectory(lockPath, { pid, token }) {
+  const owner = {
+    schema: 'taiji.docx.registry-lock.v1',
+    pid,
+    token,
+  };
+  fs.mkdirSync(lockPath, { mode: 0o700 });
+  fs.writeFileSync(
+    path.join(lockPath, 'owner.json'),
+    `${JSON.stringify(owner, null, 2)}\n`,
+    { encoding: 'utf8', mode: 0o600 }
+  );
+  return owner;
 }
 
 function copyBuiltinTemplate({ seedRoot, sourceId, templateId = sourceId }) {
@@ -185,6 +205,20 @@ function runListProcess(env) {
   });
 }
 
+async function waitForFileCount(directoryPath, prefix, expectedCount, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const count = fs.existsSync(directoryPath)
+      ? fs.readdirSync(directoryPath).filter((name) => name.startsWith(prefix)).length
+      : 0;
+    if (count >= expectedCount) {
+      return count;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${expectedCount} ${prefix} files in ${directoryPath}`);
+}
+
 function runInstallProcess(env, packageDir, { replace = false } = {}) {
   return new Promise((resolve, reject) => {
     const args = [INSTALL_TEMPLATE, '--package', packageDir, '--json'];
@@ -241,7 +275,8 @@ function addRegistryLockBeforeCommit({ packageDir, markerPath, lockPath }) {
       `const __registryBarrierLock = ${JSON.stringify(lockPath)};`,
       'if (!__registryBarrierFs.existsSync(__registryBarrierMarker)) {',
       "  __registryBarrierFs.writeFileSync(__registryBarrierMarker, 'adapter-loaded', 'utf8');",
-      "  __registryBarrierFs.writeFileSync(__registryBarrierLock, String(process.pid), 'utf8');",
+      '  __registryBarrierFs.mkdirSync(__registryBarrierLock, { mode: 0o700 });',
+      "  __registryBarrierFs.writeFileSync(require('node:path').join(__registryBarrierLock, 'owner.json'), JSON.stringify({ schema: 'taiji.docx.registry-lock.v1', pid: process.pid, token: 'f'.repeat(32) }) + '\\n', { encoding: 'utf8', mode: 0o600 });",
       '}',
       '',
       adapterSource,
@@ -277,7 +312,7 @@ async function runWithPreparedSnapshotMutationAtRegistryLock({
     "const preparedNames = fs.readdirSync(installedRoot).filter((name) => name.startsWith('.' + templateId + '.') && name.endsWith('.new'));",
     'if (preparedNames.length !== 1) process.exit(3);',
     "fs.symlinkSync(outsidePath, path.join(installedRoot, preparedNames[0], 'late-link'));",
-    'fs.rmSync(lockPath, { force: true });',
+    'fs.rmSync(lockPath, { recursive: true, force: true });',
     "fs.writeFileSync(mutationCompletePath, preparedNames[0], 'utf8');",
   ].join('\n');
   const mutator = spawn(process.execPath, ['-e', mutatorSource], {
@@ -292,33 +327,27 @@ async function runWithPreparedSnapshotMutationAtRegistryLock({
     mutator.on('close', (status, signal) => resolve({ status, signal }));
   });
 
-  const originalOpenSync = fs.openSync;
+  const originalReaddirSync = fs.readdirSync;
   let observedLockCollision = false;
-  fs.openSync = function openSyncWithRegistryBarrier(filePath, ...args) {
+  fs.readdirSync = function readdirSyncWithRegistryBarrier(directoryPath, ...args) {
     if (
       !observedLockCollision &&
-      path.resolve(String(filePath)) === path.resolve(lockPath) &&
+      path.resolve(String(directoryPath)) === path.resolve(lockPath) &&
       fs.existsSync(adapterMarkerPath)
     ) {
-      try {
-        return originalOpenSync(filePath, ...args);
-      } catch (error) {
-        if (error.code !== 'EEXIST') {
-          throw error;
+      const entries = originalReaddirSync(directoryPath, ...args);
+      observedLockCollision = true;
+      fs.writeFileSync(lockAttemptedPath, 'contended', 'utf8');
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(mutationCompletePath)) {
+        if (Date.now() >= deadline) {
+          throw new Error('Timed out waiting for the prepared snapshot mutation barrier.');
         }
-        observedLockCollision = true;
-        fs.writeFileSync(lockAttemptedPath, 'eexist', 'utf8');
-        const deadline = Date.now() + 5000;
-        while (!fs.existsSync(mutationCompletePath)) {
-          if (Date.now() >= deadline) {
-            throw new Error('Timed out waiting for the prepared snapshot mutation barrier.');
-          }
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-        }
-        throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }
+      return entries;
     }
-    return originalOpenSync(filePath, ...args);
+    return originalReaddirSync(directoryPath, ...args);
   };
 
   let operationResult;
@@ -328,8 +357,8 @@ async function runWithPreparedSnapshotMutationAtRegistryLock({
   } catch (error) {
     operationError = error;
   } finally {
-    fs.openSync = originalOpenSync;
-    fs.rmSync(lockPath, { force: true });
+    fs.readdirSync = originalReaddirSync;
+    fs.rmSync(lockPath, { recursive: true, force: true });
     if (!fs.existsSync(mutationCompletePath)) {
       mutator.kill();
     }
@@ -481,56 +510,103 @@ test('concurrent first-use initialization atomically produces one valid runtime 
   );
 });
 
-test('first-use initialization retries when a vanished lock is replaced before inspection', (t) => {
+test('registry lock is published only after its owner identity is complete', async (t) => {
   const root = makeTempRoot(t);
   const seedRoot = makeSeed(root);
   const runtimeRoot = path.join(root, 'runtime-home');
   const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
-  const originalOpenSync = fs.openSync;
-  const originalLstatSync = fs.lstatSync;
-  const originalExistsSync = fs.existsSync;
-  let simulatedCollision = false;
-  let simulatedMissingLock = false;
-
+  const barrierDir = path.join(root, 'owner-publish-barrier');
+  const readyPath = path.join(barrierDir, 'ready');
+  const releasePath = path.join(barrierDir, 'release');
+  const preloadPath = path.join(root, 'pause-owner-write.cjs');
+  fs.mkdirSync(barrierDir, { recursive: true });
+  fs.writeFileSync(
+    preloadPath,
+    [
+      "const fs = require('node:fs');",
+      `const readyPath = ${JSON.stringify(readyPath)};`,
+      `const releasePath = ${JSON.stringify(releasePath)};`,
+      'const originalWriteFileSync = fs.writeFileSync;',
+      'let paused = false;',
+      'fs.writeFileSync = function pauseCompleteOwnerWrite(target, data, ...args) {',
+      "  const text = String(data);",
+      "  if (!paused && typeof target === 'number' && (/^\\d+\\n$/.test(text) || text.includes('taiji.docx.registry-lock.v1'))) {",
+      '    paused = true;',
+      "    originalWriteFileSync(readyPath, 'ready', 'utf8');",
+      '    const deadline = Date.now() + 5000;',
+      '    while (!fs.existsSync(releasePath)) {',
+      "      if (Date.now() >= deadline) throw new Error('owner publish barrier timed out');",
+      '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
+      '    }',
+      '  }',
+      '  return originalWriteFileSync(target, data, ...args);',
+      '};',
+    ].join('\n'),
+    'utf8'
+  );
   t.after(() => {
-    fs.openSync = originalOpenSync;
-    fs.lstatSync = originalLstatSync;
-    fs.existsSync = originalExistsSync;
+    if (fs.existsSync(barrierDir)) {
+      fs.writeFileSync(releasePath, 'release', 'utf8');
+    }
   });
-  fs.openSync = (filePath, ...args) => {
-    if (filePath === lockPath && !simulatedCollision) {
-      simulatedCollision = true;
-      const error = new Error(`simulated lock collision: ${lockPath}`);
-      error.code = 'EEXIST';
-      throw error;
-    }
-    return originalOpenSync(filePath, ...args);
-  };
-  fs.lstatSync = (filePath, ...args) => {
-    if (filePath === lockPath && simulatedCollision && !simulatedMissingLock) {
-      simulatedMissingLock = true;
-      const error = new Error(`simulated vanished lock: ${lockPath}`);
-      error.code = 'ENOENT';
-      throw error;
-    }
-    return originalLstatSync(filePath, ...args);
-  };
-  fs.existsSync = (filePath) => {
-    if (filePath === lockPath && simulatedMissingLock) {
-      return true;
-    }
-    return originalExistsSync(filePath);
-  };
 
-  const templates = listTemplates({ builtinRootDir: seedRoot, runtimeRootDir: runtimeRoot });
+  const resultPromise = runListProcess({
+    ...packagedEnv(seedRoot, runtimeRoot),
+    NODE_OPTIONS: `--require ${preloadPath}`,
+  });
+  await waitForFileCount(barrierDir, 'ready', 1);
+  const publishedBeforeOwnerWrite = fs.existsSync(lockPath);
+  fs.writeFileSync(releasePath, 'release', 'utf8');
+  const result = await resultPromise;
 
-  assert.equal(simulatedCollision, true);
-  assert.equal(simulatedMissingLock, true);
-  assert.deepEqual(templates.map((template) => template.id), [
-    'general-proposal',
-    'meeting-minutes',
-  ]);
-  assert.equal(originalExistsSync(lockPath), false);
+  assert.equal(publishedBeforeOwnerWrite, false);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test('a delayed stale-lock reaper cannot quarantine a newer lock generation', (t) => {
+  const root = makeTempRoot(t);
+  const runtimeRoot = path.join(root, 'runtime-home');
+  const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const staleOwner = writeRegistryLockDirectory(lockPath, {
+    pid: 99999999,
+    token: 'a'.repeat(32),
+  });
+  const tombstonePath = `${lockPath}.stale-${staleOwner.token}`;
+  fs.renameSync(lockPath, tombstonePath);
+  const newerOwner = writeRegistryLockDirectory(lockPath, {
+    pid: process.pid,
+    token: 'b'.repeat(32),
+  });
+
+  const quarantined = quarantineStaleRegistryLock(lockPath, staleOwner);
+
+  assert.equal(quarantined, false);
+  assert.deepEqual(readRegistryLockOwner(lockPath), newerOwner);
+  assert.deepEqual(readRegistryLockOwner(tombstonePath), staleOwner);
+});
+
+test('an old owner cannot release a newer lock generation', (t) => {
+  const root = makeTempRoot(t);
+  const runtimeRoot = path.join(root, 'runtime-home');
+  const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const oldOwner = {
+    schema: 'taiji.docx.registry-lock.v1',
+    pid: process.pid,
+    token: 'c'.repeat(32),
+  };
+  const newerOwner = writeRegistryLockDirectory(lockPath, {
+    pid: process.pid,
+    token: 'd'.repeat(32),
+  });
+
+  assert.throws(
+    () => releaseRegistryLock(lockPath, oldOwner),
+    /ownership changed before release/
+  );
+  assert.deepEqual(readRegistryLockOwner(lockPath), newerOwner);
 });
 
 test('concurrent replacements use a persistent registry revision CAS so at most one succeeds', async (t) => {
@@ -586,13 +662,52 @@ test('first-use initialization recovers a stale registry lock from a dead proces
   const runtimeRoot = path.join(root, 'runtime-home');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
-  fs.writeFileSync(lockPath, '99999999\n', { mode: 0o600 });
+  const staleOwner = writeRegistryLockDirectory(lockPath, {
+    pid: 99999999,
+    token: 'e'.repeat(32),
+  });
 
   const templates = listTemplates({ builtinRootDir: seedRoot, runtimeRootDir: runtimeRoot });
 
   assert.deepEqual(templates.map((template) => template.id), ['general-proposal']);
   assert.equal(fs.existsSync(lockPath), false);
+  assert.deepEqual(
+    readRegistryLockOwner(`${lockPath}.stale-${staleOwner.token}`),
+    staleOwner
+  );
   assert.equal(fs.existsSync(path.join(runtimeRoot, 'template-registry.json')), true);
+});
+
+test('concurrent first-use quarantines one stale registry lock without overlapping owners', async (t) => {
+  const root = makeTempRoot(t);
+  const seedRoot = makeSeed(root, ['general-proposal']);
+  const runtimeRoot = path.join(root, 'runtime-home');
+  const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const staleOwner = writeRegistryLockDirectory(lockPath, {
+    pid: 99999999,
+    token: '1'.repeat(32),
+  });
+  const env = packagedEnv(seedRoot, runtimeRoot);
+
+  const results = await Promise.all(Array.from({ length: 8 }, () => runListProcess(env)));
+
+  for (const result of results) {
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  }
+  assert.equal(fs.existsSync(lockPath), false);
+  assert.deepEqual(
+    readRegistryLockOwner(`${lockPath}.stale-${staleOwner.token}`),
+    staleOwner
+  );
+  assert.deepEqual(
+    readJson(path.join(runtimeRoot, 'template-registry.json')).builtin.map((entry) => entry.templateId),
+    ['general-proposal']
+  );
+  assert.deepEqual(
+    fs.readdirSync(runtimeRoot).filter((name) => name.includes('.candidate-') || name.includes('.release-')),
+    []
+  );
 });
 
 test('packaged store derives writable state from TAIJI_RUNTIME_HOME or XDG data home', (t) => {
