@@ -205,6 +205,32 @@ function runListProcess(env) {
   });
 }
 
+function runListProcessWithTimeout(env, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [LIST_TEMPLATES, '--json'], {
+      cwd: ENGINE_ROOT,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, timedOut, stdout, stderr });
+    });
+  });
+}
+
 async function waitForFileCount(directoryPath, prefix, expectedCount, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -564,6 +590,52 @@ test('registry lock is published only after its owner identity is complete', asy
   assert.equal(fs.existsSync(lockPath), false);
 });
 
+test('registry lock contention honors its timeout across every retry path', async (t) => {
+  const root = makeTempRoot(t);
+  const seedRoot = makeSeed(root);
+  const runtimeRoot = path.join(root, 'runtime-home');
+  const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
+  const preloadPath = path.join(root, 'force-lock-collision.cjs');
+  fs.writeFileSync(
+    preloadPath,
+    [
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      `const lockPath = path.resolve(${JSON.stringify(lockPath)});`,
+      'const originalLstatSync = fs.lstatSync;',
+      'const originalRenameSync = fs.renameSync;',
+      'fs.lstatSync = function forceMissingLock(target, ...args) {',
+      '  if (path.resolve(String(target)) === lockPath) {',
+      "    const error = new Error('simulated disappearing lock');",
+      "    error.code = 'ENOENT';",
+      '    throw error;',
+      '  }',
+      '  return originalLstatSync(target, ...args);',
+      '};',
+      'fs.renameSync = function forcePublishCollision(source, target, ...args) {',
+      '  if (path.resolve(String(target)) === lockPath) {',
+      "    const error = new Error('simulated lock collision');",
+      "    error.code = 'EEXIST';",
+      '    throw error;',
+      '  }',
+      '  return originalRenameSync(source, target, ...args);',
+      '};',
+      'let simulatedNow = 0n;',
+      'process.hrtime.bigint = () => { simulatedNow += 1000000000n; return simulatedNow; };',
+    ].join('\n'),
+    'utf8'
+  );
+
+  const result = await runListProcessWithTimeout({
+    ...packagedEnv(seedRoot, runtimeRoot),
+    NODE_OPTIONS: `--require ${preloadPath}`,
+  }, 5000);
+
+  assert.equal(result.timedOut, false, 'every failed lock publication must reach the deadline');
+  assert.equal(result.status, 3, result.stderr);
+  assert.match(result.stderr, /Timed out waiting for template registry lock/);
+});
+
 test('a delayed stale-lock reaper cannot quarantine a newer lock generation', (t) => {
   const root = makeTempRoot(t);
   const runtimeRoot = path.join(root, 'runtime-home');
@@ -574,14 +646,30 @@ test('a delayed stale-lock reaper cannot quarantine a newer lock generation', (t
     token: 'a'.repeat(32),
   });
   const tombstonePath = `${lockPath}.stale-${staleOwner.token}`;
-  fs.renameSync(lockPath, tombstonePath);
-  const newerOwner = writeRegistryLockDirectory(lockPath, {
+  const newerOwner = {
+    schema: 'taiji.docx.registry-lock.v1',
     pid: process.pid,
     token: 'b'.repeat(32),
-  });
+  };
+  const originalRenameSync = fs.renameSync;
+  let injectedNewGeneration = false;
+  t.after(() => { fs.renameSync = originalRenameSync; });
+  fs.renameSync = (sourcePath, targetPath, ...args) => {
+    if (
+      !injectedNewGeneration &&
+      path.resolve(String(sourcePath)) === path.resolve(lockPath) &&
+      path.resolve(String(targetPath)) === path.resolve(tombstonePath)
+    ) {
+      injectedNewGeneration = true;
+      originalRenameSync(sourcePath, targetPath, ...args);
+      writeRegistryLockDirectory(lockPath, newerOwner);
+    }
+    return originalRenameSync(sourcePath, targetPath, ...args);
+  };
 
   const quarantined = quarantineStaleRegistryLock(lockPath, staleOwner);
 
+  assert.equal(injectedNewGeneration, true);
   assert.equal(quarantined, false);
   assert.deepEqual(readRegistryLockOwner(lockPath), newerOwner);
   assert.deepEqual(readRegistryLockOwner(tombstonePath), staleOwner);

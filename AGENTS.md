@@ -17,6 +17,8 @@
 
 凡涉及 Linux/Kylin/UOS 打包、安装脚本、桌面壳启动链、诊断脚本、运行时目录调整、离线交付或用户安装包去 Hermes 化，必须先显式调用 `$taiji-kylin-packaging`，并以该 skill 中的 release gate、目标机验收命令和已确认 Kylin 离线交付经验为准；本文件不重复维护打包细则。
 
+项目内已验证的环境边界、故障矩阵、断网演练和真机验收清单统一维护在 `docs/runbooks/taiji-kylin-uos-offline-delivery.md`；后续交付变更应同步更新该手册和当轮验证台账。
+
 ## 前端 UX QA gate
 
 任何涉及前端、UI、UX、页面、组件、布局、样式、交互、表单、列表、表格、导航、弹窗、可访问性、浏览器测试、截图、视觉优化或功能完整性的任务，都必须显式使用 `$frontend-ux-qa`。

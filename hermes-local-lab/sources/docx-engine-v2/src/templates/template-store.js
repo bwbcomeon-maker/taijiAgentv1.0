@@ -7,6 +7,7 @@ const DEFAULT_ENGINE_ROOT = path.resolve(__dirname, '../..');
 const REGISTRY_FILE_NAME = 'template-registry.json';
 const LOCK_WAIT_MS = 25;
 const LOCK_TIMEOUT_MS = 5000;
+const LOCK_TIMEOUT_NS = BigInt(LOCK_TIMEOUT_MS) * 1_000_000n;
 const LOCK_OWNER_FILE_NAME = 'owner.json';
 const LOCK_OWNER_SCHEMA = 'taiji.docx.registry-lock.v1';
 
@@ -560,7 +561,7 @@ function isPathWithin(rootDir, targetPath) {
 
 function withRegistryLock(store, operation) {
   const lockPath = `${store.registryPath}.lock`;
-  const startedAt = Date.now();
+  const startedAt = process.hrtime.bigint();
   const candidate = prepareRegistryLockCandidate(lockPath);
   let acquired = false;
 
@@ -569,15 +570,13 @@ function withRegistryLock(store, operation) {
       const existingOwner = readRegistryLockOwner(lockPath);
       if (existingOwner === null) {
         acquired = publishRegistryLockCandidate(candidate, lockPath);
-        if (acquired) {
-          break;
-        }
-        continue;
+      } else if (!isProcessAlive(existingOwner.pid)) {
+        quarantineStaleRegistryLock(lockPath, existingOwner);
       }
-      if (!isProcessAlive(existingOwner.pid) && quarantineStaleRegistryLock(lockPath, existingOwner)) {
-        continue;
+      if (acquired) {
+        break;
       }
-      if (Date.now() - startedAt >= LOCK_TIMEOUT_MS) {
+      if (process.hrtime.bigint() - startedAt >= LOCK_TIMEOUT_NS) {
         throw new Error(`Timed out waiting for template registry lock: ${lockPath}`);
       }
       waitSynchronously(LOCK_WAIT_MS);
