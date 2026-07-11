@@ -8745,7 +8745,7 @@ function _showAgentHealthAlert(payload){
   const details=$('agentHealthDetails');
   if(!banner) return;
   if(title) title.textContent='太极智能体本地服务无响应';
-  if(details) details.textContent='本地任务与对话服务心跳异常。恢复前，消息投递和计划任务自动执行可能受影响。';
+  if(details) details.textContent='本地任务与对话服务心跳异常。恢复前，消息投递和定时任务自动执行可能受影响。';
   banner.hidden=false;
   banner.classList.add('visible');
 }

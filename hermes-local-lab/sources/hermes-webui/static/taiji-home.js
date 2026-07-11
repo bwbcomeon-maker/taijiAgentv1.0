@@ -4,7 +4,7 @@
 
   const PANEL_LABELS={
     chat:'聊天',
-    tasks:'任务',
+    tasks:'定时任务',
     kanban:'看板',
     writing:'专家团',
     skills:'技能',
@@ -18,7 +18,7 @@
   };
   const SECONDARY_PANEL_CONFIG={
     chat:{title:'最近会话'},
-    tasks:{title:'计划任务',panelId:'panelTasks'},
+    tasks:{title:'定时任务',panelId:'panelTasks'},
     kanban:{title:'看板',panelId:'panelKanban'},
     writing:{title:'专家团',panelId:'panelWriting'},
     skills:{title:'技能',panelId:'panelSkills'},

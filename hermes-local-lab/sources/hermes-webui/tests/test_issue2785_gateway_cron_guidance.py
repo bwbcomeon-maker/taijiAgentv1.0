@@ -25,7 +25,7 @@ def test_cron_panel_loads_gateway_status_for_scheduling_guidance():
     assert "本地任务服务未启用" in panels
     assert "本地任务服务未运行" in panels
     assert "本地任务服务状态暂不可确认" in panels
-    assert "计划任务自动执行依赖本地任务服务" in panels
+    assert "定时任务自动执行依赖本地任务服务" in panels
     assert "Gateway not configured" not in panels
     assert "Gateway not running" not in panels
     assert "scheduled jobs require the Hermes gateway daemon" not in panels
