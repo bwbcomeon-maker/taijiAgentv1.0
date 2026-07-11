@@ -309,7 +309,9 @@ function assertSafeRegularFile(filePath, label = 'File') {
     stat = fs.lstatSync(filePath);
   } catch (error) {
     if (error.code === 'ENOENT') {
-      throw new Error(`${label} not found: ${filePath}`);
+      const missingError = new Error(`${label} not found: ${filePath}`);
+      missingError.code = 'ENOENT';
+      throw missingError;
     }
     throw error;
   }
@@ -572,7 +574,7 @@ function withRegistryLock(store, operation) {
       try {
         assertSafeRegularFile(lockPath, 'Template registry lock');
       } catch (lockError) {
-        if (!fs.existsSync(lockPath)) {
+        if (lockError.code === 'ENOENT' || !fs.existsSync(lockPath)) {
           continue;
         }
         throw lockError;

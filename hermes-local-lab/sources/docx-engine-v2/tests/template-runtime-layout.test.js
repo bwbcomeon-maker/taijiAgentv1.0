@@ -481,6 +481,58 @@ test('concurrent first-use initialization atomically produces one valid runtime 
   );
 });
 
+test('first-use initialization retries when a vanished lock is replaced before inspection', (t) => {
+  const root = makeTempRoot(t);
+  const seedRoot = makeSeed(root);
+  const runtimeRoot = path.join(root, 'runtime-home');
+  const lockPath = path.join(runtimeRoot, 'template-registry.json.lock');
+  const originalOpenSync = fs.openSync;
+  const originalLstatSync = fs.lstatSync;
+  const originalExistsSync = fs.existsSync;
+  let simulatedCollision = false;
+  let simulatedMissingLock = false;
+
+  t.after(() => {
+    fs.openSync = originalOpenSync;
+    fs.lstatSync = originalLstatSync;
+    fs.existsSync = originalExistsSync;
+  });
+  fs.openSync = (filePath, ...args) => {
+    if (filePath === lockPath && !simulatedCollision) {
+      simulatedCollision = true;
+      const error = new Error(`simulated lock collision: ${lockPath}`);
+      error.code = 'EEXIST';
+      throw error;
+    }
+    return originalOpenSync(filePath, ...args);
+  };
+  fs.lstatSync = (filePath, ...args) => {
+    if (filePath === lockPath && simulatedCollision && !simulatedMissingLock) {
+      simulatedMissingLock = true;
+      const error = new Error(`simulated vanished lock: ${lockPath}`);
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return originalLstatSync(filePath, ...args);
+  };
+  fs.existsSync = (filePath) => {
+    if (filePath === lockPath && simulatedMissingLock) {
+      return true;
+    }
+    return originalExistsSync(filePath);
+  };
+
+  const templates = listTemplates({ builtinRootDir: seedRoot, runtimeRootDir: runtimeRoot });
+
+  assert.equal(simulatedCollision, true);
+  assert.equal(simulatedMissingLock, true);
+  assert.deepEqual(templates.map((template) => template.id), [
+    'general-proposal',
+    'meeting-minutes',
+  ]);
+  assert.equal(originalExistsSync(lockPath), false);
+});
+
 test('concurrent replacements use a persistent registry revision CAS so at most one succeeds', async (t) => {
   const root = makeTempRoot(t);
   const seedRoot = makeSeed(root, ['general-proposal']);
