@@ -188,7 +188,9 @@ test('install-template CLI replaces an installed template only with explicit fla
     'Updated Installed Template'
   );
   assert.equal(readJson(payload.installReportPath).action, 'replaced');
-  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
-    { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
-  ]);
+  const registryEntry = readJson(path.join(tempRoot, 'template-registry.json')).installed[0];
+  assert.equal(registryEntry.templateId, 'custom-proposal');
+  assert.equal(registryEntry.path, 'installed/custom-proposal');
+  assert.match(registryEntry.contentDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.match(registryEntry.revisionDigest, /^sha256:[a-f0-9]{64}$/);
 });

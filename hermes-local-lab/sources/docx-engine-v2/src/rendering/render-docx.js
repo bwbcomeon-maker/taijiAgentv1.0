@@ -4,6 +4,8 @@ const path = require('node:path');
 const Ajv2020 = require('ajv/dist/2020');
 const carbone = require('carbone');
 
+const { assertSafeDirectoryTree } = require('../templates/template-store');
+
 async function renderDocx({ templatePackage, renderPlan, outputPath } = {}) {
   if (!templatePackage) {
     throw new Error('templatePackage is required.');
@@ -20,7 +22,9 @@ async function renderDocx({ templatePackage, renderPlan, outputPath } = {}) {
     throw new Error('templatePackage.templatePath is required.');
   }
 
+  assertSafeDirectoryTree(templatePackage.packageDir, 'Template render package');
   const templateData = buildTemplateData({ templatePackage, renderPlan });
+  assertSafeDirectoryTree(templatePackage.packageDir, 'Template render package');
   validateTemplateData({ templatePackage, templateData });
   const rendered = await renderCarbone(templatePath, templateData);
   await fsp.mkdir(path.dirname(outputPath), { recursive: true });

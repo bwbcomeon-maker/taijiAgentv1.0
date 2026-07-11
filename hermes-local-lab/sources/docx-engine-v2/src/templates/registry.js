@@ -1,9 +1,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
+const {
+  assertSafeDirectoryTree,
+  computeTemplateContentDigest,
+  readJsonRegularFile,
+  resolveContainedFilePath,
+  resolveRegistryPackageDir,
+  loadTemplateRegistry,
+} = require('./template-store');
 
 function resolveTemplateFiles(manifest) {
   return {
@@ -17,17 +22,17 @@ function resolveTemplateFiles(manifest) {
   };
 }
 
-function loadTemplatePackage({ rootDir, registryPath, registryEntry }) {
+function loadTemplatePackage({ store, registryPath, registryEntry }) {
   const id = registryEntry.templateId || registryEntry.id;
   if (!id) {
     throw new Error(`Template registry entry is missing templateId: ${JSON.stringify(registryEntry)}`);
   }
 
   const registrySource = registryEntry.registrySource || 'builtin';
-  const relativePath = registryEntry.path || path.join('templates', id);
-  const packageDir = path.resolve(rootDir, relativePath);
+  const packageDir = resolveRegistryPackageDir({ store, registryEntry, registrySource });
+  assertSafeDirectoryTree(packageDir, `Template package ${id}`);
   const manifestPath = path.join(packageDir, 'manifest.json');
-  const manifest = readJson(manifestPath);
+  const manifest = readJsonRegularFile(manifestPath, `Template manifest ${id}`);
   const files = resolveTemplateFiles(manifest);
 
   const template = {
@@ -41,12 +46,12 @@ function loadTemplatePackage({ rootDir, registryPath, registryEntry }) {
     files,
     manifest,
     manifestPath,
-    templatePath: path.join(packageDir, files.template),
-    schemaPath: path.join(packageDir, files.schema),
-    promptPath: path.join(packageDir, files.prompt),
-    samplePath: path.join(packageDir, files.sample),
-    dataAdapterPath: path.join(packageDir, files.dataAdapter),
-    adapterSamplePath: path.join(packageDir, files.adapterSample),
+    templatePath: resolveContainedFilePath(packageDir, files.template, `Template DOCX ${id}`),
+    schemaPath: resolveContainedFilePath(packageDir, files.schema, `Template schema ${id}`),
+    promptPath: resolveContainedFilePath(packageDir, files.prompt, `Template prompt ${id}`),
+    samplePath: resolveContainedFilePath(packageDir, files.sample, `Template sample ${id}`),
+    dataAdapterPath: resolveContainedFilePath(packageDir, files.dataAdapter, `Template data adapter ${id}`),
+    adapterSamplePath: resolveContainedFilePath(packageDir, files.adapterSample, `Template adapter sample ${id}`),
   };
 
   if (registrySource === 'installed') {
@@ -54,14 +59,19 @@ function loadTemplatePackage({ rootDir, registryPath, registryEntry }) {
     const installReport = readInstalledTemplateReport({ installReportPath, templateId: id, registryEntry });
     template.installReportPath = installReportPath;
     template.installReport = installReport;
+    if (
+      registryEntry.contentDigest &&
+      computeTemplateContentDigest(packageDir) !== registryEntry.contentDigest
+    ) {
+      throw new Error(`Installed template content digest mismatch: ${id}`);
+    }
   }
 
   return template;
 }
 
-function listTemplates({ rootDir = path.resolve(__dirname, '../..') } = {}) {
-  const registryPath = path.join(rootDir, 'template-registry.json');
-  const registry = readJson(registryPath);
+function listTemplates(options = {}) {
+  const { store, registryPath, registry } = loadTemplateRegistry(options);
   const registryEntries = [
     ...sourceEntries(registry.builtin, 'builtin'),
     ...sourceEntries(registry.installed, 'installed'),
@@ -69,7 +79,7 @@ function listTemplates({ rootDir = path.resolve(__dirname, '../..') } = {}) {
   assertUniqueTemplateIds(registryEntries);
 
   return registryEntries.map((registryEntry) =>
-    loadTemplatePackage({ rootDir, registryPath, registryEntry })
+    loadTemplatePackage({ store, registryPath, registryEntry })
   );
 }
 
@@ -108,7 +118,7 @@ function readInstalledTemplateReport({ installReportPath, templateId, registryEn
     throw new Error(`Installed template install report not found: ${installReportPath}`);
   }
 
-  const installReport = readJson(installReportPath);
+  const installReport = readJsonRegularFile(installReportPath, `Installed template report ${templateId}`);
   assertInstalledTemplateReport({ installReport, templateId, registryEntry });
   return installReport;
 }
@@ -129,6 +139,14 @@ function assertInstalledTemplateReport({ installReport, templateId, registryEntr
   }
   if (installReport.registryEntry?.path !== registryEntry.path) {
     failures.push(`registryEntry.path must be ${registryEntry.path || ''}`);
+  }
+  for (const digestField of ['contentDigest', 'revisionDigest']) {
+    if (
+      registryEntry[digestField] &&
+      installReport.registryEntry?.[digestField] !== registryEntry[digestField]
+    ) {
+      failures.push(`registryEntry.${digestField} must match registry`);
+    }
   }
   for (const checkId of ['template_package', 'sample_render', 'registry_entry']) {
     if (!hasPassedCheck(installReport.checks, checkId)) {

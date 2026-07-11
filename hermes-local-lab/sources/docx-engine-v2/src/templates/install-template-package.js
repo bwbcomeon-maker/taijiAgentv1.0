@@ -3,10 +3,22 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { renderTemplateSample } = require('./render-template-sample');
+const {
+  assertSafeDirectoryTree,
+  assertSafeInstallTarget,
+  computeTemplateContentDigest,
+  loadTemplateRegistry,
+  nextTemplateRevisionDigest,
+  readJsonRegularFile,
+  resolveContainedFilePath,
+  updateTemplateRegistry,
+} = require('./template-store');
 const { validateTemplatePackage } = require('./validate-template-package');
 
 async function installTemplatePackage({
   rootDir = path.resolve(__dirname, '../..'),
+  builtinRootDir,
+  runtimeRootDir,
   packageDir,
   installRoot = 'installed',
   replace = false,
@@ -15,10 +27,10 @@ async function installTemplatePackage({
     throw new Error('packageDir is required.');
   }
 
-  const absoluteRootDir = path.resolve(rootDir);
+  const storeOptions = { rootDir, builtinRootDir, runtimeRootDir };
+  const { store, registryPath, registry } = loadTemplateRegistry(storeOptions);
+  const absoluteRootDir = store.runtimeRootDir;
   const absolutePackageDir = path.resolve(packageDir);
-  const registryPath = path.join(absoluteRootDir, 'template-registry.json');
-  const registry = readRegistry(registryPath);
   const sourceTemplate = loadPackageFromDir({
     packageDir: absolutePackageDir,
     registryPath,
@@ -46,47 +58,94 @@ async function installTemplatePackage({
   const targetDir = path.isAbsolute(installPath)
     ? path.resolve(installPath)
     : path.resolve(absoluteRootDir, relativeInstallPath);
-  assertInstallTargetWithinRoot(targetDir, path.resolve(absoluteRootDir, installRoot));
+  const absoluteInstallRoot = path.resolve(absoluteRootDir, installRoot);
+  assertSafeInstallTarget({ store, installRootDir: absoluteInstallRoot, targetDir });
   if (installedIndex < 0) {
     assertTargetAvailable(targetDir);
   }
 
-  const validation = validateTemplatePackage(sourceTemplate);
-  if (!validation.ok) {
-    throw new Error(`Template package validation failed: ${JSON.stringify(validation.errors)}`);
-  }
-  const sampleRender = await assertTemplateSampleRenders(absolutePackageDir);
-
-  const registryEntry = { ...(existingEntry || {}), templateId, path: relativeInstallPath };
-  if (installedIndex >= 0) {
-    installedEntries[installedIndex] = registryEntry;
-  } else {
-    installedEntries.push(registryEntry);
-  }
-
   const action = installedIndex >= 0 ? 'replaced' : 'installed';
   const installReportPath = path.join(targetDir, 'template-install-report.json');
-  const installReport = buildInstallReport({
-    action,
-    templateId,
-    targetDir,
-    sourcePackageDir: absolutePackageDir,
-    registryPath,
-    registryEntry,
-    validation,
-    sampleRender,
-  });
-
-  const preparedDir = prepareInstallDirectory({
+  assertSafeInstallTarget({ store, installRootDir: absoluteInstallRoot, targetDir });
+  const preparedDir = prepareInstallSnapshot({
     sourceDir: absolutePackageDir,
     targetDir,
-    installReport,
   });
   let committedDirectory = null;
+  let registryEntry = null;
   try {
-    committedDirectory = commitPreparedDirectory({ preparedDir, targetDir });
-    registry.installed = installedEntries;
-    writeJson(registryPath, registry);
+    assertSafeDirectoryTree(absolutePackageDir, 'Template package source');
+    assertSafeDirectoryTree(preparedDir, 'Prepared template snapshot');
+    const preparedTemplate = loadPackageFromDir({
+      packageDir: preparedDir,
+      registryPath,
+      registrySource: 'incoming',
+    });
+    const validation = validateTemplatePackage(preparedTemplate);
+    assertSafeDirectoryTree(preparedDir, 'Prepared template snapshot');
+    if (!validation.ok) {
+      throw new Error(`Template package validation failed: ${JSON.stringify(validation.errors)}`);
+    }
+    const sampleRender = await assertTemplateSampleRenders(preparedDir);
+    assertSafeDirectoryTree(absolutePackageDir, 'Template package source');
+    assertSafeDirectoryTree(preparedDir, 'Prepared template snapshot');
+
+    const contentDigest = computeTemplateContentDigest(preparedDir);
+    const revisionDigest = nextTemplateRevisionDigest({
+      previousEntry: existingEntry,
+      contentDigest,
+    });
+    registryEntry = {
+      ...(existingEntry || {}),
+      templateId,
+      path: relativeInstallPath,
+      contentDigest,
+      revisionDigest,
+    };
+    const installReport = buildInstallReport({
+      action,
+      templateId,
+      targetDir,
+      sourcePackageDir: absolutePackageDir,
+      registryPath,
+      registryEntry,
+      validation,
+      sampleRender,
+    });
+    writeJson(path.join(preparedDir, 'template-install-report.json'), installReport);
+    assertSafeDirectoryTree(absolutePackageDir, 'Template package source');
+    assertSafeDirectoryTree(preparedDir, 'Prepared template snapshot');
+    assertSafeInstallTarget({ store, installRootDir: absoluteInstallRoot, targetDir });
+    updateTemplateRegistry(storeOptions, ({ store: currentStore, registry: currentRegistry }) => {
+      assertSafeInstallTarget({
+        store: currentStore,
+        installRootDir: absoluteInstallRoot,
+        targetDir,
+      });
+      assertRegistryStillInstallable({
+        registry: currentRegistry,
+        templateId,
+        replace,
+        expectedExistingEntry: existingEntry,
+      });
+      if (!existingEntry) {
+        assertTargetAvailable(targetDir);
+      }
+      assertSafeDirectoryTree(preparedDir, 'Prepared template snapshot');
+      committedDirectory = commitPreparedDirectory({ preparedDir, targetDir });
+      const currentInstalledEntries = Array.isArray(currentRegistry.installed)
+        ? [...currentRegistry.installed]
+        : [];
+      const currentInstalledIndex = currentInstalledEntries.findIndex(
+        (entry) => (entry.templateId || entry.id) === templateId
+      );
+      if (currentInstalledIndex >= 0) {
+        currentInstalledEntries[currentInstalledIndex] = registryEntry;
+      } else {
+        currentInstalledEntries.push(registryEntry);
+      }
+      currentRegistry.installed = currentInstalledEntries;
+    });
   } catch (error) {
     if (committedDirectory) {
       rollbackCommittedDirectory({ targetDir, ...committedDirectory });
@@ -108,13 +167,14 @@ async function installTemplatePackage({
   };
 }
 
-function prepareInstallDirectory({ sourceDir, targetDir, installReport }) {
+function prepareInstallSnapshot({ sourceDir, targetDir }) {
   const tempDir = createSiblingTempDir(targetDir, 'new');
   fs.mkdirSync(path.dirname(targetDir), { recursive: true });
   fs.rmSync(tempDir, { recursive: true, force: true });
   try {
     fs.cpSync(sourceDir, tempDir, { recursive: true, errorOnExist: true });
-    writeJson(path.join(tempDir, 'template-install-report.json'), installReport);
+    assertSafeDirectoryTree(sourceDir, 'Template package source');
+    assertSafeDirectoryTree(tempDir, 'Prepared template snapshot');
     return tempDir;
   } catch (error) {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -232,8 +292,9 @@ function sanitizeChecks(checks) {
 }
 
 function loadPackageFromDir({ packageDir, registryPath = '', registrySource = 'installed' }) {
+  assertSafeDirectoryTree(packageDir, 'Template package');
   const manifestPath = path.join(packageDir, 'manifest.json');
-  const manifest = readJson(manifestPath);
+  const manifest = readJsonRegularFile(manifestPath, 'Template manifest');
   const files = resolveTemplateFiles(manifest);
   const templateId = manifest.id;
 
@@ -248,12 +309,12 @@ function loadPackageFromDir({ packageDir, registryPath = '', registrySource = 'i
     files,
     manifest,
     manifestPath,
-    templatePath: path.join(packageDir, files.template),
-    schemaPath: path.join(packageDir, files.schema),
-    promptPath: path.join(packageDir, files.prompt),
-    samplePath: path.join(packageDir, files.sample),
-    dataAdapterPath: path.join(packageDir, files.dataAdapter),
-    adapterSamplePath: path.join(packageDir, files.adapterSample),
+    templatePath: resolveContainedFilePath(packageDir, files.template, 'Template DOCX'),
+    schemaPath: resolveContainedFilePath(packageDir, files.schema, 'Template schema'),
+    promptPath: resolveContainedFilePath(packageDir, files.prompt, 'Template prompt'),
+    samplePath: resolveContainedFilePath(packageDir, files.sample, 'Template sample'),
+    dataAdapterPath: resolveContainedFilePath(packageDir, files.dataAdapter, 'Template data adapter'),
+    adapterSamplePath: resolveContainedFilePath(packageDir, files.adapterSample, 'Template adapter sample'),
   };
 }
 
@@ -269,15 +330,29 @@ function resolveTemplateFiles(manifest) {
   };
 }
 
-function readRegistry(registryPath) {
-  if (!fs.existsSync(registryPath)) {
-    throw new Error(`template-registry.json not found: ${registryPath}`);
-  }
-  return readJson(registryPath);
-}
-
 function findRegistryEntry(entries, templateId) {
   return (Array.isArray(entries) ? entries : []).find((entry) => (entry.templateId || entry.id) === templateId) || null;
+}
+
+function assertRegistryStillInstallable({
+  registry,
+  templateId,
+  replace,
+  expectedExistingEntry,
+}) {
+  if (findRegistryEntry(registry.builtin, templateId)) {
+    if (replace) {
+      throw new Error(`Cannot replace builtin template: ${templateId}`);
+    }
+    throw new Error(`Template already exists: ${templateId}`);
+  }
+  const currentEntry = findRegistryEntry(registry.installed, templateId);
+  if (!expectedExistingEntry && currentEntry) {
+    throw new Error(`Template already exists: ${templateId}`);
+  }
+  if (expectedExistingEntry && JSON.stringify(currentEntry) !== JSON.stringify(expectedExistingEntry)) {
+    throw new Error(`Template registry changed during installation: ${templateId}`);
+  }
 }
 
 function assertTargetAvailable(targetDir) {
@@ -285,16 +360,6 @@ function assertTargetAvailable(targetDir) {
     return;
   }
   throw new Error(`Installed template directory already exists: ${targetDir}`);
-}
-
-function assertInstallTargetWithinRoot(targetDir, rootDir) {
-  const resolvedTarget = path.resolve(targetDir);
-  const resolvedRoot = path.resolve(rootDir);
-  const relative = path.relative(resolvedRoot, resolvedTarget);
-  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
-    return;
-  }
-  throw new Error(`Installed template path is outside the managed installed directory: ${resolvedTarget}`);
 }
 
 function assertSafeTemplateId(templateId) {

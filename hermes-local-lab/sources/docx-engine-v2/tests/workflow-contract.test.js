@@ -178,9 +178,13 @@ test('runDocumentJob rejects an installed template that was modified after insta
   assert.equal(result.ok, false);
   assert.equal(result.code, 'validation_failed');
   assert.equal(result.stage, 'validation');
-  assert.match(result.message, /Template package validation failed|template_docx_invalid/);
+  assert.match(result.message, /Template package validation failed|template_docx_invalid|content digest mismatch/);
   assert.equal(result.job.status, 'failed');
-  assert.ok(result.job.failures.some((failure) => /template_docx_invalid|Template DOCX/.test(failure)));
+  assert.ok(
+    result.job.failures.some((failure) =>
+      /template_docx_invalid|Template DOCX|content digest mismatch/.test(failure)
+    )
+  );
   assert.equal(result.jobManifestPath, path.join(deliveryDir, 'job.manifest.json'));
   assert.equal(result.failureReportPath, path.join(deliveryDir, 'failure-report.json'));
 

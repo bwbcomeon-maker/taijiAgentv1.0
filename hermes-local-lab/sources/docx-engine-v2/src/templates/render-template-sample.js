@@ -3,6 +3,7 @@ const path = require('node:path');
 
 const { renderDocx } = require('../rendering/render-docx');
 const { inspectRenderedDocx } = require('../validation/docx-render-inspection');
+const { assertSafeDirectoryTree } = require('./template-store');
 const { validateTemplatePackage } = require('./validate-template-package');
 
 async function renderTemplateSample({
@@ -27,6 +28,7 @@ async function renderTemplateSample({
   if (!validation.ok) {
     throw new Error(`Template package validation failed: ${JSON.stringify(validation.errors)}`);
   }
+  assertSafeDirectoryTree(absolutePackageDir, 'Template sample package');
 
   const renderPlan = readJson(templatePackage.adapterSamplePath);
   fs.mkdirSync(absoluteOutDir, { recursive: true });
@@ -36,6 +38,7 @@ async function renderTemplateSample({
     renderPlan,
     outputPath: documentPath,
   });
+  assertSafeDirectoryTree(absolutePackageDir, 'Template sample package');
   const docxInspection = inspectRenderedDocx({ docxPath: documentPath, label: 'sample.docx' });
 
   const report = {

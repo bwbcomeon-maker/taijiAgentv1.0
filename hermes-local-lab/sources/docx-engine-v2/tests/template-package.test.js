@@ -231,7 +231,11 @@ test('installTemplatePackage validates, smoke-renders, copies, and registers a n
     ['general-proposal', 'custom-proposal']
   );
   const registry = readJson(path.join(tempRoot, 'template-registry.json'));
-  assert.deepEqual(registry.installed, [{ templateId: 'custom-proposal', path: 'installed/custom-proposal' }]);
+  assert.equal(registry.installed.length, 1);
+  assert.equal(registry.installed[0].templateId, 'custom-proposal');
+  assert.equal(registry.installed[0].path, 'installed/custom-proposal');
+  assert.match(registry.installed[0].contentDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.match(registry.installed[0].revisionDigest, /^sha256:[a-f0-9]{64}$/);
 });
 
 test('installTemplatePackage rejects duplicate template ids before copying files', async (t) => {
@@ -302,9 +306,11 @@ test('installTemplatePackage replaces an existing installed template only when r
   assert.equal(readJson(path.join(installedDir, 'manifest.json')).name, 'Updated Custom Proposal');
   assert.equal(fs.existsSync(path.join(installedDir, 'old-only.txt')), false);
   assert.equal(readJson(result.installReportPath).action, 'replaced');
-  assert.deepEqual(readJson(path.join(tempRoot, 'template-registry.json')).installed, [
-    { templateId: 'custom-proposal', path: 'installed/custom-proposal' },
-  ]);
+  const registryEntry = readJson(path.join(tempRoot, 'template-registry.json')).installed[0];
+  assert.equal(registryEntry.templateId, 'custom-proposal');
+  assert.equal(registryEntry.path, 'installed/custom-proposal');
+  assert.match(registryEntry.contentDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.match(registryEntry.revisionDigest, /^sha256:[a-f0-9]{64}$/);
   assert.equal(getTemplatePackage('custom-proposal', { rootDir: tempRoot }).manifest.name, 'Updated Custom Proposal');
 });
 

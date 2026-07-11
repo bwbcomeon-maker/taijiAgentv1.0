@@ -126,6 +126,41 @@ Do not edit `template-registry.json` by hand. Installed templates must have
 `template-install-report.json`, and runtime registry loading rejects installed
 templates whose report is missing or disagrees with the registry entry.
 
+### Packaged runtime layout
+
+Source checkouts keep the existing single-root layout when no runtime variables
+are set. A packaged installation must point the engine at its immutable builtin
+seed and a writable runtime home:
+
+```bash
+export TAIJI_DOCX_BUILTIN_ROOT=/opt/taiji-agent/runtime/docx-engine-v2
+export TAIJI_DOCX_RUNTIME_HOME="$HOME/.local/share/taiji-agent/docx-engine-v2"
+```
+
+`TAIJI_DOCX_RUNTIME_HOME` is the explicit writable location. If it is omitted,
+the engine uses `$TAIJI_RUNTIME_HOME/docx-engine-v2`; when only the builtin root
+is configured, it falls back to
+`$XDG_DATA_HOME/taiji-agent/docx-engine-v2` (or the equivalent directory under
+`~/.local/share`). The builtin registry and `templates/` tree are read-only.
+The writable home contains `template-registry.json` and `installed/`.
+
+On first use, the writable registry is initialized atomically from the builtin
+registry. Later releases append newly seeded builtin ids without replacing
+existing entries or installed template files. If an installed template id
+collides with a builtin id added by an upgrade, the installed template wins.
+Registry files and template packages containing path traversal, symbolic links,
+or non-regular files are rejected. `list-templates`, `install-template`,
+`run-job`, scaffolding, and replay all use the same runtime routing, so none of
+those paths needs to write under `/opt`.
+
+Installation validates and smoke-renders a managed snapshot rather than the
+mutable incoming directory, then rescans both source and snapshot before the
+atomic commit. Installed registry entries persist `contentDigest` and
+`revisionDigest`; replacement uses the revision as a compare-and-swap token so
+concurrent stale replacements fail instead of silently overwriting each other.
+Explicit runtime roots reject symbolic links in any existing path ancestor;
+the automatic XDG/home fallback remains supported.
+
 ## Delivery Package
 
 A successful render writes a delivery directory containing:
