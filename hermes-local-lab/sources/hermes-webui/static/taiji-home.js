@@ -18,7 +18,7 @@
   };
   const SECONDARY_PANEL_CONFIG={
     chat:{title:'最近会话'},
-    tasks:{title:'定时任务',panelId:'panelTasks'},
+    tasks:{title:'定时任务',i18nKey:'scheduled_jobs',panelId:'panelTasks'},
     kanban:{title:'看板',panelId:'panelKanban'},
     writing:{title:'专家团',panelId:'panelWriting'},
     skills:{title:'技能',panelId:'panelSkills'},
@@ -103,6 +103,14 @@
   function secondaryToggleLabel(panel){
     if(panel==='chat') return '会话';
     const config=SECONDARY_PANEL_CONFIG[panel]||{};
+    return localizedPanelTitle(panel,config);
+  }
+
+  function localizedPanelTitle(panel,config=SECONDARY_PANEL_CONFIG[panel]||{}){
+    if(config.i18nKey&&typeof t==='function'){
+      const translated=t(config.i18nKey);
+      if(translated&&translated!==config.i18nKey) return translated;
+    }
     return config.title||PANEL_LABELS[panel]||'二栏';
   }
 
@@ -220,8 +228,9 @@
     if(!aside||!host) return;
     const key=visiblePanel(panel);
     const config=SECONDARY_PANEL_CONFIG[key];
+    const title=localizedPanelTitle(key,config);
     aside.dataset.secondaryPanel=key;
-    aside.setAttribute('aria-label',key==='chat'?'最近会话':config.title+'子功能');
+    aside.setAttribute('aria-label',key==='chat'?'最近会话':title+'子功能');
     if(key==='chat'){
       returnHostedPanels();
       host.replaceChildren();
@@ -230,14 +239,14 @@
     const panelEl=$(config.panelId);
     if(!panelEl){
       returnHostedPanels();
-      host.innerHTML=`<div class="taiji-secondary-empty"><h2>${escapeHtml(config.title)}</h2><p>该功能暂无可用子功能。</p></div>`;
+      host.innerHTML=`<div class="taiji-secondary-empty"><h2>${escapeHtml(title)}</h2><p>该功能暂无可用子功能。</p></div>`;
       return;
     }
     ensurePanelPlaceholder(panelEl);
     returnHostedPanels(panelEl.id);
     if(panelEl.parentNode!==host) host.appendChild(panelEl);
     panelEl.classList.add('active','taiji-secondary-active-view');
-    titleSecondaryPanel(panelEl,config.title);
+    titleSecondaryPanel(panelEl,title);
   }
 
   function mountRealWorkspace(){
