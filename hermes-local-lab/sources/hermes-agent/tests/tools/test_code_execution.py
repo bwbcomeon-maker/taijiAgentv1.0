@@ -27,9 +27,13 @@ def _force_local_terminal(monkeypatch):
 
     The module-level assignment above covers import time, but under xdist
     another worker can overwrite os.environ between tests.  monkeypatch
-    ensures each test starts (and ends) with the correct value.
+    ensures each test starts (and ends) with the correct value. These tests
+    exercise sandbox mechanics, so they explicitly opt into the controlled
+    full-security profile; fail-closed defaults are covered separately by
+    test_taiji_security_mode.py.
     """
     monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "full")
 import sys
 import time
 import threading

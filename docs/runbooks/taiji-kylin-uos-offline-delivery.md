@@ -183,6 +183,10 @@ SHA256SUMS.txt
 | 离线仓库看似生成，但依赖为空或不闭合 | 手写 Depends 解析和 `apt-rdepends` 不能等价于干净目标机上的 apt 求解 | 分开解析 Depends/Pre-Depends；用空 dpkg status 的 apt download-only 求解；按实际下载包建索引 | 直接依赖非空、依赖闭包、`Packages`/`Packages.gz`/每个 DEB 摘要一致 | 历史候选 `1d56849a` 生成 187 个索引项并完成断网生命周期；后续源码提交仍须重跑 |
 | 使用 Debian 13 制包或演练会带来 glibc 2.41 和新系统包冲突 | 演练系统比 Kylin V10/glibc 2.31 更新，可能产生假绿或误报依赖冲突 | 固定 Ubuntu 20.04 amd64 兼容基线，并校验镜像 baseline label | manifest 记录 OS、arch、glibc；生产器核对镜像角色和版本 | 仅证明兼容基线，不证明 Kylin 真机 |
 | Linux 签名预检误报“源码包内容与当前 Git HEAD 不一致” | macOS Apple gzip 与 Linux GNU gzip 会把同一 tar 压成不同字节；比较 `.tar.gz` 本身把编码器差异误判为源码漂移 | 仍用当前 Git HEAD 重建确定性 tar，但与源码包解压后的 tar 流逐字节比较 | 不同 gzip 编码器的同一 git archive 必须通过；解压后 tar 增加任意字节必须拒绝 | 在 `15c058b4` 签名前真实暴露；两端解压 tar SHA256 相同后修复 |
+| Linux `execute_code` 报 `OSError: AF_UNIX path too long` | `TAIJI_AGENT_TMP_DIR` 或工作树路径过深；`sockaddr_un.sun_path` 按编码字节计，Linux 约 108 B，旧逻辑只处理 Darwin 长路径 | 脚本和数据继续留在 Taiji 临时目录；仅 RPC socket 放入随机 owner-only `/tmp/taiji_rpc_*`，目录 `0700`、socket `0600`；POSIX 建立安全 UDS 失败时 fail closed，不降级到无鉴权 TCP | Ubuntu 多字节中文长路径必须成功且退出后无残留；短目录创建失败时必须返回错误且不得打开 AF_INET | Docker Linux release-check 中真实暴露；13 项聚焦测试已覆盖成功和失败路径，最终发布仍以冻结提交重跑为准 |
+| Linux 统一 release-check 的安装仿真大量报“无法读取硬链接计数” | 产品安装脚本正确使用 GNU `stat -c`；测试 fake stat 却调用了 BSD/macOS `/usr/bin/stat -f` | 只把测试桩改为 Python `os.stat().st_nlink` 与 `stat.S_IMODE`，不修改目标机安装脚本 | 同一 31 项安装仿真在 macOS 与 Ubuntu 20.04 必须全部通过 | 两端均已 31/31；该问题属于测试基础设施兼容，不是目标包安装失败 |
+| Linux 统一 release-check 的授权测试报 `node: not found` | 干净 gate clone 的 `PATH` 没有包含制包输入中准备好的固定 Node 工具链 | 在运行源码级门禁前显式检查并加入固定 Node/npm 工具链；不得因为 DEB 已生成而跳过授权和 WebUI 测试 | `command -v node npm` 后再运行完整 root/WebUI gate | 属于门禁环境准备问题，不代表安装态 Node 缺失 |
+| 核心代码执行测试批量返回 `capability_blocked` | 产品默认 restricted 是正确策略，但沙箱机制测试没有显式进入受控 full profile，导致根本未执行被测逻辑 | 机制测试 fixture 显式设置 full；默认拒绝、显式授权和失败关闭继续由独立安全套件验证 | 代码执行机制 131 项通过、3 项平台预期跳过；安全/授权相关 80/80 | 只调整测试前置条件，不放宽产品默认安全模式 |
 | `--network none` 被未启用的 tunnel 设备误报；sudo 提示 hostname 解析失败 | 只按网络节点存在判断；容器 hostname 未进入本地 hosts | 只拒绝启用链路、全局地址和非 loopback route；sudo 前确保本地 hostname 解析 | Docker inspect、网络负向测试和结构化会话记录 | 历史候选 `1d56849a` 已完成断网三阶段；后续源码提交仍须重跑 |
 | 无图形容器执行安装后可能被误写成目标机成功 | CLI 和包状态不能证明 Electron/UKUI | 无图形会话默认失败；仅显式 headless rehearsal 可继续，并强制 `desktop_app_verified=false`、`target_verified=false` | release gate 分开验证离线证据与真机证据 | 目标机仍必须执行 `04` |
 | 普通用户交付目录通过校验后、sudo 安装前可被替换 | 用户可写源文件存在 TOCTOU 窗口 | 复制到 root-owned `/var/tmp` staging 后重校验，再 purge/install | 拒绝 symlink、hardlink、路径穿越、未列入仓库文件和中途替换 | 安装脚本仿真与负向测试覆盖 |
@@ -325,6 +329,8 @@ bash ./03_目标终端_导出诊断报告.sh
 
 候选 `15c058b4` 也完成了 Ubuntu 20.04 amd64 全量制包、187 项离线仓库和 `--network none` 安装→卸载→重装。签名前预检阻止了签名流程，但暴露的不是源码漂移，而是 Apple gzip 与 GNU gzip 的压缩结果不同；两端解压后的原始 git-archive tar SHA256 完全一致。门禁已改为比较解压后的 tar 流。因为门禁代码本身改变了源码身份，`15c058b4` 的 DEB 与离线证据只能保留为历史候选，不能签给后续提交。
 
+候选 `7acea3ef` 随后完成了 Ubuntu 20.04 amd64 制包、断网安装→卸载→重装和离线证据签名，但 Linux 全量门禁又真实暴露了 AF_UNIX 多字节长路径问题和测试桩跨平台问题。修复这些问题会产生新的源码身份，因此 `7acea3ef` 的已签离线证据也只能作为历史演练记录，不能绑定最终冻结提交，更不能替代 Kylin/UOS 桌面 App 证据。
+
 2026-07-11 曾以源码候选 `1d56849a` 在 Ubuntu 20.04 amd64/glibc 2.31 环境完成一次 `00` 制包和最终发布预检。该次 manifest 记录了源码、DEB、Electron、desktop entry、`Packages` 和 `Packages.gz` 摘要，payload contract 与 187 项离线仓库索引通过；随后在 `--network none` 容器中完成安装、验证、卸载和重装，并生成通过预签内容校验的结构化证据。该证据明确记录 `desktop_app_verified=false`、`target_verified=false`，且未作为最终发布完成双证据签名。
 
 这只是历史候选构建证据，不是最终 release：
@@ -347,5 +353,13 @@ bash ./03_目标终端_导出诊断报告.sh
 5. 在本手册故障矩阵中补充稳定经验。
 6. 在当轮验证台账中记录 commit、manifest、命令、结果和未验证项。
 7. 只有跨轮稳定、已真实验证的规则才进入 `AGENTS.md` 或个人 packaging skill；猜测和一次性路径留在验证台账。
+
+发布必须设置一次明确的“源码冻结点”：
+
+1. 先把代码修复、稳定经验、门禁和文档提交完整。
+2. 冻结源码后再执行制包、断网演练、签名和目标机验收。
+3. 签名后不得把当前 commit、manifest 摘要或“最终通过”结果再写回受 Git 跟踪文件；否则源码身份会再次变化，使刚生成的 DEB 和证据立即变成历史候选。
+4. 当前产物的精确 commit、manifest、摘要和签名保存在交付目录证据，以及仓库外 append-only 项目记忆中。
+5. 区分产品缺陷、打包缺陷、演练环境问题和测试桩兼容问题；不得通过削弱生产安装/校验脚本让宿主机专用测试变绿。
 
 现场问题的默认反馈顺序是：自动失败诊断 → `03` 诊断文件/包 → 必要时补截图。不得重新回到“截图一张、猜一个命令、再打一次包”的循环。

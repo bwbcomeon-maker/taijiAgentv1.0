@@ -250,13 +250,12 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
               shift 2
               [ "${1:-}" != "--" ] || shift
               path="${1:?path is required}"
-              links="$(/usr/bin/stat -f '%l' "$path")"
+              read -r links mode < <(python3 -c 'import os, stat, sys; metadata = os.stat(sys.argv[1]); print(metadata.st_nlink, format(stat.S_IMODE(metadata.st_mode), "o"))' "$path")
               case "$format" in
                 '%h')
                   printf '%s\n' "$links"
                   ;;
                 '%u:%g:%a:%h')
-                  mode="$(/usr/bin/stat -f '%Lp' "$path")"
                   printf '0:0:%s:%s\n' "$mode" "$links"
                   ;;
                 *)

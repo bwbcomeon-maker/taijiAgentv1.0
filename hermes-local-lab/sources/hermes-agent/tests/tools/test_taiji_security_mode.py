@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import threading
 import time
 from pathlib import Path
@@ -351,15 +352,69 @@ def test_full_mode_allows_security_sensitive_tools_by_default(monkeypatch):
 
 
 def test_execute_code_uses_taiji_tmp_dir_when_allowed(monkeypatch, tmp_path):
-    taiji_tmp = tmp_path / "taiji-tmp"
+    taiji_tmp = tmp_path / f"taiji-tmp-{'深' * 32}"
     monkeypatch.setenv("TAIJI_SECURITY_MODE", "full")
     monkeypatch.setenv("TAIJI_AGENT_TMP_DIR", str(taiji_tmp))
 
-    from tools.code_execution_tool import execute_code
+    from tools import code_execution_tool
 
-    result = json.loads(execute_code("import os; print(os.path.dirname(__file__))"))
+    created_temp_dirs = []
+    original_mkdtemp = code_execution_tool.tempfile.mkdtemp
+
+    def tracked_mkdtemp(*args, **kwargs):
+        created = Path(original_mkdtemp(*args, **kwargs))
+        created_temp_dirs.append(created)
+        return str(created)
+
+    monkeypatch.setattr(code_execution_tool.tempfile, "mkdtemp", tracked_mkdtemp)
+
+    result = json.loads(code_execution_tool.execute_code("import os; print(os.path.dirname(__file__))"))
 
     assert result["status"] == "success"
     cwd = Path(result["output"].strip())
     assert cwd.parent == taiji_tmp
     assert cwd.name.startswith("hermes_sandbox_")
+    if os.name != "nt":
+        socket_dirs = [path for path in created_temp_dirs if path.name.startswith("taiji_rpc_")]
+        assert len(socket_dirs) == 1
+        expected_socket_root = Path(
+            "/tmp" if os.path.isdir("/tmp") else code_execution_tool.tempfile.gettempdir()
+        )
+        assert socket_dirs[0].parent == expected_socket_root
+        assert not socket_dirs[0].exists()
+    assert all(not path.exists() for path in created_temp_dirs)
+
+
+def test_execute_code_posix_fails_closed_when_short_socket_dir_is_unavailable(monkeypatch, tmp_path):
+    if os.name == "nt":
+        return
+
+    taiji_tmp = tmp_path / f"taiji-tmp-{'深' * 32}"
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "full")
+    monkeypatch.setenv("TAIJI_AGENT_TMP_DIR", str(taiji_tmp))
+
+    from tools import code_execution_tool
+
+    original_mkdtemp = code_execution_tool.tempfile.mkdtemp
+    original_socket = code_execution_tool.socket.socket
+    opened_socket_families = []
+
+    def fail_short_socket_dir(*args, **kwargs):
+        prefix = kwargs.get("prefix", args[0] if args else None)
+        if prefix == "taiji_rpc_":
+            raise OSError("short socket directory unavailable")
+        return original_mkdtemp(*args, **kwargs)
+
+    def tracked_socket(family=socket.AF_INET, *args, **kwargs):
+        opened_socket_families.append(family)
+        return original_socket(family, *args, **kwargs)
+
+    monkeypatch.setattr(code_execution_tool.tempfile, "mkdtemp", fail_short_socket_dir)
+    monkeypatch.setattr(code_execution_tool.socket, "socket", tracked_socket)
+
+    result = json.loads(code_execution_tool.execute_code("print('must not run')"))
+
+    assert result["status"] == "error"
+    assert "secure local RPC socket" in result["error"]
+    assert socket.AF_INET not in opened_socket_families
+    assert not any(taiji_tmp.iterdir())

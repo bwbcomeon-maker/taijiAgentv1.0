@@ -26,8 +26,13 @@ os.environ["TERMINAL_ENV"] = "local"
 
 @pytest.fixture(autouse=True)
 def _force_local_terminal(monkeypatch):
-    """Mirror test_code_execution.py — guarantee local backend under xdist."""
+    """Guarantee the controlled local sandbox profile under xdist.
+
+    The dedicated Taiji security-mode suite owns fail-closed default tests;
+    this module verifies execution-mode mechanics after explicit approval.
+    """
     monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "full")
 
 
 from tools.code_execution_tool import (

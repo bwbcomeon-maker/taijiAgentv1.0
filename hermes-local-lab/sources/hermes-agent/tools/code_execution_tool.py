@@ -35,6 +35,7 @@ import logging
 import os
 import platform
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -1114,10 +1115,12 @@ def execute_code(
 
     # --- Set up temp directory with hermes_tools.py and script.py ---
     taiji_tmp_dir = _local_taiji_temp_dir()
-    tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_", dir=taiji_tmp_dir)
-    # Use the Taiji-controlled temp dir when configured. On macOS, long paths
-    # can exceed the AF_UNIX socket limit, so we fall back to loopback TCP for
-    # the RPC transport while keeping the generated script under taiji_tmp_dir.
+    tmpdir = None
+    # Keep generated code under the Taiji-controlled temp dir. AF_UNIX paths
+    # have a small byte limit (108 on Linux and roughly 104 on macOS), so a
+    # deeply nested user/runtime path cannot safely hold the RPC socket. In
+    # that case, create only the socket in a short owner-only /tmp directory;
+    # the generated code and all other files remain under taiji_tmp_dir.
     #
     # Windows: Python 3.9+ added partial AF_UNIX support but the file-backed
     # variant is flaky across Windows builds (requires Windows 10 1803+,
@@ -1126,15 +1129,10 @@ def execute_code(
     # same ephemeral port, same 1-connection listen queue, same serialized
     # request/response framing.  The generated client reads the transport
     # selector from HERMES_RPC_SOCKET (path vs. ``tcp://host:port``).
-    _sock_tmpdir = taiji_tmp_dir
-    _candidate_sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
-    _use_tcp_rpc = _IS_WINDOWS or (sys.platform == "darwin" and len(_candidate_sock_path) >= 100)
-    if _use_tcp_rpc:
-        sock_path = None  # not used on Windows; TCP endpoint stored below
-        rpc_endpoint = None  # set after bind()
-    else:
-        sock_path = _candidate_sock_path
-        rpc_endpoint = sock_path
+    _sock_dir = None
+    sock_path = None
+    rpc_endpoint = None
+    _use_tcp_rpc = _IS_WINDOWS
 
     tool_call_log: list = []
     tool_call_counter = [0]  # mutable so the RPC thread can increment
@@ -1142,6 +1140,32 @@ def execute_code(
     server_sock = None
 
     try:
+        tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_", dir=taiji_tmp_dir)
+
+        if not _use_tcp_rpc:
+            candidate_sock_path = os.path.join(
+                taiji_tmp_dir,
+                f"taiji_rpc_{uuid.uuid4().hex}.sock",
+            )
+            if len(os.fsencode(candidate_sock_path)) >= 100:
+                try:
+                    short_socket_root = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+                    _sock_dir = tempfile.mkdtemp(prefix="taiji_rpc_", dir=short_socket_root)
+                    os.chmod(_sock_dir, 0o700)
+                    candidate_sock_path = os.path.join(_sock_dir, "rpc.sock")
+                except OSError as exc:
+                    raise RuntimeError(
+                        "Unable to create secure local RPC socket directory"
+                    ) from exc
+
+            if len(os.fsencode(candidate_sock_path)) >= 100:
+                raise RuntimeError(
+                    "Unable to create secure local RPC socket: encoded path is too long"
+                )
+
+            sock_path = candidate_sock_path
+            rpc_endpoint = sock_path
+
         # Write the auto-generated hermes_tools module.
         # encoding="utf-8" is required on Windows — the stub and user code
         # both contain non-ASCII characters (em-dashes in docstrings, plus
@@ -1467,8 +1491,8 @@ def execute_code(
                 server_sock.close()
             except OSError as e:
                 logger.debug("Server socket close error: %s", e)
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         try:
             # Only UDS has a filesystem socket to unlink; TCP sockets are
             # freed by server_sock.close() above.
@@ -1476,6 +1500,8 @@ def execute_code(
                 os.unlink(sock_path)
         except OSError:
             pass  # already cleaned up or never created
+        if _sock_dir:
+            shutil.rmtree(_sock_dir, ignore_errors=True)
 
 
 def _kill_process_group(proc, escalate: bool = False):

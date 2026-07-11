@@ -398,7 +398,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             deb.write_bytes(b"current deb bytes")
             deb_sha256 = hashlib.sha256(deb.read_bytes()).hexdigest()
             source_commit = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
+                ["git", "rev-parse", "--short=8", "HEAD"],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
