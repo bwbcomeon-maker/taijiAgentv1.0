@@ -15,6 +15,7 @@ import urllib.request
 from typing import Any
 
 from api.config import (
+    AGENT_INSTANCES,
     CANCEL_FLAGS,
     STREAMS,
     STREAMS_LOCK,
@@ -27,7 +28,7 @@ from api.config import (
     unregister_active_run,
     update_active_run,
 )
-from api.helpers import redact_session_data
+from api.helpers import _redact_text, redact_session_data
 from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     public_egress_scrub,
@@ -68,6 +69,54 @@ _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_CHAT_TRANSPORT_ENV = "HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 _GATEWAY_RUN_FALLBACK_STATUSES = {404, 405, 501}
+
+
+class _GatewayRunHandle:
+    """Minimal cancel_stream-compatible handle for a remote managed run."""
+
+    def __init__(self, session_id: str, cancel_event: threading.Event):
+        self.session_id = session_id
+        self._cancel_event = cancel_event
+        self._lock = threading.Lock()
+        self._base_url = ""
+        self._headers: dict[str, str] = {}
+        self._run_id = ""
+        self._stop_requested = False
+
+    def bind_transport(self, base_url: str, headers: dict[str, str]) -> None:
+        with self._lock:
+            self._base_url = base_url
+            self._headers = dict(headers)
+        self._dispatch_stop_if_ready()
+
+    def bind_run(self, run_id: str) -> None:
+        with self._lock:
+            self._run_id = str(run_id or "")
+        self._dispatch_stop_if_ready()
+
+    def interrupt(self, message: str = "Cancelled by user") -> None:
+        self._cancel_event.set()
+        self._dispatch_stop_if_ready()
+
+    def _dispatch_stop_if_ready(self) -> None:
+        with self._lock:
+            if (
+                self._stop_requested
+                or not self._cancel_event.is_set()
+                or not self._base_url
+                or not self._run_id
+            ):
+                return
+            self._stop_requested = True
+            base_url = self._base_url
+            headers = dict(self._headers)
+            run_id = self._run_id
+        threading.Thread(
+            target=_stop_gateway_run,
+            args=(base_url, headers, run_id),
+            name=f"gateway-stop-{run_id[:12]}",
+            daemon=True,
+        ).start()
 
 
 def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = None) -> str:
@@ -186,6 +235,46 @@ def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api
         "message": f"本地对话服务返回 HTTP {exc.code}。",
         "hint": "请检查太极智能体是否已启动，或导出诊断报告后交给管理员排查。",
     }
+
+
+def _gateway_http_error_body(exc: urllib.error.HTTPError) -> str:
+    """Read an HTTPError body once while keeping it available to outer handlers."""
+    cached = getattr(exc, "_taiji_cached_body", None)
+    if isinstance(cached, str):
+        return cached
+    try:
+        body = exc.read(2048).decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+    setattr(exc, "_taiji_cached_body", body)
+    return body
+
+
+def _gateway_run_fallback_allowed(exc: urllib.error.HTTPError) -> bool:
+    """Fallback only when managed-run bootstrap endpoints are unavailable.
+
+    A 404 from a managed-session lookup or from an accepted run's event stream
+    is authoritative.  Replaying that turn through chat completions would
+    silently fork history or execute the same user input twice.
+    """
+    error_url = str(getattr(exc, "url", "") or getattr(exc, "filename", "") or "")
+    if urllib.parse.urlsplit(error_url).path.rstrip("/") not in {
+        "/api/sessions",
+        "/v1/runs",
+    }:
+        return False
+    if exc.code not in _GATEWAY_RUN_FALLBACK_STATUSES:
+        return False
+    if exc.code != 404:
+        return True
+    body = _gateway_http_error_body(exc)
+    try:
+        payload = json.loads(body or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    raw_error = payload.get("error") if isinstance(payload, dict) else None
+    code = str(raw_error.get("code") or "").strip() if isinstance(raw_error, dict) else ""
+    return code != "session_not_found"
 
 
 def _gateway_sse_finish_reason(payload: dict) -> str:
@@ -389,6 +478,28 @@ def _stop_gateway_run(base_url: str, headers: dict[str, str], run_id: str) -> No
         logger.debug("Failed to stop gateway run %s", run_id, exc_info=True)
 
 
+def _mark_gateway_live_tool_complete(
+    stream_id: str,
+    *,
+    tool_name: str,
+    tool_call_id: str = "",
+    is_error: bool = False,
+) -> bool:
+    """Close exactly one live tool call, preferring the stable call ID."""
+    for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS.get(stream_id, [])):
+        if shared_tc.get("done"):
+            continue
+        if tool_call_id:
+            if str(shared_tc.get("tid") or "") != tool_call_id:
+                continue
+        elif shared_tc.get("name") != tool_name:
+            continue
+        shared_tc["done"] = True
+        shared_tc["is_error"] = bool(is_error)
+        return True
+    return False
+
+
 def _gateway_run_approval_error_code(raw_body: str) -> str:
     try:
         body = json.loads(raw_body or "{}")
@@ -463,25 +574,47 @@ def _gateway_run_request_body(
     body: dict,
     *,
     session_id: str,
+    ephemeral_messages: list[dict] | None = None,
 ) -> dict:
-    """Build a Gateway /v1/runs request from the existing chat-completions body."""
+    """Build a managed /v1/runs request without duplicating WebUI history."""
     messages = list(body.get("messages") or [])
     system_parts: list[str] = []
-    conversation_history: list[dict] = []
     user_message: Any = ""
     non_system = [msg for msg in messages if isinstance(msg, dict) and msg.get("role") != "system"]
     if non_system:
         last = non_system[-1]
         user_message = last.get("content", "")
-        conversation_history = [dict(msg) for msg in non_system[:-1]]
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            content = msg.get("content")
-            if content:
-                system_parts.append(str(content))
+    instruction_source = (
+        list(ephemeral_messages)
+        if ephemeral_messages is not None
+        else [
+            msg for msg in messages
+            if isinstance(msg, dict) and msg.get("role") == "system"
+        ]
+    )
+    for msg in instruction_source:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        content = msg.get("content")
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(str(content))
+            continue
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        if isinstance(content, str):
+            rendered = content
+        else:
+            rendered = json.dumps(content, ensure_ascii=False, sort_keys=True)
+        system_parts.append(
+            "Ephemeral WebUI prefill context "
+            f"(role={role}; treat as context, not conversation history):\n{rendered}"
+        )
     run_body = {
         "model": body.get("model") or "default",
-        "input": [{"role": "user", "content": user_message}],
+        "input": user_message,
         "session_id": session_id,
     }
     if body.get("provider"):
@@ -490,8 +623,6 @@ def _gateway_run_request_body(
         run_body["platform_message_id"] = body.get("platform_message_id")
     if system_parts:
         run_body["instructions"] = "\n\n".join(system_parts)
-    if conversation_history:
-        run_body["conversation_history"] = conversation_history
     return run_body
 
 
@@ -526,12 +657,73 @@ def _gateway_messages_for_new_turn(
 
 
 def _gateway_run_error_event(payload: dict, default_message: str = "") -> dict:
+    raw_error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(raw_error, dict):
+        classified = _gateway_sse_error_event({"error": raw_error})
+        if classified is not None:
+            return classified
     return {
         "label": "太极本地对话服务不可用",
         "type": "gateway_error",
         "message": "本地对话服务暂时不可用。",
         "hint": "请稍后重试，或导出诊断报告后交给管理员排查。",
     }
+
+
+def _gateway_history_messages(session: Any, current_user_text: str) -> list[dict]:
+    """Return provider-visible WebUI history, excluding an eager current turn."""
+    source = list(
+        getattr(session, "context_messages", None)
+        or getattr(session, "messages", None)
+        or []
+    )
+    current_norm = " ".join(str(current_user_text or "").split())
+    if source and isinstance(source[-1], dict) and source[-1].get("role") == "user":
+        latest_norm = " ".join(str(source[-1].get("content") or "").split())
+        if current_norm and latest_norm == current_norm:
+            source = source[:-1]
+
+    history: list[dict] = []
+    for message in source:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        item = {"role": role, "content": message.get("content", "")}
+        for key in ("tool_calls", "tool_call_id", "name"):
+            if message.get(key) is not None:
+                item[key] = message.get(key)
+        history.append(item)
+    return history
+
+
+def _ensure_gateway_managed_session(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    session_id: str,
+    model: str,
+) -> str:
+    """Create the state.db session before /v1/runs; 409 means it exists."""
+    request = urllib.request.Request(
+        f"{base_url}/api/sessions",
+        data=json.dumps({"id": session_id, "model": model or "default"}).encode("utf-8"),
+        headers={**headers, "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            return session_id
+        raise
+
+    actual = str(((payload.get("session") or {}).get("id") or "")).strip()
+    if actual != session_id:
+        raise RuntimeError("Managed session creation returned a different session ID")
+    return actual
 
 
 def _stream_gateway_run_events(
@@ -544,17 +736,28 @@ def _stream_gateway_run_events(
     cancel_event: threading.Event,
     brand_token_tail: list[str],
     put_gateway_event,
+    run_handle: _GatewayRunHandle | None = None,
+    ephemeral_messages: list[dict] | None = None,
 ) -> dict:
     """Run a Gateway /v1/runs turn and translate structured events to WebUI SSE."""
+    if cancel_event.is_set():
+        return {"final_text": "", "usage": {}, "error_event": None, "cancelled": True}
     run_req = urllib.request.Request(
         f"{base_url}/v1/runs",
-        data=json.dumps(_gateway_run_request_body(body, session_id=session_id)).encode("utf-8"),
+        data=json.dumps(_gateway_run_request_body(
+            body,
+            session_id=session_id,
+            ephemeral_messages=ephemeral_messages,
+        )).encode("utf-8"),
         headers={**headers, "Accept": "application/json"},
         method="POST",
     )
     with urllib.request.urlopen(run_req, timeout=60) as resp:
         run_start = json.loads(resp.read().decode("utf-8") or "{}")
     run_id = str(run_start.get("run_id") or "").strip()
+    actual_session_id = str(run_start.get("session_id") or "").strip()
+    if run_handle is not None and run_id:
+        run_handle.bind_run(run_id)
     if not run_id:
         return {
             "final_text": "",
@@ -563,6 +766,22 @@ def _stream_gateway_run_events(
             "usage": {},
             "error_event": _gateway_run_error_event(run_start, "Gateway run did not return a run_id."),
         }
+    if actual_session_id != session_id:
+        _stop_gateway_run(base_url, headers, run_id)
+        _clear_gateway_run_approvals_from_webui(session_id, run_id)
+        return {
+            "final_text": "",
+            "usage": {},
+            "error_event": _gateway_run_error_event(
+                {"error": {"code": "session_id_conflict"}},
+                "Gateway run returned an unexpected session ID.",
+            ),
+        }
+
+    if cancel_event.is_set():
+        _stop_gateway_run(base_url, headers, run_id)
+        _clear_gateway_run_approvals_from_webui(session_id, run_id)
+        return {"final_text": "", "usage": {}, "error_event": None, "cancelled": True}
 
     update_active_run(stream_id, phase="gateway-run", gateway_run_id=run_id)
     event_url = f"{base_url}/v1/runs/{urllib.parse.quote(run_id, safe='')}/events"
@@ -598,6 +817,8 @@ def _stream_gateway_run_events(
                     "usage": usage,
                     "error_event": None,
                     "terminal_outcome": "cancelled",
+                    "cancelled": True,
+                    "artifact_candidates": artifact_candidates,
                 }
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line or not line.startswith("data:"):
@@ -629,12 +850,18 @@ def _stream_gateway_run_events(
                     "event_type": "tool.started",
                     "name": tool_name,
                     "status": "running",
+                    "preview": payload.get("preview"),
+                    "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
                 }
+                tool_call_id = str(payload.get("tool_call_id") or "").strip()
+                if tool_call_id:
+                    event_payload["tid"] = tool_call_id
                 if stream_id in STREAM_LIVE_TOOL_CALLS:
                     STREAM_LIVE_TOOL_CALLS[stream_id].append({
                         "name": tool_name,
-                        "args": {},
+                        "args": event_payload["args"],
                         "done": False,
+                        **({"tid": tool_call_id} if tool_call_id else {}),
                     })
                 put_gateway_event("tool", event_payload)
                 update_active_run(stream_id, phase="gateway-tool", latest_tool=tool_name)
@@ -647,17 +874,24 @@ def _stream_gateway_run_events(
                 })
                 if artifact_candidate is not None:
                     artifact_candidates.append(artifact_candidate)
-                for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS.get(stream_id, [])):
-                    if not shared_tc.get("done") and shared_tc.get("name") == tool_name:
-                        shared_tc["done"] = True
-                        shared_tc["is_error"] = bool(payload.get("error"))
-                        break
+                tool_call_id = str(payload.get("tool_call_id") or "").strip()
+                _mark_gateway_live_tool_complete(
+                    stream_id,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    is_error=bool(payload.get("error")),
+                )
                 put_gateway_event("tool_complete", {
                     "event_type": "tool.completed",
                     "name": tool_name,
                     "status": "failed" if payload.get("error") else "completed",
                     "duration": payload.get("duration"),
                     "is_error": bool(payload.get("error")),
+                    **(
+                        {"tid": tool_call_id}
+                        if tool_call_id
+                        else {}
+                    ),
                 })
                 continue
             if event_name == "approval.request":
@@ -689,6 +923,8 @@ def _stream_gateway_run_events(
                     "usage": usage,
                     "error_event": None,
                     "terminal_outcome": "cancelled",
+                    "cancelled": True,
+                    "artifact_candidates": artifact_candidates,
                 }
             if event_name == "run.failed":
                 error_event = _gateway_run_error_event(payload, str(payload.get("error") or event_name))
@@ -701,12 +937,15 @@ def _stream_gateway_run_events(
         if stream_id in STREAM_PARTIAL_TEXT:
             STREAM_PARTIAL_TEXT[stream_id] += public_tail
         put_gateway_event("token", {"text": public_tail})
+    if error_event is None and not saw_run_completed:
+        _stop_gateway_run(base_url, headers, run_id)
+        _clear_gateway_run_approvals_from_webui(session_id, run_id)
+        error_event = _gateway_run_error_event(
+            {"error": {"code": "run_event_stream_incomplete"}},
+            "Gateway run event stream ended before a terminal event.",
+        )
     if error_event is not None:
         _clear_gateway_run_approvals_from_webui(session_id, run_id)
-    if error_event is None and not saw_run_completed:
-        error_event = _gateway_run_error_event(
-            {}, "Gateway run event stream ended before run.completed."
-        )
     return {
         "final_text": public_final_text,
         "public_final_text": public_final_text,
@@ -811,6 +1050,26 @@ def _run_gateway_chat_streaming(
     """
     q = STREAMS.get(stream_id)
     if q is None:
+        # cancel_stream() can win the race immediately after the route starts
+        # this worker: it removes STREAMS before we have registered a remote
+        # handle, so the normal cancel path has no session_id to finalize.
+        # Preserve the pending user turn and cancellation marker here, but only
+        # while this worker still owns the session stream.
+        try:
+            with _get_session_agent_lock(session_id):
+                cancelled_session = get_session(session_id)
+                if _stream_writeback_is_current(cancelled_session, stream_id):
+                    from api.streaming import _finalize_cancelled_turn
+
+                    _finalize_cancelled_turn(
+                        cancelled_session,
+                        message="Task cancelled before gateway worker start.",
+                    )
+        except Exception:
+            logger.debug(
+                "Failed to finalize gateway cancellation before worker registration",
+                exc_info=True,
+            )
         return
     persist_msg_text = display_msg if display_msg is not None else msg_text
     register_active_run(
@@ -830,8 +1089,10 @@ def _run_gateway_chat_streaming(
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
     cancel_event = threading.Event()
     turn_terminal_recorded = False
+    run_handle = _GatewayRunHandle(session_id, cancel_event)
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
+        AGENT_INSTANCES[stream_id] = run_handle
         STREAM_PARTIAL_TEXT[stream_id] = ""
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
@@ -917,6 +1178,12 @@ def _run_gateway_chat_streaming(
         api_key = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
         headers = _gateway_request_headers(session_id, api_key, event_stream=True)
+        run_handle.bind_transport(base_url, headers)
+        if cancel_event.is_set():
+            from api.streaming import cancel_stream
+
+            cancel_stream(stream_id)
+            return
         message_text = str(msg_text or "")
         try:
             message_content: Any = prepare_webui_chat_input(
@@ -977,6 +1244,12 @@ def _run_gateway_chat_streaming(
         run_result = None
         if _gateway_chat_transport(cfg) == "runs":
             try:
+                _ensure_gateway_managed_session(
+                    base_url=base_url,
+                    headers=headers,
+                    session_id=session_id,
+                    model=model or "default",
+                )
                 run_result = _stream_gateway_run_events(
                     base_url=base_url,
                     headers=headers,
@@ -986,13 +1259,25 @@ def _run_gateway_chat_streaming(
                     cancel_event=cancel_event,
                     brand_token_tail=brand_token_tail,
                     put_gateway_event=put_gateway_event,
+                    run_handle=run_handle,
+                    ephemeral_messages=prefill_messages,
                 )
             except urllib.error.HTTPError as exc:
-                if exc.code not in _GATEWAY_RUN_FALLBACK_STATUSES:
+                if not _gateway_run_fallback_allowed(exc):
                     raise
-                logger.info("Gateway /v1/runs unavailable (HTTP %s), falling back to chat completions", exc.code)
+                logger.info(
+                    "Gateway managed-run transport unavailable (HTTP %s), "
+                    "falling back to chat completions",
+                    exc.code,
+                )
                 run_result = None
         if run_result is not None:
+            if run_result.get("cancelled"):
+                record_turn_interrupted("cancelled")
+                from api.streaming import cancel_stream
+
+                cancel_stream(stream_id)
+                return
             raw_final_text = str(run_result.get("raw_final_text") or "")
             public_final_text = str(
                 run_result.get("public_final_text")
@@ -1052,15 +1337,12 @@ def _run_gateway_chat_streaming(
                                         **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
                                     })
                                 else:
-                                    for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                        if shared_tc.get("done"):
-                                            continue
-                                        if (
-                                            event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
-                                        ) or shared_tc.get("name") == event_payload.get("name"):
-                                            shared_tc["done"] = True
-                                            shared_tc["is_error"] = bool(event_payload.get("is_error"))
-                                            break
+                                    _mark_gateway_live_tool_complete(
+                                        stream_id,
+                                        tool_name=str(event_payload.get("name") or ""),
+                                        tool_call_id=str(event_payload.get("tid") or ""),
+                                        is_error=bool(event_payload.get("is_error")),
+                                    )
                             put_gateway_event(event_name, event_payload)
                             update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                         sse_event = "message"
@@ -1256,21 +1538,25 @@ def _run_gateway_chat_streaming(
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
+        if cancel_event.is_set():
+            record_turn_interrupted("cancelled")
+            return
         record_turn_interrupted("gateway_http_error")
-        try:
-            err_body = exc.read(2048).decode("utf-8", errors="replace")
-        except Exception:
-            err_body = ""
+        err_body = _gateway_http_error_body(exc)
         put_gateway_event(
             "apperror",
             scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))),
         )
-    except Exception:
+    except Exception as exc:
+        if cancel_event.is_set():
+            record_turn_interrupted("cancelled")
+            return
         record_turn_interrupted("gateway_error")
+        safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
         put_gateway_event("apperror", {
             "label": "太极本地对话服务请求失败",
             "type": "gateway_error",
-            "message": "本地对话服务请求失败。",
+            "message": safe or "本地对话服务请求失败。",
             "hint": "请检查太极智能体是否已启动，或导出诊断报告。",
         })
     finally:
@@ -1293,6 +1579,8 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
+            if AGENT_INSTANCES.get(stream_id) is run_handle:
+                AGENT_INSTANCES.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
             STREAM_REASONING_TEXT.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)

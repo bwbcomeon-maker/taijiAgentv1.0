@@ -40,6 +40,7 @@ import os
 import socket as _socket
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -802,6 +803,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        # Process-local exclusion for managed sessions.  The durable,
+        # cross-process lease remains a separate hardening slice; this map
+        # prevents two runs accepted by this adapter instance from interleaving
+        # reads and writes against the same state.db transcript.
+        self._managed_session_runs: Dict[str, str] = {}
+        self._managed_session_runs_lock = threading.Lock()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -3666,6 +3673,52 @@ class APIServerAdapter(BasePlatformAdapter):
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
 
+    @staticmethod
+    def _managed_history_projection(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Project history onto fields that participate in managed continuity.
+
+        state.db is authoritative.  Request-only metadata such as timestamps,
+        model names, reasoning, and UI fields must not manufacture a conflict.
+        Tool linkage remains part of the comparison because dropping it changes
+        the provider-visible conversation.
+        """
+        projected: List[Dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            item: Dict[str, Any] = {
+                "role": str(message.get("role") or ""),
+                "content": message.get("content"),
+            }
+            for key in ("tool_calls", "tool_call_id", "tool_name"):
+                if message.get(key) is not None:
+                    item[key] = message.get(key)
+            projected.append(item)
+        return projected
+
+    @classmethod
+    def _managed_history_matches(
+        cls,
+        submitted: List[Dict[str, Any]],
+        stored: List[Dict[str, Any]],
+    ) -> bool:
+        submitted_bytes = json.dumps(
+            cls._managed_history_projection(submitted),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        stored_bytes = json.dumps(
+            cls._managed_history_projection(stored),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hmac.compare_digest(
+            hashlib.sha256(submitted_bytes).digest(),
+            hashlib.sha256(stored_bytes).digest(),
+        )
+
     def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
         """Update pollable run status without exposing private agent objects."""
         now = time.time()
@@ -3681,51 +3734,36 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_statuses[run_id] = current
         return current
 
+    def _queue_run_event(
+        self,
+        run_id: str,
+        loop: "asyncio.AbstractEventLoop",
+        event: Dict[str, Any],
+    ) -> None:
+        self._set_run_status(
+            run_id,
+            self._run_statuses.get(run_id, {}).get("status", "running"),
+            last_event=event.get("event"),
+        )
+        q = self._run_streams.get(run_id)
+        if q is None:
+            return
+        try:
+            loop.call_soon_threadsafe(q.put_nowait, event)
+        except Exception:
+            pass
+
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
-        """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
-        def _push(event: Dict[str, Any]) -> None:
-            self._set_run_status(
-                run_id,
-                self._run_statuses.get(run_id, {}).get("status", "running"),
-                last_event=event.get("event"),
-            )
-            q = self._run_streams.get(run_id)
-            if q is None:
-                return
-            try:
-                loop.call_soon_threadsafe(q.put_nowait, event)
-            except Exception:
-                pass
+        """Return the progress callback for non-tool run events.
+
+        Tool lifecycle uses AIAgent's ID-bearing start/complete callbacks below;
+        forwarding progress tool events too would duplicate every tool card.
+        """
 
         def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
             ts = time.time()
-            if event_type == "tool.started":
-                _push({
-                    "event": "tool.started",
-                    "run_id": run_id,
-                    "timestamp": ts,
-                    "tool": tool_name,
-                    "preview": preview,
-                })
-            elif event_type == "tool.completed":
-                event = {
-                    "event": "tool.completed",
-                    "run_id": run_id,
-                    "timestamp": ts,
-                    "tool": tool_name,
-                    "duration": round(kwargs.get("duration", 0), 3),
-                    "error": kwargs.get("is_error", False),
-                }
-                if kwargs.get("tool_call_id"):
-                    event["toolCallId"] = str(kwargs.get("tool_call_id"))
-                structured_result = _structured_tool_result_for_gateway(
-                    tool_name, kwargs.get("result")
-                )
-                if structured_result is not None:
-                    event["structured_result"] = structured_result
-                _push(event)
-            elif event_type == "reasoning.available":
-                _push({
+            if event_type == "reasoning.available":
+                self._queue_run_event(run_id, loop, {
                     "event": "reasoning.available",
                     "run_id": run_id,
                     "timestamp": ts,
@@ -3734,6 +3772,63 @@ class APIServerAdapter(BasePlatformAdapter):
             # _thinking and subagent_progress are intentionally not forwarded
 
         return _callback
+
+    def _make_run_tool_callbacks(
+        self,
+        run_id: str,
+        loop: "asyncio.AbstractEventLoop",
+    ):
+        """Return ID-stable callbacks for concurrent tool lifecycle events."""
+        started_at: Dict[str, float] = {}
+        started_lock = threading.Lock()
+
+        def _start(tool_call_id: str, tool_name: str, args: Any) -> None:
+            call_id = str(tool_call_id or "")
+            started = time.time()
+            with started_lock:
+                started_at[call_id] = started
+            normalized_args = args if isinstance(args, dict) else {}
+            try:
+                preview = f"{tool_name}: {json.dumps(normalized_args, ensure_ascii=False)[:240]}"
+            except Exception:
+                preview = str(tool_name or "")
+            self._queue_run_event(run_id, loop, {
+                "event": "tool.started",
+                "run_id": run_id,
+                "timestamp": started,
+                "tool_call_id": call_id,
+                "tool": tool_name,
+                "preview": preview,
+                "args": normalized_args,
+            })
+
+        def _complete(tool_call_id: str, tool_name: str, args: Any, result: Any) -> None:
+            call_id = str(tool_call_id or "")
+            completed = time.time()
+            with started_lock:
+                started = started_at.pop(call_id, completed)
+            try:
+                from agent.display import _detect_tool_failure
+
+                is_error = bool(_detect_tool_failure(tool_name, result)[0])
+            except Exception:
+                is_error = False
+            event = {
+                "event": "tool.completed",
+                "run_id": run_id,
+                "timestamp": completed,
+                "tool_call_id": call_id,
+                "toolCallId": call_id,
+                "tool": tool_name,
+                "duration": round(max(0.0, completed - started), 3),
+                "error": is_error,
+            }
+            structured_result = _structured_tool_result_for_gateway(tool_name, result)
+            if structured_result is not None:
+                event["structured_result"] = structured_result
+            self._queue_run_event(run_id, loop, event)
+
+        return _start, _complete
 
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
@@ -3760,44 +3855,77 @@ class APIServerAdapter(BasePlatformAdapter):
             body = await request.json()
         except Exception:
             return web.json_response(_openai_error("Invalid JSON"), status=400)
+        if not isinstance(body, dict):
+            return web.json_response(_openai_error("Request body must be a JSON object"), status=400)
+
+        header_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
+        raw_body_session_id = body.get("session_id")
+        body_session_id = str(raw_body_session_id).strip() if raw_body_session_id else ""
+        if header_session_id and body_session_id and header_session_id != body_session_id:
+            return web.json_response(
+                _openai_error(
+                    "Header and body session IDs do not match",
+                    code="session_id_conflict",
+                ),
+                status=400,
+            )
 
         raw_input = body.get("input")
         if raw_input is None:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
 
-        # Normalize the three supported input shapes using the Responses API pattern:
-        # a string, a standard role/content message array, or a bare array of
-        # content parts (treated as one user message for client compatibility).
-        input_messages: List[Dict[str, Any]] = []
-        if isinstance(raw_input, str):
-            input_messages = [{"role": "user", "content": _normalize_multimodal_content(raw_input)}]
-        elif isinstance(raw_input, list):
-            is_bare_content = bool(raw_input) and all(
-                isinstance(item, dict) and "role" not in item and "type" in item
-                for item in raw_input
-            )
-            if is_bare_content:
-                try:
-                    content = _normalize_multimodal_content(raw_input)
-                except ValueError as exc:
-                    return _multimodal_validation_error(exc, param="input")
-                input_messages = [{"role": "user", "content": content}]
-            else:
-                for i, item in enumerate(raw_input):
-                    if not isinstance(item, dict) or "role" not in item or "content" not in item:
-                        return web.json_response(
-                            _openai_error(f"input[{i}] must have 'role' and 'content' fields"),
-                            status=400,
+        input_history: List[Dict[str, Any]] = []
+        try:
+            if isinstance(raw_input, str):
+                user_message = _normalize_multimodal_content(raw_input)
+            elif isinstance(raw_input, list):
+                # WebUI sends the current multimodal content array directly;
+                # OpenAI-style clients may instead send an array of message
+                # objects.  Distinguish the two shapes before normalization.
+                content_parts = bool(raw_input) and all(
+                    isinstance(item, dict)
+                    and "type" in item
+                    and "role" not in item
+                    and "content" not in item
+                    for item in raw_input
+                )
+                if content_parts:
+                    user_message = _normalize_multimodal_content(raw_input)
+                else:
+                    input_messages: List[Dict[str, Any]] = []
+                    for idx, item in enumerate(raw_input):
+                        if isinstance(item, str):
+                            input_messages.append({
+                                "role": "user",
+                                "content": _normalize_multimodal_content(item),
+                            })
+                            continue
+                        if not isinstance(item, dict):
+                            return web.json_response(
+                                _openai_error(f"input[{idx}] must be a string or message object"),
+                                status=400,
+                            )
+                        if "role" not in item or "content" not in item:
+                            return web.json_response(
+                                _openai_error(
+                                    f"input[{idx}] must have 'role' and 'content' fields"
+                                ),
+                                status=400,
+                            )
+                        normalized_message = _normalized_conversation_message(
+                            item,
+                            _normalize_multimodal_content(item["content"]),
                         )
-                    try:
-                        content = _normalize_multimodal_content(item["content"])
-                    except ValueError as exc:
-                        return _multimodal_validation_error(exc, param=f"input[{i}].content")
-                    input_messages.append({"role": str(item["role"]), "content": content})
-        else:
-            return web.json_response(_openai_error("'input' must be a string or array"), status=400)
-
-        user_message: Any = input_messages[-1]["content"] if input_messages else ""
+                        input_messages.append(normalized_message)
+                    input_history = input_messages[:-1]
+                    user_message = input_messages[-1].get("content", "") if input_messages else ""
+            else:
+                return web.json_response(
+                    _openai_error("'input' must be a string or array"),
+                    status=400,
+                )
+        except ValueError as exc:
+            return _multimodal_validation_error(exc, param="input")
         if not _content_has_visible_payload(user_message):
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
@@ -3809,8 +3937,8 @@ class APIServerAdapter(BasePlatformAdapter):
         # Precedence: explicit conversation_history > previous_response_id.
         conversation_history: List[Dict[str, Any]] = []
         raw_history = body.get("conversation_history")
-        has_explicit_history = raw_history is not None
-        if has_explicit_history:
+        raw_history_provided = "conversation_history" in body
+        if raw_history_provided:
             if not isinstance(raw_history, list):
                 return web.json_response(
                     _openai_error("'conversation_history' must be an array of message objects"),
@@ -3831,7 +3959,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
 
         stored_session_id = None
-        if not has_explicit_history and previous_response_id:
+        if not raw_history_provided and previous_response_id:
             stored = self._response_store.get(previous_response_id)
             if stored:
                 conversation_history = list(stored.get("conversation_history", []))
@@ -3841,10 +3969,59 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # When input is a multi-message array, extract all but the last
         # message as conversation history (the last becomes user_message).
-        conversation_history.extend(input_messages[:-1])
+        if input_history:
+            if raw_history_provided:
+                conversation_history.extend(input_history)
+            else:
+                conversation_history = input_history
+
+        requested_session_id = header_session_id or body_session_id or stored_session_id or ""
+        managed_session = bool(requested_session_id)
+        if managed_session:
+            db = self._ensure_session_db()
+            if db is None:
+                return web.json_response(
+                    _openai_error(
+                        "Session database unavailable",
+                        code="session_db_unavailable",
+                    ),
+                    status=503,
+                )
+            if db.get_session(requested_session_id) is None:
+                return web.json_response(
+                    _openai_error("Session not found", code="session_not_found"),
+                    status=404,
+                )
+            stored_history = db.get_messages_as_conversation(requested_session_id)
+            explicit_history_provided = raw_history_provided or bool(input_history)
+            if explicit_history_provided and not self._managed_history_matches(
+                conversation_history,
+                stored_history,
+            ):
+                return web.json_response(
+                    _openai_error(
+                        "Submitted history conflicts with managed session history",
+                        code="session_history_conflict",
+                    ),
+                    status=409,
+                )
+            conversation_history = stored_history
+            with self._managed_session_runs_lock:
+                session_busy = requested_session_id in self._managed_session_runs
+            if session_busy:
+                return web.json_response(
+                    _openai_error(
+                        "Session already has an active run",
+                        code="session_busy",
+                    ),
+                    status=409,
+                )
 
         run_id = f"run_{uuid.uuid4().hex}"
-        session_id = body.get("session_id") or stored_session_id or run_id
+        session_id = requested_session_id or run_id
+        if managed_session:
+            with self._managed_session_runs_lock:
+                self._managed_session_runs[session_id] = run_id
         approval_session_key = gateway_session_key or session_id or run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
@@ -3855,6 +4032,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_approval_sessions[run_id] = approval_session_key
 
         event_cb = self._make_run_event_callback(run_id, loop)
+        tool_start_cb, tool_complete_cb = self._make_run_tool_callbacks(run_id, loop)
 
         # Also wire stream_delta_callback so message.delta events flow through.
         def _text_cb(delta: Optional[str]) -> None:
@@ -3878,6 +4056,8 @@ class APIServerAdapter(BasePlatformAdapter):
             model=body.get("model", self._model_name),
         )
 
+        worker_started = threading.Event()
+
         async def _run_and_close():
             try:
                 self._set_run_status(run_id, "running")
@@ -3886,6 +4066,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     session_id=session_id,
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
+                    tool_start_callback=tool_start_cb,
+                    tool_complete_callback=tool_complete_cb,
                     gateway_session_key=gateway_session_key,
                 )
                 self._active_run_agents[run_id] = agent
@@ -3908,7 +4090,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     except Exception:
                         pass
 
-                def _run_sync():
+                def _run_sync_inner():
                     from gateway.session_context import clear_session_vars, set_session_vars
                     from tools.approval import (
                         register_gateway_notify,
@@ -3961,17 +4143,54 @@ class APIServerAdapter(BasePlatformAdapter):
                     }
                     return r, u
 
+                def _run_sync():
+                    if managed_session:
+                        # Claim worker ownership under the same lock used by
+                        # cancellation cleanup.  If the asyncio wrapper was
+                        # cancelled before this executor job began, do not run
+                        # a detached agent turn after the guard was released.
+                        with self._managed_session_runs_lock:
+                            if self._managed_session_runs.get(session_id) != run_id:
+                                return ({
+                                    "failed": True,
+                                    "error": "run cancelled before worker start",
+                                    "error_code": "run_cancelled",
+                                }, {
+                                    "input_tokens": 0,
+                                    "output_tokens": 0,
+                                    "total_tokens": 0,
+                                })
+                            worker_started.set()
+                    try:
+                        return _run_sync_inner()
+                    finally:
+                        if managed_session:
+                            # The executor thread, not its cancellable asyncio
+                            # wrapper, owns release.  This prevents a stopped
+                            # run from overlapping a still-unwinding worker.
+                            with self._managed_session_runs_lock:
+                                if self._managed_session_runs.get(session_id) == run_id:
+                                    self._managed_session_runs.pop(session_id, None)
+
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
                 # Check for structured failure (non-retryable client errors like
                 # 401/400 return failed=True instead of raising, so the except
                 # block below never fires — issue #15561).
                 if isinstance(result, dict) and result.get("failed"):
                     error_msg = result.get("error") or "agent run failed"
+                    error_payload = {
+                        "message": str(error_msg),
+                        "code": str(
+                            result.get("error_code")
+                            or result.get("code")
+                            or "run_failed"
+                        ),
+                    }
                     q.put_nowait({
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
-                        "error": error_msg,
+                        "error": error_payload,
                     })
                     self._set_run_status(
                         run_id,
@@ -4047,6 +4266,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                if managed_session:
+                    # Covers failures/cancellation before the executor worker
+                    # started.  The lock makes this race-safe with the worker's
+                    # ownership claim above.
+                    with self._managed_session_runs_lock:
+                        if (
+                            not worker_started.is_set()
+                            and self._managed_session_runs.get(session_id) == run_id
+                        ):
+                            self._managed_session_runs.pop(session_id, None)
 
         task = asyncio.create_task(_run_and_close())
         self._active_run_tasks[run_id] = task
@@ -4056,12 +4285,22 @@ class APIServerAdapter(BasePlatformAdapter):
             pass
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
+            if managed_session:
+                def _release_cancelled_before_first_step(_task: "asyncio.Task") -> None:
+                    with self._managed_session_runs_lock:
+                        if (
+                            not worker_started.is_set()
+                            and self._managed_session_runs.get(session_id) == run_id
+                        ):
+                            self._managed_session_runs.pop(session_id, None)
 
-        response_headers = (
-            {"X-Hermes-Session-Key": gateway_session_key} if gateway_session_key else {}
-        )
+                task.add_done_callback(_release_cancelled_before_first_step)
+
+        response_headers = {"X-Hermes-Session-Id": session_id}
+        if gateway_session_key:
+            response_headers["X-Hermes-Session-Key"] = gateway_session_key
         return web.json_response(
-            {"run_id": run_id, "status": "started"},
+            {"run_id": run_id, "session_id": session_id, "status": "started"},
             status=202,
             headers=response_headers,
         )

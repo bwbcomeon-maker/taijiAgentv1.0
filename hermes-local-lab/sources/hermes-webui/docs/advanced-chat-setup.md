@@ -76,9 +76,32 @@ exposing the key value. That `gateway_chat` field is an operator diagnostic
 payload only; it is not currently rendered as a user-facing health banner in the
 browser UI.
 
+Gateway-backed chat uses the managed `/v1/runs` transport by default. WebUI
+creates (or reuses) a Gateway session with the same conversation ID, then sends
+only that session ID, the current user input (including current-turn image or
+document context), model instructions, and provider/model selection. It does
+not replay WebUI's copy of prior messages: Gateway `state.db` is authoritative
+for managed-session history. A missing managed session, conflicting explicit
+history, or a second active run is returned as an error instead of silently
+forking the conversation.
+
+For compatibility with older Gateway builds, WebUI falls back to
+`/v1/chat/completions` only when the managed-session or run-start endpoint is
+unavailable (HTTP 404/405/501). The fallback request includes the full WebUI
+message history. A 404 after a run was accepted, or the authoritative
+`session_not_found` response, never falls back because replaying the turn could
+execute it twice. Operators can force the compatibility transport with
+`HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT=chat_completions`.
+
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
-messaging surfaces. Browser image turns use the same fail-closed preparation
+messaging surfaces. Managed runs translate text deltas, reasoning, tool
+lifecycle, approvals, cancellation, usage, errors, current-turn attachments,
+and final session writeback into WebUI's existing stream contract. Clarify
+prompts and any provider-specific event extensions still follow the current
+compatibility path and may not match every messaging surface.
+
+Browser image turns use the same fail-closed preparation
 boundary in Legacy and Gateway modes: a native vision main model receives image
 content parts, while a text-only main model receives a successful description
 from the configured auxiliary vision model. If any image cannot be analyzed,

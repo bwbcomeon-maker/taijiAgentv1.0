@@ -2,9 +2,11 @@ from collections import OrderedDict
 import base64
 import hashlib
 from email.message import Message
+import io
 import json
 from pathlib import Path
 import re
+import threading
 import urllib.error
 import time
 
@@ -15,11 +17,12 @@ import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
 from api.turn_journal import append_turn_journal_event, read_turn_journal
-from api.config import STREAMS, create_stream_channel
+from api.config import STREAMS, STREAM_LIVE_TOOL_CALLS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_run_request_body,
     _gateway_http_error_event,
+    _gateway_run_error_event,
     _gateway_sse_error_event,
     _gateway_sse_delta,
     _gateway_sse_reasoning_delta,
@@ -115,7 +118,7 @@ def test_gateway_sse_reasoning_delta_extracts_reasoning_without_treating_it_as_c
     ) == ""
 
 
-def test_gateway_run_request_body_uses_canonical_user_message_array():
+def test_gateway_run_request_body_uses_current_user_content_without_history_replay():
     result = _gateway_run_request_body(
         {
             "model": "deepseek-chat",
@@ -128,9 +131,7 @@ def test_gateway_run_request_body_uses_canonical_user_message_array():
         session_id="session-a",
     )
 
-    assert result["input"] == [
-        {"role": "user", "content": "prepared visual context"}
-    ]
+    assert result["input"] == "prepared visual context"
 
 
 def test_gateway_stream_usage_normalizes_token_names():
@@ -572,6 +573,12 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
     s = new_session()
+    prior_messages = [
+        {"role": "user", "content": "Earlier question", "timestamp": 1.0},
+        {"role": "assistant", "content": "Earlier answer", "timestamp": 2.0},
+    ]
+    s.messages = list(prior_messages)
+    s.context_messages = list(prior_messages)
     stream_id = "stream-gateway-test"
     s.active_stream_id = stream_id
     s.pending_user_message = "Say hello"
@@ -623,7 +630,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     )
 
     saved = models.get_session(s.session_id)
-    assert [m["role"] for m in saved.messages] == ["user", "assistant"]
+    assert [m["role"] for m in saved.messages] == [
+        "user", "assistant", "user", "assistant",
+    ]
     assert saved.messages[-1]["content"] == "hello"
     assert saved.messages[-1]["_turnDuration"] > 0
     reloaded = models.Session.load(s.session_id)
@@ -646,6 +655,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         expected_system_prompt,
         "prefill",
         "webui session context",
+        "Earlier question",
+        "Earlier answer",
         "Say hello",
     ]
     assert payload["messages"][0]["role"] == "system"
@@ -907,7 +918,8 @@ def test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text(mo
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-public-internal"}'
+        def read(self):
+            return b'{"run_id":"remote-public-internal","session_id":"sid-runs-public-internal"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -946,7 +958,8 @@ def test_gateway_runs_short_buffered_delta_is_not_duplicated_by_completed_output
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-short-buffered"}'
+        def read(self):
+            return b'{"run_id":"remote-short-buffered","session_id":"sid-runs-short-buffered"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -980,7 +993,8 @@ def test_gateway_runs_collects_private_image_candidate_without_public_path(monke
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-image"}'
+        def read(self):
+            return b'{"run_id":"remote-image","session_id":"sid-image"}'
 
     image_ref = "generated.png"
 
@@ -1041,7 +1055,11 @@ def test_failed_runs_turn_never_promotes_collected_image_candidate(tmp_path, mon
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-failed-image"}'
+        def read(self):
+            return json.dumps({
+                "run_id": "remote-failed-image",
+                "session_id": session.session_id,
+            }).encode("utf-8")
 
     class EventResponse:
         def __enter__(self): return self
@@ -1253,6 +1271,11 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, m
         "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
     })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+    monkeypatch.setattr(
+        gateway_chat,
+        "_ensure_gateway_managed_session",
+        lambda **_kwargs: "session-a",
+    )
     vision_calls = []
 
     secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
@@ -1270,7 +1293,8 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, m
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-vision"}'
+        def read(self):
+            return b'{"run_id":"remote-vision","session_id":"session-a"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -1306,7 +1330,7 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, m
     assert len(vision_calls) == 1
     assert captured["run"]["provider"] == "deepseek"
     assert captured["run"]["model"] == "deepseek-chat"
-    content = captured["run"]["input"][0]["content"]
+    content = captured["run"]["input"]
     assert "a red warning sign" in content
     assert secret not in content
     assert "/Users/alice/private/image.png" not in content
@@ -1542,11 +1566,809 @@ def test_gateway_chat_worker_injects_document_attachment_context(tmp_path, monke
     assert str(doc) not in content
 
 
+def test_gateway_runs_request_uses_only_current_input_and_instructions():
+    body = {
+        "model": "test-model",
+        "provider": "test-provider",
+        "messages": [
+            {"role": "system", "content": "product instructions"},
+            {"role": "user", "content": "stored question"},
+            {"role": "assistant", "content": "stored answer"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "current question"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AA=="},
+                    },
+                ],
+            },
+        ],
+    }
+
+    payload = _gateway_run_request_body(body, session_id="managed-session")
+
+    assert payload == {
+        "model": "test-model",
+        "provider": "test-provider",
+        "input": body["messages"][-1]["content"],
+        "session_id": "managed-session",
+        "instructions": "product instructions",
+    }
+    assert "conversation_history" not in payload
+    assert "messages" not in payload
+
+
+def test_gateway_runs_keeps_ephemeral_user_prefill_without_replaying_history():
+    ephemeral = [
+        {"role": "system", "content": "product instructions"},
+        {"role": "user", "content": "recall context from notes"},
+    ]
+    body = {
+        "model": "test-model",
+        "messages": [
+            *ephemeral,
+            {"role": "user", "content": "stored question"},
+            {"role": "assistant", "content": "stored answer"},
+            {"role": "user", "content": "current question"},
+        ],
+    }
+
+    payload = _gateway_run_request_body(
+        body,
+        session_id="managed-session",
+        ephemeral_messages=ephemeral,
+    )
+
+    assert payload["input"] == "current question"
+    assert "product instructions" in payload["instructions"]
+    assert "role=user" in payload["instructions"]
+    assert "recall context from notes" in payload["instructions"]
+    assert "stored question" not in payload["instructions"]
+    assert "stored answer" not in payload["instructions"]
+    assert "conversation_history" not in payload
+
+
+def test_gateway_run_error_preserves_model_configuration_classification():
+    event = _gateway_run_error_event({
+        "event": "run.failed",
+        "error": {
+            "message": "Set DEEPSEEK_API_KEY in the environment",
+            "code": "model_configuration_error",
+        },
+    })
+
+    assert event["type"] == "model_configuration_error"
+    assert "模型服务未配置或不可用" in event["message"]
+    _assert_no_public_hermes(event)
+
+
+@pytest.mark.parametrize(
+    ("terminal_event", "expected_local_event", "expected_error_type"),
+    [
+        ({"event": "run.cancelled"}, None, None),
+        (
+            {
+                "event": "run.failed",
+                "error": {
+                    "message": "Set DEEPSEEK_API_KEY in the environment",
+                    "code": "model_configuration_error",
+                },
+            },
+            None,
+            "model_configuration_error",
+        ),
+    ],
+)
+def test_gateway_runs_terminal_events_keep_cancel_and_error_semantics(
+    monkeypatch, terminal_event, expected_local_event, expected_error_type
+):
+    class FakeResponse:
+        def __init__(self, payload=None, lines=None):
+            self.payload = payload or {}
+            self.lines = lines or []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __iter__(self):
+            yield from self.lines
+
+    responses = iter([
+        FakeResponse({"run_id": "run-terminal", "session_id": "session-terminal"}),
+        FakeResponse(lines=[
+            f"data: {json.dumps(terminal_event)}\n\n".encode("utf-8"),
+        ]),
+    ])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: next(responses))
+    monkeypatch.setattr(gateway_chat, "update_active_run", lambda *args, **kwargs: None)
+    emitted = []
+
+    result = gateway_chat._stream_gateway_run_events(
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+        session_id="session-terminal",
+        stream_id="stream-terminal",
+        cancel_event=threading.Event(),
+        brand_token_tail=[""],
+        put_gateway_event=lambda name, payload: emitted.append((name, payload)),
+    )
+
+    if expected_local_event:
+        assert any(name == expected_local_event for name, _ in emitted)
+    else:
+        assert not any(name == "cancel" for name, _ in emitted)
+    if expected_error_type:
+        assert result["error_event"]["type"] == expected_error_type
+    else:
+        assert result["error_event"] is None
+    if terminal_event["event"] == "run.cancelled":
+        assert result["cancelled"] is True
+
+
+def test_gateway_runs_stops_orphan_when_started_session_id_does_not_match(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "run_id": "run-orphan",
+                "session_id": "unexpected-session",
+            }).encode("utf-8")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+    stopped = []
+    monkeypatch.setattr(
+        gateway_chat,
+        "_stop_gateway_run",
+        lambda base_url, headers, run_id: stopped.append((base_url, run_id)),
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_clear_gateway_run_approvals_from_webui",
+        lambda session_id, run_id: None,
+    )
+
+    result = gateway_chat._stream_gateway_run_events(
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+        session_id="expected-session",
+        stream_id="stream-orphan",
+        cancel_event=threading.Event(),
+        brand_token_tail=[""],
+        put_gateway_event=lambda name, payload: None,
+    )
+
+    assert stopped == [("http://gateway.local", "run-orphan")]
+    assert result["error_event"]["type"] == "gateway_error"
+
+
+def test_gateway_runs_same_name_tool_completion_matches_stable_id(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload=None, lines=None):
+            self.payload = payload or {}
+            self.lines = lines or []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __iter__(self):
+            yield from self.lines
+
+    responses = iter([
+        FakeResponse({"run_id": "run-tools", "session_id": "session-tools"}),
+        FakeResponse(lines=[
+            b'data: {"event":"tool.started","tool":"terminal","tool_call_id":"call-1","args":{"command":"one"}}\n\n',
+            b'data: {"event":"tool.started","tool":"terminal","tool_call_id":"call-2","args":{"command":"two"}}\n\n',
+            b'data: {"event":"tool.completed","tool":"terminal","tool_call_id":"call-1","error":false}\n\n',
+            b'data: {"event":"run.completed","output":"done","usage":{}}\n\n',
+        ]),
+    ])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: next(responses))
+    monkeypatch.setattr(gateway_chat, "update_active_run", lambda *args, **kwargs: None)
+    stream_id = "stream-same-name-tools"
+    STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    try:
+        gateway_chat._stream_gateway_run_events(
+            base_url="http://gateway.local",
+            headers={},
+            body={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+            session_id="session-tools",
+            stream_id=stream_id,
+            cancel_event=threading.Event(),
+            brand_token_tail=[""],
+            put_gateway_event=lambda name, payload: None,
+        )
+
+        by_id = {item["tid"]: item for item in STREAM_LIVE_TOOL_CALLS[stream_id]}
+        assert by_id["call-1"]["done"] is True
+        assert by_id["call-2"]["done"] is False
+    finally:
+        STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+
+
+def test_gateway_live_tool_completion_with_id_never_falls_back_to_name():
+    stream_id = "stream-tool-id-strict"
+    STREAM_LIVE_TOOL_CALLS[stream_id] = [
+        {"name": "terminal", "tid": "call-1", "done": False},
+        {"name": "terminal", "tid": "call-2", "done": False},
+    ]
+    try:
+        gateway_chat._mark_gateway_live_tool_complete(
+            stream_id,
+            tool_name="terminal",
+            tool_call_id="call-1",
+            is_error=False,
+        )
+
+        by_id = {item["tid"]: item for item in STREAM_LIVE_TOOL_CALLS[stream_id]}
+        assert by_id["call-1"]["done"] is True
+        assert by_id["call-2"]["done"] is False
+    finally:
+        STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+
+
+def test_gateway_run_incomplete_event_stream_stops_run_and_returns_error(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload=None, lines=None):
+            self.payload = payload or {}
+            self.lines = lines or []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __iter__(self):
+            yield from self.lines
+
+    responses = iter([
+        FakeResponse({"run_id": "run-incomplete", "session_id": "session-incomplete"}),
+        FakeResponse(lines=[b'data: {"event":"message.delta","delta":"partial"}\n\n']),
+    ])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: next(responses))
+    monkeypatch.setattr(gateway_chat, "update_active_run", lambda *args, **kwargs: None)
+    stopped = []
+    monkeypatch.setattr(
+        gateway_chat,
+        "_stop_gateway_run",
+        lambda base_url, headers, run_id: stopped.append(run_id),
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_clear_gateway_run_approvals_from_webui",
+        lambda session_id, run_id: None,
+    )
+
+    result = gateway_chat._stream_gateway_run_events(
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+        session_id="session-incomplete",
+        stream_id="stream-incomplete",
+        cancel_event=threading.Event(),
+        brand_token_tail=[""],
+        put_gateway_event=lambda name, payload: None,
+    )
+
+    assert stopped == ["run-incomplete"]
+    assert result["error_event"]["type"] == "gateway_error"
+
+
+def test_gateway_runs_fallback_only_when_start_endpoint_is_unavailable():
+    session_endpoint_unavailable = urllib.error.HTTPError(
+        "http://gateway.local/api/sessions",
+        404,
+        "Not Found",
+        hdrs=Message(),
+        fp=io.BytesIO(b'{"error":{"message":"Not Found"}}'),
+    )
+    unavailable = urllib.error.HTTPError(
+        "http://gateway.local/v1/runs",
+        404,
+        "Not Found",
+        hdrs=Message(),
+        fp=io.BytesIO(b'{"error":{"message":"Not Found"}}'),
+    )
+    managed_session_missing = urllib.error.HTTPError(
+        "http://gateway.local/v1/runs",
+        404,
+        "Not Found",
+        hdrs=Message(),
+        fp=io.BytesIO(b'{"error":{"message":"Session not found","code":"session_not_found"}}'),
+    )
+    event_stream_missing = urllib.error.HTTPError(
+        "http://gateway.local/v1/runs/run-1/events",
+        404,
+        "Not Found",
+        hdrs=Message(),
+        fp=io.BytesIO(b'{"error":{"message":"Run not found","code":"run_not_found"}}'),
+    )
+
+    assert gateway_chat._gateway_run_fallback_allowed(session_endpoint_unavailable) is True
+    assert gateway_chat._gateway_run_fallback_allowed(unavailable) is True
+    assert gateway_chat._gateway_run_fallback_allowed(managed_session_missing) is False
+    assert gateway_chat._gateway_run_fallback_allowed(event_stream_missing) is False
+    # The classifier may inspect the response body, but outer HTTP error
+    # handling still needs that body for a useful user-facing diagnostic.
+    assert gateway_chat._gateway_http_error_body(managed_session_missing) == (
+        '{"error":{"message":"Session not found","code":"session_not_found"}}'
+    )
+
+
+def test_gateway_runs_compatibility_fallback_sends_full_webui_history(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    captured = {"urls": [], "chat_body": None}
+
+    class FakeChatResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"new answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["urls"].append(req.full_url)
+        if req.full_url.endswith("/api/sessions"):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                404,
+                "Not Found",
+                hdrs=Message(),
+                fp=io.BytesIO(b'{"error":{"message":"Not Found"}}'),
+            )
+        if req.full_url.endswith("/v1/chat/completions"):
+            captured["chat_body"] = json.loads(req.data.decode("utf-8"))
+            return FakeChatResponse()
+        raise AssertionError(f"unexpected URL: {req.full_url}")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    session = new_session()
+    prior = [
+        {"role": "user", "content": "old question", "timestamp": 1.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 2.0},
+    ]
+    session.messages = list(prior)
+    session.context_messages = list(prior)
+    stream_id = "stream-runs-fallback"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "new question"
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "new question",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert captured["urls"] == [
+        "http://gateway.local/api/sessions",
+        "http://gateway.local/v1/chat/completions",
+    ]
+    visible_messages = [
+        message
+        for message in captured["chat_body"]["messages"]
+        if message["role"] != "system"
+    ]
+    assert visible_messages == [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new question"},
+    ]
+    saved = models.get_session(session.session_id)
+    assert [message["content"] for message in saved.messages] == [
+        "old question",
+        "old answer",
+        "new question",
+        "new answer",
+    ]
+
+
+def test_gateway_runs_transport_creates_managed_session_and_matches_visible_events(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_prefill_messages_with_webui_context",
+        lambda ctx, cfg: [],
+    )
+    captured = {"urls": [], "bodies": {}}
+
+    class FakeResponse:
+        def __init__(self, payload=None, lines=None, headers=None):
+            self.payload = payload or {}
+            self.lines = lines or []
+            self.headers = headers or {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __iter__(self):
+            yield from self.lines
+
+    def fake_urlopen(req, timeout=0):
+        captured["urls"].append(req.full_url)
+        if req.data:
+            captured["bodies"][req.full_url] = json.loads(req.data.decode("utf-8"))
+        if req.full_url.endswith("/api/sessions"):
+            return FakeResponse({
+                "object": "hermes.session",
+                "session": {"id": session.session_id},
+            })
+        if req.full_url.endswith("/v1/runs"):
+            return FakeResponse({
+                "run_id": "run-managed",
+                "session_id": session.session_id,
+                "status": "started",
+            })
+        if req.full_url.endswith("/v1/runs/run-managed/events"):
+            return FakeResponse(lines=[
+                b'data: {"event":"message.delta","delta":"hello"}\n\n',
+                b'data: {"event":"tool.started","tool":"terminal","tool_call_id":"call-1","preview":"terminal: pwd","args":{"command":"pwd"}}\n\n',
+                b'data: {"event":"tool.completed","tool":"terminal","tool_call_id":"call-1","duration":0.1,"error":false}\n\n',
+                b'data: {"event":"run.completed","output":"hello","usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}\n\n',
+            ])
+        raise AssertionError(f"unexpected URL: {req.full_url}")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    session = new_session()
+    stream_id = "stream-managed-runs"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Say hello"
+    session.pending_attachments = []
+    session.pending_started_at = 123
+    session.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    run_body = captured["bodies"]["http://gateway.local/v1/runs"]
+    assert run_body["session_id"] == session.session_id
+    assert run_body["input"] == "Say hello"
+    assert "conversation_history" not in run_body
+    assert "messages" not in run_body
+    assert captured["urls"][:2] == [
+        "http://gateway.local/api/sessions",
+        "http://gateway.local/v1/runs",
+    ]
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    assert any(name == "token" and data["text"] == "hello" for name, data in events)
+    assert any(
+        name == "tool"
+        and data["name"] == "terminal"
+        and data["tid"] == "call-1"
+        for name, data in events
+    )
+    assert any(name == "tool_complete" and data["name"] == "terminal" for name, data in events)
+    done = [data for name, data in events if name == "done"][-1]
+    assert done["usage"]["input_tokens"] == 4
+    assert done["usage"]["output_tokens"] == 2
+    saved = models.get_session(session.session_id)
+    assert [message["role"] for message in saved.messages] == ["user", "assistant"]
+    assert saved.messages[-1]["content"] == "hello"
+
+
+def test_gateway_runs_cancelled_result_uses_cancel_path_without_success_or_empty_error(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat, "_ensure_gateway_managed_session", lambda **kwargs: "managed")
+    monkeypatch.setattr(
+        gateway_chat,
+        "_stream_gateway_run_events",
+        lambda **kwargs: {
+            "final_text": "",
+            "usage": {},
+            "error_event": None,
+            "cancelled": True,
+        },
+    )
+    session = new_session()
+    stream_id = "stream-managed-cancelled"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "cancel this"
+    session.pending_started_at = 123.0
+    session.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "cancel this",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    assert any(name == "cancel" for name, _ in events)
+    assert not any(name in {"apperror", "done"} for name, _ in events)
+    saved = models.get_session(session.session_id)
+    assert saved.active_stream_id is None
+    assert [message["role"] for message in saved.messages] == ["user", "assistant"]
+    assert saved.messages[-1].get("_error") is True
+    assert "cancel" in saved.messages[-1]["content"].lower()
+
+
+def test_gateway_runs_suppresses_transport_error_after_user_cancel(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "not_configured",
+        "source": "none",
+        "label": "",
+        "message_count": 0,
+        "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat, "_ensure_gateway_managed_session", lambda **kwargs: "managed")
+
+    def cancelled_transport(**kwargs):
+        kwargs["cancel_event"].set()
+        raise RuntimeError("socket closed while stopping")
+
+    monkeypatch.setattr(gateway_chat, "_stream_gateway_run_events", cancelled_transport)
+    session = new_session()
+    stream_id = "stream-cancel-error-race"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "cancel this"
+    session.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "cancel this",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    assert not any(name == "apperror" for name, _ in events)
+
+
+def test_gateway_worker_finalizes_cancel_when_stream_was_removed_before_registration(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    session = new_session()
+    stream_id = "stream-cancel-before-worker"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "cancel before start"
+    session.pending_started_at = 123.0
+    session.save()
+    STREAMS.pop(stream_id, None)
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "cancel before start",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(session.session_id)
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+    assert [message["role"] for message in saved.messages] == ["user", "assistant"]
+    assert saved.messages[-1].get("_error") is True
+
+
+def test_gateway_runs_transport_keeps_current_image_attachment_in_input(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
+    monkeypatch.setattr(config, "get_config", lambda: {"agent": {"image_input_mode": "native"}})
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    session = models.Session(session_id="session-managed-image")
+    models.SESSIONS[session.session_id] = session
+    attachment_root = tmp_path / "attachments"
+    upload_dir = attachment_root / session.session_id
+    upload_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image_path = upload_dir / "photo.png"
+    image_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
+    captured = {}
+
+    class FakeResponse:
+        def __init__(self, payload=None, lines=None):
+            self.payload = payload or {}
+            self.lines = lines or []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __iter__(self):
+            yield from self.lines
+
+    def fake_urlopen(req, timeout=0):
+        if req.full_url.endswith("/api/sessions"):
+            return FakeResponse({"session": {"id": session.session_id}})
+        if req.full_url.endswith("/v1/runs"):
+            captured["run_body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"run_id": "run-image", "session_id": session.session_id})
+        return FakeResponse(lines=[
+            b'data: {"event":"run.completed","output":"saw it","usage":{}}\n\n',
+        ])
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    stream_id = "stream-managed-image"
+    session.active_stream_id = stream_id
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "What is in this image?",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [{"name": image_path.name, "ref": image_path.name, "mime": "image/png", "is_image": True}],
+    )
+
+    current_input = captured["run_body"]["input"]
+    assert isinstance(current_input, list), repr(current_input)
+    assert current_input[0] == {"type": "text", "text": "What is in this image?"}
+    assert current_input[1]["type"] == "image_url"
+    assert current_input[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "conversation_history" not in captured["run_body"]
+
+
 def test_gateway_runs_user_cancel_returns_cancelled_even_with_partial_text(monkeypatch):
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-cancelled"}'
+        def read(self):
+            return b'{"run_id":"remote-cancelled","session_id":"sid-runs-cancel"}'
 
     cancel = gateway_chat.threading.Event()
     partial = "partial " * 40
@@ -1566,9 +2388,14 @@ def test_gateway_runs_user_cancel_returns_cancelled_even_with_partial_text(monke
     events = []
 
     result = gateway_chat._stream_gateway_run_events(
-        base_url="http://gateway.local", headers={}, body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
-        session_id="sid-runs-cancel", stream_id="stream-runs-cancel", cancel_event=cancel,
-        brand_token_tail=[""], put_gateway_event=lambda name, data: events.append((name, data)),
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
+        session_id="sid-runs-cancel",
+        stream_id="stream-runs-cancel",
+        cancel_event=cancel,
+        brand_token_tail=[""],
+        put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
     assert result["terminal_outcome"] == "cancelled"
@@ -1581,7 +2408,8 @@ def test_gateway_run_reasoning_uses_stateful_cross_chunk_filter(monkeypatch):
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-reasoning"}'
+        def read(self):
+            return b'{"run_id":"remote-reasoning","session_id":"sid-runs-reasoning"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -1624,7 +2452,8 @@ def test_gateway_runs_server_cancelled_preserves_cancelled_outcome(monkeypatch):
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-server-cancelled"}'
+        def read(self):
+            return b'{"run_id":"remote-server-cancelled","session_id":"sid-runs-server-cancel"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -1639,9 +2468,13 @@ def test_gateway_runs_server_cancelled_preserves_cancelled_outcome(monkeypatch):
 
     events = []
     result = gateway_chat._stream_gateway_run_events(
-        base_url="http://gateway.local", headers={}, body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
-        session_id="sid-runs-server-cancel", stream_id="stream-runs-server-cancel",
-        cancel_event=gateway_chat.threading.Event(), brand_token_tail=[""],
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
+        session_id="sid-runs-server-cancel",
+        stream_id="stream-runs-server-cancel",
+        cancel_event=gateway_chat.threading.Event(),
+        brand_token_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -1654,7 +2487,8 @@ def test_gateway_runs_partial_eof_is_not_completed(monkeypatch):
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-truncated"}'
+        def read(self):
+            return b'{"run_id":"remote-truncated","session_id":"sid-runs-truncated"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -1665,13 +2499,18 @@ def test_gateway_runs_partial_eof_is_not_completed(monkeypatch):
 
     responses = iter([StartResponse(), EventResponse()])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(gateway_chat, "_stop_gateway_run", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(gateway_chat, "_clear_gateway_run_approvals_from_webui", lambda *_args, **_kwargs: None)
 
     events = []
     result = gateway_chat._stream_gateway_run_events(
-        base_url="http://gateway.local", headers={}, body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
-        session_id="sid-runs-truncated", stream_id="stream-runs-truncated",
-        cancel_event=gateway_chat.threading.Event(), brand_token_tail=[""],
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
+        session_id="sid-runs-truncated",
+        stream_id="stream-runs-truncated",
+        cancel_event=gateway_chat.threading.Event(),
+        brand_token_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -1685,7 +2524,8 @@ def test_gateway_runs_failed_discards_buffered_reasoning(monkeypatch):
     class StartResponse:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def read(self): return b'{"run_id":"remote-failed"}'
+        def read(self):
+            return b'{"run_id":"remote-failed","session_id":"sid-runs-failed"}'
 
     class EventResponse:
         def __enter__(self): return self
@@ -1700,10 +2540,13 @@ def test_gateway_runs_failed_discards_buffered_reasoning(monkeypatch):
     events = []
 
     result = gateway_chat._stream_gateway_run_events(
-        base_url="http://gateway.local", headers={},
+        base_url="http://gateway.local",
+        headers={},
         body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
-        session_id="sid-runs-failed", stream_id="stream-runs-failed",
-        cancel_event=gateway_chat.threading.Event(), brand_token_tail=[""],
+        session_id="sid-runs-failed",
+        stream_id="stream-runs-failed",
+        cancel_event=gateway_chat.threading.Event(),
+        brand_token_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
