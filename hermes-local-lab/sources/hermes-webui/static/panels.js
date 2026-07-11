@@ -3548,6 +3548,24 @@ let _writeflowModalTeamId = '';
 let _writeflowSelectedTemplateId = '';
 let _writeflowSelectedRunId = '';
 let _writeflowContractRollout = {mode:'off',contract_version:'expert-team-contract/v1',document_types:[]};
+let _writeflowTeamDialog = null;
+
+function _findWriteflowTeamTrigger(teamId) {
+  return Array.from(document.querySelectorAll('#writeflowTeamGrid [data-writeflow-team]'))
+    .find(node => node.getAttribute('data-writeflow-team') === teamId) || null;
+}
+
+function _getWriteflowTeamDialog() {
+  if (!_writeflowTeamDialog) {
+    _writeflowTeamDialog = ManagedDialog.create($('writeflowTeamModal'), {
+      initialFocus:'#writeflowTeamModalTitle',
+      returnFocus:()=>_findWriteflowTeamTrigger(_writeflowModalTeamId),
+      closeOnBackdrop:true,
+      onRequestClose: () => closeWriteflowTeamModal(),
+    });
+  }
+  return _writeflowTeamDialog;
+}
 const WRITEFLOW_PHASES = ['确定方向', '生成初稿', '打磨发布'];
 const WRITEFLOW_ARTIFACT_LABELS = {
   '01_theme': '选题确认',
@@ -3807,7 +3825,7 @@ function openWriteflowTeamModal(teamId) {
       <div class="writeflow-modal-head">
         ${_writeflowAvatarHtml(team.image, team.title, 'writeflow-modal-avatar')}
         <div>
-          <h3 id="writeflowTeamModalTitle">${esc(team.title)}</h3>
+          <h3 id="writeflowTeamModalTitle" tabindex="-1">${esc(team.title)}</h3>
           <p><i></i>${esc(team.category)} · ${esc(team.statusLabel)}</p>
         </div>
       </div>
@@ -3816,7 +3834,7 @@ function openWriteflowTeamModal(teamId) {
         <div class="writeflow-modal-overview">
           <div class="writeflow-modal-section">
             <h4>能力介绍</h4>
-            <p>${esc(team.description)}</p>
+            <p id="writeflowTeamModalDescription">${esc(team.description)}</p>
           </div>
           <div class="writeflow-modal-section">
             <h4>擅长领域</h4>
@@ -3846,10 +3864,7 @@ function openWriteflowTeamModal(teamId) {
       <span>进入新的聊天任务后，可继续确认阶段、查看运行状态和产物入口。</span>
       <button type="button" class="btn primary writeflow-summon-btn" onclick="summonWriteflowTeam()">召唤 ${esc(team.title)}</button>
     </div>`;
-  modal.hidden = false;
-  modal.onclick = event => {
-    if (event.target === modal) closeWriteflowTeamModal();
-  };
+  _getWriteflowTeamDialog().open();
   body.querySelectorAll('.writeflow-example').forEach(btn => {
     btn.addEventListener('click', () => {
       body.querySelectorAll('.writeflow-example').forEach(node => node.classList.remove('selected'));
@@ -3865,8 +3880,7 @@ function openWriteflowTeamModal(teamId) {
 }
 
 function closeWriteflowTeamModal() {
-  const modal = $('writeflowTeamModal');
-  if (modal) modal.hidden = true;
+  _getWriteflowTeamDialog().close();
 }
 
 function _writeflowExpertTeamStartPayload(team,example,base){

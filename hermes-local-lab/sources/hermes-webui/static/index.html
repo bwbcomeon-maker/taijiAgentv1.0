@@ -2154,7 +2154,7 @@
     </div>
   </aside>
 </div>
-<div class="onboarding-overlay" id="onboardingOverlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
+<div class="onboarding-overlay" id="onboardingOverlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle" aria-describedby="onboardingLead">
   <div class="onboarding-card">
     <div class="onboarding-shell">
       <div class="onboarding-sidebar">
@@ -2164,7 +2164,7 @@
         <div class="onboarding-steps" id="onboardingSteps"></div>
       </div>
       <div class="onboarding-main">
-        <div class="onboarding-status" id="onboardingNotice"></div>
+        <div class="onboarding-status" id="onboardingNotice" role="status" aria-live="polite" aria-atomic="true"></div>
         <div class="onboarding-body" id="onboardingBody"></div>
         <div class="onboarding-actions">
           <button class="sm-btn" id="onboardingBackBtn" onclick="prevOnboardingStep()" style="display:none" data-i18n="onboarding_back">Back</button>
@@ -2177,7 +2177,7 @@
 </div>
 <div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar()"></div>
 <div class="writeflow-modal-backdrop" id="writeflowTeamModal" hidden>
-  <div class="writeflow-modal" role="dialog" aria-modal="true" aria-labelledby="writeflowTeamModalTitle">
+  <div class="writeflow-modal" role="dialog" aria-modal="true" aria-labelledby="writeflowTeamModalTitle" aria-describedby="writeflowTeamModalDescription">
     <button class="writeflow-modal-close" type="button" onclick="closeWriteflowTeamModal()" aria-label="关闭专家团详情">×</button>
     <div id="writeflowTeamModalBody" class="writeflow-modal-body"></div>
     <div id="writeflowTeamModalFooter" class="writeflow-modal-footer"></div>
@@ -2203,6 +2203,7 @@
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/managed-dialog.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/expert-team-presenter.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/expert-team-ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/expert-team-actions.js?v=__WEBUI_VERSION__" defer></script>

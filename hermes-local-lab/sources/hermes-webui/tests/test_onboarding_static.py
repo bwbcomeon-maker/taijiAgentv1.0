@@ -16,6 +16,16 @@ def test_index_contains_onboarding_overlay_markup():
     assert 'src="static/onboarding.js?v=__WEBUI_VERSION__"' in html
 
 
+def test_escape_dismisses_without_marking_onboarding_complete():
+    js = read("static/onboarding.js")
+    dismiss_start = js.index("function dismissOnboardingWizard()")
+    dismiss_body = js[dismiss_start : js.index("async function skipOnboarding()", dismiss_start)]
+
+    assert "_getOnboardingDialog().close()" in dismiss_body
+    assert "/api/onboarding/complete" not in dismiss_body
+    assert "ONBOARDING.active=false" not in dismiss_body
+
+
 def test_onboarding_css_rules_exist():
     css = read("static/style.css")
     for selector in (

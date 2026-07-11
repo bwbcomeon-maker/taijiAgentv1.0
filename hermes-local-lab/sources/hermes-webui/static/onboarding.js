@@ -1,4 +1,18 @@
 const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false,probe:{status:'idle',error:null,detail:'',models:null,probedKey:''}};
+let _onboardingDialog=null;
+
+function _getOnboardingDialog(){
+  if(!_onboardingDialog){
+    _onboardingDialog=ManagedDialog.create($('onboardingOverlay'),{
+      initialFocus:'#onboardingNextBtn',
+      returnFocus:'#msg',
+      closeOnBackdrop:false,
+      display:'flex',
+      onRequestClose:()=>dismissOnboardingWizard(),
+    });
+  }
+  return _onboardingDialog;
+}
 
 // ── Onboarding base-URL probe (#1499) ───────────────────────────────────────
 // Probes <base_url>/models so the wizard can validate the configured endpoint
@@ -435,9 +449,9 @@ async function loadOnboardingWizard(){
     ONBOARDING.form.baseUrl=current.base_url||'';
     ONBOARDING.active=!status.completed;
     if(!ONBOARDING.active) return false;
-    $('onboardingOverlay').style.display='flex';
     _renderOnboardingSteps();
     _renderOnboardingBody();
+    _getOnboardingDialog().open();
     return true;
   }catch(e){
     console.warn('onboarding status failed',e);
@@ -502,7 +516,7 @@ async function _finishOnboarding(){
   const done=await api('/api/onboarding/complete',{method:'POST',body:'{}'});
   ONBOARDING.status=done;
   ONBOARDING.active=false;
-  $('onboardingOverlay').style.display='none';
+  _getOnboardingDialog().close();
   showToast(t('onboarding_complete'));
   await loadWorkspaceList();
   if(typeof renderSessionList==='function') await renderSessionList();
@@ -512,12 +526,19 @@ async function _finishOnboarding(){
   }
 }
 
+function dismissOnboardingWizard(){
+  // Dismissal is deliberately local-only. The incomplete server state makes
+  // the wizard return on the next App launch, so Escape can never silently
+  // opt the user out of required first-run setup.
+  _getOnboardingDialog().close();
+}
+
 async function skipOnboarding(){
   try{
     // Mark onboarding completed server-side without changing any config
     await api('/api/onboarding/complete',{method:'POST',body:'{}'});
     ONBOARDING.active=false;
-    $('onboardingOverlay').style.display='none';
+    _getOnboardingDialog().close();
     showToast(t('onboarding_skipped')||'Setup skipped');
   }catch(e){
     _setOnboardingNotice((e.message||String(e)),'warn');

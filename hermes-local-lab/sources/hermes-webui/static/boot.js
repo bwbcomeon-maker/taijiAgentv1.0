@@ -1618,10 +1618,10 @@ document.addEventListener('keydown',async e=>{
     await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
   }
   if(e.key==='Escape'){
-    // Close onboarding overlay if open (skip/dismiss the wizard)
+    // Escape may dismiss first-run UI, but must never persist "setup complete".
     const onboardingOverlay=$('onboardingOverlay');
     if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){
-      if(typeof skipOnboarding==='function') skipOnboarding();
+      if(typeof dismissOnboardingWizard==='function') dismissOnboardingWizard();
       return;
     }
     // Close settings panel if active
