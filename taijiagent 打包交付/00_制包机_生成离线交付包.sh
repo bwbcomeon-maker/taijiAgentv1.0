@@ -425,8 +425,8 @@ prepare_source_release() {
 
 install_build_dependencies() {
   info "安装制包依赖。这里可能需要输入 sudo 密码。"
-  sudo apt-get update
-  sudo apt-get install -y \
+  sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update
+  sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y \
     curl ca-certificates build-essential python3-dev libffi-dev git rsync \
     dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends openssl
 }

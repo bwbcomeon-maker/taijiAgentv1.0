@@ -1660,6 +1660,18 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("build_offline_dependency_repo", builder)
         self.assertIn("git archive", builder)
 
+    def test_builder_preserves_noninteractive_apt_environment_across_sudo(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn(
+            "sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update",
+            builder,
+        )
+        self.assertIn(
+            "sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y",
+            builder,
+        )
+
     def test_delivery_release_preflight_is_a_hard_gate(self):
         preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         self.assertTrue(preflight_path.exists())
