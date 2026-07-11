@@ -2,6 +2,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -1671,6 +1672,20 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y",
             builder,
         )
+
+    def test_builder_installs_declared_deb_runtime_dependencies_for_ldd_audit(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        deb_builder = read_text("packaging/linux/deb/build-deb.sh")
+        match = re.search(r'^DEB_DEPENDS="([^"]+)"$', deb_builder, re.MULTILINE)
+        self.assertIsNotNone(match)
+        declared = [item.strip() for item in match.group(1).split(",")]
+        install_body = builder[
+            builder.index("install_build_dependencies() {") : builder.index("source_lab_dir() {")
+        ]
+
+        for package in declared:
+            with self.subTest(package=package):
+                self.assertIn(package, install_body)
 
     def test_delivery_release_preflight_is_a_hard_gate(self):
         preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"

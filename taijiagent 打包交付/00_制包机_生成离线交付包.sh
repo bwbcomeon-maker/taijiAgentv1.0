@@ -428,7 +428,12 @@ install_build_dependencies() {
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y \
     curl ca-certificates build-essential python3-dev libffi-dev git rsync \
-    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends openssl
+    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends openssl \
+    libc6 libgtk-3-0 libnss3 libnspr4 libxss1 libasound2 libatk1.0-0 \
+    libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libgbm1 libxkbcommon0 libx11-6 \
+    libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxrender1 \
+    libxshmfence1 libxcb1 libcups2 libdbus-1-3 libglib2.0-0 libpango-1.0-0 \
+    libcairo2 libexpat1 libfontconfig1 libsecret-1-0 libxtst6 libuuid1 xdg-utils
 }
 
 source_lab_dir() {
