@@ -28,6 +28,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
 from hermes_cli.fallback_config import get_fallback_chain
+import taiji_license
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
@@ -174,6 +175,7 @@ def run_oneshot(
     # Redirect stderr AND stdout to devnull for the entire call tree.
     # We'll print the final response to the real stdout at the end.
     real_stdout = sys.stdout
+    real_stderr = sys.stderr
     devnull = open(os.devnull, "w", encoding="utf-8")
 
     try:
@@ -185,6 +187,10 @@ def run_oneshot(
                 toolsets=explicit_toolsets,
                 use_config_toolsets=use_config_toolsets,
             )
+    except taiji_license.LicenseExecutionBlocked as exc:
+        real_stderr.write(f"Error: {exc.message}\n")
+        real_stderr.flush()
+        return 1
     finally:
         try:
             devnull.close()

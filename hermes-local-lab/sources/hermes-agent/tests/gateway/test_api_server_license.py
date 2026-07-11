@@ -37,8 +37,22 @@ def _create_license_app(adapter: APIServerAdapter) -> web.Application:
 
 @pytest.fixture()
 def required_missing_license(monkeypatch, tmp_path):
-    monkeypatch.setenv("TAIJI_LICENSE_REQUIRED", "1")
-    monkeypatch.setenv("TAIJI_LICENSE_FILE", str(tmp_path / "missing.jwt"))
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "is_installed_production",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "installation_profile",
+        lambda: "installed-production",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("TAIJI_LICENSE_REQUIRED", raising=False)
+    monkeypatch.delenv("TAIJI_LICENSE_MACHINE_BINDING_REQUIRED", raising=False)
+    monkeypatch.delenv("TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_BINDING", raising=False)
+    monkeypatch.delenv("TAIJI_LICENSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("TAIJI_LICENSE_PUBLIC_KEY_FILE", raising=False)
 
 
@@ -57,8 +71,43 @@ async def test_license_status_is_public_and_health_stays_available(required_miss
 
     assert data["status"] == "missing"
     assert data["code"] == "license_missing"
+    assert data["required"] is True
+    assert data["policy"] == "production"
+    assert data["policy_version"] == 1
+    assert data["signing_key_fingerprint_short"] == "2dcff4f2b5e6"
     assert "path" not in data
     assert "token" not in data
+
+
+@pytest.mark.asyncio
+async def test_disable_override_is_blocked_before_agent_creation(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "is_installed_production",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "installation_profile",
+        lambda: "installed-production",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("TAIJI_LICENSE_REQUIRED", "0")
+    adapter = _make_adapter()
+    app = _create_license_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        with patch.object(adapter, "_create_agent") as create_agent:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hello"}]},
+            )
+            body = await resp.json()
+
+    assert resp.status == 403
+    assert body["error"]["code"] == "license_policy_override_forbidden"
+    create_agent.assert_not_called()
 
 
 @pytest.mark.asyncio

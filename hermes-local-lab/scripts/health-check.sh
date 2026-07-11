@@ -23,6 +23,13 @@ USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/taiji-agent"
 USER_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/taiji-agent"
 USER_LOG_DIR="$USER_STATE_DIR/logs"
 USER_TMP_DIR="$USER_STATE_DIR/tmp"
+TAIJI_ACCOUNT_HOME="$HOME"
+if command -v getent >/dev/null 2>&1; then
+  _taiji_account_home="$(getent passwd "$(id -u)" 2>/dev/null | awk -F: 'NR==1 {print $6}')"
+  if [ -n "$_taiji_account_home" ]; then
+    TAIJI_ACCOUNT_HOME="$_taiji_account_home"
+  fi
+fi
 
 if [ "${TAIJI_AGENT_USE_USER_DIRS:-0}" = "1" ]; then
   LOG_DIR="${TAIJI_AGENT_LOG_DIR:-$USER_LOG_DIR}"
@@ -69,7 +76,7 @@ TAIJI_ENV_FILE="$_TAIJI_CANONICAL_ENV_FILE"
 unset TAIJI_AGENT_HOME TAIJI_AGENT_RUNTIME_HOME TAIJI_AGENT_ENV_FILE
 unset HER""MES_HOME HER""MES_CONFIG_PATH HER""MES_CONFIG HER""MES_ENV
 
-TAIJI_LICENSE_FILE="${TAIJI_LICENSE_FILE:-${TAIJI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/taiji-agent}/license.jwt}"
+TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
 WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"

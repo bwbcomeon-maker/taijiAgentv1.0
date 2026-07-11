@@ -69,6 +69,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
+import taiji_license
 
 # OpenAI lazy proxy + safe stdio + proxy URL helpers — see agent/process_bootstrap.py.
 # `OpenAI` is re-exported here so `patch("run_agent.OpenAI", ...)` in tests works.
@@ -4378,6 +4379,19 @@ class AIAgent:
         persist_user_platform_message_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
+        try:
+            blocked = taiji_license.require_valid_license()
+        except Exception as exc:
+            status = taiji_license.LicenseStatus(
+                status="invalid",
+                required=True,
+                code="license_status_unavailable",
+                message=taiji_license.MESSAGE_STATUS_UNAVAILABLE,
+                machine_binding_required=True,
+            )
+            raise taiji_license.LicenseExecutionBlocked(status) from None
+        if blocked is not None:
+            raise taiji_license.LicenseExecutionBlocked(blocked)
         from agent.conversation_loop import run_conversation
         return run_conversation(
             self,
@@ -4586,7 +4600,11 @@ def main(
     print("\n" + "=" * 50)
     
     # Run conversation
-    result = agent.run_conversation(user_query)
+    try:
+        result = agent.run_conversation(user_query)
+    except taiji_license.LicenseExecutionBlocked as exc:
+        print(f"Error: {exc.message}", file=sys.stderr)
+        raise SystemExit(1) from None
     
     print("\n" + "=" * 50)
     print("📋 CONVERSATION SUMMARY")

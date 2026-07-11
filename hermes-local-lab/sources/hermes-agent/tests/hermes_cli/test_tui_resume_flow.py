@@ -804,6 +804,31 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["prompt"] == "recall this"
 
 
+def test_oneshot_maps_license_block_to_safe_stderr(monkeypatch, capsys):
+    import taiji_license
+    from hermes_cli import oneshot
+
+    blocked = taiji_license.LicenseStatus(
+        status="missing",
+        required=True,
+        code="license_missing",
+        message=taiji_license.MESSAGE_MISSING,
+    )
+
+    def raise_blocked(*_args, **_kwargs):
+        raise taiji_license.LicenseExecutionBlocked(blocked)
+
+    monkeypatch.setattr(oneshot, "_run_agent", raise_blocked)
+
+    code = oneshot.run_oneshot("hello")
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert captured.err == f"Error: {taiji_license.MESSAGE_MISSING}\n"
+    assert "Traceback" not in captured.err
+
+
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     captured = {}
     active_path_during_call = None

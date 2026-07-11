@@ -391,18 +391,15 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_DESKTOP_ACCESS_TOKEN = desktopAccessToken;
   env.API_SERVER_KEY = crypto.randomBytes(32).toString("hex");
   env.TAIJI_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
-  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const stateDir = process.env.TAIJI_STATE_DIR || userStateDir();
   const tmpDir = process.env.TAIJI_AGENT_TMP_DIR || path.join(stateDir, "tmp");
-  env.TAIJI_LICENSE_FILE = process.env.TAIJI_LICENSE_FILE || path.join(configHome, "taiji-agent", "license.jwt");
+  env.TAIJI_LICENSE_FILE = path.join(os.homedir(), ".config", "taiji-agent", "licenses", "active-license.jwt");
   env.TAIJI_STATE_DIR = stateDir;
   env.TAIJI_AGENT_TMP_DIR = tmpDir;
   env.TMPDIR = tmpDir;
   env.TMP = tmpDir;
   env.TEMP = tmpDir;
-  env.TAIJI_LICENSE_STATE_FILE = process.env.TAIJI_LICENSE_STATE_FILE || path.join(stateDir, "license-state.json");
-  env.TAIJI_LICENSE_REQUIRED = process.env.TAIJI_LICENSE_REQUIRED || "1";
-  env.TAIJI_LICENSE_MACHINE_BINDING_REQUIRED = process.env.TAIJI_LICENSE_MACHINE_BINDING_REQUIRED || "1";
+  env.TAIJI_LICENSE_STATE_FILE = path.join(os.homedir(), ".local", "state", "taiji-agent", "license-state.json");
   try {
     fs.mkdirSync(tmpDir, { recursive: true });
   } catch (error) {

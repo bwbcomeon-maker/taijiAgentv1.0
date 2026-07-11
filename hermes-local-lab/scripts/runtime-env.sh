@@ -25,6 +25,14 @@ WEBUI_DIR="${TAIJI_AGENT_WEBUI_DIR:-$_taiji_default_web}"
 _xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 _xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 _xdg_state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+TAIJI_ACCOUNT_HOME="$HOME"
+if command -v getent >/dev/null 2>&1; then
+  _taiji_account_home="$(getent passwd "$(id -u)" 2>/dev/null | awk -F: 'NR==1 {print $6}')"
+  if [ -n "$_taiji_account_home" ]; then
+    TAIJI_ACCOUNT_HOME="$_taiji_account_home"
+  fi
+fi
+export TAIJI_ACCOUNT_HOME
 
 TAIJI_CONFIG_DIR="${TAIJI_AGENT_CONFIG_DIR:-$_xdg_config_home/taiji-agent}"
 TAIJI_DATA_DIR="${TAIJI_AGENT_DATA_DIR:-$_xdg_data_home/taiji-agent}"
@@ -100,10 +108,8 @@ export TMPDIR="$TMP_DIR"
 export TMP="$TMP_DIR"
 export TEMP="$TMP_DIR"
 
-TAIJI_LICENSE_FILE="${TAIJI_LICENSE_FILE:-$TAIJI_CONFIG_DIR/license.jwt}"
-TAIJI_LICENSE_STATE_FILE="${TAIJI_LICENSE_STATE_FILE:-$TAIJI_STATE_DIR/license-state.json}"
-TAIJI_LICENSE_MACHINE_BINDING_REQUIRED="${TAIJI_LICENSE_MACHINE_BINDING_REQUIRED:-1}"
-# TAIJI_LICENSE_REQUIRED is set by product launchers so shared env resolution stays reusable.
+TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"
+TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"
 
 mkdir -p "$LOG_DIR" "$TMP_DIR" "$TAIJI_RUNTIME_HOME" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME/skills" "$TAIJI_RUNTIME_HOME/scripts"
-unset _TAIJI_CANONICAL_RUNTIME_HOME _TAIJI_CANONICAL_ENV_FILE
+unset _TAIJI_CANONICAL_RUNTIME_HOME _TAIJI_CANONICAL_ENV_FILE _taiji_account_home

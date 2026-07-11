@@ -1,7 +1,7 @@
+import hashlib
 import json
 import os
 import plistlib
-import re
 import stat
 import subprocess
 import tempfile
@@ -386,15 +386,23 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
             )
             self.assertEqual(verifier.stdout.strip(), "valid")
 
-    def test_product_default_public_key_matches_tracked_issuer_public_key(self):
+    def test_product_fingerprint_matches_tracked_issuer_public_key_without_embedded_pem(self):
         product_source = (AGENT_DIR / "taiji_license.py").read_text(encoding="utf-8")
-        match = re.search(r'DEFAULT_PUBLIC_KEY_PEM = """(.*?)"""', product_source, re.S)
-        self.assertIsNotNone(match)
-        product_key = match.group(1).strip()
-        issuer_key = (ROOT / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem").read_text(
-            encoding="utf-8"
-        ).strip()
-        self.assertEqual(product_key, issuer_key)
+        issuer_key = ROOT / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem"
+        completed = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-in", str(issuer_key), "-outform", "DER"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        fingerprint = hashlib.sha256(completed.stdout).hexdigest()
+
+        self.assertNotIn("DEFAULT_PUBLIC_KEY_PEM", product_source)
+        self.assertNotIn("-----BEGIN PUBLIC KEY-----", product_source)
+        self.assertIn(
+            f'PRODUCTION_PUBLIC_KEY_FINGERPRINT = "{fingerprint}"',
+            product_source,
+        )
 
     def test_gui_exposes_signing_key_initialization_action(self):
         index_html = (ROOT / "tools" / "taiji-license-issuer" / "index.html").read_text(encoding="utf-8")

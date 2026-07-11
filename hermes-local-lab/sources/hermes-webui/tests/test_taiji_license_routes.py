@@ -61,3 +61,25 @@ def test_backend_exposes_license_status_and_import_routes():
     assert 'path == "/api/license/qr-complete"' in routes_py
     assert "license_online_activation_unavailable" in routes_py
     assert "build_machine_request" in routes_py
+
+
+def test_webui_license_fallback_is_fail_closed_without_environment_policy_switch():
+    routes_py = _read("api/routes.py")
+    start = routes_py.index("def _taiji_license_error_status")
+    end = routes_py.index("def _handle_license_status", start)
+    license_guard = routes_py[start:end]
+
+    assert '"required": True' in license_guard
+    assert 'os.environ.get("TAIJI_LICENSE_REQUIRED"' not in license_guard
+    assert "return None" not in license_guard
+
+
+def test_license_import_uses_build_selected_canonical_target():
+    routes_py = _read("api/routes.py")
+    start = routes_py.index("def _handle_license_import")
+    end = routes_py.index("def _clear_stale_stream_state", start)
+    import_handler = routes_py[start:end]
+
+    assert "runtime_license_path()" in import_handler
+    assert "default_license_path()" not in import_handler
+    assert "validate_license_candidate(tmp)" in import_handler

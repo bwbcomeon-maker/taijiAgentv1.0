@@ -1,4 +1,6 @@
 import json
+import inspect
+import stat
 import types
 import time
 
@@ -70,6 +72,20 @@ def signing_keys():
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode("utf-8")
     return private_pem, public_pem
+
+
+@pytest.fixture()
+def installed_production_profile(monkeypatch):
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "is_installed_production",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "installation_profile",
+        lambda: "installed-production",
+    )
 
 
 def _write_token(path, private_pem, **overrides):
@@ -145,6 +161,286 @@ def test_missing_required_license_has_stable_code(tmp_path, signing_keys):
     assert status.status == "missing"
     assert status.code == "license_missing"
     assert "授权" in status.message
+
+
+def test_default_license_path_uses_canonical_active_license_location(tmp_path):
+    path = taiji_license.default_license_path(
+        {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    )
+
+    assert path == tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+
+
+def test_source_development_noarg_guard_never_reads_user_license(monkeypatch):
+    monkeypatch.setenv("TAIJI_LICENSE_REQUIRED", "1")
+    monkeypatch.setenv("TAIJI_LICENSE_PUBLIC_KEY", "attacker-controlled-key")
+    monkeypatch.setattr(
+        taiji_license,
+        "default_license_path",
+        lambda *_args, **_kwargs: pytest.fail("source-development guard read user license"),
+    )
+
+    status = taiji_license.load_license_status()
+    blocked = taiji_license.require_valid_license()
+
+    assert status.status == "not_required"
+    assert status.required is False
+    assert status.policy == "source-development"
+    assert blocked is None
+
+
+def test_production_policy_is_fixed_and_rejects_disable_override(
+    monkeypatch, tmp_path, installed_production_profile
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("TAIJI_LICENSE_REQUIRED", "0")
+
+    blocked = taiji_license.require_valid_license()
+
+    assert blocked is not None
+    assert blocked.required is True
+    assert blocked.code == "license_policy_override_forbidden"
+    public = blocked.to_public_dict()
+    assert public["policy"] == "production"
+    assert public["policy_version"] == 1
+    assert public["signing_key_fingerprint_short"] == "2dcff4f2b5e6"
+    assert "TAIJI_LICENSE_REQUIRED" not in json.dumps(public)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("TAIJI_LICENSE_REQUIRED", "1"),
+        ("TAIJI_LICENSE_MACHINE_BINDING_REQUIRED", "0"),
+        ("TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_BINDING", "1"),
+        ("TAIJI_LICENSE_PUBLIC_KEY", "attacker-controlled-key"),
+        ("TAIJI_LICENSE_PUBLIC_KEY_FILE", "/tmp/attacker-public.pem"),
+    ],
+)
+def test_production_policy_rejects_every_security_override_intent(
+    monkeypatch, tmp_path, name, value, installed_production_profile
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv(name, value)
+
+    status = taiji_license.load_license_status()
+
+    assert status.status == "invalid"
+    assert status.required is True
+    assert status.code == "license_policy_override_forbidden"
+    assert status.machine_binding_required is True
+
+
+def test_production_policy_pins_installed_public_key_and_fingerprint():
+    policy = taiji_license.production_license_policy()
+
+    assert policy.required is True
+    assert policy.machine_binding_required is True
+    assert policy.allow_legacy_machine_binding is False
+    assert policy.public_key_path == taiji_license.Path(
+        "/opt/taiji-agent/resources/license/signing-public.pem"
+    )
+    assert policy.public_key_fingerprint == (
+        "2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
+    )
+
+
+def test_runtime_module_contains_no_embedded_fallback_public_key():
+    source = taiji_license.Path(taiji_license.__file__).read_text(encoding="utf-8")
+
+    assert "DEFAULT_PUBLIC_KEY_PEM" not in source
+    assert "-----BEGIN PUBLIC KEY-----" not in source
+
+
+def test_production_execution_factory_accepts_no_policy_or_key_parameters():
+    assert inspect.signature(taiji_license.require_valid_license).parameters == {}
+
+
+def test_runtime_license_path_uses_build_profile(
+    monkeypatch, tmp_path, installed_production_profile
+):
+    canonical = tmp_path / "canonical/active-license.jwt"
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", canonical)
+    monkeypatch.setenv("TAIJI_LICENSE_FILE", str(tmp_path / "redirected.jwt"))
+
+    assert taiji_license.runtime_license_path() == canonical
+
+
+def test_installed_device_identity_ignores_environment_redirect(
+    monkeypatch, tmp_path, installed_production_profile
+):
+    canonical = tmp_path / "canonical/license-device.json"
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_DEVICE_PATH", canonical)
+    redirected = tmp_path / "redirected/license-device.json"
+    env = {
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+        "TAIJI_LICENSE_DEVICE_FILE": str(redirected),
+    }
+
+    assert taiji_license.default_license_device_path(env) == canonical
+
+
+def test_production_ignores_license_path_environment_redirect(
+    monkeypatch, tmp_path, installed_production_profile
+):
+    canonical = tmp_path / "canonical/licenses/active-license.jwt"
+    attacker = tmp_path / "attacker.jwt"
+    attacker.write_text("attacker-token\n", encoding="utf-8")
+    attacker.chmod(0o600)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", canonical)
+    monkeypatch.setattr(
+        taiji_license,
+        "PRODUCTION_LICENSE_STATE_PATH",
+        tmp_path / "canonical-state/license-state.json",
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "PRODUCTION_LICENSE_DEVICE_PATH",
+        tmp_path / "canonical/license-device.json",
+    )
+    monkeypatch.setenv("TAIJI_LICENSE_FILE", str(attacker))
+    monkeypatch.setenv("TAIJI_LICENSE_STATE_FILE", str(tmp_path / "attacker-state.json"))
+    monkeypatch.setenv("TAIJI_LICENSE_DEVICE_FILE", str(tmp_path / "attacker-device.json"))
+
+    status = taiji_license.load_license_status()
+
+    assert status.status == "missing"
+    assert status.code == "license_missing"
+
+
+@pytest.mark.parametrize("shape", ["wide_mode", "symlink", "hardlink"])
+def test_production_rejects_untrusted_license_file_shape(
+    monkeypatch, tmp_path, installed_production_profile, shape
+):
+    canonical = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    canonical.parent.mkdir(parents=True)
+    canonical.parent.chmod(0o700)
+    if shape == "wide_mode":
+        canonical.write_text("token\n", encoding="utf-8")
+        canonical.chmod(0o644)
+    elif shape == "symlink":
+        outside = tmp_path / "outside.jwt"
+        outside.write_text("token\n", encoding="utf-8")
+        outside.chmod(0o600)
+        canonical.symlink_to(outside)
+    else:
+        canonical.write_text("token\n", encoding="utf-8")
+        canonical.chmod(0o600)
+        canonical.with_name("second-link.jwt").hardlink_to(canonical)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", canonical)
+
+    status = taiji_license.load_license_status()
+
+    assert status.status == "invalid"
+    assert status.code == "license_file_untrusted"
+
+
+def test_production_version_input_overwrites_user_environment(
+    monkeypatch, tmp_path, installed_production_profile
+):
+    canonical = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("signed-token\n", encoding="utf-8")
+    canonical.chmod(0o600)
+    captured = {}
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", canonical)
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_production_user_file",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_production_public_key",
+        lambda _policy: "trusted-key",
+    )
+    monkeypatch.setattr(taiji_license, "_load_production_version", lambda: "9.9.9")
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_license_status_impl",
+        lambda **kwargs: captured.update(kwargs)
+        or taiji_license.LicenseStatus(status="missing", required=True),
+    )
+    monkeypatch.setenv("TAIJI_AGENT_VERSION", "0.0.1")
+
+    taiji_license.load_license_status()
+
+    assert captured["path"] == canonical
+    assert captured["environ"]["TAIJI_AGENT_VERSION"] == "9.9.9"
+    assert captured["state_path"] == taiji_license.PRODUCTION_LICENSE_STATE_PATH
+    assert (
+        captured["environ"]["TAIJI_LICENSE_DEVICE_FILE"]
+        == str(taiji_license.PRODUCTION_LICENSE_DEVICE_PATH)
+    )
+
+
+def test_installed_candidate_validation_uses_production_policy(
+    monkeypatch, tmp_path, installed_production_profile
+):
+    candidate = tmp_path / "candidate.jwt"
+    candidate.write_text("signed-token\n", encoding="utf-8")
+    candidate.chmod(0o600)
+    captured = {}
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_production_user_file",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_production_public_key",
+        lambda _policy: "trusted-key",
+    )
+    monkeypatch.setattr(taiji_license, "_load_production_version", lambda: "9.9.9")
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_license_status_impl",
+        lambda **kwargs: captured.update(kwargs)
+        or taiji_license.LicenseStatus(status="valid", required=True),
+    )
+
+    status = taiji_license.validate_license_candidate(candidate)
+
+    assert status.status == "valid"
+    assert status.policy == "production"
+    assert captured["path"] == candidate
+    assert captured["check_state"] is False
+    assert captured["environ"]["TAIJI_LICENSE_REQUIRED"] == "1"
+    assert captured["environ"]["TAIJI_LICENSE_MACHINE_BINDING_REQUIRED"] == "1"
+    assert captured["environ"]["TAIJI_AGENT_VERSION"] == "9.9.9"
+
+
+def test_production_public_key_fingerprint_matches_issuer_and_rejects_attacker(
+    monkeypatch, tmp_path, signing_keys
+):
+    repo_root = taiji_license.Path(__file__).resolve().parents[4]
+    issuer_public_key = (
+        repo_root / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem"
+    ).read_text(encoding="utf-8")
+    assert taiji_license._public_key_fingerprint(issuer_public_key) == (
+        taiji_license.PRODUCTION_PUBLIC_KEY_FINGERPRINT
+    )
+
+    _, attacker_public_key = signing_keys
+    attacker_path = tmp_path / "signing-public.pem"
+    attacker_path.write_text(attacker_public_key, encoding="utf-8")
+    attacker_path.chmod(0o644)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_PUBLIC_KEY_PATH", attacker_path)
+
+    real_lstat = taiji_license.Path.lstat
+
+    def root_owned_lstat(path):
+        real_lstat(path)
+        mode = stat.S_IFREG | 0o644 if path == attacker_path else stat.S_IFDIR | 0o755
+        return types.SimpleNamespace(st_mode=mode, st_uid=0)
+
+    monkeypatch.setattr(taiji_license.Path, "lstat", root_owned_lstat)
+    policy = taiji_license.production_license_policy()
+
+    with pytest.raises(taiji_license._LicensePublicKeyError):
+        taiji_license._load_production_public_key(policy)
 
 
 def test_macos_machine_fingerprint_uses_stable_platform_uuid(monkeypatch):
@@ -294,7 +590,7 @@ def test_require_valid_license_writes_success_state_once(tmp_path, signing_keys)
     state_path = tmp_path / "license-state.json"
     _write_token(path, private_pem, license_id="lic-state", iat=999_900, nbf=999_900, exp=2_000_000)
 
-    blocked = taiji_license.require_valid_license(
+    blocked = taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=1_000_000,
@@ -318,7 +614,7 @@ def test_success_state_write_is_throttled(tmp_path, signing_keys):
     state_path = tmp_path / "license-state.json"
     _write_token(path, private_pem, iat=900_000, nbf=900_000, exp=2_000_000)
 
-    taiji_license.require_valid_license(
+    taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=1_000_000,
@@ -326,7 +622,7 @@ def test_success_state_write_is_throttled(tmp_path, signing_keys):
         environ={"TAIJI_LICENSE_REQUIRED": "1"},
         machine_fingerprint=TEST_MACHINE_FINGERPRINT,
     )
-    taiji_license.require_valid_license(
+    taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=1_000_030,
@@ -337,7 +633,7 @@ def test_success_state_write_is_throttled(tmp_path, signing_keys):
     throttled = json.loads(state_path.read_text(encoding="utf-8"))
     assert throttled["last_successful_validation_at"] == 1_000_000
 
-    taiji_license.require_valid_license(
+    taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=1_000_061,
@@ -365,7 +661,7 @@ def test_clock_rollback_blocks_without_rewriting_state(tmp_path, signing_keys):
         encoding="utf-8",
     )
 
-    blocked = taiji_license.require_valid_license(
+    blocked = taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=999_000,
@@ -397,7 +693,7 @@ def test_clock_rollback_recovers_after_time_is_corrected(tmp_path, signing_keys)
         encoding="utf-8",
     )
 
-    blocked = taiji_license.require_valid_license(
+    blocked = taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=999_000,
@@ -407,7 +703,7 @@ def test_clock_rollback_recovers_after_time_is_corrected(tmp_path, signing_keys)
     )
     assert blocked is not None
 
-    recovered = taiji_license.require_valid_license(
+    recovered = taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=1_000_120,
@@ -438,7 +734,7 @@ def test_future_expired_license_does_not_pollute_success_state(tmp_path, signing
         encoding="utf-8",
     )
 
-    blocked = taiji_license.require_valid_license(
+    blocked = taiji_license.require_license_for_validation(
         path=path,
         public_key=public_pem,
         now=now + 10 * 86400,
@@ -562,7 +858,7 @@ def test_installed_runtime_does_not_trust_sibling_issuer_public_key_without_sour
     )
 
     assert status.status == "invalid"
-    assert status.code == "license_invalid_signature"
+    assert status.code == "license_public_key_missing"
 
 
 def test_unbound_license_is_rejected_when_machine_binding_is_required(tmp_path, signing_keys):

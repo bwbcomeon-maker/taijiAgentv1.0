@@ -6108,10 +6108,9 @@ def _taiji_license_module():
 
 
 def _taiji_license_error_status(message: str, code: str = "license_invalid") -> dict:
-    required = str(os.environ.get("TAIJI_LICENSE_REQUIRED", "")).strip().lower() in {"1", "true", "yes", "on"}
     return {
         "status": "invalid",
-        "required": required,
+        "required": True,
         "code": code,
         "message": message,
         "features": [],
@@ -6132,9 +6131,7 @@ def _taiji_license_blocked_status() -> dict | None:
         return blocked.to_public_dict() if blocked is not None else None
     except Exception:
         logger.exception("failed to check license before chat start")
-        if str(os.environ.get("TAIJI_LICENSE_REQUIRED", "")).strip().lower() in {"1", "true", "yes", "on"}:
-            return _taiji_license_error_status("授权校验不可用，请联系服务方更新安装。", "license_status_unavailable")
-        return None
+        return _taiji_license_error_status("授权校验不可用，请联系服务方更新安装。", "license_status_unavailable")
 
 
 def _handle_license_status(handler):
@@ -6194,7 +6191,7 @@ def _handle_license_import(handler, body):
 
     try:
         license_mod = _taiji_license_module()
-        target = license_mod.default_license_path()
+        target = license_mod.runtime_license_path()
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(token + "\n", encoding="utf-8")
@@ -6202,7 +6199,7 @@ def _handle_license_import(handler, body):
             tmp.chmod(0o600)
         except OSError:
             pass
-        status = license_mod.load_license_status(path=tmp, check_state=False)
+        status = license_mod.validate_license_candidate(tmp)
         if status.status != "valid":
             tmp.unlink(missing_ok=True)
             return j(handler, status.to_public_dict(), status=400)
