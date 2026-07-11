@@ -758,6 +758,113 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertFalse((delivery / ".DS_Store").exists())
             self.assertFalse(apple_dir.exists())
 
+    def _run_release_preflight_artifact_gate(self, sidecar_mode):
+        source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            delivery = tmp_path / "taijiagent 打包交付"
+            output_dir = delivery / "生成的安装包"
+            offline_repo = delivery / "离线依赖"
+            fake_bin = tmp_path / "bin"
+            verifier = tmp_path / "repo/packaging/linux/verify-payload.py"
+            for directory in (delivery, output_dir, offline_repo, fake_bin, verifier.parent):
+                directory.mkdir(parents=True, exist_ok=True)
+
+            script = delivery / "01_制包机_发布预检.sh"
+            shutil.copy2(source_script, script)
+
+            archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
+            archive.write_bytes(b"fake source archive\n")
+            archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (delivery / "SHA256SUMS.txt").write_text(
+                f"{archive_digest}  {archive.name}\n",
+                encoding="utf-8",
+            )
+
+            deb = output_dir / "taiji-agent_1.0.0_amd64.deb"
+            deb.write_bytes(b"fake deb payload\n")
+            deb_digest = hashlib.sha256(deb.read_bytes()).hexdigest()
+            sidecar = Path(f"{deb}.sha256")
+            sidecar_contents = {
+                "valid": f"{deb_digest}  {deb.name}\n",
+                "hash_mismatch": f"{'0' * 64}  {deb.name}\n",
+                "basename_mismatch": f"{deb_digest}  another-package.deb\n",
+                "missing": None,
+            }
+            contents = sidecar_contents[sidecar_mode]
+            if contents is not None:
+                sidecar.write_text(contents, encoding="utf-8")
+
+            (output_dir / ".build-success").write_text("ok\n", encoding="utf-8")
+            (output_dir / "taiji-package-manifest.json").write_text("{}\n", encoding="utf-8")
+            (output_dir / "构建报告.txt").write_text("ok\n", encoding="utf-8")
+            (offline_repo / "Packages").write_text("", encoding="utf-8")
+            (offline_repo / "Packages.gz").write_bytes(b"fake gzip\n")
+            verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
+
+            unpack_log = tmp_path / "dpkg-deb.log"
+            fake_dpkg_deb = fake_bin / "dpkg-deb"
+            fake_dpkg_deb.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "printf '%s\\n' \"$*\" >> \"$TAIJI_TEST_DPKG_LOG\"\n"
+                "[ \"${1:-}\" = \"-x\" ] || exit 2\n"
+                "mkdir -p \"$3\"\n",
+                encoding="utf-8",
+            )
+            fake_dpkg_deb.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                    "TAIJI_RELEASE_REQUIRE_ARTIFACTS": "1",
+                    "TAIJI_RELEASE_SKIP_GIT_CHECK": "1",
+                    "TAIJI_REPO_ROOT": str(tmp_path / "repo"),
+                    "TAIJI_TEST_DPKG_LOG": str(unpack_log),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=delivery,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            unpack_calls = unpack_log.read_text(encoding="utf-8") if unpack_log.exists() else ""
+
+        return result, unpack_calls
+
+    def test_release_preflight_rejects_invalid_deb_checksum_sidecars_before_payload_unpack(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        cases = (
+            ("missing", "缺少 DEB SHA256 sidecar"),
+            ("hash_mismatch", "DEB SHA256 不匹配"),
+            ("basename_mismatch", "DEB SHA256 sidecar 指向的文件不是当前 DEB"),
+        )
+        for sidecar_mode, expected_error in cases:
+            with self.subTest(sidecar_mode=sidecar_mode):
+                result, unpack_calls = self._run_release_preflight_artifact_gate(sidecar_mode)
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn(expected_error, output)
+                self.assertEqual(unpack_calls, "", output)
+
+    def test_release_preflight_accepts_valid_deb_checksum_before_payload_unpack(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        result, unpack_calls = self._run_release_preflight_artifact_gate("valid")
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("DEB SHA256 sidecar 校验通过", output)
+        self.assertIn("-x ", unpack_calls)
+
     def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")

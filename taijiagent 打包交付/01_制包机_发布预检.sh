@@ -160,6 +160,22 @@ verify_assembled_deb_payload() {
   ok "DEB 真实解包 payload contract 验证通过"
 }
 
+verify_deb_checksum_sidecar() {
+  local deb="$1" sidecar expected target actual deb_name
+  sidecar="${deb}.sha256"
+  deb_name="$(basename "$deb")"
+  [ -f "$sidecar" ] || fail "缺少 DEB SHA256 sidecar：$(basename "$sidecar")"
+
+  expected="$(awk 'NR == 1 { print $1; exit }' "$sidecar")"
+  target="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$sidecar")"
+  hex64 "$expected" || fail "DEB SHA256 sidecar 格式非法：$(basename "$sidecar")"
+  [ "$target" = "$deb_name" ] || fail "DEB SHA256 sidecar 指向的文件不是当前 DEB：$target"
+
+  actual="$(sha256sum "$deb" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || fail "DEB SHA256 不匹配：$deb_name"
+  ok "DEB SHA256 sidecar 校验通过：$deb_name"
+}
+
 check_delivery_artifacts() {
   [ "$REQUIRE_ARTIFACTS" = "1" ] || return 0
   [ -d "$OUTPUT_DIR" ] || fail "缺少生成的安装包/"
@@ -174,6 +190,7 @@ check_delivery_artifacts() {
   deb_count="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | wc -l | tr -d ' ')"
   [ "$deb_count" = "1" ] || fail "生成的安装包/ 必须且只能有一个 amd64 DEB，当前数量：$deb_count"
   deb="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | head -1)"
+  verify_deb_checksum_sidecar "$deb"
   verify_assembled_deb_payload "$deb"
   ok "交付产物完整性检查通过"
 }
