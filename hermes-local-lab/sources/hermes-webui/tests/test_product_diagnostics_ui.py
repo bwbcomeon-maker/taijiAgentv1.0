@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,3 +127,65 @@ def test_desktop_acceptance_smoke_rejects_web_and_covers_only_app_sizes():
         assert expected in smoke
     for excluded in ("resizeTo(390", "resizeTo(375", "isMobile"):
         assert excluded not in smoke
+    for web_fallback in ("chromium.launch", ".goto("):
+        assert web_fallback not in smoke
+
+
+def test_desktop_acceptance_smoke_allows_only_the_handled_missing_expert_run_404():
+    smoke = read("tests/product_diagnostics_electron_smoke.js")
+
+    assert "function isExpectedDesktopHttpFailure(entry, appOrigin)" in smoke
+    assert 'entry.status === 404' in smoke
+    assert 'url.pathname === "/api/expert-teams/run"' in smoke
+    assert "unexpectedHttpFailures" in smoke
+    assert "expectedBackgroundConsoleErrors" in smoke
+    assert "message.location()" in smoke
+
+
+def test_desktop_acceptance_404_helpers_reject_wrong_method_status_path_and_origin():
+    smoke_path = ROOT / "tests" / "product_diagnostics_electron_smoke.js"
+    script = r"""
+const {
+  isExpectedDesktopHttpFailure,
+  isExpectedBackgroundConsoleError,
+} = require(process.argv[1]);
+const origin = "http://127.0.0.1:18787";
+const http = (status, method, url) => isExpectedDesktopHttpFailure({status, method, url}, origin);
+const consoleError = (text, url) => isExpectedBackgroundConsoleError({
+  type: "error",
+  text,
+  url,
+}, origin);
+const expectedText = "console: Failed to load resource: the server responded with a status of 404 (Not Found)";
+process.stdout.write(JSON.stringify({
+  http: [
+    http(404, "GET", `${origin}/api/expert-teams/run?session_id=s1`),
+    http(404, "POST", `${origin}/api/expert-teams/run?session_id=s1`),
+    http(500, "GET", `${origin}/api/expert-teams/run?session_id=s1`),
+    http(404, "GET", `${origin}/api/other`),
+    http(404, "GET", `${origin}/api/expert-teams/run`),
+    http(404, "GET", `${origin}/api/expert-teams/run?session_id=%20`),
+    http(404, "GET", `http://127.0.0.1:9999/api/expert-teams/run?session_id=s1`),
+    http(404, "GET", "not a url"),
+  ],
+  console: [
+    consoleError(expectedText, `${origin}/api/expert-teams/run?session_id=s1`),
+    consoleError(expectedText, `${origin}/api/other`),
+    consoleError(expectedText, `${origin}/api/expert-teams/run`),
+    consoleError(expectedText, `${origin}/api/expert-teams/run?session_id=%20`),
+    consoleError(expectedText, `http://127.0.0.1:9999/api/expert-teams/run?session_id=s1`),
+    consoleError("console: unrelated 404 Not Found", `${origin}/api/expert-teams/run?session_id=s1`),
+  ],
+}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(smoke_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "http": [True, False, False, False, False, False, False, False],
+        "console": [True, False, False, False, False, False],
+    }

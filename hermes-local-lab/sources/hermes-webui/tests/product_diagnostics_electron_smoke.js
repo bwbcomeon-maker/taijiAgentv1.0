@@ -12,7 +12,6 @@ function loadPlaywright() {
   return require(process.env.PLAYWRIGHT_NODE_PATH || "playwright");
 }
 
-const { chromium } = loadPlaywright();
 const cdpEndpoint = process.env.TAIJI_DESKTOP_CDP || "http://127.0.0.1:9233";
 const evidenceDir = process.env.TAIJI_DESKTOP_EVIDENCE_DIR || "";
 
@@ -22,6 +21,35 @@ function assertState(condition, message, detail) {
 
 function mark(step) {
   process.stderr.write(`[product-diagnostics-electron] ${step}\n`);
+}
+
+function isExpectedDesktopHttpFailure(entry, appOrigin) {
+  if (!entry || !(entry.status === 404 && entry.method === "GET")) return false;
+  try {
+    const url = new URL(entry.url);
+    return (
+      url.origin === new URL(appOrigin).origin
+      && url.pathname === "/api/expert-teams/run"
+      && Boolean(url.searchParams.get("session_id")?.trim())
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isExpectedBackgroundConsoleError(entry, appOrigin) {
+  if (!entry || entry.type !== "error") return false;
+  if (entry.text !== "console: Failed to load resource: the server responded with a status of 404 (Not Found)") return false;
+  try {
+    const url = new URL(entry.url);
+    return (
+      url.origin === new URL(appOrigin).origin
+      && url.pathname === "/api/expert-teams/run"
+      && Boolean(url.searchParams.get("session_id")?.trim())
+    );
+  } catch (_error) {
+    return false;
+  }
 }
 
 async function waitForDesktopReady(page) {
@@ -206,14 +234,17 @@ async function exportBundleByKeyboard(page) {
 
 async function run() {
   mark("connect real Electron");
+  const { chromium } = loadPlaywright();
   const browser = await chromium.connectOverCDP(cdpEndpoint);
   const pages = browser.contexts().flatMap((context) => context.pages());
   const page = pages.find((candidate) => candidate.url().includes("taiji_desktop=1"));
   assertState(page, "No real Taiji Electron BrowserWindow was found", pages.map((item) => item.url()));
   assertState(page.url().includes("taiji_desktop_token="), "Desktop token missing; refusing Web acceptance", page.url());
+  const appOrigin = new URL(page.url()).origin;
 
   const jsErrors = [];
   const expectedFixtureConsoleErrors = [];
+  const expectedBackgroundConsoleErrors = [];
   const httpFailures = [];
   let injectingExpectedDiagnostics503 = false;
   let injectingExpectedSecurity403 = false;
@@ -230,10 +261,16 @@ async function run() {
   page.on("console", (message) => {
     if (message.type() !== "error") return;
     const rendered = `console: ${message.text()}`;
+    const consoleEntry = {
+      type: message.type(),
+      text: rendered,
+      url: message.location().url,
+    };
     if (
       (injectingExpectedDiagnostics503 && /503|Service Unavailable/i.test(rendered))
       || (injectingExpectedSecurity403 && /403|Forbidden/i.test(rendered))
     ) expectedFixtureConsoleErrors.push(rendered);
+    else if (isExpectedBackgroundConsoleError(consoleEntry, appOrigin)) expectedBackgroundConsoleErrors.push(consoleEntry);
     else jsErrors.push(rendered);
   });
 
@@ -433,6 +470,30 @@ async function run() {
     results.errorState = errorState;
     results.expectedFixtureConsoleErrorCount = expectedFixtureConsoleErrors.length;
     results.httpFailures = httpFailures;
+    const expectedBackgroundHttpFailures = httpFailures.filter((entry) => isExpectedDesktopHttpFailure(entry, appOrigin));
+    const expectedDiagnosticsFixtureFailures = httpFailures.filter((entry) => {
+      const url = new URL(entry.url);
+      return entry.status === 503 && entry.method === "GET" && url.origin === appOrigin && url.pathname === "/api/product/diagnostics";
+    });
+    const expectedSecurityFixtureFailures = httpFailures.filter((entry) => {
+      const url = new URL(entry.url);
+      return entry.status === 403 && entry.method === "POST" && url.origin === appOrigin && url.pathname === "/api/security/profile";
+    });
+    const unexpectedHttpFailures = httpFailures.filter((entry) => (
+      !isExpectedDesktopHttpFailure(entry, appOrigin)
+      && !expectedDiagnosticsFixtureFailures.includes(entry)
+      && !expectedSecurityFixtureFailures.includes(entry)
+    ));
+    assertState(expectedBackgroundHttpFailures.length <= 1, "Unexpected repeated missing expert-run requests", expectedBackgroundHttpFailures);
+    assertState(
+      expectedBackgroundConsoleErrors.length === expectedBackgroundHttpFailures.length,
+      "Missing expert-run console error did not correlate with its exact same-origin request",
+      { expectedBackgroundConsoleErrors, expectedBackgroundHttpFailures },
+    );
+    assertState(expectedDiagnosticsFixtureFailures.length === 1, "Diagnostics failure fixture did not produce exactly one 503", expectedDiagnosticsFixtureFailures);
+    assertState(expectedSecurityFixtureFailures.length === 1, "Security failure fixture did not produce exactly one 403", expectedSecurityFixtureFailures);
+    assertState(unexpectedHttpFailures.length === 0, "Unexpected HTTP failures occurred during App diagnostics smoke", unexpectedHttpFailures);
+    results.expectedBackgroundConsoleErrorCount = expectedBackgroundConsoleErrors.length;
     results.overall = diagnostics.payload.overall;
     results.export = { suggestedFilename: exported.suggestedFilename, bytes: exported.bytes, downloadEventObserved: exported.downloadEventObserved };
     results.jsErrorCount = jsErrors.length;
@@ -445,7 +506,14 @@ async function run() {
   }
 }
 
-run().catch((error) => {
-  console.error(error.stack || error);
-  process.exitCode = 1;
-});
+module.exports = {
+  isExpectedDesktopHttpFailure,
+  isExpectedBackgroundConsoleError,
+};
+
+if (require.main === module) {
+  run().catch((error) => {
+    console.error(error.stack || error);
+    process.exitCode = 1;
+  });
+}
