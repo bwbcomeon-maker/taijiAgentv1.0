@@ -19,6 +19,67 @@ require_env() {
   [ -n "${!name:-}" ] || fail "缺少环境变量：$name"
 }
 
+verify_runtime_baseline() {
+  local runtime_id runtime_version
+  [ -r /etc/os-release ] || fail "容器缺少可读的 /etc/os-release"
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  runtime_id="${ID:-}"
+  runtime_version="${VERSION_ID:-}"
+  [ "$runtime_id" = "ubuntu" ] \
+    || fail "离线演练容器系统不是 ubuntu：${runtime_id:-missing}"
+  [ "$runtime_version" = "20.04" ] \
+    || fail "离线演练容器版本不是 20.04：${runtime_version:-missing}"
+}
+
+verify_runtime_network_none() {
+  local active_links global_addresses non_loopback_routes
+  active_links="$(
+    ip -o link show up \
+      | awk -F ': ' '$2 !~ /^lo(@|$)/ { print $2 }' \
+      | LC_ALL=C sort \
+      | tr '\n' ' '
+  )"
+  [ -z "$active_links" ] \
+    || fail "--network none 容器仍存在启用的非 loopback 链路：$active_links"
+
+  global_addresses="$(ip -o addr show scope global | tr '\n' ' ')"
+  [ -z "$global_addresses" ] \
+    || fail "--network none 容器仍存在全局 IP 地址：$global_addresses"
+
+  non_loopback_routes="$(
+    ip -o route show table all \
+      | awk '$0 !~ / dev lo( |$)/ { print }' \
+      | tr '\n' ' '
+  )"
+  [ -z "$non_loopback_routes" ] \
+    || fail "--network none 容器仍存在非 loopback route：$non_loopback_routes"
+}
+
+ensure_local_hostname_resolution() {
+  local current_hostname
+  current_hostname="$(hostname)"
+  [[ "$current_hostname" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] \
+    || fail "容器 hostname 格式不合法"
+
+  if ! awk -v expected="$current_hostname" '
+    {
+      for (field = 2; field <= NF; field += 1) {
+        if ($field == expected) {
+          found = 1
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' /etc/hosts; then
+    printf '127.0.1.1\t%s\n' "$current_hostname" >> /etc/hosts \
+      || fail "无法为容器 hostname 写入本地解析"
+  fi
+
+  getent hosts "$current_hostname" >/dev/null 2>&1 \
+    || fail "容器 hostname 无法在本地解析"
+}
+
 verify_installed() {
   local status
   status="$(dpkg-query -W -f='${Status}' taiji-agent 2>/dev/null || true)"
@@ -63,9 +124,9 @@ case "$(uname -m)" in
   x86_64|amd64) ;;
   *) fail "容器 kernel architecture 不是 x86_64/amd64：$(uname -m)" ;;
 esac
-network_nodes="$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')"
-[ "$network_nodes" = "lo " ] || fail "容器存在非 loopback 网络接口：$network_nodes"
-[ -z "$(ip route show)" ] || fail "--network none 容器仍存在 IP route"
+verify_runtime_baseline
+verify_runtime_network_none
+ensure_local_hostname_resolution
 
 for secret_name in \
   OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY \
@@ -107,13 +168,11 @@ sudo -H -u "$REHEARSAL_USER" env \
   bash "$installer"
 verify_installed
 
-# shellcheck disable=SC1091
-source /etc/os-release
 generated_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 rehearsal_session_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 export generated_at_utc rehearsal_session_id
-export TAIJI_REHEARSAL_OS_ID="${ID:-debian}"
-export TAIJI_REHEARSAL_OS_VERSION="${VERSION_ID:-unknown}"
+export TAIJI_REHEARSAL_OS_ID="ubuntu"
+export TAIJI_REHEARSAL_OS_VERSION="20.04"
 
 python3 - "$EVIDENCE_DIR/$SESSION_BASENAME" <<'PY'
 import json

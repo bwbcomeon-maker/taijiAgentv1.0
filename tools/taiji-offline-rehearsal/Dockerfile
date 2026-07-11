@@ -1,6 +1,7 @@
-FROM debian:13-slim
+FROM ubuntu:20.04
 
 LABEL io.taiji.release-evidence.role="offline-rehearsal-v1" \
+      io.taiji.release-evidence.baseline="ubuntu-20.04" \
       io.taiji.release-evidence.network="runtime-none-required"
 
 ARG TARGETARCH

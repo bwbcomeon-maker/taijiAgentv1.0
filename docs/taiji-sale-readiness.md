@@ -60,6 +60,8 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 `--output-dir` 指向的输出目录必须不存在，生产器拒绝覆盖旧证据。它会把完整交付目录只读挂载，并在容器运行时强制使用 `--network none`，执行 install → purge/uninstall → reinstall。该证据仅证明离线安装生命周期，不能替代真实 Electron 桌面 App 验收。
 
+演练镜像固定使用与当前制包依赖链一致的 Ubuntu 20.04 x86_64 兼容基线，避免把 Debian 新版本的系统包冲突误判为交付包缺陷；它仍只是 Kylin/UOS 安装前的容器回归，不属于目标终端验收。
+
 目标机证据目录默认是：
 
 ```text
@@ -98,8 +100,8 @@ bash scripts/taiji-release-check.sh
   "deb_sha256": "当前 DEB 的 64 位小写 SHA256",
   "platform": "linux/amd64",
   "environment": "container",
-  "os_id": "debian",
-  "os_version": "13",
+  "os_id": "ubuntu",
+  "os_version": "20.04",
   "network": "none",
   "install": true,
   "uninstall": true,

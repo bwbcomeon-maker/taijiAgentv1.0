@@ -176,6 +176,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                             "io.taiji.release-evidence.role": (
                                 "wrong-role" if mode == "wrong_profile" else "offline-rehearsal-v1"
                             ),
+                            "io.taiji.release-evidence.baseline": (
+                                "debian-13" if mode == "wrong_baseline" else "ubuntu-20.04"
+                            ),
                         },
                     },
                 }]))
@@ -272,8 +275,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "deb_sha256": state["env"]["TAIJI_EXPECTED_DEB_SHA256"],
                     "platform": "linux/amd64",
                     "environment": "container",
-                    "os_id": "debian",
-                    "os_version": "13",
+                    "os_id": "debian" if mode == "wrong_runtime_os" else "ubuntu",
+                    "os_version": "13" if mode == "wrong_runtime_os" else "20.04",
                     "network": "none",
                     "checks": checks,
                     "desktop_app_verified": False,
@@ -340,12 +343,16 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
         lifecycle = LIFECYCLE.read_text(encoding="utf-8")
 
-        self.assertIn("FROM debian:13-slim", dockerfile)
+        self.assertIn("FROM ubuntu:20.04", dockerfile)
         self.assertIn('test "$TARGETARCH" = "amd64"', dockerfile)
         self.assertIn("useradd", dockerfile)
         self.assertIn("sudoers.d", dockerfile)
         self.assertIn('io.taiji.release-evidence.role="offline-rehearsal-v1"', dockerfile)
+        self.assertIn('io.taiji.release-evidence.baseline="ubuntu-20.04"', dockerfile)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/run-lifecycle.sh"]', dockerfile)
+        self.assertIn("verify_runtime_baseline", lifecycle)
+        self.assertIn('[ "$runtime_id" = "ubuntu" ]', lifecycle)
+        self.assertIn('[ "$runtime_version" = "20.04" ]', lifecycle)
 
         installer = 'TAIJI_ALLOW_HEADLESS_REHEARSAL=1'
         self.assertEqual(lifecycle.count(installer), 2)
@@ -358,6 +365,88 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn('! -e /opt/taiji-agent', lifecycle)
         self.assertIn('"schema": "taiji.offline-install-rehearsal.v1"', lifecycle)
         self.assertNotIn("ONLINE_OK=1", lifecycle)
+
+    def test_lifecycle_accepts_down_kernel_tunnels_but_rejects_usable_network(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+
+        self.assertIn("verify_runtime_network_none", lifecycle)
+        self.assertIn("ip -o link show up", lifecycle)
+        self.assertIn("ip -o addr show scope global", lifecycle)
+        self.assertIn("ip -o route show table all", lifecycle)
+        self.assertNotIn("find /sys/class/net", lifecycle)
+        self.assertNotIn('[ "$network_nodes" = "lo " ]', lifecycle)
+
+        definitions = lifecycle.split('[ "$EUID" -eq 0 ]', 1)[0]
+        definitions_path = self.temp_path / "lifecycle-definitions.sh"
+        definitions_path.write_text(definitions, encoding="utf-8")
+        network_bin = self.temp_path / "network-bin"
+        network_bin.mkdir()
+        write_executable(
+            network_bin / "ip",
+            r'''
+            #!/usr/bin/env bash
+            set -eu
+            mode="${FAKE_IP_MODE:?}"
+            case "$*" in
+              "-o link show up")
+                printf '%s\n' '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN'
+                if [ "$mode" = "active-link" ]; then
+                  printf '%s\n' '2: eth0: <BROADCAST,UP,LOWER_UP> mtu 1500 state UP'
+                fi
+                ;;
+              "-o addr show scope global")
+                if [ "$mode" = "global-address" ]; then
+                  printf '%s\n' '2: eth0 inet 192.0.2.10/24 scope global eth0'
+                fi
+                ;;
+              "-o route show table all")
+                printf '%s\n' 'local 127.0.0.0/8 dev lo table local scope host'
+                if [ "$mode" = "external-route" ]; then
+                  printf '%s\n' 'default via 192.0.2.1 dev eth0'
+                fi
+                ;;
+              *) exit 64 ;;
+            esac
+            ''',
+        )
+        command = f'source "{definitions_path}"; verify_runtime_network_none'
+        base_env = {**os.environ, "PATH": f"{network_bin}:{os.environ['PATH']}"}
+
+        down_tunnels = subprocess.run(
+            ["bash", "-c", command],
+            env={**base_env, "FAKE_IP_MODE": "down-tunnels"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(down_tunnels.returncode, 0, down_tunnels.stderr)
+
+        for mode, expected in (
+            ("active-link", "启用的非 loopback 链路"),
+            ("global-address", "全局 IP 地址"),
+            ("external-route", "非 loopback route"),
+        ):
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    ["bash", "-c", command],
+                    env={**base_env, "FAKE_IP_MODE": mode},
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_lifecycle_resolves_the_container_hostname_before_using_sudo(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+
+        self.assertIn("ensure_local_hostname_resolution", lifecycle)
+        self.assertIn("getent hosts", lifecycle)
+        self.assertIn("127.0.1.1", lifecycle)
+        self.assertIn("{0,252}", lifecycle)
+        main = lifecycle.index('[ "$EUID" -eq 0 ]')
+        self.assertLess(
+            lifecycle.index("\nensure_local_hostname_resolution\n", main),
+            lifecycle.index('sudo -H -u "$REHEARSAL_USER"', main),
+        )
 
     def test_success_uses_locked_down_docker_and_publishes_bound_evidence(self):
         result = self.run_producer()
@@ -405,6 +494,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             ("writable_delivery", "只读"),
             ("wrong_image", "镜像"),
             ("wrong_profile", "专用离线演练镜像"),
+            ("wrong_baseline", "兼容基线"),
             ("socket_mount", "未授权挂载"),
         ):
             with self.subTest(mode=mode):
@@ -418,7 +508,13 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 self.assertFalse(self.output.exists())
 
     def test_lifecycle_failure_or_false_session_check_never_publishes(self):
-        for mode in ("lifecycle_failure", "false_check", "tamper_delivery", "cleanup_failure"):
+        for mode in (
+            "lifecycle_failure",
+            "false_check",
+            "wrong_runtime_os",
+            "tamper_delivery",
+            "cleanup_failure",
+        ):
             with self.subTest(mode=mode):
                 if self.docker_log.exists():
                     self.docker_log.unlink()

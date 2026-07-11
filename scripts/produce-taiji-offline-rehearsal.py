@@ -24,6 +24,7 @@ VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
 PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"
 PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 IMAGE_ROLE_LABEL = "offline-rehearsal-v1"
+IMAGE_BASELINE_LABEL = "ubuntu-20.04"
 SESSION_BASENAME = "offline-install-rehearsal-session.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
@@ -255,6 +256,8 @@ def run_lifecycle_container(
     entrypoint = image_config.get("Entrypoint") if type(image_config) is dict else None
     if type(labels) is not dict or labels.get("io.taiji.release-evidence.role") != IMAGE_ROLE_LABEL:
         raise ProducerError("演练镜像不是仓库定义的专用离线演练镜像")
+    if labels.get("io.taiji.release-evidence.baseline") != IMAGE_BASELINE_LABEL:
+        raise ProducerError("演练镜像兼容基线不是 ubuntu-20.04")
     if entrypoint != ["/usr/local/bin/run-lifecycle.sh"]:
         raise ProducerError("演练镜像入口不是固定 lifecycle runner")
     image_id = image_info.get("Id")
@@ -340,6 +343,8 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
         "deb_sha256": release["deb_sha256"],
         "platform": "linux/amd64",
         "environment": "container",
+        "os_id": "ubuntu",
+        "os_version": "20.04",
         "network": "none",
         "desktop_app_verified": False,
         "target_verified": False,
@@ -351,10 +356,6 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
         raise ProducerError("离线会话 rehearsal_session_id 格式不合法")
     if type(session.get("generated_at_utc")) is not str or not session["generated_at_utc"].endswith("Z"):
         raise ProducerError("离线会话 generated_at_utc 格式不合法")
-    if type(session.get("os_id")) is not str or not session["os_id"].strip():
-        raise ProducerError("离线会话 os_id 不能为空")
-    if type(session.get("os_version")) is not str or not session["os_version"].strip():
-        raise ProducerError("离线会话 os_version 不能为空")
     checks = session.get("checks")
     expected_checks = {"install": True, "uninstall": True, "reinstall": True}
     if checks != expected_checks or any(type(value) is not bool for value in checks.values()):
