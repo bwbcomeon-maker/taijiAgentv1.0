@@ -10,10 +10,12 @@ SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 LOG_DIR="$SCRIPT_DIR/构建日志"
-VERSION="${TAIJI_AGENT_VERSION:-0.1.0}"
+VERSION=""
 TOOL_ROOT="$SCRIPT_DIR/.构建工具"
 NODE_ROOT="$TOOL_ROOT/node"
-NODE_MAJOR="${TAIJI_NODE_MAJOR:-22}"
+NODE_VERSION="22.23.1"
+NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
+NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
@@ -134,6 +136,18 @@ on_error() {
 trap 'on_error "$?" "$BASH_COMMAND"' ERR
 
 require_cmd() { have "$1" || fail "缺少命令：$1"; }
+
+read_product_version() {
+  local version_file="$SRC_DIR/VERSION" product_version
+  [ -f "$version_file" ] || fail "源码缺少根 VERSION：$version_file"
+  product_version="$(tr -d '\r\n' < "$version_file")"
+  printf '%s\n' "$product_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+    || fail "根 VERSION 不是三段 SemVer：$product_version"
+  if [ -n "${TAIJI_AGENT_VERSION:-}" ] && [ "$TAIJI_AGENT_VERSION" != "$product_version" ]; then
+    fail "TAIJI_AGENT_VERSION 必须与根 VERSION 一致：root=$product_version env=$TAIJI_AGENT_VERSION"
+  fi
+  printf '%s\n' "$product_version"
+}
 
 checksum_source_archive_name() {
   [ -f "$CHECKSUM_FILE" ] || return 1
@@ -256,9 +270,11 @@ require_admin_capability() {
 
 run_release_preflight() {
   local preflight_script="$SCRIPT_DIR/01_制包机_发布预检.sh"
+  local repo_root="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
   [ -x "$preflight_script" ] || fail "缺少发布预检脚本：$preflight_script"
   TAIJI_RELEASE_REQUIRE_ARTIFACTS="${TAIJI_RELEASE_REQUIRE_ARTIFACTS:-0}" \
     TAIJI_RELEASE_SKIP_GIT_CHECK="${TAIJI_RELEASE_SKIP_GIT_CHECK:-0}" \
+    TAIJI_REPO_ROOT="$repo_root" \
     "$preflight_script"
 }
 
@@ -300,15 +316,7 @@ install_build_dependencies() {
   sudo apt-get update
   sudo apt-get install -y \
     curl ca-certificates build-essential python3-dev libffi-dev git rsync \
-    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends
-}
-
-node_major() {
-  node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || printf '0\n'
-}
-
-npm_major() {
-  npm -v 2>/dev/null | awk -F. '{print $1 + 0}' || printf '0\n'
+    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends openssl
 }
 
 source_lab_dir() {
@@ -317,13 +325,6 @@ source_lab_dir() {
 
 source_agent_dir() {
   printf '%s/sources/%s%s%s\n' "$(source_lab_dir)" "her" "mes-" "agent"
-}
-
-have_modern_node() {
-  have node || return 1
-  have npm || return 1
-  [ "$(node_major)" -ge 20 ] || return 1
-  [ "$(npm_major)" -ge 9 ] || return 1
 }
 
 ensure_uv() {
@@ -389,41 +390,45 @@ electron_mirrors() {
     | awk 'NF && !seen[$0]++'
 }
 
+portable_node_is_exact() {
+  local root="$NODE_ROOT/current"
+  [ -x "$root/bin/node" ] || return 1
+  [ -x "$root/bin/npm" ] || return 1
+  [ -f "$root/.taiji-node-version" ] || return 1
+  [ -f "$root/.taiji-node-archive-sha256" ] || return 1
+  [ "$(tr -d '\r\n' < "$root/.taiji-node-version")" = "$NODE_VERSION" ] || return 1
+  [ "$(tr -d '\r\n' < "$root/.taiji-node-archive-sha256")" = "$NODE_ARCHIVE_SHA256" ] || return 1
+  [ "$("$root/bin/node" --version 2>/dev/null)" = "v$NODE_VERSION" ] || return 1
+  file "$root/bin/node" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' || return 1
+}
+
 install_portable_node() {
   mkdir -p "$NODE_ROOT"
-  if [ -x "$NODE_ROOT/current/bin/node" ] && [ -x "$NODE_ROOT/current/bin/npm" ]; then
+  if portable_node_is_exact; then
     export PATH="$NODE_ROOT/current/bin:$PATH"
-    have_modern_node && return 0
+    return 0
   fi
 
-  local mirror release_dir tmp_dir tarball downloaded
-  release_dir="latest-v${NODE_MAJOR}.x"
+  local mirror release_dir tmp_dir tarball downloaded actual_sha extracted_root
+  release_dir="v${NODE_VERSION}"
   tmp_dir="$NODE_ROOT/download"
-  tarball=""
+  tarball="$NODE_ARCHIVE"
   downloaded=0
   rm -rf "$tmp_dir"
   mkdir -p "$tmp_dir"
 
-  info "准备 Node.js ${NODE_MAJOR}.x Linux x64 构建工具"
+  info "准备固定版 Node.js ${NODE_VERSION} Linux x64 离线运行时"
   for mirror in $(node_mirrors); do
     mirror="${mirror%/}"
     [ -n "$mirror" ] || continue
-    rm -f "$tmp_dir/SHASUMS256.txt" "$tmp_dir"/node-v*-linux-x64.tar.xz
+    rm -f "$tmp_dir/$tarball"
     info "尝试 Node.js 镜像：$mirror"
-    if ! curl_download "$mirror/$release_dir/SHASUMS256.txt" "$tmp_dir/SHASUMS256.txt"; then
-      warn "Node.js 校验清单下载失败，切换镜像：$mirror"
-      continue
-    fi
-    tarball="$(awk '/linux-x64.tar.xz$/ {print $2; exit}' "$tmp_dir/SHASUMS256.txt")"
-    if [ -z "$tarball" ]; then
-      warn "Node.js 校验清单中没有 linux-x64 tarball，切换镜像：$mirror"
-      continue
-    fi
     if ! curl_download "$mirror/$release_dir/$tarball" "$tmp_dir/$tarball"; then
       warn "Node.js 安装包下载失败，切换镜像：$mirror"
       continue
     fi
-    if ! (cd "$tmp_dir" && grep "  $tarball$" SHASUMS256.txt | sha256sum -c -); then
+    actual_sha="$(sha256sum "$tmp_dir/$tarball" | awk '{print $1}')"
+    if [ "$actual_sha" != "$NODE_ARCHIVE_SHA256" ]; then
       warn "Node.js 安装包校验失败，切换镜像：$mirror"
       continue
     fi
@@ -431,23 +436,23 @@ install_portable_node() {
     break
   done
 
-  [ "$downloaded" = "1" ] || fail "无法下载 Node.js ${NODE_MAJOR}.x Linux x64 构建工具；请检查制包机 DNS/代理，或设置 TAIJI_NODE_MIRRORS 为可访问的 Node.js 镜像列表"
-  rm -rf "$NODE_ROOT/${tarball%.tar.xz}"
+  [ "$downloaded" = "1" ] || fail "无法下载 Node.js ${NODE_VERSION} Linux x64 离线运行时，或下载内容校验失败；请检查制包机 DNS/代理，或设置 TAIJI_NODE_MIRRORS"
+  extracted_root="$NODE_ROOT/${tarball%.tar.xz}"
+  rm -rf "$extracted_root"
   tar -xJf "$tmp_dir/$tarball" -C "$NODE_ROOT"
-  ln -sfn "$NODE_ROOT/${tarball%.tar.xz}" "$NODE_ROOT/current"
+  [ -x "$extracted_root/bin/node" ] || fail "Node.js 离线运行时解压后缺少 bin/node"
+  printf '%s\n' "$NODE_VERSION" > "$extracted_root/.taiji-node-version"
+  printf '%s\n' "$NODE_ARCHIVE_SHA256" > "$extracted_root/.taiji-node-archive-sha256"
+  ln -sfn "$extracted_root" "$NODE_ROOT/current"
   export PATH="$NODE_ROOT/current/bin:$PATH"
+  portable_node_is_exact || fail "Node.js ${NODE_VERSION} Linux x64 离线运行时验证失败"
 }
 
 ensure_node() {
   export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
-  if have_modern_node; then
-    ok "Node.js 可用：$(command -v node) ($(node --version), npm $(npm -v))"
-    return
-  fi
-  warn "系统 Node/npm 不满足要求，将使用交付目录内的隔离构建工具"
   install_portable_node
-  have_modern_node || fail "Node.js 构建工具不可用，请检查网络或日志"
-  ok "Node.js 已准备：$(command -v node) ($(node --version), npm $(npm -v))"
+  portable_node_is_exact || fail "固定版 Node.js 离线运行时不可用，禁止回退到系统 Node"
+  ok "Node.js 离线运行时已准备：$NODE_ROOT/current ($(node --version), npm $(npm -v))"
 }
 
 reset_build_root() {
@@ -484,11 +489,13 @@ unpack_source() {
   tar -xzf "$SRC_ARCHIVE" -C "$BUILD_ROOT"
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
   repair_build_tree_permissions
+  VERSION="$(read_product_version)"
   ok "源码已解压：$SRC_DIR"
 }
 
 npm_ci_with_network_fallback() {
   local registry electron_mirror installed
+  local -a npm_args=("$@")
   installed=0
 
   for registry in $(npm_registries); do
@@ -500,7 +507,7 @@ npm_ci_with_network_fallback() {
       info "尝试 npm registry：$registry"
       info "尝试 Electron mirror：$electron_mirror"
       rm -rf node_modules
-      if NPM_CONFIG_REGISTRY="$registry" ELECTRON_MIRROR="$electron_mirror" npm ci; then
+      if NPM_CONFIG_REGISTRY="$registry" ELECTRON_MIRROR="$electron_mirror" npm ci "${npm_args[@]}"; then
         export NPM_CONFIG_REGISTRY="$registry"
         export ELECTRON_MIRROR="$electron_mirror"
         installed=1
@@ -549,11 +556,18 @@ build_runtime_and_deb() {
   info "获取 Linux Electron runtime"
   cd "$SRC_DIR/apps/taiji-desktop"
   npm --version
-  npm_ci_with_network_fallback
+  npm_ci_with_network_fallback --omit=dev
+
+  info "准备 DOCX Engine V2 生产依赖并执行源码测试"
+  cd "$(source_lab_dir)/sources/docx-engine-v2"
+  npm_ci_with_network_fallback --omit=dev
+  npm test
 
   info "构建 DEB 安装包"
   cd "$SRC_DIR"
-  TAIJI_AGENT_VERSION="$VERSION" ./packaging/linux/deb/build-deb.sh
+  TAIJI_AGENT_VERSION="$VERSION" \
+  TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current" \
+    ./packaging/linux/deb/build-deb.sh
 }
 
 collect_artifacts() {
@@ -613,7 +627,7 @@ recursive_runtime_dependencies() {
 
 build_offline_dependency_repo() {
   info "生成完全离线 apt 依赖仓库"
-  local deb deb_name pkg repo_sha
+  local deb deb_name pkg packages_sha packages_gz_sha
   deb="$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
   [ -f "$deb" ] || fail "未找到待打包 DEB：$deb"
   rm -rf "$OFFLINE_REPO"
@@ -634,11 +648,12 @@ build_offline_dependency_repo() {
   (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null > Packages)
   (cd "$OFFLINE_REPO" && gzip -9c Packages > Packages.gz)
   (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
-  repo_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
-  PACKAGES_GZ_SHA256="$repo_sha"
+  packages_sha="$(sha256sum "$OFFLINE_REPO/Packages" | awk '{print $1}')"
+  packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
   ok "离线依赖仓库已生成：$OFFLINE_REPO/Packages.gz"
   ok "主安装包已纳入离线仓库：$deb_name"
-  ok "Packages.gz SHA256：$repo_sha"
+  ok "Packages SHA256：$packages_sha"
+  ok "Packages.gz SHA256：$packages_gz_sha"
 }
 
 build_glibc() {
@@ -661,12 +676,13 @@ json_string() {
 
 write_release_manifest() {
   info "生成发布 manifest"
-  local src_name deb_name checksum_name source_sha deb_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
+  local src_name deb_name checksum_name source_sha deb_sha packages_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
   src_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_${VERSION}_amd64.deb"
   checksum_name="$deb_name.sha256"
   source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$src_name" | awk '{print $1}')"
   deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
+  packages_sha="$(sha256sum "$OFFLINE_REPO/Packages" | awk '{print $1}')"
   packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
   build_os="$(. /etc/os-release 2>/dev/null && printf '%s %s' "${PRETTY_NAME:-Linux}" "${VERSION_ID:-}" || uname -a)"
   build_glibc="$(build_glibc)"
@@ -685,6 +701,7 @@ write_release_manifest() {
     printf '  "deb_sha256": %s,\n' "$(json_string "$deb_sha")"
     printf '  "dpkg_arch": %s,\n' "$(json_string "$dpkg_arch")"
     printf '  "package": "taiji-agent",\n'
+    printf '  "packages_sha256": %s,\n' "$(json_string "$packages_sha")"
     printf '  "packages_gz_sha256": %s,\n' "$(json_string "$packages_gz_sha")"
     printf '  "schema_version": 1,\n'
     printf '  "source_archive": %s,\n' "$(json_string "$src_name")"
@@ -701,7 +718,7 @@ write_release_manifest() {
     printf '      "RPM-only terminals without dpkg/apt",\n'
     printf '      "ARM/aarch64 terminals",\n'
     printf '      "Headless or strongly sandboxed terminals without desktop session",\n'
-    printf '      "Offline installations missing 离线依赖/Packages.gz"\n'
+    printf '      "Offline installations missing 离线依赖/Packages or Packages.gz"\n'
     printf '    ]\n'
     printf '  },\n'
     printf '  "target_matrix": [\n'
@@ -715,18 +732,20 @@ write_release_manifest() {
 
   {
     printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
+    printf 'packages_sha256=%s\n' "$packages_sha"
     printf 'packages_gz_sha256=%s\n' "$packages_gz_sha"
   } >> "$BUILD_MARKER"
   ok "发布 manifest 已生成：$MANIFEST_FILE"
 }
 
 write_build_report() {
-  local commit system_info source_line deb_line repo_line
+  local commit system_info source_line deb_line packages_line packages_gz_line
   commit="$(tar -tzf "$SRC_ARCHIVE" 2>/dev/null | head -1 | sed 's#/.*##' || true)"
   system_info="$(. /etc/os-release 2>/dev/null && printf '%s %s' "${PRETTY_NAME:-Linux}" "${VERSION_ID:-}" || uname -a)"
   source_line="$(cd "$SCRIPT_DIR" && sha256sum "$(basename "$SRC_ARCHIVE")")"
   deb_line="$(cd "$OUTPUT_DIR" && sha256sum "taiji-agent_${VERSION}_amd64.deb")"
-  repo_line="$(cd "$OFFLINE_REPO" && sha256sum Packages.gz)"
+  packages_line="$(cd "$OFFLINE_REPO" && sha256sum Packages)"
+  packages_gz_line="$(cd "$OFFLINE_REPO" && sha256sum Packages.gz)"
   {
     printf '太极 Agent 离线交付构建报告\n'
     printf '生成时间：%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
@@ -748,11 +767,12 @@ write_build_report() {
     printf '依赖源：%s\n' "$(apt_source_summary)"
     printf '源码包 SHA256：%s\n' "$source_line"
     printf 'DEB SHA256：%s\n' "$deb_line"
-    printf 'Packages.gz SHA256：%s\n' "$repo_line"
+    printf 'Packages SHA256：%s\n' "$packages_line"
+    printf 'Packages.gz SHA256：%s\n' "$packages_gz_line"
     printf '发布 manifest：%s\n' "$(basename "$MANIFEST_FILE")"
-    printf '支持边界：Debian-like x86_64/amd64 图形桌面，必须包含离线依赖/Packages.gz；RPM/.run 另行制包。\n'
+    printf '支持边界：Debian-like x86_64/amd64 图形桌面，必须同时包含离线依赖/Packages 与 Packages.gz；RPM/.run 另行制包。\n'
     printf '目标机安装脚本：02_目标终端_安装并验证.sh\n'
-    printf '目标机离线仓库：离线依赖/Packages.gz\n'
+    printf '目标机离线仓库：离线依赖/Packages 与 Packages.gz\n'
   } > "$BUILD_REPORT"
   ok "构建报告已生成：$BUILD_REPORT"
 }
@@ -797,7 +817,7 @@ main() {
   write_release_manifest
   write_build_report
   set_stage "最终发布预检"
-  TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight
+  TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight "$SRC_DIR"
   printf '\n[OK] 离线交付包生成完成。目标机断网后执行：\n'
   printf 'bash ./02_目标终端_安装并验证.sh\n'
   printf '\n日志：%s\n' "$LOG_FILE"

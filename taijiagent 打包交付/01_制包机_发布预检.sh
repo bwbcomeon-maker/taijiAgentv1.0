@@ -9,6 +9,7 @@ OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
+PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
 REQUIRE_ARTIFACTS="${TAIJI_RELEASE_REQUIRE_ARTIFACTS:-0}"
 SKIP_GIT_CHECK="${TAIJI_RELEASE_SKIP_GIT_CHECK:-0}"
 SOURCE_ARCHIVE=""
@@ -140,6 +141,25 @@ check_no_macos_metadata_or_stale_zip() {
   fi
 }
 
+verify_assembled_deb_payload() {
+  local deb="$1" payload_root status
+  have dpkg-deb || fail "缺少 dpkg-deb，无法真实解包验证 payload"
+  have python3 || fail "缺少 python3，无法执行 payload contract verifier"
+  [ -f "$PAYLOAD_VERIFIER" ] || fail "缺少 payload verifier：$PAYLOAD_VERIFIER"
+  payload_root="$(mktemp -d /tmp/taiji-payload-verify.XXXXXX)"
+  if ! dpkg-deb -x "$deb" "$payload_root"; then
+    rm -rf "$payload_root"
+    fail "DEB 真实解包失败：$(basename "$deb")"
+  fi
+  set +e
+  python3 "$PAYLOAD_VERIFIER" --root "$payload_root"
+  status=$?
+  set -e
+  rm -rf "$payload_root"
+  [ "$status" -eq 0 ] || fail "DEB payload contract 验证失败：$(basename "$deb")"
+  ok "DEB 真实解包 payload contract 验证通过"
+}
+
 check_delivery_artifacts() {
   [ "$REQUIRE_ARTIFACTS" = "1" ] || return 0
   [ -d "$OUTPUT_DIR" ] || fail "缺少生成的安装包/"
@@ -150,9 +170,11 @@ check_delivery_artifacts() {
   [ -f "$OFFLINE_REPO/Packages" ] || fail "缺少离线依赖/Packages"
   [ -f "$OFFLINE_REPO/Packages.gz" ] || fail "缺少离线依赖/Packages.gz"
 
-  local deb_count
+  local deb_count deb
   deb_count="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | wc -l | tr -d ' ')"
   [ "$deb_count" = "1" ] || fail "生成的安装包/ 必须且只能有一个 amd64 DEB，当前数量：$deb_count"
+  deb="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | head -1)"
+  verify_assembled_deb_payload "$deb"
   ok "交付产物完整性检查通过"
 }
 

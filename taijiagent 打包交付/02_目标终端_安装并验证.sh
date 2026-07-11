@@ -100,7 +100,7 @@ failure_next_steps() {
       printf 'next=先执行 sudo -v，确认当前用户具备管理员权限后重试安装脚本\n'
       ;;
     *"缺少离线依赖仓库"*)
-      printf 'next=完全离线安装必须包含 离线依赖/Packages.gz；若明确允许在线源，设置 ONLINE_OK=1 后重试但不能算离线验收\n'
+      printf 'next=完全离线安装必须同时包含 离线依赖/Packages 与 Packages.gz；若明确允许在线源，设置 ONLINE_OK=1 后重试但不能算离线验收\n'
       ;;
     *"构建成功标记"*|*"manifest"*|*"安装包与构建成功标记"*|*"Packages.gz"*)
       printf 'next=回到制包机重新执行 bash ./00_制包机_生成离线交付包.sh，并完整拷贝 生成的安装包/ 与 离线依赖/\n'
@@ -187,31 +187,40 @@ json_string_value() {
 }
 
 validate_release_manifest() {
-  local deb_name checksum_name expected_sha manifest_name marker_packages_sha
-  local manifest_deb manifest_checksum manifest_deb_sha manifest_packages_sha actual_packages_sha
+  local deb_name checksum_name expected_sha manifest_name marker_packages_sha marker_packages_gz_sha
+  local manifest_deb manifest_checksum manifest_deb_sha manifest_packages_sha manifest_packages_gz_sha
+  local actual_packages_sha actual_packages_gz_sha
   deb_name="$(marker_value deb)"
   checksum_name="$(marker_value checksum)"
   expected_sha="$(marker_value deb_sha256)"
   manifest_name="$(marker_value manifest)"
-  marker_packages_sha="$(marker_value packages_gz_sha256)"
+  marker_packages_sha="$(marker_value packages_sha256)"
+  marker_packages_gz_sha="$(marker_value packages_gz_sha256)"
 
   [ -n "$manifest_name" ] || fail "构建成功标记缺少 manifest 字段，请重新执行制包脚本"
-  [ -n "$marker_packages_sha" ] || fail "构建成功标记缺少 packages_gz_sha256 字段，请重新执行制包脚本"
+  [ -n "$marker_packages_sha" ] || fail "构建成功标记缺少 packages_sha256 字段，请重新执行制包脚本"
+  [ -n "$marker_packages_gz_sha" ] || fail "构建成功标记缺少 packages_gz_sha256 字段，请重新执行制包脚本"
   MANIFEST_PATH="$OUTPUT_DIR/$manifest_name"
   [ -f "$MANIFEST_PATH" ] || fail "构建成功标记指向的 manifest 不存在：$MANIFEST_PATH"
 
   manifest_deb="$(json_string_value deb "$MANIFEST_PATH")"
   manifest_checksum="$(json_string_value checksum "$MANIFEST_PATH")"
   manifest_deb_sha="$(json_string_value deb_sha256 "$MANIFEST_PATH")"
-  manifest_packages_sha="$(json_string_value packages_gz_sha256 "$MANIFEST_PATH")"
+  manifest_packages_sha="$(json_string_value packages_sha256 "$MANIFEST_PATH")"
+  manifest_packages_gz_sha="$(json_string_value packages_gz_sha256 "$MANIFEST_PATH")"
   [ "$manifest_deb" = "$deb_name" ] || fail "manifest 与构建标记的 DEB 名称不一致"
   [ "$manifest_checksum" = "$checksum_name" ] || fail "manifest 与构建标记的校验文件名称不一致"
   [ "$manifest_deb_sha" = "$expected_sha" ] || fail "manifest 与构建标记的 DEB SHA256 不一致"
-  [ "$manifest_packages_sha" = "$marker_packages_sha" ] || fail "manifest 与构建标记的 Packages.gz SHA256 不一致"
+  [ -n "$manifest_packages_sha" ] || fail "manifest 缺少 packages_sha256 字段"
+  [ -n "$manifest_packages_gz_sha" ] || fail "manifest 缺少 packages_gz_sha256 字段"
+  [ "$manifest_packages_sha" = "$marker_packages_sha" ] || fail "manifest 与构建标记的 Packages SHA256 不一致"
+  [ "$manifest_packages_gz_sha" = "$marker_packages_gz_sha" ] || fail "manifest 与构建标记的 Packages.gz SHA256 不一致"
 
   if offline_repo_available; then
-    actual_packages_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
-    [ "$actual_packages_sha" = "$manifest_packages_sha" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
+    actual_packages_sha="$(sha256sum "$OFFLINE_REPO/Packages" | awk '{print $1}')"
+    actual_packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
+    [ "$actual_packages_sha" = "$manifest_packages_sha" ] || fail "离线依赖/Packages 与 manifest 不匹配"
+    [ "$actual_packages_gz_sha" = "$manifest_packages_gz_sha" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
   fi
   ok "发布 manifest 有效：$manifest_name"
 }
@@ -527,17 +536,25 @@ install_trial_license() {
     return 0
   fi
 
-  local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-  local target_dir="$config_home/taiji-agent"
-  local target="$target_dir/license.jwt"
+  local account_home="$HOME"
+  local detected_home=""
+  if command -v getent >/dev/null 2>&1; then
+    detected_home="$(getent passwd "$(id -u)" 2>/dev/null | awk -F: 'NR==1 {print $6}')"
+    if [ -n "$detected_home" ]; then
+      account_home="$detected_home"
+    fi
+  fi
+  local config_home="$account_home/.config"
+  local target_dir="$config_home/taiji-agent/licenses"
+  local target="$target_dir/active-license.jwt"
   mkdir -p "$target_dir"
   chmod 0700 "$target_dir" || true
   install -m 0600 "$source" "$target"
-  ok "已安装试用授权：$(basename "$source") -> license.jwt"
+  ok "已安装试用授权：$(basename "$source") -> licenses/active-license.jwt"
 }
 
 offline_repo_available() {
-  [ -d "$OFFLINE_REPO" ] && [ -f "$OFFLINE_REPO/Packages.gz" ]
+  [ -d "$OFFLINE_REPO" ] && [ -f "$OFFLINE_REPO/Packages" ] && [ -f "$OFFLINE_REPO/Packages.gz" ]
 }
 
 validate_offline_repo_requirement() {
@@ -549,7 +566,7 @@ validate_offline_repo_requirement() {
     warn "ONLINE_OK=1：未检测到离线依赖仓库，将显式允许使用目标机系统已配置软件源安装。"
     return 0
   fi
-  fail "缺少离线依赖仓库：$OFFLINE_REPO/Packages.gz。完全离线发布包必须包含该文件；如明确允许目标机在线源，请设置 ONLINE_OK=1 后重试。"
+  fail "缺少离线依赖仓库：完全离线发布包必须同时包含 $OFFLINE_REPO/Packages 与 Packages.gz；如明确允许目标机在线源，请设置 ONLINE_OK=1 后重试。"
 }
 
 prepare_offline_apt_repo_source_path() {
@@ -561,9 +578,6 @@ prepare_offline_apt_repo_source_path() {
   while IFS= read -r -d '' file; do
     cp -f "$file" "$OFFLINE_APT_REPO_MOUNT/repo/$(basename "$file")"
   done < <(find "$repo_path" -maxdepth 1 -type f -print0)
-  if [ ! -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages" ] && [ -f "$repo_path/Packages.gz" ]; then
-    gzip -dc "$repo_path/Packages.gz" > "$OFFLINE_APT_REPO_MOUNT/repo/Packages" || fail "离线 apt 仓库索引不可读：无法从 Packages.gz 生成 Packages"
-  fi
   [ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages" ] || fail "离线 apt 仓库索引不可读：缺少 Packages"
   [ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages.gz" ] || fail "离线 apt 仓库索引不可读：缺少 Packages.gz"
   chmod a+r "$OFFLINE_APT_REPO_MOUNT/repo"/* 2>/dev/null || true
@@ -598,7 +612,7 @@ install_taiji_package() {
     return
   fi
 
-  [ "$ONLINE_OK" = "1" ] || fail "缺少离线依赖仓库：$OFFLINE_REPO/Packages.gz。完全离线发布包不能回退到目标机在线源。"
+  [ "$ONLINE_OK" = "1" ] || fail "缺少离线依赖仓库：必须同时包含 $OFFLINE_REPO/Packages 与 Packages.gz。完全离线发布包不能回退到目标机在线源。"
   warn "ONLINE_OK=1：使用系统已配置软件源安装；这不是完全离线发布包验收路径。"
   sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$DEB_PATH"
 }

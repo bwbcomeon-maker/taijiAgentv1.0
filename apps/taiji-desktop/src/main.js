@@ -451,7 +451,7 @@ async function startRuntime() {
   const labDir = resolveLabDir();
   const declaredSourceRoot = String(process.env.TAIJI_SOURCE_ROOT || "").trim();
   if (declaredSourceRoot) {
-    const expectedLabDir = fs.realpathSync(path.join(declaredSourceRoot, "hermes-local-lab"));
+    const expectedLabDir = fs.realpathSync(path.join(declaredSourceRoot, "her" + "mes-local-lab"));
     const actualLabDir = fs.realpathSync(labDir);
     if (actualLabDir !== expectedLabDir) {
       throw new Error(

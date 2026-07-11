@@ -1,0 +1,30 @@
+{
+  "schema_version": "taiji-product-skills-allowlist/v1",
+  "skills": [
+    {
+      "id": "docx-template-skill",
+      "category": "productivity",
+      "source": "hermes-local-lab/sources/docx-engine-v2/compat/docx-template-skill"
+    },
+    {
+      "id": "style-modeler",
+      "category": "writing",
+      "source": "hermes-local-lab/custom-skills/writing-agent/style-modeler"
+    },
+    {
+      "id": "web-article-extractor",
+      "category": "writing",
+      "source": "hermes-local-lab/custom-skills/writing-agent/web-article-extractor",
+      "exclude": [
+        "scripts/markdown_converter.js",
+        "scripts/readability_loader.js",
+        "scripts/readability_extractor.js.backup"
+      ]
+    },
+    {
+      "id": "workflow-producer",
+      "category": "writing",
+      "source": "hermes-local-lab/custom-skills/writing-agent/workflow-producer"
+    }
+  ]
+}

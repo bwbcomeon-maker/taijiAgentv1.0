@@ -50,9 +50,12 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         output_dir.mkdir(exist_ok=True)
         repo_dir = self.tmp_path / "离线依赖"
         repo_dir.mkdir(exist_ok=True)
+        packages = repo_dir / "Packages"
+        packages.write_bytes(b"fake packages\n")
         packages_gz = repo_dir / "Packages.gz"
-        packages_gz.write_bytes(gzip.compress(b"fake packages\n"))
-        packages_sha = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
+        packages_gz.write_bytes(gzip.compress(packages.read_bytes()))
+        packages_sha = hashlib.sha256(packages.read_bytes()).hexdigest()
+        packages_gz_sha = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
         deb = output_dir / "taiji-agent_0.1.0_amd64.deb"
         checksum = output_dir / "taiji-agent_0.1.0_amd64.deb.sha256"
         manifest = output_dir / "taiji-package-manifest.json"
@@ -70,7 +73,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                   "deb": "{deb.name}",
                   "deb_sha256": "{sha}",
                   "checksum": "{checksum.name}",
-                  "packages_gz_sha256": "{packages_sha}",
+                  "packages_sha256": "{packages_sha}",
+                  "packages_gz_sha256": "{packages_gz_sha}",
                   "target_matrix": ["Debian-like x86_64/amd64 desktop Linux"],
                   "support_boundary": {{
                     "supported": ["Debian-like x86_64/amd64 desktop Linux"],
@@ -89,7 +93,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                     f"checksum={checksum.name}",
                     f"deb_sha256={sha}",
                     f"manifest={manifest.name}",
-                    f"packages_gz_sha256={packages_sha}",
+                    f"packages_sha256={packages_sha}",
+                    f"packages_gz_sha256={packages_gz_sha}",
                     "version=0.1.0",
                 ]
             )
@@ -98,6 +103,18 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         )
 
     def _write_fake_commands(self) -> None:
+        write_executable(
+            self.fake_bin / "getent",
+            r'''
+            #!/usr/bin/env bash
+            set -euo pipefail
+            if [ "${1:-}" = "passwd" ]; then
+              printf 'taiji:x:%s:%s::%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME"
+              exit 0
+            fi
+            exit 1
+            ''',
+        )
         write_executable(
             self.fake_bin / "sudo",
             r'''
@@ -246,6 +263,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         lsof_mode: str = "none",
         pgrep_mode: str = "none",
         online_ok: bool = False,
+        xdg_config_home: Path | None = None,
     ) -> subprocess.CompletedProcess:
         harness = self.tmp_path / "run.sh"
         harness.write_text(
@@ -257,6 +275,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export FAKE_STATE="{self.fake_state}"
                 export FAKE_LOG="{self.fake_log}"
                 export HOME="{self.fake_home}"
+                export XDG_CONFIG_HOME="{xdg_config_home or ''}"
                 export FAKE_APT_PURGE_FAIL="{1 if apt_purge_fails else 0}"
                 export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
                 export FAKE_LSOF_MODE="{lsof_mode}"
@@ -321,6 +340,52 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("安装包 SHA256 校验通过", result.stdout + result.stderr)
+
+    def test_tampered_plain_packages_index_stops_before_install(self):
+        (self.tmp_path / "离线依赖" / "Packages").write_bytes(b"tampered packages\n")
+
+        result = self.run_install_package()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Packages 与 manifest 不匹配", result.stdout + result.stderr)
+        self.assertFalse((self.fake_state / "installed").exists())
+
+    def test_tampered_gzip_packages_index_stops_before_install(self):
+        (self.tmp_path / "离线依赖" / "Packages.gz").write_bytes(b"tampered gzip\n")
+
+        result = self.run_install_package()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Packages.gz 与 manifest 不匹配", result.stdout + result.stderr)
+        self.assertFalse((self.fake_state / "installed").exists())
+
+    def test_missing_plain_packages_hash_binding_stops_before_install(self):
+        marker = self.tmp_path / "生成的安装包" / ".build-success"
+        marker.write_text(
+            "\n".join(
+                line
+                for line in marker.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("packages_sha256=")
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest = self.tmp_path / "生成的安装包" / "taiji-package-manifest.json"
+        manifest.write_text(
+            "\n".join(
+                line
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+                if '"packages_sha256"' not in line
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_install_package()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("缺少 packages_sha256", result.stdout + result.stderr)
+        self.assertFalse((self.fake_state / "installed").exists())
 
     def test_clean_reinstall_removes_legacy_without_backup_before_installing(self):
         result = self.run_install_package()
@@ -388,7 +453,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         diagnostic = diagnostics[-1].read_text(encoding="utf-8")
         self.assertIn("缺少离线依赖仓库", diagnostic)
         self.assertIn("ONLINE_OK=0", diagnostic)
-        self.assertIn("next=完全离线安装必须包含 离线依赖/Packages.gz", diagnostic)
+        self.assertIn(
+            "next=完全离线安装必须同时包含 离线依赖/Packages 与 Packages.gz",
+            diagnostic,
+        )
 
     def test_online_ok_allows_explicit_fallback_without_offline_repo(self):
         shutil.rmtree(self.tmp_path / "离线依赖")
@@ -402,8 +470,6 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
 
     def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
         repo = self.tmp_path / "离线依赖"
-        repo.mkdir(exist_ok=True)
-        (repo / "Packages.gz").write_bytes(gzip.compress(b"fake packages\n"))
 
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -423,7 +489,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        target = self.fake_home / ".config" / "taiji-agent" / "license.jwt"
+        target = self.fake_home / ".config" / "taiji-agent" / "licenses" / "active-license.jwt"
         self.assertEqual(target.read_text(encoding="utf-8"), "signed-license-token\n")
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
         self.assertIn("license.jwt", self.fake_log_text() + result.stdout + result.stderr)
@@ -435,9 +501,26 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        target = self.fake_home / ".config" / "taiji-agent" / "license.jwt"
+        target = self.fake_home / ".config" / "taiji-agent" / "licenses" / "active-license.jwt"
         self.assertEqual(target.read_text(encoding="utf-8"), "signed-license-token\n")
         self.assertIn(source.name, self.fake_log_text() + result.stdout + result.stderr)
+
+    def test_license_install_ignores_xdg_redirect_and_uses_account_home(self):
+        (self.tmp_path / "license.jwt").write_text("signed-license-token\n", encoding="utf-8")
+        redirected = self.tmp_path / "redirected-config"
+
+        result = self.run_install_package(xdg_config_home=redirected)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        canonical = (
+            self.fake_home
+            / ".config"
+            / "taiji-agent"
+            / "licenses"
+            / "active-license.jwt"
+        )
+        self.assertTrue(canonical.is_file())
+        self.assertFalse((redirected / "taiji-agent/licenses/active-license.jwt").exists())
 
     def test_multiple_adjacent_descriptive_licenses_require_explicit_source(self):
         (self.tmp_path / "taiji-license-客户A-一号-aaaaaaaaaaaa-20260612-000000Z-20260712-000000Z.jwt").write_text(

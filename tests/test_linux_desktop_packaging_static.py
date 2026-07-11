@@ -388,6 +388,28 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('path.join(accountHome, ".local", "state", "taiji-agent", "license-state.json")', main_js)
         self.assertNotIn("os.homedir()", main_js)
 
+    def test_installed_payload_profile_is_generated_before_sourceless_compile(self):
+        source_profile = read_text(
+            "hermes-local-lab/sources/hermes-agent/taiji-runtime-profile.json"
+        )
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn('"profile": "source-development"', source_profile)
+        profile_call = "  write_installed_runtime_profile\n"
+        self.assertIn(profile_call, build)
+        self.assertIn('"profile": "installed-production"', build)
+        self.assertLess(
+            build.index(profile_call),
+            build.index('compile_sourceless_python "$AGENT_RUNTIME"'),
+        )
+
+    def test_build_fixes_root_owned_trust_anchor_directory_modes(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+
+        self.assertIn('chmod 0755 "$PKG_ROOT/opt" "$INSTALL_ROOT"', build)
+        self.assertIn('chmod 0755 "$INSTALL_ROOT/resources"', build)
+        self.assertIn('chmod 0755 "$INSTALL_ROOT/resources/license"', build)
+
     def test_packaging_never_embeds_customer_license_or_private_key_inputs(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
         gitignore = read_text(".gitignore")
@@ -435,8 +457,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("scan_product_privacy", build)
         self.assertNotIn("scripts/hermes-gateway", build)
 
-    def test_packaged_runtime_excludes_dev_templates_and_repairs_venv_paths(self):
+    def test_packaged_runtime_excludes_dev_templates_and_stages_portable_python(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
+        python_stager = read_text("packaging/linux/stage-python-runtime.py")
 
         for expected in (
             "--exclude '.env.example'",
@@ -458,11 +481,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         ):
             self.assertIn(expected, build)
 
-        self.assertIn("repair_packaged_venv_paths", build)
-        self.assertIn("SOURCE_VENV", build)
-        self.assertIn("/opt/taiji-agent/runtime/agent/venv", build)
-        self.assertIn('"$AGENT_RUNTIME/venv/bin"', build)
-        self.assertIn('"$AGENT_RUNTIME/venv/pyvenv.cfg"', build)
+        self.assertIn("stage-python-runtime.py", build)
+        self.assertIn('--source-venv "$SOURCE_AGENT_DIR/venv"', build)
+        self.assertIn('--destination "$AGENT_RUNTIME/venv"', build)
+        self.assertIn("--require-linux-x86-64", build)
+        self.assertNotIn('"$SOURCE_AGENT_DIR/venv"/ "$AGENT_RUNTIME/venv"/', build)
+        self.assertNotIn("repair_packaged_venv_paths", build)
+        self.assertIn("def assert_no_source_paths", python_stager)
+        self.assertIn("def run_relocation_smoke", python_stager)
+        self.assertIn("/opt/taiji-agent/runtime/agent/venv", python_stager)
         self.assertIn("-path \"$AGENT_RUNTIME/venv/lib*\" -prune", build)
 
     def test_packaged_launch_surface_has_no_hermes_visible_tokens(self):
@@ -738,6 +765,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("MANIFEST_FILE", builder)
         self.assertIn("taiji-package-manifest.json", builder)
         self.assertIn("write_release_manifest", builder)
+        self.assertIn("packages_sha256", builder)
         self.assertIn("packages_gz_sha256", builder)
         self.assertIn("build_glibc", builder)
         self.assertIn("target_matrix", builder)
@@ -768,6 +796,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("MANIFEST_PATH", install)
         self.assertIn("validate_release_manifest", install)
         self.assertIn("manifest", install)
+        self.assertIn("packages_sha256", install)
         self.assertIn("packages_gz_sha256", install)
         self.assertIn("verify_deb_checksum", install)
         self.assertNotIn('sha256sum -c "$(basename "$CHECKSUM_PATH")"', install)
@@ -786,7 +815,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("/tmp/taiji-agent-apt-lists.XXXXXX", install)
         self.assertIn("OFFLINE_APT_LISTS_DIR", install)
         self.assertIn("Dir::State::Lists=$lists_dir", install)
-        self.assertIn('gzip -dc "$repo_path/Packages.gz" > "$OFFLINE_APT_REPO_MOUNT/repo/Packages"', install)
+        self.assertIn('[ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages" ]', install)
+        self.assertIn('[ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages.gz" ]', install)
+        self.assertNotIn('gzip -dc "$repo_path/Packages.gz"', install)
         self.assertIn("离线 apt 仓库索引更新失败", install)
         self.assertLess(install.index('*"离线 apt 仓库索引"*'), install.index('*"管理员权限"*'))
         self.assertNotIn('lists_dir="$LOG_DIR/apt-lists"', install)
@@ -841,6 +872,41 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertIn(required, build)
         self.assertIn('out_deb_name="$(basename "$OUT_DEB")"', build)
         self.assertIn('sha256sum "$out_deb_name" > "$out_deb_name.sha256"', build)
+
+    def test_desktop_payload_uses_an_explicit_runtime_file_allowlist(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        start = build.index('mkdir -p "$DESKTOP_RUNTIME/src"')
+        end = build.index('install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent"')
+        desktop_stage = build[start:end]
+
+        self.assertIn('DESKTOP_RUNTIME="$INSTALL_ROOT/apps/taiji-desktop"', build)
+        self.assertNotIn('"$APP_DIR" "$INSTALL_ROOT/apps/"', desktop_stage)
+        self.assertIn(
+            'install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"',
+            desktop_stage,
+        )
+        self.assertIn(
+            'install -m 0644 "$APP_DIR/src/main.js" "$DESKTOP_RUNTIME/src/main.js"',
+            desktop_stage,
+        )
+        self.assertIn(
+            'install -m 0644 "$APP_DIR/src/preload.js" "$DESKTOP_RUNTIME/src/preload.js"',
+            desktop_stage,
+        )
+        self.assertIn("stage-electron-runtime.py", build)
+        self.assertIn('--source "$APP_DIR/node_modules/electron"', desktop_stage)
+        self.assertIn('--destination "$DESKTOP_RUNTIME/node_modules/electron"', desktop_stage)
+        self.assertIn("--require-linux-x86-64", desktop_stage)
+        self.assertNotIn('"$APP_DIR/node_modules"/ "$DESKTOP_RUNTIME/node_modules"/', desktop_stage)
+        self.assertNotIn('"$APP_DIR/package-lock.json"', desktop_stage)
+        self.assertNotIn("--exclude '.package-lock.json'", desktop_stage)
+
+    def test_offline_builder_omits_desktop_development_dependencies(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        start = builder.index('cd "$SRC_DIR/apps/taiji-desktop"')
+        end = builder.index('info "准备 DOCX Engine V2 生产依赖并执行源码测试"')
+
+        self.assertIn("npm_ci_with_network_fallback --omit=dev", builder[start:end])
 
     def test_webui_runtime_assets_are_local_for_offline_target(self):
         static_root = ROOT / "hermes-local-lab/sources/hermes-webui/static"

@@ -1,0 +1,156 @@
+{
+  "schema_version": "taiji-payload-contract/v1",
+  "contract_path": "opt/taiji-agent/resources/payload-contract.json",
+  "product_version": {
+    "source": "opt/taiji-agent/VERSION",
+    "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+  },
+  "components": [
+    {
+      "id": "product_version",
+      "path": "opt/taiji-agent/VERSION",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "python_runtime",
+      "path": "opt/taiji-agent/runtime/agent/venv/bin/python",
+      "type": "file",
+      "mode": "0755",
+      "version": {
+        "kind": "text",
+        "path": "opt/taiji-agent/runtime/agent/PYTHON_VERSION",
+        "pattern": "^3\\.[0-9]+\\.[0-9]+$"
+      }
+    },
+    {
+      "id": "webui_runtime",
+      "path": "opt/taiji-agent/runtime/web",
+      "type": "directory",
+      "mode": "0755",
+      "version": {
+        "kind": "text",
+        "path": "opt/taiji-agent/runtime/web/PRODUCT_VERSION",
+        "equals_product": true
+      }
+    },
+    {
+      "id": "electron_runtime",
+      "path": "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
+      "type": "file",
+      "mode": "0755",
+      "version": {
+        "kind": "json",
+        "path": "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/package.json",
+        "field": "version",
+        "expected": "39.8.10"
+      }
+    },
+    {
+      "id": "packaged_node",
+      "path": "opt/taiji-agent/runtime/node/bin/node",
+      "type": "file",
+      "mode": "0755",
+      "version": {
+        "kind": "text",
+        "path": "opt/taiji-agent/runtime/node/NODE_VERSION",
+        "expected": "22.23.1"
+      }
+    },
+    {
+      "id": "docx_engine_v2",
+      "path": "opt/taiji-agent/runtime/docx-engine-v2",
+      "type": "directory",
+      "mode": "0755",
+      "version": {
+        "kind": "json",
+        "path": "opt/taiji-agent/runtime/docx-engine-v2/package.json",
+        "field": "version",
+        "expected": "0.1.0"
+      }
+    },
+    {
+      "id": "product_skills",
+      "path": "opt/taiji-agent/runtime/agent/skills",
+      "type": "directory",
+      "mode": "0755",
+      "version": {
+        "kind": "json",
+        "path": "opt/taiji-agent/runtime/agent/skills/product-skills.json",
+        "field": "schema_version",
+        "expected": "taiji-product-skills/v1"
+      }
+    },
+    {
+      "id": "runtime_installation_profile",
+      "path": "opt/taiji-agent/runtime/agent/taiji-runtime-profile.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {
+        "kind": "json",
+        "path": "opt/taiji-agent/runtime/agent/taiji-runtime-profile.json",
+        "field": "profile",
+        "expected": "installed-production"
+      }
+    },
+    {
+      "id": "license_public_key",
+      "path": "opt/taiji-agent/resources/license/signing-public.pem",
+      "type": "file",
+      "mode": "0644",
+      "version": {
+        "kind": "spki_sha256",
+        "path": "opt/taiji-agent/resources/license/signing-public.pem",
+        "expected": "2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
+      }
+    },
+    {
+      "id": "builtin_template_seed",
+      "path": "opt/taiji-agent/runtime/docx-engine-v2/template-registry.json",
+      "type": "file",
+      "mode": "0444",
+      "version": {
+        "kind": "json",
+        "path": "opt/taiji-agent/runtime/docx-engine-v2/template-registry.json",
+        "field": "version",
+        "expected": 1
+      }
+    },
+    {
+      "id": "taiji_cli",
+      "path": "usr/bin/taiji",
+      "type": "file",
+      "mode": "0755",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "taiji_desktop_launcher",
+      "path": "usr/bin/taiji-agent",
+      "type": "file",
+      "mode": "0755",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "taiji_diagnose_entrypoint",
+      "path": "usr/bin/taiji-agent-diagnose",
+      "type": "file",
+      "mode": "0755",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "taiji_native_verify",
+      "path": "opt/taiji-agent/bin/taiji-native-verify",
+      "type": "file",
+      "mode": "0755",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "desktop_entry",
+      "path": "usr/share/applications/taiji-agent.desktop",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    }
+  ]
+}

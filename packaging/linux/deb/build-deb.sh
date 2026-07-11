@@ -15,13 +15,32 @@ APP_DIR="$REPO_ROOT/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/electron"
 DESKTOP_FILE="$REPO_ROOT/packaging/linux/taiji-agent.desktop"
 DEFAULT_CONFIG="$LAB_DIR/config/taiji-default-config.yaml"
-VERSION="${TAIJI_AGENT_VERSION:-0.1.0}"
+VERSION_FILE="$REPO_ROOT/VERSION"
+PAYLOAD_CONTRACT="$REPO_ROOT/packaging/linux/payload-contract.json"
+PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
+RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-runtime-components.py"
+PYTHON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-python-runtime.py"
+ELECTRON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-electron-runtime.py"
+PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
+PACKAGED_NODE_VERSION="22.23.1"
+ISSUER_PUBLIC_KEY_FINGERPRINT="2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
+[ -f "$VERSION_FILE" ] || { echo "Missing product VERSION: $VERSION_FILE" >&2; exit 1; }
+VERSION="$(tr -d '\r\n' < "$VERSION_FILE")"
+printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+  echo "Invalid product VERSION: $VERSION" >&2
+  exit 1
+}
+if [ -n "${TAIJI_AGENT_VERSION:-}" ] && [ "$TAIJI_AGENT_VERSION" != "$VERSION" ]; then
+  echo "TAIJI_AGENT_VERSION must match root VERSION ($VERSION), got: $TAIJI_AGENT_VERSION" >&2
+  exit 1
+fi
 ARCH="amd64"
 BUILD_ROOT="$REPO_ROOT/runtime/package-build/deb"
 PKG_ROOT="$BUILD_ROOT/root"
 INSTALL_ROOT="$PKG_ROOT/opt/taiji-agent"
 AGENT_RUNTIME="$INSTALL_ROOT/runtime/agent"
 WEB_RUNTIME="$INSTALL_ROOT/runtime/web"
+DESKTOP_RUNTIME="$INSTALL_ROOT/apps/taiji-desktop"
 OUT_DIR="$REPO_ROOT/packages/麒麟操作系统安装包"
 OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"
 ARCHIVE_DIR="$OUT_DIR/旧版本归档"
@@ -31,6 +50,11 @@ fail() {
   echo "$*" >&2
   exit 1
 }
+
+[ -n "$PACKAGED_NODE_ROOT" ] || fail "TAIJI_PACKAGED_NODE_ROOT is required; system Node and source-tree fallback are not release inputs."
+[ -f "$RUNTIME_STAGER" ] || fail "Missing runtime component stager: $RUNTIME_STAGER"
+[ -f "$PYTHON_RUNTIME_STAGER" ] || fail "Missing Python runtime stager: $PYTHON_RUNTIME_STAGER"
+[ -f "$ELECTRON_RUNTIME_STAGER" ] || fail "Missing Electron runtime stager: $ELECTRON_RUNTIME_STAGER"
 
 warn() {
   echo "Warning: $*" >&2
@@ -171,38 +195,6 @@ compile_sourceless_python() {
   find "$target" -type f -name '*.py' ! -path '*/venv/*' -delete
 }
 
-remove_editable_install_metadata() {
-  local site_packages
-  while IFS= read -r -d '' site_packages; do
-    find "$site_packages" -maxdepth 1 \( \
-      -name '__editable__*' -o \
-      -name '*editable*' -o \
-      -iname '*hermes*' \
-    \) -exec rm -rf {} +
-  done < <(find "$AGENT_RUNTIME/venv" -type d -name site-packages -print0)
-
-  find "$AGENT_RUNTIME/venv/bin" -maxdepth 1 -iname '*hermes*' -exec rm -f {} + 2>/dev/null || true
-}
-
-repair_packaged_venv_paths() {
-  local source_venv installed_venv source_agent installed_agent file
-  source_venv="$SOURCE_AGENT_DIR/venv"
-  installed_venv="/opt/taiji-agent/runtime/agent/venv"
-  source_agent="$SOURCE_AGENT_DIR"
-  installed_agent="/opt/taiji-agent/runtime/agent"
-
-  while IFS= read -r -d '' file; do
-    SOURCE_VENV="$source_venv" \
-    INSTALLED_VENV="$installed_venv" \
-    SOURCE_AGENT="$source_agent" \
-    INSTALLED_AGENT="$installed_agent" \
-      perl -pi -e 's/\Q$ENV{SOURCE_VENV}\E/$ENV{INSTALLED_VENV}/g; s/\Q$ENV{SOURCE_AGENT}\E/$ENV{INSTALLED_AGENT}/g' "$file"
-  done < <(
-    find "$AGENT_RUNTIME/venv/bin" -maxdepth 1 -type f -print0 2>/dev/null || true
-    [ -f "$AGENT_RUNTIME/venv/pyvenv.cfg" ] && printf '%s\0' "$AGENT_RUNTIME/venv/pyvenv.cfg"
-  )
-}
-
 rename_internal_agent_modules() {
   if [ -d "$AGENT_RUNTIME/hermes_cli" ]; then
     mv "$AGENT_RUNTIME/hermes_cli" "$AGENT_RUNTIME/taiji_cli"
@@ -272,6 +264,16 @@ write_packaged_webui_version() {
   printf '%s-pkg.%s\n' "$base" "$digest" > "$WEB_RUNTIME/api/_version.txt"
 }
 
+write_installed_runtime_profile() {
+  cat > "$AGENT_RUNTIME/taiji-runtime-profile.json" <<'PROFILE'
+{
+  "schema_version": "taiji-runtime-profile/v1",
+  "profile": "installed-production"
+}
+PROFILE
+  chmod 0644 "$AGENT_RUNTIME/taiji-runtime-profile.json"
+}
+
 stage_python_runtime() {
   mkdir -p "$AGENT_RUNTIME" "$WEB_RUNTIME"
 
@@ -329,15 +331,15 @@ stage_python_runtime() {
   rename_internal_agent_modules
   rewrite_product_text_tokens "$AGENT_RUNTIME"
 
-  rsync -a \
-    --exclude '.git' \
-    --exclude '.DS_Store' \
-    --exclude '._*' \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    "$SOURCE_AGENT_DIR/venv"/ "$AGENT_RUNTIME/venv"/
-  remove_editable_install_metadata
-  repair_packaged_venv_paths
+  python3 "$PYTHON_RUNTIME_STAGER" \
+    --source-venv "$SOURCE_AGENT_DIR/venv" \
+    --destination "$AGENT_RUNTIME/venv" \
+    --require-linux-x86-64 \
+    --smoke-import yaml \
+    --smoke-import fastapi \
+    --smoke-import uvicorn \
+    --smoke-import httpx \
+    --smoke-import pydantic
 
   rsync -a \
     --exclude '.git' \
@@ -376,6 +378,7 @@ stage_python_runtime() {
 
   rewrite_product_text_tokens "$WEB_RUNTIME"
   write_packaged_webui_version
+  write_installed_runtime_profile
 
   compile_sourceless_python "$AGENT_RUNTIME" "$SOURCE_AGENT_PYTHON"
   compile_sourceless_python "$WEB_RUNTIME" "$SOURCE_AGENT_PYTHON"
@@ -507,7 +510,7 @@ case "$(uname -m)" in
     ;;
 esac
 
-for cmd in dpkg-deb rsync npm sha256sum file ldd strings perl; do
+for cmd in dpkg-deb rsync npm sha256sum file ldd strings perl python3 openssl; do
   require_cmd "$cmd"
 done
 
@@ -545,9 +548,27 @@ mkdir -p \
   "$PKG_ROOT/usr/share/applications" \
   "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps" \
   "$OUT_DIR"
+chmod 0755 "$PKG_ROOT/opt" "$INSTALL_ROOT"
+chmod 0755 "$INSTALL_ROOT/resources"
 archive_old_packages
 
 stage_python_runtime
+install -m 0644 "$VERSION_FILE" "$INSTALL_ROOT/VERSION"
+printf '%s\n' "$("$SOURCE_AGENT_PYTHON" -c 'import platform; print(platform.python_version())')" \
+  > "$AGENT_RUNTIME/PYTHON_VERSION"
+chmod 0644 "$AGENT_RUNTIME/PYTHON_VERSION"
+printf '%s\n' "$VERSION" > "$WEB_RUNTIME/PRODUCT_VERSION"
+chmod 0644 "$WEB_RUNTIME/PRODUCT_VERSION"
+install -m 0644 "$PAYLOAD_CONTRACT" "$INSTALL_ROOT/resources/payload-contract.json"
+python3 "$RUNTIME_STAGER" \
+  --repo-root "$REPO_ROOT" \
+  --install-root "$INSTALL_ROOT" \
+  --node-root "$PACKAGED_NODE_ROOT" \
+  --public-key-fingerprint "$ISSUER_PUBLIC_KEY_FINGERPRINT"
+chmod 0755 "$INSTALL_ROOT/resources/license"
+if [ "$("$INSTALL_ROOT/runtime/node/bin/node" --version)" != "v$PACKAGED_NODE_VERSION" ]; then
+  fail "Staged Node runtime did not execute as v$PACKAGED_NODE_VERSION on the Linux build host."
+fi
 
 rsync -a "$LAB_DIR/config"/ "$INSTALL_ROOT/config"/
 install -m 0755 "$LAB_DIR/scripts/runtime-env.sh" "$INSTALL_ROOT/scripts/runtime-env.sh"
@@ -566,12 +587,14 @@ if [ -f "$SOURCE_WEB_DIR/LICENSE" ]; then
   install -m 0644 "$SOURCE_WEB_DIR/LICENSE" "$INSTALL_ROOT/licenses/web-runtime.LICENSE"
 fi
 
-mkdir -p "$INSTALL_ROOT/apps"
-rsync -a \
-  --exclude '.git' \
-  --exclude '.DS_Store' \
-  --exclude '__pycache__' \
-  "$APP_DIR" "$INSTALL_ROOT/apps/"
+mkdir -p "$DESKTOP_RUNTIME/src" "$DESKTOP_RUNTIME/node_modules"
+install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"
+install -m 0644 "$APP_DIR/src/main.js" "$DESKTOP_RUNTIME/src/main.js"
+install -m 0644 "$APP_DIR/src/preload.js" "$DESKTOP_RUNTIME/src/preload.js"
+python3 "$ELECTRON_RUNTIME_STAGER" \
+  --source "$APP_DIR/node_modules/electron" \
+  --destination "$DESKTOP_RUNTIME/node_modules/electron" \
+  --require-linux-x86-64
 
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
@@ -607,6 +630,7 @@ Description: Taiji Agent local desktop app
  Local desktop shell and offline runtime for Taiji Agent WebUI and Agent API.
 CONTROL
 
+python3 "$PAYLOAD_VERIFIER" --root "$PKG_ROOT"
 scan_package_tree
 
 dpkg-deb --root-owner-group -Zxz --build "$PKG_ROOT" "$OUT_DEB"
