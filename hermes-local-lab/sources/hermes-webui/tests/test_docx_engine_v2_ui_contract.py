@@ -146,17 +146,19 @@ def test_docx_engine_workbench_covers_feedback_and_recovery_states():
     assert "delivery_dir" in ui_js
 
 
-def test_docx_engine_workbench_surfaces_traceable_failure_artifacts():
+def test_docx_engine_workbench_keeps_failure_artifacts_out_of_product_copy():
     ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     workspace_js = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    start = ui_js.index("function _docxEngineFailureEvidence(err)")
+    function = ui_js[start : ui_js.index("function _clearDocxEngineFieldErrors", start)]
 
     assert "err.payload" in workspace_js
     assert "_docxEngineFailureEvidence" in ui_js
-    assert "failure_report_path" in ui_js
-    assert "job_manifest_path" in ui_js
-    assert "失败报告" in ui_js
-    assert "作业清单" in ui_js
-    assert "失败阶段" in ui_js
+    assert "_safeProductErrorEnvelope({payload})" in function
+    assert "productError.incident_id" in function
+    assert "failure_report_path" not in function
+    assert "job_manifest_path" not in function
+    assert "payload.failures" not in function
 
 
 def test_docx_engine_workbench_prevents_duplicate_and_premature_actions():

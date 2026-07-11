@@ -1989,6 +1989,27 @@
                 <span id="checkUpdatesStatus"></span>
               </div>
             </div>
+            <section class="settings-field product-diagnostics-card" id="productDiagnosticsCard" aria-labelledby="productDiagnosticsTitle">
+              <div class="product-diagnostics-head">
+                <div>
+                  <h3 id="productDiagnosticsTitle">安全诊断</h3>
+                  <p>只展示运行状态与安全版本号，不包含日志、本地路径、环境变量或密钥。</p>
+                </div>
+                <div class="product-diagnostics-status" id="productDiagnosticsStatus" role="status" aria-live="polite" data-status="unknown">等待检查</div>
+              </div>
+              <div class="product-diagnostics-actions">
+                <button class="sm-btn" id="btnRefreshProductDiagnostics" type="button" onclick="loadProductDiagnostics(true)">重新检查</button>
+                <button class="sm-btn product-diagnostics-primary" id="btnExportProductDiagnostics" type="button" onclick="exportProductDiagnostics()">预览并导出脱敏支持包</button>
+              </div>
+              <div class="product-diagnostics-meta">
+                <span>最后检查：<time id="productDiagnosticsCheckedAt">尚未检查</time></span>
+                <span class="product-diagnostics-incident">事件编号：<code id="productDiagnosticsIncidentId">—</code><button type="button" id="btnCopyProductDiagnosticsIncident" onclick="copyProductDiagnosticsIncidentId()" disabled>复制</button></span>
+              </div>
+              <div class="product-diagnostics-recovery" id="productDiagnosticsRecovery" role="status" aria-live="polite">检查完成后会显示安全的处理建议。</div>
+              <div class="product-diagnostics-grid" id="productDiagnosticsComponents" role="list" aria-label="组件诊断状态">
+                <div class="product-diagnostics-empty" role="listitem">打开“系统”设置后自动检查。</div>
+              </div>
+            </section>
             <div class="settings-field">
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>

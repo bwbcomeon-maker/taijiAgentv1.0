@@ -482,9 +482,16 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {_safe_request_path(self.path)}\n' + traceback.format_exc(), flush=True)
+            from api.product_contract import build_product_error
+
+            product_error = build_product_error("unknown_error")
+            print(
+                f'[webui] ERROR {self.command} {_safe_request_path(self.path)} '
+                f'incident_id={product_error["incident_id"]}\n' + traceback.format_exc(),
+                flush=True,
+            )
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                j(self, {'error': 'Internal server error', 'product_error': product_error}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
                 # Client disconnected while we were sending the 500 — nothing to do.
                 pass
@@ -522,9 +529,16 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {_safe_request_path(self.path)}\n' + traceback.format_exc(), flush=True)
+            from api.product_contract import build_product_error
+
+            product_error = build_product_error("unknown_error")
+            print(
+                f'[webui] ERROR {self.command} {_safe_request_path(self.path)} '
+                f'incident_id={product_error["incident_id"]}\n' + traceback.format_exc(),
+                flush=True,
+            )
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                j(self, {'error': 'Internal server error', 'product_error': product_error}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
                 # Client disconnected while we were sending the 500 — nothing to do.
                 pass

@@ -221,20 +221,61 @@ def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None 
     }
 
 
+def gateway_chat_authenticated_probe(
+    config_data=None,
+    environ: dict[str, str] | None = None,
+    *,
+    timeout: float = 0.75,
+) -> bool | None:
+    """Check the configured local Gateway with its actual API key.
+
+    ``True`` proves both reachability and authentication through ``/v1/models``.
+    ``False`` is a confirmed request/auth failure. ``None`` means the product
+    Gateway is not configured or the installed Gateway is too old to expose
+    the authenticated probe endpoint.
+    """
+
+    if webui_chat_backend_mode(config_data, environ) != "gateway":
+        return None
+    base_url = _gateway_base_url(config_data, environ)
+    api_key = _gateway_api_key(environ)
+    if not base_url or not api_key:
+        return None
+    request = urllib.request.Request(
+        f"{base_url}/v1/models",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
+            return 200 <= int(getattr(response, "status", response.getcode())) < 300
+    except urllib.error.HTTPError as exc:
+        if int(exc.code) in {404, 405, 501}:
+            return None
+        return False
+    except (OSError, TimeoutError, ValueError):
+        return False
+
+
 def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api_key_configured: bool) -> dict:
+    from api.product_contract import attach_product_error
+
     if exc.code == 401:
-        return {
+        return attach_product_error({
             "label": "本地对话服务认证失败",
             "type": "gateway_auth_error",
             "message": "本地对话服务认证失败（HTTP 401）。",
             "hint": "请重启太极智能体，或导出诊断报告后交给管理员排查。",
-        }
-    return {
+        }, "model_configuration_required")
+    return attach_product_error({
         "label": "太极本地对话服务请求失败",
         "type": "gateway_http_error",
         "message": f"本地对话服务返回 HTTP {exc.code}。",
         "hint": "请检查太极智能体是否已启动，或导出诊断报告后交给管理员排查。",
-    }
+    }, "backend_unavailable")
 
 
 def _gateway_http_error_body(exc: urllib.error.HTTPError) -> str:
@@ -289,6 +330,8 @@ def _gateway_sse_finish_reason(payload: dict) -> str:
 
 
 def _gateway_sse_error_event(payload: dict) -> dict | None:
+    from api.product_contract import attach_product_error
+
     if not isinstance(payload, dict):
         return None
     raw_error = payload.get("error")
@@ -306,18 +349,18 @@ def _gateway_sse_error_event(payload: dict) -> dict | None:
         or ("api key" in lowered and ("no api key" in lowered or "not found" in lowered or "missing" in lowered))
         or ("provider" in lowered and "config" in lowered)
     ):
-        return {
+        return attach_product_error({
             "label": "模型服务配置不可用",
             "type": "model_configuration_error",
             "message": "模型服务未配置或不可用。请在配置页补充模型 API Key，或切换到可用模型。",
             "hint": "请检查太极智能体的模型配置、网络或账号余额状态。",
-        }
-    return {
+        }, "model_configuration_required")
+    return attach_product_error({
         "label": "太极本地对话服务不可用",
         "type": "gateway_error",
         "message": "本地对话服务暂时不可用。",
         "hint": "请稍后重试，或导出诊断报告后交给管理员排查。",
-    }
+    }, "backend_unavailable")
 
 
 def _gateway_sse_delta(payload: dict) -> str:
@@ -671,17 +714,19 @@ def _gateway_messages_for_new_turn(
 
 
 def _gateway_run_error_event(payload: dict, default_message: str = "") -> dict:
+    from api.product_contract import attach_product_error
+
     raw_error = payload.get("error") if isinstance(payload, dict) else None
     if isinstance(raw_error, dict):
         classified = _gateway_sse_error_event({"error": raw_error})
         if classified is not None:
             return classified
-    return {
+    return attach_product_error({
         "label": "太极本地对话服务不可用",
         "type": "gateway_error",
         "message": "本地对话服务暂时不可用。",
         "hint": "请稍后重试，或导出诊断报告后交给管理员排查。",
-    }
+    }, "backend_unavailable")
 
 
 def _gateway_history_messages(session: Any, current_user_text: str) -> list[dict]:
@@ -1418,12 +1463,14 @@ def _run_gateway_chat_streaming(
         public_assistant_text = str(public_final_text or "").strip()
         if not internal_assistant_text:
             record_turn_interrupted("gateway_empty_response")
-            put_gateway_event("apperror", {
+            from api.product_contract import attach_product_error
+
+            put_gateway_event("apperror", attach_product_error({
                 "label": "太极本地对话服务未返回内容",
                 "type": "gateway_empty_response",
                 "message": "本地对话服务没有返回有效回复。",
                 "hint": "请检查模型配置、网络或账号余额状态，必要时导出诊断报告。",
-            })
+            }, "backend_unavailable"))
             return
         artifacts, artifact_errors, uncommitted_artifact_ids = _ingest_gateway_artifact_candidates(
             session_id,
@@ -1578,12 +1625,14 @@ def _run_gateway_chat_streaming(
             return
         record_turn_interrupted("gateway_error")
         safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
-        put_gateway_event("apperror", {
+        from api.product_contract import attach_product_error
+
+        put_gateway_event("apperror", attach_product_error({
             "label": "太极本地对话服务请求失败",
             "type": "gateway_error",
             "message": safe or "本地对话服务请求失败。",
             "hint": "请检查太极智能体是否已启动，或导出诊断报告。",
-        })
+        }, "backend_unavailable"))
     finally:
         if uncommitted_artifact_ids and not artifacts_committed:
             try:

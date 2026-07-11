@@ -4008,6 +4008,54 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .settings-field > div[style*="color:var(--muted)"],
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
+.product-diagnostics-card{display:flex;flex-direction:column;gap:14px;}
+.product-diagnostics-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;}
+.product-diagnostics-head h3{margin:0;color:var(--text);font-size:15px;line-height:1.35;font-weight:700;}
+.product-diagnostics-head p{margin:5px 0 0;color:var(--muted);font-size:12px;line-height:1.5;max-width:520px;}
+.product-diagnostics-status{display:inline-flex;align-items:center;min-height:28px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:700;white-space:nowrap;}
+.product-diagnostics-status[data-status="ready"]{border-color:color-mix(in srgb,var(--success,#22c55e) 38%,var(--border));color:var(--success,#16803c);background:color-mix(in srgb,var(--success,#22c55e) 9%,var(--surface));}
+.product-diagnostics-status[data-status="degraded"],.product-diagnostics-status[data-status="loading"]{border-color:color-mix(in srgb,var(--warning) 35%,var(--border));color:var(--warning);background:color-mix(in srgb,var(--warning) 8%,var(--surface));}
+.product-diagnostics-status[data-status="blocked"]{border-color:color-mix(in srgb,var(--error,#e05) 35%,var(--border));color:var(--error,#c53b4d);background:color-mix(in srgb,var(--error,#e05) 8%,var(--surface));}
+.product-diagnostics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+.product-diagnostics-component{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 10px;align-items:center;min-height:52px;padding:9px 11px;border:1px solid var(--border);border-radius:9px;background:var(--bg);}
+.product-diagnostics-component-name{min-width:0;color:var(--text);font-size:12px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.product-diagnostics-component-state{color:var(--muted);font-size:11px;font-weight:650;white-space:nowrap;}
+.product-diagnostics-component[data-status="ready"] .product-diagnostics-component-state{color:var(--success,#16803c);}
+.product-diagnostics-component[data-status="degraded"] .product-diagnostics-component-state{color:var(--warning);}
+.product-diagnostics-component[data-status="blocked"] .product-diagnostics-component-state{color:var(--error,#c53b4d);}
+.product-diagnostics-version{grid-column:1 / -1;color:var(--muted);font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.product-diagnostics-empty{grid-column:1 / -1;padding:12px;border:1px dashed var(--border);border-radius:9px;color:var(--muted);font-size:12px;line-height:1.5;text-align:center;}
+.product-diagnostics-error{color:var(--error,#c53b4d);display:flex;flex-direction:column;gap:4px;text-align:left;}
+.product-diagnostics-error strong{font-size:12px;line-height:1.35;}
+.product-diagnostics-error span{color:var(--muted);font-size:11px;line-height:1.5;}
+.product-diagnostics-meta{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;color:var(--muted);font-size:11px;line-height:1.45;}
+.product-diagnostics-meta time{color:var(--text);font-variant-numeric:tabular-nums;}
+.product-diagnostics-incident{display:inline-flex;align-items:center;gap:6px;min-width:0;}
+.product-diagnostics-incident code{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:10px;}
+.product-diagnostics-incident button,.product-diagnostics-recovery button{min-height:34px;padding:5px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text);font-size:11px;font-weight:650;cursor:pointer;}
+.product-diagnostics-incident button:focus-visible,.product-diagnostics-recovery button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.product-diagnostics-incident button:disabled{opacity:.5;cursor:not-allowed;}
+.product-diagnostics-recovery{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border:1px solid var(--border);border-radius:9px;background:var(--surface);color:var(--muted);font-size:11px;line-height:1.5;}
+.product-diagnostics-recovery button{flex:0 0 auto;}
+.product-diagnostics-restart-hint{flex:0 0 auto;color:var(--text);font-weight:650;}
+.product-diagnostics-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;}
+.product-diagnostics-actions .sm-btn{min-height:34px;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:12px;font-weight:650;cursor:pointer;}
+.product-diagnostics-actions .product-diagnostics-primary{border-color:var(--accent);background:var(--accent);color:#fff;}
+.product-diagnostics-actions .sm-btn:hover:not(:disabled){border-color:var(--accent);}
+.product-diagnostics-actions .sm-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.product-diagnostics-actions .sm-btn:disabled{opacity:.55;cursor:wait;}
+
+/* The desktop App's 1120px minimum leaves a narrow settings canvas after the
+   product rail and settings menu. Stack System metadata instead of squeezing
+   the Chinese title or clipping long local build versions. */
+@media (max-width:1200px){
+  .taiji-home-shell #settingsPaneSystem .settings-section-head{flex-direction:column;align-items:stretch;gap:10px;}
+  .taiji-home-shell #settingsPaneSystem .settings-section-head > div:first-child{min-width:0;width:100%;}
+  .taiji-home-shell #settingsPaneSystem .settings-section-title{white-space:nowrap;word-break:keep-all;}
+  .taiji-home-shell #settingsPaneSystem #checkUpdatesBlock{width:100%;flex-wrap:wrap;align-items:flex-start;}
+  .taiji-home-shell #settingsPaneSystem #checkUpdatesBlock .settings-version-badge{max-width:100%;white-space:normal;overflow-wrap:anywhere;line-height:1.35;}
+}
+
 /* Sidebar tab visibility — hide nav-tab and matching rail-btn when toggled off by user */
 .nav-tab-hidden{display:none!important;}
 

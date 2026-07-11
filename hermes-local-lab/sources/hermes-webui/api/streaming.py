@@ -791,6 +791,14 @@ def _provider_error_payload(message: str, err_type: str, hint: str = '') -> dict
             _details = _details[:1197].rstrip() + '…'
         if _details:
             payload['details'] = _details
+    if err_type in {'auth_mismatch', 'model_not_found'}:
+        from api.product_contract import attach_product_error
+
+        payload = attach_product_error(payload, 'model_configuration_required')
+    elif err_type in {'error', 'no_response'}:
+        from api.product_contract import attach_product_error
+
+        payload = attach_product_error(payload, 'backend_unavailable')
     return payload
 
 

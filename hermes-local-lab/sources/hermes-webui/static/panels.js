@@ -10711,6 +10711,248 @@ function _downloadJsonFile(filename,data){
  setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
+let _productDiagnosticsData=null;
+let _productDiagnosticsLoading=false;
+let _productDiagnosticsPending=null;
+const _productDiagnosticsLabels={
+ ready:'正常',
+ degraded:'需要关注',
+ blocked:'不可用',
+ not_applicable:'不适用',
+ unknown:'待确认'
+};
+const _productErrorCatalog={
+ agent_unavailable:{title:'本地服务暂不可用',message:'太极智能体尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics']},
+ backend_unavailable:{title:'本地服务暂不可用',message:'太极智能体的本地服务尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics']},
+ gateway_unavailable:{title:'本地任务服务暂不可用',message:'本地任务服务尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics']},
+ model_configuration_required:{title:'模型配置待完成',message:'请先完成模型配置，再重新执行此操作。',actions:['open_model_settings','export_diagnostics']},
+ permission_denied:{title:'当前操作未获授权',message:'请检查安全模式或联系管理员确认操作权限。',actions:['open_security_settings','export_diagnostics']},
+ license_blocked:{title:'授权状态需要处理',message:'当前授权不可用，请先在授权管理中完成处理。',actions:['open_license','export_diagnostics']},
+ artifact_generation_failed:{title:'文档生成未完成',message:'文档成果未能生成，请重试或重新生成。',actions:['retry','regenerate','export_diagnostics']},
+ office_review_required:{title:'文档仍待办公软件复核',message:'请在 WPS 或 Word 中检查文档后，再确认交付结果。',actions:['open_office_review','export_diagnostics']},
+ diagnostics_unavailable:{title:'安全诊断暂不可用',message:'暂时无法生成安全诊断，请稍后重试。',actions:['retry','restart_app']},
+ unknown_error:{title:'操作未能完成',message:'应用遇到暂时性问题，请重试或导出诊断。',actions:['retry','export_diagnostics']}
+};
+const _productRecoveryActionLabels={
+ retry:'重试',
+ restart_app:'重启桌面 App',
+ open_model_settings:'打开模型配置',
+ open_security_settings:'打开安全设置',
+ open_license:'打开授权管理',
+ regenerate:'重新生成',
+ open_result:'查看文档成果',
+ open_office_review:'打开 Office 验收',
+ export_diagnostics:'导出诊断'
+};
+
+function _safeProductErrorEnvelope(error){
+ const payload=error&&error.payload;
+ const raw=payload&&payload.product_error&&typeof payload.product_error==='object'?payload.product_error:payload;
+ if(!raw||raw.schema!=='taiji.product.error.v1') return null;
+ const code=String(raw.code||'');
+ const spec=_productErrorCatalog[code];
+ const incident=String(raw.incident_id||'');
+ if(!spec||!/^inc-[0-9a-f]{12,32}$/.test(incident)) return null;
+ const offered=new Set(Array.isArray(raw.recovery_actions)?raw.recovery_actions.map(item=>String((item&&item.id)||'')):[]);
+ return {
+  code,
+  title:spec.title,
+  message:spec.message,
+  incident_id:incident,
+  recovery_actions:spec.actions.filter(action=>offered.has(action)).map(action=>({id:action,label:_productRecoveryActionLabels[action]}))
+ };
+}
+
+function _renderProductDiagnosticsError(error){
+ const envelope=_safeProductErrorEnvelope(error);
+ const statusEl=$('productDiagnosticsStatus');
+ const componentsEl=$('productDiagnosticsComponents');
+ const checkedAt=$('productDiagnosticsCheckedAt');
+ const incidentEl=$('productDiagnosticsIncidentId');
+ const copyBtn=$('btnCopyProductDiagnosticsIncident');
+ const recovery=$('productDiagnosticsRecovery');
+ if(statusEl){statusEl.dataset.status='blocked';statusEl.textContent='检查失败';}
+ if(checkedAt){checkedAt.removeAttribute('datetime');checkedAt.textContent='检查失败';}
+ if(incidentEl) incidentEl.textContent=envelope?envelope.incident_id:'—';
+ if(copyBtn) copyBtn.disabled=!envelope;
+ if(componentsEl){
+  componentsEl.replaceChildren();
+  const errorCard=document.createElement('div');
+  errorCard.className='product-diagnostics-empty product-diagnostics-error';
+  errorCard.setAttribute('role','listitem');
+  const title=document.createElement('strong');
+  title.textContent=envelope?envelope.title:'安全诊断加载失败';
+  const message=document.createElement('span');
+  message.textContent=envelope?envelope.message:'无法取得安全诊断，请确认桌面 App 服务已启动后重新检查。';
+  errorCard.append(title,message);
+  componentsEl.appendChild(errorCard);
+ }
+ if(!recovery) return;
+ recovery.replaceChildren();
+ const guidance=document.createElement('span');
+ guidance.textContent=envelope?'请选择安全的恢复操作。':'请确认桌面 App 服务已启动后重新检查；持续失败时联系管理员。';
+ recovery.appendChild(guidance);
+ if(!envelope) return;
+ for(const action of envelope.recovery_actions){
+  if(action.id==='restart_app'){
+   const hint=document.createElement('span');
+   hint.className='product-diagnostics-restart-hint';
+   hint.textContent='请关闭并重新打开桌面 App';
+   recovery.appendChild(hint);
+   continue;
+  }
+  const handlers={
+   retry:()=>loadProductDiagnostics(true),
+   export_diagnostics:()=>exportProductDiagnostics(),
+   open_model_settings:()=>switchSettingsSection('models'),
+   open_security_settings:()=>switchSettingsSection('system'),
+   open_license:()=>switchSettingsSection('models')
+  };
+  const handler=handlers[action.id];
+  if(!handler) continue;
+  const button=document.createElement('button');
+  button.type='button';
+  button.textContent=action.label;
+  button.addEventListener('click',handler);
+  recovery.appendChild(button);
+ }
+}
+
+function _renderProductDiagnosticsRecovery(data){
+ const recovery=$('productDiagnosticsRecovery');
+ if(!recovery) return;
+ const components=Array.isArray(data&&data.components)?data.components:[];
+ const byId=Object.fromEntries(components.map(item=>[item&&item.id,item&&item.status]));
+ if(byId.license==='blocked'){
+  recovery.innerHTML='<span>授权状态需要处理。请先进入模型配置中的授权管理，处理后重新检查。</span><button type="button" onclick="switchSettingsSection(\'models\')">打开授权管理</button>';
+ }else if(byId.agent==='blocked'||byId.gateway==='blocked'){
+  recovery.textContent='本地基础服务不可用。请重启桌面 App，然后选择“重新检查”；仍未恢复时导出脱敏支持包。';
+ }else if(data&&data.overall==='degraded'){
+  recovery.textContent='部分组件需要关注。请先重新检查；状态持续异常时导出脱敏支持包交给管理员。';
+ }else if(data&&data.overall==='ready'){
+  recovery.textContent='当前未发现阻塞项。若实际操作仍异常，可重新检查或导出脱敏支持包。';
+ }else{
+  recovery.textContent='暂未取得安全诊断，请重新检查。';
+ }
+}
+
+function _renderProductDiagnostics(data){
+ const statusEl=$('productDiagnosticsStatus');
+ const componentsEl=$('productDiagnosticsComponents');
+ if(!statusEl||!componentsEl) return;
+ const overall=(data&&['ready','degraded','blocked'].includes(data.overall))?data.overall:'unknown';
+ statusEl.dataset.status=overall;
+ statusEl.textContent=_productDiagnosticsLabels[overall]||_productDiagnosticsLabels.unknown;
+ const checkedAt=$('productDiagnosticsCheckedAt');
+ const incidentEl=$('productDiagnosticsIncidentId');
+ const copyBtn=$('btnCopyProductDiagnosticsIncident');
+ const generatedAt=String((data&&data.generated_at)||'');
+ const parsedAt=new Date(generatedAt);
+ if(checkedAt){
+  if(generatedAt&&!Number.isNaN(parsedAt.getTime())){
+   checkedAt.dateTime=generatedAt;
+   checkedAt.textContent=parsedAt.toLocaleString('zh-CN',{hour12:false});
+  }else{
+   checkedAt.removeAttribute('datetime');
+   checkedAt.textContent='时间不可用';
+  }
+ }
+ const incident=String((data&&data.incident_id)||'');
+ const incidentSafe=/^inc-[0-9a-f]{12,32}$/.test(incident);
+ if(incidentEl) incidentEl.textContent=incidentSafe?incident:'—';
+ if(copyBtn) copyBtn.disabled=!incidentSafe;
+ const components=Array.isArray(data&&data.components)?data.components:[];
+ if(!components.length){
+  componentsEl.innerHTML='<div class="product-diagnostics-empty" role="listitem">暂未取得诊断结果，请重新检查。</div>';
+  _renderProductDiagnosticsRecovery(data);
+  return;
+ }
+ componentsEl.innerHTML=components.map(item=>{
+  const status=['ready','degraded','blocked','not_applicable','unknown'].includes(item&&item.status)?item.status:'unknown';
+  const version=item&&item.version?`<span class="product-diagnostics-version">${esc(String(item.version))}</span>`:'';
+  return `<div class="product-diagnostics-component" role="listitem" data-status="${status}"><span class="product-diagnostics-component-name">${esc(String((item&&item.label)||'组件'))}</span><span class="product-diagnostics-component-state">${esc(_productDiagnosticsLabels[status]||_productDiagnosticsLabels.unknown)}</span>${version}</div>`;
+ }).join('');
+ _renderProductDiagnosticsRecovery(data);
+}
+
+async function loadProductDiagnostics(force){
+ if(_productDiagnosticsPending) return _productDiagnosticsPending;
+ if(!force&&_productDiagnosticsData){
+  _renderProductDiagnostics(_productDiagnosticsData);
+  return _productDiagnosticsData;
+ }
+ _productDiagnosticsPending=(async()=>{
+  const statusEl=$('productDiagnosticsStatus');
+  const refreshBtn=$('btnRefreshProductDiagnostics');
+  const exportBtn=$('btnExportProductDiagnostics');
+  const recovery=$('productDiagnosticsRecovery');
+  _productDiagnosticsLoading=true;
+  if(statusEl){statusEl.dataset.status='loading';statusEl.textContent='检查中…';}
+  if(recovery) recovery.textContent='正在检查本地组件，请稍候。';
+  for(const button of [refreshBtn,exportBtn]){if(button){button.disabled=true;button.setAttribute('aria-busy','true');}}
+  try{
+   const data=await api('/api/product/diagnostics');
+   _productDiagnosticsData=data;
+   _renderProductDiagnostics(data);
+   return data;
+  }catch(error){
+   _productDiagnosticsData=null;
+   _renderProductDiagnosticsError(error);
+   return null;
+  }finally{
+   _productDiagnosticsLoading=false;
+   for(const button of [refreshBtn,exportBtn]){if(button){button.disabled=false;button.removeAttribute('aria-busy');}}
+  }
+ })();
+ try{return await _productDiagnosticsPending;}
+ finally{_productDiagnosticsPending=null;}
+}
+
+async function copyProductDiagnosticsIncidentId(){
+ const incident=String(($('productDiagnosticsIncidentId')&&$('productDiagnosticsIncidentId').textContent)||'').trim();
+ if(!/^inc-[0-9a-f]{12,32}$/.test(incident)){
+  if(typeof showToast==='function') showToast('当前没有可复制的事件编号。',3500,'error');
+  return;
+ }
+ try{
+  await _copyText(incident);
+  if(typeof showToast==='function') showToast('事件编号已复制。',2500,'success');
+ }catch(error){
+  if(typeof showToast==='function') showToast('事件编号复制失败。',3500,'error');
+ }
+}
+
+async function exportProductDiagnostics(){
+ const exportBtn=$('btnExportProductDiagnostics');
+ const summary=_productDiagnosticsData||await loadProductDiagnostics(true);
+ if(!summary) return;
+ const components=Array.isArray(summary.components)?summary.components:[];
+ const preview=components.map(item=>`${String(item.label||'组件')}：${_productDiagnosticsLabels[item.status]||_productDiagnosticsLabels.unknown}`).join('；');
+ const confirmed=await showConfirmDialog({
+  title:'导出脱敏支持包？',
+  message:`将导出 ${components.length} 项组件状态（${preview}）。支持包不包含日志、本地路径、环境变量或密钥。`,
+  confirmLabel:'导出脱敏支持包',
+  danger:false,
+  focusCancel:true
+ });
+ if(!confirmed) return;
+ if(exportBtn){exportBtn.disabled=true;exportBtn.setAttribute('aria-busy','true');}
+ try{
+  const bundle=await api('/api/product/diagnostics/export',{method:'POST',body:JSON.stringify({incident_id:summary.incident_id||''})});
+  const manifest=bundle&&bundle.manifest;
+  if(!manifest||manifest.redacted!==true||manifest.logs_included!==false||manifest.paths_included!==false||manifest.secrets_included!==false){
+   throw new Error('unsafe support bundle manifest');
+  }
+  const date=new Date().toISOString().slice(0,10);
+  _downloadJsonFile(`taiji-support-bundle-${date}.json`,bundle);
+  if(typeof showToast==='function') showToast('脱敏支持包已导出。',3500,'success');
+ }catch(error){
+  if(typeof showToast==='function') showToast('支持包导出失败，请重新检查后再试。',5000,'error');
+ }finally{
+  if(exportBtn){exportBtn.disabled=false;exportBtn.removeAttribute('aria-busy');}
+ }
+}
+
 function _bindTaijiLicenseControls(){
  const fileInput=$('taijiLicenseFile');
  const importBtn=$('btnImportTaijiLicense');
@@ -12235,7 +12477,7 @@ function loadGatewayStatus(){
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
-  if(name==='system'){loadMcpPresets();loadMcpServers();loadMcpTools();loadMcpLogs();loadGatewayStatus();}
+  if(name==='system'){loadProductDiagnostics();loadMcpPresets();loadMcpServers();loadMcpTools();loadMcpLogs();loadGatewayStatus();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

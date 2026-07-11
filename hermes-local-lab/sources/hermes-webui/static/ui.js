@@ -8701,8 +8701,10 @@ async function saveSecurityProfile(){
     if(typeof showToast==='function')showToast('安全模式已保存，重启后完整生效。',3500);
     await refreshSecurityStatus(true);
   }catch(e){
-    if(status)status.textContent='保存失败：'+(e&&e.message?e.message:e);
-    if(typeof showToast==='function')showToast('安全模式保存失败：'+(e&&e.message?e.message:e),5000,'error');
+    const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope(e):null;
+    const message=productError?`${productError.title}：${productError.message}`:'安全模式保存失败，请重试。';
+    if(status)status.textContent=message;
+    if(typeof showToast==='function')showToast(message,5000,'error');
   }
 }
 function startSecurityStatusMonitor(){
@@ -10685,16 +10687,8 @@ function _docxEngineErrorPayload(err){
 function _docxEngineFailureEvidence(err){
   const payload=_docxEngineErrorPayload(err);
   if(!payload)return '';
-  const stage=String(payload.stage||'').trim();
-  const failureReportPath=String(payload.failure_report_path||payload.failureReportPath||'').trim();
-  const jobManifestPath=String(payload.job_manifest_path||payload.jobManifestPath||'').trim();
-  const failures=Array.isArray(payload.failures)?payload.failures.map((item)=>String(item||'').trim()).filter(Boolean).slice(0,2):[];
-  const parts=[];
-  if(stage)parts.push(`失败阶段：${stage}`);
-  if(failureReportPath)parts.push(`失败报告：${failureReportPath}`);
-  if(jobManifestPath)parts.push(`作业清单：${jobManifestPath}`);
-  if(failures.length)parts.push(`失败原因：${failures.join('；')}`);
-  return parts.length?` ${parts.join('；')}`:'';
+  const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload}):null;
+  return productError?` 事件编号：${productError.incident_id}`:'';
 }
 
 function _clearDocxEngineFieldErrors(root){

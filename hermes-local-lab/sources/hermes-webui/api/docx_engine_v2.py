@@ -1596,7 +1596,9 @@ def _known_failure_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if value:
                 result[output_key] = value
                 break
-    return result
+    from api.product_contract import attach_product_error
+
+    return attach_product_error(result, "artifact_generation_failed")
 
 
 def _read_quality_report(report_path: Path) -> dict[str, Any]:

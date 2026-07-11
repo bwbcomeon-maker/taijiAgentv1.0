@@ -2383,6 +2383,25 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     return run
 
 
+def _expert_team_response_with_product_state(payload: dict, run: dict | None) -> dict:
+    if not isinstance(run, dict):
+        return payload
+    candidates = [
+        run.get("validation"),
+        run.get("delivery_gate"),
+        (run.get("view") or {}).get("delivery_gate") if isinstance(run.get("view"), dict) else None,
+        (run.get("view") or {}).get("validation") if isinstance(run.get("view"), dict) else None,
+    ]
+    if any(
+        isinstance(item, dict) and str(item.get("status") or "") == "office_acceptance_required"
+        for item in candidates
+    ):
+        from api.product_contract import attach_product_error
+
+        return attach_product_error(payload, "office_review_required")
+    return payload
+
+
 def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
     outcome = {"pending_run_id": "", "error": ""}
     if adapter is None:
@@ -2480,6 +2499,14 @@ def _start_expert_team_execution(
         StartRunRequest,
         build_runtime_adapter,
     )
+    from api.product_contract import attach_product_error
+
+    def _execution_failure(payload: dict, status: int) -> dict:
+        code = "backend_unavailable" if int(status) >= 500 else "unknown_error"
+        return attach_product_error(payload, code)
+
+    def _backend_failure(payload: dict) -> dict:
+        return _execution_failure(payload, 503)
 
     def _fail_known_pre_dispatch(message: str) -> dict:
         if not already_reserved:
@@ -2540,12 +2567,12 @@ def _start_expert_team_execution(
             execution_prompt = _expert_team_execution_prompt(run)
     except Exception as exc:
         error = str(exc) or "当前运行时启动参数无效，请检查配置后重试。"
-        return {
+        return _backend_failure({
             "ok": False,
             "code": "runtime_incompatible",
             "error": error,
             "run": _fail_known_pre_dispatch(error),
-        }, 503
+        }), 503
 
     def _legacy_start(request: StartRunRequest) -> dict:
         current = (
@@ -2588,7 +2615,7 @@ def _start_expert_team_execution(
     except Exception as exc:
         error = str(exc) or "当前运行时不可用，请检查配置后重试。"
         failed_run = _fail_known_pre_dispatch(error)
-        return {"ok": False, "code": "runtime_incompatible", "error": error, "run": failed_run}, 503
+        return _backend_failure({"ok": False, "code": "runtime_incompatible", "error": error, "run": failed_run}), 503
 
     planned_runtime_adapter = type(adapter).__name__
     if already_reserved:
@@ -2604,12 +2631,12 @@ def _start_expert_team_execution(
                 )
             except expert_teams.ExpertTeamStateConflict as conflict:
                 failed_run = conflict.run or run
-            return {
+            return _backend_failure({
                 "ok": False,
                 "code": "runtime_incompatible",
                 "error": error,
                 "run": failed_run,
-            }, 503
+            }), 503
         reserved_run = run
     else:
         try:
@@ -2654,13 +2681,13 @@ def _start_expert_team_execution(
     if license_status is not None:
         error = str(license_status.get("message") or "授权不可用，请联系服务方更新授权。")
         failed_run = _fail_reserved_start(error)
-        return {
+        return attach_product_error({
             "ok": False,
             "license_blocked": True,
             "license": license_status,
             "error": error,
             "run": failed_run,
-        }, 403
+        }, "license_blocked"), 403
 
     if planned_runtime_adapter == "RunnerRuntimeAdapter":
         try:
@@ -2672,12 +2699,12 @@ def _start_expert_team_execution(
         except Exception as exc:
             error = str(exc) or "当前 Runner 不支持安全启动校验，未启动专家团。"
             failed_run = _fail_reserved_start(error)
-            return {
+            return _backend_failure({
                 "ok": False,
                 "code": "runtime_incompatible",
                 "error": error,
                 "run": failed_run,
-            }, 503
+            }), 503
         if lookup_outcome not in {"not_found", "missing", "absent"}:
             error = "无法证明 Runner 中不存在同一启动请求，为避免重复执行，未启动专家团。"
             cleanup = {}
@@ -2685,12 +2712,12 @@ def _start_expert_team_execution(
             if lookup_outcome not in {"unknown", "pending", "unavailable", "unsupported"} and remote_run_id:
                 cleanup = {"pending_run_id": remote_run_id, "error": "existing runtime requires cleanup"}
             failed_run = _fail_reserved_start(error, cleanup)
-            return {
+            return _backend_failure({
                 "ok": False,
                 "code": "runtime_incompatible",
                 "error": error,
                 "run": failed_run,
-            }, 503
+            }), 503
 
     current_stage = _expert_team_current_task(reserved_run)
     stage_attempt_reservation = (
@@ -2789,33 +2816,33 @@ def _start_expert_team_execution(
                     workspace,
                     str(run.get("run_id") or ""),
                 )
-            return {
+            return _backend_failure({
                 "ok": False,
                 "code": "start_pending",
                 "error": error,
                 "run": pending_run,
-            }, 202
+            }), 202
         failed_run = _fail_reserved_start(error, cleanup)
-        return {"ok": False, "error": error, "run": failed_run}, 500
+        return _backend_failure({"ok": False, "error": error, "run": failed_run}), 500
 
     status = int(response.pop("_status", 200) or 200)
     if status >= 400:
         cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
         error = str(response.get("error") or "当前阶段启动失败，请重新尝试。")
         failed_run = _fail_reserved_start(error, cleanup)
-        return {"ok": False, **response, "run": failed_run}, status
+        return _execution_failure({"ok": False, **response, "run": failed_run}, status), status
     result_run_id = str(getattr(result, "run_id", "") or "").strip()
     result_session_id = str(getattr(result, "session_id", "") or "").strip()
     if not result_run_id or result_session_id != sid:
         cleanup = _cancel_expert_team_runtime_start(adapter, result)
         error = "expert team runtime returned a mismatched run identity"
         failed_run = _fail_reserved_start(error, cleanup)
-        return {"ok": False, "error": error, "run": failed_run}, 502
+        return _backend_failure({"ok": False, "error": error, "run": failed_run}), 502
     if not str(response.get("stream_id") or "").strip():
         cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
         error = "expert team execution did not return a stream_id"
         failed_run = _fail_reserved_start(error, cleanup)
-        return {"ok": False, "error": error, "run": failed_run}, 502
+        return _backend_failure({"ok": False, "error": error, "run": failed_run}), 502
     response["execution_message_start_index"] = execution_message_start_index
     response["pending_user_message"] = display_msg
     response["execution_start_id"] = str(reserved_run.get("execution_start_id") or "")
@@ -2833,7 +2860,7 @@ def _start_expert_team_execution(
         failed_run = _fail_reserved_start(error, cleanup)
         status = 409 if isinstance(exc, expert_teams.ExpertTeamStateConflict) else 500
         code = getattr(exc, "code", "start_commit_failed")
-        return {"ok": False, "code": code, "error": error, "run": failed_run}, status
+        return _execution_failure({"ok": False, "code": code, "error": error, "run": failed_run}, status), status
     response["run"] = updated_run
     response["pending_user_message"] = display_msg
     response["ok"] = True
@@ -9692,6 +9719,17 @@ def handle_get(handler, parsed) -> bool:
         j(handler, build_system_health_payload())
         return True
 
+    if parsed.path == "/api/product/diagnostics":
+        from api.product_contract import build_product_error
+        from api.product_diagnostics import build_product_diagnostics
+
+        try:
+            return j(handler, build_product_diagnostics())
+        except Exception:
+            product_error = build_product_error("diagnostics_unavailable")
+            logger.exception("failed to build product diagnostics incident_id=%s", product_error["incident_id"])
+            return j(handler, product_error, status=503)
+
     if parsed.path == "/api/security/status":
         j(handler, build_security_status_payload())
         return True
@@ -10777,7 +10815,8 @@ def handle_get(handler, parsed) -> bool:
             if run_sid and run_sid != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
         run = _expert_team_run_with_execution_truth(workspace, run)
-        return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+        payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+        return j(handler, _expert_team_response_with_product_state(payload, run))
 
     if parsed.path == "/api/writeflow/runs":
         qs = parse_qs(parsed.query)
@@ -11484,6 +11523,19 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if parsed.path == "/api/product/diagnostics/export":
+        from api.product_contract import build_product_error
+        from api.product_diagnostics import build_product_diagnostics, build_support_bundle
+
+        try:
+            incident_id = body.get("incident_id") if isinstance(body, dict) else None
+            summary = build_product_diagnostics(incident_id=incident_id)
+            return j(handler, build_support_bundle(summary))
+        except Exception:
+            product_error = build_product_error("diagnostics_unavailable")
+            logger.exception("failed to build redacted product support bundle incident_id=%s", product_error["incident_id"])
+            return j(handler, product_error, status=503)
 
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
@@ -12608,7 +12660,13 @@ def handle_post(handler, parsed) -> bool:
         try:
             return j(handler, set_security_profile(body.get("profile", "")))
         except PermissionError as e:
-            return bad(handler, str(e), 403)
+            from api.product_contract import attach_product_error
+
+            return j(
+                handler,
+                attach_product_error({"error": str(e)}, "permission_denied"),
+                status=403,
+            )
         except ValueError as e:
             return bad(handler, str(e), 400)
 
@@ -12790,6 +12848,7 @@ def handle_post(handler, parsed) -> bool:
                 },
             )
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+            payload = _expert_team_response_with_product_state(payload, run)
             if (
                 str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
                 and str(run.get("workflow_state") or "") in {"ready_to_generate", "delivery_validation_required"}
@@ -17768,6 +17827,9 @@ def _record_license_blocked_turn_for_session(
         "session": redact_session_data(raw_session),
         "title": s.title,
     }
+    from api.product_contract import attach_product_error
+
+    response = attach_product_error(response, "license_blocked")
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
@@ -19666,6 +19728,13 @@ def _docx_engine_v2_latest_chat_result_text(session) -> str:
     return ""
 
 
+def _docx_engine_v2_product_failure(handler, exc, code: str, *, status: int = 500):
+    from api.product_contract import attach_product_error
+
+    payload = attach_product_error({"error": _sanitize_error(exc)}, code)
+    return j(handler, payload, status=status)
+
+
 def _docx_engine_v2_materialize_current_result_source(session, workspace: Path) -> str:
     text = _docx_engine_v2_latest_chat_result_text(session)
     if not text:
@@ -19682,7 +19751,7 @@ def _handle_docx_engine_v2_templates(handler):
     try:
         return j(handler, docx_engine_v2.list_templates())
     except (FileNotFoundError, subprocess.TimeoutExpired, docx_engine_v2.DocxEngineV2Error) as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable")
 
 
 def _handle_docx_engine_v2_create_job(handler, body):
@@ -19693,10 +19762,12 @@ def _handle_docx_engine_v2_create_job(handler, body):
             job_body["source_path"] = _docx_engine_v2_materialize_current_result_source(session, workspace)
         payload, status = docx_engine_v2.create_job(job_body, workspace)
         return j(handler, payload, status=status)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed")
 
 
 def _handle_docx_engine_v2_install_template(handler, body):
@@ -19704,10 +19775,12 @@ def _handle_docx_engine_v2_install_template(handler, body):
         workspace = _docx_engine_v2_workspace(body)
         payload, status = docx_engine_v2.install_template(body, workspace)
         return j(handler, payload, status=status)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable")
 
 
 def _handle_docx_engine_v2_package_draft(handler, body):
@@ -19715,10 +19788,12 @@ def _handle_docx_engine_v2_package_draft(handler, body):
         workspace = _docx_engine_v2_workspace(body)
         payload, status = docx_engine_v2.package_rich_draft(body, workspace)
         return j(handler, payload, status=status)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed")
 
 
 def _handle_docx_engine_v2_wps_visual_acceptance(handler, body):
@@ -19744,10 +19819,12 @@ def _handle_docx_engine_v2_wps_visual_acceptance(handler, body):
         return j(handler, payload, status=status)
     except TrustedIdentityError as e:
         return j(handler, {"ok": False, "code": e.code, "error": str(e)}, status=403)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable")
 
 
 def _handle_docx_engine_v2_office_evidence_upload(handler):
@@ -19823,10 +19900,12 @@ def _handle_docx_engine_v2_begin_office_review(handler, body):
         return j(handler, payload, status=status)
     except TrustedIdentityError as e:
         return j(handler, {"ok": False, "code": e.code, "error": str(e)}, status=403)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "backend_unavailable")
 
 
 def _handle_expert_team_waiver_create(handler, body):
@@ -19898,10 +19977,12 @@ def _handle_docx_engine_v2_rerender_asset(handler, body):
         workspace = _docx_engine_v2_workspace(body)
         payload, status = docx_engine_v2.rerender_asset(body, workspace)
         return j(handler, payload, status=status)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed")
 
 
 def _handle_docx_engine_v2_replace_asset(handler, body):
@@ -19909,10 +19990,12 @@ def _handle_docx_engine_v2_replace_asset(handler, body):
         workspace = _docx_engine_v2_workspace(body)
         payload, status = docx_engine_v2.replace_asset(body, workspace)
         return j(handler, payload, status=status)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+    except (ValueError, KeyError) as e:
         return bad(handler, _sanitize_error(e))
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed", status=400)
     except subprocess.TimeoutExpired as e:
-        return bad(handler, _sanitize_error(e), 500)
+        return _docx_engine_v2_product_failure(handler, e, "artifact_generation_failed")
 
 
 def _handle_docx_figure_adjustment_package(handler, body):

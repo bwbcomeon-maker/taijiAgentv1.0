@@ -919,6 +919,7 @@ async function send(){
     }
 
     if(startData.license_blocked){
+      const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:startData}):null;
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
       stopApprovalPolling();
@@ -936,7 +937,8 @@ async function send(){
       if(startData.session&&Array.isArray(startData.session.messages)){
         S.messages=startData.session.messages;
       }else{
-        S.messages.push({role:'assistant',content:startData.message||'授权不可用，请联系服务方更新授权。',license_blocked:true,_ts:Date.now()/1000});
+        const content=productError?`**${productError.title}：** ${productError.message}`:(startData.message||'授权不可用，请联系服务方更新授权。');
+        S.messages.push({role:'assistant',content,license_blocked:true,_ts:Date.now()/1000});
       }
       renderMessages();
       setBusy(false);
@@ -2656,6 +2658,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         let isRecoveryControlMessage=false;
         try{
           const d=JSON.parse(e.data);
+          const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:d}):null;
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
@@ -2666,9 +2669,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isVisionFailure=_VISION_RECOVERY_TYPES.has(String(d.type||''));
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'本地对话服务认证失败'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
-          const hint=d.hint?`\n\n*${d.hint}*`:'';
-          const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
+          const label=productError?productError.title:(isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'本地对话服务认证失败'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error');
+          const message=productError?productError.message:String(d.message||'操作未能完成。');
+          const hint=productError?'':(d.hint?`\n\n*${d.hint}*`:'');
+          const details=productError?'':(d.details?String(d.details).replace(/```/g,'`\u200b``'):'');
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
@@ -2681,7 +2685,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _ts:Date.now()/1000,
             });
           } else {
-            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+            S.messages.push({role:'assistant',content:`**${label}:** ${message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
           }
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
@@ -2705,7 +2709,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
+        try{
+          const d=JSON.parse(e.data);
+          const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:d}):null;
+          trackBackgroundError(activeSid,_errTitle,productError?`${productError.title}：${productError.message}`:(d.message||'Error'));
+        }
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
       _setActivePaneIdleIfOwner();
@@ -4144,7 +4152,8 @@ function attachBtwStream(parentSid, streamId, question){
     src.close();
     try{
       const d=JSON.parse(e.data);
-      showToast(t('btw_failed')+(d.message||''));
+      const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:d}):null;
+      showToast(t('btw_failed')+(productError?`${productError.title}：${productError.message}`:(d.message||'')));
     }catch(_){showToast(t('btw_failed'));}
     if(btwRow&&btwRow.isConnected) btwRow.remove();
   });
