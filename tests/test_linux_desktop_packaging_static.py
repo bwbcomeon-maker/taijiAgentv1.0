@@ -1687,6 +1687,94 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(package, install_body)
 
+    def test_builder_reads_dependency_fields_separately_and_normalizes_them(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        helper = builder[
+            builder.index("normalize_dependency_names() {") :
+            builder.index("recursive_runtime_dependencies() {")
+        ]
+
+        self.assertIn('dpkg-deb -f "$1" Depends', helper)
+        self.assertIn('dpkg-deb -f "$1" Pre-Depends', helper)
+        self.assertNotIn('dpkg-deb -f "$1" Depends Pre-Depends', helper)
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "set -euo pipefail\n"
+                "dpkg-deb() {\n"
+                "  [ \"$1\" = \"-f\" ] || return 2\n"
+                "  case \"$3\" in\n"
+                "    Depends) printf '%s\\n' 'libc6 (>= 2.31), libgtk-3-0 | libgtk-4-1, libsecret-1-0:any [amd64]' ;;\n"
+                "    Pre-Depends) printf '%s\\n' 'dpkg (>= 1.20)' ;;\n"
+                "    *) return 2 ;;\n"
+                "  esac\n"
+                "}\n"
+                f"{helper}\n"
+                "package_names_from_depends fixture.deb\n",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["dpkg", "libc6", "libgtk-3-0", "libsecret-1-0"],
+        )
+
+    def test_builder_fails_closed_when_dependency_closure_is_empty_or_incomplete(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        helper = builder[
+            builder.index("validate_runtime_dependency_closure() {") :
+            builder.index("build_offline_dependency_repo() {")
+        ]
+        repo = builder[
+            builder.index("build_offline_dependency_repo() {") :
+            builder.index("build_glibc() {")
+        ]
+
+        self.assertIn('direct_dependencies_file="$BUILD_ROOT/direct-runtime-dependencies.txt"', repo)
+        self.assertIn(
+            'validate_runtime_dependency_closure "$direct_dependencies_file" "$OFFLINE_REPO/runtime-dependencies.txt"',
+            repo,
+        )
+
+        cases = (
+            ("valid", "libc6\nlibgtk-3-0\n", "coreutils\nlibc6\nlibgtk-3-0\n", True),
+            ("empty-direct", "", "libc6\n", False),
+            ("empty-recursive", "libc6\n", "", False),
+            ("missing-direct", "libc6\nlibgtk-3-0\n", "libc6\n", False),
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-dependency-closure-test.") as temp_dir:
+            temp_path = Path(temp_dir)
+            for name, direct_payload, recursive_payload, should_pass in cases:
+                with self.subTest(name=name):
+                    direct_file = temp_path / f"{name}.direct"
+                    recursive_file = temp_path / f"{name}.recursive"
+                    direct_file.write_text(direct_payload, encoding="utf-8")
+                    recursive_file.write_text(recursive_payload, encoding="utf-8")
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            "set -euo pipefail\n"
+                            "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+                            f"{helper}\n"
+                            "validate_runtime_dependency_closure \"$1\" \"$2\"\n",
+                            "closure-test",
+                            str(direct_file),
+                            str(recursive_file),
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if should_pass:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_release_manifest_cleanup_handles_readonly_payload_directories(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
@@ -1840,6 +1928,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         sidecar_mode,
         tampered_acceptance_tool=None,
         extra_output_case=None,
+        dependency_repo_mode="valid",
     ):
         source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1956,7 +2045,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 raise AssertionError(f"unknown extra output case: {extra_output_case}")
             repo_deb = offline_repo / deb.name
             repo_deb.write_bytes(deb.read_bytes())
-            packages_payload = (
+            taiji_packages_payload = (
                 "Package: taiji-agent\n"
                 "Version: 1.0.0\n"
                 "Architecture: amd64\n"
@@ -1964,9 +2053,31 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 f"Size: {repo_deb.stat().st_size}\n"
                 f"SHA256: {deb_digest}\n\n"
             ).encode("utf-8")
+            dependency_deb = offline_repo / "dependency-fixture_1.0_amd64.deb"
+            if dependency_repo_mode == "valid":
+                dependency_deb.write_bytes(b"fake dependency payload\n")
+                dependency_digest = hashlib.sha256(dependency_deb.read_bytes()).hexdigest()
+                dependency_packages_payload = (
+                    "Package: dependency-fixture\n"
+                    "Version: 1.0\n"
+                    "Architecture: amd64\n"
+                    f"Filename: ./{dependency_deb.name}\n"
+                    f"Size: {dependency_deb.stat().st_size}\n"
+                    f"SHA256: {dependency_digest}\n\n"
+                ).encode("utf-8")
+                packages_payload = taiji_packages_payload + dependency_packages_payload
+                runtime_dependencies = "dependency-fixture\n"
+            elif dependency_repo_mode == "empty":
+                packages_payload = taiji_packages_payload
+                runtime_dependencies = ""
+            else:
+                raise AssertionError(f"unknown dependency_repo_mode: {dependency_repo_mode}")
             (offline_repo / "Packages").write_bytes(packages_payload)
             (offline_repo / "Packages.gz").write_bytes(gzip.compress(packages_payload))
-            (offline_repo / "runtime-dependencies.txt").write_text("", encoding="utf-8")
+            (offline_repo / "runtime-dependencies.txt").write_text(
+                runtime_dependencies,
+                encoding="utf-8",
+            )
             checksum_lines = []
             for path in sorted(offline_repo.iterdir()):
                 if path.name == "SHA256SUMS.txt":
@@ -1983,10 +2094,17 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "printf '%s\\n' \"$*\" >> \"$TAIJI_TEST_DPKG_LOG\"\n"
                 "if [ \"${1:-}\" = \"--info\" ]; then exit 0; fi\n"
                 "if [ \"${1:-}\" = \"-f\" ]; then\n"
+                "  package_name=taiji-agent\n"
+                "  package_version=1.0.0\n"
+                "  case \"${2##*/}\" in\n"
+                "    dependency-fixture_*) package_name=dependency-fixture; package_version=1.0 ;;\n"
+                "  esac\n"
                 "  case \"${3:-}\" in\n"
-                "    Package) printf 'taiji-agent\\n' ;;\n"
-                "    Version) printf '1.0.0\\n' ;;\n"
+                "    Package) printf '%s\\n' \"$package_name\" ;;\n"
+                "    Version) printf '%s\\n' \"$package_version\" ;;\n"
                 "    Architecture) printf 'amd64\\n' ;;\n"
+                "    Depends) [ \"$package_name\" != taiji-agent ] || printf 'dependency-fixture (>= 1.0)\\n' ;;\n"
+                "    Pre-Depends) : ;;\n"
                 "    *) exit 2 ;;\n"
                 "  esac\n"
                 "  exit 0\n"
@@ -2097,6 +2215,19 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("DEB SHA256 sidecar 校验通过", output)
         self.assertIn("-x ", unpack_calls)
+
+    def test_release_preflight_rejects_empty_dependency_closure_for_deb_with_depends(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        result, _ = self._run_release_preflight_artifact_gate(
+            "valid",
+            dependency_repo_mode="empty",
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("主安装包直接依赖未被 runtime-dependencies.txt 覆盖", output)
 
     def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

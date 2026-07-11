@@ -722,12 +722,19 @@ collect_artifacts() {
   ok "安装包已生成：$OUTPUT_DIR/$deb_name"
 }
 
-package_names_from_depends() {
-  dpkg-deb -f "$1" Depends Pre-Depends 2>/dev/null \
-    | tr ',' '\n' \
-    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]*\\([^)]*\\)//g; s/[[:space:]]*\\[[^]]*\\]//g; s/[[:space:]]*<[^>]*>//g; s/\\|.*$//' \
-    | awk 'NF { print $1 }' \
+normalize_dependency_names() {
+  tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]*\([^)]*\)//g; s/[[:space:]]*\[[^]]*\]//g; s/[[:space:]]*<[^>]*>//g; s/[[:space:]]*\|.*$//; s/:[A-Za-z0-9][A-Za-z0-9-]*$//' \
+    | awk '/^[A-Za-z0-9][A-Za-z0-9.+-]*$/ { print }' \
     | sort -u
+}
+
+package_names_from_depends() {
+  {
+    dpkg-deb -f "$1" Depends
+    dpkg-deb -f "$1" Pre-Depends
+  } 2>/dev/null \
+    | normalize_dependency_names
 }
 
 recursive_runtime_dependencies() {
@@ -747,17 +754,36 @@ recursive_runtime_dependencies() {
   fi
 }
 
+validate_runtime_dependency_closure() {
+  local direct_dependencies_file="$1" recursive_dependencies_file="$2" pkg
+  [ -s "$direct_dependencies_file" ] \
+    || fail "主安装包未解析出直接运行依赖，拒绝生成伪离线仓库"
+  [ -s "$recursive_dependencies_file" ] \
+    || fail "递归运行依赖为空，拒绝生成伪离线仓库"
+
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    grep -Fqx -- "$pkg" "$recursive_dependencies_file" \
+      || fail "递归运行依赖缺少直接依赖：$pkg"
+  done < "$direct_dependencies_file"
+}
+
 build_offline_dependency_repo() {
   info "生成完全离线 apt 依赖仓库"
-  local deb deb_name pkg packages_sha packages_gz_sha
+  local deb deb_name pkg packages_sha packages_gz_sha direct_dependencies_file
   deb="$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
+  direct_dependencies_file="$BUILD_ROOT/direct-runtime-dependencies.txt"
   [ -f "$deb" ] || fail "未找到待打包 DEB：$deb"
   rm -rf "$OFFLINE_REPO"
   mkdir -p "$OFFLINE_REPO"
   cp -f "$deb" "$OFFLINE_REPO/"
-  recursive_runtime_dependencies "$deb" > "$OFFLINE_REPO/runtime-dependencies.txt"
+  package_names_from_depends "$deb" > "$direct_dependencies_file" \
+    || fail "无法解析主安装包的直接运行依赖"
+  recursive_runtime_dependencies "$deb" > "$OFFLINE_REPO/runtime-dependencies.txt" \
+    || fail "无法解析主安装包的递归运行依赖"
+  validate_runtime_dependency_closure "$direct_dependencies_file" "$OFFLINE_REPO/runtime-dependencies.txt"
 
-  while read -r pkg; do
+  while IFS= read -r pkg; do
     [ -n "$pkg" ] || continue
     case "$pkg" in
       taiji-agent) continue ;;

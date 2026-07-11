@@ -397,6 +397,35 @@ if runtime_dependencies - indexed_packages:
 if indexed_packages - runtime_dependencies - {"taiji-agent"}:
     raise SystemExit("Packages contains dependency packages absent from runtime-dependencies.txt")
 
+direct_runtime_dependencies = set()
+for field in ("Depends", "Pre-Depends"):
+    result = subprocess.run(
+        ["dpkg-deb", "-f", str(release_deb), field],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"无法读取主安装包 {field}: {result.stderr.strip()}")
+    for clause in result.stdout.replace("\n", " ").split(","):
+        candidate = clause.split("|", 1)[0]
+        candidate = re.sub(r"\([^)]*\)|\[[^]]*\]|<[^>]*>", "", candidate).strip()
+        if not candidate:
+            continue
+        name = candidate.split()[0].split(":", 1)[0]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]*", name):
+            raise SystemExit(f"主安装包含无法识别的 {field} 依赖: {clause!r}")
+        direct_runtime_dependencies.add(name)
+if not direct_runtime_dependencies:
+    raise SystemExit("主安装包未声明可验证的直接运行依赖")
+missing_direct_dependencies = direct_runtime_dependencies - runtime_dependencies
+if missing_direct_dependencies:
+    raise SystemExit(
+        "主安装包直接依赖未被 runtime-dependencies.txt 覆盖: "
+        + ", ".join(sorted(missing_direct_dependencies))
+    )
+
 for filename, fields in stanzas.items():
     package_path = root / filename
     for field in ("Package", "Version", "Architecture"):
