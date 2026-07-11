@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [ "$EUID" -eq 0 ]; then
+  printf '[FAIL] 请以普通桌面用户运行此脚本，不要使用 sudo bash；脚本会在需要时单独调用 sudo。\n' >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
@@ -23,6 +28,13 @@ EXPECTED_MANIFEST_NAME=""
 EXPECTED_DEB_SHA256=""
 EXPECTED_PACKAGES_SHA256=""
 EXPECTED_PACKAGES_GZ_SHA256=""
+EXPECTED_BUILD_MARKER_FILE_SHA256=""
+EXPECTED_CHECKSUM_FILE_SHA256=""
+EXPECTED_MANIFEST_FILE_SHA256=""
+INSTALL_INPUTS_VALIDATED=0
+STAGED_OFFLINE_REPO_AVAILABLE=0
+OFFLINE_REPO_STAGE_FILES=()
+OFFLINE_REPO_STAGE_SHA256=()
 ONLINE_OK="${ONLINE_OK:-0}"
 TAIJI_ALLOW_HEADLESS_REHEARSAL="${TAIJI_ALLOW_HEADLESS_REHEARSAL:-0}"
 
@@ -170,12 +182,26 @@ require_cmd() { have "$1" || fail "缺少命令：$1"; }
 
 cleanup_offline_apt_repo_mount() {
   if [ -n "${ROOT_INSTALL_STAGING:-}" ]; then
-    sudo rm -rf -- "$ROOT_INSTALL_STAGING" >/dev/null 2>&1 || true
-    ROOT_INSTALL_STAGING=""
+    if sudo rm -rf -- "$ROOT_INSTALL_STAGING" >/dev/null 2>&1; then
+      ROOT_INSTALL_STAGING=""
+      return 0
+    fi
+    printf '[FAIL] root staging 清理失败，残留路径：%s\n' "$ROOT_INSTALL_STAGING" >&2
+    return 1
   fi
 }
 
-trap cleanup_offline_apt_repo_mount EXIT
+on_exit() {
+  local exit_code="$?" cleanup_code=0
+  trap - EXIT
+  cleanup_offline_apt_repo_mount || cleanup_code="$?"
+  if [ "$exit_code" -eq 0 ] && [ "$cleanup_code" -ne 0 ]; then
+    exit_code="$cleanup_code"
+  fi
+  exit "$exit_code"
+}
+
+trap on_exit EXIT
 trap 'on_error "$?" "$BASH_COMMAND"' ERR
 
 require_admin_capability() {
@@ -187,6 +213,37 @@ require_admin_capability() {
   info "需要管理员权限预检。这里可能需要输入 sudo 密码。"
   sudo -v || fail "管理员权限预检失败：当前用户不能执行 sudo，无法安装太极 Agent"
   ok "管理员权限预检通过"
+}
+
+user_file_sha256() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+validate_user_source_file() {
+  local path="$1" label="$2" links
+  [ ! -L "$path" ] || fail "$label 不能是符号链接：$path"
+  [ -f "$path" ] || fail "$label 不是普通文件：$path"
+  [ -r "$path" ] || fail "$label 当前用户不可读：$path"
+  links="$(stat -c '%h' -- "$path" 2>/dev/null)" || fail "无法读取 $label 的硬链接计数：$path"
+  [ "$links" = "1" ] || fail "$label 不能是硬链接（link_count=${links}）：$path"
+}
+
+validate_deb_basename() {
+  local name="$1"
+  [[ "$name" =~ ^taiji-agent_[A-Za-z0-9.+:~_-]+_amd64\.deb$ ]] || fail "DEB 文件名不合法，必须是纯 basename 且符合 taiji-agent_*_amd64.deb：$name"
+}
+
+validate_offline_repo_deb_basename() {
+  local name="$1"
+  case "$name" in
+    *..*) fail "离线仓库 DEB 文件名不合法，不能包含 ..：$name" ;;
+  esac
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9.+%:~_-]*_(amd64|all)\.deb$ ]] || fail "离线仓库 DEB 文件名不合法：$name"
+}
+
+validate_fixed_basename() {
+  local actual="$1" expected="$2" label="$3"
+  [ "$actual" = "$expected" ] || fail "$label 文件名不合法，必须是纯 basename：$expected"
 }
 
 marker_value() {
@@ -203,7 +260,7 @@ json_string_value() {
 validate_release_manifest() {
   local deb_name checksum_name expected_sha manifest_name marker_packages_sha marker_packages_gz_sha
   local manifest_deb manifest_checksum manifest_deb_sha manifest_packages_sha manifest_packages_gz_sha
-  local actual_packages_sha actual_packages_gz_sha
+  local actual_packages_sha actual_packages_gz_sha manifest_sha_before manifest_sha_after
   deb_name="$(marker_value deb)"
   checksum_name="$(marker_value checksum)"
   expected_sha="$(marker_value deb_sha256)"
@@ -214,8 +271,12 @@ validate_release_manifest() {
   [ -n "$manifest_name" ] || fail "构建成功标记缺少 manifest 字段，请重新执行制包脚本"
   [ -n "$marker_packages_sha" ] || fail "构建成功标记缺少 packages_sha256 字段，请重新执行制包脚本"
   [ -n "$marker_packages_gz_sha" ] || fail "构建成功标记缺少 packages_gz_sha256 字段，请重新执行制包脚本"
+  validate_fixed_basename "$manifest_name" "taiji-package-manifest.json" "manifest"
+  [[ "$marker_packages_sha" =~ ^[0-9a-f]{64}$ ]] || fail "构建成功标记的 packages_sha256 格式不合法"
+  [[ "$marker_packages_gz_sha" =~ ^[0-9a-f]{64}$ ]] || fail "构建成功标记的 packages_gz_sha256 格式不合法"
   MANIFEST_PATH="$OUTPUT_DIR/$manifest_name"
-  [ -f "$MANIFEST_PATH" ] || fail "构建成功标记指向的 manifest 不存在：$MANIFEST_PATH"
+  validate_user_source_file "$MANIFEST_PATH" "发布 manifest"
+  manifest_sha_before="$(user_file_sha256 "$MANIFEST_PATH")"
 
   manifest_deb="$(json_string_value deb "$MANIFEST_PATH")"
   manifest_checksum="$(json_string_value checksum "$MANIFEST_PATH")"
@@ -231,19 +292,26 @@ validate_release_manifest() {
   [ "$manifest_packages_gz_sha" = "$marker_packages_gz_sha" ] || fail "manifest 与构建标记的 Packages.gz SHA256 不一致"
 
   if offline_repo_available; then
-    actual_packages_sha="$(sha256sum "$OFFLINE_REPO/Packages" | awk '{print $1}')"
-    actual_packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
+    validate_user_source_file "$OFFLINE_REPO/Packages" "离线依赖/Packages"
+    validate_user_source_file "$OFFLINE_REPO/Packages.gz" "离线依赖/Packages.gz"
+    actual_packages_sha="$(user_file_sha256 "$OFFLINE_REPO/Packages")"
+    actual_packages_gz_sha="$(user_file_sha256 "$OFFLINE_REPO/Packages.gz")"
     [ "$actual_packages_sha" = "$manifest_packages_sha" ] || fail "离线依赖/Packages 与 manifest 不匹配"
     [ "$actual_packages_gz_sha" = "$manifest_packages_gz_sha" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
   fi
+  manifest_sha_after="$(user_file_sha256 "$MANIFEST_PATH")"
+  [ "$manifest_sha_after" = "$manifest_sha_before" ] || fail "发布 manifest 在校验期间发生变化，请停止安装并重新复制交付目录"
   EXPECTED_MANIFEST_NAME="$manifest_name"
+  EXPECTED_MANIFEST_FILE_SHA256="$manifest_sha_before"
   EXPECTED_PACKAGES_SHA256="$manifest_packages_sha"
   EXPECTED_PACKAGES_GZ_SHA256="$manifest_packages_gz_sha"
   ok "发布 manifest 有效：$manifest_name"
 }
 
 validate_build_marker() {
-  [ -f "$BUILD_MARKER" ] || fail "未找到构建成功标记，请先在制包机执行并确认成功：bash ./00_制包机_生成离线交付包.sh"
+  local deb_name checksum_name expected_sha actual_sha marker_sha_before marker_sha_after
+  validate_user_source_file "$BUILD_MARKER" "构建成功标记"
+  marker_sha_before="$(user_file_sha256 "$BUILD_MARKER")"
 
   deb_name="$(marker_value deb)"
   checksum_name="$(marker_value checksum)"
@@ -251,38 +319,46 @@ validate_build_marker() {
   [ -n "$deb_name" ] || fail "构建成功标记缺少 deb 字段，请重新执行构建脚本"
   [ -n "$checksum_name" ] || fail "构建成功标记缺少 checksum 字段，请重新执行构建脚本"
   [ -n "$expected_sha" ] || fail "构建成功标记缺少 deb_sha256 字段，请重新执行构建脚本"
+  validate_deb_basename "$deb_name"
+  validate_fixed_basename "$checksum_name" "${deb_name}.sha256" "DEB SHA256 sidecar"
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || fail "构建成功标记的 deb_sha256 格式不合法"
 
   DEB_PATH="$OUTPUT_DIR/$deb_name"
   CHECKSUM_PATH="$OUTPUT_DIR/$checksum_name"
-  [ -f "$DEB_PATH" ] || fail "构建成功标记指向的安装包不存在：$DEB_PATH"
-  [ -f "$CHECKSUM_PATH" ] || fail "构建成功标记指向的校验文件不存在：$CHECKSUM_PATH"
+  validate_user_source_file "$DEB_PATH" "DEB 安装包"
+  validate_user_source_file "$CHECKSUM_PATH" "DEB SHA256 sidecar"
 
-  actual_sha="$(sha256sum "$DEB_PATH" | awk '{print $1}')"
+  actual_sha="$(user_file_sha256 "$DEB_PATH")"
   [ "$actual_sha" = "$expected_sha" ] || fail "安装包与构建成功标记不匹配，请重新执行构建脚本"
   validate_release_manifest
+  marker_sha_after="$(user_file_sha256 "$BUILD_MARKER")"
+  [ "$marker_sha_after" = "$marker_sha_before" ] || fail "构建成功标记在校验期间发生变化，请停止安装并重新复制交付目录"
   EXPECTED_DEB_NAME="$deb_name"
   EXPECTED_CHECKSUM_NAME="$checksum_name"
   EXPECTED_DEB_SHA256="$expected_sha"
+  EXPECTED_BUILD_MARKER_FILE_SHA256="$marker_sha_before"
   ok "构建成功标记有效：$deb_name"
 }
 
 verify_deb_checksum() {
-  local actual_sha checksum_file_sha checksum_file_target
+  local actual_sha checksum_file_sha checksum_file_target checksum_sha_before checksum_sha_after
   [ -n "${DEB_PATH:-}" ] || fail "内部错误：DEB_PATH 未设置"
   [ -n "${EXPECTED_DEB_SHA256:-}" ] || fail "内部错误：EXPECTED_DEB_SHA256 未设置"
-  actual_sha="$(sha256sum "$DEB_PATH" | awk '{print $1}')"
+  validate_user_source_file "$DEB_PATH" "DEB 安装包"
+  validate_user_source_file "$CHECKSUM_PATH" "DEB SHA256 sidecar"
+  actual_sha="$(user_file_sha256 "$DEB_PATH")"
   [ "$actual_sha" = "$EXPECTED_DEB_SHA256" ] || fail "安装包 SHA256 不匹配：$(basename "$DEB_PATH")"
 
-  if [ -f "$CHECKSUM_PATH" ]; then
-    checksum_file_sha="$(awk 'NR == 1 { print $1; exit }' "$CHECKSUM_PATH")"
-    checksum_file_target="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$CHECKSUM_PATH")"
-    if [ -n "${checksum_file_sha:-}" ] && [ "$checksum_file_sha" != "$EXPECTED_DEB_SHA256" ]; then
-      fail "校验文件 SHA256 与构建成功标记不一致：$(basename "$CHECKSUM_PATH")"
-    fi
-    if [ -n "${checksum_file_target:-}" ] && [ "$(basename "$checksum_file_target")" != "$(basename "$DEB_PATH")" ]; then
-      fail "校验文件指向的安装包名称不一致：$checksum_file_target"
-    fi
-  fi
+  checksum_sha_before="$(user_file_sha256 "$CHECKSUM_PATH")"
+  checksum_file_sha="$(awk 'NR == 1 { print $1; exit }' "$CHECKSUM_PATH")"
+  checksum_file_target="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$CHECKSUM_PATH")"
+  [[ "$checksum_file_sha" =~ ^[0-9a-f]{64}$ ]] || fail "校验文件 SHA256 格式不合法：$(basename "$CHECKSUM_PATH")"
+  [ "$checksum_file_sha" = "$EXPECTED_DEB_SHA256" ] || fail "校验文件 SHA256 与构建成功标记不一致：$(basename "$CHECKSUM_PATH")"
+  [ -n "${checksum_file_target:-}" ] || fail "校验文件缺少 DEB 文件名：$(basename "$CHECKSUM_PATH")"
+  [ "$(basename "$checksum_file_target")" = "$(basename "$DEB_PATH")" ] || fail "校验文件指向的安装包名称不一致：$checksum_file_target"
+  checksum_sha_after="$(user_file_sha256 "$CHECKSUM_PATH")"
+  [ "$checksum_sha_after" = "$checksum_sha_before" ] || fail "DEB SHA256 sidecar 在校验期间发生变化"
+  EXPECTED_CHECKSUM_FILE_SHA256="$checksum_sha_before"
   ok "安装包 SHA256 校验通过：$(basename "$DEB_PATH")"
 }
 
@@ -292,17 +368,19 @@ preflight() {
     x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
     *) fail "当前 CPU 架构不是 x86_64/amd64：$(uname -m)" ;;
   esac
+  [ "$(id -u)" -ne 0 ] || fail "请以普通桌面用户运行此脚本，不要使用 sudo bash；脚本会在需要时单独调用 sudo。"
   have apt-get || fail "缺少 apt-get"
   have dpkg || fail "缺少 dpkg"
   have sha256sum || fail "缺少 sha256sum"
   have gzip || fail "缺少 gzip"
   require_cmd mktemp
-  require_cmd sudo
+  require_cmd stat
+  require_cmd find
+  require_cmd getent
   require_cmd systemctl
   require_cmd pgrep
   require_cmd ps
   require_cmd lsof
-  require_admin_capability
 }
 
 require_desktop_session_or_rehearsal() {
@@ -595,86 +673,174 @@ validate_offline_repo_requirement() {
   fail "缺少离线依赖仓库：完全离线发布包必须同时包含 $OFFLINE_REPO/Packages 与 Packages.gz；如明确允许目标机在线源，请设置 ONLINE_OK=1 后重试。"
 }
 
+validate_offline_repo_contents() {
+  local file name actual_sha
+  OFFLINE_REPO_STAGE_FILES=()
+  OFFLINE_REPO_STAGE_SHA256=()
+  offline_repo_available || return 0
+
+  while IFS= read -r -d '' file; do
+    name="${file##*/}"
+    case "$name" in
+      Packages)
+        validate_user_source_file "$file" "离线仓库文件 $name"
+        actual_sha="$(user_file_sha256 "$file")"
+        [ "$actual_sha" = "$EXPECTED_PACKAGES_SHA256" ] || fail "离线依赖/Packages 与 manifest 不匹配"
+        OFFLINE_REPO_STAGE_FILES+=("$file")
+        OFFLINE_REPO_STAGE_SHA256+=("$EXPECTED_PACKAGES_SHA256")
+        ;;
+      Packages.gz)
+        validate_user_source_file "$file" "离线仓库文件 $name"
+        actual_sha="$(user_file_sha256 "$file")"
+        [ "$actual_sha" = "$EXPECTED_PACKAGES_GZ_SHA256" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
+        OFFLINE_REPO_STAGE_FILES+=("$file")
+        OFFLINE_REPO_STAGE_SHA256+=("$EXPECTED_PACKAGES_GZ_SHA256")
+        ;;
+      *.deb)
+        validate_offline_repo_deb_basename "$name"
+        validate_user_source_file "$file" "离线仓库文件 $name"
+        OFFLINE_REPO_STAGE_FILES+=("$file")
+        OFFLINE_REPO_STAGE_SHA256+=("$(user_file_sha256 "$file")")
+        ;;
+      runtime-dependencies.txt|SHA256SUMS.txt)
+        validate_user_source_file "$file" "离线仓库元数据 $name"
+        ;;
+      *)
+        fail "离线依赖目录包含未允许的文件或目录：${name}；只允许 Packages、Packages.gz、*.deb、runtime-dependencies.txt、SHA256SUMS.txt"
+        ;;
+    esac
+  done < <(find "$OFFLINE_REPO" -mindepth 1 -maxdepth 1 -print0)
+}
+
+offline_repo_staged_expected_sha() {
+  local index="$1" name
+  name="${OFFLINE_REPO_STAGE_FILES[$index]##*/}"
+  case "$name" in
+    Packages) printf '%s\n' "$EXPECTED_PACKAGES_SHA256" ;;
+    Packages.gz) printf '%s\n' "$EXPECTED_PACKAGES_GZ_SHA256" ;;
+    *) printf '%s\n' "${OFFLINE_REPO_STAGE_SHA256[$index]}" ;;
+  esac
+}
+
+validate_install_inputs() {
+  validate_build_marker
+  info "校验安装包"
+  verify_deb_checksum
+  validate_offline_repo_requirement
+  validate_offline_repo_contents
+  INSTALL_INPUTS_VALIDATED=1
+  ok "交付物已在普通用户权限下完成校验"
+}
+
 staged_offline_repo_available() {
-  [ -n "${OFFLINE_APT_REPO_SOURCE:-}" ] && \
+  [ "$STAGED_OFFLINE_REPO_AVAILABLE" = "1" ] && \
+    [ -n "${OFFLINE_APT_REPO_SOURCE:-}" ] && \
     [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && \
     [ -f "$OFFLINE_APT_REPO_SOURCE/Packages.gz" ]
 }
 
-verify_staged_install_inputs() {
-  local marker_deb marker_checksum marker_manifest marker_deb_sha marker_packages_sha marker_packages_gz_sha
-  local manifest_deb manifest_checksum manifest_deb_sha manifest_packages_sha manifest_packages_gz_sha
-  local checksum_file_sha checksum_file_target actual_sha
+root_file_sha256() {
+  sudo sha256sum -- "$1" | awk '{print $1}'
+}
 
-  marker_deb="$(marker_value deb "$STAGED_BUILD_MARKER")"
-  marker_checksum="$(marker_value checksum "$STAGED_BUILD_MARKER")"
-  marker_manifest="$(marker_value manifest "$STAGED_BUILD_MARKER")"
-  marker_deb_sha="$(marker_value deb_sha256 "$STAGED_BUILD_MARKER")"
-  marker_packages_sha="$(marker_value packages_sha256 "$STAGED_BUILD_MARKER")"
-  marker_packages_gz_sha="$(marker_value packages_gz_sha256 "$STAGED_BUILD_MARKER")"
+verify_private_staged_file() {
+  local path="$1" expected_sha="$2" label="$3" metadata actual_sha
+  sudo test -f "$path" || fail "root staging 中 $label 不是普通文件"
+  sudo test ! -L "$path" || fail "root staging 中 $label 不能是符号链接"
+  metadata="$(sudo stat -c '%u:%g:%a:%h' -- "$path")" || fail "无法读取 root staging 中 $label 的元数据"
+  [ "$metadata" = "0:0:600:1" ] || fail "root staging 中 $label 的 owner/mode/link_count 不安全：$metadata"
+  actual_sha="$(root_file_sha256 "$path")"
+  [ "$actual_sha" = "$expected_sha" ] || fail "root staging 中 $label SHA256 重校验失败"
+}
 
-  [ "$marker_deb" = "$EXPECTED_DEB_NAME" ] || fail "root staging 中的 DEB 名称与已校验构建标记不一致"
-  [ "$marker_checksum" = "$EXPECTED_CHECKSUM_NAME" ] || fail "root staging 中的校验文件名称与已校验构建标记不一致"
-  [ "$marker_manifest" = "$EXPECTED_MANIFEST_NAME" ] || fail "root staging 中的 manifest 名称与已校验构建标记不一致"
-  [ "$marker_deb_sha" = "$EXPECTED_DEB_SHA256" ] || fail "root staging 中的 DEB SHA256 与已校验构建标记不一致"
-  [ "$marker_packages_sha" = "$EXPECTED_PACKAGES_SHA256" ] || fail "root staging 中的 Packages SHA256 与已校验构建标记不一致"
-  [ "$marker_packages_gz_sha" = "$EXPECTED_PACKAGES_GZ_SHA256" ] || fail "root staging 中的 Packages.gz SHA256 与已校验构建标记不一致"
-
-  manifest_deb="$(json_string_value deb "$STAGED_MANIFEST_PATH")"
-  manifest_checksum="$(json_string_value checksum "$STAGED_MANIFEST_PATH")"
-  manifest_deb_sha="$(json_string_value deb_sha256 "$STAGED_MANIFEST_PATH")"
-  manifest_packages_sha="$(json_string_value packages_sha256 "$STAGED_MANIFEST_PATH")"
-  manifest_packages_gz_sha="$(json_string_value packages_gz_sha256 "$STAGED_MANIFEST_PATH")"
-  [ "$manifest_deb" = "$EXPECTED_DEB_NAME" ] || fail "root staging 中的 manifest DEB 名称与已校验值不一致"
-  [ "$manifest_checksum" = "$EXPECTED_CHECKSUM_NAME" ] || fail "root staging 中的 manifest 校验文件名称与已校验值不一致"
-  [ "$manifest_deb_sha" = "$EXPECTED_DEB_SHA256" ] || fail "root staging 中的 manifest DEB SHA256 与已校验值不一致"
-  [ "$manifest_packages_sha" = "$EXPECTED_PACKAGES_SHA256" ] || fail "root staging 中的 manifest Packages SHA256 与已校验值不一致"
-  [ "$manifest_packages_gz_sha" = "$EXPECTED_PACKAGES_GZ_SHA256" ] || fail "root staging 中的 manifest Packages.gz SHA256 与已校验值不一致"
-
-  actual_sha="$(sha256sum "$STAGED_DEB_PATH" | awk '{print $1}')"
-  [ "$actual_sha" = "$EXPECTED_DEB_SHA256" ] || fail "root staging 中 DEB SHA256 重校验失败"
-  checksum_file_sha="$(awk 'NR == 1 { print $1; exit }' "$STAGED_CHECKSUM_PATH")"
-  checksum_file_target="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$STAGED_CHECKSUM_PATH")"
-  [ "$checksum_file_sha" = "$EXPECTED_DEB_SHA256" ] || fail "root staging 中 DEB 校验文件与已校验值不一致"
-  [ "$(basename "$checksum_file_target")" = "$EXPECTED_DEB_NAME" ] || fail "root staging 中 DEB 校验文件指向了其他文件"
-
-  if staged_offline_repo_available; then
-    actual_sha="$(sha256sum "$OFFLINE_APT_REPO_SOURCE/Packages" | awk '{print $1}')"
-    [ "$actual_sha" = "$EXPECTED_PACKAGES_SHA256" ] || fail "root staging 中 Packages SHA256 重校验失败"
-    actual_sha="$(sha256sum "$OFFLINE_APT_REPO_SOURCE/Packages.gz" | awk '{print $1}')"
-    [ "$actual_sha" = "$EXPECTED_PACKAGES_GZ_SHA256" ] || fail "root staging 中 Packages.gz SHA256 重校验失败"
+copy_user_file_to_private_root_stage() {
+  local source="$1" destination="$2" expected_sha="$3" label="$4" current_sha
+  validate_user_source_file "$source" "$label"
+  current_sha="$(user_file_sha256 "$source")"
+  [ "$current_sha" = "$expected_sha" ] || fail "$label 在普通用户校验后发生变化，已停止安装"
+  sudo install -o root -g root -m 0600 /dev/null "$destination"
+  if ! cat -- "$source" | sudo tee -- "$destination" >/dev/null; then
+    fail "$label 复制到 root staging 失败"
   fi
-  ok "root staging 安装输入 SHA256 重校验通过"
+  sudo chown root:root "$destination"
+  sudo chmod 0600 "$destination"
+  verify_private_staged_file "$destination" "$expected_sha" "$label"
+}
+
+verify_staged_install_inputs() {
+  local index source destination expected_sha
+  verify_private_staged_file "$STAGED_BUILD_MARKER" "$EXPECTED_BUILD_MARKER_FILE_SHA256" "构建成功标记"
+  verify_private_staged_file "$STAGED_DEB_PATH" "$EXPECTED_DEB_SHA256" "$EXPECTED_DEB_NAME"
+  verify_private_staged_file "$STAGED_CHECKSUM_PATH" "$EXPECTED_CHECKSUM_FILE_SHA256" "$EXPECTED_CHECKSUM_NAME"
+  verify_private_staged_file "$STAGED_MANIFEST_PATH" "$EXPECTED_MANIFEST_FILE_SHA256" "$EXPECTED_MANIFEST_NAME"
+
+  for index in "${!OFFLINE_REPO_STAGE_FILES[@]}"; do
+    source="${OFFLINE_REPO_STAGE_FILES[$index]}"
+    destination="$ROOT_INSTALL_STAGING/repo/${source##*/}"
+    expected_sha="$(offline_repo_staged_expected_sha "$index")"
+    verify_private_staged_file "$destination" "$expected_sha" "${source##*/}"
+  done
+  ok "root staging 安装输入 SHA256 与私有权限重校验通过"
+}
+
+publish_staged_install_inputs() {
+  local index source
+  getent passwd _apt >/dev/null 2>&1 || fail "目标机缺少 _apt 系统账号，拒绝以 unsandboxed root 模式继续"
+  sudo chown -R root:root "$ROOT_INSTALL_STAGING"
+  sudo chmod 0755 "$ROOT_INSTALL_STAGING" "$ROOT_INSTALL_STAGING/package"
+  sudo chmod 0644 "$STAGED_DEB_PATH"
+
+  if [ "$STAGED_OFFLINE_REPO_AVAILABLE" = "1" ]; then
+    sudo chmod 0755 "$ROOT_INSTALL_STAGING/repo" "$ROOT_INSTALL_STAGING/apt-lists"
+    for index in "${!OFFLINE_REPO_STAGE_FILES[@]}"; do
+      source="${OFFLINE_REPO_STAGE_FILES[$index]}"
+      sudo chmod 0644 "$ROOT_INSTALL_STAGING/repo/${source##*/}"
+    done
+    sudo chmod 0644 "$OFFLINE_APT_SOURCE_FILE"
+    sudo chown _apt:root "$ROOT_INSTALL_STAGING/apt-lists/partial"
+    sudo chmod 0700 "$ROOT_INSTALL_STAGING/apt-lists/partial"
+  fi
+  ok "root staging 已冻结并按 apt 最小权限发布"
 }
 
 stage_privileged_install_inputs() {
-  local file
+  local index source destination expected_sha
+  [ "$INSTALL_INPUTS_VALIDATED" = "1" ] || fail "内部错误：交付物尚未在普通用户权限下校验"
   ROOT_INSTALL_STAGING="$(sudo mktemp -d "/var/tmp/taiji-agent-install.XXXXXX")"
   [ -n "$ROOT_INSTALL_STAGING" ] || fail "无法创建 root 安装 staging 目录"
-  sudo chmod 0755 "$ROOT_INSTALL_STAGING"
-  sudo install -d -m 0755 "$ROOT_INSTALL_STAGING/package" "$ROOT_INSTALL_STAGING/repo" "$ROOT_INSTALL_STAGING/apt-lists" "$ROOT_INSTALL_STAGING/apt-lists/partial"
+  sudo chown root:root "$ROOT_INSTALL_STAGING"
+  sudo chmod 0700 "$ROOT_INSTALL_STAGING"
+  sudo mkdir -p -m 0700 "$ROOT_INSTALL_STAGING/package"
 
   STAGED_BUILD_MARKER="$ROOT_INSTALL_STAGING/package/.build-success"
-  STAGED_DEB_PATH="$ROOT_INSTALL_STAGING/package/$(basename "$DEB_PATH")"
-  STAGED_CHECKSUM_PATH="$ROOT_INSTALL_STAGING/package/$(basename "$CHECKSUM_PATH")"
-  STAGED_MANIFEST_PATH="$ROOT_INSTALL_STAGING/package/$(basename "$MANIFEST_PATH")"
-  sudo install -m 0644 "$BUILD_MARKER" "$STAGED_BUILD_MARKER"
-  sudo install -m 0644 "$DEB_PATH" "$STAGED_DEB_PATH"
-  sudo install -m 0644 "$CHECKSUM_PATH" "$STAGED_CHECKSUM_PATH"
-  sudo install -m 0644 "$MANIFEST_PATH" "$STAGED_MANIFEST_PATH"
+  STAGED_DEB_PATH="$ROOT_INSTALL_STAGING/package/$EXPECTED_DEB_NAME"
+  STAGED_CHECKSUM_PATH="$ROOT_INSTALL_STAGING/package/$EXPECTED_CHECKSUM_NAME"
+  STAGED_MANIFEST_PATH="$ROOT_INSTALL_STAGING/package/$EXPECTED_MANIFEST_NAME"
+  copy_user_file_to_private_root_stage "$BUILD_MARKER" "$STAGED_BUILD_MARKER" "$EXPECTED_BUILD_MARKER_FILE_SHA256" "构建成功标记"
+  copy_user_file_to_private_root_stage "$DEB_PATH" "$STAGED_DEB_PATH" "$EXPECTED_DEB_SHA256" "$EXPECTED_DEB_NAME"
+  copy_user_file_to_private_root_stage "$CHECKSUM_PATH" "$STAGED_CHECKSUM_PATH" "$EXPECTED_CHECKSUM_FILE_SHA256" "$EXPECTED_CHECKSUM_NAME"
+  copy_user_file_to_private_root_stage "$MANIFEST_PATH" "$STAGED_MANIFEST_PATH" "$EXPECTED_MANIFEST_FILE_SHA256" "$EXPECTED_MANIFEST_NAME"
 
   if offline_repo_available; then
-    while IFS= read -r -d '' file; do
-      sudo install -m 0644 "$file" "$ROOT_INSTALL_STAGING/repo/$(basename "$file")"
-    done < <(find "$OFFLINE_REPO" -maxdepth 1 -type f -print0)
+    sudo mkdir -p -m 0700 "$ROOT_INSTALL_STAGING/repo" "$ROOT_INSTALL_STAGING/apt-lists" "$ROOT_INSTALL_STAGING/apt-lists/partial"
+    for index in "${!OFFLINE_REPO_STAGE_FILES[@]}"; do
+      source="${OFFLINE_REPO_STAGE_FILES[$index]}"
+      destination="$ROOT_INSTALL_STAGING/repo/${source##*/}"
+      expected_sha="$(offline_repo_staged_expected_sha "$index")"
+      copy_user_file_to_private_root_stage "$source" "$destination" "$expected_sha" "${source##*/}"
+    done
     OFFLINE_APT_REPO_SOURCE="$ROOT_INSTALL_STAGING/repo"
     OFFLINE_APT_SOURCE_FILE="$ROOT_INSTALL_STAGING/taiji-agent-offline.list"
     OFFLINE_APT_LISTS_DIR="$ROOT_INSTALL_STAGING/apt-lists"
-    printf 'deb [trusted=yes] file:%s ./\n' "$OFFLINE_APT_REPO_SOURCE" | sudo tee "$OFFLINE_APT_SOURCE_FILE" >/dev/null
-    sudo chmod 0644 "$OFFLINE_APT_SOURCE_FILE"
+    sudo install -o root -g root -m 0600 /dev/null "$OFFLINE_APT_SOURCE_FILE"
+    printf 'deb [trusted=yes] file:%s ./\n' "$OFFLINE_APT_REPO_SOURCE" | sudo tee -- "$OFFLINE_APT_SOURCE_FILE" >/dev/null
+    sudo chown root:root "$OFFLINE_APT_SOURCE_FILE"
+    sudo chmod 0600 "$OFFLINE_APT_SOURCE_FILE"
+    STAGED_OFFLINE_REPO_AVAILABLE=1
   fi
 
   verify_staged_install_inputs
+  publish_staged_install_inputs
 }
 
 install_taiji_package() {
@@ -706,11 +872,7 @@ install_taiji_package() {
 }
 
 install_package() {
-  validate_build_marker
-
-  info "校验安装包"
-  verify_deb_checksum
-  validate_offline_repo_requirement
+  [ "$INSTALL_INPUTS_VALIDATED" = "1" ] || fail "内部错误：交付物尚未校验，拒绝进入安装阶段"
   stage_privileged_install_inputs
 
   prepare_legacy_replacement
@@ -761,6 +923,9 @@ main() {
   set_stage "目标机预检"
   preflight
   require_desktop_session_or_rehearsal
+  set_stage "交付物校验"
+  validate_install_inputs
+  require_admin_capability
   set_stage "安装太极 Agent"
   install_package
   set_stage "安装后验证"

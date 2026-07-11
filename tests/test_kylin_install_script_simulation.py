@@ -125,10 +125,26 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             #!/usr/bin/env bash
             set -euo pipefail
             if [ "${1:-}" = "passwd" ]; then
+              if [ "${2:-}" = "_apt" ] && [ "${FAKE_MISSING_APT_USER:-0}" = "1" ]; then
+                exit 2
+              fi
               printf 'taiji:x:%s:%s::%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME"
               exit 0
             fi
             exit 1
+            ''',
+        )
+        write_executable(
+            self.fake_bin / "cat",
+            r'''
+            #!/usr/bin/env bash
+            set -euo pipefail
+            source="${*: -1}"
+            if [ "${FAKE_TAMPER_DURING_COPY:-0}" = "1" ] && [[ "$source" = */生成的安装包/taiji-agent_*_amd64.deb ]] && [ ! -f "$FAKE_STATE/tampered_during_copy" ]; then
+              printf 'raced readable replacement\n' > "$source"
+              touch "$FAKE_STATE/tampered_during_copy"
+            fi
+            exec /bin/cat "$@"
             ''',
         )
         write_executable(
@@ -147,6 +163,9 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             shift || true
             case "$cmd" in
               rm)
+                if [ "${FAKE_CLEANUP_FAIL:-0}" = "1" ] && [[ "${*: -1}" = *taiji-agent-install.* ]]; then
+                  exit 1
+                fi
                 /bin/rm "$@"
                 ;;
               chmod)
@@ -154,6 +173,9 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 ;;
               chown)
                 :
+                ;;
+              mkdir)
+                /bin/mkdir "$@"
                 ;;
               mktemp)
                 if [ "$*" = "-d /var/tmp/taiji-agent-install.XXXXXX" ]; then
@@ -165,8 +187,18 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 fi
                 ;;
               install)
+                if [ "${1:-}" = "-o" ] && [ "${2:-}" = "root" ] && [ "${3:-}" = "-g" ] && [ "${4:-}" = "root" ]; then
+                  shift 4
+                fi
                 destination="${@: -1}"
                 /usr/bin/install "$@"
+                if [ "${FAKE_TAMPER_STAGED_PACKAGES:-0}" = "1" ] && [[ "$destination" = */repo/Packages.gz ]]; then
+                  printf 'tampered staged packages gzip\n' > "$destination"
+                fi
+                ;;
+              tee)
+                destination="${@: -1}"
+                /usr/bin/tee "$@"
                 if [ "${FAKE_TAMPER_STAGED_PACKAGES:-0}" = "1" ] && [[ "$destination" = */repo/Packages.gz ]]; then
                   printf 'tampered staged packages gzip\n' > "$destination"
                 fi
@@ -206,6 +238,35 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 "$cmd" "$@"
                 ;;
             esac
+            ''',
+        )
+        write_executable(
+            self.fake_bin / "stat",
+            r'''
+            #!/usr/bin/env bash
+            set -euo pipefail
+            if [ "${1:-}" = "-c" ]; then
+              format="${2:-}"
+              shift 2
+              [ "${1:-}" != "--" ] || shift
+              path="${1:?path is required}"
+              links="$(/usr/bin/stat -f '%l' "$path")"
+              case "$format" in
+                '%h')
+                  printf '%s\n' "$links"
+                  ;;
+                '%u:%g:%a:%h')
+                  mode="$(/usr/bin/stat -f '%Lp' "$path")"
+                  printf '0:0:%s:%s\n' "$mode" "$links"
+                  ;;
+                *)
+                  printf 'unsupported fake stat format: %s\n' "$format" >&2
+                  exit 2
+                  ;;
+              esac
+              exit 0
+            fi
+            exec /usr/bin/stat "$@"
             ''',
         )
         write_executable(
@@ -317,6 +378,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         pgrep_mode: str = "none",
         online_ok: bool = False,
         tamper_staged_packages: bool = False,
+        tamper_during_copy: bool = False,
+        tamper_repo_after_manifest: bool = False,
+        cleanup_fails: bool = False,
+        missing_apt_user: bool = False,
         xdg_config_home: Path | None = None,
     ) -> subprocess.CompletedProcess:
         harness = self.tmp_path / "run.sh"
@@ -336,8 +401,22 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export FAKE_LSOF_MODE="{lsof_mode}"
                 export FAKE_PGREP_MODE="{pgrep_mode}"
                 export FAKE_TAMPER_STAGED_PACKAGES="{1 if tamper_staged_packages else 0}"
+                export FAKE_TAMPER_DURING_COPY="{1 if tamper_during_copy else 0}"
+                export FAKE_TAMPER_REPO_AFTER_MANIFEST="{1 if tamper_repo_after_manifest else 0}"
+                export FAKE_CLEANUP_FAIL="{1 if cleanup_fails else 0}"
+                export FAKE_MISSING_APT_USER="{1 if missing_apt_user else 0}"
                 export ONLINE_OK="{1 if online_ok else 0}"
                 source "{self.import_script}"
+                if [ "$FAKE_TAMPER_REPO_AFTER_MANIFEST" = "1" ]; then
+                  original_validate_build_marker_definition="$(declare -f validate_build_marker)"
+                  eval "${{original_validate_build_marker_definition/validate_build_marker/original_validate_build_marker}}"
+                  validate_build_marker() {{
+                    original_validate_build_marker
+                    printf 'rebound packages index\n' > "$OFFLINE_REPO/Packages"
+                    gzip -9c "$OFFLINE_REPO/Packages" > "$OFFLINE_REPO/Packages.gz"
+                    printf 'rebound dependency\n' > "$OFFLINE_REPO/dependency_1.0_amd64.deb"
+                  }}
+                fi
                 path_exists() {{
                   case "$1" in
                     /opt/taiji-agent|\\
@@ -362,6 +441,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                       ;;
                   esac
                 }}
+                validate_install_inputs
                 install_package
                 if [ -n "${{OFFLINE_APT_REPO_SOURCE:-}}" ]; then
                   [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && cp "$OFFLINE_APT_REPO_SOURCE/Packages" "$FAKE_STATE/offline_Packages"
@@ -404,6 +484,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export TAIJI_ALLOW_HEADLESS_REHEARSAL="{1 if allow_headless_rehearsal else 0}"
                 source "{self.import_script}"
                 preflight() {{ :; }}
+                validate_install_inputs() {{ :; }}
+                require_admin_capability() {{ :; }}
                 install_package() {{ :; }}
                 main
                 """
@@ -444,9 +526,50 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                   esac
                 }}
                 have() {{ return 0; }}
-                require_admin_capability() {{ :; }}
-                install_package() {{ touch "$FAKE_STATE/install_called"; }}
+                validate_install_inputs() {{ printf 'validate\n' >> "$FAKE_STATE/main_order"; }}
+                require_admin_capability() {{ printf 'admin\n' >> "$FAKE_STATE/main_order"; }}
+                install_package() {{ printf 'install\n' >> "$FAKE_STATE/main_order"; touch "$FAKE_STATE/install_called"; }}
                 main
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        harness.chmod(0o755)
+        return subprocess.run(
+            ["bash", str(harness)],
+            cwd=self.tmp_path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def run_preflight_as_root(self) -> subprocess.CompletedProcess:
+        harness = self.tmp_path / "run-root-preflight.sh"
+        harness.write_text(
+            textwrap.dedent(
+                f"""
+                #!/usr/bin/env bash
+                set -Eeuo pipefail
+                export PATH="{self.fake_bin}:$PATH"
+                export FAKE_STATE="{self.fake_state}"
+                export FAKE_LOG="{self.fake_log}"
+                export HOME="{self.fake_home}"
+                source "{self.import_script}"
+                uname() {{
+                  case "${{1:-}}" in
+                    -s) printf 'Linux\n' ;;
+                    -m) printf 'x86_64\n' ;;
+                    *) command uname "$@" ;;
+                  esac
+                }}
+                id() {{
+                  if [ "${{1:-}}" = "-u" ]; then
+                    printf '0\n'
+                    return 0
+                  fi
+                  command id "$@"
+                }}
+                preflight
                 """
             ).lstrip(),
             encoding="utf-8",
@@ -474,6 +597,14 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("安装包 SHA256 校验通过", result.stdout + result.stderr)
 
+    def test_entire_script_root_invocation_is_rejected_before_sudo(self):
+        result = self.run_preflight_as_root()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("不要使用 sudo bash", output)
+        self.assertNotIn("sudo ", self.fake_log_text())
+
     def test_root_owned_staging_precedes_purge_and_is_cleaned_on_exit(self):
         result = self.run_install_package()
 
@@ -484,8 +615,22 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         staging = staging_path_file.read_text(encoding="utf-8").strip()
         self.assertIn("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX", log)
         self.assertIn(
-            f"sudo install -m 0644 {self.tmp_path / '离线依赖' / 'dependency_1.0_amd64.deb'} {staging}/repo/dependency_1.0_amd64.deb",
+            f"sudo tee -- {staging}/repo/dependency_1.0_amd64.deb",
             log,
+        )
+        self.assertNotIn(
+            f"sudo install -m 0644 {self.tmp_path / '离线依赖' / 'dependency_1.0_amd64.deb'}",
+            log,
+        )
+        self.assertIn(f"sudo chown _apt:root {staging}/apt-lists/partial", log)
+        self.assertIn(f"sudo chmod 0700 {staging}/apt-lists/partial", log)
+        self.assertLess(
+            log.index(f"sudo chmod 0700 {staging}"),
+            log.index(f"sudo tee -- {staging}/package/taiji-agent_0.1.0_amd64.deb"),
+        )
+        self.assertLess(
+            log.index(f"sudo tee -- {staging}/package/taiji-agent_0.1.0_amd64.deb"),
+            log.index(f"sudo chmod 0755 {staging} {staging}/package"),
         )
         self.assertLess(
             log.index("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX"),
@@ -496,6 +641,100 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertNotIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
         self.assertIn(f"sudo rm -rf -- {staging}", log)
         self.assertFalse(Path(staging).exists())
+
+    def test_cleanup_failure_reports_residual_root_staging_path(self):
+        result = self.run_install_package(cleanup_fails=True)
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        staging = (self.fake_state / "root_staging_path").read_text(encoding="utf-8").strip()
+        self.assertIn("root staging 清理失败", output)
+        self.assertIn(staging, output)
+        self.assertTrue(Path(staging).exists())
+
+    def test_symlinked_deb_is_rejected_before_root_staging(self):
+        deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
+        real_deb = deb.with_name("same-content.deb")
+        real_deb.write_bytes(deb.read_bytes())
+        deb.unlink()
+        deb.symlink_to(real_deb.name)
+
+        result = self.run_install_package()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("符号链接", output)
+        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
+
+    def test_hardlinked_deb_is_rejected_before_root_staging(self):
+        deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
+        real_deb = deb.with_name("same-content.deb")
+        real_deb.write_bytes(deb.read_bytes())
+        deb.unlink()
+        os.link(real_deb, deb)
+
+        result = self.run_install_package()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("硬链接", output)
+        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
+
+    def test_marker_path_traversal_is_rejected_before_root_staging(self):
+        marker = self.tmp_path / "生成的安装包" / ".build-success"
+        marker.write_text(
+            marker.read_text(encoding="utf-8").replace(
+                "deb=taiji-agent_0.1.0_amd64.deb",
+                "deb=../taiji-agent_0.1.0_amd64.deb",
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_install_package()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("DEB 文件名不合法", output)
+        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
+
+    def test_source_swap_during_user_open_is_detected_before_purge(self):
+        result = self.run_install_package(tamper_during_copy=True)
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("root staging 中 taiji-agent_0.1.0_amd64.deb SHA256 重校验失败", output)
+        log = self.fake_log_text()
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn(" install -y --reinstall", log)
+
+    def test_repo_index_swap_after_manifest_validation_is_rejected(self):
+        result = self.run_install_package(tamper_repo_after_manifest=True)
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertRegex(output, r"Packages(?:\.gz)? 与 manifest 不匹配")
+        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
+        self.assertNotIn("apt-get purge -y taiji-agent", self.fake_log_text())
+
+    def test_unlisted_offline_repo_entry_is_rejected_before_root_staging(self):
+        (self.tmp_path / "离线依赖" / "unexpected.conf").write_text("ignored?\n", encoding="utf-8")
+
+        result = self.run_install_package()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("包含未允许的文件或目录", output)
+        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
+
+    def test_double_dot_offline_deb_name_is_rejected_before_root_staging(self):
+        (self.tmp_path / "离线依赖" / "dependency.._1.0_amd64.deb").write_bytes(b"fake dependency\n")
+
+        result = self.run_install_package()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("离线仓库 DEB 文件名不合法", output)
+        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
 
     def test_staged_repo_hash_mismatch_stops_before_purge(self):
         result = self.run_install_package(tamper_staged_packages=True)
@@ -524,6 +763,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, output)
         self.assertIn("图形桌面会话", output)
         self.assertFalse((self.fake_state / "install_called").exists(), output)
+        self.assertFalse((self.fake_state / "main_order").exists(), output)
         self.assertNotIn("[INFO] 阶段：安装太极 Agent", output)
 
     def test_explicit_headless_rehearsal_reports_partial_non_target_result(self):
@@ -534,6 +774,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertTrue((self.fake_state / "install_called").is_file(), output)
+        self.assertEqual(
+            (self.fake_state / "main_order").read_text(encoding="utf-8").splitlines(),
+            ["validate", "admin", "install"],
+        )
         self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", output)
         self.assertIn("真实模型对话和目标机验证：未验证", output)
         self.assertIn("taiji 命令可用", output)
@@ -670,6 +914,18 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         staging = staging_path_file.read_text(encoding="utf-8").strip()
         self.assertIn(f" install -y --reinstall --allow-downgrades --allow-change-held-packages {staging}/package/taiji-agent_0.1.0_amd64.deb", log)
         self.assertNotIn(f" install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
+
+    def test_online_fallback_rejects_missing_apt_sandbox_account_before_purge(self):
+        shutil.rmtree(self.tmp_path / "离线依赖")
+
+        result = self.run_install_package(online_ok=True, missing_apt_user=True)
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("缺少 _apt 系统账号", output)
+        log = self.fake_log_text()
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn(" install -y --reinstall", log)
 
     def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
         repo = self.tmp_path / "离线依赖"

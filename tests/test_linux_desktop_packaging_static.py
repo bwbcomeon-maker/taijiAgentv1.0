@@ -638,8 +638,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("install_taiji_package", install)
         self.assertIn("stage_privileged_install_inputs", install)
         self.assertIn("/var/tmp/taiji-agent-install.XXXXXX", install)
-        self.assertIn('sudo install -m 0644 "$file" "$ROOT_INSTALL_STAGING/repo/$(basename "$file")"', install)
-        self.assertIn('sudo install -d -m 0755 "$ROOT_INSTALL_STAGING/package" "$ROOT_INSTALL_STAGING/repo"', install)
+        self.assertIn('cat -- "$source" | sudo tee -- "$destination" >/dev/null', install)
+        self.assertNotIn('sudo install -m 0644 "$file"', install)
+        self.assertIn('sudo mkdir -p -m 0700', install)
         self.assertIn("OFFLINE_APT_REPO_SOURCE", install)
         self.assertNotIn('ln -s "$repo_path"', install)
         self.assertNotIn('printf \'deb [trusted=yes] file:%s ./\\n\' "$repo_path"', install)
@@ -927,6 +928,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('source_file="$ROOT_INSTALL_STAGING/taiji-agent-offline.list"', install)
         self.assertIn('lists_dir="$ROOT_INSTALL_STAGING/apt-lists"', install)
         self.assertIn('verify_staged_install_inputs', install)
+        self.assertIn('publish_staged_install_inputs', install)
+        self.assertIn('sudo chown _apt:root "$ROOT_INSTALL_STAGING/apt-lists/partial"', install)
+        self.assertIn('sudo chmod 0700 "$ROOT_INSTALL_STAGING/apt-lists/partial"', install)
+        self.assertIn("EXPECTED_BUILD_MARKER_FILE_SHA256", install)
+        self.assertIn("EXPECTED_CHECKSUM_FILE_SHA256", install)
+        self.assertIn("EXPECTED_MANIFEST_FILE_SHA256", install)
+        self.assertIn("stat -c '%h'", install)
+        self.assertIn('sudo install -o root -g root -m 0600 /dev/null "$destination"', install)
         self.assertIn("离线 apt 仓库索引更新失败", install)
         self.assertLess(install.index('*"离线 apt 仓库索引"*'), install.index('*"管理员权限"*'))
         self.assertNotIn('lists_dir="$LOG_DIR/apt-lists"', install)
@@ -948,6 +957,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             install.index("cleanup_offline_apt_repo_mount() {") : install.index("require_admin_capability() {")
         ]
         self.assertIn('sudo rm -rf -- "$ROOT_INSTALL_STAGING"', cleanup)
+        self.assertIn("root staging 清理失败", cleanup)
+        self.assertNotIn('|| true', cleanup)
+
+        publish = install[
+            install.index("publish_staged_install_inputs() {") : install.index("stage_privileged_install_inputs() {")
+        ]
+        self.assertLess(
+            publish.index("getent passwd _apt"),
+            publish.index('if [ "$STAGED_OFFLINE_REPO_AVAILABLE" = "1" ]'),
+        )
 
     def test_install_script_requires_explicit_headless_rehearsal_mode(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
@@ -960,8 +979,20 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         main = install[install.index("main() {") :]
         self.assertLess(
             main.index("require_desktop_session_or_rehearsal"),
+            main.index("validate_install_inputs"),
+        )
+        self.assertLess(
+            main.index("validate_install_inputs"),
+            main.index("require_admin_capability"),
+        )
+        self.assertLess(
+            main.index("require_admin_capability"),
             main.index('set_stage "安装太极 Agent"'),
         )
+        self.assertIn("不要使用 sudo bash", install)
+        root_guard = install.index('if [ "$EUID" -eq 0 ]; then')
+        self.assertLess(root_guard, install.index('mkdir -p "$LOG_DIR"'))
+        self.assertLess(root_guard, install.index('exec > >(tee -a "$LOG_FILE") 2>&1'))
         verify = install[
             install.index("verify_installation() {") : install.index("main() {")
         ]
