@@ -1657,7 +1657,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("dpkg-scanpackages", builder)
         self.assertIn("dpkg-scanpackages . /dev/null > Packages", builder)
         self.assertIn("gzip -9c Packages > Packages.gz", builder)
-        self.assertIn("apt-get download", builder)
+        self.assertIn("apt-get -y --download-only", builder)
+        self.assertIn("Dir::State::status", builder)
         self.assertIn("build_offline_dependency_repo", builder)
         self.assertIn("git archive", builder)
 
@@ -1691,7 +1692,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         helper = builder[
             builder.index("normalize_dependency_names() {") :
-            builder.index("recursive_runtime_dependencies() {")
+            builder.index("download_resolved_runtime_dependencies() {")
         ]
 
         self.assertIn('dpkg-deb -f "$1" Depends', helper)
@@ -1723,6 +1724,72 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             result.stdout.splitlines(),
             ["dpkg", "libc6", "libgtk-3-0", "libsecret-1-0"],
         )
+
+    def test_builder_uses_apt_solver_with_empty_status_and_inventories_real_packages(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        helpers = builder[
+            builder.index("download_resolved_runtime_dependencies() {") :
+            builder.index("validate_runtime_dependency_closure() {")
+        ]
+
+        self.assertNotIn("apt-rdepends", helpers)
+        with tempfile.TemporaryDirectory(prefix="taiji-apt-solver-test.") as temp_dir:
+            temp_path = Path(temp_dir)
+            repo = temp_path / "repo"
+            status = temp_path / "empty-status"
+            inventory = temp_path / "runtime-dependencies.txt"
+            apt_log = temp_path / "apt-get.log"
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "set -euo pipefail\n"
+                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+                    "apt-get() {\n"
+                    "  printf '%s\\n' \"$@\" > \"$TAIJI_TEST_APT_LOG\"\n"
+                    "  cache= status=\n"
+                    "  for arg in \"$@\"; do\n"
+                    "    case \"$arg\" in\n"
+                    "      Dir::Cache::archives=*) cache=${arg#*=} ;;\n"
+                    "      Dir::State::status=*) status=${arg#*=} ;;\n"
+                    "    esac\n"
+                    "  done\n"
+                    "  [ -n \"$cache\" ] && [ -f \"$status\" ] && [ ! -s \"$status\" ] || return 9\n"
+                    "  printf fake > \"$cache/libc6_2.31_amd64.deb\"\n"
+                    "  printf fake > \"$cache/dbus-user-session_1.0_amd64.deb\"\n"
+                    "}\n"
+                    "dpkg-deb() {\n"
+                    "  [ \"$1\" = -f ] && [ \"$3\" = Package ] || return 2\n"
+                    "  case \"${2##*/}\" in\n"
+                    "    libc6_*) printf 'libc6\\n' ;;\n"
+                    "    dbus-user-session_*) printf 'dbus-user-session\\n' ;;\n"
+                    "    *) return 2 ;;\n"
+                    "  esac\n"
+                    "}\n"
+                    f"{helpers}\n"
+                    "download_resolved_runtime_dependencies fixture.deb \"$1\" \"$2\"\n"
+                    "write_runtime_dependency_inventory \"$1\" taiji-agent_fixture_amd64.deb \"$3\"\n",
+                    "apt-solver-test",
+                    str(repo),
+                    str(status),
+                    str(inventory),
+                ],
+                env={**os.environ, "TAIJI_TEST_APT_LOG": str(apt_log)},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                inventory.read_text(encoding="utf-8").splitlines(),
+                ["dbus-user-session", "libc6"],
+            )
+            apt_args = apt_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--download-only", apt_args)
+            self.assertIn(f"Dir::State::status={status}", apt_args)
+            self.assertIn(f"Dir::Cache::archives={repo}", apt_args)
+            self.assertIn("install", apt_args)
+            self.assertIn("fixture.deb", apt_args)
 
     def test_builder_fails_closed_when_dependency_closure_is_empty_or_incomplete(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

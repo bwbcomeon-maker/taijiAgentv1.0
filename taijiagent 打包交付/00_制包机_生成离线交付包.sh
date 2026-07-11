@@ -130,7 +130,7 @@ failure_next_steps() {
     *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
       printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
       ;;
-    *"离线依赖"*|*"Packages.gz"*|*"apt-get download"*)
+    *"离线依赖"*|*"运行依赖"*|*"Packages.gz"*|*"--download-only"*)
       printf 'next=确认制包机 apt 源可访问目标机同发行版/架构依赖，重新生成离线依赖仓库\n'
       ;;
     *)
@@ -428,7 +428,7 @@ install_build_dependencies() {
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y \
     curl ca-certificates build-essential python3-dev libffi-dev git rsync \
-    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip apt-rdepends openssl \
+    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip openssl \
     libc6 libgtk-3-0 libnss3 libnspr4 libxss1 libasound2 libatk1.0-0 \
     libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libgbm1 libxkbcommon0 libx11-6 \
     libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxrender1 \
@@ -737,21 +737,35 @@ package_names_from_depends() {
     | normalize_dependency_names
 }
 
-recursive_runtime_dependencies() {
-  local deb="$1" pkg
-  if have apt-rdepends; then
-    package_names_from_depends "$deb" | while read -r pkg; do
-      [ -n "$pkg" ] || continue
-      apt-rdepends "$pkg" 2>/dev/null | awk '/^[A-Za-z0-9.+:-]+$/ { print $1 }'
-    done | sort -u
-  else
-    package_names_from_depends "$deb" | while read -r pkg; do
-      [ -n "$pkg" ] || continue
-      printf '%s\n' "$pkg"
-      apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances "$pkg" \
-        | awk '/^[[:space:]]*Depends:/ { print $2 }'
-    done | sort -u
-  fi
+download_resolved_runtime_dependencies() {
+  local deb="$1" offline_repo="$2" resolver_status="$3" current_user
+  current_user="$(id -un)"
+  mkdir -p "$offline_repo/partial" || fail "无法创建离线依赖下载缓存"
+  : > "$resolver_status" || fail "无法创建空白 apt 安装状态：$resolver_status"
+  [ ! -s "$resolver_status" ] || fail "apt 安装状态必须为空：$resolver_status"
+
+  apt-get -y --download-only --no-install-recommends --no-remove \
+    -o Debug::NoLocking=1 \
+    -o "APT::Sandbox::User=$current_user" \
+    -o "Dir::State::status=$resolver_status" \
+    -o "Dir::Cache::archives=$offline_repo" \
+    install "$deb" \
+    || fail "apt 无法为干净目标系统解析并下载完整运行依赖"
+  rm -rf -- "$offline_repo/partial" || fail "无法清理离线依赖下载缓存"
+}
+
+write_runtime_dependency_inventory() {
+  local offline_repo="$1" main_deb_name="$2" output_file="$3" package_deb package_name
+  : > "$output_file" || fail "无法创建运行依赖清单：$output_file"
+  while IFS= read -r -d '' package_deb; do
+    [ "$(basename "$package_deb")" != "$main_deb_name" ] || continue
+    package_name="$(dpkg-deb -f "$package_deb" Package 2>/dev/null)" \
+      || fail "无法读取离线依赖包名：$package_deb"
+    printf '%s\n' "$package_name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.+-]*$' \
+      || fail "离线依赖包含非法包名：$package_name"
+    printf '%s\n' "$package_name" >> "$output_file"
+  done < <(find "$offline_repo" -maxdepth 1 -type f -name '*.deb' -print0)
+  sort -u -o "$output_file" "$output_file"
 }
 
 validate_runtime_dependency_closure() {
@@ -770,29 +784,21 @@ validate_runtime_dependency_closure() {
 
 build_offline_dependency_repo() {
   info "生成完全离线 apt 依赖仓库"
-  local deb deb_name pkg packages_sha packages_gz_sha direct_dependencies_file
+  local deb deb_name packages_sha packages_gz_sha direct_dependencies_file resolver_status
   deb="$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
   direct_dependencies_file="$BUILD_ROOT/direct-runtime-dependencies.txt"
+  resolver_status="$BUILD_ROOT/offline-apt-empty-status"
   [ -f "$deb" ] || fail "未找到待打包 DEB：$deb"
   rm -rf "$OFFLINE_REPO"
   mkdir -p "$OFFLINE_REPO"
   cp -f "$deb" "$OFFLINE_REPO/"
   package_names_from_depends "$deb" > "$direct_dependencies_file" \
     || fail "无法解析主安装包的直接运行依赖"
-  recursive_runtime_dependencies "$deb" > "$OFFLINE_REPO/runtime-dependencies.txt" \
-    || fail "无法解析主安装包的递归运行依赖"
+  deb_name="$(basename "$deb")"
+  download_resolved_runtime_dependencies "$deb" "$OFFLINE_REPO" "$resolver_status"
+  write_runtime_dependency_inventory "$OFFLINE_REPO" "$deb_name" "$OFFLINE_REPO/runtime-dependencies.txt"
   validate_runtime_dependency_closure "$direct_dependencies_file" "$OFFLINE_REPO/runtime-dependencies.txt"
 
-  while IFS= read -r pkg; do
-    [ -n "$pkg" ] || continue
-    case "$pkg" in
-      taiji-agent) continue ;;
-    esac
-    info "下载离线依赖：$pkg"
-    (cd "$OFFLINE_REPO" && apt-get download "$pkg") || fail "下载依赖失败：$pkg"
-  done < "$OFFLINE_REPO/runtime-dependencies.txt"
-
-  deb_name="$(basename "$deb")"
   (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null > Packages)
   (cd "$OFFLINE_REPO" && gzip -9c Packages > Packages.gz)
   (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
