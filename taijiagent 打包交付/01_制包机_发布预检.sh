@@ -101,17 +101,19 @@ check_source_archive_matches_git_head() {
   have gzip || fail "缺少 gzip，无法重建当前 HEAD 源码包"
   have cmp || fail "缺少 cmp，无法逐字节核对当前 HEAD 源码包"
   local expected_archive
-  expected_archive="$(mktemp /tmp/taiji-source-head.XXXXXX.tar.gz)"
-  if ! git -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$expected_archive"; then
+  expected_archive="$(mktemp /tmp/taiji-source-head.XXXXXX.tar)"
+  if ! git -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD > "$expected_archive"; then
     rm -f "$expected_archive"
     fail "无法从当前 HEAD 重建确定性源码包"
   fi
-  if ! cmp -s "$expected_archive" "$SOURCE_ARCHIVE"; then
+  # gzip output is encoder/version dependent even with timestamps disabled.
+  # Compare the exact decompressed git-archive tar stream instead.
+  if ! gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" -; then
     rm -f "$expected_archive"
-    fail "源码包内容与当前 git HEAD 不一致"
+    fail "源码包归档内容与当前 git HEAD 不一致"
   fi
   rm -f "$expected_archive"
-  ok "源码包内容与当前 git HEAD 逐字节一致"
+  ok "源码包归档内容与当前 git HEAD 逐字节一致（忽略 gzip 编码器差异）"
 }
 
 check_single_source_archive() {

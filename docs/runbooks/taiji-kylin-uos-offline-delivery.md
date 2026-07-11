@@ -182,6 +182,7 @@ SHA256SUMS.txt
 | manifest、最终预检或重试清理出现只读模板 `Permission denied` | 内置模板有意使用 `0444/0555`，普通 `rm -rf` 无法删除父目录 | 只清理受控 `/tmp` 专用目录；先恢复目录 owner 写权限再删除 | manifest、payload-preflight、build-root 三类只读树清理测试 | 已由真实制包失败暴露并修复 |
 | 离线仓库看似生成，但依赖为空或不闭合 | 手写 Depends 解析和 `apt-rdepends` 不能等价于干净目标机上的 apt 求解 | 分开解析 Depends/Pre-Depends；用空 dpkg status 的 apt download-only 求解；按实际下载包建索引 | 直接依赖非空、依赖闭包、`Packages`/`Packages.gz`/每个 DEB 摘要一致 | 历史候选 `1d56849a` 生成 187 个索引项并完成断网生命周期；后续源码提交仍须重跑 |
 | 使用 Debian 13 制包或演练会带来 glibc 2.41 和新系统包冲突 | 演练系统比 Kylin V10/glibc 2.31 更新，可能产生假绿或误报依赖冲突 | 固定 Ubuntu 20.04 amd64 兼容基线，并校验镜像 baseline label | manifest 记录 OS、arch、glibc；生产器核对镜像角色和版本 | 仅证明兼容基线，不证明 Kylin 真机 |
+| Linux 签名预检误报“源码包内容与当前 Git HEAD 不一致” | macOS Apple gzip 与 Linux GNU gzip 会把同一 tar 压成不同字节；比较 `.tar.gz` 本身把编码器差异误判为源码漂移 | 仍用当前 Git HEAD 重建确定性 tar，但与源码包解压后的 tar 流逐字节比较 | 不同 gzip 编码器的同一 git archive 必须通过；解压后 tar 增加任意字节必须拒绝 | 在 `15c058b4` 签名前真实暴露；两端解压 tar SHA256 相同后修复 |
 | `--network none` 被未启用的 tunnel 设备误报；sudo 提示 hostname 解析失败 | 只按网络节点存在判断；容器 hostname 未进入本地 hosts | 只拒绝启用链路、全局地址和非 loopback route；sudo 前确保本地 hostname 解析 | Docker inspect、网络负向测试和结构化会话记录 | 历史候选 `1d56849a` 已完成断网三阶段；后续源码提交仍须重跑 |
 | 无图形容器执行安装后可能被误写成目标机成功 | CLI 和包状态不能证明 Electron/UKUI | 无图形会话默认失败；仅显式 headless rehearsal 可继续，并强制 `desktop_app_verified=false`、`target_verified=false` | release gate 分开验证离线证据与真机证据 | 目标机仍必须执行 `04` |
 | 普通用户交付目录通过校验后、sudo 安装前可被替换 | 用户可写源文件存在 TOCTOU 窗口 | 复制到 root-owned `/var/tmp` staging 后重校验，再 purge/install | 拒绝 symlink、hardlink、路径穿越、未列入仓库文件和中途替换 | 安装脚本仿真与负向测试覆盖 |
@@ -321,6 +322,8 @@ bash ./03_目标终端_导出诊断报告.sh
 禁止收集或外发：API Key、token、密码、私钥、授权 JWT 正文、模型完整请求、完整用户数据库、附件正文、客户 IP/域名和未脱敏绝对用户路径。需要额外材料时必须单独取得用户确认。
 
 ## 12. 候选证据与发布身份
+
+候选 `15c058b4` 也完成了 Ubuntu 20.04 amd64 全量制包、187 项离线仓库和 `--network none` 安装→卸载→重装。签名前预检阻止了签名流程，但暴露的不是源码漂移，而是 Apple gzip 与 GNU gzip 的压缩结果不同；两端解压后的原始 git-archive tar SHA256 完全一致。门禁已改为比较解压后的 tar 流。因为门禁代码本身改变了源码身份，`15c058b4` 的 DEB 与离线证据只能保留为历史候选，不能签给后续提交。
 
 2026-07-11 曾以源码候选 `1d56849a` 在 Ubuntu 20.04 amd64/glibc 2.31 环境完成一次 `00` 制包和最终发布预检。该次 manifest 记录了源码、DEB、Electron、desktop entry、`Packages` 和 `Packages.gz` 摘要，payload contract 与 187 项离线仓库索引通过；随后在 `--network none` 容器中完成安装、验证、卸载和重装，并生成通过预签内容校验的结构化证据。该证据明确记录 `desktop_app_verified=false`、`target_verified=false`，且未作为最终发布完成双证据签名。
 

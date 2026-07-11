@@ -1237,8 +1237,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("check_source_archive_matches_git_head", preflight)
         self.assertIn("git -C \"$REPO_ROOT\" archive", preflight)
-        self.assertIn("gzip -n", preflight)
-        self.assertIn('cmp -s "$expected_archive" "$SOURCE_ARCHIVE"', preflight)
+        self.assertIn('gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" -', preflight)
+        self.assertNotIn('cmp -s "$expected_archive" "$SOURCE_ARCHIVE"', preflight)
         self.assertIn("verify_offline_repository_integrity", preflight)
         self.assertIn('gzip -t "$OFFLINE_REPO/Packages.gz"', preflight)
         self.assertIn('gzip -dc "$OFFLINE_REPO/Packages.gz" | cmp -s - "$OFFLINE_REPO/Packages"', preflight)
@@ -1268,6 +1268,108 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         )
         self.assertIn("validate_build_root_location", builder)
         self.assertIn("umask 022", read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh"))
+
+    def test_release_preflight_accepts_same_git_archive_from_a_different_gzip_encoder(self):
+        if not all(shutil.which(command) for command in ("git", "gzip", "sha256sum")):
+            self.skipTest("git, gzip, and sha256sum are required by release preflight")
+
+        source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            delivery = repo_root / "taijiagent 打包交付"
+            delivery.mkdir(parents=True)
+            script = delivery / source_script.name
+            shutil.copy2(source_script, script)
+            (repo_root / ".gitignore").write_text(
+                "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.tar.gz\n"
+                "/taijiagent 打包交付/SHA256SUMS.txt\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q", str(repo_root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo_root), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_root), "config", "user.name", "Release Test"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(repo_root), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo_root), "commit", "-q", "-m", "fixture"],
+                check=True,
+            )
+            short = subprocess.run(
+                ["git", "-C", str(repo_root), "rev-parse", "--short=8", "HEAD"],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            tar_payload = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo_root),
+                    "archive",
+                    "--format=tar",
+                    "--prefix=taiji-agentv1.0/",
+                    "HEAD",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout
+            alternate_gzip = gzip.compress(tar_payload, compresslevel=1, mtime=0)
+            local_gzip = subprocess.run(
+                ["gzip", "-n", "-6", "-c"],
+                input=tar_payload,
+                check=True,
+                capture_output=True,
+            ).stdout
+            self.assertNotEqual(alternate_gzip, local_gzip)
+
+            archive = delivery / f"taiji-agentv1.0-kylin-build-src-{short}.tar.gz"
+            archive.write_bytes(alternate_gzip)
+            digest = hashlib.sha256(alternate_gzip).hexdigest()
+            (delivery / "SHA256SUMS.txt").write_text(
+                f"{digest}  {archive.name}\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=delivery,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            self.assertIn("源码包归档内容与当前 git HEAD", result.stdout)
+
+            tampered_payload = gzip.compress(
+                tar_payload + b"not part of git archive\n",
+                compresslevel=1,
+                mtime=0,
+            )
+            archive.write_bytes(tampered_payload)
+            tampered_digest = hashlib.sha256(tampered_payload).hexdigest()
+            (delivery / "SHA256SUMS.txt").write_text(
+                f"{tampered_digest}  {archive.name}\n",
+                encoding="utf-8",
+            )
+            rejected = subprocess.run(
+                ["bash", str(script)],
+                cwd=delivery,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("源码包归档内容与当前 git HEAD 不一致", rejected.stderr)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
