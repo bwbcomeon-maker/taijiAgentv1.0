@@ -572,10 +572,16 @@ ensure_node() {
   ok "Node.js 离线运行时已准备：$NODE_ROOT/current ($(node --version), npm $(npm -v))"
 }
 
+restore_owned_build_root_directory_writes() {
+  find "$BUILD_ROOT" -type d -exec chmod u+w {} + \
+    || fail "无法恢复受控构建工作区目录的 owner 写权限：$BUILD_ROOT"
+}
+
 reset_build_root() {
   validate_safe_build_root_path
   if [ -e "$BUILD_ROOT" ] || [ -L "$BUILD_ROOT" ]; then
     require_owned_build_root
+    restore_owned_build_root_directory_writes
     rm -rf -- "$BUILD_ROOT" || fail "无法以当前用户清理专用构建工作区：$BUILD_ROOT"
     [ ! -e "$BUILD_ROOT" ] && [ ! -L "$BUILD_ROOT" ] \
       || fail "专用构建工作区清理后仍存在：$BUILD_ROOT"
@@ -992,6 +998,7 @@ cleanup_temporary_build_root() {
   info "清理最终预检使用完毕的临时构建工作区"
   if [ -e "$BUILD_ROOT" ] || [ -L "$BUILD_ROOT" ]; then
     require_owned_build_root
+    restore_owned_build_root_directory_writes
     rm -rf -- "$BUILD_ROOT" || fail "无法以当前用户清理专用构建工作区：$BUILD_ROOT"
   fi
   [ ! -e "$BUILD_ROOT" ] && [ ! -L "$BUILD_ROOT" ] \

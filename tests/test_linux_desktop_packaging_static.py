@@ -2270,12 +2270,67 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             builder.index("repair_build_tree_permissions() {")
         ]
         self.assertLess(reset.index("require_owned_build_root"), reset.index('rm -rf -- "$BUILD_ROOT"'))
+        self.assertLess(
+            reset.index("require_owned_build_root"),
+            reset.index("restore_owned_build_root_directory_writes"),
+        )
+        self.assertLess(
+            reset.index("restore_owned_build_root_directory_writes"),
+            reset.index('rm -rf -- "$BUILD_ROOT"'),
+        )
 
         cleanup = builder[
             builder.index("cleanup_temporary_build_root() {") :
             builder.index("apt_source_summary() {")
         ]
         self.assertLess(cleanup.index("require_owned_build_root"), cleanup.index('rm -rf -- "$BUILD_ROOT"'))
+        self.assertLess(
+            cleanup.index("require_owned_build_root"),
+            cleanup.index("restore_owned_build_root_directory_writes"),
+        )
+        self.assertLess(
+            cleanup.index("restore_owned_build_root_directory_writes"),
+            cleanup.index('rm -rf -- "$BUILD_ROOT"'),
+        )
+
+    def test_offline_builder_restores_directory_writes_before_retry_cleanup(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        helper = builder[
+            builder.index("restore_owned_build_root_directory_writes() {") :
+            builder.index("reset_build_root() {")
+        ]
+
+        with tempfile.TemporaryDirectory(prefix="taiji-build-retry-test.", dir="/tmp") as temp_dir:
+            build_root = Path(temp_dir) / "taiji-agent-build-test"
+            readonly_dir = build_root / "payload" / "builtin-templates"
+            readonly_dir.mkdir(parents=True)
+            (build_root / ".taiji-build-root-owner").write_text(
+                "taiji-agent-offline-builder-v1\n",
+                encoding="utf-8",
+            )
+            (readonly_dir / "template.json").write_text("{}\n", encoding="utf-8")
+            (build_root / ".taiji-build-root-owner").chmod(0o600)
+            readonly_dir.chmod(0o555)
+            readonly_dir.parent.chmod(0o555)
+            build_root.chmod(0o700)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "set -e\n"
+                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+                    f"{helper}\n"
+                    "restore_owned_build_root_directory_writes\n"
+                    "rm -rf \"$BUILD_ROOT\"\n",
+                ],
+                env={**os.environ, "BUILD_ROOT": str(build_root)},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(build_root.exists())
 
     def test_offline_builder_keeps_build_machine_logs_outside_the_delivery(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
