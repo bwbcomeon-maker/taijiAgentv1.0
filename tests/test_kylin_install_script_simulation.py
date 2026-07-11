@@ -28,6 +28,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.fake_bin.mkdir()
         self.fake_state = self.tmp_path / "state"
         self.fake_state.mkdir()
+        self.fake_root_tmp = Path(self.tmp.name) / "root-tmp"
+        self.fake_root_tmp.mkdir()
         self.fake_home = self.tmp_path / "home"
         self.fake_home.mkdir()
         self.fake_log = self.tmp_path / "fake.log"
@@ -42,6 +44,19 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def _write_import_script(self) -> None:
         source = INSTALL_SCRIPT.read_text(encoding="utf-8")
         source = source.replace('exec > >(tee -a "$LOG_FILE") 2>&1\n', "")
+        verifier = str(self.fake_bin / "taiji-native-verify")
+        source = source.replace(
+            "[ -x /opt/taiji-agent/bin/taiji-native-verify ]",
+            f'[ -x "{verifier}" ]',
+        )
+        source = source.replace(
+            "\n  /opt/taiji-agent/bin/taiji-native-verify\n",
+            f'\n  "{verifier}"\n',
+        )
+        source = source.replace(
+            "TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify",
+            f'TAIJI_VERIFY_DESKTOP_SMOKE=1 "{verifier}"',
+        )
         source = re.sub(r'\nmain "\$@"\s*\Z', "\n", source)
         self.import_script.write_text(source, encoding="utf-8")
 
@@ -54,6 +69,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         packages.write_bytes(b"fake packages\n")
         packages_gz = repo_dir / "Packages.gz"
         packages_gz.write_bytes(gzip.compress(packages.read_bytes()))
+        (repo_dir / "dependency_1.0_amd64.deb").write_bytes(b"fake dependency\n")
         packages_sha = hashlib.sha256(packages.read_bytes()).hexdigest()
         packages_gz_sha = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
         deb = output_dir / "taiji-agent_0.1.0_amd64.deb"
@@ -138,6 +154,22 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 ;;
               chown)
                 :
+                ;;
+              mktemp)
+                if [ "$*" = "-d /var/tmp/taiji-agent-install.XXXXXX" ]; then
+                  staging="$(/usr/bin/mktemp -d "$FAKE_ROOT_TMP/taiji-agent-install.XXXXXX")"
+                  printf '%s\n' "$staging" > "$FAKE_STATE/root_staging_path"
+                  printf '%s\n' "$staging"
+                else
+                  /usr/bin/mktemp "$@"
+                fi
+                ;;
+              install)
+                destination="${@: -1}"
+                /usr/bin/install "$@"
+                if [ "${FAKE_TAMPER_STAGED_PACKAGES:-0}" = "1" ] && [[ "$destination" = */repo/Packages.gz ]]; then
+                  printf 'tampered staged packages gzip\n' > "$destination"
+                fi
                 ;;
               systemctl)
                 op="${1:-}"
@@ -254,6 +286,27 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             exit 1
             ''',
         )
+        write_executable(
+            self.fake_bin / "taiji-native-verify",
+            r'''
+            #!/usr/bin/env bash
+            printf 'verify desktop_smoke=%s\n' "${TAIJI_VERIFY_DESKTOP_SMOKE:-0}" >> "$FAKE_LOG"
+            ''',
+        )
+        write_executable(
+            self.fake_bin / "taiji",
+            r'''
+            #!/usr/bin/env bash
+            [ "${1:-}" = "--help" ]
+            ''',
+        )
+        write_executable(
+            self.fake_bin / "taiji-agent",
+            r'''
+            #!/usr/bin/env bash
+            exit 0
+            ''',
+        )
 
     def run_install_package(
         self,
@@ -263,6 +316,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         lsof_mode: str = "none",
         pgrep_mode: str = "none",
         online_ok: bool = False,
+        tamper_staged_packages: bool = False,
         xdg_config_home: Path | None = None,
     ) -> subprocess.CompletedProcess:
         harness = self.tmp_path / "run.sh"
@@ -274,12 +328,14 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export PATH="{self.fake_bin}:$PATH"
                 export FAKE_STATE="{self.fake_state}"
                 export FAKE_LOG="{self.fake_log}"
+                export FAKE_ROOT_TMP="{self.fake_root_tmp}"
                 export HOME="{self.fake_home}"
                 export XDG_CONFIG_HOME="{xdg_config_home or ''}"
                 export FAKE_APT_PURGE_FAIL="{1 if apt_purge_fails else 0}"
                 export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
                 export FAKE_LSOF_MODE="{lsof_mode}"
                 export FAKE_PGREP_MODE="{pgrep_mode}"
+                export FAKE_TAMPER_STAGED_PACKAGES="{1 if tamper_staged_packages else 0}"
                 export ONLINE_OK="{1 if online_ok else 0}"
                 source "{self.import_script}"
                 path_exists() {{
@@ -311,6 +367,9 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                   [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && cp "$OFFLINE_APT_REPO_SOURCE/Packages" "$FAKE_STATE/offline_Packages"
                   [ -f "$OFFLINE_APT_REPO_SOURCE/Packages.gz" ] && touch "$FAKE_STATE/offline_Packages_gz"
                 fi
+                if [ -n "${{OFFLINE_APT_SOURCE_FILE:-}}" ]; then
+                  cp "$OFFLINE_APT_SOURCE_FILE" "$FAKE_STATE/offline_source.list"
+                fi
                 """
             ).lstrip(),
             encoding="utf-8",
@@ -327,6 +386,39 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def fake_log_text(self) -> str:
         return self.fake_log.read_text(encoding="utf-8") if self.fake_log.exists() else ""
 
+    def run_main_for_verification(
+        self, *, allow_headless_rehearsal: bool
+    ) -> subprocess.CompletedProcess:
+        harness = self.tmp_path / "run-verification.sh"
+        harness.write_text(
+            textwrap.dedent(
+                f"""
+                #!/usr/bin/env bash
+                set -Eeuo pipefail
+                export PATH="{self.fake_bin}:$PATH"
+                export FAKE_STATE="{self.fake_state}"
+                export FAKE_LOG="{self.fake_log}"
+                export HOME="{self.fake_home}"
+                export DISPLAY=""
+                export WAYLAND_DISPLAY=""
+                export TAIJI_ALLOW_HEADLESS_REHEARSAL="{1 if allow_headless_rehearsal else 0}"
+                source "{self.import_script}"
+                preflight() {{ :; }}
+                install_package() {{ :; }}
+                main
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        harness.chmod(0o755)
+        return subprocess.run(
+            ["bash", str(harness)],
+            cwd=self.tmp_path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_cross_machine_absolute_deb_checksum_path_is_tolerated(self):
         deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
         checksum = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb.sha256"
@@ -340,6 +432,57 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("安装包 SHA256 校验通过", result.stdout + result.stderr)
+
+    def test_root_owned_staging_precedes_purge_and_is_cleaned_on_exit(self):
+        result = self.run_install_package()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log = self.fake_log_text()
+        staging_path_file = self.fake_state / "root_staging_path"
+        self.assertTrue(staging_path_file.is_file(), log)
+        staging = staging_path_file.read_text(encoding="utf-8").strip()
+        self.assertIn("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX", log)
+        self.assertIn(
+            f"sudo install -m 0644 {self.tmp_path / '离线依赖' / 'dependency_1.0_amd64.deb'} {staging}/repo/dependency_1.0_amd64.deb",
+            log,
+        )
+        self.assertLess(
+            log.index("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX"),
+            log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"),
+        )
+        self.assertIn(f"Dir::Etc::sourcelist={staging}/taiji-agent-offline.list", log)
+        self.assertIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {staging}/package/taiji-agent_0.1.0_amd64.deb", log)
+        self.assertNotIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
+        self.assertIn(f"sudo rm -rf -- {staging}", log)
+        self.assertFalse(Path(staging).exists())
+
+    def test_staged_repo_hash_mismatch_stops_before_purge(self):
+        result = self.run_install_package(tamper_staged_packages=True)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("root staging 中 Packages.gz", result.stdout + result.stderr)
+        log = self.fake_log_text()
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn(" install -y --reinstall", log)
+
+    def test_headless_verification_fails_by_default_without_success_claim(self):
+        result = self.run_main_for_verification(allow_headless_rehearsal=False)
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("图形桌面会话", output)
+        self.assertIn("TAIJI_ALLOW_HEADLESS_REHEARSAL=1", output)
+        self.assertNotIn("[OK] 安装验证命令已执行完毕", output)
+
+    def test_explicit_headless_rehearsal_reports_partial_non_target_result(self):
+        result = self.run_main_for_verification(allow_headless_rehearsal=True)
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", output)
+        self.assertIn("真实模型对话和目标机验证：未验证", output)
+        self.assertIn("taiji 命令可用", output)
+        self.assertNotIn("[OK] 安装验证命令已执行完毕", output)
 
     def test_tampered_plain_packages_index_stops_before_install(self):
         (self.tmp_path / "离线依赖" / "Packages").write_bytes(b"tampered packages\n")
@@ -466,7 +609,12 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
 
         output = result.stdout + result.stderr
         self.assertIn("ONLINE_OK=1", output)
-        self.assertIn(" install -y --reinstall", self.fake_log_text())
+        log = self.fake_log_text()
+        staging_path_file = self.fake_state / "root_staging_path"
+        self.assertTrue(staging_path_file.is_file(), log)
+        staging = staging_path_file.read_text(encoding="utf-8").strip()
+        self.assertIn(f" install -y --reinstall --allow-downgrades --allow-change-held-packages {staging}/package/taiji-agent_0.1.0_amd64.deb", log)
+        self.assertNotIn(f" install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
 
     def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
         repo = self.tmp_path / "离线依赖"
@@ -474,9 +622,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        source_file = self.tmp_path / "构建日志" / "taiji-agent-offline.list"
+        source_file = self.fake_state / "offline_source.list"
         source = source_file.read_text(encoding="utf-8").strip()
-        self.assertTrue(source.startswith("deb [trusted=yes] file:/tmp/taiji-agent-offline-repo."), source)
+        staging = (self.fake_state / "root_staging_path").read_text(encoding="utf-8").strip()
+        self.assertEqual(source, f"deb [trusted=yes] file:{staging}/repo ./")
         apt_uri = source.split("file:", 1)[1].split(" ", 1)[0]
         self.assertNotIn(" ", apt_uri)
         self.assertNotIn(str(repo), source)

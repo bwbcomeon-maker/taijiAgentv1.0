@@ -636,12 +636,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("file:", install)
         self.assertIn("Dir::Etc::sourcelist", install)
         self.assertIn("install_taiji_package", install)
-        self.assertIn("prepare_offline_apt_repo_source_path", install)
-        self.assertIn("/tmp/taiji-agent-offline-repo.XXXXXX", install)
-        self.assertIn('cp -f "$file" "$OFFLINE_APT_REPO_MOUNT/repo/$(basename "$file")"', install)
-        self.assertIn('chmod 0755 "$OFFLINE_APT_REPO_MOUNT" "$OFFLINE_APT_REPO_MOUNT/repo"', install)
+        self.assertIn("stage_privileged_install_inputs", install)
+        self.assertIn("/var/tmp/taiji-agent-install.XXXXXX", install)
+        self.assertIn('sudo install -m 0644 "$file" "$ROOT_INSTALL_STAGING/repo/$(basename "$file")"', install)
+        self.assertIn('sudo install -d -m 0755 "$ROOT_INSTALL_STAGING/package" "$ROOT_INSTALL_STAGING/repo"', install)
         self.assertIn("OFFLINE_APT_REPO_SOURCE", install)
-        self.assertNotIn('ln -s "$repo_path" "$OFFLINE_APT_REPO_MOUNT/repo"', install)
+        self.assertNotIn('ln -s "$repo_path"', install)
         self.assertNotIn('printf \'deb [trusted=yes] file:%s ./\\n\' "$repo_path"', install)
         self.assertIn("apt-get update", install)
         self.assertIn("dpkg-scanpackages", builder)
@@ -916,18 +916,54 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("ONLINE_OK=1", install)
         self.assertIn("完全离线发布包", install)
 
-    def test_install_script_uses_tmp_apt_lists_for_offline_repo(self):
+    def test_install_script_uses_root_owned_staged_inputs_for_offline_repo(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
-        self.assertIn("/tmp/taiji-agent-apt-lists.XXXXXX", install)
+        self.assertIn('ROOT_INSTALL_STAGING=""', install)
+        self.assertIn('STAGED_DEB_PATH=""', install)
+        self.assertIn('sudo mktemp -d "/var/tmp/taiji-agent-install.XXXXXX"', install)
         self.assertIn("OFFLINE_APT_LISTS_DIR", install)
         self.assertIn("Dir::State::Lists=$lists_dir", install)
-        self.assertIn('[ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages" ]', install)
-        self.assertIn('[ -f "$OFFLINE_APT_REPO_MOUNT/repo/Packages.gz" ]', install)
-        self.assertNotIn('gzip -dc "$repo_path/Packages.gz"', install)
+        self.assertIn('source_file="$ROOT_INSTALL_STAGING/taiji-agent-offline.list"', install)
+        self.assertIn('lists_dir="$ROOT_INSTALL_STAGING/apt-lists"', install)
+        self.assertIn('verify_staged_install_inputs', install)
         self.assertIn("离线 apt 仓库索引更新失败", install)
         self.assertLess(install.index('*"离线 apt 仓库索引"*'), install.index('*"管理员权限"*'))
         self.assertNotIn('lists_dir="$LOG_DIR/apt-lists"', install)
+
+        install_package = install[
+            install.index("install_package() {") : install.index("verify_installation() {")
+        ]
+        self.assertLess(
+            install_package.index("stage_privileged_install_inputs"),
+            install_package.index("prepare_legacy_replacement"),
+        )
+        package_install = install[
+            install.index("install_taiji_package() {") : install.index("install_package() {")
+        ]
+        self.assertIn('"$STAGED_DEB_PATH"', package_install)
+        self.assertNotIn('"$DEB_PATH"', package_install)
+
+        cleanup = install[
+            install.index("cleanup_offline_apt_repo_mount() {") : install.index("require_admin_capability() {")
+        ]
+        self.assertIn('sudo rm -rf -- "$ROOT_INSTALL_STAGING"', cleanup)
+
+    def test_install_script_requires_explicit_headless_rehearsal_mode(self):
+        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
+
+        self.assertIn('TAIJI_ALLOW_HEADLESS_REHEARSAL="${TAIJI_ALLOW_HEADLESS_REHEARSAL:-0}"', install)
+        self.assertIn('TAIJI_ALLOW_HEADLESS_REHEARSAL=1', install)
+        self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", install)
+        self.assertIn("真实模型对话和目标机验证：未验证", install)
+
+        verify = install[
+            install.index("verify_installation() {") : install.index("main() {")
+        ]
+        self.assertLess(
+            verify.index('TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1"'),
+            verify.index("运行安装态诊断"),
+        )
 
     def test_build_report_avoids_tr_pipefail_for_apt_sources(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
