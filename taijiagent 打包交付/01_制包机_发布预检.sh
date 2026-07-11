@@ -162,6 +162,26 @@ check_no_macos_metadata_or_stale_zip() {
   fi
 }
 
+cleanup_payload_verification_root() {
+  local root="$1"
+  case "$root" in
+    /tmp/taiji-payload-verify.*)
+      [ "${root#/tmp/}" = "${root##*/}" ] \
+        || fail "拒绝清理嵌套的 payload 校验路径：$root"
+      ;;
+    *) fail "拒绝清理非专用 payload 校验目录：$root" ;;
+  esac
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] && [ -O "$root" ] \
+      || fail "payload 校验临时路径不是当前用户的实体目录：$root"
+    find "$root" -xdev -type d -exec chmod u+w {} + \
+      || fail "无法恢复 payload 校验临时目录的 owner 写权限：$root"
+    rm -rf -- "$root" || fail "无法清理 payload 校验临时目录：$root"
+  fi
+  [ ! -e "$root" ] && [ ! -L "$root" ] \
+    || fail "payload 校验临时目录清理后仍存在：$root"
+}
+
 verify_assembled_deb_payload() {
   local deb="$1" payload_root status manifest_status
   have dpkg-deb || fail "缺少 dpkg-deb，无法真实解包验证 payload"
@@ -169,7 +189,7 @@ verify_assembled_deb_payload() {
   [ -f "$PAYLOAD_VERIFIER" ] || fail "缺少 payload verifier：$PAYLOAD_VERIFIER"
   payload_root="$(mktemp -d /tmp/taiji-payload-verify.XXXXXX)"
   if ! dpkg-deb -x "$deb" "$payload_root"; then
-    rm -rf "$payload_root"
+    cleanup_payload_verification_root "$payload_root"
     fail "DEB 真实解包失败：$(basename "$deb")"
   fi
   set +e
@@ -223,7 +243,7 @@ for field, path in (
 PY
   manifest_status=$?
   set -e
-  rm -rf "$payload_root"
+  cleanup_payload_verification_root "$payload_root"
   [ "$status" -eq 0 ] || fail "DEB payload contract 验证失败：$(basename "$deb")"
   [ "$manifest_status" -eq 0 ] || fail "DEB 内 Electron/desktop entry 摘要与发布 manifest 不一致：$(basename "$deb")"
   ok "DEB 真实解包 payload contract 验证通过"

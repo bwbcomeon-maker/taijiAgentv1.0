@@ -1883,6 +1883,53 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(root.exists())
 
+    def test_release_preflight_cleanup_handles_readonly_payload_directories(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+        cleanup = preflight[
+            preflight.index("cleanup_payload_verification_root() {") :
+            preflight.index("verify_assembled_deb_payload() {")
+        ]
+        verifier = preflight[
+            preflight.index("verify_assembled_deb_payload() {") :
+            preflight.index("verify_deb_checksum_sidecar() {")
+        ]
+
+        self.assertIn('/tmp/taiji-payload-verify.*', cleanup)
+        self.assertIn('find "$root" -xdev -type d -exec chmod u+w {} +', cleanup)
+        self.assertIn('rm -rf -- "$root"', cleanup)
+        self.assertGreaterEqual(
+            verifier.count('cleanup_payload_verification_root "$payload_root"'),
+            2,
+        )
+        self.assertNotIn('rm -rf "$payload_root"', verifier)
+
+        with tempfile.TemporaryDirectory(prefix="taiji-payload-verify.", dir="/tmp") as temp_dir:
+            root = Path(temp_dir)
+            readonly = root / "opt/taiji-agent/runtime/templates/general-proposal"
+            readonly.mkdir(parents=True)
+            (readonly / "manifest.json").write_text("{}", encoding="utf-8")
+            for directory in [readonly, *readonly.parents]:
+                if directory == root.parent:
+                    break
+                directory.chmod(0o555)
+            shell = "\n".join(
+                [
+                    "set -euo pipefail",
+                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
+                    cleanup,
+                    'cleanup_payload_verification_root "$1"',
+                ]
+            )
+            completed = subprocess.run(
+                ["bash", "-c", shell, "cleanup-test", str(root)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(root.exists())
+
     def test_delivery_release_preflight_is_a_hard_gate(self):
         preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         self.assertTrue(preflight_path.exists())
