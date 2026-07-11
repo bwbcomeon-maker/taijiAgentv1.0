@@ -11,6 +11,7 @@ Covers:
 import asyncio
 import base64
 import json
+import sqlite3
 import threading
 import time as _time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -615,6 +616,89 @@ class TestStartRun:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_managed_api_run_allows_real_compression_child_append(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "compression-api.db")
+        db.create_session("compression-api-parent", "api_server")
+        adapter._session_db = db
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            db.end_session("compression-api-parent", "compression")
+            db.create_session(
+                "compression-api-child",
+                "api_server",
+                parent_session_id="compression-api-parent",
+            )
+            db.append_message("compression-api-child", "assistant", "continued")
+            return {"final_response": "done"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent):
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "compress", "session_id": "compression-api-parent"},
+                )
+                payload = await resp.json()
+                for _ in range(80):
+                    status = await (await cli.get(f"/v1/runs/{payload['run_id']}")).json()
+                    if status["status"] in {"completed", "failed"}:
+                        break
+                    await asyncio.sleep(0.025)
+        assert resp.status == 202
+        assert status["status"] == "completed"
+        assert db.get_messages("compression-api-child")[-1]["content"] == "continued"
+        assert db.get_managed_run_lease("compression-api-parent") is None
+        assert db.get_managed_run_lease("compression-api-child") is None
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_api_run_rejects_precompression_branch_append(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "branch-api.db")
+        db.create_session("branch-api-parent", "api_server")
+        db.create_session(
+            "branch-api-child", "api_server", parent_session_id="branch-api-parent"
+        )
+        adapter._session_db = db
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            db.end_session("branch-api-parent", "compression")
+            db.append_message("branch-api-child", "assistant", "must-not-land")
+            return {"final_response": "unreachable"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent):
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "branch", "session_id": "branch-api-parent"},
+                )
+                payload = await resp.json()
+                for _ in range(80):
+                    status = await (await cli.get(f"/v1/runs/{payload['run_id']}")).json()
+                    if status["status"] in {"completed", "failed"}:
+                        break
+                    await asyncio.sleep(0.025)
+        assert resp.status == 202
+        assert status["status"] == "failed"
+        assert db.get_messages("branch-api-child") == []
+        assert db.get_managed_run_lease("branch-api-parent") is None
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_second_active_run_for_managed_session_returns_409(
         self, adapter, tmp_path
     ):
@@ -646,7 +730,1256 @@ class TestStartRun:
         db.close()
 
     @pytest.mark.asyncio
-    async def test_cancelled_async_wrapper_holds_busy_guard_until_worker_exits(
+    async def test_two_adapters_sharing_state_db_allow_only_one_managed_run(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db_a = SessionDB(db_path=db_path)
+        db_a.create_session("session-shared", "api_server")
+        db_b = SessionDB(db_path=db_path)
+        adapter_a = _make_adapter()
+        adapter_b = _make_adapter()
+        adapter_a._session_db = db_a
+        adapter_b._session_db = db_b
+
+        worker_release = threading.Event()
+        entered_workers = []
+        entered_lock = threading.Lock()
+
+        def _agent_for(label):
+            mock_agent = MagicMock()
+
+            def _run(**kwargs):
+                with entered_lock:
+                    entered_workers.append(label)
+                worker_release.wait(timeout=3.0)
+                return {"final_response": label}
+
+            mock_agent.run_conversation.side_effect = _run
+            mock_agent.session_prompt_tokens = 0
+            mock_agent.session_completion_tokens = 0
+            mock_agent.session_total_tokens = 0
+            return mock_agent
+
+        app_a = _create_runs_app(adapter_a)
+        app_b = _create_runs_app(adapter_b)
+        try:
+            async with (
+                TestClient(TestServer(app_a)) as cli_a,
+                TestClient(TestServer(app_b)) as cli_b,
+            ):
+                with (
+                    patch.object(adapter_a, "_create_agent", return_value=_agent_for("a")),
+                    patch.object(adapter_b, "_create_agent", return_value=_agent_for("b")),
+                ):
+                    response_a, response_b = await asyncio.gather(
+                        cli_a.post(
+                            "/v1/runs",
+                            json={"input": "from a", "session_id": "session-shared"},
+                        ),
+                        cli_b.post(
+                            "/v1/runs",
+                            json={"input": "from b", "session_id": "session-shared"},
+                        ),
+                    )
+                    payload_a, payload_b = await asyncio.gather(
+                        response_a.json(), response_b.json()
+                    )
+                    for _ in range(40):
+                        with entered_lock:
+                            if entered_workers:
+                                break
+                        await asyncio.sleep(0.025)
+        finally:
+            worker_release.set()
+            for _ in range(40):
+                if not adapter_a._active_run_tasks and not adapter_b._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            db_a.close()
+            db_b.close()
+
+        responses = [(response_a.status, payload_a), (response_b.status, payload_b)]
+        assert sorted(status for status, _ in responses) == [202, 409]
+        busy_payload = next(payload for status, payload in responses if status == 409)
+        assert busy_payload["error"]["code"] == "session_busy"
+        assert len(entered_workers) == 1
+
+    @pytest.mark.asyncio
+    async def test_busy_lease_is_checked_before_loading_managed_history(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        owner_db = SessionDB(db_path=db_path)
+        owner_db.create_session("session-history-race", "api_server")
+        owner_db.append_message("session-history-race", "user", "baseline")
+        assert owner_db.acquire_managed_run_lease(
+            "session-history-race",
+            owner_id="old-owner",
+            run_id="old-run",
+            lease_seconds=30.0,
+        ) is True
+        contender_db = SessionDB(db_path=db_path)
+        adapter = _make_adapter()
+        adapter._session_db = contender_db
+        original_history = contender_db.get_messages_as_conversation
+        history_was_loaded = threading.Event()
+
+        def _stale_history_then_old_owner_finishes(session_id):
+            stale = original_history(session_id)
+            history_was_loaded.set()
+            owner_db.append_message(session_id, "assistant", "old run committed")
+            owner_db.release_managed_run_lease(
+                session_id,
+                owner_id="old-owner",
+                run_id="old-run",
+            )
+            return stale
+
+        app = _create_runs_app(adapter)
+        try:
+            with patch.object(
+                contender_db,
+                "get_messages_as_conversation",
+                side_effect=_stale_history_then_old_owner_finishes,
+            ), patch.object(adapter, "_create_agent") as create_agent:
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "contender",
+                            "session_id": "session-history-race",
+                        },
+                    )
+                    payload = await response.json()
+        finally:
+            for _ in range(80):
+                if not adapter._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            owner_db.release_managed_run_lease(
+                "session-history-race",
+                owner_id="old-owner",
+                run_id="old-run",
+            )
+            for lease_db in (contender_db, owner_db):
+                lease = lease_db.get_managed_run_lease("session-history-race")
+                if lease is not None:
+                    lease_db.release_managed_run_lease(
+                        "session-history-race",
+                        owner_id=lease["owner_id"],
+                        run_id=lease["run_id"],
+                    )
+                    break
+            contender_db.close()
+            owner_db.close()
+
+        assert response.status == 409, payload
+        assert payload["error"]["code"] == "session_busy"
+        assert not history_was_loaded.is_set()
+        create_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_history_read_is_covered_by_managed_lease_heartbeat(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db_a = SessionDB(db_path=db_path)
+        db_a.create_session("session-history-heartbeat", "api_server")
+        db_b = SessionDB(db_path=db_path)
+        adapter_a = _make_adapter()
+        adapter_b = _make_adapter()
+        adapter_a._session_db = db_a
+        adapter_b._session_db = db_b
+        adapter_a._MANAGED_RUN_LEASE_SECONDS = 0.12
+        adapter_a._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.02
+        adapter_b._MANAGED_RUN_LEASE_SECONDS = 0.12
+        adapter_b._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.02
+        history_entered = threading.Event()
+        history_release = threading.Event()
+        original_history = db_a.get_messages_as_conversation
+
+        def _blocked_history(session_id):
+            history_entered.set()
+            history_release.wait(timeout=3.0)
+            return original_history(session_id)
+
+        agent_a = MagicMock()
+        agent_a.run_conversation.return_value = {"final_response": "a"}
+        agent_a.session_prompt_tokens = 0
+        agent_a.session_completion_tokens = 0
+        agent_a.session_total_tokens = 0
+        app_a = _create_runs_app(adapter_a)
+        app_b = _create_runs_app(adapter_b)
+
+        try:
+            with patch.object(
+                db_a,
+                "get_messages_as_conversation",
+                side_effect=_blocked_history,
+            ), patch.object(
+                adapter_a, "_create_agent", return_value=agent_a
+            ), patch.object(adapter_b, "_create_agent") as create_agent_b:
+                async with (
+                    TestClient(TestServer(app_a)) as cli_a,
+                    TestClient(TestServer(app_b)) as cli_b,
+                ):
+                    request_a = asyncio.create_task(
+                        cli_a.post(
+                            "/v1/runs",
+                            json={
+                                "input": "a",
+                                "session_id": "session-history-heartbeat",
+                            },
+                        )
+                    )
+                    assert await asyncio.to_thread(
+                        history_entered.wait, 3.0
+                    )
+                    probe_started = asyncio.get_running_loop().time()
+                    await asyncio.sleep(0.05)
+                    probe_delay = asyncio.get_running_loop().time() - probe_started
+                    await asyncio.sleep(0.25)
+                    response_b = await cli_b.post(
+                        "/v1/runs",
+                        json={
+                            "input": "b",
+                            "session_id": "session-history-heartbeat",
+                        },
+                    )
+                    payload_b = await response_b.json()
+                    history_release.set()
+                    response_a = await request_a
+                    payload_a = await response_a.json()
+                    for _ in range(80):
+                        if not adapter_a._active_run_tasks:
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert probe_delay < 0.15
+            assert response_b.status == 409, payload_b
+            assert payload_b["error"]["code"] == "session_busy"
+            create_agent_b.assert_not_called()
+            assert response_a.status == 202, payload_a
+            assert agent_a.run_conversation.called
+        finally:
+            history_release.set()
+            for _ in range(80):
+                if not adapter_a._active_run_tasks and not adapter_b._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            db_a.close()
+            db_b.close()
+
+    @pytest.mark.asyncio
+    async def test_history_takeover_rejects_stale_owner_before_worker_admission(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db_a = SessionDB(db_path=db_path)
+        db_a.create_session("session-history-takeover", "api_server")
+        db_b = SessionDB(db_path=db_path)
+        adapter_a = _make_adapter()
+        adapter_b = _make_adapter()
+        adapter_a._session_db = db_a
+        adapter_b._session_db = db_b
+        adapter_a._MANAGED_RUN_LEASE_SECONDS = 0.10
+        adapter_a._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 1.0
+        adapter_b._MANAGED_RUN_LEASE_SECONDS = 1.0
+        adapter_b._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.05
+        history_entered = threading.Event()
+        history_release = threading.Event()
+        worker_b_started = threading.Event()
+        worker_b_release = threading.Event()
+        original_history = db_a.get_messages_as_conversation
+
+        def _blocked_history(session_id):
+            history_entered.set()
+            history_release.wait(timeout=3.0)
+            return original_history(session_id)
+
+        agent_a = MagicMock()
+        agent_a.run_conversation.return_value = {"final_response": "stale"}
+        agent_a.session_prompt_tokens = 0
+        agent_a.session_completion_tokens = 0
+        agent_a.session_total_tokens = 0
+        agent_b = MagicMock()
+
+        def _run_b(**kwargs):
+            worker_b_started.set()
+            worker_b_release.wait(timeout=3.0)
+            return {"final_response": "current"}
+
+        agent_b.run_conversation.side_effect = _run_b
+        agent_b.session_prompt_tokens = 0
+        agent_b.session_completion_tokens = 0
+        agent_b.session_total_tokens = 0
+        app_a = _create_runs_app(adapter_a)
+        app_b = _create_runs_app(adapter_b)
+
+        try:
+            with patch.object(
+                db_a,
+                "get_messages_as_conversation",
+                side_effect=_blocked_history,
+            ), patch.object(
+                adapter_a, "_create_agent", return_value=agent_a
+            ), patch.object(adapter_b, "_create_agent", return_value=agent_b):
+                async with (
+                    TestClient(TestServer(app_a)) as cli_a,
+                    TestClient(TestServer(app_b)) as cli_b,
+                ):
+                    request_a = asyncio.create_task(
+                        cli_a.post(
+                            "/v1/runs",
+                            json={
+                                "input": "a",
+                                "session_id": "session-history-takeover",
+                            },
+                        )
+                    )
+                    assert await asyncio.to_thread(
+                        history_entered.wait, 3.0
+                    )
+                    await asyncio.sleep(0.15)
+                    response_b = await cli_b.post(
+                        "/v1/runs",
+                        json={
+                            "input": "b",
+                            "session_id": "session-history-takeover",
+                        },
+                    )
+                    payload_b = await response_b.json()
+                    assert response_b.status == 202, payload_b
+                    assert await asyncio.to_thread(
+                        worker_b_started.wait, 3.0
+                    )
+                    history_release.set()
+                    response_a = await request_a
+                    payload_a = await response_a.json()
+                    lease = db_b.get_managed_run_lease(
+                        "session-history-takeover"
+                    )
+
+            assert response_a.status == 409, payload_a
+            assert payload_a["error"]["code"] == "session_lease_lost"
+            agent_a.run_conversation.assert_not_called()
+            assert lease is not None
+            assert lease["run_id"] == payload_b["run_id"]
+            assert adapter_a._managed_session_runs == {}
+            assert adapter_a._run_streams == {}
+            assert adapter_a._run_statuses == {}
+        finally:
+            history_release.set()
+            worker_b_release.set()
+            for _ in range(120):
+                if not adapter_a._active_run_tasks and not adapter_b._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            db_a.close()
+            db_b.close()
+
+    @pytest.mark.asyncio
+    async def test_executor_revalidates_exact_lease_before_agent_call(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db_a = SessionDB(db_path=db_path)
+        db_a.create_session("session-executor-takeover", "api_server")
+        db_b = SessionDB(db_path=db_path)
+        adapter = _make_adapter()
+        adapter._session_db = db_a
+        adapter._MANAGED_RUN_LEASE_SECONDS = 1.0
+        adapter._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 10.0
+        takeover_done = threading.Event()
+        original_heartbeat = db_a.heartbeat_managed_run_lease
+        agent = MagicMock()
+        agent.run_conversation.return_value = {"final_response": "stale"}
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+
+        def _renew_then_take_over(session_id, **kwargs):
+            renewed = original_heartbeat(session_id, **kwargs)
+            if not takeover_done.is_set():
+                assert renewed is True
+                assert db_b.release_managed_run_lease(
+                    session_id,
+                    owner_id=kwargs["owner_id"],
+                    run_id=kwargs["run_id"],
+                ) is True
+                assert db_b.acquire_managed_run_lease(
+                    session_id,
+                    owner_id="owner-b",
+                    run_id="run-b",
+                    lease_seconds=10.0,
+                ) is True
+                takeover_done.set()
+            return renewed
+
+        app = _create_runs_app(adapter)
+        payload = None
+        status_payload = None
+        try:
+            with patch.object(
+                db_a,
+                "heartbeat_managed_run_lease",
+                side_effect=_renew_then_take_over,
+            ), patch.object(adapter, "_create_agent", return_value=agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "a",
+                            "session_id": "session-executor-takeover",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    for _ in range(120):
+                        status_response = await cli.get(
+                            f"/v1/runs/{payload['run_id']}"
+                        )
+                        status_payload = await status_response.json()
+                        if status_payload["status"] in {"completed", "failed"}:
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert takeover_done.is_set()
+            assert status_payload is not None
+            assert status_payload["status"] == "failed"
+            assert "lease lost" in status_payload["error"]
+            agent.run_conversation.assert_not_called()
+            lease = db_b.get_managed_run_lease("session-executor-takeover")
+            assert lease is not None
+            assert lease["owner_id"] == "owner-b"
+            assert lease["run_id"] == "run-b"
+        finally:
+            lease = db_b.get_managed_run_lease("session-executor-takeover")
+            if lease is not None:
+                db_b.release_managed_run_lease(
+                    "session-executor-takeover",
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db_a.close()
+            db_b.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_lease_heartbeat_prevents_takeover_during_long_run(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db_a = SessionDB(db_path=db_path)
+        db_a.create_session("session-heartbeat", "api_server")
+        db_b = SessionDB(db_path=db_path)
+        adapter_a = _make_adapter()
+        adapter_b = _make_adapter()
+        adapter_a._session_db = db_a
+        adapter_b._session_db = db_b
+        adapter_a._MANAGED_RUN_LEASE_SECONDS = 0.3
+        adapter_a._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.05
+        adapter_b._MANAGED_RUN_LEASE_SECONDS = 0.3
+        adapter_b._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.05
+
+        worker_ready = threading.Event()
+        worker_release = threading.Event()
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            worker_ready.set()
+            worker_release.wait(timeout=3.0)
+            return {"final_response": "done"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        app_a = _create_runs_app(adapter_a)
+        app_b = _create_runs_app(adapter_b)
+        try:
+            async with (
+                TestClient(TestServer(app_a)) as cli_a,
+                TestClient(TestServer(app_b)) as cli_b,
+            ):
+                with (
+                    patch.object(adapter_a, "_create_agent", return_value=mock_agent),
+                    patch.object(adapter_b, "_create_agent", return_value=mock_agent),
+                ):
+                    first = await cli_a.post(
+                        "/v1/runs",
+                        json={"input": "first", "session_id": "session-heartbeat"},
+                    )
+                    first_payload = await first.json()
+                    assert first.status == 202, first_payload
+                    assert worker_ready.wait(timeout=3.0)
+                    await asyncio.sleep(0.55)
+
+                    second = await cli_b.post(
+                        "/v1/runs",
+                        json={"input": "second", "session_id": "session-heartbeat"},
+                    )
+                    second_payload = await second.json()
+        finally:
+            worker_release.set()
+            for _ in range(80):
+                if not adapter_a._active_run_tasks and not adapter_b._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            db_a.close()
+            db_b.close()
+
+        assert second.status == 409, second_payload
+        assert second_payload["error"]["code"] == "session_busy"
+
+    @pytest.mark.asyncio
+    async def test_expired_owner_is_fenced_from_late_history_writes(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db_a = SessionDB(db_path=db_path)
+        db_a.create_session("session-fenced", "api_server")
+        db_b = SessionDB(db_path=db_path)
+        adapter_a = _make_adapter()
+        adapter_b = _make_adapter()
+        adapter_a._session_db = db_a
+        adapter_b._session_db = db_b
+        adapter_a._MANAGED_RUN_LEASE_SECONDS = 0.2
+        adapter_a._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.05
+        adapter_b._MANAGED_RUN_LEASE_SECONDS = 0.2
+        adapter_b._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.05
+        heartbeat_entered = threading.Event()
+        heartbeat_continue = threading.Event()
+        a_ready = threading.Event()
+        a_write = threading.Event()
+        original_heartbeat = db_a.heartbeat_managed_run_lease
+
+        def _blocked_heartbeat(*args, **kwargs):
+            if not threading.current_thread().name.startswith(
+                "managed-run-lease-"
+            ):
+                return original_heartbeat(*args, **kwargs)
+            heartbeat_entered.set()
+            heartbeat_continue.wait(timeout=3.0)
+            return original_heartbeat(*args, **kwargs)
+
+        agent_a = MagicMock()
+
+        def _run_a(**kwargs):
+            a_ready.set()
+            a_write.wait(timeout=3.0)
+            db_a.append_message("session-fenced", "user", "a stale question")
+            db_a.append_message("session-fenced", "assistant", "a late answer")
+            return {"final_response": "a late answer"}
+
+        agent_a.run_conversation.side_effect = _run_a
+        agent_a.session_prompt_tokens = 0
+        agent_a.session_completion_tokens = 0
+        agent_a.session_total_tokens = 0
+
+        agent_b = MagicMock()
+
+        def _run_b(**kwargs):
+            db_b.append_message("session-fenced", "user", "b question")
+            db_b.append_message("session-fenced", "assistant", "b answer")
+            return {"final_response": "b answer"}
+
+        agent_b.run_conversation.side_effect = _run_b
+        agent_b.session_prompt_tokens = 0
+        agent_b.session_completion_tokens = 0
+        agent_b.session_total_tokens = 0
+        app_a = _create_runs_app(adapter_a)
+        app_b = _create_runs_app(adapter_b)
+
+        try:
+            with patch.object(
+                db_a,
+                "heartbeat_managed_run_lease",
+                side_effect=_blocked_heartbeat,
+            ), patch.object(
+                adapter_a, "_create_agent", return_value=agent_a
+            ), patch.object(adapter_b, "_create_agent", return_value=agent_b):
+                async with (
+                    TestClient(TestServer(app_a)) as cli_a,
+                    TestClient(TestServer(app_b)) as cli_b,
+                ):
+                    response_a = await cli_a.post(
+                        "/v1/runs",
+                        json={"input": "a", "session_id": "session-fenced"},
+                    )
+                    payload_a = await response_a.json()
+                    assert response_a.status == 202, payload_a
+                    assert a_ready.wait(timeout=3.0)
+                    assert heartbeat_entered.wait(timeout=3.0)
+                    await asyncio.sleep(0.3)
+
+                    response_b = await cli_b.post(
+                        "/v1/runs",
+                        json={"input": "b", "session_id": "session-fenced"},
+                    )
+                    payload_b = await response_b.json()
+                    assert response_b.status == 202, payload_b
+                    for _ in range(120):
+                        status_b = await (
+                            await cli_b.get(f"/v1/runs/{payload_b['run_id']}")
+                        ).json()
+                        if status_b["status"] == "completed":
+                            break
+                        await asyncio.sleep(0.025)
+                    for _ in range(80):
+                        if db_b.get_managed_run_lease("session-fenced") is None:
+                            break
+                        await asyncio.sleep(0.025)
+
+                    a_write.set()
+                    heartbeat_continue.set()
+                    for _ in range(120):
+                        status_a = await (
+                            await cli_a.get(f"/v1/runs/{payload_a['run_id']}")
+                        ).json()
+                        if status_a["status"] in {"failed", "completed"}:
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert status_b["status"] == "completed"
+            assert status_a["status"] == "failed"
+            assert db_b.get_messages_as_conversation("session-fenced") == [
+                {"role": "user", "content": "b question"},
+                {"role": "assistant", "content": "b answer"},
+            ]
+        finally:
+            a_write.set()
+            heartbeat_continue.set()
+            for _ in range(120):
+                if not adapter_a._active_run_tasks and not adapter_b._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            db_a.close()
+            db_b.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_lease_releases_after_terminal_status_and_persisted_turn(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-release-order", "api_server")
+        adapter._session_db = db
+        release_observations = []
+        original_release = db.release_managed_run_lease
+
+        def _recording_release(session_id, *, owner_id, run_id):
+            release_observations.append({
+                "status": adapter._run_statuses.get(run_id, {}).get("status"),
+                "history": db.get_messages_as_conversation(session_id),
+            })
+            return original_release(
+                session_id, owner_id=owner_id, run_id=run_id
+            )
+
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            db.append_message("session-release-order", "user", "question")
+            db.append_message("session-release-order", "assistant", "answer")
+            return {"final_response": "answer"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db, "release_managed_run_lease", side_effect=_recording_release
+            ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "question",
+                            "session_id": "session-release-order",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    for _ in range(80):
+                        if release_observations:
+                            break
+                        await asyncio.sleep(0.025)
+        finally:
+            db.close()
+
+        assert release_observations == [{
+            "status": "completed",
+            "history": [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ],
+        }]
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_worker_commit_keeps_completed_terminal_state(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-commit-cancel-race", "api_server")
+        adapter._session_db = db
+        worker_ready = threading.Event()
+        worker_release = threading.Event()
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            db.append_message("session-commit-cancel-race", "user", "question")
+            db.append_message("session-commit-cancel-race", "assistant", "answer")
+            worker_ready.set()
+            worker_release.wait(timeout=3.0)
+            return {"final_response": "answer"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "question",
+                            "session_id": "session-commit-cancel-race",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    assert worker_ready.wait(timeout=3.0)
+                    task = adapter._active_run_tasks[payload["run_id"]]
+                    worker_release.set()
+                    # Hold the event loop long enough for the executor worker
+                    # to return, then cancel before its Future callback can
+                    # publish the terminal event.
+                    _time.sleep(0.05)
+                    task.cancel()
+                    await task
+                    status_response = await cli.get(
+                        f"/v1/runs/{payload['run_id']}"
+                    )
+                    status_payload = await status_response.json()
+
+            assert status_payload["status"] == "completed"
+            assert status_payload["output"] == "answer"
+            assert db.get_messages_as_conversation(
+                "session-commit-cancel-race"
+            ) == [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ]
+            assert db.get_managed_run_lease("session-commit-cancel-race") is None
+        finally:
+            worker_release.set()
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_lease_acquire_failure_is_503_without_execution(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-db-busy", "api_server")
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db,
+                "acquire_managed_run_lease",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ), patch.object(adapter, "_create_agent") as create_agent:
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={"input": "hello", "session_id": "session-db-busy"},
+                    )
+                    payload = await response.json()
+        finally:
+            db.close()
+
+        assert response.status == 503
+        assert payload["error"]["code"] == "session_lease_unavailable"
+        create_agent.assert_not_called()
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
+    async def test_managed_lease_contention_does_not_block_event_loop(
+        self, adapter, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        db = SessionDB(db_path=db_path)
+        db.create_session("session-loop-responsive", "api_server")
+        adapter._session_db = db
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "done"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+        lock_conn = sqlite3.connect(
+            str(db_path),
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        lock_conn.execute("BEGIN IMMEDIATE")
+
+        def _release_db_lock():
+            _time.sleep(0.3)
+            lock_conn.commit()
+
+        release_thread = threading.Thread(target=_release_db_lock)
+        release_thread.start()
+
+        async def _event_loop_probe():
+            started_at = asyncio.get_running_loop().time()
+            await asyncio.sleep(0.05)
+            return asyncio.get_running_loop().time() - started_at
+
+        try:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    probe_task = asyncio.create_task(_event_loop_probe())
+                    await asyncio.sleep(0)
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-loop-responsive",
+                        },
+                    )
+                    payload = await response.json()
+                    probe_delay = await probe_task
+
+            assert response.status == 202, payload
+            assert probe_delay < 0.15
+        finally:
+            release_thread.join(timeout=2.0)
+            lock_conn.close()
+            for _ in range(80):
+                if not adapter._active_run_tasks:
+                    break
+                await asyncio.sleep(0.025)
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_lease_release_does_not_block_event_loop(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-release-responsive", "api_server")
+        adapter._session_db = db
+        worker_ready = threading.Event()
+        worker_release = threading.Event()
+        original_release = db.release_managed_run_lease
+
+        def _slow_release(*args, **kwargs):
+            _time.sleep(0.3)
+            return original_release(*args, **kwargs)
+
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            worker_ready.set()
+            worker_release.wait(timeout=3.0)
+            return {"final_response": "done"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        async def _event_loop_probe():
+            started_at = asyncio.get_running_loop().time()
+            await asyncio.sleep(0.05)
+            return asyncio.get_running_loop().time() - started_at
+
+        try:
+            with patch.object(
+                db,
+                "release_managed_run_lease",
+                side_effect=_slow_release,
+            ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-release-responsive",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    assert worker_ready.wait(timeout=3.0)
+                    probe_task = asyncio.create_task(_event_loop_probe())
+                    await asyncio.sleep(0)
+                    worker_release.set()
+                    probe_delay = await probe_task
+                    for _ in range(80):
+                        if not adapter._active_run_tasks:
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert probe_delay < 0.15
+        finally:
+            worker_release.set()
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_history_read_failure_releases_admission_lease(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-history-db-failure", "api_server")
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db,
+                "get_messages_as_conversation",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ), patch.object(adapter, "_create_agent") as create_agent:
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-history-db-failure",
+                        },
+                    )
+                    payload = await response.json()
+
+            assert response.status == 503
+            assert payload["error"]["code"] == "session_db_unavailable"
+            create_agent.assert_not_called()
+            assert db.get_managed_run_lease("session-history-db-failure") is None
+            assert adapter._run_streams == {}
+            assert adapter._run_statuses == {}
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_task_creation_failure_releases_lease_without_execution(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-task-create-failure", "api_server")
+        adapter._session_db = db
+        adapter._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.01
+        app = _create_runs_app(adapter)
+        response = None
+        payload = None
+
+        try:
+            with patch(
+                "gateway.platforms.api_server.asyncio.create_task",
+                side_effect=RuntimeError("executor unavailable"),
+            ), patch.object(adapter, "_create_agent") as create_agent:
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-task-create-failure",
+                        },
+                    )
+                    payload = await response.json()
+        finally:
+            lease = db.get_managed_run_lease("session-task-create-failure")
+            if lease is not None:
+                db.release_managed_run_lease(
+                    "session-task-create-failure",
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        assert response is not None
+        assert response.status == 503
+        assert payload["error"]["code"] == "run_executor_unavailable"
+        create_agent.assert_not_called()
+        assert adapter._managed_session_runs == {}
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
+    async def test_managed_lease_heartbeat_failure_interrupts_and_fails_run(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-heartbeat-failure", "api_server")
+        adapter._session_db = db
+        adapter._MANAGED_RUN_LEASE_SECONDS = 0.3
+        adapter._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.05
+        worker_ready = threading.Event()
+        interrupted = threading.Event()
+        original_heartbeat = db.heartbeat_managed_run_lease
+        mock_agent = MagicMock()
+        mock_agent.interrupt.side_effect = lambda message=None: interrupted.set()
+
+        def _fail_background_heartbeat(*args, **kwargs):
+            if not threading.current_thread().name.startswith(
+                "managed-run-lease-"
+            ):
+                return original_heartbeat(*args, **kwargs)
+            raise sqlite3.OperationalError("database is locked")
+
+        def _run(**kwargs):
+            worker_ready.set()
+            interrupted.wait(timeout=3.0)
+            return {"final_response": "must not complete"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db,
+                "heartbeat_managed_run_lease",
+                side_effect=_fail_background_heartbeat,
+            ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-heartbeat-failure",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    assert worker_ready.wait(timeout=3.0)
+                    for _ in range(120):
+                        status_response = await cli.get(
+                            f"/v1/runs/{payload['run_id']}"
+                        )
+                        status_payload = await status_response.json()
+                        if status_payload["status"] == "failed":
+                            break
+                        await asyncio.sleep(0.025)
+                    for _ in range(80):
+                        if db.get_managed_run_lease(
+                            "session-heartbeat-failure"
+                        ) is None:
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert interrupted.is_set()
+            assert status_payload["status"] == "failed"
+            assert "lease lost" in status_payload["error"]
+            assert db.get_managed_run_lease("session-heartbeat-failure") is None
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_terminal_release_does_not_race_inflight_heartbeat(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-heartbeat-release-race", "api_server")
+        adapter._session_db = db
+        adapter._MANAGED_RUN_LEASE_SECONDS = 0.5
+        adapter._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.01
+        heartbeat_entered = threading.Event()
+        heartbeat_continue = threading.Event()
+        original_heartbeat = db.heartbeat_managed_run_lease
+
+        def _blocked_heartbeat(*args, **kwargs):
+            if not threading.current_thread().name.startswith(
+                "managed-run-lease-"
+            ):
+                return original_heartbeat(*args, **kwargs)
+            heartbeat_entered.set()
+            heartbeat_continue.wait(timeout=3.0)
+            return original_heartbeat(*args, **kwargs)
+
+        mock_agent = MagicMock()
+
+        def _run(**kwargs):
+            assert heartbeat_entered.wait(timeout=3.0)
+            return {"final_response": "done"}
+
+        mock_agent.run_conversation.side_effect = _run
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db,
+                "heartbeat_managed_run_lease",
+                side_effect=_blocked_heartbeat,
+            ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-heartbeat-release-race",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    for _ in range(120):
+                        status_response = await cli.get(
+                            f"/v1/runs/{payload['run_id']}"
+                        )
+                        status_payload = await status_response.json()
+                        if status_payload["status"] == "completed":
+                            break
+                        await asyncio.sleep(0.025)
+                    heartbeat_continue.set()
+                    for _ in range(120):
+                        if (
+                            not adapter._active_run_tasks
+                            and db.get_managed_run_lease(
+                                "session-heartbeat-release-race"
+                            ) is None
+                        ):
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert status_payload["status"] == "completed"
+            mock_agent.interrupt.assert_not_called()
+            assert db.get_managed_run_lease(
+                "session-heartbeat-release-race"
+            ) is None
+        finally:
+            heartbeat_continue.set()
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_worker_exception_releases_after_failed_status(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-worker-error", "api_server")
+        adapter._session_db = db
+        release_statuses = []
+        original_release = db.release_managed_run_lease
+
+        def _recording_release(session_id, *, owner_id, run_id):
+            release_statuses.append(
+                adapter._run_statuses.get(run_id, {}).get("status")
+            )
+            return original_release(
+                session_id, owner_id=owner_id, run_id=run_id
+            )
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.side_effect = RuntimeError("worker failed")
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db, "release_managed_run_lease", side_effect=_recording_release
+            ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-worker-error",
+                        },
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    for _ in range(80):
+                        if release_statuses:
+                            break
+                        await asyncio.sleep(0.025)
+
+            assert release_statuses == ["failed"]
+            assert db.get_managed_run_lease("session-worker-error") is None
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_release_db_failure_keeps_durable_guard_fail_closed(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-release-db-failure", "api_server")
+        adapter._session_db = db
+        original_release = db.release_managed_run_lease
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "done"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        app = _create_runs_app(adapter)
+
+        try:
+            with patch.object(
+                db,
+                "release_managed_run_lease",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+                async with TestClient(TestServer(app)) as cli:
+                    first = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "first",
+                            "session_id": "session-release-db-failure",
+                        },
+                    )
+                    first_payload = await first.json()
+                    assert first.status == 202, first_payload
+                    for _ in range(80):
+                        status_response = await cli.get(
+                            f"/v1/runs/{first_payload['run_id']}"
+                        )
+                        status_payload = await status_response.json()
+                        if status_payload["status"] == "completed":
+                            break
+                        await asyncio.sleep(0.025)
+
+                    second = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "second",
+                            "session_id": "session-release-db-failure",
+                        },
+                    )
+                    second_payload = await second.json()
+
+            assert status_payload["status"] == "completed"
+            assert second.status == 409, second_payload
+            assert second_payload["error"]["code"] == "session_busy"
+            assert mock_agent.run_conversation.call_count == 1
+            lease = db.get_managed_run_lease("session-release-db-failure")
+            assert lease is not None
+            assert lease["run_id"] == first_payload["run_id"]
+        finally:
+            lease = db.get_managed_run_lease("session-release-db-failure")
+            if lease is not None:
+                original_release(
+                    "session-release-db-failure",
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_async_wrapper_reconciles_after_worker_exits(
         self, adapter, tmp_path
     ):
         db = SessionDB(db_path=tmp_path / "state.db")
@@ -660,6 +1993,8 @@ class TestStartRun:
         def _slow_run(**kwargs):
             worker_ready.set()
             worker_release.wait(timeout=3.0)
+            db.append_message("session-cancel-race", "user", "first")
+            db.append_message("session-cancel-race", "assistant", "late result")
             return {"final_response": "late result"}
 
         mock_agent.run_conversation.side_effect = _slow_run
@@ -677,19 +2012,30 @@ class TestStartRun:
                 assert worker_ready.wait(timeout=3.0)
                 task = adapter._active_run_tasks[payload["run_id"]]
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                await asyncio.sleep(0.05)
 
                 assert adapter._managed_session_runs.get("session-cancel-race") == payload["run_id"]
+                lease = db.get_managed_run_lease("session-cancel-race")
+                assert lease is not None
+                assert lease["run_id"] == payload["run_id"]
                 worker_release.set()
+                await task
                 for _ in range(40):
-                    if "session-cancel-race" not in adapter._managed_session_runs:
+                    if (
+                        "session-cancel-race" not in adapter._managed_session_runs
+                        and db.get_managed_run_lease("session-cancel-race") is None
+                    ):
                         break
                     await asyncio.sleep(0.025)
 
         assert "session-cancel-race" not in adapter._managed_session_runs
+        assert db.get_managed_run_lease("session-cancel-race") is None
+        assert adapter._run_statuses[payload["run_id"]]["status"] == "cancelled"
+        assert adapter._run_statuses[payload["run_id"]]["output"] == "late result"
+        assert db.get_messages_as_conversation("session-cancel-race") == [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "late result"},
+        ]
         db.close()
 
 

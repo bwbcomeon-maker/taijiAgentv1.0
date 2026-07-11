@@ -8,6 +8,9 @@ history, and model configuration for CLI and gateway sessions.
 
 Key design decisions:
 - WAL mode for concurrent readers + one writer (gateway multi-platform)
+- Renewable managed-run leases use atomic SQLite writes for cross-process
+  per-session exclusion; bound message writes re-check the exact lease inside
+  their transaction, so process-local locks are not an admission authority
 - FTS5 virtual table for fast text search across all session messages
 - Compression-triggered session splitting via parent_session_id chains
 - Batch runner and RL trajectories are NOT stored here (separate systems)
@@ -22,11 +25,12 @@ import sqlite3
 import threading
 import time
 from contextlib import nullcontext
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +74,36 @@ def _state_write_guard():
         factory = _STATE_WRITE_GUARD_FACTORY
     return factory()
 
+class ManagedRunLeaseLostError(RuntimeError):
+    """Raised when a managed run tries to write without its durable lease."""
+
+
+_managed_run_write_lease: ContextVar[Optional[tuple]] = ContextVar(
+    "managed_run_write_lease",
+    default=None,
+)
+
+
+def bind_managed_run_write_lease(
+    session_id: str,
+    *,
+    owner_id: str,
+    run_id: str,
+    lost_event: Optional[threading.Event] = None,
+):
+    """Fence message writes in the current execution context to one lease."""
+    return _managed_run_write_lease.set(
+        (session_id, owner_id, run_id, lost_event)
+    )
+
+
+def reset_managed_run_write_lease(token) -> None:
+    """Restore the previous managed-run write fence context."""
+    _managed_run_write_lease.reset(token)
+
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -315,6 +346,15 @@ CREATE TABLE IF NOT EXISTS messages (
     observed INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS managed_run_leases (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    acquired_at REAL NOT NULL,
+    heartbeat_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -324,6 +364,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_managed_run_leases_expiry ON managed_run_leases(expires_at);
 """
 
 FTS_SQL = """
@@ -426,10 +467,7 @@ class SessionDB:
                 isolation_level=None,
             )
             self._conn.row_factory = sqlite3.Row
-            apply_wal_with_fallback(self._conn, db_label="state.db")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-
-            self._init_schema()
+            self._initialize_connection_with_retry()
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
             # session DB is unavailable instead of a bare "Session database
@@ -445,6 +483,36 @@ class SessionDB:
             # ``hermes_state._set_last_init_error(None)`` explicitly.
             _set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
+
+    def _initialize_connection_with_retry(self) -> None:
+        """Initialize journal mode and schema despite concurrent first opens."""
+        last_err: Optional[sqlite3.OperationalError] = None
+        for attempt in range(self._WRITE_MAX_RETRIES):
+            try:
+                apply_wal_with_fallback(self._conn, db_label="state.db")
+                self._conn.execute("PRAGMA foreign_keys=ON")
+                self._init_schema()
+                return
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                last_err = exc
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                if attempt >= self._WRITE_MAX_RETRIES - 1:
+                    raise
+                time.sleep(
+                    random.uniform(
+                        self._WRITE_RETRY_MIN_S,
+                        self._WRITE_RETRY_MAX_S,
+                    )
+                )
+        raise last_err or sqlite3.OperationalError(
+            "database is locked during schema initialization"
+        )
 
     # ── Core write helper ──
 
@@ -776,6 +844,162 @@ class SessionDB:
     # =========================================================================
     # Session lifecycle
     # =========================================================================
+
+    @staticmethod
+    def _validate_managed_run_lease_args(
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        lease_seconds: float,
+    ) -> None:
+        if not session_id or not owner_id or not run_id:
+            raise ValueError("session_id, owner_id, and run_id are required")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+
+    def acquire_managed_run_lease(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        run_id: str,
+        lease_seconds: float,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Atomically acquire an expired-or-absent managed-run lease.
+
+        The write runs under ``BEGIN IMMEDIATE`` via :meth:`_execute_write`,
+        so adapters and processes sharing this database cannot both win the
+        same session.  A live lease is never overwritten, including by the
+        same owner; callers must heartbeat or release the exact run instead.
+        """
+        self._validate_managed_run_lease_args(
+            session_id, owner_id, run_id, lease_seconds
+        )
+        explicit_now = None if now is None else float(now)
+
+        def _do(conn):
+            lease_session_id = self._managed_run_lease_key(conn, session_id)
+            acquired_at = time.time() if explicit_now is None else explicit_now
+            expires_at = acquired_at + float(lease_seconds)
+            cursor = conn.execute(
+                """INSERT INTO managed_run_leases (
+                       session_id, owner_id, run_id,
+                       acquired_at, heartbeat_at, expires_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                       owner_id = excluded.owner_id,
+                       run_id = excluded.run_id,
+                       acquired_at = excluded.acquired_at,
+                       heartbeat_at = excluded.heartbeat_at,
+                       expires_at = excluded.expires_at
+                   WHERE managed_run_leases.expires_at <= excluded.acquired_at""",
+                (
+                    lease_session_id,
+                    owner_id,
+                    run_id,
+                    acquired_at,
+                    acquired_at,
+                    expires_at,
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return self._execute_write(_do)
+
+    @staticmethod
+    def _managed_run_lease_key(conn, session_id: str) -> str:
+        """Return the root of the legal compression-continuation lineage."""
+        row = conn.execute(
+            """WITH RECURSIVE lineage(id, parent_session_id, started_at, depth) AS (
+                   SELECT id, parent_session_id, started_at, 0 FROM sessions WHERE id = ?
+                   UNION ALL
+                   SELECT parent.id, parent.parent_session_id, parent.started_at, lineage.depth + 1
+                   FROM lineage
+                   JOIN sessions parent ON parent.id = lineage.parent_session_id
+                   WHERE parent.end_reason = 'compression'
+                     AND lineage.started_at >= parent.ended_at
+                     AND lineage.depth < 1000
+               )
+               SELECT id FROM lineage ORDER BY depth DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        return (row["id"] if row is not None and hasattr(row, "keys") else row[0]) if row else session_id
+
+    def get_managed_run_lease_key(self, session_id: str) -> str:
+        with self._lock:
+            return self._managed_run_lease_key(self._conn, session_id)
+
+    def heartbeat_managed_run_lease(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        run_id: str,
+        lease_seconds: float,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Extend a still-live lease owned by the exact owner/run pair."""
+        self._validate_managed_run_lease_args(
+            session_id, owner_id, run_id, lease_seconds
+        )
+        explicit_now = None if now is None else float(now)
+
+        def _do(conn):
+            lease_session_id = self._managed_run_lease_key(conn, session_id)
+            heartbeat_at = time.time() if explicit_now is None else explicit_now
+            expires_at = heartbeat_at + float(lease_seconds)
+            cursor = conn.execute(
+                """UPDATE managed_run_leases
+                   SET heartbeat_at = ?, expires_at = ?
+                   WHERE session_id = ? AND owner_id = ? AND run_id = ?
+                     AND expires_at > ?""",
+                (
+                    heartbeat_at,
+                    expires_at,
+                    lease_session_id,
+                    owner_id,
+                    run_id,
+                    heartbeat_at,
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return self._execute_write(_do)
+
+    def release_managed_run_lease(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        run_id: str,
+    ) -> bool:
+        """Release a lease only when the exact owner/run pair still owns it."""
+        if not session_id or not owner_id or not run_id:
+            raise ValueError("session_id, owner_id, and run_id are required")
+
+        def _do(conn):
+            lease_session_id = self._managed_run_lease_key(conn, session_id)
+            cursor = conn.execute(
+                """DELETE FROM managed_run_leases
+                   WHERE session_id = ? AND owner_id = ? AND run_id = ?""",
+                (lease_session_id, owner_id, run_id),
+            )
+            return cursor.rowcount == 1
+
+        return self._execute_write(_do)
+
+    def get_managed_run_lease(
+        self, session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the current durable lease row for diagnostics and tests."""
+        with self._lock:
+            lease_session_id = self._managed_run_lease_key(self._conn, session_id)
+            row = self._conn.execute(
+                "SELECT * FROM managed_run_leases WHERE session_id = ?",
+                (lease_session_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def _insert_session_row(
         self,
@@ -1579,7 +1803,28 @@ class SessionDB:
         if tool_calls is not None:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
+        write_lease = _managed_run_write_lease.get()
+
         def _do(conn):
+            write_at = time.time()
+            if write_lease is not None:
+                leased_session_id, owner_id, run_id, lost_event = write_lease
+                lease_is_current = False
+                write_lease_session_id = self._managed_run_lease_key(conn, session_id)
+                if write_lease_session_id == leased_session_id:
+                    lease_is_current = conn.execute(
+                        """SELECT 1 FROM managed_run_leases
+                           WHERE session_id = ? AND owner_id = ? AND run_id = ?
+                             AND expires_at > ?""",
+                        (leased_session_id, owner_id, run_id, write_at),
+                    ).fetchone() is not None
+                if not lease_is_current:
+                    if lost_event is not None:
+                        lost_event.set()
+                    raise ManagedRunLeaseLostError(
+                        "managed run no longer owns the session write lease"
+                    )
+
             if platform_message_id:
                 existing = conn.execute(
                     """SELECT id FROM messages
@@ -1588,7 +1833,12 @@ class SessionDB:
                     (session_id, role, platform_message_id),
                 ).fetchone()
                 if existing is not None:
-                    return existing["id"] if isinstance(existing, sqlite3.Row) else existing[0]
+                    return (
+                        existing["id"]
+                        if isinstance(existing, sqlite3.Row)
+                        else existing[0]
+                    )
+
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -1602,7 +1852,7 @@ class SessionDB:
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
-                    time.time(),
+                    write_at,
                     token_count,
                     finish_reason,
                     reasoning,

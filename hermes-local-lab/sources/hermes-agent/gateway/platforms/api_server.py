@@ -29,6 +29,12 @@ authenticating with API_SERVER_KEY.
 
 Requires:
 - aiohttp (already available in the gateway)
+
+Managed ``/v1/runs`` requests (those carrying a session ID) are serialized
+through a renewable SQLite lease in ``state.db``.  The lease is shared across
+adapter instances and processes, and message inserts are transactionally
+fenced by the exact owner/run pair.  Lease database I/O is kept off the aiohttp
+event loop; errors fail closed instead of falling back to process-local admission.
 """
 
 import asyncio
@@ -803,12 +809,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
-        # Process-local exclusion for managed sessions.  The durable,
-        # cross-process lease remains a separate hardening slice; this map
-        # prevents two runs accepted by this adapter instance from interleaving
-        # reads and writes against the same state.db transcript.
+        # Process-local mirror for managed-session run lifecycle and tests.
+        # Cross-adapter/process exclusion is enforced by the state.db lease;
+        # this map must never be used as the authoritative admission gate.
         self._managed_session_runs: Dict[str, str] = {}
         self._managed_session_runs_lock = threading.Lock()
+        self._managed_run_lease_owner_id = f"{os.getpid()}:{uuid.uuid4().hex}"
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -3672,6 +3678,8 @@ class APIServerAdapter(BasePlatformAdapter):
     _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
+    _MANAGED_RUN_LEASE_SECONDS = 30.0
+    _MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 5.0
 
     @staticmethod
     def _managed_history_projection(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3977,6 +3985,96 @@ class APIServerAdapter(BasePlatformAdapter):
 
         requested_session_id = header_session_id or body_session_id or stored_session_id or ""
         managed_session = bool(requested_session_id)
+        run_id = f"run_{uuid.uuid4().hex}"
+        session_id = requested_session_id or run_id
+        managed_lease_session_id = session_id
+        managed_session_db = None
+
+        worker_started = threading.Event()
+        worker_exited = threading.Event()
+        worker_abandoned = threading.Event()
+        lease_heartbeat_stop = threading.Event()
+        lease_lost = threading.Event()
+        lease_release_started = threading.Event()
+        lease_release_lock = threading.Lock()
+        run_agent_ref: List[Optional[Any]] = [None]
+        worker_outcome: List[tuple] = []
+        worker_exception: List[BaseException] = []
+
+        def _release_managed_lease() -> None:
+            if not managed_session or managed_session_db is None:
+                return
+            with lease_release_lock:
+                if lease_release_started.is_set():
+                    return
+                lease_release_started.set()
+            lease_heartbeat_stop.set()
+            try:
+                managed_session_db.release_managed_run_lease(
+                    managed_lease_session_id,
+                    owner_id=self._managed_run_lease_owner_id,
+                    run_id=run_id,
+                )
+            except Exception as exc:
+                # Fail closed: a release failure leaves the durable lease in
+                # place until expiry instead of admitting a duplicate turn.
+                logger.error(
+                    "[api_server] failed to release managed run lease %s/%s: %s",
+                    session_id,
+                    run_id,
+                    exc,
+                )
+            finally:
+                with self._managed_session_runs_lock:
+                    if self._managed_session_runs.get(managed_lease_session_id) == run_id:
+                        self._managed_session_runs.pop(managed_lease_session_id, None)
+
+        def _mark_managed_lease_lost(reason: str) -> None:
+            if lease_lost.is_set():
+                return
+            lease_lost.set()
+            logger.error(
+                "[api_server] managed run lease lost for %s/%s: %s",
+                session_id,
+                run_id,
+                reason,
+            )
+            agent = run_agent_ref[0]
+            if agent is not None:
+                try:
+                    agent.interrupt("Managed session lease lost; stopping run")
+                except Exception:
+                    pass
+
+        def _managed_lease_heartbeat_loop() -> None:
+            if not managed_session or managed_session_db is None:
+                return
+            interval = float(self._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS)
+            while not lease_heartbeat_stop.wait(interval):
+                if lease_heartbeat_stop.is_set():
+                    return
+                try:
+                    renewed = managed_session_db.heartbeat_managed_run_lease(
+                        managed_lease_session_id,
+                        owner_id=self._managed_run_lease_owner_id,
+                        run_id=run_id,
+                        lease_seconds=self._MANAGED_RUN_LEASE_SECONDS,
+                    )
+                except Exception as exc:
+                    _mark_managed_lease_lost(
+                        f"heartbeat unavailable: {type(exc).__name__}: {exc}"
+                    )
+                    return
+                # Release sets the stop flag before deleting the row.  An
+                # already in-flight heartbeat may therefore observe rowcount
+                # zero after a legitimate terminal release; that is shutdown,
+                # not ownership loss, and must not interrupt a completed run.
+                if lease_heartbeat_stop.is_set():
+                    return
+                if not renewed:
+                    _mark_managed_lease_lost("lease no longer owned by this run")
+                    return
+
         if managed_session:
             db = self._ensure_session_db()
             if db is None:
@@ -3987,28 +4085,36 @@ class APIServerAdapter(BasePlatformAdapter):
                     ),
                     status=503,
                 )
-            if db.get_session(requested_session_id) is None:
+            if await asyncio.to_thread(db.get_session, requested_session_id) is None:
                 return web.json_response(
                     _openai_error("Session not found", code="session_not_found"),
                     status=404,
                 )
-            stored_history = db.get_messages_as_conversation(requested_session_id)
-            explicit_history_provided = raw_history_provided or bool(input_history)
-            if explicit_history_provided and not self._managed_history_matches(
-                conversation_history,
-                stored_history,
-            ):
+            managed_lease_session_id = await asyncio.to_thread(
+                db.get_managed_run_lease_key, requested_session_id
+            )
+            try:
+                managed_lease_acquired = await asyncio.to_thread(
+                    db.acquire_managed_run_lease,
+                    managed_lease_session_id,
+                    owner_id=self._managed_run_lease_owner_id,
+                    run_id=run_id,
+                    lease_seconds=self._MANAGED_RUN_LEASE_SECONDS,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[api_server] managed run lease unavailable for session %s: %s",
+                    requested_session_id,
+                    exc,
+                )
                 return web.json_response(
                     _openai_error(
-                        "Submitted history conflicts with managed session history",
-                        code="session_history_conflict",
+                        "Session lease unavailable",
+                        code="session_lease_unavailable",
                     ),
-                    status=409,
+                    status=503,
                 )
-            conversation_history = stored_history
-            with self._managed_session_runs_lock:
-                session_busy = requested_session_id in self._managed_session_runs
-            if session_busy:
+            if not managed_lease_acquired:
                 return web.json_response(
                     _openai_error(
                         "Session already has an active run",
@@ -4017,11 +4123,109 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=409,
                 )
 
-        run_id = f"run_{uuid.uuid4().hex}"
-        session_id = requested_session_id or run_id
+            managed_session_db = db
+            try:
+                threading.Thread(
+                    target=_managed_lease_heartbeat_loop,
+                    name=f"managed-run-lease-{run_id[-8:]}",
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                logger.error(
+                    "[api_server] failed to start managed lease heartbeat: %s",
+                    exc,
+                )
+                worker_abandoned.set()
+                await asyncio.to_thread(_release_managed_lease)
+                return web.json_response(
+                    _openai_error(
+                        "Session lease unavailable",
+                        code="session_lease_unavailable",
+                    ),
+                    status=503,
+                )
+
+            # Read the authoritative transcript only after acquiring the
+            # session.  Reading first lets a previous owner commit and release
+            # in the gap, causing this run to execute with stale history.
+            try:
+                stored_history = await asyncio.to_thread(
+                    db.get_messages_as_conversation,
+                    requested_session_id,
+                )
+            except asyncio.CancelledError:
+                await asyncio.to_thread(_release_managed_lease)
+                raise
+            except Exception as exc:
+                await asyncio.to_thread(_release_managed_lease)
+                logger.error(
+                    "[api_server] managed history unavailable for session %s: %s",
+                    requested_session_id,
+                    exc,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Session database unavailable",
+                        code="session_db_unavailable",
+                    ),
+                    status=503,
+                )
+
+            explicit_history_provided = raw_history_provided or bool(input_history)
+            if explicit_history_provided and not self._managed_history_matches(
+                conversation_history,
+                stored_history,
+            ):
+                await asyncio.to_thread(_release_managed_lease)
+                return web.json_response(
+                    _openai_error(
+                        "Submitted history conflicts with managed session history",
+                        code="session_history_conflict",
+                    ),
+                    status=409,
+                )
+
+            try:
+                admission_lease_renewed = await asyncio.to_thread(
+                    db.heartbeat_managed_run_lease,
+                    managed_lease_session_id,
+                    owner_id=self._managed_run_lease_owner_id,
+                    run_id=run_id,
+                    lease_seconds=self._MANAGED_RUN_LEASE_SECONDS,
+                )
+            except asyncio.CancelledError:
+                await asyncio.to_thread(_release_managed_lease)
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[api_server] managed lease admission check unavailable for %s/%s: %s",
+                    requested_session_id,
+                    run_id,
+                    exc,
+                )
+                await asyncio.to_thread(_release_managed_lease)
+                return web.json_response(
+                    _openai_error(
+                        "Session lease unavailable",
+                        code="session_lease_unavailable",
+                    ),
+                    status=503,
+                )
+            if lease_lost.is_set() or not admission_lease_renewed:
+                _mark_managed_lease_lost("lease lost before worker admission")
+                await asyncio.to_thread(_release_managed_lease)
+                return web.json_response(
+                    _openai_error(
+                        "Session lease lost before run start",
+                        code="session_lease_lost",
+                    ),
+                    status=409,
+                )
+            conversation_history = stored_history
+
         if managed_session:
             with self._managed_session_runs_lock:
-                self._managed_session_runs[session_id] = run_id
+                self._managed_session_runs[managed_lease_session_id] = run_id
         approval_session_key = gateway_session_key or session_id or run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
@@ -4056,7 +4260,104 @@ class APIServerAdapter(BasePlatformAdapter):
             model=body.get("model", self._model_name),
         )
 
-        worker_started = threading.Event()
+        def _publish_worker_outcome(result: Any, usage: Dict[str, Any]) -> None:
+            if isinstance(result, dict) and result.get("failed"):
+                error_msg = result.get("error") or "agent run failed"
+                error_payload = {
+                    "message": str(error_msg),
+                    "code": str(
+                        result.get("error_code")
+                        or result.get("code")
+                        or "run_failed"
+                    ),
+                }
+                q.put_nowait({
+                    "event": "run.failed",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "error": error_payload,
+                })
+                self._set_run_status(
+                    run_id,
+                    "failed",
+                    error=error_msg,
+                    last_event="run.failed",
+                )
+                return
+
+            final_response = (
+                result.get("final_response", "") if isinstance(result, dict) else ""
+            )
+            q.put_nowait({
+                "event": "run.completed",
+                "run_id": run_id,
+                "timestamp": time.time(),
+                "output": final_response,
+                "usage": usage,
+            })
+            self._set_run_status(
+                run_id,
+                "completed",
+                output=final_response,
+                usage=usage,
+                last_event="run.completed",
+            )
+
+        def _publish_worker_exception(exc: BaseException) -> None:
+            self._set_run_status(
+                run_id,
+                "failed",
+                error=str(exc),
+                last_event="run.failed",
+            )
+            try:
+                q.put_nowait({
+                    "event": "run.failed",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "error": str(exc),
+                })
+            except Exception:
+                pass
+
+        def _publish_cancelled_after_worker(
+            result: Any = None,
+            usage: Optional[Dict[str, Any]] = None,
+            exc: Optional[BaseException] = None,
+            *,
+            worker_completed: bool = False,
+        ) -> None:
+            event: Dict[str, Any] = {
+                "event": "run.cancelled",
+                "run_id": run_id,
+                "timestamp": time.time(),
+            }
+            status_fields: Dict[str, Any] = {
+                "last_event": "run.cancelled",
+            }
+            if worker_completed:
+                event["worker_completed_after_cancel"] = True
+                status_fields["worker_completed_after_cancel"] = True
+            if isinstance(result, dict):
+                if result.get("failed"):
+                    error_msg = result.get("error") or "agent run failed"
+                    event["error"] = str(error_msg)
+                    status_fields["error"] = str(error_msg)
+                else:
+                    output = result.get("final_response", "")
+                    event["output"] = output
+                    status_fields["output"] = output
+            if usage is not None:
+                event["usage"] = usage
+                status_fields["usage"] = usage
+            if exc is not None:
+                event["error"] = str(exc)
+                status_fields["error"] = str(exc)
+            try:
+                q.put_nowait(event)
+            except Exception:
+                pass
+            self._set_run_status(run_id, "cancelled", **status_fields)
 
         async def _run_and_close():
             try:
@@ -4071,6 +4372,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                 )
                 self._active_run_agents[run_id] = agent
+                run_agent_ref[0] = agent
 
                 def _approval_notify(approval_data: Dict[str, Any]) -> None:
                     event = dict(approval_data or {})
@@ -4092,6 +4394,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
                 def _run_sync_inner():
                     from gateway.session_context import clear_session_vars, set_session_vars
+                    from hermes_state import (
+                        bind_managed_run_write_lease,
+                        reset_managed_run_write_lease,
+                    )
                     from tools.approval import (
                         register_gateway_notify,
                         reset_current_session_key,
@@ -4101,6 +4407,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
                     effective_task_id = session_id or run_id
                     approval_token = None
+                    write_lease_token = None
                     session_tokens = []
                     try:
                         # Bind approval/session identity for this API run via
@@ -4111,6 +4418,13 @@ class APIServerAdapter(BasePlatformAdapter):
                             platform="api_server",
                             session_key=approval_session_key,
                         )
+                        if managed_session:
+                            write_lease_token = bind_managed_run_write_lease(
+                                managed_lease_session_id,
+                                owner_id=self._managed_run_lease_owner_id,
+                                run_id=run_id,
+                                lost_event=lease_lost,
+                            )
                         register_gateway_notify(approval_session_key, _approval_notify)
                         conversation_kwargs = {
                             "user_message": user_message,
@@ -4131,6 +4445,11 @@ class APIServerAdapter(BasePlatformAdapter):
                                     reset_current_session_key(approval_token)
                                 except Exception:
                                     pass
+                            if write_lease_token is not None:
+                                try:
+                                    reset_managed_run_write_lease(write_lease_token)
+                                except Exception:
+                                    pass
                             if session_tokens:
                                 try:
                                     clear_session_vars(session_tokens)
@@ -4144,108 +4463,163 @@ class APIServerAdapter(BasePlatformAdapter):
                     return r, u
 
                 def _run_sync():
-                    if managed_session:
-                        # Claim worker ownership under the same lock used by
-                        # cancellation cleanup.  If the asyncio wrapper was
-                        # cancelled before this executor job began, do not run
-                        # a detached agent turn after the guard was released.
-                        with self._managed_session_runs_lock:
-                            if self._managed_session_runs.get(session_id) != run_id:
-                                return ({
-                                    "failed": True,
-                                    "error": "run cancelled before worker start",
-                                    "error_code": "run_cancelled",
-                                }, {
-                                    "input_tokens": 0,
-                                    "output_tokens": 0,
-                                    "total_tokens": 0,
-                                })
-                            worker_started.set()
+                    cancelled_before_start = (
+                        {
+                            "failed": True,
+                            "error": "run cancelled before worker start",
+                            "error_code": "run_cancelled",
+                        },
+                        {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                    )
+
+                    def _record_outcome(outcome: tuple) -> tuple:
+                        worker_outcome[:] = [outcome]
+                        return outcome
+
                     try:
-                        return _run_sync_inner()
+                        if managed_session:
+                            # Check the process-local cancellation marker before
+                            # touching SQLite, then renew the exact durable
+                            # owner/run pair at the final executor boundary.
+                            # The HTTP admission check can be arbitrarily far
+                            # behind a queued worker and is not sufficient here.
+                            with self._managed_session_runs_lock:
+                                if (
+                                    worker_abandoned.is_set()
+                                    or self._managed_session_runs.get(managed_lease_session_id) != run_id
+                                ):
+                                    return _record_outcome(cancelled_before_start)
+
+                            try:
+                                worker_lease_renewed = (
+                                    managed_session_db is not None
+                                    and managed_session_db.heartbeat_managed_run_lease(
+                                        managed_lease_session_id,
+                                        owner_id=self._managed_run_lease_owner_id,
+                                        run_id=run_id,
+                                        lease_seconds=self._MANAGED_RUN_LEASE_SECONDS,
+                                    )
+                                )
+                            except Exception as exc:
+                                _mark_managed_lease_lost(
+                                    "worker admission heartbeat unavailable: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                                worker_lease_renewed = False
+
+                            # Cancellation can win while the durable renewal is
+                            # blocked.  Re-check under the process-local lock
+                            # before claiming worker execution.
+                            with self._managed_session_runs_lock:
+                                if (
+                                    worker_abandoned.is_set()
+                                    or self._managed_session_runs.get(managed_lease_session_id) != run_id
+                                ):
+                                    return _record_outcome(cancelled_before_start)
+                                if worker_lease_renewed and not lease_lost.is_set():
+                                    worker_started.set()
+
+                            if not worker_lease_renewed or lease_lost.is_set():
+                                _mark_managed_lease_lost(
+                                    "lease lost before executor worker start"
+                                )
+                                return _record_outcome(
+                                    (
+                                        {
+                                            "failed": True,
+                                            "error": "managed session lease lost before worker start",
+                                            "error_code": "session_lease_lost",
+                                        },
+                                        cancelled_before_start[1],
+                                    )
+                                )
+
+                        result_and_usage = _run_sync_inner()
+                        if managed_session and lease_lost.is_set():
+                            return _record_outcome(
+                                (
+                                    {
+                                        "failed": True,
+                                        "error": "managed session lease lost during run",
+                                        "error_code": "session_lease_lost",
+                                    },
+                                    result_and_usage[1],
+                                )
+                            )
+                        return _record_outcome(result_and_usage)
+                    except BaseException as exc:
+                        worker_exception[:] = [exc]
+                        raise
                     finally:
                         if managed_session:
-                            # The executor thread, not its cancellable asyncio
-                            # wrapper, owns release.  This prevents a stopped
-                            # run from overlapping a still-unwinding worker.
-                            with self._managed_session_runs_lock:
-                                if self._managed_session_runs.get(session_id) == run_id:
-                                    self._managed_session_runs.pop(session_id, None)
+                            # Mark the executor boundary.  The async wrapper
+                            # publishes the terminal event/status before it
+                            # releases the durable lease in its ``finally``.
+                            worker_exited.set()
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
-                # Check for structured failure (non-retryable client errors like
-                # 401/400 return failed=True instead of raising, so the except
-                # block below never fires — issue #15561).
-                if isinstance(result, dict) and result.get("failed"):
-                    error_msg = result.get("error") or "agent run failed"
-                    error_payload = {
-                        "message": str(error_msg),
-                        "code": str(
-                            result.get("error_code")
-                            or result.get("code")
-                            or "run_failed"
-                        ),
-                    }
-                    q.put_nowait({
-                        "event": "run.failed",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                        "error": error_payload,
-                    })
-                    self._set_run_status(
-                        run_id,
-                        "failed",
-                        error=error_msg,
-                        last_event="run.failed",
+                # Structured client failures (401/400) return ``failed=True``
+                # instead of raising; the shared publisher handles both those
+                # and successful results (issue #15561).
+                _publish_worker_outcome(result, usage)
+            except asyncio.CancelledError:
+                # Cancellation can race with an executor turn that has already
+                # returned and persisted its messages.  In that case the
+                # durable turn wins: publish its terminal outcome instead of a
+                # contradictory cancelled event.
+                if worker_exited.is_set() and worker_outcome:
+                    _publish_worker_outcome(*worker_outcome[0])
+                    return
+                if worker_exited.is_set() and worker_exception:
+                    _publish_worker_exception(worker_exception[0])
+                    return
+
+                with self._managed_session_runs_lock:
+                    if managed_session and not worker_started.is_set():
+                        worker_abandoned.set()
+                if not managed_session or worker_abandoned.is_set():
+                    _publish_cancelled_after_worker()
+                    return
+
+                # The executor cannot be preempted by Task.cancel().  Keep the
+                # wrapper, heartbeat, and durable lease alive until the worker
+                # actually exits; otherwise a terminal cancelled event can be
+                # followed by a late history write from the same run.
+                self._set_run_status(
+                    run_id,
+                    "stopping",
+                    last_event="run.stopping",
+                )
+                while not worker_exited.is_set():
+                    try:
+                        await asyncio.sleep(0.025)
+                    except asyncio.CancelledError:
+                        # Repeated stop/shutdown cancellation does not widen
+                        # the admission window while the worker still writes.
+                        continue
+
+                if worker_outcome:
+                    result, usage = worker_outcome[0]
+                    _publish_cancelled_after_worker(
+                        result,
+                        usage,
+                        worker_completed=True,
+                    )
+                elif worker_exception:
+                    _publish_cancelled_after_worker(
+                        exc=worker_exception[0],
+                        worker_completed=True,
                     )
                 else:
-                    final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                    q.put_nowait({
-                        "event": "run.completed",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                        "output": final_response,
-                        "usage": usage,
-                    })
-                    self._set_run_status(
-                        run_id,
-                        "completed",
-                        output=final_response,
-                        usage=usage,
-                        last_event="run.completed",
-                    )
-            except asyncio.CancelledError:
-                self._set_run_status(
-                    run_id,
-                    "cancelled",
-                    last_event="run.cancelled",
-                )
-                try:
-                    q.put_nowait({
-                        "event": "run.cancelled",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                    })
-                except Exception:
-                    pass
-                raise
+                    _publish_cancelled_after_worker(worker_completed=True)
+                return
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
-                self._set_run_status(
-                    run_id,
-                    "failed",
-                    error=str(exc),
-                    last_event="run.failed",
-                )
-                try:
-                    q.put_nowait({
-                        "event": "run.failed",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                        "error": str(exc),
-                    })
-                except Exception:
-                    pass
+                _publish_worker_exception(exc)
             finally:
                 # If the asyncio wrapper is cancelled (for example via
                 # /stop), the executor thread can still be blocked waiting
@@ -4267,17 +4641,39 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
                 if managed_session:
-                    # Covers failures/cancellation before the executor worker
-                    # started.  The lock makes this race-safe with the worker's
-                    # ownership claim above.
+                    # Publish/cleanup the wrapper boundary before releasing.
+                    # If cancellation won before the executor claimed the
+                    # run, mark it abandoned under the same lock used by the
+                    # worker's claim so a queued job cannot execute later.
                     with self._managed_session_runs_lock:
-                        if (
-                            not worker_started.is_set()
-                            and self._managed_session_runs.get(session_id) == run_id
-                        ):
-                            self._managed_session_runs.pop(session_id, None)
+                        if not worker_started.is_set():
+                            worker_abandoned.set()
+                    if worker_exited.is_set() or worker_abandoned.is_set():
+                        await asyncio.to_thread(_release_managed_lease)
 
-        task = asyncio.create_task(_run_and_close())
+        run_coroutine = _run_and_close()
+        try:
+            task = asyncio.create_task(run_coroutine)
+        except Exception as exc:
+            run_coroutine.close()
+            logger.error(
+                "[api_server] failed to create run task %s: %s",
+                run_id,
+                exc,
+            )
+            worker_abandoned.set()
+            await asyncio.to_thread(_release_managed_lease)
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+            self._run_approval_sessions.pop(run_id, None)
+            self._run_statuses.pop(run_id, None)
+            return web.json_response(
+                _openai_error(
+                    "Run executor unavailable",
+                    code="run_executor_unavailable",
+                ),
+                status=503,
+            )
         self._active_run_tasks[run_id] = task
         try:
             self._background_tasks.add(task)
@@ -4288,11 +4684,14 @@ class APIServerAdapter(BasePlatformAdapter):
             if managed_session:
                 def _release_cancelled_before_first_step(_task: "asyncio.Task") -> None:
                     with self._managed_session_runs_lock:
-                        if (
-                            not worker_started.is_set()
-                            and self._managed_session_runs.get(session_id) == run_id
-                        ):
-                            self._managed_session_runs.pop(session_id, None)
+                        if not worker_started.is_set():
+                            worker_abandoned.set()
+                    if worker_abandoned.is_set():
+                        threading.Thread(
+                            target=_release_managed_lease,
+                            name=f"managed-run-release-{run_id[-8:]}",
+                            daemon=True,
+                        ).start()
 
                 task.add_done_callback(_release_cancelled_before_first_step)
 
