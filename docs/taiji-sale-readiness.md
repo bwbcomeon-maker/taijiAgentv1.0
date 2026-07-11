@@ -33,17 +33,40 @@
 bash scripts/taiji-release-check.sh
 ```
 
+离线生命周期演练证据目录默认是：
+
+```text
+taijiagent 打包交付/offline-install-rehearsal/offline-install-rehearsal.json
+```
+
 目标机证据目录默认是：
 
 ```text
 taijiagent 打包交付/target-verification/target-verification.json
 ```
 
-也可以通过环境变量指定：
+也可以分别通过环境变量指定：
 
 ```bash
-TAIJI_TARGET_VERIFICATION_DIR=/path/to/target-verification bash scripts/taiji-release-check.sh
+TAIJI_OFFLINE_REHEARSAL_DIR=/path/to/offline-install-rehearsal \
+TAIJI_TARGET_VERIFICATION_DIR=/path/to/target-verification \
+bash scripts/taiji-release-check.sh
 ```
+
+`offline-install-rehearsal.json` 必须由断网的 Linux amd64 环境生成，且 install → purge/uninstall → reinstall 三段都实际成功。它只能记录为离线安装演练，不能冒充桌面目标机验收：
+
+```json
+{
+  "platform": "linux/amd64",
+  "network": "none",
+  "install": true,
+  "uninstall": true,
+  "reinstall": true,
+  "target_verified": false
+}
+```
+
+只有在容器/VM/chroot 使用 `--network none` 或等价断网策略、并且只读取本地交付目录时，才可生成该证据。该文件不是 `target-verification.json`，也不能把 `target_verified` 写成 `true`。
 
 `target-verification.json` 至少需要包含：
 

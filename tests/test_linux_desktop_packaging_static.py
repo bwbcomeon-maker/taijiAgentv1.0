@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -259,6 +260,91 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("target-verification.json", release_check)
         self.assertIn("目标机已验证", docs)
         self.assertIn("x86_64/amd64", docs)
+
+    def _run_offline_rehearsal_gate(self, payload):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            evidence_dir = tmp_path / "offline-install-rehearsal"
+            evidence_dir.mkdir()
+            if payload is not None:
+                evidence = evidence_dir / "offline-install-rehearsal.json"
+                if isinstance(payload, str):
+                    evidence.write_text(payload, encoding="utf-8")
+                else:
+                    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+            source = read_text("scripts/taiji-release-check.sh")
+            source = source.rsplit('\nmain "$@"', 1)[0] + "\n"
+            import_script = tmp_path / "release-check-import.sh"
+            import_script.write_text(source, encoding="utf-8")
+            harness = tmp_path / "run-offline-rehearsal-gate.sh"
+            harness.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env bash",
+                        "set -euo pipefail",
+                        f'export TAIJI_OFFLINE_REHEARSAL_DIR="{evidence_dir}"',
+                        f'source "{import_script}"',
+                        "check_offline_install_rehearsal",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return subprocess.run(
+                ["bash", str(harness)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+    def test_release_check_requires_valid_offline_lifecycle_evidence(self):
+        valid = {
+            "platform": "linux/amd64",
+            "network": "none",
+            "install": True,
+            "uninstall": True,
+            "reinstall": True,
+            "target_verified": False,
+        }
+        invalid_cases = (
+            ("missing", None),
+            ("malformed", "{not-json\n"),
+            ("wrong_platform", {**valid, "platform": "linux/arm64"}),
+            ("online", {**valid, "network": "bridge"}),
+            ("missing_install", {**valid, "install": False}),
+            ("missing_uninstall", {**valid, "uninstall": False}),
+            ("missing_reinstall", {**valid, "reinstall": False}),
+            ("claims_target", {**valid, "target_verified": True}),
+            ("string_boolean", {**valid, "install": "true"}),
+        )
+
+        for label, payload in invalid_cases:
+            with self.subTest(label=label):
+                result = self._run_offline_rehearsal_gate(payload)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        accepted = self._run_offline_rehearsal_gate(valid)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertIn("离线生命周期演练证据有效", accepted.stdout + accepted.stderr)
+
+    def test_release_check_runs_offline_rehearsal_gate_before_target_gate(self):
+        release_check = read_text("scripts/taiji-release-check.sh")
+        docs = read_text("docs/taiji-sale-readiness.md")
+
+        self.assertIn("TAIJI_OFFLINE_REHEARSAL_DIR", release_check)
+        self.assertIn("offline-install-rehearsal.json", release_check)
+        self.assertIn("check_offline_install_rehearsal", release_check)
+        self.assertIn("python3", release_check)
+        main = release_check[release_check.index("main() {") :]
+        self.assertLess(
+            main.index("check_offline_install_rehearsal"),
+            main.index("check_target_verification"),
+        )
+        self.assertIn("TAIJI_OFFLINE_REHEARSAL_DIR", docs)
+        self.assertIn('"network": "none"', docs)
+        self.assertIn('"target_verified": false', docs)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")

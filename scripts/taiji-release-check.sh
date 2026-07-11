@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-agent"
 WEBUI_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-webui"
 DELIVERY_DIR="$ROOT_DIR/taijiagent 打包交付"
+OFFLINE_REHEARSAL_DIR="${TAIJI_OFFLINE_REHEARSAL_DIR:-$DELIVERY_DIR/offline-install-rehearsal}"
 TARGET_EVIDENCE_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$DELIVERY_DIR/target-verification}"
 
 failures=0
@@ -94,6 +95,67 @@ check_delivery_artifacts() {
   [ -f "$DELIVERY_DIR/构建报告.txt" ] || { fail "缺少 构建报告.txt"; return 1; }
 }
 
+check_offline_install_rehearsal() {
+  local evidence="$OFFLINE_REHEARSAL_DIR/offline-install-rehearsal.json"
+  [ -f "$evidence" ] || {
+    fail "离线安装已演练：未实时验证。缺少 $evidence"
+    return 1
+  }
+
+  if ! python3 - "$evidence" <<'PY'
+import json
+import sys
+
+
+def object_without_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle, object_pairs_hook=object_without_duplicate_keys)
+except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+    print(f"offline-install-rehearsal.json 无法解析: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if type(data) is not dict:
+    print("offline-install-rehearsal.json 顶层必须是 JSON object", file=sys.stderr)
+    raise SystemExit(1)
+
+expected_strings = {
+    "platform": "linux/amd64",
+    "network": "none",
+}
+expected_booleans = {
+    "install": True,
+    "uninstall": True,
+    "reinstall": True,
+    "target_verified": False,
+}
+for key, expected in expected_strings.items():
+    value = data.get(key)
+    if type(value) is not str or value != expected:
+        print(f"offline-install-rehearsal.json 要求 {key}={expected!r}", file=sys.stderr)
+        raise SystemExit(1)
+for key, expected in expected_booleans.items():
+    value = data.get(key)
+    if type(value) is not bool or value is not expected:
+        print(f"offline-install-rehearsal.json 要求 {key}={str(expected).lower()}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+  then
+    fail "offline-install-rehearsal.json 未通过离线生命周期证据校验"
+    return 1
+  fi
+  ok "离线生命周期演练证据有效：$evidence"
+}
+
 check_target_verification() {
   local evidence="$TARGET_EVIDENCE_DIR/target-verification.json"
   [ -f "$evidence" ] || {
@@ -119,6 +181,7 @@ main() {
   run_step "run_agent_tests" run_agent_tests
   run_step "run_webui_tests" run_webui_tests
   run_step "check_delivery_artifacts" check_delivery_artifacts
+  run_step "check_offline_install_rehearsal" check_offline_install_rehearsal
   run_step "check_target_verification" check_target_verification
 
   if [ "$failures" -gt 0 ]; then
