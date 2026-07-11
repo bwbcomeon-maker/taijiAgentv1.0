@@ -26,4 +26,4 @@ def test_simplified_chinese_task_tab_matches_scheduled_job_domain():
     assert "tab_tasks: '定时任务'" in zh
     assert "scheduled_jobs: '定时任务'" in zh
     assert "tasks_empty_title: '选择一个定时任务'" in zh
-    assert "tasks_empty_sub: '从侧边栏中选择一个定时任务" in zh
+    assert "tasks_empty_sub: '从任务列表中选择一个定时任务" in zh

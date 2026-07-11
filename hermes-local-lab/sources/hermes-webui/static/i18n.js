@@ -8866,7 +8866,7 @@ const LOCALES = {
     skills_delete: '删除',
     skills_back_to: '返回 {0}',
     tasks_empty_title: '选择一个定时任务',
-    tasks_empty_sub: '从侧边栏中选择一个定时任务以查看其详情和运行记录，或创建一个新的定时任务。',
+    tasks_empty_sub: '从任务列表中选择一个定时任务以查看详情和运行记录，或创建一个新的定时任务。',
     workspaces_empty_title: '选择一个空间',
     workspaces_empty_sub: '从侧边栏中选择一个空间以查看其文件和设置，或添加一个新空间。',
     profiles_empty_title: '选择一个配置文件',
