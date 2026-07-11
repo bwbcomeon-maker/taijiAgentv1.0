@@ -262,6 +262,9 @@ def test_generating_presentation_has_single_running_state(tmp_path):
     assert generating["view"]["team"]["members"][0]["name"] == "写作总导演"
     assert generating["view"]["workflow"]["stages"][0]["id"] == "plan"
     assert generating["view"]["workflow"]["progress"]["total"] == 5
+    assert generating["view"]["workflow"]["progress"]["done"] == 0
+    assert generating["view"]["workflow"]["progress"]["text"] == "0/5"
+    assert presentation["progress_text"] == "0/5"
 
 
 def test_requirements_are_prestep_and_workflow_progress_is_catalog_driven(tmp_path):

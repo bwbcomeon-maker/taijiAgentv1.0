@@ -310,10 +310,8 @@ def _progress_text(run: dict, state: str | None = None) -> str:
         return f"0/{total}"
     if (state or str(run.get("workflow_state") or "")) == "completed":
         return f"{total}/{total}"
-    index = int(progress.get("current_index") or 0)
     done = int(progress.get("done") or 0)
-    current = min(total, max(done, index + 1))
-    return f"{current}/{total}"
+    return f"{min(total, max(0, done))}/{total}"
 
 
 def _current_worker(run: dict) -> dict:
