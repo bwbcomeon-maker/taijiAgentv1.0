@@ -1687,6 +1687,47 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(package, install_body)
 
+    def test_release_manifest_cleanup_handles_readonly_payload_directories(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        cleanup = builder[
+            builder.index("cleanup_release_manifest_payload() {") : builder.index("write_release_manifest() {")
+        ]
+        self.assertIn('find "$root" -type d -exec chmod u+w {} +', cleanup)
+        self.assertIn('rm -rf -- "$root"', cleanup)
+        manifest = builder[
+            builder.index("write_release_manifest() {") : builder.index("write_build_report() {")
+        ]
+        self.assertGreaterEqual(manifest.count('cleanup_release_manifest_payload "$payload_root"'), 3)
+        self.assertNotIn('rm -rf "$payload_root"', manifest)
+
+        with tempfile.TemporaryDirectory(prefix="taiji-release-manifest.", dir="/tmp") as tmp:
+            root = Path(tmp)
+            readonly = root / "opt/taiji-agent/runtime/templates/general-proposal"
+            readonly.mkdir(parents=True)
+            (readonly / "manifest.json").write_text("{}", encoding="utf-8")
+            for directory in [readonly, *readonly.parents]:
+                if directory == root.parent:
+                    break
+                directory.chmod(0o555)
+            shell = "\n".join(
+                [
+                    "set -euo pipefail",
+                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
+                    cleanup,
+                    'cleanup_release_manifest_payload "$1"',
+                ]
+            )
+            completed = subprocess.run(
+                ["bash", "-c", shell, "cleanup-test", str(root)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(root.exists())
+
     def test_delivery_release_preflight_is_a_hard_gate(self):
         preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         self.assertTrue(preflight_path.exists())

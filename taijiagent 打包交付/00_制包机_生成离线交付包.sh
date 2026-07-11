@@ -776,6 +776,21 @@ build_glibc() {
   getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>/dev/null | head -1 || printf 'unknown\n'
 }
 
+cleanup_release_manifest_payload() {
+  local root="$1"
+  case "$root" in
+    /tmp/taiji-release-manifest.*) ;;
+    *) fail "拒绝清理非专用 manifest 临时目录：$root" ;;
+  esac
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] || fail "manifest 临时路径不是实体目录：$root"
+    find "$root" -type d -exec chmod u+w {} + \
+      || fail "无法恢复 manifest 临时目录的 owner 写权限：$root"
+    rm -rf -- "$root" || fail "无法清理 manifest 临时目录：$root"
+  fi
+  [ ! -e "$root" ] && [ ! -L "$root" ] || fail "manifest 临时目录清理后仍存在：$root"
+}
+
 json_escape() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -808,19 +823,19 @@ write_release_manifest() {
   source_commit="$(printf '%s\n' "$src_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
   payload_root="$(mktemp -d /tmp/taiji-release-manifest.XXXXXX)"
   if ! dpkg-deb -x "$OUTPUT_DIR/$deb_name" "$payload_root"; then
-    rm -rf "$payload_root"
+    cleanup_release_manifest_payload "$payload_root"
     fail "无法解包当前 DEB 以绑定 Electron/desktop entry 摘要"
   fi
   if [ ! -f "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" ] \
     || [ -L "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" ] \
     || [ ! -f "$payload_root/usr/share/applications/taiji-agent.desktop" ] \
     || [ -L "$payload_root/usr/share/applications/taiji-agent.desktop" ]; then
-    rm -rf "$payload_root"
+    cleanup_release_manifest_payload "$payload_root"
     fail "当前 DEB 缺少可绑定的安装态 Electron 或 desktop entry"
   fi
   electron_executable_sha="$(sha256sum "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" | awk '{print $1}')"
   desktop_entry_sha="$(sha256sum "$payload_root/usr/share/applications/taiji-agent.desktop" | awk '{print $1}')"
-  rm -rf "$payload_root"
+  cleanup_release_manifest_payload "$payload_root"
 
   {
     printf '{\n'
