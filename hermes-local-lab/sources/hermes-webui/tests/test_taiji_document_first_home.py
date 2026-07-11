@@ -30,6 +30,31 @@ def test_simplified_chinese_task_tab_matches_scheduled_job_domain():
     assert "tasks_empty_sub: '从任务列表中选择一个定时任务" in zh
 
 
+def test_simplified_chinese_onboarding_has_no_english_password_fallback():
+    zh_start = I18N_JS.index("  zh: {")
+    zh_end = I18N_JS.index("\n  },", zh_start)
+    zh = I18N_JS[zh_start:zh_end]
+
+    assert "onboarding_step_password_desc: '共享设备使用前可启用密码保护。'" in zh
+    assert "onboarding_finish_help: '完成后会保存设置并进入应用。'" in zh
+    expected_localized_lines = (
+        "onboarding_notice_system_ready: '本机应用已就绪。'",
+        "onboarding_notice_system_unavailable: '本机应用仍在准备中。请等待就绪检查通过后再完成设置。'",
+        "onboarding_config_file: '配置状态：'",
+        "onboarding_env_file: '凭据状态：'",
+        "onboarding_notice_setup_required: '请选择提供商并在此保存凭据。'",
+        "onboarding_oauth_provider_ready_body: '当前应用已配置为使用 OAuth 提供商",
+        "onboarding_oauth_provider_not_ready_body: '当前应用已配置为使用 <strong>{provider}</strong>",
+        "onboarding_workspace_placeholder: '可选的本地工作区路径'",
+        "onboarding_api_key_help_prefix: '已保存在本机凭据存储中'",
+    )
+    assert all(line in zh for line in expected_localized_lines)
+    assert "Protect the app before sharing it." not in zh
+    assert "Finishing saves your setup and opens the app." not in zh
+    assert "The local app is ready." not in zh
+    assert "Choose a provider and save credentials here." not in zh
+
+
 def test_english_task_surface_uses_one_scheduled_task_term():
     en_start = I18N_JS.index("  en: {")
     en_end = I18N_JS.index("\n  },", en_start)
