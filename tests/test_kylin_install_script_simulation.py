@@ -419,6 +419,47 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             check=False,
         )
 
+    def run_main_with_install_sentinel(
+        self, *, allow_headless_rehearsal: bool
+    ) -> subprocess.CompletedProcess:
+        harness = self.tmp_path / "run-main-order.sh"
+        harness.write_text(
+            textwrap.dedent(
+                f"""
+                #!/usr/bin/env bash
+                set -Eeuo pipefail
+                export PATH="{self.fake_bin}:$PATH"
+                export FAKE_STATE="{self.fake_state}"
+                export FAKE_LOG="{self.fake_log}"
+                export HOME="{self.fake_home}"
+                export DISPLAY=""
+                export WAYLAND_DISPLAY=""
+                export TAIJI_ALLOW_HEADLESS_REHEARSAL="{1 if allow_headless_rehearsal else 0}"
+                source "{self.import_script}"
+                uname() {{
+                  case "${{1:-}}" in
+                    -s) printf 'Linux\n' ;;
+                    -m) printf 'x86_64\n' ;;
+                    *) command uname "$@" ;;
+                  esac
+                }}
+                have() {{ return 0; }}
+                require_admin_capability() {{ :; }}
+                install_package() {{ touch "$FAKE_STATE/install_called"; }}
+                main
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        harness.chmod(0o755)
+        return subprocess.run(
+            ["bash", str(harness)],
+            cwd=self.tmp_path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_cross_machine_absolute_deb_checksum_path_is_tolerated(self):
         deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
         checksum = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb.sha256"
@@ -474,11 +515,25 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn("TAIJI_ALLOW_HEADLESS_REHEARSAL=1", output)
         self.assertNotIn("[OK] 安装验证命令已执行完毕", output)
 
+    def test_main_rejects_headless_before_install_package(self):
+        result = self.run_main_with_install_sentinel(
+            allow_headless_rehearsal=False
+        )
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("图形桌面会话", output)
+        self.assertFalse((self.fake_state / "install_called").exists(), output)
+        self.assertNotIn("[INFO] 阶段：安装太极 Agent", output)
+
     def test_explicit_headless_rehearsal_reports_partial_non_target_result(self):
-        result = self.run_main_for_verification(allow_headless_rehearsal=True)
+        result = self.run_main_with_install_sentinel(
+            allow_headless_rehearsal=True
+        )
 
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
+        self.assertTrue((self.fake_state / "install_called").is_file(), output)
         self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", output)
         self.assertIn("真实模型对话和目标机验证：未验证", output)
         self.assertIn("taiji 命令可用", output)

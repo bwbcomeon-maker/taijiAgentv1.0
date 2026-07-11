@@ -957,13 +957,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", install)
         self.assertIn("真实模型对话和目标机验证：未验证", install)
 
+        main = install[install.index("main() {") :]
+        self.assertLess(
+            main.index("require_desktop_session_or_rehearsal"),
+            main.index('set_stage "安装太极 Agent"'),
+        )
         verify = install[
             install.index("verify_installation() {") : install.index("main() {")
         ]
-        self.assertLess(
-            verify.index('TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1"'),
-            verify.index("运行安装态诊断"),
-        )
+        self.assertNotIn('TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1"', verify)
 
     def test_build_report_avoids_tr_pipefail_for_apt_sources(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

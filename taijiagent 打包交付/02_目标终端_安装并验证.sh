@@ -305,6 +305,12 @@ preflight() {
   require_admin_capability
 }
 
+require_desktop_session_or_rehearsal() {
+  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1" ]; then
+    fail "未检测到图形桌面会话；桌面 App/目标机验证必须在 DISPLAY 或 WAYLAND_DISPLAY 可用时执行。如果只做离线安装演练，可显式设置 TAIJI_ALLOW_HEADLESS_REHEARSAL=1。"
+  fi
+}
+
 dpkg_has_taiji_state() {
   dpkg-query -W -f='${db:Status-Abbrev}' taiji-agent >/dev/null 2>&1
 }
@@ -726,10 +732,6 @@ install_package() {
 }
 
 verify_installation() {
-  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1" ]; then
-    fail "未检测到图形桌面会话；桌面 App/目标机验证必须在 DISPLAY 或 WAYLAND_DISPLAY 可用时执行。如果只做离线安装演练，可显式设置 TAIJI_ALLOW_HEADLESS_REHEARSAL=1。"
-  fi
-
   info "运行安装态诊断"
   [ -x /opt/taiji-agent/bin/taiji-native-verify ] || fail "未找到 /opt/taiji-agent/bin/taiji-native-verify"
   /opt/taiji-agent/bin/taiji-native-verify
@@ -758,6 +760,7 @@ verify_installation() {
 main() {
   set_stage "目标机预检"
   preflight
+  require_desktop_session_or_rehearsal
   set_stage "安装太极 Agent"
   install_package
   set_stage "安装后验证"
