@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
 PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"
 PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+IMAGE_ROLE_LABEL = "offline-rehearsal-v1"
 SESSION_BASENAME = "offline-install-rehearsal-session.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
@@ -249,6 +250,13 @@ def run_lifecycle_container(
     image_info = docker_json(docker, ["image", "inspect", image], "Docker image inspect")
     if image_info.get("Os") != "linux" or image_info.get("Architecture") != "amd64":
         raise ProducerError("演练镜像必须是 linux/amd64")
+    image_config = image_info.get("Config")
+    labels = image_config.get("Labels") if type(image_config) is dict else None
+    entrypoint = image_config.get("Entrypoint") if type(image_config) is dict else None
+    if type(labels) is not dict or labels.get("io.taiji.release-evidence.role") != IMAGE_ROLE_LABEL:
+        raise ProducerError("演练镜像不是仓库定义的专用离线演练镜像")
+    if entrypoint != ["/usr/local/bin/run-lifecycle.sh"]:
+        raise ProducerError("演练镜像入口不是固定 lifecycle runner")
     image_id = image_info.get("Id")
     if type(image_id) is not str or not image_id.startswith("sha256:"):
         raise ProducerError("Docker image inspect 缺少不可变镜像 ID")

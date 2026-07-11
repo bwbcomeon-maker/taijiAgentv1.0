@@ -660,11 +660,11 @@
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" placeholder="输入消息给 taiji Agent…"></textarea>
+        <textarea id="msg" rows="1" placeholder="输入消息给 taiji Agent…" aria-label="输入消息"></textarea>
         <div class="composer-footer">
           <div class="composer-left">
-            <input type="file" id="fileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.xls,.xlsx,.ppt,.pptx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
-            <button type="button" class="icon-btn has-tooltip composer-control composer-icon-control" id="btnAttach" data-tooltip="附加文件">
+            <input type="file" id="fileInput" class="file-input-visually-hidden" tabindex="-1" aria-hidden="true" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.xls,.xlsx,.ppt,.pptx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
+            <button type="button" class="icon-btn has-tooltip composer-control composer-icon-control" id="btnAttach" data-tooltip="附加文件" title="附加文件" aria-label="附加文件">
               <span class="taiji-icon composer-control-icon" data-icon="paperclip" aria-hidden="true"></span>
             </button>
             <button type="button" class="icon-btn mic-btn has-tooltip composer-control composer-icon-control" id="btnMic" data-tooltip="Dictate" data-i18n-title="voice_dictate" title="Dictate" aria-label="语音输入" style="display:none">

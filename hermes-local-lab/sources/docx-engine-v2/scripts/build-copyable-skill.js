@@ -4,14 +4,38 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const {
+  portablePackageSpecs,
+  validatePackageDirectory,
+} = require('./materialize-portable-resvg-dependencies');
+
 const rootDir = path.resolve(__dirname, '..');
 
 function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const outDir = path.resolve(args.outDir);
   assertSafeOutDir(outDir);
+  validateBuildInputs();
 
-  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(outDir), { recursive: true });
+  const stagingDir = fs.mkdtempSync(
+    path.join(path.dirname(outDir), `.${path.basename(outDir)}.tmp-`)
+  );
+  let promoted = false;
+  try {
+    buildSkillInto(stagingDir);
+    promoteOutput(stagingDir, outDir);
+    promoted = true;
+  } finally {
+    if (!promoted) {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    }
+  }
+
+  process.stdout.write(`build-copyable-skill-ok\t${outDir}\n`);
+}
+
+function buildSkillInto(outDir) {
   fs.mkdirSync(outDir, { recursive: true });
 
   copyRecursive(path.join(rootDir, 'compat', 'docx-template-skill', 'SKILL.md'), path.join(outDir, 'SKILL.md'));
@@ -30,14 +54,69 @@ function main(argv = process.argv.slice(2)) {
   copyRecursive(path.join(rootDir, 'README.md'), path.join(outDir, 'engine', 'README.md'));
 
   const nodeModules = path.join(rootDir, 'node_modules');
-  if (fs.existsSync(nodeModules)) {
-    assertPortableRasterizerDependencies(nodeModules);
-    copyRecursive(nodeModules, path.join(outDir, 'engine', 'node_modules'));
+  if (!fs.existsSync(nodeModules)) {
+    throw new Error('缺少 node_modules，拒绝构建没有运行依赖的 skill 包。请先执行 npm ci 和 portable resvg 物化。');
   }
+  assertPortableRasterizerDependencies(nodeModules);
+  copyRecursive(nodeModules, path.join(outDir, 'engine', 'node_modules'));
 
   chmodScripts(path.join(outDir, 'scripts'));
   chmodScripts(path.join(outDir, 'engine', 'src', 'cli'));
-  process.stdout.write(`build-copyable-skill-ok\t${outDir}\n`);
+}
+
+function validateBuildInputs() {
+  for (const relative of [
+    'compat/docx-template-skill/SKILL.md',
+    'compat/docx-template-skill/skill.json',
+    'compat/docx-template-skill/README.md',
+    'compat/docx-template-skill/skill-invocation-contract.md',
+    'compat/docx-template-skill/scripts',
+    'src',
+    'templates',
+    'template-registry.json',
+    'package.json',
+    'package-lock.json',
+    'README.md',
+    'node_modules',
+  ]) {
+    if (!fs.existsSync(path.join(rootDir, relative))) {
+      throw new Error(`缺少构建输入: ${path.join(rootDir, relative)}`);
+    }
+  }
+  assertPortableRasterizerDependencies(path.join(rootDir, 'node_modules'));
+}
+
+function promoteOutput(
+  stagingDir,
+  outDir,
+  {
+    remove = (candidate) => fs.rmSync(candidate, { recursive: true, force: true }),
+    warn = (message) => process.stderr.write(`build-copyable-skill-warning\t${message}\n`),
+  } = {}
+) {
+  let backupDir = '';
+  if (fs.existsSync(outDir)) {
+    backupDir = fs.mkdtempSync(
+      path.join(path.dirname(outDir), `.${path.basename(outDir)}.backup-`)
+    );
+    remove(backupDir);
+    fs.renameSync(outDir, backupDir);
+  }
+  try {
+    fs.renameSync(stagingDir, outDir);
+  } catch (error) {
+    if (backupDir && !fs.existsSync(outDir) && fs.existsSync(backupDir)) {
+      fs.renameSync(backupDir, outDir);
+    }
+    throw error;
+  }
+  if (backupDir) {
+    try {
+      remove(backupDir);
+    } catch (error) {
+      warn(`新产物已生效，但旧备份清理失败并保留在 ${backupDir}: ${error.message}`);
+    }
+  }
 }
 
 function parseArgs(argv) {
@@ -87,24 +166,19 @@ function copyRecursive(sourcePath, targetPath) {
 }
 
 function assertPortableRasterizerDependencies(nodeModules) {
-  const requiredPackages = [
-    '@resvg/resvg-js',
-    '@resvg/resvg-js-linux-x64-gnu',
-    '@resvg/resvg-js-linux-x64-musl',
-    '@resvg/resvg-js-linux-arm64-gnu',
-    '@resvg/resvg-js-linux-arm64-musl',
-  ];
-  const missing = requiredPackages.filter((packageName) => {
-    const packagePath = path.join(nodeModules, ...packageName.split('/'), 'package.json');
-    return !fs.existsSync(packagePath);
-  });
-  if (missing.length > 0) {
-    throw new Error(
-      [
-        '缺少跨平台 SVG 转 PNG 运行依赖，拒绝构建不可迁移的 skill 包:',
-        missing.join(', '),
-        '请补齐 @resvg/resvg-js 及 Linux x64/arm64 gnu/musl 原生包后再构建。',
-      ].join(' ')
+  const metaPackagePath = path.join(nodeModules, '@resvg', 'resvg-js', 'package.json');
+  if (!fs.existsSync(metaPackagePath)) {
+    throw new Error('缺少 @resvg/resvg-js，拒绝构建不可迁移的 skill 包');
+  }
+  const metaPackage = JSON.parse(fs.readFileSync(metaPackagePath, 'utf8'));
+  if (metaPackage.name !== '@resvg/resvg-js' || metaPackage.version !== '2.6.2') {
+    throw new Error('要求准确的 @resvg/resvg-js@2.6.2');
+  }
+  for (const spec of portablePackageSpecs(rootDir)) {
+    validatePackageDirectory(
+      path.join(nodeModules, ...spec.name.split('/')),
+      spec.name,
+      spec.version
     );
   }
 }
@@ -123,9 +197,13 @@ function chmodScripts(dir) {
   }
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`build-copyable-skill-failed\t${error.message}\n`);
-  process.exitCode = 1;
+module.exports = { main, promoteOutput };
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`build-copyable-skill-failed\t${error.message}\n`);
+    process.exitCode = 1;
+  }
 }

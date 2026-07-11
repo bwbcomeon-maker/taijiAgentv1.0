@@ -15,6 +15,8 @@ PRODUCER = ROOT / "scripts" / "produce-taiji-offline-rehearsal.py"
 DOCKERFILE = ROOT / "tools" / "taiji-offline-rehearsal" / "Dockerfile"
 LIFECYCLE = ROOT / "tools" / "taiji-offline-rehearsal" / "run-lifecycle.sh"
 CHALLENGE = "ab" * 32
+SALE_READINESS = ROOT / "docs" / "taiji-sale-readiness.md"
+DELIVERY_GUIDE = ROOT / "taijiagent 打包交付" / "操作说明.md"
 
 
 def sha256(path: Path) -> str:
@@ -116,9 +118,24 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             "01_制包机_发布预检.sh",
             "02_目标终端_安装并验证.sh",
             "03_目标终端_导出诊断报告.sh",
+            "04_目标终端_桌面App验收并导出证据.sh",
             "99_本机_准备制包输入包.sh",
         ):
             write_executable(self.delivery / filename, "#!/usr/bin/env bash\nexit 0\n")
+        acceptance_tools = self.delivery / "验收工具"
+        acceptance_tools.mkdir()
+        (acceptance_tools / "run-installed-electron-acceptance.js").write_text(
+            "// fixture desktop acceptance driver\n", encoding="utf-8"
+        )
+        (acceptance_tools / "assemble-target-evidence.py").write_text(
+            "# fixture target evidence assembler\n", encoding="utf-8"
+        )
+        (acceptance_tools / "validate-taiji-release-evidence.py").write_text(
+            "# fixture release evidence validator\n", encoding="utf-8"
+        )
+        (acceptance_tools / "signing-public.pem").write_text(
+            "fixture release public key\n", encoding="utf-8"
+        )
         (self.delivery / "SHA256SUMS.txt").write_text(
             f"{sha256(source_archive)}  {source_archive.name}\n", encoding="utf-8"
         )
@@ -153,6 +170,14 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "Id": "sha256:expected-image",
                     "Architecture": architecture,
                     "Os": "linux",
+                    "Config": {
+                        "Entrypoint": ["/usr/local/bin/run-lifecycle.sh"],
+                        "Labels": {
+                            "io.taiji.release-evidence.role": (
+                                "wrong-role" if mode == "wrong_profile" else "offline-rehearsal-v1"
+                            ),
+                        },
+                    },
                 }]))
                 raise SystemExit(0)
 
@@ -319,6 +344,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn('test "$TARGETARCH" = "amd64"', dockerfile)
         self.assertIn("useradd", dockerfile)
         self.assertIn("sudoers.d", dockerfile)
+        self.assertIn('io.taiji.release-evidence.role="offline-rehearsal-v1"', dockerfile)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/run-lifecycle.sh"]', dockerfile)
 
         installer = 'TAIJI_ALLOW_HEADLESS_REHEARSAL=1'
@@ -350,6 +376,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
 
         calls = self.docker_calls()
         create = next(call for call in calls if call and call[0] == "create")
+        self.assertEqual(create.count("create"), 1)
+        self.assertEqual(create[1], "--platform")
         self.assertIn("--platform", create)
         self.assertIn("linux/amd64", create)
         self.assertIn("--pull=never", create)
@@ -376,6 +404,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         for mode, expected in (
             ("writable_delivery", "只读"),
             ("wrong_image", "镜像"),
+            ("wrong_profile", "专用离线演练镜像"),
             ("socket_mount", "未授权挂载"),
         ):
             with self.subTest(mode=mode):
@@ -410,6 +439,40 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "existing evidence\n")
         self.assertFalse(self.docker_log.exists())
+
+
+class OfflineRehearsalDocumentationTest(unittest.TestCase):
+    def test_docs_show_executable_offline_evidence_producer_flow(self):
+        required_snippets = (
+            "docker build --platform linux/amd64",
+            "-t taiji-offline-rehearsal:local",
+            "tools/taiji-offline-rehearsal",
+            "python3 scripts/produce-taiji-offline-rehearsal.py",
+            '--delivery-dir "taijiagent 打包交付"',
+            '--output-dir "taijiagent 打包交付/offline-install-rehearsal"',
+            "--image taiji-offline-rehearsal:local",
+            '--challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"',
+            "输出目录必须不存在",
+            "容器运行时强制使用 `--network none`",
+            "仅证明离线安装生命周期",
+            "不能替代真实 Electron 桌面 App 验收",
+        )
+
+        for path in (SALE_READINESS, DELIVERY_GUIDE):
+            with self.subTest(path=path):
+                document = path.read_text(encoding="utf-8")
+                for snippet in required_snippets:
+                    self.assertIn(snippet, document)
+
+    def test_final_release_gate_reuses_original_challenges(self):
+        document = SALE_READINESS.read_text(encoding="utf-8")
+        final_gate = document.split("## 一键门禁", 1)[1].split("离线生命周期演练证据目录默认是", 1)[0]
+
+        self.assertIn('<本次断网演练时保留的原 challenge>', final_gate)
+        self.assertIn('<本次真实桌面 App 验收时保留的原 challenge>', final_gate)
+        self.assertIn("最终门禁只复用本次验收时保留的原 challenge", final_gate)
+        self.assertIn("不得在最终门禁阶段重新执行 `openssl rand`", final_gate)
+        self.assertNotIn("openssl rand -hex 32", final_gate)
 
 
 if __name__ == "__main__":

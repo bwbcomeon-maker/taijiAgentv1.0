@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 022
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-$(id -u 2>/dev/null || printf user)"
 BUILD_ROOT="${TAIJI_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"
+BUILD_ROOT_OWNER_MARKER=".taiji-build-root-owner"
+BUILD_ROOT_OWNER_TOKEN="taiji-agent-build-root-v1:$(id -u 2>/dev/null || printf user)"
 SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
-LOG_DIR="$SCRIPT_DIR/构建日志"
+STATE_HOME="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
+LOG_DIR="$STATE_HOME/taiji-agent/build-logs"
+DELIVERY_BUILD_LOG_DIR="$SCRIPT_DIR/构建日志"
 VERSION=""
 TOOL_ROOT="$SCRIPT_DIR/.构建工具"
 NODE_ROOT="$TOOL_ROOT/node"
@@ -20,9 +25,8 @@ BUILD_MARKER="$OUTPUT_DIR/.build-success"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
 
-mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$OFFLINE_REPO"
-LOG_FILE="$LOG_DIR/00_offline_build_$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+LOG_DIR_REAL=""
+LOG_FILE=""
 FAILURE_REPORTED=0
 CURRENT_STAGE="初始化"
 
@@ -31,6 +35,41 @@ info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 set_stage() { CURRENT_STAGE="$1"; info "阶段：$CURRENT_STAGE"; }
+
+initialize_build_logging() {
+  case "$STATE_HOME" in
+    /*) ;;
+    *) printf '[FAIL] XDG_STATE_HOME/HOME 必须解析为绝对路径，无法安全保存制包日志：%s\n' "$STATE_HOME" >&2; exit 1 ;;
+  esac
+  if [ -e "$DELIVERY_BUILD_LOG_DIR" ] || [ -L "$DELIVERY_BUILD_LOG_DIR" ]; then
+    printf '[FAIL] 交付目录残留旧构建日志，请先归档并移出后重试：%s\n' "$DELIVERY_BUILD_LOG_DIR" >&2
+    exit 1
+  fi
+  case "$LOG_DIR" in
+    "$SCRIPT_DIR"|"$SCRIPT_DIR"/*)
+      printf '[FAIL] 制包日志不能位于完整交付目录内：%s\n' "$LOG_DIR" >&2
+      exit 1
+      ;;
+  esac
+  mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$OFFLINE_REPO" \
+    || { printf '[FAIL] 无法创建制包日志或交付产物目录\n' >&2; exit 1; }
+  [ -d "$LOG_DIR" ] && [ ! -L "$LOG_DIR" ] \
+    || { printf '[FAIL] 制包日志目录不是可信实体目录：%s\n' "$LOG_DIR" >&2; exit 1; }
+  chmod 0700 "$LOG_DIR" \
+    || { printf '[FAIL] 无法设置制包日志目录权限：%s\n' "$LOG_DIR" >&2; exit 1; }
+  [ "$(stat -c '%u' "$LOG_DIR")" = "$(id -u)" ] && [ "$(stat -c '%a' "$LOG_DIR")" = "700" ] \
+    || { printf '[FAIL] 制包日志目录必须由当前用户以 0700 独占：%s\n' "$LOG_DIR" >&2; exit 1; }
+  LOG_DIR_REAL="$(cd "$LOG_DIR" && pwd -P)" \
+    || { printf '[FAIL] 无法解析制包日志真实路径：%s\n' "$LOG_DIR" >&2; exit 1; }
+  case "$LOG_DIR_REAL" in
+    "$SCRIPT_DIR"|"$SCRIPT_DIR"/*)
+      printf '[FAIL] 制包日志真实路径不能位于完整交付目录内：%s\n' "$LOG_DIR_REAL" >&2
+      exit 1
+      ;;
+  esac
+  LOG_FILE="$LOG_DIR/00_offline_build_$(date +%Y%m%d_%H%M%S)_$$.log"
+  exec > >(tee -a "$LOG_FILE") 2>&1
+}
 
 safe_cmd_path() {
   command -v "$1" 2>/dev/null || printf 'missing'
@@ -281,6 +320,7 @@ run_release_preflight() {
 preflight() {
   info "检查制包机环境"
   cleanup_delivery_metadata
+  validate_build_root_location
   [ "$(uname -s)" = "Linux" ] || fail "最终 DEB 必须在 Linux amd64 制包机生成，当前为：$(uname -s)"
   case "$(uname -m)" in
     x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
@@ -293,6 +333,78 @@ preflight() {
   require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
   [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
+}
+
+validate_build_root_location() {
+  local resolved_script resolved_build
+  have readlink || fail "缺少 readlink，无法验证临时构建目录边界"
+  validate_safe_build_root_path
+  resolved_script="$(readlink -f -- "$SCRIPT_DIR")" || fail "无法解析交付目录真实路径：$SCRIPT_DIR"
+  resolved_build="$(readlink -m -- "$BUILD_ROOT")" || fail "无法解析临时构建目录：$BUILD_ROOT"
+  case "$resolved_build" in
+    "$resolved_script"|"$resolved_script"/*)
+      fail "TAIJI_BUILD_ROOT 不能位于交付目录内：$resolved_build"
+      ;;
+  esac
+}
+
+validate_safe_build_root_path() {
+  local resolved_build build_basename
+  case "$BUILD_ROOT" in
+    /*) ;;
+    *) fail "TAIJI_BUILD_ROOT 必须是绝对路径：$BUILD_ROOT" ;;
+  esac
+  resolved_build="$(readlink -m -- "$BUILD_ROOT")" || fail "无法解析临时构建目录：$BUILD_ROOT"
+  build_basename="${resolved_build##*/}"
+  case "$build_basename" in
+    taiji-agent-build-?*) ;;
+    *) fail "TAIJI_BUILD_ROOT 必须使用 taiji-agent-build-* 专用目录名：$resolved_build" ;;
+  esac
+  case "$resolved_build" in
+    "/"|"/tmp"|"/home"|"/usr"|"/var")
+      fail "拒绝使用危险构建目录：$resolved_build"
+      ;;
+  esac
+  [ ! -L "$BUILD_ROOT" ] || fail "TAIJI_BUILD_ROOT 不能是符号链接：$BUILD_ROOT"
+  if [ -e "$BUILD_ROOT" ] && [ ! -d "$BUILD_ROOT" ]; then
+    fail "TAIJI_BUILD_ROOT 已存在但不是目录：$BUILD_ROOT"
+  fi
+}
+
+require_owned_build_root() {
+  local marker="$BUILD_ROOT/$BUILD_ROOT_OWNER_MARKER" current_uid root_uid root_mode marker_uid marker_mode marker_links marker_value
+  validate_safe_build_root_path
+  [ -d "$BUILD_ROOT" ] && [ ! -L "$BUILD_ROOT" ] \
+    || fail "构建工作区不是可信实体目录：$BUILD_ROOT"
+  current_uid="$(id -u)"
+  root_uid="$(stat -c '%u' "$BUILD_ROOT")" || fail "无法读取构建工作区所有者：$BUILD_ROOT"
+  root_mode="$(stat -c '%a' "$BUILD_ROOT")" || fail "无法读取构建工作区权限：$BUILD_ROOT"
+  [ "$root_uid" = "$current_uid" ] || fail "构建工作区不属于当前用户，拒绝清理：$BUILD_ROOT"
+  [ "$root_mode" = "700" ] || fail "构建工作区权限必须是 0700，拒绝清理：$BUILD_ROOT"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "构建工作区缺少可信所有权标记：$marker"
+  marker_uid="$(stat -c '%u' "$marker")" || fail "无法读取构建工作区标记所有者：$marker"
+  marker_mode="$(stat -c '%a' "$marker")" || fail "无法读取构建工作区标记权限：$marker"
+  marker_links="$(stat -c '%h' "$marker")" || fail "无法读取构建工作区标记链接数：$marker"
+  [ "$marker_uid" = "$current_uid" ] && [ "$marker_mode" = "600" ] && [ "$marker_links" = "1" ] \
+    || fail "构建工作区所有权标记不可信：$marker"
+  marker_value="$(tr -d '\r\n' < "$marker")"
+  [ "$marker_value" = "$BUILD_ROOT_OWNER_TOKEN" ] \
+    || fail "构建工作区所有权标记不匹配：$marker"
+}
+
+create_owned_build_root() {
+  local marker="$BUILD_ROOT/$BUILD_ROOT_OWNER_MARKER" marker_tmp
+  validate_safe_build_root_path
+  mkdir -p -- "$BUILD_ROOT" || fail "无法创建构建工作区：$BUILD_ROOT"
+  chmod 0700 "$BUILD_ROOT" || fail "无法设置构建工作区权限：$BUILD_ROOT"
+  [ "$(stat -c '%u' "$BUILD_ROOT")" = "$(id -u)" ] \
+    || fail "新建构建工作区不属于当前用户：$BUILD_ROOT"
+  marker_tmp="$marker.tmp.$$"
+  (umask 077; printf '%s\n' "$BUILD_ROOT_OWNER_TOKEN" > "$marker_tmp") \
+    || fail "无法写入构建工作区所有权标记：$marker_tmp"
+  chmod 0600 "$marker_tmp" || fail "无法设置构建工作区标记权限：$marker_tmp"
+  mv -f -- "$marker_tmp" "$marker" || fail "无法发布构建工作区所有权标记：$marker"
+  require_owned_build_root
 }
 
 prepare_source_release() {
@@ -456,16 +568,14 @@ ensure_node() {
 }
 
 reset_build_root() {
-  case "$BUILD_ROOT" in
-    ""|"/"|"/tmp"|"/home"|"$SCRIPT_DIR")
-      fail "拒绝清理危险构建目录：${BUILD_ROOT:-empty}"
-      ;;
-  esac
-  if [ -e "$BUILD_ROOT" ] && ! rm -rf "$BUILD_ROOT"; then
-    warn "构建工作区无法由当前用户清理，尝试使用 sudo 清理：$BUILD_ROOT"
-    sudo rm -rf "$BUILD_ROOT" || fail "无法清理构建工作区：$BUILD_ROOT"
+  validate_safe_build_root_path
+  if [ -e "$BUILD_ROOT" ] || [ -L "$BUILD_ROOT" ]; then
+    require_owned_build_root
+    rm -rf -- "$BUILD_ROOT" || fail "无法以当前用户清理专用构建工作区：$BUILD_ROOT"
+    [ ! -e "$BUILD_ROOT" ] && [ ! -L "$BUILD_ROOT" ] \
+      || fail "专用构建工作区清理后仍存在：$BUILD_ROOT"
   fi
-  mkdir -p "$BUILD_ROOT"
+  create_owned_build_root
 }
 
 repair_build_tree_permissions() {
@@ -522,7 +632,7 @@ npm_ci_with_network_fallback() {
 
 run_setup_local() {
   local uv_lock_mode="$1" setup_log status
-  setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S).log"
+  setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S)_$$.log"
 
   set +e
   TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
@@ -561,6 +671,7 @@ build_runtime_and_deb() {
   info "准备 DOCX Engine V2 生产依赖并执行源码测试"
   cd "$(source_lab_dir)/sources/docx-engine-v2"
   npm_ci_with_network_fallback --omit=dev
+  node scripts/materialize-portable-resvg-dependencies.js
   npm test
 
   info "构建 DEB 安装包"
@@ -677,6 +788,7 @@ json_string() {
 write_release_manifest() {
   info "生成发布 manifest"
   local src_name deb_name checksum_name source_sha deb_sha packages_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
+  local payload_root electron_executable_sha desktop_entry_sha
   src_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_${VERSION}_amd64.deb"
   checksum_name="$deb_name.sha256"
@@ -689,6 +801,21 @@ write_release_manifest() {
   build_arch="$(uname -m)"
   dpkg_arch="$(dpkg --print-architecture 2>/dev/null || true)"
   source_commit="$(printf '%s\n' "$src_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+  payload_root="$(mktemp -d /tmp/taiji-release-manifest.XXXXXX)"
+  if ! dpkg-deb -x "$OUTPUT_DIR/$deb_name" "$payload_root"; then
+    rm -rf "$payload_root"
+    fail "无法解包当前 DEB 以绑定 Electron/desktop entry 摘要"
+  fi
+  if [ ! -f "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" ] \
+    || [ -L "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" ] \
+    || [ ! -f "$payload_root/usr/share/applications/taiji-agent.desktop" ] \
+    || [ -L "$payload_root/usr/share/applications/taiji-agent.desktop" ]; then
+    rm -rf "$payload_root"
+    fail "当前 DEB 缺少可绑定的安装态 Electron 或 desktop entry"
+  fi
+  electron_executable_sha="$(sha256sum "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" | awk '{print $1}')"
+  desktop_entry_sha="$(sha256sum "$payload_root/usr/share/applications/taiji-agent.desktop" | awk '{print $1}')"
+  rm -rf "$payload_root"
 
   {
     printf '{\n'
@@ -699,7 +826,9 @@ write_release_manifest() {
     printf '  "checksum": %s,\n' "$(json_string "$checksum_name")"
     printf '  "deb": %s,\n' "$(json_string "$deb_name")"
     printf '  "deb_sha256": %s,\n' "$(json_string "$deb_sha")"
+    printf '  "desktop_entry_sha256": %s,\n' "$(json_string "$desktop_entry_sha")"
     printf '  "dpkg_arch": %s,\n' "$(json_string "$dpkg_arch")"
+    printf '  "electron_executable_sha256": %s,\n' "$(json_string "$electron_executable_sha")"
     printf '  "package": "taiji-agent",\n'
     printf '  "packages_sha256": %s,\n' "$(json_string "$packages_sha")"
     printf '  "packages_gz_sha256": %s,\n' "$(json_string "$packages_gz_sha")"
@@ -777,6 +906,79 @@ write_build_report() {
   ok "构建报告已生成：$BUILD_REPORT"
 }
 
+stage_target_acceptance_tools() {
+  local target="$SCRIPT_DIR/验收工具"
+  local driver="$SRC_DIR/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
+  local assembler="$SRC_DIR/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+  local validator="$SRC_DIR/scripts/validate-taiji-release-evidence.py"
+  local public_key="$SRC_DIR/tools/taiji-release-evidence/signing-public.pem"
+  local public_fingerprint expected_fingerprint
+  expected_fingerprint="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+
+  info "收集目标终端真实 Electron 桌面 App 验收工具"
+  [ -f "$driver" ] && [ ! -L "$driver" ] || fail "源码缺少桌面 App 验收驱动：$driver"
+  [ -f "$assembler" ] && [ ! -L "$assembler" ] || fail "源码缺少目标证据组装器：$assembler"
+  [ -f "$validator" ] && [ ! -L "$validator" ] || fail "源码缺少发布证据校验器：$validator"
+  [ -f "$public_key" ] && [ ! -L "$public_key" ] || fail "源码缺少发布证据验签公钥：$public_key"
+  node --check "$driver" >/dev/null || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
+  python3 - "$assembler" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+import sys
+from pathlib import Path
+
+for raw in sys.argv[1:]:
+    path = Path(raw)
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+PY
+  public_fingerprint="$(openssl pkey -pubin -in "$public_key" -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"
+  [ "$public_fingerprint" = "$expected_fingerprint" ] || fail "目标验收验签公钥 fingerprint 不匹配"
+
+  rm -rf -- "$target"
+  install -d -m 0755 "$target"
+  install -m 0644 "$driver" "$target/run-installed-electron-acceptance.js"
+  install -m 0644 "$assembler" "$target/assemble-target-evidence.py"
+  install -m 0644 "$validator" "$target/validate-taiji-release-evidence.py"
+  install -m 0644 "$public_key" "$target/signing-public.pem"
+  ok "目标终端桌面 App 验收工具已收集：$target"
+}
+
+cleanup_delivery_build_cache() {
+  info "清理交付目录中的制包缓存"
+  rm -rf "$TOOL_ROOT" || fail "无法清理制包缓存：$TOOL_ROOT"
+  [ ! -e "$TOOL_ROOT" ] || fail "制包缓存仍然存在：$TOOL_ROOT"
+  ok "交付目录制包缓存已清理"
+}
+
+normalize_delivery_permissions() {
+  local unsafe_node
+  info "归一化交付目录权限"
+  unsafe_node="$(find "$SCRIPT_DIR" -xdev -mindepth 1 \( -type l -o \( -type f -links +1 \) \) -print -quit)"
+  [ -z "$unsafe_node" ] || fail "交付目录含符号链接或硬链接，拒绝修改其权限：$unsafe_node"
+  chmod go-w "$SCRIPT_DIR"
+  find "$SCRIPT_DIR" -xdev -mindepth 1 \( -type d -o -type f \) -exec chmod go-w -- {} +
+  for script in \
+    "$SCRIPT_DIR/00_制包机_生成离线交付包.sh" \
+    "$SCRIPT_DIR/01_制包机_发布预检.sh" \
+    "$SCRIPT_DIR/02_目标终端_安装并验证.sh" \
+    "$SCRIPT_DIR/03_目标终端_导出诊断报告.sh" \
+    "$SCRIPT_DIR/04_目标终端_桌面App验收并导出证据.sh" \
+    "$SCRIPT_DIR/99_本机_准备制包输入包.sh"; do
+    [ -f "$script" ] || fail "交付目录缺少脚本：$script"
+    chmod 0755 "$script"
+  done
+  ok "交付目录权限已归一化"
+}
+
+cleanup_temporary_build_root() {
+  info "清理最终预检使用完毕的临时构建工作区"
+  if [ -e "$BUILD_ROOT" ] || [ -L "$BUILD_ROOT" ]; then
+    require_owned_build_root
+    rm -rf -- "$BUILD_ROOT" || fail "无法以当前用户清理专用构建工作区：$BUILD_ROOT"
+  fi
+  [ ! -e "$BUILD_ROOT" ] && [ ! -L "$BUILD_ROOT" ] \
+    || fail "临时构建工作区仍然存在：$BUILD_ROOT"
+  ok "临时构建工作区已清理"
+}
+
 apt_source_summary() {
   awk '
     /^[[:space:]]*deb[[:space:]]/ {
@@ -796,6 +998,7 @@ apt_source_summary() {
 }
 
 main() {
+  initialize_build_logging
   set_stage "制包机预检"
   preflight
   set_stage "安装制包依赖"
@@ -816,8 +1019,16 @@ main() {
   set_stage "生成 manifest 和报告"
   write_release_manifest
   write_build_report
+  set_stage "收集目标终端桌面 App 验收工具"
+  stage_target_acceptance_tools
+  set_stage "清理制包缓存"
+  cleanup_delivery_build_cache
+  set_stage "归一化交付权限"
+  normalize_delivery_permissions
   set_stage "最终发布预检"
   TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight "$SRC_DIR"
+  set_stage "清理临时构建工作区"
+  cleanup_temporary_build_root
   printf '\n[OK] 离线交付包生成完成。目标机断网后执行：\n'
   printf 'bash ./02_目标终端_安装并验证.sh\n'
   printf '\n日志：%s\n' "$LOG_FILE"

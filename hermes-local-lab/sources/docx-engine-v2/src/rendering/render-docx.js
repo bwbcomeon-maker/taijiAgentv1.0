@@ -1,10 +1,48 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const Ajv2020 = require('ajv/dist/2020');
-const carbone = require('carbone');
+
+const { carbone, carboneTempRoot } = loadCarboneWithIsolatedTemp();
+process.once('exit', () => {
+  try {
+    fs.rmSync(carboneTempRoot, { recursive: true, force: true });
+  } catch {
+    // Process shutdown must not be masked by best-effort temporary cleanup.
+  }
+});
 
 const { assertSafeDirectoryTree } = require('../templates/template-store');
+
+function loadCarboneWithIsolatedTemp() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taiji-carbone-'));
+  const tempKeys = ['TMPDIR', 'TMP', 'TEMP'];
+  const previous = new Map(
+    tempKeys.map((key) => [key, {
+      existed: Object.prototype.hasOwnProperty.call(process.env, key),
+      value: process.env[key],
+    }])
+  );
+  try {
+    for (const key of tempKeys) {
+      process.env[key] = tempRoot;
+    }
+    return { carbone: require('carbone'), carboneTempRoot: tempRoot };
+  } catch (error) {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    throw error;
+  } finally {
+    for (const key of tempKeys) {
+      const state = previous.get(key);
+      if (state.existed) {
+        process.env[key] = state.value;
+      } else {
+        delete process.env[key];
+      }
+    }
+  }
+}
 
 async function renderDocx({ templatePackage, renderPlan, outputPath } = {}) {
   if (!templatePackage) {

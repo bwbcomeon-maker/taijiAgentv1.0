@@ -1,10 +1,14 @@
+import gzip
 import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
+import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -13,6 +17,51 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def png_fixture(width: int = 1120, height: int = 720, color_type: int = 2, *, varied: bool = True) -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload))
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    if varied:
+        rgb = [bytes((index % 251, (index * 3) % 251, (index * 7) % 251)) for index in range(width)]
+        pixel_row = b"".join(pixel if color_type == 2 else pixel + b"\xff" for pixel in rgb)
+    else:
+        pixel = b"\x00\x00\x00" if color_type == 2 else b"\x00\x00\x00\xff"
+        pixel_row = pixel * width
+    scanline = b"\x00" + pixel_row
+    pixels = zlib.compress(scanline * height, level=9)
+    return signature + chunk(b"IHDR", ihdr) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
+
+
+def delivery_inventory_fixture_sha256(delivery_dir: Path) -> str:
+    excluded = {"offline-install-rehearsal", "target-verification", "构建日志", "诊断报告"}
+    entries = [("D", ".", "")]
+    for path in delivery_dir.rglob("*"):
+        relative = path.relative_to(delivery_dir)
+        if relative.parts and relative.parts[0] in excluded:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            entries.append(("D", relative.as_posix(), ""))
+        elif path.is_file() and not path.is_symlink():
+            entries.append(
+                (
+                    "F",
+                    relative.as_posix(),
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+            )
+    digest = hashlib.sha256()
+    for kind, relative, file_hash in sorted(entries):
+        digest.update(kind.encode("ascii") + b"\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        if kind == "F":
+            digest.update(file_hash.encode("ascii"))
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class LinuxDesktopPackagingStaticTest(unittest.TestCase):
@@ -255,37 +304,503 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("run_root_tests", release_check)
         self.assertIn("run_agent_tests", release_check)
         self.assertIn("run_webui_tests", release_check)
+        self.assertIn("tests/test_issue1800_file_html_interactions.py", release_check)
         self.assertIn("check_delivery_artifacts", release_check)
+        self.assertIn("run_delivery_preflight", release_check)
+        self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS=1", release_check)
         self.assertIn("TAIJI_TARGET_VERIFICATION_DIR", release_check)
         self.assertIn("target-verification.json", release_check)
         self.assertIn("目标机已验证", docs)
         self.assertIn("x86_64/amd64", docs)
 
-    def _run_offline_rehearsal_gate(self, payload):
+    def test_root_release_check_runs_all_release_evidence_tool_tests(self):
+        release_check = read_text("scripts/taiji-release-check.sh")
+
+        self.assertIn("tests.test_offline_rehearsal_producer", release_check)
+        self.assertIn("tests.test_target_desktop_acceptance_producer", release_check)
+        self.assertIn("tests.test_release_evidence_signer_guards", release_check)
+        self.assertIn("run_desktop_evidence_tool_tests()", release_check)
+        self.assertIn(
+            "node --test tools/taiji-desktop-acceptance/run-installed-electron-acceptance.test.js",
+            release_check,
+        )
+        self.assertIn(
+            "python3 -B tools/taiji-desktop-acceptance/test_assemble_target_evidence.py",
+            release_check,
+        )
+        main = release_check[release_check.index("main() {") :]
+        self.assertIn(
+            'run_step "run_desktop_evidence_tool_tests" run_desktop_evidence_tool_tests',
+            main,
+        )
+
+    def test_release_check_cannot_mask_an_earlier_webui_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            evidence_dir = tmp_path / "offline-install-rehearsal"
-            evidence_dir.mkdir()
-            if payload is not None:
-                evidence = evidence_dir / "offline-install-rehearsal.json"
+            webui = tmp_path / "webui"
+            agent_python = tmp_path / "hermes-agent" / "venv" / "bin" / "python"
+            fake_bin = tmp_path / "bin"
+            webui.mkdir()
+            agent_python.parent.mkdir(parents=True)
+            fake_bin.mkdir()
+            agent_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            agent_python.chmod(0o755)
+            npm = fake_bin / "npm"
+            npm.write_text("#!/usr/bin/env bash\nexit 23\n", encoding="utf-8")
+            npm.chmod(0o755)
+            harness = tmp_path / "masked-webui-failure.sh"
+            harness.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env bash",
+                        "set -euo pipefail",
+                        f'export PATH="{fake_bin}:$PATH"',
+                        f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
+                        f'WEBUI_DIR="{webui}"',
+                        'run_step "webui" run_webui_tests',
+                        '[ "$failures" -eq 1 ]',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["bash", str(harness)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _run_release_evidence_gate(
+        self,
+        gate_name,
+        payload_transform,
+        artifact_transform=None,
+        diagnostic_transform=None,
+        screenshot_transform=None,
+        driver_transform=None,
+        symlink_evidence_dir=False,
+        symlink_evidence_ancestor=False,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            delivery_dir = tmp_path / "delivery"
+            package_dir = delivery_dir / "生成的安装包"
+            package_dir.mkdir(parents=True)
+            offline_repo = delivery_dir / "离线依赖"
+            offline_repo.mkdir()
+            deb = package_dir / "taiji-agent_0.1.0-preview_amd64.deb"
+            deb.write_bytes(b"current deb bytes")
+            deb_sha256 = hashlib.sha256(deb.read_bytes()).hexdigest()
+            source_commit = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            challenge = "ab" * 32
+            test_private_key = tmp_path / "test-attestation-private.pem"
+            test_public_key = tmp_path / "test-attestation-public.pem"
+            subprocess.run(
+                [
+                    "openssl",
+                    "genpkey",
+                    "-algorithm",
+                    "EC",
+                    "-pkeyopt",
+                    "ec_paramgen_curve:P-256",
+                    "-out",
+                    str(test_private_key),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            public_der = subprocess.run(
+                ["openssl", "pkey", "-in", str(test_private_key), "-pubout", "-outform", "DER"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            ).stdout
+            test_public_key.write_bytes(
+                subprocess.run(
+                    ["openssl", "pkey", "-in", str(test_private_key), "-pubout"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout
+            )
+            test_public_fingerprint = hashlib.sha256(public_der).hexdigest()
+            source_archive = delivery_dir / f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
+            source_archive.write_bytes(b"current source archive bytes")
+            packages = offline_repo / "Packages"
+            packages_gz = offline_repo / "Packages.gz"
+            packages.write_bytes(b"Package: taiji-agent\nArchitecture: amd64\n")
+            packages_gz.write_bytes(b"\x1f\x8bfixture packages gz")
+            (offline_repo / deb.name).write_bytes(deb.read_bytes())
+            (offline_repo / "dependency-fixture_1.0_amd64.deb").write_bytes(b"offline dependency")
+            (offline_repo / "runtime-dependencies.txt").write_text("dependency-fixture\n", encoding="utf-8")
+            (offline_repo / "SHA256SUMS.txt").write_text("fixture inventory\n", encoding="utf-8")
+            source_sha256 = hashlib.sha256(source_archive.read_bytes()).hexdigest()
+            packages_sha256 = hashlib.sha256(packages.read_bytes()).hexdigest()
+            packages_gz_sha256 = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
+            checksum = package_dir / f"{deb.name}.sha256"
+            checksum.write_text(f"{deb_sha256}  {deb.name}\n", encoding="utf-8")
+            manifest = package_dir / "taiji-package-manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "package": "taiji-agent",
+                        "version": "0.1.0-preview",
+                        "build_arch": "x86_64",
+                        "dpkg_arch": "amd64",
+                        "deb": deb.name,
+                        "deb_sha256": deb_sha256,
+                        "checksum": checksum.name,
+                        "source_archive": source_archive.name,
+                        "source_commit": source_commit,
+                        "source_sha256": source_sha256,
+                        "packages_sha256": packages_sha256,
+                        "packages_gz_sha256": packages_gz_sha256,
+                        "electron_executable_sha256": "4" * 64,
+                        "desktop_entry_sha256": "5" * 64,
+                        "built_at": generated_at,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            build_marker = package_dir / ".build-success"
+            build_marker.write_text(
+                "\n".join(
+                    [
+                        "version=0.1.0-preview",
+                        f"source_archive={source_archive.name}",
+                        f"source_sha256={source_sha256}",
+                        f"deb={deb.name}",
+                        f"deb_sha256={deb_sha256}",
+                        f"checksum={checksum.name}",
+                        "built_at=2026-07-11T08:00:00+0800",
+                        f"manifest={manifest.name}",
+                        f"packages_sha256={packages_sha256}",
+                        f"packages_gz_sha256={packages_gz_sha256}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (package_dir / "构建报告.txt").write_text("current build report\n", encoding="utf-8")
+            for filename in (
+                "00_制包机_生成离线交付包.sh",
+                "01_制包机_发布预检.sh",
+                "02_目标终端_安装并验证.sh",
+                "03_目标终端_导出诊断报告.sh",
+                "04_目标终端_桌面App验收并导出证据.sh",
+                "99_本机_准备制包输入包.sh",
+            ):
+                script = delivery_dir / filename
+                script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+                script.chmod(0o755)
+            acceptance_tools = delivery_dir / "验收工具"
+            acceptance_tools.mkdir(mode=0o755)
+            (acceptance_tools / "run-installed-electron-acceptance.js").write_text(
+                "// fixture desktop acceptance driver\n", encoding="utf-8"
+            )
+            (acceptance_tools / "assemble-target-evidence.py").write_text(
+                "# fixture target assembler\n", encoding="utf-8"
+            )
+            (acceptance_tools / "validate-taiji-release-evidence.py").write_text(
+                "# fixture release validator\n", encoding="utf-8"
+            )
+            (acceptance_tools / "signing-public.pem").write_text(
+                "fixture release public key\n", encoding="utf-8"
+            )
+            (delivery_dir / "SHA256SUMS.txt").write_text(
+                f"{source_sha256}  {source_archive.name}\n",
+                encoding="utf-8",
+            )
+            (delivery_dir / "操作说明.md").write_text("fixture instructions\n", encoding="utf-8")
+            (delivery_dir / "版本信息.txt").write_text("0.1.0-preview\n", encoding="utf-8")
+            release_artifacts_sha256 = delivery_inventory_fixture_sha256(delivery_dir)
+
+            driver_result = None
+            driver_payload = None
+            if gate_name == "check_offline_install_rehearsal":
+                real_evidence_dir = tmp_path / "offline-install-rehearsal-real"
+                evidence_name = "offline-install-rehearsal.json"
+                log = real_evidence_dir / "offline-install-rehearsal-session.json"
+                session_id = "1" * 32
+                base_payload = {
+                    "schema_version": 1,
+                    "evidence_type": "offline-install-rehearsal",
+                    "generated_at_utc": generated_at,
+                    "rehearsal_session_id": session_id,
+                    "challenge_nonce": challenge,
+                    "release_artifacts_sha256": release_artifacts_sha256,
+                    "source_commit": source_commit,
+                    "deb_basename": deb.name,
+                    "deb_sha256": deb_sha256,
+                    "platform": "linux/amd64",
+                    "environment": "container",
+                    "os_id": "debian",
+                    "os_version": "13",
+                    "network": "none",
+                    "install": True,
+                    "uninstall": True,
+                    "reinstall": True,
+                    "desktop_app_verified": False,
+                    "target_verified": False,
+                    "log_basename": log.name,
+                    "log_sha256": "",
+                }
+                environment_name = "TAIJI_OFFLINE_REHEARSAL_DIR"
+                session_payload = {
+                    "schema": "taiji.offline-install-rehearsal.v1",
+                    "generated_at_utc": generated_at,
+                    "rehearsal_session_id": session_id,
+                    "challenge_nonce": challenge,
+                    "source_commit": source_commit,
+                    "deb_basename": deb.name,
+                    "deb_sha256": deb_sha256,
+                    "platform": "linux/amd64",
+                    "environment": "container",
+                    "os_id": "debian",
+                    "os_version": "13",
+                    "network": "none",
+                    "checks": {"install": True, "uninstall": True, "reinstall": True},
+                    "desktop_app_verified": False,
+                    "target_verified": False,
+                }
+            elif gate_name == "check_target_verification":
+                real_evidence_dir = tmp_path / "target-verification-real"
+                evidence_name = "target-verification.json"
+                log = real_evidence_dir / "desktop-acceptance-session.json"
+                screenshot = real_evidence_dir / "desktop-app.png"
+                diagnostic = real_evidence_dir / "taiji-support-bundle.json"
+                driver_result = real_evidence_dir / "desktop-driver-result.json"
+                session_id = "2" * 32
+                machine_fingerprint = "3" * 64
+                base_payload = {
+                    "schema_version": 1,
+                    "evidence_type": "target-desktop-verification",
+                    "application": "taiji-electron-desktop",
+                    "generated_at_utc": generated_at,
+                    "acceptance_session_id": session_id,
+                    "challenge_nonce": challenge,
+                    "machine_fingerprint_sha256": machine_fingerprint,
+                    "release_artifacts_sha256": release_artifacts_sha256,
+                    "electron_executable_sha256": "4" * 64,
+                    "desktop_entry_sha256": "5" * 64,
+                    "installed_package_version": "0.1.0-preview",
+                    "source_commit": source_commit,
+                    "deb_basename": deb.name,
+                    "deb_sha256": deb_sha256,
+                    "platform": "linux/amd64",
+                    "os_id": "kylin",
+                    "os_version": "V10",
+                    "desktop_environment": "UKUI",
+                    "target_verified": True,
+                    "desktop_launch": True,
+                    "real_model_conversation": True,
+                    "attachment_flow": True,
+                    "window_close_exit": True,
+                    "diagnostic_export": True,
+                    "session_log_basename": log.name,
+                    "session_log_sha256": "",
+                    "screenshot_basename": screenshot.name,
+                    "screenshot_sha256": "",
+                    "diagnostic_basename": diagnostic.name,
+                    "diagnostic_sha256": "",
+                    "driver_result_basename": driver_result.name,
+                    "driver_result_sha256": "",
+                }
+                environment_name = "TAIJI_TARGET_VERIFICATION_DIR"
+                session_payload = {
+                    "schema": "taiji.desktop.acceptance.v1",
+                    "application": "taiji-electron-desktop",
+                    "generated_at_utc": generated_at,
+                    "acceptance_session_id": session_id,
+                    "challenge_nonce": challenge,
+                    "source_commit": source_commit,
+                    "deb_sha256": deb_sha256,
+                    "platform": "linux/amd64",
+                    "os_id": "kylin",
+                    "os_version": "V10",
+                    "desktop_environment": "UKUI",
+                    "machine_fingerprint_sha256": machine_fingerprint,
+                    "electron_pid": 4242,
+                    "electron_executable": "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
+                    "electron_executable_sha256": "4" * 64,
+                    "desktop_entry_sha256": "5" * 64,
+                    "installed_package_version": "0.1.0-preview",
+                    "transport": "electron-cdp",
+                    "desktop_token_present": True,
+                    "web_fallback_used": False,
+                    "checks": {
+                        "desktop_launch": True,
+                        "real_model_conversation": True,
+                        "attachment_flow": True,
+                        "window_close_exit": True,
+                        "diagnostic_export": True,
+                    },
+                    "js_error_count": 0,
+                    "unexpected_http_failures": 0,
+                }
+                driver_payload = {
+                    "schema": "taiji.desktop.acceptance-driver.v1",
+                    "acceptance_session_id": session_id,
+                    "challenge_nonce": challenge,
+                    "electron_pid": 4242,
+                    "electron_executable": "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
+                    "electron_executable_sha256": "4" * 64,
+                    "desktop_entry_sha256": "5" * 64,
+                    "app_url": (
+                        "http://127.0.0.1:18787/?taiji_desktop=1&"
+                        "taiji_desktop_token=%3Credacted%3E"
+                    ),
+                    "webui_origin": "http://127.0.0.1:18787",
+                    "model": "openai/gpt-test",
+                    "attachment_probe_sha256": "6" * 64,
+                    "agent_pid": 4243,
+                    "web_pid": 4244,
+                    "screenshot_basename": screenshot.name,
+                    "diagnostic_basename": diagnostic.name,
+                    "checks": dict(session_payload["checks"]),
+                    "js_error_count": 0,
+                    "unexpected_http_failures": 0,
+                    "electron_exit_code": 0,
+                }
+            else:
+                raise AssertionError(f"unknown gate: {gate_name}")
+
+            real_evidence_dir.mkdir()
+            if symlink_evidence_ancestor:
+                evidence_ancestor = tmp_path / "evidence-ancestor-link"
+                evidence_ancestor.symlink_to(tmp_path, target_is_directory=True)
+                evidence_dir = evidence_ancestor / real_evidence_dir.name
+            else:
+                evidence_dir = tmp_path / ("evidence-link" if symlink_evidence_dir else real_evidence_dir.name)
+            if symlink_evidence_dir and not symlink_evidence_ancestor:
+                evidence_dir.symlink_to(real_evidence_dir, target_is_directory=True)
+            if gate_name == "check_offline_install_rehearsal":
+                log.write_text(json.dumps(session_payload), encoding="utf-8")
+                base_payload["log_sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+            else:
+                log.write_text(json.dumps(session_payload), encoding="utf-8")
+                screenshot_payload = png_fixture()
+                if screenshot_transform:
+                    screenshot_payload = screenshot_transform(screenshot_payload)
+                screenshot.write_bytes(screenshot_payload)
+                diagnostic_payload = {
+                    "schema": "taiji.product.support-bundle.v1",
+                    "manifest": {
+                        "redacted": True,
+                        "logs_included": False,
+                        "paths_included": False,
+                        "secrets_included": False,
+                    },
+                    "diagnostics": {
+                        "schema": "taiji.product.diagnostics.v1",
+                        "generated_at": generated_at,
+                        "incident_id": "inc-0123456789ab",
+                        "overall": "ready",
+                        "components": [
+                            {"id": item, "label": label, "status": "ready"}
+                            for item, label in (
+                                ("webui", "桌面界面"),
+                                ("agent", "智能体服务"),
+                                ("gateway", "本地任务服务"),
+                                ("license", "授权状态"),
+                                ("docx", "文档引擎"),
+                                ("skills", "专家能力"),
+                                ("node", "运行环境"),
+                            )
+                        ],
+                    },
+                }
+                if diagnostic_transform:
+                    diagnostic_payload = diagnostic_transform(diagnostic_payload)
+                diagnostic.write_text(json.dumps(diagnostic_payload), encoding="utf-8")
+                if driver_transform:
+                    driver_payload = driver_transform(dict(driver_payload))
+                driver_result.write_text(json.dumps(driver_payload), encoding="utf-8")
+                driver_result.chmod(0o600)
+                base_payload["session_log_sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+                base_payload["screenshot_sha256"] = hashlib.sha256(screenshot.read_bytes()).hexdigest()
+                base_payload["diagnostic_sha256"] = hashlib.sha256(diagnostic.read_bytes()).hexdigest()
+                base_payload["driver_result_sha256"] = hashlib.sha256(
+                    driver_result.read_bytes()
+                ).hexdigest()
+
+            if payload_transform != "missing":
+                evidence = evidence_dir / evidence_name
+                payload = payload_transform(dict(base_payload)) if callable(payload_transform) else payload_transform
                 if isinstance(payload, str):
                     evidence.write_text(payload, encoding="utf-8")
                 else:
                     evidence.write_text(json.dumps(payload), encoding="utf-8")
+                signature = Path(f"{evidence}.sig")
+                subprocess.run(
+                    [
+                        "openssl",
+                        "dgst",
+                        "-sha256",
+                        "-sign",
+                        str(test_private_key),
+                        "-out",
+                        str(signature),
+                        str(evidence),
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                evidence = evidence_dir / evidence_name
+                signature = Path(f"{evidence}.sig")
 
-            source = read_text("scripts/taiji-release-check.sh")
-            source = source.rsplit('\nmain "$@"', 1)[0] + "\n"
-            import_script = tmp_path / "release-check-import.sh"
-            import_script.write_text(source, encoding="utf-8")
+            artifact_paths = {
+                "deb": deb,
+                "checksum": checksum,
+                "manifest": manifest,
+                "build_marker": build_marker,
+                "source_archive": source_archive,
+                "packages": packages,
+                "packages_gz": packages_gz,
+                "offline_dependency": offline_repo / "dependency-fixture_1.0_amd64.deb",
+                "offline_repo": offline_repo,
+                "delivery_dir": delivery_dir,
+                "install_script": delivery_dir / "02_目标终端_安装并验证.sh",
+                "evidence_dir": evidence_dir,
+                "real_evidence_dir": real_evidence_dir,
+                "evidence": evidence,
+                "signature": signature,
+                "driver_result": driver_result,
+            }
+            if artifact_transform:
+                artifact_transform(artifact_paths)
+
             harness = tmp_path / "run-offline-rehearsal-gate.sh"
             harness.write_text(
                 "\n".join(
                     [
                         "#!/usr/bin/env bash",
                         "set -euo pipefail",
-                        f'export TAIJI_OFFLINE_REHEARSAL_DIR="{evidence_dir}"',
-                        f'source "{import_script}"',
-                        "check_offline_install_rehearsal",
+                        f'export TAIJI_RELEASE_REPO_ROOT="{ROOT}"',
+                        f'export TAIJI_DELIVERY_DIR="{delivery_dir}"',
+                        f'export {environment_name}="{evidence_dir}"',
+                        f'export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="{challenge}"',
+                        f'export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="{challenge}"',
+                        f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
+                        f'EVIDENCE_ATTESTATION_PUBLIC_KEY="{test_public_key}"',
+                        f'EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT="{test_public_fingerprint}"',
+                        gate_name,
                     ]
                 )
                 + "\n",
@@ -300,34 +815,289 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             )
 
     def test_release_check_requires_valid_offline_lifecycle_evidence(self):
-        valid = {
-            "platform": "linux/amd64",
-            "network": "none",
-            "install": True,
-            "uninstall": True,
-            "reinstall": True,
-            "target_verified": False,
-        }
         invalid_cases = (
-            ("missing", None),
+            ("missing", "missing"),
             ("malformed", "{not-json\n"),
-            ("wrong_platform", {**valid, "platform": "linux/arm64"}),
-            ("online", {**valid, "network": "bridge"}),
-            ("missing_install", {**valid, "install": False}),
-            ("missing_uninstall", {**valid, "uninstall": False}),
-            ("missing_reinstall", {**valid, "reinstall": False}),
-            ("claims_target", {**valid, "target_verified": True}),
-            ("string_boolean", {**valid, "install": "true"}),
+            ("wrong_platform", lambda data: {**data, "platform": "linux/arm64"}),
+            ("online", lambda data: {**data, "network": "bridge"}),
+            ("missing_install", lambda data: {**data, "install": False}),
+            ("missing_uninstall", lambda data: {**data, "uninstall": False}),
+            ("missing_reinstall", lambda data: {**data, "reinstall": False}),
+            ("claims_desktop", lambda data: {**data, "desktop_app_verified": True}),
+            ("claims_target", lambda data: {**data, "target_verified": True}),
+            ("string_boolean", lambda data: {**data, "install": "true"}),
+            ("wrong_commit", lambda data: {**data, "source_commit": "deadbeef"}),
+            ("wrong_deb_hash", lambda data: {**data, "deb_sha256": "0" * 64}),
+            ("wrong_challenge", lambda data: {**data, "challenge_nonce": "cd" * 32}),
+            ("wrong_log_hash", lambda data: {**data, "log_sha256": "0" * 64}),
+            ("unsafe_log_path", lambda data: {**data, "log_basename": "../outside.log"}),
+            ("invalid_environment_type", lambda data: {**data, "environment": ["container"]}),
+            ("extra_field", lambda data: {**data, "actual_network": "bridge"}),
+            ("missing_field", lambda data: {key: value for key, value in data.items() if key != "network"}),
+            (
+                "duplicate_key",
+                lambda data: json.dumps(data)[:-1] + ', "network": "none"}',
+            ),
         )
 
         for label, payload in invalid_cases:
             with self.subTest(label=label):
-                result = self._run_offline_rehearsal_gate(payload)
+                result = self._run_release_evidence_gate("check_offline_install_rehearsal", payload)
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        accepted = self._run_offline_rehearsal_gate(valid)
+        accepted = self._run_release_evidence_gate("check_offline_install_rehearsal", lambda data: data)
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         self.assertIn("离线生命周期演练证据有效", accepted.stdout + accepted.stderr)
+
+    def test_release_check_requires_strict_current_desktop_target_evidence(self):
+        invalid_cases = (
+            ("missing", "missing"),
+            ("malformed", '{"target_verified": true, "desktop_launch": true, "diagnostic_export": true'),
+            ("wrong_app", lambda data: {**data, "application": "web"}),
+            ("wrong_os", lambda data: {**data, "os_id": "debian"}),
+            ("wrong_commit", lambda data: {**data, "source_commit": "deadbeef"}),
+            ("wrong_deb_hash", lambda data: {**data, "deb_sha256": "f" * 64}),
+            ("wrong_electron_hash", lambda data: {**data, "electron_executable_sha256": "0" * 64}),
+            ("wrong_desktop_entry_hash", lambda data: {**data, "desktop_entry_sha256": "0" * 64}),
+            ("wrong_challenge", lambda data: {**data, "challenge_nonce": "cd" * 32}),
+            ("no_desktop_launch", lambda data: {**data, "desktop_launch": False}),
+            ("no_model_conversation", lambda data: {**data, "real_model_conversation": False}),
+            ("no_attachment", lambda data: {**data, "attachment_flow": False}),
+            ("no_window_exit", lambda data: {**data, "window_close_exit": False}),
+            ("no_diagnostics", lambda data: {**data, "diagnostic_export": False}),
+            ("string_boolean", lambda data: {**data, "target_verified": "true"}),
+            ("wrong_session_log_hash", lambda data: {**data, "session_log_sha256": "0" * 64}),
+            ("unsafe_screenshot_path", lambda data: {**data, "screenshot_basename": "../web.png"}),
+            ("wrong_diagnostic_hash", lambda data: {**data, "diagnostic_sha256": "0" * 64}),
+            ("wrong_driver_hash", lambda data: {**data, "driver_result_sha256": "0" * 64}),
+            ("unsafe_driver_path", lambda data: {**data, "driver_result_basename": "../driver.json"}),
+            (
+                "same_file_for_all_evidence",
+                lambda data: {
+                    **data,
+                    "screenshot_basename": data["session_log_basename"],
+                    "screenshot_sha256": data["session_log_sha256"],
+                    "diagnostic_basename": data["session_log_basename"],
+                    "diagnostic_sha256": data["session_log_sha256"],
+                },
+            ),
+            ("extra_mobile_claim", lambda data: {**data, "mobile_verified": True}),
+        )
+
+        for label, payload in invalid_cases:
+            with self.subTest(label=label):
+                result = self._run_release_evidence_gate("check_target_verification", payload)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        accepted = self._run_release_evidence_gate("check_target_verification", lambda data: data)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertIn("桌面 App 目标机证据有效", accepted.stdout + accepted.stderr)
+
+        for label, transform in (
+            (
+                "driver unknown field",
+                lambda data: {**data, "unexpected": True},
+            ),
+            (
+                "driver session mismatch",
+                lambda data: {**data, "acceptance_session_id": "f" * 32},
+            ),
+            (
+                "driver challenge mismatch",
+                lambda data: {**data, "challenge_nonce": "e" * 64},
+            ),
+            (
+                "driver electron pid mismatch",
+                lambda data: {**data, "electron_pid": 5252},
+            ),
+        ):
+            with self.subTest(label=label):
+                result = self._run_release_evidence_gate(
+                    "check_target_verification",
+                    lambda data: data,
+                    driver_transform=transform,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        copied_driver = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["driver_result"].chmod(0o644),
+        )
+        self.assertEqual(
+            copied_driver.returncode,
+            0,
+            copied_driver.stdout + copied_driver.stderr,
+        )
+
+        def emulate_permission_losing_copy(paths):
+            delivery = paths["delivery_dir"]
+            delivery.chmod(0o755)
+            for item in delivery.rglob("*"):
+                if item.is_dir() and not item.is_symlink():
+                    item.chmod(0o700 if len(item.parts) % 2 else 0o755)
+                elif item.is_file() and not item.is_symlink():
+                    item.chmod(0o644)
+
+        copied_delivery = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=emulate_permission_losing_copy,
+        )
+        self.assertEqual(
+            copied_delivery.returncode,
+            0,
+            copied_delivery.stdout + copied_delivery.stderr,
+        )
+
+        tampered_driver = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["driver_result"].write_text(
+                '{"schema":"tampered"}', encoding="utf-8"
+            ),
+        )
+        self.assertNotEqual(
+            tampered_driver.returncode,
+            0,
+            tampered_driver.stdout + tampered_driver.stderr,
+        )
+
+        def hardlink_driver(paths):
+            os.link(paths["driver_result"], paths["driver_result"].with_suffix(".hardlink"))
+
+        hardlinked_driver = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=hardlink_driver,
+        )
+        self.assertNotEqual(
+            hardlinked_driver.returncode,
+            0,
+            hardlinked_driver.stdout + hardlinked_driver.stderr,
+        )
+
+        def contradict_diagnostic_overall(bundle):
+            bundle["diagnostics"]["components"][1]["status"] = "blocked"
+            return bundle
+
+        contradictory = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            diagnostic_transform=contradict_diagnostic_overall,
+        )
+        self.assertNotEqual(contradictory.returncode, 0, contradictory.stdout + contradictory.stderr)
+
+        def add_private_diagnostic_field(bundle):
+            bundle["diagnostics"]["raw_secret"] = "/Users/alice/sk-private"
+            return bundle
+
+        private_diagnostic = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            diagnostic_transform=add_private_diagnostic_field,
+        )
+        self.assertNotEqual(private_diagnostic.returncode, 0, private_diagnostic.stdout + private_diagnostic.stderr)
+
+        blank_screenshot = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            screenshot_transform=lambda _payload: png_fixture(varied=False),
+        )
+        self.assertNotEqual(blank_screenshot.returncode, 0, blank_screenshot.stdout + blank_screenshot.stderr)
+
+    def test_release_evidence_binds_build_manifest_and_rejects_symlinked_evidence_directory(self):
+        def corrupt_manifest(paths):
+            payload = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+            payload["source_commit"] = "deadbeef"
+            paths["manifest"].write_text(json.dumps(payload), encoding="utf-8")
+
+        manifest_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=corrupt_manifest,
+        )
+        self.assertNotEqual(manifest_result.returncode, 0, manifest_result.stdout + manifest_result.stderr)
+
+        def corrupt_sidecar(paths):
+            paths["checksum"].write_text(f"{'0' * 64}  {paths['deb'].name}\n", encoding="utf-8")
+
+        checksum_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=corrupt_sidecar,
+        )
+        self.assertNotEqual(checksum_result.returncode, 0, checksum_result.stdout + checksum_result.stderr)
+
+        dependency_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["offline_dependency"].write_bytes(
+                b"tampered offline dependency after evidence signing"
+            ),
+        )
+        self.assertNotEqual(dependency_result.returncode, 0, dependency_result.stdout + dependency_result.stderr)
+
+        writable_directory_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["offline_repo"].chmod(0o777),
+        )
+        self.assertNotEqual(
+            writable_directory_result.returncode,
+            0,
+            writable_directory_result.stdout + writable_directory_result.stderr,
+        )
+
+        writable_script_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["install_script"].chmod(0o777),
+        )
+        self.assertNotEqual(
+            writable_script_result.returncode,
+            0,
+            writable_script_result.stdout + writable_script_result.stderr,
+        )
+
+        signature_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["signature"].unlink(),
+        )
+        self.assertNotEqual(signature_result.returncode, 0, signature_result.stdout + signature_result.stderr)
+
+        tampered_evidence_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            artifact_transform=lambda paths: paths["evidence"].write_text(
+                paths["evidence"].read_text(encoding="utf-8") + " ",
+                encoding="utf-8",
+            ),
+        )
+        self.assertNotEqual(
+            tampered_evidence_result.returncode,
+            0,
+            tampered_evidence_result.stdout + tampered_evidence_result.stderr,
+        )
+
+        symlink_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            symlink_evidence_dir=True,
+        )
+        self.assertNotEqual(symlink_result.returncode, 0, symlink_result.stdout + symlink_result.stderr)
+
+        ancestor_symlink_result = self._run_release_evidence_gate(
+            "check_target_verification",
+            lambda data: data,
+            symlink_evidence_ancestor=True,
+        )
+        self.assertNotEqual(
+            ancestor_symlink_result.returncode,
+            0,
+            ancestor_symlink_result.stdout + ancestor_symlink_result.stderr,
+        )
 
     def test_release_check_runs_offline_rehearsal_gate_before_target_gate(self):
         release_check = read_text("scripts/taiji-release-check.sh")
@@ -345,6 +1115,158 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("TAIJI_OFFLINE_REHEARSAL_DIR", docs)
         self.assertIn('"network": "none"', docs)
         self.assertIn('"target_verified": false', docs)
+
+    def test_release_check_main_aggregates_both_missing_evidence_gates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "run-release-main.sh"
+            harness.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env bash",
+                        "set -euo pipefail",
+                        f'export TAIJI_RELEASE_REPO_ROOT="{ROOT}"',
+                        f'export TAIJI_DELIVERY_DIR="{tmp_path / "delivery"}"',
+                        f'export TAIJI_OFFLINE_REHEARSAL_DIR="{tmp_path / "offline"}"',
+                        f'export TAIJI_TARGET_VERIFICATION_DIR="{tmp_path / "target"}"',
+                        f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
+                        "run_root_tests() { :; }",
+                        "run_desktop_evidence_tool_tests() { :; }",
+                        "run_agent_tests() { :; }",
+                        "run_webui_tests() { :; }",
+                        "run_delivery_preflight() { :; }",
+                        "check_delivery_artifacts() { :; }",
+                        "main",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", str(harness)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("check_offline_install_rehearsal", output)
+        self.assertIn("check_target_verification", output)
+        self.assertIn("2 项失败", output)
+
+    def test_release_delivery_check_propagates_source_failure_and_uses_build_output_metadata(self):
+        release_check = read_text("scripts/taiji-release-check.sh")
+        self.assertIn("check_source_archive || return 1", release_check)
+        self.assertIn("生成的安装包/taiji-package-manifest.json", release_check)
+        self.assertIn("生成的安装包/构建报告.txt", release_check)
+        self.assertIn('EVIDENCE_VALIDATOR="$SCRIPT_ROOT/scripts/validate-taiji-release-evidence.py"', release_check)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            delivery = tmp_path / "delivery"
+            output = delivery / "生成的安装包"
+            offline = delivery / "离线依赖"
+            output.mkdir(parents=True)
+            offline.mkdir()
+            (output / "taiji-agent_fixture_amd64.deb").write_bytes(b"deb")
+            (output / "taiji-agent_fixture_amd64.deb.sha256").write_text("fixture\n", encoding="utf-8")
+            (output / ".build-success").write_text("fixture\n", encoding="utf-8")
+            (output / "taiji-package-manifest.json").write_text("{}\n", encoding="utf-8")
+            (output / "构建报告.txt").write_text("fixture\n", encoding="utf-8")
+            (offline / "Packages").write_text("fixture\n", encoding="utf-8")
+            (offline / "Packages.gz").write_bytes(b"fixture")
+            harness = tmp_path / "check-delivery-propagation.sh"
+            harness.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env bash",
+                        "set -euo pipefail",
+                        f'export TAIJI_RELEASE_REPO_ROOT="{ROOT}"',
+                        f'export TAIJI_DELIVERY_DIR="{delivery}"',
+                        f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
+                        "check_source_archive() { return 1; }",
+                        "check_delivery_artifacts",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", str(harness)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_evidence_signer_uses_fixed_offline_trust_anchor(self):
+        signer = read_text("scripts/sign-taiji-release-evidence.sh")
+        release_check = read_text("scripts/taiji-release-check.sh")
+
+        self.assertIn("tools/taiji-release-evidence/signing-public.pem", signer)
+        self.assertIn("839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da", signer)
+        self.assertIn("openssl dgst -sha256 -sign", signer)
+        self.assertIn("openssl dgst -sha256 -verify", signer)
+        self.assertIn('SIGNATURE="${EVIDENCE}.sig"', signer)
+        self.assertIn('--attestation-signature "${evidence}.sig"', release_check)
+        self.assertIn("EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT", release_check)
+        self.assertIn("TAIJI_RELEASE_SKIP_GIT_CHECK=0", signer)
+        self.assertIn("TAIJI_RELEASE_SKIP_GIT_CHECK=0", release_check)
+        self.assertIn("st_nlink", signer)
+        self.assertIn("stat.S_IMODE", signer)
+        self.assertIn("O_EXCL", signer)
+        self.assertIn("used-challenges", signer)
+        self.assertIn("TAIJI_OFFLINE_REHEARSAL_CHALLENGE", signer)
+        self.assertIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", signer)
+        self.assertIn('"$CHALLENGE" = "$EXPECTED_CHALLENGE"', signer)
+        self.assertIn("st_size > 1024 * 1024", signer)
+        self.assertIn("O_NOFOLLOW", signer)
+        self.assertIn("os.fsync(state_descriptor)", signer)
+        self.assertLess(
+            signer.index('--attestation-signature "$tmp_signature"'),
+            signer.index('mv -f "$tmp_signature" "$SIGNATURE"'),
+        )
+
+    def test_release_preflight_rebuilds_source_and_semantically_checks_offline_repo(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+
+        self.assertIn("check_source_archive_matches_git_head", preflight)
+        self.assertIn("git -C \"$REPO_ROOT\" archive", preflight)
+        self.assertIn("gzip -n", preflight)
+        self.assertIn('cmp -s "$expected_archive" "$SOURCE_ARCHIVE"', preflight)
+        self.assertIn("verify_offline_repository_integrity", preflight)
+        self.assertIn('gzip -t "$OFFLINE_REPO/Packages.gz"', preflight)
+        self.assertIn('gzip -dc "$OFFLINE_REPO/Packages.gz" | cmp -s - "$OFFLINE_REPO/Packages"', preflight)
+        self.assertIn("Packages index does not exactly cover repository DEBs", preflight)
+        self.assertIn('dpkg-deb --info "$repo_deb"', preflight)
+        self.assertIn('["dpkg-deb", "-f", str(package_path), field]', preflight)
+        self.assertIn("offline taiji-agent DEB does not match release DEB", preflight)
+        self.assertIn("electron_executable_sha256", preflight)
+        self.assertIn("desktop_entry_sha256", preflight)
+
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        self.assertIn('"electron_executable_sha256"', builder)
+        self.assertIn('"desktop_entry_sha256"', builder)
+        self.assertIn("cleanup_delivery_build_cache", builder)
+        self.assertIn("cleanup_temporary_build_root", builder)
+        self.assertIn("umask 022", builder)
+        self.assertIn("normalize_delivery_permissions", builder)
+        self.assertIn("-type f -links +1", builder)
+        self.assertIn('find "$SCRIPT_DIR" -xdev -mindepth 1 \\( -type d -o -type f \\) -exec chmod go-w', builder)
+        self.assertLess(
+            builder.index("cleanup_delivery_build_cache", builder.index("main() {")),
+            builder.index("最终发布预检", builder.index("main() {")),
+        )
+        self.assertGreater(
+            builder.index("cleanup_temporary_build_root", builder.index("main() {")),
+            builder.index("run_release_preflight", builder.index("最终发布预检")),
+        )
+        self.assertIn("validate_build_root_location", builder)
+        self.assertIn("umask 022", read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh"))
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
@@ -845,7 +1767,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertFalse((delivery / ".DS_Store").exists())
             self.assertFalse(apple_dir.exists())
 
-    def _run_release_preflight_artifact_gate(self, sidecar_mode):
+    def _run_release_preflight_artifact_gate(
+        self,
+        sidecar_mode,
+        tampered_acceptance_tool=None,
+        extra_output_case=None,
+    ):
         source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -853,12 +1780,52 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             output_dir = delivery / "生成的安装包"
             offline_repo = delivery / "离线依赖"
             fake_bin = tmp_path / "bin"
-            verifier = tmp_path / "repo/packaging/linux/verify-payload.py"
+            repo_root = tmp_path / "repo"
+            verifier = repo_root / "packaging/linux/verify-payload.py"
             for directory in (delivery, output_dir, offline_repo, fake_bin, verifier.parent):
                 directory.mkdir(parents=True, exist_ok=True)
 
             script = delivery / "01_制包机_发布预检.sh"
             shutil.copy2(source_script, script)
+            target_script_relative = Path("taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh")
+            source_target_script = repo_root / target_script_relative
+            source_target_script.parent.mkdir(parents=True, exist_ok=True)
+            source_target_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            source_target_script.chmod(0o755)
+            target_script = delivery / source_target_script.name
+            shutil.copy2(source_target_script, target_script)
+            acceptance_tools = delivery / "验收工具"
+            acceptance_tools.mkdir()
+            acceptance_sources = {
+                "run-installed-electron-acceptance.js": Path(
+                    "tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
+                ),
+                "assemble-target-evidence.py": Path(
+                    "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+                ),
+                "validate-taiji-release-evidence.py": Path(
+                    "scripts/validate-taiji-release-evidence.py"
+                ),
+                "signing-public.pem": Path("tools/taiji-release-evidence/signing-public.pem"),
+            }
+            for filename, relative_source in acceptance_sources.items():
+                source = repo_root / relative_source
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative_source, source)
+                shutil.copy2(source, acceptance_tools / filename)
+            if tampered_acceptance_tool is not None:
+                tamper_target = (
+                    target_script
+                    if tampered_acceptance_tool == target_script.name
+                    else acceptance_tools / tampered_acceptance_tool
+                )
+                with tamper_target.open("a", encoding="utf-8") as handle:
+                    if tampered_acceptance_tool.endswith(".js"):
+                        handle.write("\n// bytewise tamper that preserves existing semantic checks\n")
+                    elif tampered_acceptance_tool.endswith(".py"):
+                        handle.write("\n# bytewise tamper that preserves existing semantic checks\n")
+                    else:
+                        handle.write("\n")
 
             archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
             archive.write_bytes(b"fake source archive\n")
@@ -882,11 +1849,62 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             if contents is not None:
                 sidecar.write_text(contents, encoding="utf-8")
 
+            electron_payload = b"fake electron\n"
+            desktop_payload = b"fake desktop\n"
             (output_dir / ".build-success").write_text("ok\n", encoding="utf-8")
-            (output_dir / "taiji-package-manifest.json").write_text("{}\n", encoding="utf-8")
+            (output_dir / "taiji-package-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "electron_executable_sha256": hashlib.sha256(electron_payload).hexdigest(),
+                        "desktop_entry_sha256": hashlib.sha256(desktop_payload).hexdigest(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             (output_dir / "构建报告.txt").write_text("ok\n", encoding="utf-8")
-            (offline_repo / "Packages").write_text("", encoding="utf-8")
-            (offline_repo / "Packages.gz").write_bytes(b"fake gzip\n")
+            if extra_output_case == "old_deb":
+                (output_dir / "old.deb").write_bytes(b"stale deb\n")
+            elif extra_output_case == "extra_sidecar":
+                (output_dir / "old.deb.sha256").write_text("stale\n", encoding="utf-8")
+            elif extra_output_case == "zip":
+                (output_dir / "historical-build.zip").write_bytes(b"stale zip\n")
+            elif extra_output_case == "nested_history":
+                historical = output_dir / "history"
+                historical.mkdir()
+                (historical / "old.deb").write_bytes(b"stale nested deb\n")
+            elif extra_output_case == "extra_file":
+                (output_dir / "notes.txt").write_text("unexpected\n", encoding="utf-8")
+            elif extra_output_case == "symlink":
+                external_sidecar = tmp_path / "external-sidecar"
+                shutil.copy2(sidecar, external_sidecar)
+                sidecar.unlink()
+                sidecar.symlink_to(external_sidecar)
+            elif extra_output_case == "hardlink":
+                os.link(deb, tmp_path / "external-deb-hardlink")
+            elif extra_output_case == "fifo":
+                os.mkfifo(output_dir / "package-fifo")
+            elif extra_output_case is not None:
+                raise AssertionError(f"unknown extra output case: {extra_output_case}")
+            repo_deb = offline_repo / deb.name
+            repo_deb.write_bytes(deb.read_bytes())
+            packages_payload = (
+                "Package: taiji-agent\n"
+                "Version: 1.0.0\n"
+                "Architecture: amd64\n"
+                f"Filename: ./{repo_deb.name}\n"
+                f"Size: {repo_deb.stat().st_size}\n"
+                f"SHA256: {deb_digest}\n\n"
+            ).encode("utf-8")
+            (offline_repo / "Packages").write_bytes(packages_payload)
+            (offline_repo / "Packages.gz").write_bytes(gzip.compress(packages_payload))
+            (offline_repo / "runtime-dependencies.txt").write_text("", encoding="utf-8")
+            checksum_lines = []
+            for path in sorted(offline_repo.iterdir()):
+                if path.name == "SHA256SUMS.txt":
+                    continue
+                checksum_lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+            (offline_repo / "SHA256SUMS.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
             verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
 
             unpack_log = tmp_path / "dpkg-deb.log"
@@ -895,8 +1913,20 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -eu\n"
                 "printf '%s\\n' \"$*\" >> \"$TAIJI_TEST_DPKG_LOG\"\n"
+                "if [ \"${1:-}\" = \"--info\" ]; then exit 0; fi\n"
+                "if [ \"${1:-}\" = \"-f\" ]; then\n"
+                "  case \"${3:-}\" in\n"
+                "    Package) printf 'taiji-agent\\n' ;;\n"
+                "    Version) printf '1.0.0\\n' ;;\n"
+                "    Architecture) printf 'amd64\\n' ;;\n"
+                "    *) exit 2 ;;\n"
+                "  esac\n"
+                "  exit 0\n"
+                "fi\n"
                 "[ \"${1:-}\" = \"-x\" ] || exit 2\n"
-                "mkdir -p \"$3\"\n",
+                "mkdir -p \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist\" \"$3/usr/share/applications\"\n"
+                "printf 'fake electron\\n' > \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron\"\n"
+                "printf 'fake desktop\\n' > \"$3/usr/share/applications/taiji-agent.desktop\"\n",
                 encoding="utf-8",
             )
             fake_dpkg_deb.chmod(0o755)
@@ -907,7 +1937,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
                     "TAIJI_RELEASE_REQUIRE_ARTIFACTS": "1",
                     "TAIJI_RELEASE_SKIP_GIT_CHECK": "1",
-                    "TAIJI_REPO_ROOT": str(tmp_path / "repo"),
+                    "TAIJI_REPO_ROOT": str(repo_root),
                     "TAIJI_TEST_DPKG_LOG": str(unpack_log),
                 }
             )
@@ -922,6 +1952,54 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             unpack_calls = unpack_log.read_text(encoding="utf-8") if unpack_log.exists() else ""
 
         return result, unpack_calls
+
+    def test_release_preflight_rejects_every_non_allowlisted_package_output_entry(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        cases = (
+            "old_deb",
+            "extra_sidecar",
+            "zip",
+            "nested_history",
+            "extra_file",
+            "symlink",
+            "hardlink",
+            "fifo",
+        )
+        for extra_output_case in cases:
+            with self.subTest(extra_output_case=extra_output_case):
+                result, unpack_calls = self._run_release_preflight_artifact_gate(
+                    "valid",
+                    extra_output_case=extra_output_case,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn("生成的安装包/ 含不允许的条目", output)
+                self.assertEqual(unpack_calls, "", output)
+
+    def test_release_preflight_rejects_bytewise_modified_staged_acceptance_tool(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        for filename in (
+            "04_目标终端_桌面App验收并导出证据.sh",
+            "run-installed-electron-acceptance.js",
+            "assemble-target-evidence.py",
+            "validate-taiji-release-evidence.py",
+            "signing-public.pem",
+        ):
+            with self.subTest(filename=filename):
+                result, unpack_calls = self._run_release_preflight_artifact_gate(
+                    "valid",
+                    tampered_acceptance_tool=filename,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn("目标终端验收工具与当前源码不一致", output)
+                self.assertEqual(unpack_calls, "", output)
 
     def test_release_preflight_rejects_invalid_deb_checksum_sidecars_before_payload_unpack(self):
         if not shutil.which("sha256sum"):
@@ -1107,6 +2185,78 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         unpack = builder[builder.index("unpack_source() {") : builder.index("npm_ci_with_network_fallback() {")]
         self.assertLess(unpack.index("reset_build_root"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
         self.assertLess(unpack.index('tar -xzf "$SRC_ARCHIVE"'), unpack.index("repair_build_tree_permissions"))
+
+    def test_offline_builder_only_deletes_owned_dedicated_build_roots(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("validate_safe_build_root_path", builder)
+        self.assertIn('taiji-agent-build-*', builder)
+        self.assertIn(".taiji-build-root-owner", builder)
+        self.assertIn("require_owned_build_root", builder)
+        self.assertIn('stat -c \'%u\' "$BUILD_ROOT"', builder)
+        self.assertIn('stat -c \'%a\' "$BUILD_ROOT"', builder)
+        self.assertIn('chmod 0700 "$BUILD_ROOT"', builder)
+
+        reset = builder[
+            builder.index("reset_build_root() {") :
+            builder.index("repair_build_tree_permissions() {")
+        ]
+        self.assertLess(reset.index("require_owned_build_root"), reset.index('rm -rf -- "$BUILD_ROOT"'))
+
+        cleanup = builder[
+            builder.index("cleanup_temporary_build_root() {") :
+            builder.index("apt_source_summary() {")
+        ]
+        self.assertLess(cleanup.index("require_owned_build_root"), cleanup.index('rm -rf -- "$BUILD_ROOT"'))
+
+    def test_offline_builder_keeps_build_machine_logs_outside_the_delivery(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        docs = read_text("taijiagent 打包交付/操作说明.md")
+        version_info = read_text("taijiagent 打包交付/版本信息.txt")
+
+        self.assertNotRegex(builder, r'(?m)^LOG_DIR="\$SCRIPT_DIR/构建日志"$')
+        self.assertIn("XDG_STATE_HOME", builder)
+        self.assertIn("taiji-agent/build-logs", builder)
+        self.assertIn('chmod 0700 "$LOG_DIR"', builder)
+        self.assertIn('"$SCRIPT_DIR/构建日志"', builder)
+        self.assertIn("交付目录残留旧构建日志", builder)
+        self.assertIn("~/.local/state/taiji-agent/build-logs", docs)
+        self.assertNotIn("会生成 `构建日志/失败诊断", docs)
+        self.assertIn("XDG_STATE_HOME", version_info)
+        self.assertIn("taiji-agent/build-logs", version_info)
+        self.assertNotIn("制包失败会生成 构建日志/", version_info)
+
+    def test_offline_builder_materializes_locked_portable_resvg_dependencies_before_docx_tests(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        materializer = read_text(
+            "hermes-local-lab/sources/docx-engine-v2/scripts/materialize-portable-resvg-dependencies.js"
+        )
+        renderer = read_text("hermes-local-lab/sources/docx-engine-v2/src/rendering/render-docx.js")
+
+        self.assertIn("materialize-portable-resvg-dependencies.js", builder)
+        docx_build = builder[
+            builder.index('cd "$(source_lab_dir)/sources/docx-engine-v2"') :
+            builder.index('info "构建 DEB 安装包"')
+        ]
+        self.assertLess(
+            docx_build.index("materialize-portable-resvg-dependencies.js"),
+            docx_build.index("npm test"),
+        )
+        self.assertIn("mkdtempSync", renderer)
+        self.assertIn("['TMPDIR', 'TMP', 'TEMP']", renderer)
+        self.assertIn("process.env[key]", renderer)
+        self.assertIn("process.once('exit'", renderer)
+        for package_name in (
+            "@resvg/resvg-js-linux-x64-gnu",
+            "@resvg/resvg-js-linux-x64-musl",
+            "@resvg/resvg-js-linux-arm64-gnu",
+            "@resvg/resvg-js-linux-arm64-musl",
+        ):
+            self.assertIn(package_name, materializer)
+        self.assertIn("sha512-", materializer)
+        self.assertIn("npm", materializer)
+        self.assertIn("pack", materializer)
+        self.assertIn("--ignore-scripts", materializer)
 
     def test_build_script_audits_final_deb_payload_and_webui_offline_assets(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

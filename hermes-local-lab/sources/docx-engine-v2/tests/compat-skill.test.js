@@ -9,6 +9,8 @@ const yauzl = require('yauzl');
 
 const rootDir = path.join(__dirname, '..');
 const BUILD_SKILL = path.join(rootDir, 'scripts', 'build-copyable-skill.js');
+const MATERIALIZE_RESVG = path.join(rootDir, 'scripts', 'materialize-portable-resvg-dependencies.js');
+const { promoteOutput } = require('../scripts/build-copyable-skill');
 const WPS_EVIDENCE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
   'base64'
@@ -102,7 +104,7 @@ function recordWpsVisualAcceptance({ outDir, workspace, deliveryDir, evidenceNam
 }
 
 test('build-copyable-skill writes a v2-backed skill package without runtime leftovers', (t) => {
-  const { outDir } = buildSkillPackage(t);
+  const { workspace, outDir } = buildSkillPackage(t);
 
   assert.equal(fs.existsSync(path.join(outDir, 'SKILL.md')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'skill.json')), true);
@@ -133,6 +135,28 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.equal(fs.existsSync(path.join(outDir, 'engine/README.md')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'engine/templates/general-proposal/template.docx')), true);
   assert.equal(fs.existsSync(path.join(outDir, 'runtime')), false);
+  assert.equal(
+    fs.readdirSync(workspace).some((name) => name.startsWith('.docx-template-skill.')),
+    false,
+    'atomic build staging directories must be cleaned'
+  );
+  for (const packageName of [
+    'resvg-js',
+    'resvg-js-linux-x64-gnu',
+    'resvg-js-linux-x64-musl',
+    'resvg-js-linux-arm64-gnu',
+    'resvg-js-linux-arm64-musl',
+  ]) {
+    const packageDir = path.join(outDir, 'engine/node_modules/@resvg', packageName);
+    assert.equal(fs.existsSync(path.join(packageDir, 'package.json')), true, packageName);
+    if (packageName !== 'resvg-js') {
+      assert.equal(
+        fs.readdirSync(packageDir).some((name) => name.endsWith('.node')),
+        true,
+        `${packageName} native binary`
+      );
+    }
+  }
 
   const readme = fs.readFileSync(path.join(outDir, 'README.md'), 'utf8');
   const contract = fs.readFileSync(path.join(outDir, 'skill-invocation-contract.md'), 'utf8');
@@ -145,6 +169,54 @@ test('build-copyable-skill writes a v2-backed skill package without runtime left
   assert.match(contract, /record-wps-visual/);
   assert.match(engineReadme, /node src\/cli\/run-job\.js/);
   assert.match(engineReadme, /node src\/cli\/install-template\.js/);
+});
+
+test('build-copyable-skill preserves an existing output when build inputs are invalid', (t) => {
+  const workspace = makeWorkspace(t);
+  const brokenRoot = path.join(workspace, 'broken-engine');
+  const scriptsDir = path.join(brokenRoot, 'scripts');
+  const outDir = path.join(workspace, 'existing-skill');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.copyFileSync(BUILD_SKILL, path.join(scriptsDir, 'build-copyable-skill.js'));
+  fs.copyFileSync(MATERIALIZE_RESVG, path.join(scriptsDir, 'materialize-portable-resvg-dependencies.js'));
+  fs.writeFileSync(path.join(outDir, 'sentinel.txt'), 'keep existing output');
+
+  const result = spawnSync(
+    process.execPath,
+    [path.join(scriptsDir, 'build-copyable-skill.js'), '--out-dir', outDir],
+    { cwd: brokenRoot, encoding: 'utf8' }
+  );
+
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(path.join(outDir, 'sentinel.txt'), 'utf8'), 'keep existing output');
+});
+
+test('promoteOutput keeps the committed output successful when old backup cleanup fails', (t) => {
+  const workspace = makeWorkspace(t);
+  const outDir = path.join(workspace, 'skill');
+  const stagingDir = path.join(workspace, '.skill.tmp-test');
+  fs.mkdirSync(outDir);
+  fs.mkdirSync(stagingDir);
+  fs.writeFileSync(path.join(outDir, 'old.txt'), 'old');
+  fs.writeFileSync(path.join(stagingDir, 'new.txt'), 'new');
+  const warnings = [];
+
+  promoteOutput(stagingDir, outDir, {
+    remove(candidate) {
+      if (candidate.includes('.skill.backup-') && fs.existsSync(path.join(candidate, 'old.txt'))) {
+        throw new Error('simulated backup cleanup failure');
+      }
+      fs.rmSync(candidate, { recursive: true, force: true });
+    },
+    warn(message) {
+      warnings.push(message);
+    },
+  });
+
+  assert.equal(fs.readFileSync(path.join(outDir, 'new.txt'), 'utf8'), 'new');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /新产物已生效.*旧备份清理失败/);
 });
 
 test('copyable apply-template wrapper renders a delivery package through v2', (t) => {

@@ -7,6 +7,7 @@
 !.env.example
 **/.claude/settings.local.json
 tools/taiji-license-issuer/private/signing-private.pem
+tools/taiji-release-evidence/signing-private.pem
 tools/taiji-license-issuer/*.jwt
 tools/taiji-license-issuer/license*.jwt
 tools/taiji-license-issuer/*.zip
@@ -55,6 +56,7 @@ hermes-local-lab/sources/hermes-agent/.playwright-mcp/
 !/taijiagent 打包交付/01_制包机_发布预检.sh
 !/taijiagent 打包交付/02_目标终端_安装并验证.sh
 !/taijiagent 打包交付/03_目标终端_导出诊断报告.sh
+!/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh
 !/taijiagent 打包交付/99_本机_准备制包输入包.sh
 !/taijiagent 打包交付/操作说明.md
 !/taijiagent 打包交付/版本信息.txt

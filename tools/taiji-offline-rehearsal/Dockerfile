@@ -1,5 +1,8 @@
 FROM debian:13-slim
 
+LABEL io.taiji.release-evidence.role="offline-rehearsal-v1" \
+      io.taiji.release-evidence.network="runtime-none-required"
+
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 

@@ -188,8 +188,14 @@ Word and records the result.
 Build the copyable compatibility skill:
 
 ```bash
+npm ci --omit=dev
+node scripts/materialize-portable-resvg-dependencies.js
 node scripts/build-copyable-skill.js --out-dir <docx-template-skill-dir>
 ```
+
+The materialization step downloads the four lockfile-pinned Linux x64/arm64
+glibc/musl native packages, verifies their SHA512 integrity, and refuses to
+build a dependency-free or platform-incomplete skill package.
 
 Then run its self-test:
 

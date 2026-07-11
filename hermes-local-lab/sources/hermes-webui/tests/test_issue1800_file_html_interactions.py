@@ -27,6 +27,16 @@ def test_attach_button_is_non_submit_button():
     assert 'type="button"' in m.group(0)
 
 
+def test_core_composer_controls_have_accessible_names():
+    textarea = re.search(r"<textarea[^>]*id=\"msg\"[^>]*>", INDEX_HTML)
+    attach = re.search(r"<button[^>]*id=\"btnAttach\"[^>]*>", INDEX_HTML)
+    assert textarea, "msg textarea not found"
+    assert attach, "btnAttach button not found"
+    assert 'aria-label="输入消息"' in textarea.group(0)
+    assert 'aria-label="附加文件"' in attach.group(0)
+    assert 'title="附加文件"' in attach.group(0)
+
+
 def test_file_input_is_visually_hidden_not_display_none():
     """Hidden file inputs are more consistently opened by user-gesture clicks."""
     m = re.search(r"<input[^>]*id=\"fileInput\"[^>]*>", INDEX_HTML)
@@ -34,6 +44,8 @@ def test_file_input_is_visually_hidden_not_display_none():
     tag = m.group(0)
     assert "file-input-visually-hidden" in tag
     assert "display:none" not in tag
+    assert 'tabindex="-1"' in tag
+    assert 'aria-hidden="true"' in tag
     rule = _slice_after(STYLE_CSS, ".file-input-visually-hidden", 240)
     assert "position:absolute" in rule
     assert "opacity:0" in rule

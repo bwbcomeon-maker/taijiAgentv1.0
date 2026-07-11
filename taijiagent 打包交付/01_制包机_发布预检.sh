@@ -9,6 +9,7 @@ OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
+ACCEPTANCE_TOOLS="$SCRIPT_DIR/验收工具"
 PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
 REQUIRE_ARTIFACTS="${TAIJI_RELEASE_REQUIRE_ARTIFACTS:-0}"
 SKIP_GIT_CHECK="${TAIJI_RELEASE_SKIP_GIT_CHECK:-0}"
@@ -70,7 +71,7 @@ checksum_source_archive_hash() {
 
 check_git_clean_and_commit_match() {
   [ "$SKIP_GIT_CHECK" = "1" ] && return 0
-  [ -d "$REPO_ROOT/.git" ] || return 0
+  [ -e "$REPO_ROOT/.git" ] || return 0
   have git || fail "缺少 git，无法执行发布预检"
 
   git -C "$REPO_ROOT" diff --quiet || fail "源码仓库存在未提交改动，不能发布"
@@ -91,6 +92,26 @@ check_git_clean_and_commit_match() {
       fail "源码包不匹配当前 commit：当前=$short 源码包=$source_name"
       ;;
   esac
+}
+
+check_source_archive_matches_git_head() {
+  [ "$SKIP_GIT_CHECK" = "1" ] && return 0
+  [ -e "$REPO_ROOT/.git" ] || return 0
+  have git || fail "缺少 git，无法重建当前 HEAD 源码包"
+  have gzip || fail "缺少 gzip，无法重建当前 HEAD 源码包"
+  have cmp || fail "缺少 cmp，无法逐字节核对当前 HEAD 源码包"
+  local expected_archive
+  expected_archive="$(mktemp /tmp/taiji-source-head.XXXXXX.tar.gz)"
+  if ! git -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$expected_archive"; then
+    rm -f "$expected_archive"
+    fail "无法从当前 HEAD 重建确定性源码包"
+  fi
+  if ! cmp -s "$expected_archive" "$SOURCE_ARCHIVE"; then
+    rm -f "$expected_archive"
+    fail "源码包内容与当前 git HEAD 不一致"
+  fi
+  rm -f "$expected_archive"
+  ok "源码包内容与当前 git HEAD 逐字节一致"
 }
 
 check_single_source_archive() {
@@ -142,7 +163,7 @@ check_no_macos_metadata_or_stale_zip() {
 }
 
 verify_assembled_deb_payload() {
-  local deb="$1" payload_root status
+  local deb="$1" payload_root status manifest_status
   have dpkg-deb || fail "缺少 dpkg-deb，无法真实解包验证 payload"
   have python3 || fail "缺少 python3，无法执行 payload contract verifier"
   [ -f "$PAYLOAD_VERIFIER" ] || fail "缺少 payload verifier：$PAYLOAD_VERIFIER"
@@ -154,9 +175,57 @@ verify_assembled_deb_payload() {
   set +e
   python3 "$PAYLOAD_VERIFIER" --root "$payload_root"
   status=$?
+  python3 - "$MANIFEST_FILE" \
+    "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" \
+    "$payload_root/usr/share/applications/taiji-agent.desktop" <<'PY'
+import hashlib
+import json
+import re
+import stat
+import sys
+from pathlib import Path
+
+
+def no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+manifest_path, electron_path, desktop_path = map(Path, sys.argv[1:])
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicates)
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+for field, path in (
+    ("electron_executable_sha256", electron_path),
+    ("desktop_entry_sha256", desktop_path),
+):
+    expected = manifest.get(field)
+    if type(expected) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise SystemExit(f"manifest field is missing or invalid: {field}")
+    mode = path.lstat().st_mode
+    if not stat.S_ISREG(mode) or path.is_symlink():
+        raise SystemExit(f"unsafe payload file: {path}")
+    actual = sha256_file(path)
+    if actual != expected:
+        raise SystemExit(f"payload hash does not match manifest: {field}")
+PY
+  manifest_status=$?
   set -e
   rm -rf "$payload_root"
   [ "$status" -eq 0 ] || fail "DEB payload contract 验证失败：$(basename "$deb")"
+  [ "$manifest_status" -eq 0 ] || fail "DEB 内 Electron/desktop entry 摘要与发布 manifest 不一致：$(basename "$deb")"
   ok "DEB 真实解包 payload contract 验证通过"
 }
 
@@ -176,8 +245,235 @@ verify_deb_checksum_sidecar() {
   ok "DEB SHA256 sidecar 校验通过：$deb_name"
 }
 
+verify_package_output_allowlist() {
+  local deb="$1" deb_name
+  deb_name="$(basename -- "$deb")"
+  have python3 || fail "缺少 python3，无法核对安装包输出目录"
+
+  python3 - "$OUTPUT_DIR" "$deb_name" <<'PY' || \
+    fail "生成的安装包/ 含不允许的条目，必须严格匹配当前发布清单"
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+deb_name = sys.argv[2]
+expected = {
+    deb_name,
+    f"{deb_name}.sha256",
+    ".build-success",
+    "taiji-package-manifest.json",
+    "构建报告.txt",
+}
+
+root_mode = root.lstat().st_mode
+if not stat.S_ISDIR(root_mode) or root.is_symlink():
+    raise SystemExit("生成的安装包不是安全的真实目录")
+
+entries = {entry.name: entry for entry in os.scandir(root)}
+actual = set(entries)
+if actual != expected:
+    unexpected = sorted(actual - expected)
+    missing = sorted(expected - actual)
+    raise SystemExit(f"输出目录清单不匹配: unexpected={unexpected!r} missing={missing!r}")
+
+for name in sorted(expected):
+    entry = entries[name]
+    metadata = entry.stat(follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or entry.is_symlink():
+        raise SystemExit(f"输出条目不是安全的普通文件: {name}")
+    if metadata.st_nlink != 1:
+        raise SystemExit(f"输出条目存在硬链接: {name}")
+PY
+  ok "安装包输出目录与当前发布清单精确一致"
+}
+
+verify_offline_repository_integrity() {
+  local release_deb="$1"
+  have gzip || fail "缺少 gzip，无法验证离线仓库索引"
+  have cmp || fail "缺少 cmp，无法核对离线仓库索引"
+  have python3 || fail "缺少 python3，无法验证离线仓库清单"
+  have dpkg-deb || fail "缺少 dpkg-deb，无法验证离线仓库 DEB"
+  [ -f "$OFFLINE_REPO/SHA256SUMS.txt" ] || fail "离线仓库缺少 SHA256SUMS.txt"
+  [ -f "$OFFLINE_REPO/runtime-dependencies.txt" ] || fail "离线仓库缺少 runtime-dependencies.txt"
+  gzip -t "$OFFLINE_REPO/Packages.gz" || fail "离线仓库 Packages.gz 不是有效 gzip"
+  gzip -dc "$OFFLINE_REPO/Packages.gz" | cmp -s - "$OFFLINE_REPO/Packages" \
+    || fail "Packages.gz 解压内容与 Packages 不一致"
+
+  python3 - "$OFFLINE_REPO" "$release_deb" <<'PY' || fail "离线仓库 SHA256/Packages 文件清单不一致"
+import hashlib
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+release_deb = Path(sys.argv[2])
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+allowed_fixed = {"Packages", "Packages.gz", "runtime-dependencies.txt", "SHA256SUMS.txt"}
+actual_files = set()
+for entry in root.iterdir():
+    mode = entry.lstat().st_mode
+    if not stat.S_ISREG(mode) or entry.is_symlink() or entry.stat().st_nlink != 1:
+        raise SystemExit(f"unsafe offline repository entry: {entry.name}")
+    if entry.name not in allowed_fixed and not entry.name.endswith(".deb"):
+        raise SystemExit(f"unexpected offline repository entry: {entry.name}")
+    actual_files.add(entry.name)
+
+checksums = {}
+for raw in (root / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
+    match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?(?:\./)?([^/\s]+)", raw)
+    if not match or match.group(2) == "SHA256SUMS.txt" or match.group(2) in checksums:
+        raise SystemExit(f"invalid checksum line: {raw!r}")
+    checksums[match.group(2)] = match.group(1)
+expected_checksum_files = actual_files - {"SHA256SUMS.txt"}
+if set(checksums) != expected_checksum_files:
+    raise SystemExit("SHA256SUMS file set mismatch")
+for name, expected in checksums.items():
+    digest = sha256_file(root / name)
+    if digest != expected:
+        raise SystemExit(f"checksum mismatch: {name}")
+
+indexed = set()
+indexed_packages = set()
+stanzas = {}
+packages_text = (root / "Packages").read_text(encoding="utf-8")
+for paragraph in re.split(r"\n[ \t]*\n", packages_text.strip()):
+    fields = {}
+    for raw in paragraph.splitlines():
+        if not raw or raw[:1].isspace():
+            continue
+        if ":" not in raw:
+            raise SystemExit(f"invalid Packages field: {raw!r}")
+        key, value = raw.split(":", 1)
+        if key in fields:
+            raise SystemExit(f"duplicate Packages field: {key}")
+        fields[key] = value.strip()
+    required = {"Package", "Version", "Architecture", "Filename", "Size", "SHA256"}
+    if not required <= fields.keys():
+        raise SystemExit("Packages stanza is missing required integrity fields")
+    value = fields["Filename"]
+    value = value[2:] if value.startswith("./") else value
+    if not value or "/" in value or not value.endswith(".deb") or value in indexed:
+        raise SystemExit(f"unsafe or duplicate Packages Filename: {value!r}")
+    if fields["Architecture"] not in {"amd64", "all"}:
+        raise SystemExit(f"unsupported Packages Architecture: {fields['Architecture']!r}")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]*", fields["Package"]):
+        raise SystemExit(f"unsafe Packages Package: {fields['Package']!r}")
+    if not fields["Version"] or not re.fullmatch(r"[0-9]+", fields["Size"]):
+        raise SystemExit("Packages Version/Size is invalid")
+    package_path = root / value
+    if int(fields["Size"]) != package_path.stat().st_size:
+        raise SystemExit(f"Packages Size mismatch: {value}")
+    if fields["SHA256"] != checksums.get(value):
+        raise SystemExit(f"Packages SHA256 mismatch: {value}")
+    indexed.add(value)
+    indexed_packages.add(fields["Package"])
+    stanzas[value] = fields
+deb_files = {name for name in actual_files if name.endswith(".deb")}
+if not deb_files or indexed != deb_files:
+    raise SystemExit("Packages index does not exactly cover repository DEBs")
+
+runtime_dependencies = set()
+for raw in (root / "runtime-dependencies.txt").read_text(encoding="utf-8").splitlines():
+    name = raw.strip().split(":", 1)[0]
+    if not name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]*", name):
+        raise SystemExit(f"invalid runtime dependency: {raw!r}")
+    runtime_dependencies.add(name)
+if runtime_dependencies - indexed_packages:
+    raise SystemExit("runtime-dependencies.txt contains packages absent from Packages")
+if indexed_packages - runtime_dependencies - {"taiji-agent"}:
+    raise SystemExit("Packages contains dependency packages absent from runtime-dependencies.txt")
+
+for filename, fields in stanzas.items():
+    package_path = root / filename
+    for field in ("Package", "Version", "Architecture"):
+        result = subprocess.run(
+            ["dpkg-deb", "-f", str(package_path), field],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0 or result.stdout.strip() != fields[field]:
+            raise SystemExit(f"Packages {field} does not match DEB control metadata: {filename}")
+
+taiji_stanzas = [filename for filename, fields in stanzas.items() if fields["Package"] == "taiji-agent"]
+if len(taiji_stanzas) != 1:
+    raise SystemExit("Packages must contain exactly one taiji-agent package")
+offline_taiji = root / taiji_stanzas[0]
+if sha256_file(offline_taiji) != sha256_file(release_deb):
+    raise SystemExit("offline taiji-agent DEB does not match release DEB")
+PY
+
+  local repo_deb
+  while IFS= read -r repo_deb; do
+    dpkg-deb --info "$repo_deb" >/dev/null 2>&1 \
+      || fail "离线仓库包含无效 DEB：$(basename "$repo_deb")"
+  done < <(find "$OFFLINE_REPO" -maxdepth 1 -type f -name '*.deb' | sort)
+  ok "离线仓库 gzip、清单、索引和每个 DEB 均有效"
+}
+
+verify_target_acceptance_toolchain() {
+  local script="$SCRIPT_DIR/04_目标终端_桌面App验收并导出证据.sh"
+  local driver="$ACCEPTANCE_TOOLS/run-installed-electron-acceptance.js"
+  local assembler="$ACCEPTANCE_TOOLS/assemble-target-evidence.py"
+  local validator="$ACCEPTANCE_TOOLS/validate-taiji-release-evidence.py"
+  local public_key="$ACCEPTANCE_TOOLS/signing-public.pem"
+  local source_script="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
+  local source_driver="$REPO_ROOT/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
+  local source_assembler="$REPO_ROOT/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+  local source_validator="$REPO_ROOT/scripts/validate-taiji-release-evidence.py"
+  local source_public_key="$REPO_ROOT/tools/taiji-release-evidence/signing-public.pem"
+  local public_fingerprint expected_fingerprint file source index
+  local staged_files=("$script" "$driver" "$assembler" "$validator" "$public_key")
+  local source_files=("$source_script" "$source_driver" "$source_assembler" "$source_validator" "$source_public_key")
+  expected_fingerprint="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+
+  [ -f "$script" ] && [ ! -L "$script" ] || fail "缺少安全的目标终端桌面 App 验收脚本"
+  have cmp || fail "缺少 cmp，无法逐字节核对目标终端验收工具"
+  for index in "${!staged_files[@]}"; do
+    file="${staged_files[$index]}"
+    source="${source_files[$index]}"
+    [ -f "$file" ] && [ ! -L "$file" ] || fail "目标终端验收工具缺失或不安全：$file"
+    [ -f "$source" ] && [ ! -L "$source" ] || fail "目标终端验收工具源文件缺失或不安全：$source"
+    cmp -s "$source" "$file" || fail "目标终端验收工具与当前源码不一致：$(basename "$file")"
+  done
+  have python3 || fail "缺少 python3，无法检查目标证据工具"
+  python3 - "$assembler" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+import sys
+from pathlib import Path
+
+for raw in sys.argv[1:]:
+    path = Path(raw)
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+PY
+  grep -Fq '/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron' "$driver" \
+    || fail "桌面 App 验收驱动未锁定安装态 Electron"
+  grep -Fq 'taiji.desktop.acceptance-driver.v1' "$driver" \
+    || fail "桌面 App 验收驱动缺少固定结果 schema"
+  have openssl || fail "缺少 openssl，无法核对目标验收验签公钥"
+  public_fingerprint="$(openssl pkey -pubin -in "$public_key" -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"
+  [ "$public_fingerprint" = "$expected_fingerprint" ] || fail "目标验收验签公钥 fingerprint 不匹配"
+  ok "目标终端真实 Electron 桌面 App 验收工具链完整"
+}
+
 check_delivery_artifacts() {
   [ "$REQUIRE_ARTIFACTS" = "1" ] || return 0
+  [ ! -e "$SCRIPT_DIR/.构建工具" ] || fail "交付目录仍含制包缓存 .构建工具/，必须清理后再发布"
+  [ ! -e "$SCRIPT_DIR/构建工作区" ] || fail "交付目录仍含临时构建工作区，必须清理后再发布"
   [ -d "$OUTPUT_DIR" ] || fail "缺少生成的安装包/"
   [ -f "$BUILD_MARKER" ] || fail "缺少生成的安装包/.build-success"
   [ -f "$MANIFEST_FILE" ] || fail "缺少生成的安装包/taiji-package-manifest.json"
@@ -185,13 +481,16 @@ check_delivery_artifacts() {
   [ -d "$OFFLINE_REPO" ] || fail "缺少离线依赖/"
   [ -f "$OFFLINE_REPO/Packages" ] || fail "缺少离线依赖/Packages"
   [ -f "$OFFLINE_REPO/Packages.gz" ] || fail "缺少离线依赖/Packages.gz"
+  verify_target_acceptance_toolchain
 
   local deb_count deb
   deb_count="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | wc -l | tr -d ' ')"
   [ "$deb_count" = "1" ] || fail "生成的安装包/ 必须且只能有一个 amd64 DEB，当前数量：$deb_count"
   deb="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | head -1)"
   verify_deb_checksum_sidecar "$deb"
+  verify_package_output_allowlist "$deb"
   verify_assembled_deb_payload "$deb"
+  verify_offline_repository_integrity "$deb"
   ok "交付产物完整性检查通过"
 }
 
@@ -200,6 +499,7 @@ main() {
   check_single_source_archive
   check_source_checksum
   check_git_clean_and_commit_match
+  check_source_archive_matches_git_head
   check_no_macos_metadata_or_stale_zip
   check_delivery_artifacts
   ok "发布预检通过"
