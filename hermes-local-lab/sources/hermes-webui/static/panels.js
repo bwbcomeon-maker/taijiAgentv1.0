@@ -8144,6 +8144,7 @@ let _auxProviders=[];       // cached provider list from /api/model/options
 let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
 let _modelConfigData=null;
 let _visionTestGeneration=0;
+let _visionVerificationSnapshot=null;
 let _modelConfigAuxProviders=[];
 let _modelConfigAuxOriginalConfig=null;
 
@@ -8347,6 +8348,42 @@ function _visionConfigIdentity(data){
  ]);
 }
 
+function _setVisionConfigTestBusy(busy){
+ ['visionConfigProvider','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey','btnSaveVisionConfig'].forEach(id=>{
+  const control=$(id);
+  if(control) control.disabled=!!busy;
+ });
+ const keyRow=$('visionConfigApiKeyRow');
+ const pasteBtn=keyRow?keyRow.querySelector('.model-config-paste-btn'):null;
+ if(pasteBtn) pasteBtn.disabled=!!busy;
+}
+
+function _restoreVisionTestSnapshot(runGeneration){
+ const snapshot=_visionVerificationSnapshot;
+ if(!snapshot||snapshot.generation!==runGeneration) return false;
+ const vision=(_modelConfigData&&_modelConfigData.vision)||null;
+ if(vision) vision.verification=Object.assign({},snapshot.verification);
+ _visionVerificationSnapshot=null;
+ _renderVisionConfigSummary(_modelConfigData);
+ return true;
+}
+
+function _invalidateVisionTest(){
+ const snapshot=_visionVerificationSnapshot;
+ if(!snapshot) return false;
+ _visionTestGeneration++;
+ return _restoreVisionTestSnapshot(snapshot.generation);
+}
+
+function _bindVisionConfigEditInvalidation(){
+ ['visionConfigModel','visionConfigBaseUrl','visionConfigApiKey'].forEach(id=>{
+  const control=$(id);
+  if(!control) return;
+  control.oninput=_invalidateVisionTest;
+  control.onchange=_invalidateVisionTest;
+ });
+}
+
 function _renderVisionConfigSummary(data){
  const vision=(data&&data.vision)||{};
  const provider=String(vision.provider||'').trim();
@@ -8381,6 +8418,7 @@ function _renderVisionConfigSummary(data){
   testBtn.disabled=status==='verifying'||!configured;
   testBtn.setAttribute('aria-busy',status==='verifying'?'true':'false');
  }
+ _setVisionConfigTestBusy(status==='verifying');
 }
 
 function _renderModelConfigFocusSummary(data){
@@ -8898,7 +8936,7 @@ function _syncImageGenConfigControls(){
 function _renderModelConfigPanel(data){
  const previousVisionIdentity=_modelConfigData?_visionConfigIdentity(_modelConfigData):'';
  const nextVisionIdentity=_visionConfigIdentity(data||{});
- if(previousVisionIdentity&&previousVisionIdentity!==nextVisionIdentity) _visionTestGeneration++;
+ if(previousVisionIdentity&&previousVisionIdentity!==nextVisionIdentity) _invalidateVisionTest();
  _modelConfigData=data||{};
  const main=data.main||{};
  const profile=$('modelConfigProfile');
@@ -8944,6 +8982,7 @@ function _renderModelConfigPanel(data){
   });
   visionProviderSel.value=vision.provider||((data.vision_providers||[])[0]||{}).id||'';
   visionProviderSel.onchange=()=>{
+   _invalidateVisionTest();
    const p=(data.vision_providers||[]).find(item=>String(item.id||'')===visionProviderSel.value)||null;
    const modelInput=$('visionConfigModel');
    if(modelInput){
@@ -8961,6 +9000,7 @@ function _renderModelConfigPanel(data){
  if(visionBaseInput) visionBaseInput.value=vision.base_url||'';
  const visionKeyInput=$('visionConfigApiKey');
  if(visionKeyInput) visionKeyInput.value='';
+ _bindVisionConfigEditInvalidation();
  _syncVisionConfigControls();
 
  const imageGen=data.image_gen||{};
@@ -9218,24 +9258,31 @@ async function saveMainModelConfig(){
 }
 
 async function saveVisionConfig(){
- const btn=$('btnSaveVisionConfig');
+ _invalidateVisionTest();
  const provider=($('visionConfigProvider')||{}).value||'';
  const model=(($('visionConfigModel')||{}).value||'').trim();
  const baseUrl=(($('visionConfigBaseUrl')||{}).value||'').trim();
  const apiKey=(($('visionConfigApiKey')||{}).value||'').trim();
- _visionTestGeneration++;
- if(btn) btn.disabled=true;
+ _setVisionConfigTestBusy(true);
  try{
   const payload={provider,model,base_url:baseUrl};
   if(apiKey) payload.api_key=apiKey;
-  await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
-  await loadModelConfigPanel(true);
+  const data=await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
+  if(_modelConfigData&&data&&data.vision){
+   _modelConfigData.profile=data.profile||_modelConfigData.profile;
+   _modelConfigData.vision=data.vision;
+   if(Array.isArray(data.providers)) _modelConfigData.vision_providers=data.providers;
+   const keyInput=$('visionConfigApiKey');
+   if(keyInput&&keyInput.value===apiKey) keyInput.value='';
+   _syncVisionConfigControls();
+   _renderVisionConfigSummary(_modelConfigData);
+  }
   toggleModelConfigSection('visionConfigEdit',false);
   if(typeof showToast==='function') showToast('识图配置已保存');
  }catch(e){
   if(typeof showToast==='function') showToast('保存识图配置失败：'+(e.message||e),5000,'error');
  }finally{
-  if(btn) btn.disabled=false;
+  _renderVisionConfigSummary(_modelConfigData);
  }
 }
 
@@ -9254,6 +9301,7 @@ function _visionConfigHasUnsavedChanges(){
 async function testVisionConfig(){
  const saved=(_modelConfigData&&_modelConfigData.vision)||{};
  const verification=saved.verification||{};
+ if(_visionVerificationSnapshot) return;
  if(_visionConfigHasUnsavedChanges()){
   _setModelConfigText('visionConfigVerificationStatus','请先保存当前识图配置，再开始测试。');
   if(typeof showToast==='function') showToast('请先保存当前识图配置',5000,'error');
@@ -9266,23 +9314,24 @@ async function testVisionConfig(){
  }
  const startIdentity=_visionConfigIdentity(_modelConfigData);
  const runGeneration=++_visionTestGeneration;
+ _visionVerificationSnapshot={generation:runGeneration,verification:Object.assign({},verification)};
  saved.verification={status:'verifying',message:'正在使用安全测试图片验证当前识图配置…'};
  _renderVisionConfigSummary(_modelConfigData);
  try{
   const result=await api('/api/vision/test',{method:'POST',body:'{}',timeoutMs:150000});
   if(runGeneration!==_visionTestGeneration||_visionConfigIdentity(_modelConfigData)!==startIdentity) return;
   saved.verification=result||{};
+  _visionVerificationSnapshot=null;
   _renderVisionConfigSummary(_modelConfigData);
-  await loadModelConfigPanel(true);
-  if(runGeneration!==_visionTestGeneration) return;
   if(typeof showToast==='function') showToast(result&&result.ok?'识图验证通过':'识图验证失败',5000,result&&result.ok?'success':'error');
  }catch(e){
   if(runGeneration!==_visionTestGeneration||_visionConfigIdentity(_modelConfigData)!==startIdentity) return;
   saved.verification={status:'failed',message:'识图验证请求失败，请稍后重试。'};
+  _visionVerificationSnapshot=null;
   _renderVisionConfigSummary(_modelConfigData);
   if(typeof showToast==='function') showToast('识图验证请求失败：'+(e.message||e),5000,'error');
  }finally{
-  if(runGeneration===_visionTestGeneration) _renderVisionConfigSummary(_modelConfigData);
+  _restoreVisionTestSnapshot(runGeneration);
  }
 }
 

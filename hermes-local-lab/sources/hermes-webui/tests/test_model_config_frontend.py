@@ -1,11 +1,106 @@
-"""Static coverage for the Settings model configuration panel."""
+"""Coverage for the Settings model configuration panel."""
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parent.parent
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+
+_VISION_RACE_DRIVER = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){
+ const re=new RegExp('(?:async\\s+)?function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);
+ if(start<0) throw new Error(name+' not found');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+const ids=['visionConfigProvider','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey',
+ 'btnSaveVisionConfig','btnTestVisionConfig','modelConfigVisionSummaryCard',
+ 'visionConfigProviderSummary','visionConfigModelSummary','visionConfigKeyState',
+ 'visionConfigEffective','visionConfigStatusBadge','visionConfigSummary','visionConfigVerificationStatus'];
+const elements={};
+for(const id of ids) elements[id]={id,value:'',disabled:false,dataset:{},textContent:'',attrs:{},setAttribute(k,v){this.attrs[k]=v;}};
+elements.visionConfigProvider.value='alibaba';
+elements.visionConfigModel.value='qwen3-vl-plus';
+const $=id=>elements[id]||null;
+const _setModelConfigText=(id,value)=>{if(elements[id])elements[id].textContent=String(value||'');};
+const _setModelConfigStatusBadge=(id,value)=>_setModelConfigText(id,value);
+const _modelConfigVisionProviderRow=()=>({id:'alibaba',name:'阿里百炼',requires_base_url:false});
+const _modelConfigKeyLabel=()=> '凭据已配置';
+const _formatModelConfigProvider=(id,label)=>label||id;
+const _syncVisionConfigControls=()=>{};
+const toggleModelConfigSection=()=>{};
+const showToast=()=>{};
+let _modelConfigData={profile:'default',vision:{provider:'alibaba',model:'qwen3-vl-plus',base_url:'',
+ key_status:{configured:true},verification:{status:'verified',message:'已验证'}},vision_providers:[]};
+let _visionTestGeneration=0;
+let _visionVerificationSnapshot=null;
+let resolveProbe;
+const probePromise=new Promise(resolve=>{resolveProbe=resolve;});
+const api=(url)=>{
+ if(url==='/api/vision/test') return probePromise;
+ if(url==='/api/vision/config') return Promise.reject(new Error('save failed'));
+ throw new Error('unexpected '+url);
+};
+for(const name of ['_visionConfigIdentity','_setVisionConfigTestBusy','_restoreVisionTestSnapshot',
+ '_invalidateVisionTest','_bindVisionConfigEditInvalidation','_renderVisionConfigSummary','_visionConfigHasUnsavedChanges',
+ 'saveVisionConfig','testVisionConfig']) eval(extractFunc(name));
+_bindVisionConfigEditInvalidation();
+
+async function run(scenario){
+ const probeRun=testVisionConfig();
+ await Promise.resolve();
+ const during={
+  status:_modelConfigData.vision.verification.status,
+  controls:['visionConfigProvider','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey','btnSaveVisionConfig'].map(id=>elements[id].disabled),
+  testDisabled:elements.btnTestVisionConfig.disabled
+ };
+ if(scenario==='save-failure'){
+  elements.visionConfigApiKey.value='draft-secret';
+  await saveVisionConfig();
+ }else if(scenario==='edit'){
+  elements.visionConfigModel.value='draft-model';
+  elements.visionConfigModel.oninput();
+ }else{
+  elements.visionConfigModel.value='draft-model';
+  _visionTestGeneration++;
+ }
+ const afterAction={status:_modelConfigData.vision.verification.status,model:elements.visionConfigModel.value,
+  key:elements.visionConfigApiKey.value,testDisabled:elements.btnTestVisionConfig.disabled,
+  saveDisabled:elements.btnSaveVisionConfig.disabled};
+ resolveProbe({ok:true,status:'verified',message:'old response'});
+ await probeRun;
+ return {during,afterAction,afterLate:{status:_modelConfigData.vision.verification.status,
+  model:elements.visionConfigModel.value,key:elements.visionConfigApiKey.value,
+  testDisabled:elements.btnTestVisionConfig.disabled,saveDisabled:elements.btnSaveVisionConfig.disabled}};
+}
+run(process.argv[3]).then(value=>process.stdout.write(JSON.stringify(value))).catch(err=>{console.error(err);process.exit(1);});
+"""
+
+
+def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
+    driver = tmp_path / "vision-race-driver.js"
+    driver.write_text(_VISION_RACE_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout)
 
 
 def test_model_config_settings_section_exists():
@@ -217,7 +312,56 @@ def test_vision_verification_uses_long_timeout_and_stale_response_guard():
     assert "_visionTestGeneration" in PANELS_JS
     assert "_visionConfigIdentity" in PANELS_JS
     assert "runGeneration!==_visionTestGeneration" in PANELS_JS
-    assert "if(runGeneration===_visionTestGeneration)" in PANELS_JS
+    assert "_restoreVisionTestSnapshot(runGeneration)" in PANELS_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_vision_verifying_save_failure_restores_state_without_losing_draft(tmp_path):
+    result = _run_vision_race(tmp_path, "save-failure")
+
+    assert result["during"] == {
+        "status": "verifying",
+        "controls": [True, True, True, True, True],
+        "testDisabled": True,
+    }
+    assert result["afterAction"] == {
+        "status": "verified",
+        "model": "qwen3-vl-plus",
+        "key": "draft-secret",
+        "testDisabled": False,
+        "saveDisabled": False,
+    }
+    assert result["afterLate"] == result["afterAction"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_vision_verifying_edit_invalidates_probe_and_ignores_late_response(tmp_path):
+    result = _run_vision_race(tmp_path, "edit")
+
+    assert result["during"]["status"] == "verifying"
+    assert result["during"]["controls"] == [True, True, True, True, True]
+    assert result["afterAction"] == {
+        "status": "verified",
+        "model": "draft-model",
+        "key": "",
+        "testDisabled": False,
+        "saveDisabled": False,
+    }
+    assert result["afterLate"] == result["afterAction"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_vision_stale_finally_restores_snapshot_without_overwriting_input(tmp_path):
+    result = _run_vision_race(tmp_path, "stale")
+
+    assert result["afterAction"]["status"] == "verifying"
+    assert result["afterLate"] == {
+        "status": "verified",
+        "model": "draft-model",
+        "key": "",
+        "testDisabled": False,
+        "saveDisabled": False,
+    }
 
 
 def test_vision_test_route_is_registered():
