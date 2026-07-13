@@ -11567,6 +11567,7 @@ function renderMessages(options){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   if(typeof _retainVisionRecoveryForSession==='function') _retainVisionRecoveryForSession(sid);
+  if(typeof _hydratePersistedVisionRecoveries==='function') _hydratePersistedVisionRecoveries(S.messages,sid);
   const msgCount=S.messages.length;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();

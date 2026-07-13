@@ -80,6 +80,19 @@ def test_recovery_card_never_renders_descriptor_paths_and_settings_is_reachable(
     assert "toggleModelConfigSection('visionConfigEdit',true)" in settings_body
 
 
+def test_persisted_vision_error_rehydrates_recovery_actions_after_reload():
+    hydrate_body = _function_body(MESSAGES, "_hydratePersistedVisionRecoveries")
+    assert "error_type" in hydrate_body
+    assert "_VISION_RECOVERY_TYPES" in hydrate_body
+    assert "_storeVisionRecovery" in hydrate_body
+    assert "attachments" in hydrate_body
+
+    render_body = _function_body(UI, "renderMessages")
+    hydrate_pos = render_body.index("_hydratePersistedVisionRecoveries")
+    signature_pos = render_body.index("_messageRenderCacheSignature")
+    assert hydrate_pos < signature_pos
+
+
 def test_retry_is_guarded_against_repeat_clicks_and_transient_state_is_pruned():
     retry_body = _function_body(MESSAGES, "retryVisionAnalysis")
     assert "button.disabled=true" in retry_body

@@ -234,6 +234,30 @@ function _storeVisionRecovery(activeSid,text,attachments,type){
   return id;
 }
 
+function _hydratePersistedVisionRecoveries(messages,sessionId){
+  if(!Array.isArray(messages)||!sessionId) return false;
+  let lastUser=null;
+  let changed=false;
+  for(const message of messages){
+    if(!message||typeof message!=='object') continue;
+    if(message.role==='user'){
+      lastUser=message;
+      continue;
+    }
+    const type=String(message.error_type||'');
+    if(message.role!=='assistant'||message.vision_recovery||!_VISION_RECOVERY_TYPES.has(type)) continue;
+    const attachments=lastUser&&Array.isArray(lastUser.attachments)?lastUser.attachments:[];
+    const content=lastUser&&Array.isArray(lastUser.content)
+      ? lastUser.content.filter(part=>part&&part.type==='text').map(part=>part.text||'').join('').trim()
+      : String((lastUser&&lastUser.content)||'').trim();
+    if(!lastUser||!content||!attachments.length) continue;
+    const id=_storeVisionRecovery(sessionId,content,attachments,type);
+    message.vision_recovery={id,type};
+    changed=true;
+  }
+  return changed;
+}
+
 function _deleteVisionRecovery(id){
   if(id) _visionRecoveryById.delete(String(id));
 }

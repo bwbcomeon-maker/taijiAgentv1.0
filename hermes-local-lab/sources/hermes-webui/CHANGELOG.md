@@ -39,6 +39,7 @@
 
 ### Fixed
 
+- Persisted image-analysis errors now rebuild their in-memory recovery action after a session reload, so "Retry image analysis" and "Open image configuration" remain visible without storing attachment paths in browser storage.
 - Browser image turns now use one fail-closed preparation path in both Legacy and Gateway chat. Text-only main models receive successful auxiliary-vision descriptions, native vision models keep image parts, and any image failure stops the main-model request instead of silently answering without visual context.
 - Gateway `/v1/runs` now accepts string input, standard role/content message arrays, and bare multimodal content-part arrays without flattening image content. Invalid file or non-image inputs fail before run state is created.
 - Image-analysis failures and cancellations now preserve the current user turn, attachments, typed error, and reload order in both eager and deferred session modes, including repeated prompts such as "What does this mean?" with different images.
