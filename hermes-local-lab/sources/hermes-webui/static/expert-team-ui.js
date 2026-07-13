@@ -9,7 +9,7 @@
   function presentationTone(state){
     if(state==='generating'||state==='ready_to_generate'||state==='starting'||state==='revising'||state==='cancelling')return 'running';
     if(state==='awaiting_stage_input'||state==='collecting_required'||state==='collecting_optional'||state==='awaiting_review')return 'waiting';
-    if(state==='generated_invalid'||state==='start_failed'||state==='failed')return 'issue';
+    if(state==='generated_invalid'||state==='start_failed'||state==='generation_failed'||state==='result_unverified'||state==='legacy_result_unverified'||state==='failed')return 'issue';
     if(state==='completed')return 'done';
     return 'waiting';
   }
@@ -27,6 +27,9 @@
       ready_to_generate:'待启动',
       starting:'正在启动',
       start_failed:'启动失败',
+      generation_failed:'生成失败',
+      result_unverified:'结果待核验',
+      legacy_result_unverified:'历史结果未绑定',
       generating:'生成中',
       revising:'重做中',
       cancelling:'正在停止',

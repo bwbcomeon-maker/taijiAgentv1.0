@@ -13,6 +13,9 @@ STATE_LABELS = {
     "ready_to_generate": "准备开始生成",
     "starting": "正在启动专家团",
     "start_failed": "启动失败",
+    "generation_failed": "生成失败",
+    "result_unverified": "结果待核验",
+    "legacy_result_unverified": "历史结果未绑定",
     "generating": "专家团正在生成",
     "cancelling": "正在停止专家团",
     "awaiting_stage_input": "需要确认后继续",
@@ -28,6 +31,11 @@ STATE_LABELS = {
 
 def _effective_state(run: dict) -> str:
     state = str(run.get("workflow_state") or "collecting_required")
+    if (
+        state == "start_failed"
+        and "本轮生成已结束，但没有检测到有效结果" in str(run.get("last_execution_error") or "")
+    ):
+        return "legacy_result_unverified"
     integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
     if state == "completed" and str(integrity.get("status") or "") in {"drifted", "unverified"}:
         return "completed_invalid"
@@ -41,6 +49,9 @@ def _primary_action(state: str) -> dict | None:
         "ready_to_generate": {"id": "start_generation", "label": "开始生成", "kind": "primary"},
         "starting": {"id": "cancel", "label": "停止启动", "kind": "danger"},
         "start_failed": {"id": "regenerate", "label": "重新尝试", "kind": "primary"},
+        "generation_failed": {"id": "regenerate", "label": "重新生成", "kind": "primary"},
+        "result_unverified": {"id": "refresh", "label": "重新核验结果", "kind": "primary"},
+        "legacy_result_unverified": {"id": "regenerate_unverified", "label": "重新生成（已有结果保留）", "kind": "primary"},
         "generating": {"id": "cancel", "label": "停止生成", "kind": "danger"},
         "awaiting_stage_input": {"id": "submit_stage_input", "label": "确认并继续生成", "kind": "primary"},
         "generated_invalid": {"id": "regenerate", "label": "重新生成", "kind": "primary"},
@@ -83,6 +94,8 @@ def _secondary_actions(state: str, run: dict | None = None) -> list[dict]:
         ]
     if state == "generated_invalid":
         return [{"id": "view_result", "label": "查看草稿", "kind": "ghost"}]
+    if state == "result_unverified":
+        return [{"id": "regenerate_unverified", "label": "放弃本次结果并重新生成", "kind": "ghost"}]
     return []
 
 
@@ -153,6 +166,12 @@ def _presentation(run: dict, business_context: dict) -> dict:
         detail = "正在建立当前阶段执行连接。"
     elif state == "start_failed":
         detail = str(run.get("last_execution_error") or "当前阶段启动失败，请重新尝试。")
+    elif state == "generation_failed":
+        detail = str(run.get("last_execution_error") or "当前阶段生成失败，请重新生成。")
+    elif state == "result_unverified":
+        detail = str(run.get("last_execution_error") or "生成已结束，正在核验结果归属；不会自动重复生成。")
+    elif state == "legacy_result_unverified":
+        detail = "已在对话中发现历史生成结果，但旧记录缺少安全绑定身份，系统不会自动认领。已有内容会保留。"
     elif state in {"generating", "revising"}:
         detail = "后台正在按当前阶段生成内容。"
     elif state == "cancelling":
@@ -407,7 +426,7 @@ def expert_team_run_view(run: dict) -> dict:
             "can_start_generation": state == "ready_to_generate",
             "can_cancel": state in {"generating", "revising"},
             "can_submit_stage_input": state == "awaiting_stage_input",
-            "can_retry": state in {"start_failed", "generated_invalid"},
+            "can_retry": state in {"start_failed", "generation_failed", "generated_invalid"},
             "can_approve_stage": state == "awaiting_review",
             "can_request_revision": state == "awaiting_review",
         },

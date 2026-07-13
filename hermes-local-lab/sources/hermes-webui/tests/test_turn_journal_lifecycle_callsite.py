@@ -38,6 +38,20 @@ def test_streaming_appends_completed_after_final_save():
     assert save_idx < completed_idx
 
 
+def test_gateway_appends_assistant_started_before_save_and_completed_before_done():
+    src = Path("api/gateway_chat.py").read_text(encoding="utf-8")
+    worker_idx = src.index("def _run_gateway_chat_streaming(")
+    assistant_idx = src.index('"event": "assistant_started"', worker_idx)
+    save_idx = src.index("s.save()", assistant_idx)
+    completed_idx = src.index('"event": "completed"', save_idx)
+    done_idx = src.index('put_gateway_event("done"', completed_idx)
+
+    assert worker_idx < assistant_idx < save_idx < completed_idx < done_idx
+    terminal_idx = src.index("turn_terminal_recorded = True", completed_idx)
+    compact_idx = src.index("gateway_session_payload =", completed_idx)
+    assert completed_idx < terminal_idx < compact_idx
+
+
 def test_streaming_appends_interrupted_on_provider_error_path():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     err_idx = src.index("err_str = str(e)")

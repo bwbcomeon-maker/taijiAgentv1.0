@@ -431,6 +431,6 @@ def test_caught_up_terminal_without_public_output_persists_failure(monkeypatch, 
     routes._expert_team_run_with_execution_truth(tmp_path, generating)
     stored = expert_teams.read_expert_team_run(tmp_path, generating["run_id"])
 
-    assert stored["workflow_state"] == "start_failed"
+    assert stored["workflow_state"] == "generation_failed"
     assert stored["view"]["actions"]["can_retry"] is True
     assert stored.get("last_execution_error")

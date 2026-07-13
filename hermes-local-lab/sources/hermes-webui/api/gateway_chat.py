@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import threading
@@ -35,9 +36,14 @@ from api.brand_privacy import (
 )
 from api.models import get_session
 from api.run_journal import RunJournalWriter
+from api.turn_journal import append_turn_journal_event_for_stream
 from api.turn_duration import stamp_turn_duration_on_latest_assistant
 
 logger = logging.getLogger(__name__)
+
+
+def _turn_message_sha256(content: Any) -> str:
+    return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
@@ -483,13 +489,18 @@ def _stream_gateway_run_events(
     final_text = ""
     usage: dict[str, Any] = {}
     error_event = None
+    saw_run_completed = False
     with urllib.request.urlopen(event_req, timeout=600) as resp:
         for raw_line in resp:
             if cancel_event.is_set():
                 _stop_gateway_run(base_url, headers, run_id)
                 _clear_gateway_run_approvals_from_webui(session_id, run_id)
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
-                return {"final_text": final_text, "usage": usage, "error_event": None}
+                return {
+                    "final_text": final_text,
+                    "usage": usage,
+                    "error_event": None,
+                    "terminal_outcome": "cancelled",
+                }
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line or not line.startswith("data:"):
                 continue
@@ -554,6 +565,7 @@ def _stream_gateway_run_events(
                 _clear_gateway_run_approvals_from_webui(session_id, run_id)
                 continue
             if event_name == "run.completed":
+                saw_run_completed = True
                 output = scrub_brand_leaks(str(payload.get("output") or "")).strip()
                 if output and not final_text:
                     final_text = output
@@ -561,12 +573,29 @@ def _stream_gateway_run_events(
                     usage.update(payload.get("usage") or {})
                 _clear_gateway_run_approvals_from_webui(session_id, run_id)
                 break
-            if event_name in {"run.failed", "run.cancelled"}:
+            if event_name == "run.cancelled":
+                _clear_gateway_run_approvals_from_webui(session_id, run_id)
+                return {
+                    "final_text": final_text,
+                    "usage": usage,
+                    "error_event": None,
+                    "terminal_outcome": "cancelled",
+                }
+            if event_name == "run.failed":
                 error_event = _gateway_run_error_event(payload, str(payload.get("error") or event_name))
                 break
     if error_event is not None:
         _clear_gateway_run_approvals_from_webui(session_id, run_id)
-    return {"final_text": final_text, "usage": usage, "error_event": error_event}
+    if error_event is None and not saw_run_completed:
+        error_event = _gateway_run_error_event(
+            {}, "Gateway run event stream ended before run.completed."
+        )
+    return {
+        "final_text": final_text,
+        "usage": usage,
+        "error_event": error_event,
+        "terminal_outcome": "failed" if error_event is not None else "completed",
+    }
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -593,6 +622,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     display_msg=None,
+    turn_id=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -622,6 +652,7 @@ def _run_gateway_chat_streaming(
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
     cancel_event = threading.Event()
+    turn_terminal_recorded = False
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = ""
@@ -650,6 +681,25 @@ def _run_gateway_chat_streaming(
             q.put_nowait((event, data))
         except Exception:
             logger.debug("Failed to put gateway event to queue")
+
+    def record_turn_interrupted(reason: str) -> None:
+        nonlocal turn_terminal_recorded
+        if turn_terminal_recorded:
+            return
+        try:
+            append_turn_journal_event_for_stream(
+                session_id,
+                stream_id,
+                {
+                    "event": "interrupted",
+                    "turn_id": str(turn_id or ""),
+                    "created_at": time.time(),
+                    "reason": str(reason or "failed"),
+                },
+            )
+            turn_terminal_recorded = True
+        except Exception:
+            logger.warning("Failed to append Gateway interrupted turn journal event", exc_info=True)
 
     s = None
     final_text = ""
@@ -754,6 +804,10 @@ def _run_gateway_chat_streaming(
             final_text = str(run_result.get("final_text") or "")
             usage.update({k: v for k, v in (run_result.get("usage") or {}).items() if v})
             gateway_error_event = run_result.get("error_event")
+            if str(run_result.get("terminal_outcome") or "") == "cancelled":
+                record_turn_interrupted("cancelled")
+                put_gateway_event("cancel", {"message": "Cancelled by user"})
+                return
         else:
             req = urllib.request.Request(
                 url,
@@ -764,6 +818,7 @@ def _run_gateway_chat_streaming(
             with urllib.request.urlopen(req, timeout=600) as resp:
                 for raw_line in resp:
                     if cancel_event.is_set():
+                        record_turn_interrupted("cancelled")
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
                         return
                     line = raw_line.decode("utf-8", errors="replace").strip()
@@ -835,10 +890,12 @@ def _run_gateway_chat_streaming(
             put_gateway_event("token", {"text": tail_delta})
         usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         if gateway_error_event:
+            record_turn_interrupted(str(gateway_error_event.get("type") or "gateway_error"))
             put_gateway_event("apperror", gateway_error_event)
             return
         assistant_text = scrub_brand_leaks(final_text).strip()
         if not assistant_text:
+            record_turn_interrupted("gateway_empty_response")
             put_gateway_event("apperror", {
                 "label": "太极本地对话服务未返回内容",
                 "type": "gateway_empty_response",
@@ -873,6 +930,28 @@ def _run_gateway_chat_streaming(
                     if latest_text == msg_norm:
                         display = display[:-1]
             s.messages = scrub_messages(display + [user_msg, assistant_msg])
+            assistant_message_index = next(
+                (idx for idx in range(len(s.messages) - 1, -1, -1)
+                 if isinstance(s.messages[idx], dict) and s.messages[idx].get("role") == "assistant"),
+                None,
+            )
+            user_message_index = (
+                assistant_message_index - 1
+                if isinstance(assistant_message_index, int)
+                and assistant_message_index > 0
+                and isinstance(s.messages[assistant_message_index - 1], dict)
+                and s.messages[assistant_message_index - 1].get("role") == "user"
+                else None
+            )
+            lifecycle_identity = {
+                "assistant_message_index": assistant_message_index,
+                "assistant_content_sha256": _turn_message_sha256(assistant_text),
+                "user_message_index": user_message_index,
+                "user_content_sha256": _turn_message_sha256(
+                    s.messages[user_message_index].get("content")
+                    if isinstance(user_message_index, int) else ""
+                ),
+            }
             duration_seconds = stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
             if duration_seconds is not None:
                 usage["duration_seconds"] = duration_seconds
@@ -883,11 +962,39 @@ def _run_gateway_chat_streaming(
             s.workspace = str(workspace)
             s.model = model
             s.model_provider = model_provider
+            try:
+                append_turn_journal_event_for_stream(
+                    s.session_id,
+                    stream_id,
+                    {
+                        "event": "assistant_started",
+                        "turn_id": str(turn_id or ""),
+                        "created_at": assistant_ts,
+                        **lifecycle_identity,
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to append Gateway assistant_started turn journal event", exc_info=True)
             s.save()
+            try:
+                append_turn_journal_event_for_stream(
+                    s.session_id,
+                    stream_id,
+                    {
+                        "event": "completed",
+                        "turn_id": str(turn_id or ""),
+                        "created_at": time.time(),
+                        **lifecycle_identity,
+                    },
+                )
+                turn_terminal_recorded = True
+            except Exception:
+                logger.warning("Failed to append Gateway completed turn journal event", exc_info=True)
         gateway_session_payload = scrub_public_session_payload(s.compact() | {"messages": s.messages, "tool_calls": []})
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
+        record_turn_interrupted("gateway_http_error")
         try:
             err_body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:
@@ -897,6 +1004,7 @@ def _run_gateway_chat_streaming(
             scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))),
         )
     except Exception as exc:
+        record_turn_interrupted("gateway_error")
         safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
         put_gateway_event("apperror", {
             "label": "太极本地对话服务请求失败",

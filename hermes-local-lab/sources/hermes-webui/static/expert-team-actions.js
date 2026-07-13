@@ -208,6 +208,11 @@
     try{
       const data=await api(`/api/expert-teams/run?session_id=${encodeURIComponent(sid)}&run_id=${encodeURIComponent(card.runId)}`);
       applyExpertTeamActionResponse(data);
+      const nextState=String(data&&data.run&&data.run.view&&data.run.view.presentation&&data.run.view.presentation.state||data&&data.run&&data.run.workflow_state||'');
+      if(typeof showToast==='function'){
+        if(nextState==='result_unverified')showToast('仍未找到可安全绑定的结果。已有内容不会自动重做，你可以稍后再次核验。');
+        else showToast('专家团状态已核验。');
+      }
       return true;
     }catch(error){
       if(typeof showToast==='function')showToast('刷新专家团状态失败：'+(error&&error.message||error));
@@ -295,6 +300,10 @@
       return false;
     }
     if(action==='start_generation'||action==='regenerate'){
+      return typeof resumeExpertTeamRun==='function'?resumeExpertTeamRun(btn):false;
+    }
+    if(action==='regenerate_unverified'){
+      if(typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('已有结果可能尚未核验。放弃本次结果并重新生成会产生额外模型消耗，确定继续吗？'))return false;
       return typeof resumeExpertTeamRun==='function'?resumeExpertTeamRun(btn):false;
     }
     if(action==='cancel'){

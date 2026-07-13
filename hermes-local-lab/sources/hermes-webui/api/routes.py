@@ -1309,6 +1309,8 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
 
 
 def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
+    import hashlib
+
     messages = [message for message in getattr(session, "messages", None) or [] if isinstance(message, dict)]
     stream_id = str(run.get("execution_stream_id") or "").strip()
     turn_id = str(run.get("execution_turn_id") or "").strip()
@@ -1320,26 +1322,119 @@ def _latest_expert_team_assistant_content_after_execution(session, run: dict) ->
             from api.turn_journal import read_turn_journal
 
             journal = read_turn_journal(str(run.get("session_id") or ""))
-            completed = [
-                event
-                for event in journal.get("events") or []
+            matching_events = [
+                event for event in journal.get("events") or []
                 if isinstance(event, dict)
-                and str(event.get("event") or "") == "completed"
                 and str(event.get("stream_id") or "") == stream_id
                 and (not turn_id or str(event.get("turn_id") or "") == turn_id)
             ]
-            if completed:
-                message_index = completed[-1].get("assistant_message_index")
-                if isinstance(message_index, int) and 0 <= message_index < len(messages):
-                    message = messages[message_index]
+            submitted = [event for event in matching_events if str(event.get("event") or "") == "submitted"]
+            for event in submitted:
+                if event.get("expert_team_run_id") and str(event.get("expert_team_run_id")) != str(run.get("run_id") or ""):
+                    return ""
+                if event.get("stage_id") and str(event.get("stage_id")) != str(run.get("execution_stage_id") or ""):
+                    return ""
+                if event.get("attempt") is not None and int(event.get("attempt")) != int(run.get("execution_attempt") or 0):
+                    return ""
+                if event.get("execution_start_id") and str(event.get("execution_start_id")) != str(run.get("execution_start_id") or ""):
+                    return ""
+            terminal_names = {
+                str(event.get("event") or "")
+                for event in matching_events
+                if str(event.get("event") or "") in {"completed", "interrupted"}
+            }
+            if terminal_names == {"completed", "interrupted"}:
+                return ""
+            completed = [
+                event
+                for event in matching_events
+                if str(event.get("event") or "") == "completed"
+            ]
+            candidates = completed
+            if not candidates:
+                candidates = [
+                    event
+                    for event in matching_events
+                    if str(event.get("event") or "") == "assistant_started"
+                    and str(event.get("assistant_content_sha256") or "")
+                    and str(event.get("user_content_sha256") or "")
+                ]
+            if candidates:
+                signatures = {
+                    (
+                        event.get("assistant_message_index"),
+                        str(event.get("assistant_content_sha256") or ""),
+                        event.get("user_message_index"),
+                        str(event.get("user_content_sha256") or ""),
+                    )
+                    for event in candidates
+                }
+                if len(signatures) != 1:
+                    return ""
+                candidate = candidates[-1]
+                candidate_messages = messages
+                if str(candidate.get("event") or "") == "assistant_started":
+                    from api.models import Session
+
+                    persisted = Session.load(str(run.get("session_id") or ""))
+                    candidate_messages = [
+                        message for message in getattr(persisted, "messages", None) or []
+                        if isinstance(message, dict)
+                    ]
+                message_index = candidate.get("assistant_message_index")
+                if isinstance(message_index, int) and 0 <= message_index < len(candidate_messages):
+                    message = candidate_messages[message_index]
                     if message.get("role") == "assistant" and not message.get("_error"):
                         content = str(message.get("content") or "").strip()
-                        if content:
+                        assistant_digest = str(candidate.get("assistant_content_sha256") or "")
+                        digest_matches = not assistant_digest or hashlib.sha256(
+                            content.encode("utf-8")
+                        ).hexdigest() == assistant_digest
+                        user_index = candidate.get("user_message_index")
+                        user_digest = str(candidate.get("user_content_sha256") or "")
+                        user_matches = True
+                        if user_digest:
+                            user_matches = (
+                                isinstance(user_index, int)
+                                and 0 <= user_index < len(candidate_messages)
+                                and candidate_messages[user_index].get("role") == "user"
+                                and hashlib.sha256(
+                                    str(candidate_messages[user_index].get("content") or "").encode("utf-8")
+                                ).hexdigest() == user_digest
+                            )
+                        if content and digest_matches and user_matches:
                             return content
         except Exception:
             logger.debug("Failed to resolve expert team result from turn journal", exc_info=True)
 
     return ""
+
+
+def _expert_team_turn_terminal_outcome(run: dict) -> str:
+    stream_id = str(run.get("execution_stream_id") or "").strip()
+    turn_id = str(run.get("execution_turn_id") or "").strip()
+    if not stream_id:
+        return ""
+    try:
+        from api.turn_journal import read_turn_journal
+
+        events = [
+            event for event in read_turn_journal(str(run.get("session_id") or "")).get("events") or []
+            if isinstance(event, dict)
+            and str(event.get("stream_id") or "") == stream_id
+            and (not turn_id or str(event.get("turn_id") or "") == turn_id)
+            and str(event.get("event") or "") in {"completed", "interrupted"}
+        ]
+        names = {str(event.get("event") or "") for event in events}
+        if names != {"interrupted"}:
+            return ""
+        reasons = {str(event.get("reason") or "failed") for event in events}
+        if len(reasons) != 1:
+            return ""
+        return "cancelled" if reasons == {"cancelled"} else "failed"
+    except Exception:
+        logger.debug("Failed to resolve expert team terminal turn outcome", exc_info=True)
+        return ""
 
 
 def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
@@ -1964,7 +2059,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     if str(run.get("workflow_state") or "") == "awaiting_stage_input":
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
-    if str(run.get("workflow_state") or "") not in {"generating", "cancelling"}:
+    if str(run.get("workflow_state") or "") not in {"generating", "result_unverified", "cancelling"}:
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
     runtime_adapter_name = str(run.get("execution_runtime_adapter") or "")
@@ -2137,7 +2232,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
         return run
     stream_id = str(run.get("execution_stream_id") or "")
     active_stream_ids = _active_stream_id_set()
-    if stream_id and stream_id in active_stream_ids:
+    if stream_id and stream_id in active_stream_ids and str(run.get("workflow_state") or "") == "generating":
         run["execution_status"] = "running"
         run["workflow_state"] = "generating"
         run["needs_resume"] = False
@@ -2145,7 +2240,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
 
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
-    if stream_id and str(run.get("execution_status") or "") == "running":
+    if stream_id and str(run.get("workflow_state") or "") in {"generating", "result_unverified"}:
         try:
             session = get_session(str(run.get("session_id") or ""))
             if (
@@ -2171,17 +2266,43 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                         "content": content or "已写入当前对话",
                     },
                 )
-            if not getattr(session, "active_stream_id", None) and not getattr(session, "pending_user_message", None):
+            if (
+                str(run.get("workflow_state") or "") == "generating"
+                and not getattr(session, "active_stream_id", None)
+                and not getattr(session, "pending_user_message", None)
+            ):
                 from api import expert_teams
 
-                return expert_teams.fail_expert_team_execution(
+                terminal_outcome = _expert_team_turn_terminal_outcome(run)
+                if terminal_outcome == "cancelled":
+                    return expert_teams.mark_expert_team_execution_cancelled(
+                        workspace,
+                        str(run.get("run_id") or ""),
+                        "本轮生成已取消。",
+                        stream_id=stream_id,
+                    )
+                if terminal_outcome == "failed":
+                    return expert_teams.fail_expert_team_execution(
+                        workspace,
+                        str(run.get("run_id") or ""),
+                        "本轮生成未成功完成，请重新生成。",
+                        stream_id=stream_id,
+                    )
+
+                return expert_teams.mark_expert_team_result_unverified(
                     workspace,
                     str(run.get("run_id") or ""),
-                    "本轮生成已结束，但没有检测到有效结果，请重新尝试。",
+                    "本轮生成已结束，结果绑定证据尚未闭环。请重新核验；已有内容不会自动重做。",
                     stream_id=stream_id,
                 )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            current = exc.run or expert_teams.read_expert_team_run(
+                workspace, str(run.get("run_id") or "")
+            )
+            current["view"] = expert_teams.expert_team_run_view(current)
+            return current
         except Exception:
-            pass
+            logger.debug("Failed to reconcile local expert team result", exc_info=True)
     from api import expert_teams
 
     run["view"] = expert_teams.expert_team_run_view(run)
@@ -2295,6 +2416,11 @@ def _start_expert_team_execution(
         }, 503
 
     def _legacy_start(request: StartRunRequest) -> dict:
+        current = (
+            reserved_run.get("current_stage")
+            if isinstance(reserved_run.get("current_stage"), dict)
+            else {}
+        )
         return _start_chat_stream_for_session(
             session,
             msg=request.message,
@@ -2305,6 +2431,12 @@ def _start_expert_team_execution(
             model_provider=request.provider or model_provider,
             normalized_model=normalized_model,
             stream_id=str(request.idempotency_key or "").strip() or None,
+            turn_metadata={
+                "expert_team_run_id": str(reserved_run.get("run_id") or ""),
+                "stage_id": str(current.get("task_id") or current.get("id") or ""),
+                "attempt": int(reserved_run.get("execution_attempt") or 0) + 1,
+                "execution_start_id": str(reserved_run.get("execution_start_id") or ""),
+            },
         )
 
     def _legacy_adapter() -> LegacyJournalRuntimeAdapter:
@@ -16297,6 +16429,7 @@ def _start_chat_stream_for_session(
     diag=None,
     goal_related: bool = False,
     stream_id: str | None = None,
+    turn_metadata: dict | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -16384,6 +16517,8 @@ def _start_chat_stream_for_session(
                 logger.exception("Failed to roll back unstarted stream claim %s", stream_id)
 
     journal_event = {}
+    from api.turn_journal import new_turn_id
+    reserved_turn_id = new_turn_id()
     try:
         if was_hidden_empty_session:
             publish_session_list_changed("session_new")
@@ -16396,6 +16531,7 @@ def _start_chat_stream_for_session(
                 {
                     "event": "submitted",
                     "stream_id": stream_id,
+                    "turn_id": reserved_turn_id,
                     "role": "user",
                     "content": persisted_msg,
                     "attachments": attachments,
@@ -16403,6 +16539,7 @@ def _start_chat_stream_for_session(
                     "model": model,
                     "model_provider": model_provider,
                     "created_at": s.pending_started_at,
+                    **(turn_metadata or {}),
                 },
             )
         except Exception:
@@ -16422,6 +16559,8 @@ def _start_chat_stream_for_session(
                 {
                     "source": "expert-team",
                     "idempotency_key": deterministic_stream_id,
+                    "turn_id": reserved_turn_id,
+                    **(turn_metadata or {}),
                 },
             )
         # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
@@ -16431,6 +16570,8 @@ def _start_chat_stream_for_session(
         backend_is_gateway = webui_gateway_chat_enabled(get_config())
         worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
         worker_kwargs = {"model_provider": model_provider, "display_msg": persisted_msg}
+        if backend_is_gateway:
+            worker_kwargs["turn_id"] = reserved_turn_id
         if not backend_is_gateway:
             worker_kwargs["goal_related"] = goal_related
         thr = threading.Thread(
@@ -16448,7 +16589,7 @@ def _start_chat_stream_for_session(
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
         "pending_user_message": persisted_msg,
-        "turn_id": journal_event.get("turn_id"),
+        "turn_id": journal_event.get("turn_id") or reserved_turn_id,
         "title": s.title,
     }
     if normalized_model:

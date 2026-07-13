@@ -275,11 +275,14 @@ def test_retry_after_network_failure_reuses_same_idempotency_key():
 
 
 def test_recovery_actions_are_visible_and_have_handlers():
-    for action in ("retry_cancel", "refresh", "refresh_status", "retry_cleanup"):
+    for action in ("retry_cancel", "refresh", "refresh_status", "retry_cleanup", "regenerate_unverified"):
         assert f"action==='{action}'" in ACTIONS_JS
     assert "refreshExpertTeamRun" in ACTIONS_JS
+    assert "已有结果可能尚未核验" in ACTIONS_JS
     refresh = _function_body(ACTIONS_JS, "async function refreshExpertTeamRun", "function applyExpertTeamActionResponse")
     assert "run_id=${encodeURIComponent(card.runId)}" in refresh
+    assert "仍未找到可安全绑定的结果" in refresh
+    assert "专家团状态已核验" in refresh
 
 
 def test_read_only_workspace_renders_no_mutating_controls():
@@ -472,13 +475,16 @@ def test_question_confirmation_dialog_and_mobile_targets_are_accessible():
 def test_all_runtime_states_have_user_facing_chinese_labels():
     for mapping in (
         "starting:'正在启动'",
-        "start_failed:'启动失败'",
+            "start_failed:'启动失败'",
+            "generation_failed:'生成失败'",
+            "result_unverified:'结果待核验'",
+            "legacy_result_unverified:'历史结果未绑定'",
         "revising:'重做中'",
         "cancelling:'正在停止'",
         "cancelled:'已取消'",
     ):
         assert mapping in EXPERT_UI_JS
-    assert "if(state==='generated_invalid'||state==='start_failed'||state==='failed')return 'issue'" in EXPERT_UI_JS
+    assert "if(state==='generated_invalid'||state==='start_failed'||state==='generation_failed'||state==='result_unverified'||state==='legacy_result_unverified'||state==='failed')return 'issue'" in EXPERT_UI_JS
 
 
 def test_form_state_restore_keeps_same_question_draft_but_never_leaks_it_to_next_question():

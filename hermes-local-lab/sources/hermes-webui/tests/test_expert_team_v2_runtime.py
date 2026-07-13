@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import threading
 import time
@@ -194,6 +195,10 @@ def test_answer_route_starts_first_stage_in_the_same_request(monkeypatch, tmp_pa
     payload = handler.json_body()
     assert handler.status == 200
     assert len(calls) == 1
+    assert calls[0]["turn_metadata"]["expert_team_run_id"] == run["run_id"]
+    assert calls[0]["turn_metadata"]["stage_id"] == "plan"
+    assert calls[0]["turn_metadata"]["attempt"] == 1
+    assert calls[0]["turn_metadata"]["execution_start_id"]
     assert payload["run"]["workflow_state"] == "generating"
     assert payload["run"]["execution_stream_id"] == "stream-first"
 
@@ -477,6 +482,36 @@ def test_assistant_result_uses_the_stream_bound_journal_message_index(monkeypatc
     )
 
     assert routes._latest_expert_team_assistant_content_after_execution(session, run) == "专家团阶段成果"
+
+
+def test_assistant_result_rejects_conflicting_completed_candidates(monkeypatch):
+    from api import routes, turn_journal
+
+    session = SimpleNamespace(messages=[
+        {"role": "user", "content": "请求"},
+        {"role": "assistant", "content": "结果一"},
+        {"role": "assistant", "content": "结果二"},
+    ])
+    run = {"session_id": "sid-conflict", "run_id": "et-conflict", "execution_stream_id": "stream-conflict", "execution_turn_id": "turn-conflict"}
+    monkeypatch.setattr(turn_journal, "read_turn_journal", lambda _sid: {"events": [
+        {"event": "completed", "stream_id": "stream-conflict", "turn_id": "turn-conflict", "assistant_message_index": 1},
+        {"event": "completed", "stream_id": "stream-conflict", "turn_id": "turn-conflict", "assistant_message_index": 2},
+    ], "malformed": []})
+
+    assert routes._latest_expert_team_assistant_content_after_execution(session, run) == ""
+
+
+def test_assistant_result_rejects_completed_interrupted_terminal_collision(monkeypatch):
+    from api import routes, turn_journal
+
+    session = SimpleNamespace(messages=[{"role": "assistant", "content": "结果"}])
+    run = {"session_id": "sid-terminal-conflict", "run_id": "et-terminal-conflict", "execution_stream_id": "stream-terminal-conflict", "execution_turn_id": "turn-terminal-conflict"}
+    monkeypatch.setattr(turn_journal, "read_turn_journal", lambda _sid: {"events": [
+        {"event": "completed", "stream_id": "stream-terminal-conflict", "turn_id": "turn-terminal-conflict", "assistant_message_index": 0},
+        {"event": "interrupted", "stream_id": "stream-terminal-conflict", "turn_id": "turn-terminal-conflict", "reason": "gateway_error"},
+    ], "malformed": []})
+
+    assert routes._latest_expert_team_assistant_content_after_execution(session, run) == ""
 
 
 def test_storage_rejects_payload_with_a_different_filename_run_id(tmp_path):
@@ -1207,7 +1242,7 @@ def test_fail_execution_requires_matching_active_stream(tmp_path):
         "真实失败",
         stream_id="stream-fail-current",
     )
-    assert failed["workflow_state"] == "start_failed"
+    assert failed["workflow_state"] == "generation_failed"
     assert failed["view"]["actions"]["can_retry"] is True
 
 
@@ -1730,6 +1765,24 @@ def test_only_recoverable_failures_expose_retry_action(tmp_path):
     assert recoverable_view["actions"]["can_retry"] is True
 
 
+def test_legacy_post_generation_binding_failure_never_presents_as_start_failure(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.view import expert_team_run_view
+
+    ready = _ready_run(expert_teams, tmp_path, session_id="sid-legacy-unbound")
+    legacy = dict(ready)
+    legacy["workflow_state"] = "start_failed"
+    legacy["last_execution_error"] = "本轮生成已结束，但没有检测到有效结果，请重新尝试。"
+
+    view = expert_team_run_view(legacy)
+
+    assert view["presentation"]["state"] == "legacy_result_unverified"
+    assert view["presentation"]["title"] == "历史结果未绑定"
+    assert view["presentation"]["primary_action"]["id"] == "regenerate_unverified"
+    assert "已有内容会保留" in view["presentation"]["detail"]
+    assert view["actions"]["can_retry"] is False
+
+
 def test_cancel_persists_cancelling_before_runtime_side_effect(monkeypatch, tmp_path):
     from api import expert_teams, routes, runtime_adapter
 
@@ -1864,7 +1917,7 @@ def test_start_route_rejects_missing_session_id(monkeypatch, tmp_path):
     assert "session_id" in handler.json_body()["error"]
 
 
-def test_local_stream_ended_without_result_is_recoverable(monkeypatch, tmp_path):
+def test_local_stream_ended_without_bound_result_enters_result_unverified(monkeypatch, tmp_path):
     from api import expert_teams, routes
 
     ready = _ready_run(expert_teams, tmp_path, session_id="sid-local-empty-recoverable")
@@ -1886,16 +1939,117 @@ def test_local_stream_ended_without_result_is_recoverable(monkeypatch, tmp_path)
 
     recovered = routes._expert_team_run_with_execution_truth(tmp_path, generating)
 
-    assert recovered["workflow_state"] == "start_failed"
+    assert recovered["workflow_state"] == "result_unverified"
     assert recovered["execution_attempt"] == attempt
-    assert recovered["execution_stream_id"] == ""
+    assert recovered["execution_stream_id"] == "stream-local-empty"
+    assert recovered["execution_stage_id"] == stage_id
     assert (recovered.get("current_stage") or {}).get("task_id") == stage_id
     assert [
         (item.get("id"), item.get("answer"), item.get("status"))
         for item in recovered.get("questions") or []
     ] == confirmed
-    assert recovered["view"]["presentation"]["primary_action"]["id"] == "regenerate"
-    assert recovered["view"]["actions"]["can_retry"] is True
+    assert recovered["view"]["presentation"]["primary_action"]["id"] == "refresh"
+    assert recovered["view"]["presentation"]["secondary_actions"][0]["id"] == "regenerate_unverified"
+    assert recovered["view"]["actions"]["can_retry"] is False
+
+
+def test_local_stream_terminal_gateway_error_enters_generation_failed(monkeypatch, tmp_path):
+    from api import expert_teams, routes, turn_journal
+
+    ready = _ready_run(expert_teams, tmp_path, session_id="sid-gateway-failed")
+    generating = _started(expert_teams, tmp_path, ready, "stream-gateway-failed", "turn-gateway-failed")
+    session = SimpleNamespace(
+        session_id=generating["session_id"], active_stream_id=None,
+        pending_user_message=None, messages=[],
+    )
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: set())
+    monkeypatch.setattr(routes, "get_session", lambda _sid, **_kwargs: session)
+    monkeypatch.setattr(turn_journal, "read_turn_journal", lambda _sid: {"events": [{
+        "event": "interrupted", "stream_id": "stream-gateway-failed",
+        "turn_id": "turn-gateway-failed", "reason": "model_configuration_error",
+    }], "malformed": []})
+
+    failed = routes._expert_team_run_with_execution_truth(tmp_path, generating)
+
+    assert failed["workflow_state"] == "generation_failed"
+    assert failed["view"]["presentation"]["title"] == "生成失败"
+    assert failed["view"]["presentation"]["primary_action"]["id"] == "regenerate"
+
+
+def test_result_unverified_reconciles_started_intent_without_rerun(monkeypatch, tmp_path):
+    from api import expert_teams, models, routes, turn_journal
+
+    ready = _ready_run(expert_teams, tmp_path, session_id="sid-late-result")
+    generating = _started(expert_teams, tmp_path, ready, "stream-late-result", "turn-late-result")
+    pending = expert_teams.mark_expert_team_result_unverified(
+        tmp_path,
+        generating["run_id"],
+        "等待核验",
+        stream_id=generating["execution_stream_id"],
+    )
+    content = _valid_plan_content()
+    user_content = "专家团开始生成：计划"
+    session = SimpleNamespace(
+        session_id=pending["session_id"],
+        active_stream_id=None,
+        pending_user_message=None,
+        messages=[
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": content},
+        ],
+    )
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: set())
+    monkeypatch.setattr(routes, "get_session", lambda _sid, **_kwargs: session)
+    monkeypatch.setattr(models.Session, "load", staticmethod(lambda _sid: session))
+    monkeypatch.setattr(
+        turn_journal,
+        "read_turn_journal",
+        lambda _sid: {
+            "events": [{
+                "event": "assistant_started",
+                "stream_id": "stream-late-result",
+                "turn_id": "turn-late-result",
+                "assistant_message_index": 1,
+                "assistant_content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "user_message_index": 0,
+                "user_content_sha256": hashlib.sha256(user_content.encode()).hexdigest(),
+            }],
+            "malformed": [],
+        },
+    )
+
+    recovered = routes._expert_team_run_with_execution_truth(tmp_path, pending)
+
+    assert recovered["workflow_state"] == "awaiting_review"
+    assert recovered["execution_attempt"] == generating["execution_attempt"]
+    assert len(recovered["stage_outputs"]) == 1
+
+
+def test_result_unverified_rejects_started_intent_when_content_digest_drifts(monkeypatch, tmp_path):
+    from api import expert_teams, models, routes, turn_journal
+
+    ready = _ready_run(expert_teams, tmp_path, session_id="sid-drifted-result")
+    generating = _started(expert_teams, tmp_path, ready, "stream-drifted", "turn-drifted")
+    pending = expert_teams.mark_expert_team_result_unverified(
+        tmp_path, generating["run_id"], "等待核验", stream_id="stream-drifted"
+    )
+    session = SimpleNamespace(
+        session_id=pending["session_id"], active_stream_id=None, pending_user_message=None,
+        messages=[{"role": "user", "content": "请求"}, {"role": "assistant", "content": _valid_plan_content()}],
+    )
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: set())
+    monkeypatch.setattr(routes, "get_session", lambda _sid, **_kwargs: session)
+    monkeypatch.setattr(models.Session, "load", staticmethod(lambda _sid: session))
+    monkeypatch.setattr(turn_journal, "read_turn_journal", lambda _sid: {"events": [{
+        "event": "assistant_started", "stream_id": "stream-drifted", "turn_id": "turn-drifted",
+        "assistant_message_index": 1, "assistant_content_sha256": hashlib.sha256(b"other").hexdigest(),
+        "user_message_index": 0, "user_content_sha256": hashlib.sha256("请求".encode()).hexdigest(),
+    }], "malformed": []})
+
+    observed = routes._expert_team_run_with_execution_truth(tmp_path, pending)
+
+    assert observed["workflow_state"] == "result_unverified"
+    assert observed["stage_outputs"] == []
 
 
 @pytest.mark.parametrize("runtime_status", ["failed", "error", "errored"])
@@ -1938,7 +2092,7 @@ def test_remote_runtime_failure_is_recoverable(monkeypatch, tmp_path, runtime_st
 
     recovered = routes._expert_team_run_with_execution_truth(tmp_path, generating)
 
-    assert recovered["workflow_state"] == "start_failed"
+    assert recovered["workflow_state"] == "generation_failed"
     assert recovered["execution_attempt"] == attempt
     assert recovered["execution_stream_id"] == ""
     assert (recovered.get("current_stage") or {}).get("task_id") == stage_id

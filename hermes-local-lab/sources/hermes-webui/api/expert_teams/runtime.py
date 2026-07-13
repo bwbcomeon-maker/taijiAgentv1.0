@@ -820,6 +820,8 @@ def _task_statuses(tasks: list[dict], index: int, state: str) -> list[dict]:
                 "ready_to_generate": "pending",
                 "starting": "starting",
                 "start_failed": "error",
+                "generation_failed": "error",
+                "result_unverified": "awaiting_input",
                 "generating": "running",
                 "cancelling": "running",
                 "awaiting_stage_input": "awaiting_input",
@@ -1247,6 +1249,10 @@ def _sync_derived(run: dict) -> dict:
             item["status"] = "启动中"
         elif state == "start_failed" and (member_id == current_worker_id or name == current_worker):
             item["status"] = "需重试"
+        elif state == "generation_failed" and (member_id == current_worker_id or name == current_worker):
+            item["status"] = "生成失败"
+        elif state == "result_unverified" and (member_id == current_worker_id or name == current_worker):
+            item["status"] = "等待核验"
         elif state in {"generating", "revising", "cancelling"} and (
             member_id == current_worker_id or name == current_worker
         ):
@@ -1268,6 +1274,8 @@ def _sync_derived(run: dict) -> dict:
         "ready_to_generate": "awaiting_user",
         "starting": "starting",
         "start_failed": "error",
+        "generation_failed": "error",
+        "result_unverified": "awaiting_user",
         "generating": "running",
         "cancelling": "running",
         "awaiting_stage_input": "awaiting_user",
@@ -1282,6 +1290,8 @@ def _sync_derived(run: dict) -> dict:
         "ready_to_generate": "idle",
         "starting": "starting",
         "start_failed": "error",
+        "generation_failed": "error",
+        "result_unverified": "awaiting_result",
         "generating": "running",
         "cancelling": "cancelling",
         "awaiting_stage_input": "paused",
@@ -1331,6 +1341,7 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
         "stage_revision_requested": "已收到修改意见",
         "generation_resumed": "准备重新生成当前阶段",
         "generation_failed": "生成失败",
+        "generation_result_unverified": "生成结束，结果等待核验",
         "generation_cancelled": "本轮生成已停止",
         "generation_cancel_requested": "正在停止本轮生成",
         "generation_cancel_accepted": "已受理停止请求",
@@ -2178,7 +2189,7 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         delivered_attempt = int((delivery or {}).get("attempt"))
     except (TypeError, ValueError):
         delivered_attempt = -1
-    if state != "generating":
+    if state not in {"generating", "result_unverified"}:
         code = "missing_stream" if state == "ready_to_generate" and not expected_stream_id else "stale_state"
         raise ExpertTeamStateConflict(code, "expert team execution is not generating", run)
     if not expected_stream_id:
@@ -2763,7 +2774,7 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
             "previous expert team runtime cleanup is not yet confirmed",
             run,
         )
-    if state not in {"ready_to_generate", "start_failed", "generated_invalid"}:
+    if state not in {"ready_to_generate", "start_failed", "generation_failed", "result_unverified", "generated_invalid"}:
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
     _record_action(run, body, "resume")
     return _transition(workspace, run, "ready_to_generate", "generation_resumed", _clear_execution_patch())
@@ -2787,11 +2798,38 @@ def fail_expert_team_execution(
     return _transition(
         workspace,
         run,
-        "start_failed",
+        "generation_failed",
         "generation_failed",
         {
             **_clear_execution_patch(),
             "last_execution_error": str(message or "未检测到生成结果，请重新尝试。"),
+        },
+    )
+
+
+@_serialized_run_mutation
+def mark_expert_team_result_unverified(
+    workspace: Path,
+    run_id: str,
+    message: str,
+    *,
+    stream_id: str,
+) -> dict:
+    """Keep execution identity when a completed stream cannot yet be bound."""
+    run = read_run(workspace, run_id)
+    _require_mutable_v2(run)
+    if str(run.get("workflow_state") or "") != "generating":
+        raise ExpertTeamStateConflict("stale_state", "expert team execution is not generating", run)
+    expected_stream_id = str(run.get("execution_stream_id") or "")
+    if not stream_id or str(stream_id) != expected_stream_id:
+        raise ExpertTeamStateConflict("stale_stream", "expert team execution stream changed", run)
+    return _transition(
+        workspace,
+        run,
+        "result_unverified",
+        "generation_result_unverified",
+        {
+            "last_execution_error": str(message or "结果绑定证据尚未闭环，请重新核验。"),
         },
     )
 

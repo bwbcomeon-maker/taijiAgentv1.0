@@ -43,6 +43,11 @@ def _make_turn_id() -> str:
     return f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
 
 
+def new_turn_id() -> str:
+    """Create a stable turn id before any journal write is attempted."""
+    return _make_turn_id()
+
+
 @contextmanager
 def _journal_file_lock(file_obj):
     """Serialize multi-process journal writes when advisory locks exist.
