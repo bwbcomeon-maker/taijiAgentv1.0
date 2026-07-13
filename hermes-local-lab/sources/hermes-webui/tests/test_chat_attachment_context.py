@@ -531,8 +531,11 @@ def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_
     uploaded_dir = attachment_root / "session-a"
     uploaded_dir.mkdir(parents=True)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
-    image = uploaded_dir / "photo.png"
+    old_image = uploaded_dir / "old.png"
+    image = uploaded_dir / "current.png"
+    _make_png(old_image)
     _make_png(image)
+    old_attachment = {"name": old_image.name, "path": str(old_image), "mime": "image/png", "is_image": True}
     attachment = {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
     cfg = _text_vision_config()
     stream_id = "stream-legacy-vision-failure-reload"
@@ -582,7 +585,10 @@ def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_
         title="Vision failure",
         workspace=str(tmp_path),
         model="deepseek-chat",
-        messages=[],
+        messages=[
+            {"role": "user", "content": "describe this image", "attachments": [old_attachment], "timestamp": 1},
+            {"role": "assistant", "content": "old answer", "timestamp": 2},
+        ],
     )
     session.active_stream_id = stream_id
     session.pending_user_message = "describe this image"
@@ -605,11 +611,11 @@ def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_
 
     assert run_calls == []
     reloaded = models.Session.load(session.session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
-    assert reloaded.messages[0]["content"] == "describe this image"
-    assert reloaded.messages[0]["attachments"] == [attachment]
-    assert reloaded.messages[1]["_error"] is True
-    assert reloaded.messages[1]["error_type"] == "vision_analysis_error"
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user", "assistant"]
+    assert reloaded.messages[2]["content"] == "describe this image"
+    assert reloaded.messages[2]["attachments"] == [attachment]
+    assert reloaded.messages[3]["_error"] is True
+    assert reloaded.messages[3]["error_type"] == "vision_analysis_error"
     serialized = json.dumps(reloaded.messages, ensure_ascii=False)
     assert "Response interrupted" not in serialized
     assert "/private/provider/path" not in serialized

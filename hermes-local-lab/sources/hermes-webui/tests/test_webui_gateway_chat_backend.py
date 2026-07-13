@@ -671,7 +671,11 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     uploaded_dir = attachment_root / "session-a"
     uploaded_dir.mkdir(parents=True)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
-    image_path = uploaded_dir / "photo.png"
+    old_image_path = uploaded_dir / "old.png"
+    image_path = uploaded_dir / "current.png"
+    old_image_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
     image_path.write_bytes(base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     ))
@@ -697,7 +701,12 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     )
     s = new_session()
     stream_id = "stream-gateway-vision-error"
+    old_attachment = {"name": old_image_path.name, "path": str(old_image_path), "mime": "image/png", "is_image": True}
     attachment = {"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}
+    s.messages = [
+        {"role": "user", "content": "describe", "attachments": [old_attachment], "timestamp": 1},
+        {"role": "assistant", "content": "old answer", "timestamp": 2},
+    ]
     s.active_stream_id = stream_id
     s.pending_user_message = "describe"
     s.pending_attachments = [attachment]
@@ -727,14 +736,14 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     assert str(image_path) not in public_error
     assert "provider secret" not in public_error
     reloaded = models.Session.load(s.session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
-    assert reloaded.messages[0]["content"] == "describe"
-    assert reloaded.messages[0]["attachments"] == [attachment]
-    assert reloaded.messages[1]["_error"] is True
-    assert reloaded.messages[1]["error_type"] == "vision_analysis_error"
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user", "assistant"]
+    assert reloaded.messages[2]["content"] == "describe"
+    assert reloaded.messages[2]["attachments"] == [attachment]
+    assert reloaded.messages[3]["_error"] is True
+    assert reloaded.messages[3]["error_type"] == "vision_analysis_error"
     persisted = json.dumps(reloaded.messages, ensure_ascii=False)
     assert "provider secret" not in persisted
-    assert str(image_path) not in reloaded.messages[1]["content"]
+    assert str(image_path) not in reloaded.messages[3]["content"]
 
 
 def test_gateway_cancellation_after_first_auxiliary_image_skips_second_and_main_request(tmp_path, monkeypatch):

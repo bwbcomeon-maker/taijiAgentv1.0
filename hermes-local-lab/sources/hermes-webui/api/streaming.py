@@ -3756,12 +3756,28 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     if not pending_text:
         return False
     normalized_pending = " ".join(pending_text.split())
-    if normalized_pending:
-        for existing in reversed(list(getattr(session, 'messages', None) or [])[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != 'user':
-                continue
-            existing_text = " ".join(str(existing.get('content') or '').split())
-            if existing_text == normalized_pending:
+    messages = list(getattr(session, 'messages', None) or [])
+    latest = messages[-1] if messages else None
+    if normalized_pending and isinstance(latest, dict) and latest.get('role') == 'user':
+        latest_text = " ".join(str(latest.get('content') or '').split())
+        if latest_text == normalized_pending:
+            pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+            latest_attachments = list(latest.get('attachments') or [])
+            pending_started_at = getattr(session, 'pending_started_at', None)
+            latest_started_at = latest.get('timestamp', latest.get('_ts'))
+            timestamps_match = (
+                isinstance(pending_started_at, (int, float))
+                and isinstance(latest_started_at, (int, float))
+                and int(pending_started_at) == int(latest_started_at)
+            )
+            pending_turn_id = str(
+                getattr(session, 'pending_turn_id', None)
+                or getattr(session, 'turn_id', None)
+                or ''
+            ).strip()
+            latest_turn_id = str(latest.get('turn_id') or latest.get('_turn_id') or '').strip()
+            same_turn_id = bool(pending_turn_id and latest_turn_id == pending_turn_id)
+            if same_turn_id or (timestamps_match and latest_attachments == pending_attachments):
                 return False
     recovered_ts = int(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
