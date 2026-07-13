@@ -26,7 +26,7 @@ from api.config import (
     unregister_active_run,
     update_active_run,
 )
-from api.helpers import _redact_text, redact_session_data
+from api.helpers import redact_session_data
 from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     scrub_brand_leaks,
@@ -162,7 +162,6 @@ def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None 
 
 
 def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api_key_configured: bool) -> dict:
-    safe = scrub_brand_leaks(_redact_text(err_body or str(exc))[:500])
     if exc.code == 401:
         return {
             "label": "本地对话服务认证失败",
@@ -174,7 +173,7 @@ def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api
         "label": "太极本地对话服务请求失败",
         "type": "gateway_http_error",
         "message": f"本地对话服务返回 HTTP {exc.code}。",
-        "hint": safe or "请检查太极智能体是否已启动，或导出诊断报告。",
+        "hint": "请检查太极智能体是否已启动，或导出诊断报告后交给管理员排查。",
     }
 
 
@@ -448,12 +447,11 @@ def _gateway_run_request_body(
 
 
 def _gateway_run_error_event(payload: dict, default_message: str = "") -> dict:
-    safe = scrub_brand_leaks(_redact_text(default_message or str(payload or ""))[:500])
     return {
         "label": "太极本地对话服务不可用",
         "type": "gateway_error",
         "message": "本地对话服务暂时不可用。",
-        "hint": safe or "请稍后重试，或导出诊断报告后交给管理员排查。",
+        "hint": "请稍后重试，或导出诊断报告后交给管理员排查。",
     }
 
 
@@ -997,13 +995,12 @@ def _run_gateway_chat_streaming(
             "apperror",
             scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))),
         )
-    except Exception as exc:
+    except Exception:
         record_turn_interrupted("gateway_error")
-        safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
         put_gateway_event("apperror", {
             "label": "太极本地对话服务请求失败",
             "type": "gateway_error",
-            "message": safe or "本地对话服务请求失败。",
+            "message": "本地对话服务请求失败。",
             "hint": "请检查太极智能体是否已启动，或导出诊断报告。",
         })
     finally:

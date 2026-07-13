@@ -645,19 +645,51 @@ def safe_toolsets_for_workspace(toolsets: list[str] | tuple[str, ...] | None, wo
     return list(_SAFE_TOOLSETS_FOR_INTERNAL_WORKSPACE)
 
 
-def scrub_streaming_token_delta(delta: str, tail_ref: list[str], *, final: bool = False) -> str:
-    """Scrub token streams across chunk boundaries by holding a short suffix."""
-    combined = str(tail_ref[0] or "") + str(delta or "")
-    cleaned = scrub_brand_leaks(combined)
+def scrub_streaming_token_delta(delta: str, tail_ref: list[Any], *, final: bool = False) -> str:
+    """Scrub streams consistently across arbitrary provider chunk sizes.
+
+    The look-ahead window retains raw text. Re-feeding an already scrubbed and
+    often shorter suffix loses its original boundary, causing repeated
+    replacements, omissions, or unsafe fragments.
+    """
+    current = tail_ref[0] if tail_ref else ""
+    if isinstance(current, dict):
+        pending = str(current.get("pending") or "")
+        last_replacement = str(current.get("last_replacement") or "")
+    else:
+        pending = str(current or "")
+        last_replacement = ""
+
+    emitted: list[str] = []
+    for char in str(delta or ""):
+        pending += char
+        if len(pending) <= _BRAND_STREAM_HOLD_CHARS:
+            continue
+        cleaned = str(scrub_brand_leaks(pending))
+        if cleaned != pending:
+            if cleaned != last_replacement:
+                emitted.append(cleaned)
+            last_replacement = cleaned
+            pending = ""
+            continue
+        emitted.append(pending[0])
+        last_replacement = ""
+        pending = pending[1:]
+
     if final:
-        tail_ref[0] = ""
-        return cleaned
-    if len(cleaned) <= _BRAND_STREAM_HOLD_CHARS:
-        tail_ref[0] = cleaned
-        return ""
-    emit = cleaned[:-_BRAND_STREAM_HOLD_CHARS]
-    tail_ref[0] = cleaned[-_BRAND_STREAM_HOLD_CHARS:]
-    return emit
+        cleaned = str(scrub_brand_leaks(pending))
+        if cleaned != last_replacement:
+            emitted.append(cleaned)
+        if tail_ref:
+            tail_ref[0] = ""
+        return "".join(emitted)
+
+    if tail_ref:
+        tail_ref[0] = {
+            "pending": pending,
+            "last_replacement": last_replacement,
+        }
+    return "".join(emitted)
 
 
 def _scrub_text(text: str) -> str:

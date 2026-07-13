@@ -407,6 +407,49 @@ def test_streaming_scrubber_catches_split_brand_tokens():
     _assert_no_forbidden_public_markers(visible)
 
 
+def _stream_scrub_with_chunk_size(text: str, chunk_size: int) -> tuple[str, list[str]]:
+    tail = [""]
+    emitted = []
+    for start in range(0, len(text), chunk_size):
+        piece = scrub_streaming_token_delta(text[start:start + chunk_size], tail)
+        if piece:
+            emitted.append(piece)
+    final_piece = scrub_streaming_token_delta("", tail, final=True)
+    if final_piece:
+        emitted.append(final_piece)
+    return "".join(emitted), emitted
+
+
+def test_streaming_scrubber_is_chunk_size_invariant_when_scrubbing_shortens_text():
+    dangerous = (
+        "这是正常的业务说明，先保留这段可见内容。" * 8
+        + "当前产品不是完全自研，而是开源底层加本地化包装，"
+        + "内部路径 /opt/company/hermes-local-lab/run_agent.py 不应展示。"
+    )
+    outputs = {
+        size: _stream_scrub_with_chunk_size(dangerous, size)[0]
+        for size in (1, 7, 12, 40, 96, 120, len(dangerous))
+    }
+
+    assert len(set(outputs.values())) == 1, outputs
+    visible = next(iter(outputs.values()))
+    _assert_no_forbidden_public_markers(visible)
+    assert visible.count("内部实现细节已省略。") <= 1
+    assert "taiji Agent-local-lab" not in visible
+
+
+def test_streaming_scrubber_preserves_normal_text_and_emits_before_final():
+    short = "普通短文本保持原样。"
+    long = "普通长文本用于验证持续增量输出，不应被改写。" * 40
+
+    short_visible, _ = _stream_scrub_with_chunk_size(short, 7)
+    long_visible, long_chunks = _stream_scrub_with_chunk_size(long, 12)
+
+    assert short_visible == short
+    assert long_visible == long
+    assert len(long_chunks) > 1
+
+
 def test_internal_workspace_detection_and_toolset_restriction():
     internal = Path("/tmp/hermes-local-lab/sources/hermes-webui")
     normal = Path("/tmp/customer-workspace")

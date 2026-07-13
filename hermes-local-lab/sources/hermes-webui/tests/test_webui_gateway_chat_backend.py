@@ -205,6 +205,29 @@ def test_gateway_http_401_with_key_suggests_key_mismatch():
     _assert_no_public_hermes(event)
 
 
+def test_gateway_public_errors_do_not_echo_provider_secrets_paths_or_raw_exceptions():
+    raw = "provider exploded sk-abcdefghijklmnopqrstuvwxyz at /private/provider/model.py"
+    exc = urllib.error.HTTPError(
+        "http://gateway.local/v1/runs",
+        503,
+        raw,
+        hdrs=Message(),
+        fp=None,
+    )
+
+    events = [
+        _gateway_http_error_event(exc, raw, api_key_configured=True),
+        gateway_chat._gateway_run_error_event({"error": raw}, raw),
+    ]
+
+    for event in events:
+        serialized = json.dumps(event, ensure_ascii=False)
+        assert "provider exploded" not in serialized
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in serialized
+        assert "/private/provider/model.py" not in serialized
+        assert "HTTP 503" in serialized or "暂时不可用" in serialized
+
+
 def test_gateway_sse_error_event_sanitizes_model_configuration_errors():
     event = _gateway_sse_error_event({
         "error": {
@@ -605,9 +628,14 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, m
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
     vision_calls = []
 
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+
     async def fake_vision_analyze_tool(**kwargs):
         vision_calls.append(kwargs)
-        return json.dumps({"success": True, "analysis": "a red warning sign"})
+        return json.dumps({
+            "success": True,
+            "analysis": f"a red warning sign {secret} /Users/alice/private/image.png",
+        })
 
     monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
     captured = {}
@@ -652,6 +680,8 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, m
     assert captured["run"]["model"] == "deepseek-chat"
     content = captured["run"]["input"][0]["content"]
     assert "a red warning sign" in content
+    assert secret not in content
+    assert "/Users/alice/private/image.png" not in content
     assert "What is shown?" in content
     assert content != "What is shown?"
     assert str(image_path) not in content

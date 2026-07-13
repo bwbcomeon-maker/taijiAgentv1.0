@@ -8,6 +8,7 @@ from pathlib import Path
 from collections import OrderedDict
 import json
 import queue
+import re
 import zipfile
 
 import pytest
@@ -225,6 +226,85 @@ def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
     assert str(session_dir) not in result
     assert "image_url" not in result
     assert "base64" not in result
+
+
+def test_prepare_webui_chat_input_force_redacts_vision_credentials_before_main_model(
+    tmp_path, monkeypatch
+):
+    from api.streaming import prepare_webui_chat_input
+    from tools import vision_tools
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = session_dir / "credentials.png"
+    _make_png(image)
+    secrets = [
+        "sk-abcdefghijklmnopqrstuvwxyz123456",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
+        "AKIAABCDEFGHIJKLMNOP",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart123456",
+        "Authorization: Bearer provider-token-1234567890",
+        "OPENAI_API_KEY=env-secret-value-1234567890",
+        "postgresql://admin:password@db.internal:5432/prod",
+        "-----BEGIN PRIVATE KEY-----\nprivate-material-123456\n-----END PRIVATE KEY-----",
+    ]
+    normal_description = "画面是一张登录页，蓝色按钮清晰可见。"
+    analysis = normal_description + "\n" + "\n".join(secrets) + "\n/Users/alice/private/screenshot.png"
+
+    async def fake_vision_analyze_tool(**_kwargs):
+        return json.dumps({"success": True, "analysis": analysis})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
+    result = prepare_webui_chat_input(
+        "请描述图片",
+        [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+        workspace=str(tmp_path / "workspace"),
+        cfg=_text_vision_config(),
+        provider="deepseek",
+        model="deepseek-chat",
+    )
+
+    assert normal_description in result
+    for secret in secrets:
+        assert secret not in result
+    assert "/Users/alice/private/screenshot.png" not in result
+
+
+def test_vision_provider_warning_logs_only_safe_category_and_diagnostic_id(
+    tmp_path, monkeypatch, caplog
+):
+    from api.streaming import WebUIChatInputError, prepare_webui_chat_input
+    from tools import vision_tools
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = session_dir / "secret-name.png"
+    _make_png(image)
+
+    async def failing_vision(**_kwargs):
+        raise RuntimeError("provider raw sk-abcdefghijklmnopqrstuvwxyz /private/provider/path")
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", failing_vision)
+    with caplog.at_level("WARNING"), pytest.raises(WebUIChatInputError):
+        prepare_webui_chat_input(
+            "describe",
+            [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+            workspace=str(tmp_path / "workspace"),
+            cfg=_text_vision_config(),
+            provider="deepseek",
+            model="deepseek-chat",
+        )
+
+    assert "category=provider_exception" in caplog.text
+    assert re.search(r"diagnostic_id=[0-9a-f]{32}", caplog.text)
+    assert "provider raw" not in caplog.text
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in caplog.text
+    assert "/private/provider/path" not in caplog.text
+    assert "secret-name.png" not in caplog.text
 
 
 @pytest.mark.parametrize(

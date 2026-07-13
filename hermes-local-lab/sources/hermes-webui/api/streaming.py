@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 import copy
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -1297,6 +1298,22 @@ def _vision_input_error(error_type: str) -> WebUIChatInputError:
     })
 
 
+_VISION_LOCAL_PATH_RE = re.compile(
+    r"(?<![:/A-Za-z0-9])/(?!/)[^\s`'\"<>]+|(?<![A-Za-z0-9])[A-Za-z]:\\[^\s`'\"<>]+"
+)
+
+
+def _sanitize_auxiliary_vision_analysis(value: str) -> str:
+    """Force-redact untrusted vision text before it crosses WebUI boundaries."""
+    safe = _redact_text(str(value or ""), _enabled=True)
+    return _VISION_LOCAL_PATH_RE.sub("[本地路径已隐藏]", safe).strip()
+
+
+def _safe_vision_attachment_name(value: str) -> str:
+    leaf = re.split(r"[/\\]", str(value or "image"))[-1].strip() or "image"
+    return _redact_text(leaf, _enabled=True)
+
+
 def _enrich_webui_images_with_vision(
     user_text: str,
     image_items: list[dict[str, str]],
@@ -1325,7 +1342,7 @@ def _enrich_webui_images_with_vision(
         parts = []
         for item in image_items:
             _raise_if_webui_input_cancelled(cancel_check)
-            name = str(item.get("name") or "image").strip() or "image"
+            name = _safe_vision_attachment_name(item.get("name") or "image")
             path = str(item.get("path") or "").strip()
             if not path:
                 raise _vision_input_error("vision_analysis_error")
@@ -1333,7 +1350,9 @@ def _enrich_webui_images_with_vision(
                 result_json = await vision_analyze_tool(image_url=path, user_prompt=prompt)
                 _raise_if_webui_input_cancelled(cancel_check)
                 result = json.loads(result_json)
-                analysis = sanitize_context(str(result.get("analysis") or "").strip())
+                analysis = _sanitize_auxiliary_vision_analysis(
+                    sanitize_context(str(result.get("analysis") or "").strip())
+                )
                 if not result.get("success") or not analysis:
                     raise _vision_input_error("vision_analysis_error")
                 parts.append(f"[Uploaded image: {name}]\n{analysis}")
@@ -1342,7 +1361,11 @@ def _enrich_webui_images_with_vision(
             except WebUIChatInputError:
                 raise
             except Exception as exc:
-                logger.warning("WebUI image attachment vision analysis failed for %s: %s", name, exc)
+                diagnostic_id = uuid.uuid4().hex
+                logger.warning(
+                    "WebUI vision analysis failed category=provider_exception diagnostic_id=%s",
+                    diagnostic_id,
+                )
                 raise _vision_input_error("vision_analysis_error") from exc
         prefix = "[Uploaded image context]\n" + "\n\n".join(parts)
         return f"{prefix}\n\n{user_text}" if user_text else prefix
