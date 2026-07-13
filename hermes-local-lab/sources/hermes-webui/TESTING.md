@@ -355,6 +355,44 @@ EXPECT:
   - Speed selection updates the video `playbackRate` without reloading the media
 FAIL: Video only shows a generic badge, overflows the chat column, or speed controls fail.
 
+### T4.8: Verify Image Understanding Configuration
+SETUP: Save a supported auxiliary vision Provider, model, and a newly issued API key in Settings > Model Configuration. Do not use a key that has appeared in a screenshot, chat, or log.
+STEPS:
+  1. Confirm the image-understanding card says "configured, unverified" rather than "available"
+  2. Click "Test image understanding"
+  3. Wait for the fixed safe probe to finish
+EXPECT:
+  - The card announces a verifying state and disables conflicting image configuration controls
+  - Success changes the state to verified and shows a check time without exposing the probe path, model response, or credential
+  - Failure shows a safe actionable message and leaves the test action available for another attempt
+  - Changing the Provider, model, base URL, profile, or API key invalidates the old verified state
+FAIL: Merely saving a key shows "available", a fallback Provider can pass the selected Provider, a stale response overwrites edited fields, or any secret/path/raw Provider error is displayed.
+
+### T4.9: Image Turn Uses Visual Content
+SETUP: T4.8 is verified. Select a text-only main model and prepare an image containing a unique, non-sensitive marker and an obvious visual fact.
+STEPS:
+  1. Attach the image
+  2. Ask for both the marker and the visual fact
+  3. Send the turn
+EXPECT:
+  - The reply states the marker and visual fact from the image, not only the filename or surrounding prompt
+  - The main model is called only after auxiliary image analysis succeeds
+  - No local attachment path, credential-like text, or internal Provider error appears in the reply
+FAIL: The reply says it cannot see images despite verified configuration, guesses without the marker, or the main model answers after image analysis failed.
+
+### T4.10: Image Failure Recovery and Reload
+SETUP: Preserve a test image turn, then make the configured image Provider unavailable in a safe test environment.
+STEPS:
+  1. Send the image turn and wait for the dedicated failure card
+  2. Reload the page and reopen the conversation
+  3. Restore the Provider, then activate "Retry image analysis"
+EXPECT:
+  - The failure card is a visible alert with "Retry image analysis" and "Open image configuration"
+  - Reload keeps the user question, image attachment, and typed image error in the correct order
+  - Retry reuses the original text and uploaded image without opening a file picker or uploading it again
+  - If another turn is running, retry is rejected without clearing the current draft or pending attachments
+FAIL: The error becomes a generic interruption after reload, the user image turn disappears, retry loses the image, or retry mutates the current draft while chat is busy.
+
 ---
 
 ## Section 5: Workspace File Browser

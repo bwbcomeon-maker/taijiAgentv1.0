@@ -78,6 +78,42 @@ browser UI.
 
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
-messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
-still follow WebUI's current compatibility path and may not match every messaging
-surface until the runtime-adapter migration is complete.
+messaging surfaces. Browser image turns use the same fail-closed preparation
+boundary in Legacy and Gateway modes: a native vision main model receives image
+content parts, while a text-only main model receives a successful description
+from the configured auxiliary vision model. If any image cannot be analyzed,
+WebUI emits a typed image error and does not call the main model.
+
+Gateway `/v1/runs` accepts a plain string, an OpenAI-style `role`/`content`
+message array, or a bare array of multimodal content parts. WebUI sends the
+canonical message-array form. Image-only turns are valid; `file`, `input_file`,
+non-image data URLs, and unsupported URL schemes are rejected before a run is
+created.
+
+## Image understanding verification and privacy
+
+Saving an image-understanding Provider, model, and key means **configured**, not
+verified. Use Settings > Model Configuration > Test image understanding to send
+a fixed, non-sensitive probe image to the exact selected Provider and model.
+The probe disables fallback routing, so a different visual backend cannot make
+the selected configuration appear healthy. Evidence is scoped per profile and
+becomes unverified when the profile, Provider, model, base URL, API mode, or key
+changes.
+
+The verification API returns only status, time, Provider/model identifiers, a
+safe error code/message, and a diagnostic ID. It does not return or persist the
+model's answer, raw Provider exception, local probe path, or credential. The
+probe can take up to two minutes; the browser allows 150 seconds and discards
+stale responses if configuration changes while the request is running.
+
+Uploaded images are sent to the configured external visual Provider. Do not
+upload screenshots containing credentials, private keys, personal records, or
+other data that the Provider is not authorized to process. Visual descriptions
+are force-redacted locally before entering the main model, session, log, or
+public error path, but this text redaction happens after the external visual
+Provider has received the image and is not a substitute for image-level masking.
+
+If analysis fails, the chat keeps the user turn and attachment and shows visible
+Retry image analysis and Open image configuration actions. Retry reuses the
+already uploaded descriptor in page memory; persisted browser in-flight state
+continues to store only safe filenames, not local attachment paths.

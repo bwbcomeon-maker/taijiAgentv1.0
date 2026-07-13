@@ -5,6 +5,8 @@
 
 ### Added
 
+- Added a real image-understanding verification flow in Settings: configured credentials now remain "configured, unverified" until a fixed safe image probe succeeds against the exact selected Provider and model. Verification evidence is isolated per profile, invalidated by model/key/config changes, and never stores model output, raw errors, paths, or credentials.
+- Added dedicated image-analysis recovery cards with visible "Retry image analysis" and "Open image configuration" actions. Retries reuse the already uploaded image descriptors in memory without re-uploading files or persisting local paths in browser storage.
 - Added the `taiji-light-glass` WebUI skin with light glass enterprise tokens, centralized brand metadata in `static/brand.js`, and service-worker coverage for the new brand entrypoint.
 - Added Doubao Seedream 5.0 Lite as a built-in image-generation provider, configurable from Settings with `ARK_API_KEY` and routed through the existing `image_generate` tool.
 - Added repo-local taiji brand assets under `static/assets/taiji/`, wiring the real logo, background, navigation icons, composer actions, workspace panel controls, favicons, login page, and restart shell into the `taiji-light-glass` skin while keeping Lucide/SVG fallback markup for other skins.
@@ -37,6 +39,10 @@
 
 ### Fixed
 
+- Browser image turns now use one fail-closed preparation path in both Legacy and Gateway chat. Text-only main models receive successful auxiliary-vision descriptions, native vision models keep image parts, and any image failure stops the main-model request instead of silently answering without visual context.
+- Gateway `/v1/runs` now accepts string input, standard role/content message arrays, and bare multimodal content-part arrays without flattening image content. Invalid file or non-image inputs fail before run state is created.
+- Image-analysis failures and cancellations now preserve the current user turn, attachments, typed error, and reload order in both eager and deferred session modes, including repeated prompts such as "What does this mean?" with different images.
+- Auxiliary image descriptions are force-redacted locally before entering the main model, logs, sessions, or public errors. Streaming brand/privacy filtering is now invariant to Provider chunk boundaries and no longer emits duplicated safe replacements or unsafe fragments.
 - Expert-team Collaboration tab now maps raw generated-invalid states to Chinese UI labels and stretches member cards to fill the right-side workspace without exposing backend state names.
 - Expert-team workbench refreshes now preserve the user's scroll position when the same run and stage re-render, preventing review actions from jumping back to the top during polling.
 - Expert-team plan/research draft prompts now include the rich-draft table and diagram acceptance gates, so draft stages no longer produce ordinary prose that the backend must reject as `generated_invalid`.
