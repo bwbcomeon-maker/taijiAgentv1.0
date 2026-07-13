@@ -3679,11 +3679,43 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error("Invalid JSON"), status=400)
 
         raw_input = body.get("input")
-        if not raw_input:
+        if raw_input is None:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
 
-        user_message = raw_input if isinstance(raw_input, str) else (raw_input[-1].get("content", "") if isinstance(raw_input, list) else "")
-        if not user_message:
+        # Normalize the three supported input shapes using the Responses API pattern:
+        # a string, a standard role/content message array, or a bare array of
+        # content parts (treated as one user message for client compatibility).
+        input_messages: List[Dict[str, Any]] = []
+        if isinstance(raw_input, str):
+            input_messages = [{"role": "user", "content": _normalize_multimodal_content(raw_input)}]
+        elif isinstance(raw_input, list):
+            is_bare_content = bool(raw_input) and all(
+                isinstance(item, dict) and "role" not in item and "type" in item
+                for item in raw_input
+            )
+            if is_bare_content:
+                try:
+                    content = _normalize_multimodal_content(raw_input)
+                except ValueError as exc:
+                    return _multimodal_validation_error(exc, param="input")
+                input_messages = [{"role": "user", "content": content}]
+            else:
+                for i, item in enumerate(raw_input):
+                    if not isinstance(item, dict) or "role" not in item or "content" not in item:
+                        return web.json_response(
+                            _openai_error(f"input[{i}] must have 'role' and 'content' fields"),
+                            status=400,
+                        )
+                    try:
+                        content = _normalize_multimodal_content(item["content"])
+                    except ValueError as exc:
+                        return _multimodal_validation_error(exc, param=f"input[{i}].content")
+                    input_messages.append({"role": str(item["role"]), "content": content})
+        else:
+            return web.json_response(_openai_error("'input' must be a string or array"), status=400)
+
+        user_message: Any = input_messages[-1]["content"] if input_messages else ""
+        if not _content_has_visible_payload(user_message):
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
         instructions = body.get("instructions")
@@ -3691,9 +3723,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
-        conversation_history: List[Dict[str, str]] = []
+        conversation_history: List[Dict[str, Any]] = []
         raw_history = body.get("conversation_history")
-        if raw_history:
+        has_explicit_history = raw_history is not None
+        if has_explicit_history:
             if not isinstance(raw_history, list):
                 return web.json_response(
                     _openai_error("'conversation_history' must be an array of message objects"),
@@ -3705,12 +3738,16 @@ class APIServerAdapter(BasePlatformAdapter):
                         _openai_error(f"conversation_history[{i}] must have 'role' and 'content' fields"),
                         status=400,
                     )
-                conversation_history.append({"role": str(entry["role"]), "content": str(entry["content"])})
+                try:
+                    content = _normalize_multimodal_content(entry["content"])
+                except ValueError as exc:
+                    return _multimodal_validation_error(exc, param=f"conversation_history[{i}].content")
+                conversation_history.append({"role": str(entry["role"]), "content": content})
             if previous_response_id:
                 logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
 
         stored_session_id = None
-        if not conversation_history and previous_response_id:
+        if not has_explicit_history and previous_response_id:
             stored = self._response_store.get(previous_response_id)
             if stored:
                 conversation_history = list(stored.get("conversation_history", []))
@@ -3720,18 +3757,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # When input is a multi-message array, extract all but the last
         # message as conversation history (the last becomes user_message).
-        # Only fires when no explicit history was provided.
-        if not conversation_history and isinstance(raw_input, list) and len(raw_input) > 1:
-            for msg in raw_input[:-1]:
-                if isinstance(msg, dict) and msg.get("role") and msg.get("content"):
-                    content = msg["content"]
-                    if isinstance(content, list):
-                        # Flatten multi-part content blocks to text
-                        content = " ".join(
-                            part.get("text", "") for part in content
-                            if isinstance(part, dict) and part.get("type") == "text"
-                        )
-                    conversation_history.append({"role": msg["role"], "content": str(content)})
+        conversation_history.extend(input_messages[:-1])
 
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id

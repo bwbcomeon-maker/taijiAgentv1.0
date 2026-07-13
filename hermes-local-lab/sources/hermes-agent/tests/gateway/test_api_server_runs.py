@@ -102,6 +102,168 @@ def auth_adapter():
 
 class TestStartRun:
     @pytest.mark.asyncio
+    async def test_start_accepts_bare_multimodal_content_parts(self, adapter):
+        image_input = [
+            {"type": "input_text", "text": "Describe this image."},
+            {"type": "input_image", "image_url": "https://example.com/cat.png"},
+        ]
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "A cat."}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": image_input})
+                assert resp.status == 202, await resp.text()
+
+                for _ in range(20):
+                    if mock_agent.run_conversation.called:
+                        break
+                    await asyncio.sleep(0.05)
+
+                mock_agent.run_conversation.assert_called_once()
+                assert mock_agent.run_conversation.call_args.kwargs["user_message"] == [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+                ]
+
+    @pytest.mark.asyncio
+    async def test_start_preserves_multimodal_standard_messages(self, adapter):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": "Earlier image"},
+                                    {"type": "input_image", "image_url": "https://example.com/earlier.png"},
+                                ],
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_image", "image_url": "https://example.com/latest.png"},
+                                ],
+                            },
+                        ]
+                    },
+                )
+                assert resp.status == 202, await resp.text()
+
+                for _ in range(20):
+                    if mock_agent.run_conversation.called:
+                        break
+                    await asyncio.sleep(0.05)
+
+                kwargs = mock_agent.run_conversation.call_args.kwargs
+                assert kwargs["conversation_history"] == [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Earlier image"},
+                            {"type": "image_url", "image_url": {"url": "https://example.com/earlier.png"}},
+                        ],
+                    }
+                ]
+                assert kwargs["user_message"] == [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/latest.png"}},
+                ]
+
+    @pytest.mark.asyncio
+    async def test_start_explicit_history_takes_precedence_and_preserves_images(self, adapter):
+        adapter._response_store.put(
+            "resp_previous",
+            {"conversation_history": [{"role": "assistant", "content": "stored history"}]},
+        )
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": [
+                            {"role": "assistant", "content": "ignored input history"},
+                            {"role": "user", "content": "latest"},
+                        ],
+                        "conversation_history": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_image", "image_url": "https://example.com/history.png"},
+                                ],
+                            }
+                        ],
+                        "previous_response_id": "resp_previous",
+                    },
+                )
+                assert resp.status == 202, await resp.text()
+
+                for _ in range(20):
+                    if mock_agent.run_conversation.called:
+                        break
+                    await asyncio.sleep(0.05)
+
+                kwargs = mock_agent.run_conversation.call_args.kwargs
+                assert kwargs["conversation_history"] == [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": "https://example.com/history.png"}},
+                        ],
+                    },
+                    {"role": "assistant", "content": "ignored input history"},
+                ]
+                assert kwargs["user_message"] == "latest"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("content", "expected_code"),
+        [
+            ([{"type": "file", "file": {"file_id": "f_1"}}], "unsupported_content_type"),
+            ([{"type": "input_file", "file_id": "f_1"}], "unsupported_content_type"),
+            (
+                [{"type": "image_url", "image_url": {"url": "data:text/plain;base64,SGVsbG8="}}],
+                "unsupported_content_type",
+            ),
+            ([{"type": "image_url", "image_url": {"url": "ftp://example.com/image.png"}}], "invalid_image_url"),
+        ],
+    )
+    async def test_start_rejects_invalid_multimodal_input_before_allocating_run(
+        self, adapter, content, expected_code
+    ):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/runs", json={"input": content})
+            body = await resp.json()
+
+        assert resp.status == 400
+        assert body["error"]["code"] == expected_code
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
     async def test_start_returns_202(self, adapter):
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:
