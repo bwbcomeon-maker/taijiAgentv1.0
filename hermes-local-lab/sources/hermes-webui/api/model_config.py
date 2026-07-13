@@ -7,9 +7,17 @@ never secret values.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
 import importlib
+import json
 import logging
 import os
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from api.config import (
@@ -81,6 +89,20 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "models": [],
         "requires_base_url": True,
     },
+}
+_VISION_PROBE_MARKER = "TAIJI-VISION-CHECK-7319"
+_VISION_PROBE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAkAAAAA0CAAAAABH3dgUAAABPElEQVR42u3aYRKCIBAGUO9/6TpAyO4COYrv+1cpwvKasc3jIzKRQwkEIAFIABKARAASgAQgAUgEIAFIHgLoaKT1Web41jnR8T+Ta4xXmWf1+Oi60Vxb1101/8p8zsaPan/2Xm+vAAIIIIAAAmgHQNkCVhaUnei/51E5PwKVXU9v/NFxsrUbGXekvgABBBBAAAEE0F6AMht+NaCVeFbVFyCAAAIIIIB2BxQ1DGcA9Rpf5QUVGmWZDc40JHsbX2noReNkx19Vn1TzESCAAAIIIIA2BzT6+sqb6FXrmL3OHW6is38Az64TIIAAAggggABaDygq3tsAzXz5AAIIIIAAAgigdYAyD4dXGl+VhVYbdG96qH6kKZidC0AAAQQQQADtDEgk/SNHCQQgAUgAEoBEABKABCABSAQgAUjumy803ZPAu+g+xgAAAABJRU5ErkJggg=="
+)
+_VISION_VERIFICATION_PUBLIC_FIELDS = {
+    "ok",
+    "status",
+    "checked_at",
+    "provider",
+    "model",
+    "error_code",
+    "message",
+    "diagnostic_id",
 }
 _IMAGE_GEN_FALLBACK_META: dict[str, dict[str, Any]] = {
     "doubao": {
@@ -624,6 +646,221 @@ def _vision_key_status(provider_id: str) -> dict[str, Any]:
     return _provider_key_status(provider)
 
 
+def _vision_verification_state_path() -> Path:
+    from api.config import STATE_DIR
+
+    return Path(STATE_DIR) / "vision-verification.json"
+
+
+def _vision_probe_image_path() -> Path:
+    return _vision_verification_state_path().with_name("vision-verification-probe.png")
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+    _atomic_write_bytes(path, encoded)
+
+
+def _read_vision_verification_state() -> dict[str, Any]:
+    try:
+        data = json.loads(_vision_verification_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _vision_secret_digest(provider: str) -> str:
+    env_var = _VISION_KEY_ENV.get(provider) or _PROVIDER_ENV_VAR.get(provider) or ""
+    if not env_var:
+        return ""
+    env_values = _load_env_file(_get_hermes_home() / ".env")
+    secret = str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else ""
+
+
+def _vision_config_fingerprint(vision_cfg: dict[str, Any], key_status: dict[str, Any]) -> str:
+    provider = str(vision_cfg.get("provider") or "").strip().lower()
+    material = {
+        "profile": _active_profile_name(),
+        "provider": provider,
+        "model": str(vision_cfg.get("model") or "").strip(),
+        "base_url": str(vision_cfg.get("base_url") or "").strip().rstrip("/"),
+        "api_mode": str(vision_cfg.get("api_mode") or "").strip(),
+        "key_configured": bool(key_status.get("configured")),
+        "key_digest": _vision_secret_digest(provider),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _vision_is_configured(vision_cfg: dict[str, Any], key_status: dict[str, Any]) -> bool:
+    provider = str(vision_cfg.get("provider") or "").strip().lower()
+    model = str(vision_cfg.get("model") or "").strip()
+    meta = _VISION_PROVIDER_META.get(provider) or {}
+    base_url = str(vision_cfg.get("base_url") or "").strip()
+    return bool(
+        provider
+        and model
+        and key_status.get("configured")
+        and (not meta.get("requires_base_url") or base_url)
+    )
+
+
+def _public_vision_verification(vision_cfg: dict[str, Any], key_status: dict[str, Any]) -> dict[str, Any]:
+    if not _vision_is_configured(vision_cfg, key_status):
+        return {
+            "status": "unconfigured",
+            "checked_at": "",
+            "error_code": "vision_not_configured",
+            "message": "请先保存完整的识图 Provider、模型和密钥配置。",
+            "diagnostic_id": "",
+        }
+    state = _read_vision_verification_state()
+    fingerprint = _vision_config_fingerprint(vision_cfg, key_status)
+    if state.get("fingerprint") == fingerprint and state.get("status") in {"verified", "failed"}:
+        return {
+            "status": str(state.get("status")),
+            "checked_at": str(state.get("checked_at") or ""),
+            "error_code": str(state.get("error_code") or ""),
+            "message": str(state.get("message") or ""),
+            "diagnostic_id": str(state.get("diagnostic_id") or ""),
+        }
+    return {
+        "status": "configured_unverified",
+        "checked_at": "",
+        "error_code": "",
+        "message": "识图配置已保存，但尚未通过真实图片验证。",
+        "diagnostic_id": "",
+    }
+
+
+def _invalidate_vision_verification() -> None:
+    path = _vision_verification_state_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        _atomic_write_json(path, {})
+
+
+def _vision_test_response(
+    *,
+    ok: bool,
+    status: str,
+    checked_at: str,
+    provider: str,
+    model: str,
+    error_code: str,
+    message: str,
+    diagnostic_id: str,
+) -> dict[str, Any]:
+    response = {
+        "ok": bool(ok),
+        "status": status,
+        "checked_at": checked_at,
+        "provider": provider,
+        "model": model,
+        "error_code": error_code,
+        "message": message,
+        "diagnostic_id": diagnostic_id,
+    }
+    return {key: response[key] for key in _VISION_VERIFICATION_PUBLIC_FIELDS}
+
+
+def test_vision_config() -> dict[str, Any]:
+    reload_config()
+    config_data = _load_yaml_config_file(_get_config_path())
+    auxiliary = config_data.get("auxiliary")
+    vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+    if not isinstance(vision_cfg, dict):
+        vision_cfg = {}
+    provider = str(vision_cfg.get("provider") or "").strip().lower()
+    model = str(vision_cfg.get("model") or "").strip()
+    key_status = _vision_key_status(provider)
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    diagnostic_id = uuid.uuid4().hex
+    if not _vision_is_configured(vision_cfg, key_status):
+        return _vision_test_response(
+            ok=False,
+            status="unconfigured",
+            checked_at=checked_at,
+            provider=provider,
+            model=model,
+            error_code="vision_not_configured",
+            message="请先保存完整的识图 Provider、模型和密钥配置。",
+            diagnostic_id=diagnostic_id,
+        )
+
+    error_code = ""
+    message = "识图验证通过，当前配置已完成真实图片探测。"
+    ok = False
+    try:
+        from tools.vision_tools import vision_analyze_tool
+
+        probe_path = _vision_probe_image_path()
+        if not probe_path.exists() or probe_path.read_bytes() != _VISION_PROBE_PNG:
+            _atomic_write_bytes(probe_path, _VISION_PROBE_PNG)
+        prompt = (
+            "请只识别图片中的大写英文、数字和连字符标记。"
+            "不要猜测或补全，请在回复中完整包含你真实看到的标记。"
+        )
+
+        async def _run_probe() -> str:
+            return await vision_analyze_tool(
+                image_url=str(probe_path),
+                user_prompt=prompt,
+                model=model,
+            )
+
+        result = json.loads(asyncio.run(_run_probe()))
+        analysis = str(result.get("analysis") or "") if isinstance(result, dict) else ""
+        ok = bool(isinstance(result, dict) and result.get("success") and _VISION_PROBE_MARKER in analysis)
+        if not ok:
+            error_code = "vision_probe_failed"
+            message = "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
+    except Exception:
+        logger.warning("Vision configuration probe failed (%s)", diagnostic_id)
+        error_code = "vision_probe_failed"
+        message = "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
+
+    status = "verified" if ok else "failed"
+    state = {
+        "fingerprint": _vision_config_fingerprint(vision_cfg, key_status),
+        "status": status,
+        "checked_at": checked_at,
+        "error_code": error_code,
+        "message": message,
+        "diagnostic_id": diagnostic_id,
+    }
+    _atomic_write_json(_vision_verification_state_path(), state)
+    return _vision_test_response(
+        ok=ok,
+        status=status,
+        checked_at=checked_at,
+        provider=provider,
+        model=model,
+        error_code=error_code,
+        message=message,
+        diagnostic_id=diagnostic_id,
+    )
+
+
 def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     active = str(active_provider or "").strip().lower()
@@ -676,6 +913,7 @@ def get_vision_config() -> dict[str, Any]:
     model = str(vision_cfg.get("model") or "").strip()
     base_url = str(vision_cfg.get("base_url") or "").strip()
     api_mode = str(vision_cfg.get("api_mode") or "").strip()
+    key_status = _vision_key_status(provider)
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -685,7 +923,8 @@ def get_vision_config() -> dict[str, Any]:
             "model": model,
             "base_url": base_url,
             "api_mode": api_mode,
-            "key_status": _vision_key_status(provider),
+            "key_status": key_status,
+            "verification": _public_vision_verification(vision_cfg, key_status),
         },
         "providers": _vision_provider_rows(provider, vision_cfg),
     }
@@ -748,6 +987,7 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
         _save_yaml_config_file(config_path, config_data)
     reload_config()
     invalidate_models_cache()
+    _invalidate_vision_verification()
     return get_vision_config()
 
 

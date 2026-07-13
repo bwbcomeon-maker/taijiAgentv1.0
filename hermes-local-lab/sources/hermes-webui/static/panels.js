@@ -8340,17 +8340,31 @@ function _renderVisionConfigSummary(data){
  const keyLabel=_modelConfigKeyLabel(keyStatus);
  const baseUrl=String(vision.base_url||'').trim();
  const needsBase=!!(row&&row.requires_base_url);
- const ready=!!(provider&&model&&keyStatus.configured&&(!needsBase||baseUrl));
+ const configured=!!(provider&&model&&keyStatus.configured&&(!needsBase||baseUrl));
+ const verification=vision.verification||{};
+ const status=String(verification.status||(configured?'configured_unverified':'unconfigured'));
+ const stateMeta={
+  unconfigured:{label:'待配置',badge:'看图识别待配置',tone:'warn',summary:'需要选择支持视觉的模型并配置密钥。'},
+  configured_unverified:{label:'已配置，尚未验证',badge:'看图识别尚未验证',tone:'warn',summary:'配置已保存，请点击“测试识图”完成真实图片探测。'},
+  verifying:{label:'正在验证',badge:'看图识别正在验证',tone:'warn',summary:'正在使用无用户数据的安全测试图片检查当前配置。'},
+  verified:{label:'已验证',badge:'看图识别已验证',tone:'ok',summary:'当前配置已通过真实图片探测。'},
+  failed:{label:'验证失败',badge:'看图识别验证失败',tone:'danger',summary:'请检查网络、密钥、模型和账号状态后重试。'}
+ };
+ const meta=stateMeta[status]||stateMeta.configured_unverified;
  _setModelConfigText('visionConfigProviderSummary',_formatModelConfigProvider(provider,row.name));
  _setModelConfigText('visionConfigModelSummary',model||String(row.default_model||''));
  _setModelConfigText('visionConfigKeyState',keyLabel);
- _setModelConfigStatusBadge('visionConfigEffective',ready?'已可用':'待配置',ready?'ok':'warn');
- _setModelConfigStatusBadge('visionConfigStatusBadge',ready?'看图识别可用':'看图识别待配置',ready?'ok':'warn');
+ _setModelConfigStatusBadge('visionConfigEffective',meta.label,meta.tone);
+ _setModelConfigStatusBadge('visionConfigStatusBadge',meta.badge,meta.tone);
  const card=$('modelConfigVisionSummaryCard');
- if(card) card.dataset.state=ready?'ok':'warn';
- _setModelConfigText('visionConfigSummary',ready
-  ? '上传图片、截图或表格截图后，可以交给视觉模型理解内容。'
-  : '需要选择支持视觉的模型并配置密钥，否则 agent 会继续提示没有可用识图能力。');
+ if(card) card.dataset.state=status==='verified'?'ok':'warn';
+ _setModelConfigText('visionConfigSummary',meta.summary);
+ _setModelConfigText('visionConfigVerificationStatus',String(verification.message||meta.summary));
+ const testBtn=$('btnTestVisionConfig');
+ if(testBtn){
+  testBtn.disabled=status==='verifying'||!configured;
+  testBtn.setAttribute('aria-busy',status==='verifying'?'true':'false');
+ }
 }
 
 function _renderModelConfigFocusSummary(data){
@@ -9200,6 +9214,50 @@ async function saveVisionConfig(){
   if(typeof showToast==='function') showToast('识图配置已保存');
  }catch(e){
   if(typeof showToast==='function') showToast('保存识图配置失败：'+(e.message||e),5000,'error');
+ }finally{
+  if(btn) btn.disabled=false;
+ }
+}
+
+function _visionConfigHasUnsavedChanges(){
+ const saved=(_modelConfigData&&_modelConfigData.vision)||{};
+ const provider=(($('visionConfigProvider')||{}).value||'').trim();
+ const model=(($('visionConfigModel')||{}).value||'').trim();
+ const baseUrl=(($('visionConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'');
+ const apiKey=(($('visionConfigApiKey')||{}).value||'').trim();
+ return !!apiKey
+  || provider!==String(saved.provider||'').trim()
+  || model!==String(saved.model||'').trim()
+  || baseUrl!==String(saved.base_url||'').trim().replace(/\/$/,'');
+}
+
+async function testVisionConfig(){
+ const btn=$('btnTestVisionConfig');
+ const saved=(_modelConfigData&&_modelConfigData.vision)||{};
+ const verification=saved.verification||{};
+ if(_visionConfigHasUnsavedChanges()){
+  _setModelConfigText('visionConfigVerificationStatus','请先保存当前识图配置，再开始测试。');
+  if(typeof showToast==='function') showToast('请先保存当前识图配置',5000,'error');
+  return;
+ }
+ if(String(verification.status||'')==='unconfigured'){
+  _setModelConfigText('visionConfigVerificationStatus','请先完整配置 Provider、模型和密钥。');
+  if(typeof showToast==='function') showToast('识图配置不完整',5000,'error');
+  return;
+ }
+ if(btn) btn.disabled=true;
+ saved.verification={status:'verifying',message:'正在使用安全测试图片验证当前识图配置…'};
+ _renderVisionConfigSummary(_modelConfigData);
+ try{
+  const result=await api('/api/vision/test',{method:'POST',body:'{}'});
+  saved.verification=result||{};
+  _renderVisionConfigSummary(_modelConfigData);
+  await loadModelConfigPanel(true);
+  if(typeof showToast==='function') showToast(result&&result.ok?'识图验证通过':'识图验证失败',5000,result&&result.ok?'success':'error');
+ }catch(e){
+  saved.verification={status:'failed',message:'识图验证请求失败，请稍后重试。'};
+  _renderVisionConfigSummary(_modelConfigData);
+  if(typeof showToast==='function') showToast('识图验证请求失败：'+(e.message||e),5000,'error');
  }finally{
   if(btn) btn.disabled=false;
  }

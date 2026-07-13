@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import yaml
 
@@ -333,6 +334,143 @@ def test_custom_vision_config_without_key_does_not_write_placeholder(monkeypatch
     assert cfg["auxiliary"]["vision"]["provider"] == "custom"
     assert cfg["auxiliary"]["vision"]["base_url"] == "http://127.0.0.1:8000/v1"
     assert "api_key" not in cfg["auxiliary"]["vision"]
+
+
+def _write_saved_vision_config(tmp_path, *, provider="alibaba", model="qwen3-vl-plus"):
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"auxiliary": {"vision": {"provider": provider, "model": model}}}),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=test-only-key\n", encoding="utf-8")
+
+
+def test_vision_config_distinguishes_configured_from_verified(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: tmp_path / "vision-verification.json")
+    _write_saved_vision_config(tmp_path)
+
+    result = model_config.get_vision_config()
+
+    assert result["vision"]["verification"]["status"] == "configured_unverified"
+    assert result["vision"]["verification"]["checked_at"] == ""
+
+
+def test_vision_test_rejects_unconfigured_without_calling_provider(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: tmp_path / "vision-verification.json")
+    calls = []
+
+    async def should_not_run(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({"success": True, "analysis": "TAIJI-VISION-CHECK-7319"})
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", should_not_run)
+    result = model_config.test_vision_config()
+
+    assert calls == []
+    assert result["ok"] is False
+    assert result["status"] == "unconfigured"
+    assert result["error_code"] == "vision_not_configured"
+    assert set(result) == {
+        "ok", "status", "checked_at", "provider", "model",
+        "error_code", "message", "diagnostic_id",
+    }
+
+
+def test_vision_test_persists_verified_result_without_model_text_or_secret(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    _write_saved_vision_config(tmp_path)
+    calls = []
+
+    async def succeed(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({
+            "success": True,
+            "analysis": "The image contains TAIJI-VISION-CHECK-7319 and secret-model-text.",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", succeed)
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is True
+    assert result["status"] == "verified"
+    assert result["provider"] == "alibaba"
+    assert result["model"] == "qwen3-vl-plus"
+    assert result["error_code"] == ""
+    assert calls and calls[0]["model"] == "qwen3-vl-plus"
+    assert Path(calls[0]["image_url"]).name == "vision-verification-probe.png"
+    assert "识别图片" in calls[0]["user_prompt"]
+    assert "TAIJI-VISION-CHECK-7319" not in calls[0]["user_prompt"]
+    public_dump = json.dumps(result, ensure_ascii=False)
+    persisted_dump = state_path.read_text(encoding="utf-8")
+    for forbidden in ("test-only-key", "secret-model-text", str(tmp_path)):
+        assert forbidden not in public_dump
+        assert forbidden not in persisted_dump
+    assert model_config.get_vision_config()["vision"]["verification"]["status"] == "verified"
+
+
+def test_vision_test_failure_returns_only_safe_fields(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    _write_saved_vision_config(tmp_path)
+
+    async def fail(**_kwargs):
+        return json.dumps({
+            "success": False,
+            "error": "401 leaked-test-only-key /private/provider/path",
+            "analysis": "raw provider response",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fail)
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["error_code"] == "vision_probe_failed"
+    assert result["message"] == "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
+    combined = json.dumps(result, ensure_ascii=False) + state_path.read_text(encoding="utf-8")
+    for forbidden in ("leaked-test-only-key", "/private/provider/path", "raw provider response"):
+        assert forbidden not in combined
+
+
+def test_vision_verification_fingerprint_invalidates_when_key_changes(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    _write_saved_vision_config(tmp_path)
+
+    async def succeed(**_kwargs):
+        return json.dumps({"success": True, "analysis": "TAIJI-VISION-CHECK-7319"})
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", succeed)
+    assert model_config.test_vision_config()["status"] == "verified"
+
+    (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=rotated-test-key\n", encoding="utf-8")
+
+    assert model_config.get_vision_config()["vision"]["verification"]["status"] == "configured_unverified"
+
+
+def test_saving_vision_config_invalidates_previous_verification(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    _write_saved_vision_config(tmp_path)
+    state_path.write_text('{"status":"verified"}', encoding="utf-8")
+
+    model_config.set_vision_config({"provider": "alibaba", "model": "qwen3-vl-plus"})
+
+    assert not state_path.exists()
 
 
 def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypatch, tmp_path):

@@ -11075,6 +11075,11 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as exc:
             return bad(handler, str(exc), status=500)
 
+    if parsed.path == "/api/vision/test":
+        from api.model_config import test_vision_config
+
+        return j(handler, test_vision_config())
+
     if parsed.path == "/api/image-gen/custom-providers":
         from api.model_config import set_custom_image_provider_config
 

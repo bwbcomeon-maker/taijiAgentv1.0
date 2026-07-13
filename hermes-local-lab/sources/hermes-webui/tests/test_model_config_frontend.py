@@ -183,6 +183,41 @@ def test_model_config_has_clear_image_capability_cards():
     assert ".model-config-capability-card" in STYLE_CSS
 
 
+def test_vision_verification_has_visible_accessible_status_and_action():
+    for marker in (
+        'id="btnTestVisionConfig"',
+        'onclick="testVisionConfig()"',
+        'aria-label="测试识图配置"',
+        'id="visionConfigVerificationStatus"',
+        'aria-live="polite"',
+        "图片会发送给你配置的外部视觉服务",
+        "请勿上传密钥或隐私截图",
+    ):
+        assert marker in INDEX_HTML
+
+
+def test_vision_verification_ui_uses_explicit_state_machine_and_test_endpoint():
+    for marker in (
+        "configured_unverified",
+        "verifying",
+        "verified",
+        "failed",
+        "async function testVisionConfig",
+        "/api/vision/test",
+        "已配置，尚未验证",
+        "验证失败",
+        "正在验证",
+    ):
+        assert marker in PANELS_JS
+    assert "ready?'\u5df2可用':'\u5f85配置'" not in PANELS_JS
+
+
+def test_vision_test_route_is_registered():
+    routes_source = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    assert 'parsed.path == "/api/vision/test"' in routes_source
+    assert "test_vision_config" in routes_source
+
+
 def test_image_generation_advanced_actions_are_outside_primary_card():
     card_start = INDEX_HTML.find('id="modelConfigImageSummaryCard"')
     card_end = INDEX_HTML.find('</section>', card_start)

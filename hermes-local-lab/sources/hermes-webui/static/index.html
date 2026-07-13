@@ -1486,8 +1486,11 @@
                         <span><b>密钥状态</b><em id="visionConfigKeyState">—</em></span>
                       </div>
                       <p class="model-config-muted" id="visionConfigSummary">配置后，上传图片时可以直接让 agent 理解图片内容。</p>
+                      <p class="model-config-hint" id="visionConfigVerificationStatus" aria-live="polite">尚未检查识图配置。</p>
+                      <p class="model-config-hint">测试图片会发送给你配置的外部视觉服务；请勿上传密钥或隐私截图。</p>
                       <div class="model-config-actions">
                         <button class="sm-btn" type="button" data-model-config-toggle="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
+                        <button class="btn-tiny" type="button" id="btnTestVisionConfig" aria-label="测试识图配置" onclick="testVisionConfig()">测试识图</button>
                         <button class="btn-tiny" type="button" onclick="openVisionConfigKeyEditor()">粘贴密钥</button>
                       </div>
                       <div class="model-config-collapsible" id="visionConfigEdit" hidden>
