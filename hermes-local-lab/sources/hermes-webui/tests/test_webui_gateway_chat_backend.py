@@ -678,6 +678,70 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     assert "provider secret" not in public_error
 
 
+def test_gateway_cancellation_after_auxiliary_vision_skips_main_request(tmp_path, monkeypatch):
+    from tools import vision_tools
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    attachment_root = tmp_path / "attachments"
+    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image_path = uploaded_dir / "photo.png"
+    image_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
+    cfg = {
+        "agent": {"image_input_mode": "text"},
+        "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
+    }
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {
+        "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+    stream_id = "stream-gateway-cancel-after-vision"
+
+    async def vision_then_cancel(**_kwargs):
+        gateway_chat.CANCEL_FLAGS[stream_id].set()
+        return json.dumps({"success": True, "analysis": "vision finished"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", vision_then_cancel)
+    urlopen_calls = []
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: urlopen_calls.append((args, kwargs)),
+    )
+    session = new_session()
+    session.active_stream_id = stream_id
+    session.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "describe",
+        "deepseek-chat",
+        str(tmp_path),
+        stream_id,
+        [{"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}],
+        model_provider="deepseek",
+    )
+
+    assert urlopen_calls == []
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    terminal = [name for name, _data in events if name in {"cancel", "apperror", "error", "done"}]
+    assert terminal == ["cancel"]
+    assert not any(name == "token" for name, _data in events)
+
+
 def test_gateway_chat_worker_injects_document_attachment_context(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

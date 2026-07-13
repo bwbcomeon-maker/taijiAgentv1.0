@@ -5,7 +5,9 @@ leave non-image files as opaque absolute paths. The agent needs bounded
 content context for documents and explicit image routing status.
 """
 from pathlib import Path
+from collections import OrderedDict
 import json
+import queue
 import zipfile
 
 import pytest
@@ -392,6 +394,113 @@ def test_prepare_webui_chat_input_keeps_native_images_as_multimodal_parts(
 
     assert result[0] == {"type": "text", "text": "compare"}
     assert [part["type"] for part in result[1:]] == ["image_url", "image_url"]
+
+
+def test_legacy_cancellation_after_auxiliary_vision_skips_main_model(
+    tmp_path, monkeypatch
+):
+    import api.config as config
+    import api.models as models
+    import api.oauth as oauth
+    import api.profiles as profiles
+    import api.streaming as streaming
+    from tools import vision_tools
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    attachment_root = tmp_path / "attachments"
+    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = uploaded_dir / "photo.png"
+    _make_png(image)
+    cfg = _text_vision_config()
+    stream_id = "stream-legacy-cancel-after-vision"
+    run_calls = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id")
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            run_calls.append(kwargs)
+            return {"messages": [{"role": "assistant", "content": "must not run"}]}
+
+        def interrupt(self, _message):
+            return None
+
+    async def vision_then_cancel(**_kwargs):
+        streaming.CANCEL_FLAGS[stream_id].set()
+        return json.dumps({"success": True, "analysis": "vision finished"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", vision_then_cancel)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(
+        streaming,
+        "resolve_model_provider",
+        lambda *_args, **_kwargs: ("deepseek-chat", "deepseek", None),
+    )
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda _cfg: [])
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {
+        "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+    monkeypatch.setattr(profiles, "patch_skill_home_modules", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda *_args, **_kwargs: {
+            "provider": "deepseek", "api_key": "synthetic-key", "base_url": None,
+        },
+    )
+
+    session = models.Session(
+        session_id="legacy_cancel_session",
+        title="Cancel",
+        workspace=str(tmp_path),
+        model="deepseek-chat",
+        messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "describe"
+    session.pending_started_at = 1.0
+    session.save(touch_updated_at=False)
+    models.SESSIONS[session.session_id] = session
+    event_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = event_queue
+
+    streaming._run_agent_streaming(
+        session.session_id,
+        "describe",
+        "deepseek-chat",
+        str(tmp_path),
+        stream_id,
+        [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+        model_provider="deepseek",
+    )
+
+    assert run_calls == []
+    events = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+    terminal = [name for name, _data in events if name in {"cancel", "apperror", "error", "done"}]
+    assert terminal == ["cancel"]
+    assert not any(name == "token" for name, _data in events)
 
 
 def test_secret_like_attachment_is_not_extracted(tmp_path, monkeypatch):
