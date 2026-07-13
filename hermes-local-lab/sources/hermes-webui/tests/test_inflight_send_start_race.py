@@ -71,9 +71,13 @@ def test_pre_start_optimistic_ui_helpers_cannot_block_chat_start():
     body = _function_body(MESSAGES_JS, "send")
     helper_body = _function_body(MESSAGES_JS, "_runOptionalPreStartUiStep")
 
-    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+    optimistic_idx = body.index("let optimisticMessages;")
+    user_push_idx = body.index("S.messages.push(userMsg);", optimistic_idx)
+    pending_render_idx = body.index("renderMessages();appendThinking('',{pending:true});setBusy(true);", user_push_idx)
     chat_start_idx = body.index("api('/api/chat/start'")
     pre_start = body[optimistic_idx:chat_start_idx]
+
+    assert optimistic_idx < user_push_idx < pending_render_idx < chat_start_idx
 
     assert "try" in helper_body and "catch" in helper_body, (
         "optional pre-start UI helper wrapper must catch errors before /api/chat/start"
@@ -91,9 +95,13 @@ def test_pre_start_optimistic_ui_helpers_cannot_block_chat_start():
 def test_pre_start_optimistic_block_cannot_prevent_chat_start():
     """Any pre-start UI/storage exception must still fall through to /api/chat/start."""
     body = _function_body(MESSAGES_JS, "send")
-    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+    optimistic_idx = body.index("let optimisticMessages;")
+    user_push_idx = body.index("S.messages.push(userMsg);", optimistic_idx)
+    pending_render_idx = body.index("renderMessages();appendThinking('',{pending:true});setBusy(true);", user_push_idx)
     chat_start_idx = body.index("api('/api/chat/start'")
     pre_start = body[optimistic_idx:chat_start_idx]
+
+    assert optimistic_idx < user_push_idx < pending_render_idx < chat_start_idx
 
     assert "}catch(preStartError){" in pre_start, (
         "The whole optimistic pre-start block needs a catch, not only individual optional helpers"

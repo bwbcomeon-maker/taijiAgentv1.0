@@ -65,16 +65,29 @@ def test_attach_live_stream_closes_other_session_streams_before_opening_new_one(
     )
 
 
-def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
-    """Reusing transport must not skip per-session uploaded attachment state."""
+def test_attach_live_stream_updates_safe_upload_names_before_same_stream_reuse():
+    """Reusing transport keeps names for persistence, not private descriptors."""
     body = _function_body(MESSAGES_JS, "attachLiveStream")
-    upload_pos = body.find("if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded]")
+    names_pos = body.find("const uploadedNames=uploaded.map")
+    upload_pos = body.find("if(uploadedNames.length) INFLIGHT[activeSid].uploaded=[...uploadedNames]")
     reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
     close_pos = body.find("\n  closeLiveStream(activeSid);\n")
+    assert names_pos != -1
     assert upload_pos != -1
     assert reuse_pos != -1
     assert close_pos != -1
-    assert upload_pos < reuse_pos < close_pos
+    assert names_pos < upload_pos < reuse_pos < close_pos
+
+
+def test_attach_live_stream_persists_only_safe_upload_names():
+    """Full retry descriptors stay in the SSE closure and never enter localStorage snapshots."""
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    persist_start = body.find("function persistInflightState()")
+    persist_end = body.find("function snapshotLiveTurn()", persist_start)
+    assert persist_start != -1 and persist_end != -1
+    persist = body[persist_start:persist_end]
+    assert "uploaded:inflight.uploaded||[...uploadedNames]" in persist.replace(" ", "")
+    assert "uploaded:inflight.uploaded||[...uploaded]" not in persist.replace(" ", "")
 
 
 def test_attach_live_stream_different_stream_still_reopens_transport():

@@ -1,7 +1,9 @@
 """Frontend contract for recoverable image-analysis failures."""
 
 from pathlib import Path
+import json
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,3 +91,89 @@ def test_retry_is_guarded_against_repeat_clicks_and_transient_state_is_pruned():
     assert "_deleteVisionRecovery" in _function_body(MESSAGES, "send")
     retain_body = _function_body(MESSAGES, "_retainVisionRecoveryForSession")
     assert "clearMessageRenderCache" in retain_body
+
+
+def test_busy_vision_retry_preserves_composer_and_pending_files_without_side_effects():
+    send_source = _function_body(MESSAGES, "send")
+    driver = f"""
+{send_source}
+let S;
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+let composer;
+let calls;
+const document={{querySelector:()=>null}};
+const window={{_busyInputMode:'queue'}};
+const $=()=>composer;
+const _dismissHandoffHint=()=>{{}};
+const isCompressionUiRunning=()=>false;
+const _clearStaleBusyStateBeforeSend=()=>false;
+const _chatPayloadModelState=()=>({{model:'test-model',model_provider:'test-provider'}});
+const newSession=async()=>{{calls.push('newSession')}};
+const renderSessionList=async()=>{{calls.push('renderSessionList')}};
+const parseCommand=()=>null;
+const COMMANDS=[];
+const _trySteer=async()=>{{calls.push('steer')}};
+const queueSessionMessage=()=>{{calls.push('queue')}};
+const updateQueueBadge=()=>{{calls.push('queueBadge')}};
+const autoResize=()=>{{calls.push('resize')}};
+const renderTray=()=>{{calls.push('tray')}};
+const cancelStream=async()=>{{calls.push('cancel')}};
+const showToast=()=>{{calls.push('toast')}};
+const t=key=>key;
+const api=async()=>{{calls.push('api');return {{stream_id:'unexpected'}}}};
+const uploadPendingFiles=async()=>{{calls.push('upload');return []}};
+
+async function run(mode){{
+  const pending={{name:'new-draft.png'}};
+  composer={{value:'CURRENT DRAFT'}};
+  calls=[];
+  window._busyInputMode=mode;
+  S={{
+    busy:true,
+    pendingFiles:[pending],
+    session:{{session_id:'session-1',profile:'default'}},
+    messages:[],
+    activeStreamId:'live-stream',
+    activeProfile:'default',
+  }};
+  const accepted=await send({{
+    retryText:'original image question',
+    retryAttachments:[{{name:'old.png',path:'/private/server/old.png'}}],
+    recoveryId:'recovery-1',
+  }});
+  return {{
+    mode,
+    accepted,
+    draft:composer.value,
+    pendingLength:S.pendingFiles.length,
+    pendingSame:S.pendingFiles[0]===pending,
+    calls,
+  }};
+}}
+
+(async()=>{{
+  const result=[];
+  for(const mode of ['queue','steer','interrupt']){{
+    _sendInProgress=false;
+    _sendInProgressSid=null;
+    result.push(await run(mode));
+  }}
+  console.log(JSON.stringify(result));
+}})();
+"""
+    result = subprocess.run(
+        ["node", "-e", driver],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    cases = json.loads(result.stdout)
+    for case in cases:
+        assert case.get("accepted") is False
+        assert case["draft"] == "CURRENT DRAFT"
+        assert case["pendingLength"] == 1
+        assert case["pendingSame"] is True
+        assert "toast" in case["calls"]
+        assert not ({"api", "upload", "queue", "queueBadge", "steer", "cancel", "resize", "tray"} & set(case["calls"]))

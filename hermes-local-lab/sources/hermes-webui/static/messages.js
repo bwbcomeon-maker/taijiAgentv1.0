@@ -544,7 +544,10 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
-    if(isVisionRetry) return false;
+    if(isVisionRetry){
+      if(typeof showToast==='function') showToast('当前任务仍在运行，请等待完成后再重试识图。',2600);
+      return false;
+    }
     const _text=$('msg').value.trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
@@ -566,12 +569,17 @@ async function send(){
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
 
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  if(isVisionRetry&&(S.busy||compressionRunning)){
+    if(typeof showToast==='function') showToast('当前任务仍在运行，请等待完成后再重试识图。',2600);
+    return false;
+  }
+
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
     _dismissHandoffHint(S.session.session_id);
   }
 
-  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){
