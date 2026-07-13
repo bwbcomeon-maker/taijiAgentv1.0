@@ -2969,6 +2969,48 @@ class TestAuxiliaryClientPoisonedCacheEviction:
 
 
 # ---------------------------------------------------------------------------
+# Strict vision target — verification probes must never fall back
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_vision_no_fallback_keeps_failed_alibaba_target():
+    target = MagicMock(name="alibaba_async_client")
+    target.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    target.chat.completions.create = AsyncMock(side_effect=ConnectionError("alibaba unavailable"))
+    resolution = {}
+
+    def resolve_target(*, provider=None, **_kwargs):
+        assert provider == "alibaba"
+        return "alibaba", target, "qwen3-vl-plus"
+
+    backup = MagicMock(name="available_backup")
+    with patch(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        return_value=("alibaba", "qwen3-vl-plus", None, None, None),
+    ), patch(
+        "agent.auxiliary_client.resolve_vision_provider_client",
+        side_effect=resolve_target,
+    ) as resolve_mock, patch(
+        "agent.auxiliary_client._try_configured_fallback_chain",
+        return_value=(backup, "backup-vision", "openrouter"),
+    ) as fallback_mock:
+        with pytest.raises(ConnectionError, match="alibaba unavailable"):
+            await async_call_llm(
+                task="vision",
+                provider="alibaba",
+                model="qwen3-vl-plus",
+                messages=[{"role": "user", "content": "image"}],
+                no_fallback=True,
+                resolution_out=resolution,
+            )
+
+    assert resolve_mock.call_count == 1
+    fallback_mock.assert_not_called()
+    assert resolution == {"provider": "alibaba", "model": "qwen3-vl-plus"}
+
+
+# ---------------------------------------------------------------------------
 # _build_call_kwargs — tool dedup at API boundary
 # ---------------------------------------------------------------------------
 

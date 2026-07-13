@@ -716,6 +716,70 @@ class TestErrorClassification:
         assert "smaller" in result["analysis"].lower()
 
 
+class TestStrictVisionTarget:
+    @pytest.mark.asyncio
+    async def test_strict_target_passes_provider_and_returns_resolution(self, tmp_path):
+        img = tmp_path / "strict.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        response = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "TAIJI-VISION-CHECK-7319"
+        response.choices = [choice]
+
+        async def strict_call(**kwargs):
+            assert kwargs["provider"] == "alibaba"
+            assert kwargs["model"] == "qwen3-vl-plus"
+            assert kwargs["no_fallback"] is True
+            kwargs["resolution_out"].update(
+                {"provider": "alibaba", "model": "qwen3-vl-plus"}
+            )
+            return response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=strict_call):
+            result = json.loads(
+                await vision_analyze_tool(
+                    str(img),
+                    "识别图片",
+                    "qwen3-vl-plus",
+                    provider="alibaba",
+                    strict_target=True,
+                )
+            )
+
+        assert result["success"] is True
+        assert result["resolved_provider"] == "alibaba"
+        assert result["resolved_model"] == "qwen3-vl-plus"
+
+    @pytest.mark.asyncio
+    async def test_strict_target_rejects_resolution_mismatch(self, tmp_path):
+        img = tmp_path / "strict.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        response = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "TAIJI-VISION-CHECK-7319"
+        response.choices = [choice]
+
+        async def wrong_backend(**kwargs):
+            kwargs["resolution_out"].update(
+                {"provider": "openrouter", "model": "backup-vision"}
+            )
+            return response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=wrong_backend):
+            result = json.loads(
+                await vision_analyze_tool(
+                    str(img),
+                    "识别图片",
+                    "qwen3-vl-plus",
+                    provider="alibaba",
+                    strict_target=True,
+                )
+            )
+
+        assert result["success"] is False
+        assert "strict vision target mismatch" in result["error"].lower()
+
+
 class TestVisionRegistration:
     def test_vision_analyze_registered(self):
         from tools.registry import registry

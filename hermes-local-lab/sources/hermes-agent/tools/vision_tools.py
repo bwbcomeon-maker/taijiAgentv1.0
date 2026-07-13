@@ -634,6 +634,9 @@ async def vision_analyze_tool(
     image_url: str,
     user_prompt: str,
     model: str = None,
+    *,
+    provider: str = None,
+    strict_target: bool = False,
 ) -> str:
     """
     Analyze an image from a URL or local file path using vision AI.
@@ -651,6 +654,9 @@ async def vision_analyze_tool(
                          Accepts http://, https:// URLs or absolute/relative file paths.
         user_prompt (str): The pre-formatted prompt for the vision model
         model (str): The vision model to use (default: google/gemini-3-flash-preview)
+        provider (str): Optional explicit vision provider.
+        strict_target (bool): When true, disable cross-provider fallback and
+                              require the resolved provider/model to match.
     
     Returns:
         str: JSON string containing the analysis results with the following structure:
@@ -796,6 +802,7 @@ async def vision_analyze_tool(
                 vision_temperature = float(_vtemp)
         except Exception:
             pass
+        resolution: Dict[str, str] = {}
         call_kwargs = {
             "task": "vision",
             "messages": messages,
@@ -805,6 +812,11 @@ async def vision_analyze_tool(
         }
         if model:
             call_kwargs["model"] = model
+        if provider:
+            call_kwargs["provider"] = provider
+        if strict_target:
+            call_kwargs["no_fallback"] = True
+            call_kwargs["resolution_out"] = resolution
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
             response = await async_call_llm(**call_kwargs)
@@ -823,6 +835,14 @@ async def vision_analyze_tool(
                 response = await async_call_llm(**call_kwargs)
             else:
                 raise
+
+        if strict_target:
+            resolved_provider = str(resolution.get("provider") or "").strip().lower()
+            resolved_model = str(resolution.get("model") or "").strip()
+            target_provider = str(provider or "").strip().lower()
+            target_model = str(model or "").strip()
+            if resolved_provider != target_provider or resolved_model != target_model:
+                raise RuntimeError("Strict vision target mismatch")
         
         # Extract the analysis — fall back to reasoning if content is empty
         analysis = extract_content_or_reasoning(response)
@@ -842,6 +862,9 @@ async def vision_analyze_tool(
             "success": True,
             "analysis": analysis or "There was a problem with the request and the image could not be analyzed."
         }
+        if strict_target:
+            result["resolved_provider"] = resolved_provider
+            result["resolved_model"] = resolved_model
         
         debug_call_data["success"] = True
         debug_call_data["analysis_length"] = analysis_length

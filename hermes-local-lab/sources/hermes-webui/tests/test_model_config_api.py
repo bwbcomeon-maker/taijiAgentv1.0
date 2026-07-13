@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 import yaml
@@ -346,7 +347,7 @@ def _write_saved_vision_config(tmp_path, *, provider="alibaba", model="qwen3-vl-
 
 def test_vision_config_distinguishes_configured_from_verified(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: tmp_path / "vision-verification.json")
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: tmp_path / "vision-verification.json")
     _write_saved_vision_config(tmp_path)
 
     result = model_config.get_vision_config()
@@ -357,7 +358,7 @@ def test_vision_config_distinguishes_configured_from_verified(monkeypatch, tmp_p
 
 def test_vision_test_rejects_unconfigured_without_calling_provider(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: tmp_path / "vision-verification.json")
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: tmp_path / "vision-verification.json")
     calls = []
 
     async def should_not_run(**kwargs):
@@ -382,7 +383,7 @@ def test_vision_test_rejects_unconfigured_without_calling_provider(monkeypatch, 
 def test_vision_test_persists_verified_result_without_model_text_or_secret(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
-    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
     _write_saved_vision_config(tmp_path)
     calls = []
 
@@ -391,6 +392,8 @@ def test_vision_test_persists_verified_result_without_model_text_or_secret(monke
         return json.dumps({
             "success": True,
             "analysis": "The image contains TAIJI-VISION-CHECK-7319 and secret-model-text.",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
         })
 
     import tools.vision_tools as vision_tools
@@ -404,6 +407,8 @@ def test_vision_test_persists_verified_result_without_model_text_or_secret(monke
     assert result["model"] == "qwen3-vl-plus"
     assert result["error_code"] == ""
     assert calls and calls[0]["model"] == "qwen3-vl-plus"
+    assert calls[0]["provider"] == "alibaba"
+    assert calls[0]["strict_target"] is True
     assert Path(calls[0]["image_url"]).name == "vision-verification-probe.png"
     assert "识别图片" in calls[0]["user_prompt"]
     assert "TAIJI-VISION-CHECK-7319" not in calls[0]["user_prompt"]
@@ -418,7 +423,7 @@ def test_vision_test_persists_verified_result_without_model_text_or_secret(monke
 def test_vision_test_failure_returns_only_safe_fields(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
-    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
     _write_saved_vision_config(tmp_path)
 
     async def fail(**_kwargs):
@@ -445,11 +450,16 @@ def test_vision_test_failure_returns_only_safe_fields(monkeypatch, tmp_path):
 def test_vision_verification_fingerprint_invalidates_when_key_changes(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
-    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
     _write_saved_vision_config(tmp_path)
 
     async def succeed(**_kwargs):
-        return json.dumps({"success": True, "analysis": "TAIJI-VISION-CHECK-7319"})
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
 
     import tools.vision_tools as vision_tools
 
@@ -464,13 +474,178 @@ def test_vision_verification_fingerprint_invalidates_when_key_changes(monkeypatc
 def test_saving_vision_config_invalidates_previous_verification(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
-    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda: state_path)
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
     _write_saved_vision_config(tmp_path)
     state_path.write_text('{"status":"verified"}', encoding="utf-8")
 
     model_config.set_vision_config({"provider": "alibaba", "model": "qwen3-vl-plus"})
 
     assert not state_path.exists()
+
+
+def test_vision_probe_does_not_persist_success_after_key_rotation(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
+    _write_saved_vision_config(tmp_path)
+
+    async def rotate_key_during_probe(**_kwargs):
+        (tmp_path / ".env").write_text(
+            "DASHSCOPE_API_KEY=rotated-during-probe\n", encoding="utf-8"
+        )
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", rotate_key_during_probe)
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "configured_unverified"
+    assert result["error_code"] == "vision_probe_superseded"
+    assert not state_path.exists()
+
+
+def test_vision_verification_is_isolated_per_profile(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    active_profile = {"name": "profile-a"}
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: active_profile["name"])
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_root",
+        lambda: tmp_path / "vision-verification",
+    )
+    _write_saved_vision_config(tmp_path)
+
+    async def succeed(**_kwargs):
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", succeed)
+    assert model_config.test_vision_config()["status"] == "verified"
+    active_profile["name"] = "profile-b"
+    assert model_config.test_vision_config()["status"] == "verified"
+    active_profile["name"] = "profile-a"
+
+    assert model_config.get_vision_config()["vision"]["verification"]["status"] == "verified"
+    assert len(list((tmp_path / "vision-verification").glob("*.json"))) == 2
+
+
+def test_vision_probe_does_not_persist_after_profile_switch(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    active_profile = {"name": "profile-a"}
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: active_profile["name"])
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_root",
+        lambda: tmp_path / "vision-verification",
+    )
+    _write_saved_vision_config(tmp_path)
+
+    async def switch_profile(**_kwargs):
+        active_profile["name"] = "profile-b"
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", switch_profile)
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "configured_unverified"
+    assert result["error_code"] == "vision_probe_superseded"
+    assert list((tmp_path / "vision-verification").glob("*.json")) == []
+
+
+def test_vision_probe_rejects_success_from_wrong_resolved_backend(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
+    _write_saved_vision_config(tmp_path)
+
+    async def fallback_success(**_kwargs):
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "openrouter",
+            "resolved_model": "backup-vision",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fallback_success)
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["error_code"] == "vision_probe_failed"
+
+
+def test_newer_vision_probe_prevents_older_request_overwrite(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
+    _write_saved_vision_config(tmp_path)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_lock = threading.Lock()
+    call_count = {"value": 0}
+
+    async def ordered_probe(**_kwargs):
+        with call_lock:
+            call_count["value"] += 1
+            call_number = call_count["value"]
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+            return json.dumps({
+                "success": False,
+                "error": "old failure",
+                "analysis": "old failure",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            })
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", ordered_probe)
+    results = {}
+    first = threading.Thread(
+        target=lambda: results.setdefault("first", model_config.test_vision_config())
+    )
+    first.start()
+    assert first_started.wait(timeout=5)
+    results["second"] = model_config.test_vision_config()
+    release_first.set()
+    first.join(timeout=5)
+
+    assert not first.is_alive()
+    assert results["second"]["status"] == "verified"
+    assert results["first"]["status"] == "configured_unverified"
+    assert results["first"]["error_code"] == "vision_probe_superseded"
+    assert model_config.get_vision_config()["vision"]["verification"]["status"] == "verified"
 
 
 def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypatch, tmp_path):

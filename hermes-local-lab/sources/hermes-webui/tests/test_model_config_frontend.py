@@ -212,6 +212,14 @@ def test_vision_verification_ui_uses_explicit_state_machine_and_test_endpoint():
     assert "ready?'\u5df2可用':'\u5f85配置'" not in PANELS_JS
 
 
+def test_vision_verification_uses_long_timeout_and_stale_response_guard():
+    assert "timeoutMs:150000" in PANELS_JS
+    assert "_visionTestGeneration" in PANELS_JS
+    assert "_visionConfigIdentity" in PANELS_JS
+    assert "runGeneration!==_visionTestGeneration" in PANELS_JS
+    assert "if(runGeneration===_visionTestGeneration)" in PANELS_JS
+
+
 def test_vision_test_route_is_registered():
     routes_source = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
     assert 'parsed.path == "/api/vision/test"' in routes_source

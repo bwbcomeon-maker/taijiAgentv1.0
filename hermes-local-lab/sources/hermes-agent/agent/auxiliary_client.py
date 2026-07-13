@@ -5258,6 +5258,8 @@ async def async_call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    no_fallback: bool = False,
+    resolution_out: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
@@ -5276,7 +5278,12 @@ async def async_call_llm(
             api_key=resolved_api_key or api_key,
             async_mode=True,
         )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
+        if (
+            client is None
+            and not no_fallback
+            and resolved_provider != "auto"
+            and not resolved_base_url
+        ):
             logger.warning(
                 "Vision provider %s unavailable, falling back to auto vision backends",
                 resolved_provider,
@@ -5317,6 +5324,13 @@ async def async_call_llm(
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
                 f"Run: hermes setup")
+
+    if resolution_out is not None:
+        resolution_out.clear()
+        resolution_out.update({
+            "provider": str(resolved_provider or ""),
+            "model": str(final_model or ""),
+        })
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
@@ -5526,7 +5540,7 @@ async def async_call_llm(
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if should_fallback and (is_auto or is_capacity_error):
+        if not no_fallback and should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 _mark_provider_unhealthy(
