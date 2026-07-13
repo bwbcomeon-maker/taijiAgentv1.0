@@ -9129,7 +9129,33 @@ function _isRecoveryControlMessage(m){
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
-  return !!msgContent(m);
+  return !!(msgContent(m)||m.vision_recovery);
+}
+
+function _visionRecoveryCardHtml(recovery){
+  const data=recovery&&typeof recovery==='object'?recovery:{};
+  const type=String(data.type||'vision_analysis_error');
+  const id=String(data.id||'');
+  const configured=type==='vision_configuration_error';
+  const attachment=type==='image_attachment_error';
+  const title=configured?'识图配置不可用':attachment?'图片附件无法读取':'图片识别未完成';
+  const message=configured
+    ? '请检查识图模型与密钥；在识图成功前，主模型不会继续回答这次图片问题。'
+    : attachment
+      ? '请确认附件仍可用，然后重试；无需重新选择图片。'
+      : '这次图片没有交给主模型猜测。可直接重试，或打开配置检查识图服务。';
+  const available=typeof _hasVisionRecovery==='function'&&_hasVisionRecovery(id);
+  const retryAttrs=available?'':` disabled aria-disabled="true" title="本次临时恢复信息已清理"`;
+  return `<section class="vision-recovery-card" role="alert" aria-labelledby="${esc(id)}-title">
+    <div class="vision-recovery-card-copy">
+      <strong id="${esc(id)}-title">${esc(title)}</strong>
+      <p>${esc(message)}</p>
+    </div>
+    <div class="vision-recovery-card-actions">
+      <button class="sm-btn vision-recovery-retry" type="button"${retryAttrs} onclick="retryVisionAnalysis(this,'${esc(id)}')">重试识图</button>
+      <button class="btn-tiny vision-recovery-settings" type="button" onclick="openVisionRecognitionSettings(this)">打开识图配置</button>
+    </div>
+  </section>`;
 }
 
 function _fmtDateSep(d){
@@ -9856,7 +9882,7 @@ function _messageRenderCacheSignature(){
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);add(m.vision_recovery&&JSON.stringify(m.vision_recovery));
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -11540,6 +11566,7 @@ function renderMessages(options){
   const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  if(typeof _retainVisionRecoveryForSession==='function') _retainVisionRecoveryForSession(sid);
   const msgCount=S.messages.length;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();
@@ -11804,6 +11831,7 @@ function renderMessages(options){
     const docxSourceRequestHtml=(!isUser&&m.docx_source_request)?_docxSourceRequestHtml(m.docx_source_request):'';
     const docxEngineWorkbenchHtml=(!isUser&&m.docx_engine_workbench)?renderDocxEngineWorkbench(m.docx_engine_workbench):'';
     const docxFigureAdjustmentHtml=(!isUser&&m.docx_figure_adjustment)?_docxFigureAdjustmentHtml(m.docx_figure_adjustment):'';
+    const visionRecoveryHtml=(!isUser&&m.vision_recovery)?_visionRecoveryCardHtml(m.vision_recovery):'';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -11880,12 +11908,12 @@ function renderMessages(options){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||docxTemplateSelectionHtml||docxTemplateDeliveryHtml||docxSourceRequestHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||docxTemplateSelectionHtml||docxTemplateDeliveryHtml||docxSourceRequestHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml||visionRecoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
       const bodyBlock=String(content||'').trim()?`<div class="msg-body">${bodyHtml}</div>`:'';
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${docxTemplateSelectionHtml}${docxTemplateDeliveryHtml}${docxSourceRequestHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${footHtml}`);
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${docxTemplateSelectionHtml}${docxTemplateDeliveryHtml}${docxSourceRequestHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${visionRecoveryHtml}${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }

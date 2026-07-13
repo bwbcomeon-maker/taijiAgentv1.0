@@ -219,6 +219,65 @@ if(typeof document!=='undefined'){
 let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
+const _VISION_RECOVERY_TYPES=new Set(['vision_analysis_error','vision_configuration_error','image_attachment_error']);
+const _visionRecoveryById=new Map();
+let _visionRecoverySequence=0;
+
+function _storeVisionRecovery(activeSid,text,attachments,type){
+  const id=`vision-recovery-${Date.now()}-${++_visionRecoverySequence}`;
+  _visionRecoveryById.set(id,{
+    sessionId:String(activeSid||''),
+    text:String(text||''),
+    attachments:Array.isArray(attachments)?attachments.map(item=>(item&&typeof item==='object'?{...item}:item)):[],
+    type:String(type||'vision_analysis_error'),
+  });
+  return id;
+}
+
+function _deleteVisionRecovery(id){
+  if(id) _visionRecoveryById.delete(String(id));
+}
+
+function _retainVisionRecoveryForSession(sessionId){
+  const keep=String(sessionId||'');
+  let removed=false;
+  for(const [id,recovery] of _visionRecoveryById.entries()){
+    if(!keep||recovery.sessionId!==keep){_visionRecoveryById.delete(id);removed=true;}
+  }
+  if(removed&&typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+}
+
+function _hasVisionRecovery(id){
+  return _visionRecoveryById.has(String(id||''));
+}
+
+async function retryVisionAnalysis(button,recoveryId){
+  if(!button||button.disabled) return false;
+  const recovery=_visionRecoveryById.get(String(recoveryId||''));
+  if(!recovery) return false;
+  if(!S.session||S.session.session_id!==recovery.sessionId) return false;
+  button.disabled=true;
+  button.setAttribute('aria-busy','true');
+  let accepted=false;
+  try{
+    accepted=await send({
+      retryText:recovery.text,
+      retryAttachments:recovery.attachments,
+      recoveryId:String(recoveryId||''),
+    });
+  }catch(_){
+    accepted=false;
+  }finally{
+    button.removeAttribute('aria-busy');
+    if(!accepted) button.disabled=false;
+  }
+  return !!accepted;
+}
+
+function openVisionRecognitionSettings(){
+  if(typeof switchSettingsSection==='function') switchSettingsSection('models');
+  if(typeof toggleModelConfigSection==='function') toggleModelConfigSection('visionConfigEdit',true);
+}
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -478,10 +537,14 @@ function dismissDocxTemplateSelection(button){
 }
 
 async function send(){
+  const options=arguments[0]&&typeof arguments[0]==='object'?arguments[0]:{};
+  const retryAttachments=Array.isArray(options.retryAttachments)?options.retryAttachments:null;
+  const isVisionRetry=retryAttachments!==null;
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
+    if(isVisionRetry) return false;
     const _text=$('msg').value.trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
@@ -498,8 +561,8 @@ async function send(){
   }
   _sendInProgress = true;
   try{
-  const text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  const text=isVisionRetry?String(options.retryText||'').trim():$('msg').value.trim();
+  if(!text&&!S.pendingFiles.length&&!(retryAttachments&&retryAttachments.length)){_sendInProgress=false;_sendInProgressSid=null;return false;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
 
@@ -581,7 +644,7 @@ async function send(){
   // their assistant response synchronously.  If we pushed AFTER, S.messages
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
-  if(text.startsWith('/')&&!S.pendingFiles.length){
+  if(!isVisionRetry&&text.startsWith('/')&&!S.pendingFiles.length){
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
@@ -636,9 +699,9 @@ async function send(){
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
 
-  setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
+  setComposerStatus(!isVisionRetry&&S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles();}
+  try{uploaded=isVisionRetry?retryAttachments.map(item=>(item&&typeof item==='object'?{...item}:item)):await uploadPendingFiles();}
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
@@ -650,9 +713,9 @@ async function send(){
   if(uploaded.length&&!msgText)msgText=`Uploaded files: ${uploadedNames.join(', ')}`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
-  $('msg').value='';autoResize();
+  if(!isVisionRetry){$('msg').value='';autoResize();}
   // Clear persisted composer draft since message was sent.
-  if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
+  if (!isVisionRetry&&activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
   const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
@@ -878,11 +941,13 @@ async function send(){
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
-    return;
+    return false;
   }
 
   // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploadedNames);
+  _deleteVisionRecovery(options.recoveryId);
+  attachLiveStream(activeSid, streamId, uploaded, {retryText:text});
+  return true;
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
@@ -921,9 +986,10 @@ function closeOtherLiveStreams(activeSid){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
-  if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
+  const uploadedNames=uploaded.map(item=>(item&&typeof item==='object'?(item.name||item.filename||''):item)).filter(Boolean);
+  if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploadedNames],toolCalls:[]};
   else {
-    if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
+    if(uploadedNames.length) INFLIGHT[activeSid].uploaded=[...uploadedNames];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
   }
   const existingLive=LIVE_STREAMS[activeSid];
@@ -1054,7 +1120,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     saveInflightState(activeSid,{
       streamId,
       messages:inflight.messages||[],
-      uploaded:inflight.uploaded||[...uploaded],
+      uploaded:inflight.uploaded||[...uploadedNames],
       toolCalls:inflight.toolCalls||[],
     });
   }
@@ -2481,6 +2547,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isModelNotFound=d.type==='model_not_found';
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
+          const isVisionFailure=_VISION_RECOVERY_TYPES.has(String(d.type||''));
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
           const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'本地对话服务认证失败'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
@@ -2489,6 +2556,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
+          } else if(isVisionFailure){
+            const recoveryId=_storeVisionRecovery(activeSid,options.retryText,uploaded,d.type);
+            S.messages.push({
+              role:'assistant',
+              content:'',
+              vision_recovery:{id:recoveryId,type:String(d.type||'vision_analysis_error')},
+              _ts:Date.now()/1000,
+            });
           } else {
             S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
           }
