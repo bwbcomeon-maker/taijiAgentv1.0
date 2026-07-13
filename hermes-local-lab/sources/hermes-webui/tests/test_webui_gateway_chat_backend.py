@@ -399,6 +399,52 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         assert event["user_content_sha256"] == hashlib.sha256(b"Say hello").hexdigest()
 
 
+def test_gateway_required_input_helper_survives_optional_prefill_import_failure(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "chat_completions")
+    monkeypatch.delattr(streaming, "_WEBUI_PROGRESS_PROMPT")
+    captured = []
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured.append(req.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    session = new_session()
+    stream_id = "stream-gateway-prefill-import-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "hello"
+    session.pending_started_at = 1.0
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert captured == ["http://127.0.0.1:8642/v1/chat/completions"]
+    reloaded = models.Session.load(session.session_id)
+    assert reloaded.messages[-1]["content"] == "ok"
+
+
 def test_gateway_chat_worker_maps_sse_error_to_taiji_message(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -651,7 +697,11 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     )
     s = new_session()
     stream_id = "stream-gateway-vision-error"
+    attachment = {"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}
     s.active_stream_id = stream_id
+    s.pending_user_message = "describe"
+    s.pending_attachments = [attachment]
+    s.pending_started_at = 1.0
     s.save()
     channel = create_stream_channel()
     subscriber = channel.subscribe()
@@ -663,7 +713,7 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
         "deepseek-chat",
         str(tmp_path / "workspace"),
         stream_id,
-        [{"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}],
+        [attachment],
         model_provider="deepseek",
     )
 
@@ -676,9 +726,18 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     public_error = json.dumps(errors[-1], ensure_ascii=False)
     assert str(image_path) not in public_error
     assert "provider secret" not in public_error
+    reloaded = models.Session.load(s.session_id)
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
+    assert reloaded.messages[0]["content"] == "describe"
+    assert reloaded.messages[0]["attachments"] == [attachment]
+    assert reloaded.messages[1]["_error"] is True
+    assert reloaded.messages[1]["error_type"] == "vision_analysis_error"
+    persisted = json.dumps(reloaded.messages, ensure_ascii=False)
+    assert "provider secret" not in persisted
+    assert str(image_path) not in reloaded.messages[1]["content"]
 
 
-def test_gateway_cancellation_after_auxiliary_vision_skips_main_request(tmp_path, monkeypatch):
+def test_gateway_cancellation_after_first_auxiliary_image_skips_second_and_main_request(tmp_path, monkeypatch):
     from tools import vision_tools
 
     session_dir = tmp_path / "sessions"
@@ -690,10 +749,11 @@ def test_gateway_cancellation_after_auxiliary_vision_skips_main_request(tmp_path
     uploaded_dir = attachment_root / "session-a"
     uploaded_dir.mkdir(parents=True)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
-    image_path = uploaded_dir / "photo.png"
-    image_path.write_bytes(base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-    ))
+    image_paths = [uploaded_dir / "first.png", uploaded_dir / "second.png"]
+    for image_path in image_paths:
+        image_path.write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        ))
     cfg = {
         "agent": {"image_input_mode": "text"},
         "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
@@ -704,8 +764,10 @@ def test_gateway_cancellation_after_auxiliary_vision_skips_main_request(tmp_path
     })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
     stream_id = "stream-gateway-cancel-after-vision"
+    vision_calls = []
 
-    async def vision_then_cancel(**_kwargs):
+    async def vision_then_cancel(**kwargs):
+        vision_calls.append(kwargs["image_url"])
         gateway_chat.CANCEL_FLAGS[stream_id].set()
         return json.dumps({"success": True, "analysis": "vision finished"})
 
@@ -729,10 +791,14 @@ def test_gateway_cancellation_after_auxiliary_vision_skips_main_request(tmp_path
         "deepseek-chat",
         str(tmp_path),
         stream_id,
-        [{"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}],
+        [
+            {"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}
+            for image_path in image_paths
+        ],
         model_provider="deepseek",
     )
 
+    assert [Path(path).name for path in vision_calls] == ["first.png"]
     assert urlopen_calls == []
     events = []
     while not subscriber.empty():

@@ -38,6 +38,12 @@ from api.models import get_session
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.turn_duration import stamp_turn_duration_on_latest_assistant
+from api.streaming import (
+    WebUIChatInputCancelled,
+    WebUIChatInputError,
+    _persist_webui_chat_input_error,
+    prepare_webui_chat_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -713,11 +719,9 @@ def _run_gateway_chat_streaming(
         try:
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
-                WebUIChatInputError,
                 _load_webui_prefill_context,
                 _prefill_messages_with_webui_context,
                 _public_prefill_context_status,
-                prepare_webui_chat_input,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -745,8 +749,15 @@ def _run_gateway_chat_streaming(
                 cfg=cfg,
                 provider=model_provider,
                 model=model,
+                cancel_check=cancel_event.is_set,
             )
+        except WebUIChatInputCancelled:
+            record_turn_interrupted("cancelled")
+            put_gateway_event("cancel", {"message": "Cancelled by user"})
+            return
         except WebUIChatInputError as exc:
+            with _get_session_agent_lock(session_id):
+                _persist_webui_chat_input_error(s, stream_id, exc.payload)
             record_turn_interrupted(str(exc.payload.get("type") or "chat_input_error"))
             put_gateway_event("apperror", exc.payload)
             return

@@ -1272,6 +1272,15 @@ class WebUIChatInputError(Exception):
         self.payload = payload
 
 
+class WebUIChatInputCancelled(Exception):
+    """Internal signal: cancellation won while preparing attachment input."""
+
+
+def _raise_if_webui_input_cancelled(cancel_check) -> None:
+    if cancel_check is not None and cancel_check():
+        raise WebUIChatInputCancelled()
+
+
 def _vision_input_error(error_type: str) -> WebUIChatInputError:
     if error_type == "vision_configuration_error":
         return WebUIChatInputError({
@@ -1288,7 +1297,12 @@ def _vision_input_error(error_type: str) -> WebUIChatInputError:
     })
 
 
-def _enrich_webui_images_with_vision(user_text: str, image_items: list[dict[str, str]]) -> str:
+def _enrich_webui_images_with_vision(
+    user_text: str,
+    image_items: list[dict[str, str]],
+    *,
+    cancel_check=None,
+) -> str:
     """Pre-analyze uploaded images for text-mode image routing.
 
     This mirrors the agent-side vision enrichment but keeps local filesystem
@@ -1310,17 +1324,21 @@ def _enrich_webui_images_with_vision(user_text: str, image_items: list[dict[str,
         )
         parts = []
         for item in image_items:
+            _raise_if_webui_input_cancelled(cancel_check)
             name = str(item.get("name") or "image").strip() or "image"
             path = str(item.get("path") or "").strip()
             if not path:
                 raise _vision_input_error("vision_analysis_error")
             try:
                 result_json = await vision_analyze_tool(image_url=path, user_prompt=prompt)
+                _raise_if_webui_input_cancelled(cancel_check)
                 result = json.loads(result_json)
                 analysis = sanitize_context(str(result.get("analysis") or "").strip())
                 if not result.get("success") or not analysis:
                     raise _vision_input_error("vision_analysis_error")
                 parts.append(f"[Uploaded image: {name}]\n{analysis}")
+            except WebUIChatInputCancelled:
+                raise
             except WebUIChatInputError:
                 raise
             except Exception as exc:
@@ -1348,6 +1366,7 @@ def prepare_webui_chat_input(
     provider: str | None = None,
     model: str | None = None,
     workspace_ctx: str = "",
+    cancel_check=None,
 ):
     """Prepare one WebUI turn before selecting the Legacy or Gateway transport.
 
@@ -1356,6 +1375,7 @@ def prepare_webui_chat_input(
     before the main model can be called.
     """
     text = str(msg_text or "")
+    _raise_if_webui_input_cancelled(cancel_check)
     if not attachments:
         return workspace_ctx + text
 
@@ -1371,7 +1391,11 @@ def prepare_webui_chat_input(
     if image_mode == "text" and attachment_context.image_items:
         if not vision_available:
             raise _vision_input_error("vision_configuration_error")
-        text = _enrich_webui_images_with_vision(text, attachment_context.image_items)
+        text = _enrich_webui_images_with_vision(
+            text,
+            attachment_context.image_items,
+            cancel_check=cancel_check,
+        )
     if attachment_context.text_context:
         text = f"{attachment_context.text_context}\n\n{text}".strip()
 
@@ -3756,6 +3780,34 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     return True
 
 
+def _persist_webui_chat_input_error(session, stream_id: str, payload: dict) -> bool:
+    """Persist a typed attachment-preparation error for reload recovery."""
+    if not _stream_writeback_is_current(session, stream_id):
+        return False
+    turn_started_at = getattr(session, 'pending_started_at', None)
+    _materialize_pending_user_turn_before_error(session)
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    label = str(payload.get('label') or '图片处理失败').strip()
+    message = str(payload.get('message') or '图片处理失败，本轮请求已停止。').strip()
+    hint = str(payload.get('hint') or '').strip()
+    content = f"**{label}:** {message}"
+    if hint:
+        content += f"\n\n*{hint}*"
+    session.messages.append({
+        'role': 'assistant',
+        'content': content,
+        'timestamp': int(time.time()),
+        '_error': True,
+        'error_type': str(payload.get('type') or 'chat_input_error'),
+    })
+    stamp_turn_duration_on_latest_assistant(session, turn_started_at, time.time())
+    session.save()
+    return True
+
+
 def _last_resort_sync_from_core(session, stream_id, agent_lock):
     """Final-exit guard: if the stream exits with pending_user_message still set,
     sync messages from the core transcript or add an error marker.
@@ -5504,8 +5556,28 @@ def _run_agent_streaming(
                     provider=model_provider,
                     model=model,
                     workspace_ctx=workspace_ctx,
+                    cancel_check=cancel_event.is_set,
                 )
+            except WebUIChatInputCancelled:
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
+                if ephemeral:
+                    _cleanup_ephemeral_cancelled_turn(s)
+                else:
+                    with _agent_lock:
+                        _finalize_cancelled_turn(s, ephemeral=False)
+                put('cancel', {'message': 'Cancelled by user'})
+                return
             except WebUIChatInputError as exc:
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
+                if not ephemeral:
+                    with _agent_lock:
+                        _persist_webui_chat_input_error(s, stream_id, exc.payload)
                 put('apperror', exc.payload)
                 return
             if cancel_event.is_set():

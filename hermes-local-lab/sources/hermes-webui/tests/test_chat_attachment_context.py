@@ -396,7 +396,7 @@ def test_prepare_webui_chat_input_keeps_native_images_as_multimodal_parts(
     assert [part["type"] for part in result[1:]] == ["image_url", "image_url"]
 
 
-def test_legacy_cancellation_after_auxiliary_vision_skips_main_model(
+def test_legacy_cancellation_after_first_auxiliary_image_skips_second_and_main_model(
     tmp_path, monkeypatch
 ):
     import api.config as config
@@ -417,11 +417,13 @@ def test_legacy_cancellation_after_auxiliary_vision_skips_main_model(
     uploaded_dir = attachment_root / "session-a"
     uploaded_dir.mkdir(parents=True)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
-    image = uploaded_dir / "photo.png"
-    _make_png(image)
+    images = [uploaded_dir / "first.png", uploaded_dir / "second.png"]
+    for image in images:
+        _make_png(image)
     cfg = _text_vision_config()
     stream_id = "stream-legacy-cancel-after-vision"
     run_calls = []
+    vision_calls = []
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -440,7 +442,8 @@ def test_legacy_cancellation_after_auxiliary_vision_skips_main_model(
         def interrupt(self, _message):
             return None
 
-    async def vision_then_cancel(**_kwargs):
+    async def vision_then_cancel(**kwargs):
+        vision_calls.append(kwargs["image_url"])
         streaming.CANCEL_FLAGS[stream_id].set()
         return json.dumps({"success": True, "analysis": "vision finished"})
 
@@ -490,10 +493,14 @@ def test_legacy_cancellation_after_auxiliary_vision_skips_main_model(
         "deepseek-chat",
         str(tmp_path),
         stream_id,
-        [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+        [
+            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+            for image in images
+        ],
         model_provider="deepseek",
     )
 
+    assert [Path(path).name for path in vision_calls] == ["first.png"]
     assert run_calls == []
     events = []
     while not event_queue.empty():
@@ -501,6 +508,111 @@ def test_legacy_cancellation_after_auxiliary_vision_skips_main_model(
     terminal = [name for name, _data in events if name in {"cancel", "apperror", "error", "done"}]
     assert terminal == ["cancel"]
     assert not any(name == "token" for name, _data in events)
+
+
+def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_error(
+    tmp_path, monkeypatch
+):
+    import api.config as config
+    import api.models as models
+    import api.oauth as oauth
+    import api.profiles as profiles
+    import api.streaming as streaming
+    from tools import vision_tools
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    attachment_root = tmp_path / "attachments"
+    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = uploaded_dir / "photo.png"
+    _make_png(image)
+    attachment = {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+    cfg = _text_vision_config()
+    stream_id = "stream-legacy-vision-failure-reload"
+    run_calls = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id")
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            run_calls.append(kwargs)
+            return {"messages": [{"role": "assistant", "content": "must not run"}]}
+
+        def interrupt(self, _message):
+            return None
+
+    async def failed_vision(**_kwargs):
+        return json.dumps({"success": False, "analysis": "secret /private/provider/path"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", failed_vision)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("deepseek-chat", "deepseek", None))
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda _cfg: [])
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {
+        "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+    monkeypatch.setattr(profiles, "patch_skill_home_modules", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda *_args, **_kwargs: {"provider": "deepseek", "api_key": "synthetic-key", "base_url": None},
+    )
+
+    session = models.Session(
+        session_id="legacy_vision_failure_reload",
+        title="Vision failure",
+        workspace=str(tmp_path),
+        model="deepseek-chat",
+        messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "describe this image"
+    session.pending_attachments = [attachment]
+    session.pending_started_at = 1.0
+    session.save(touch_updated_at=False)
+    models.SESSIONS[session.session_id] = session
+    event_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = event_queue
+
+    streaming._run_agent_streaming(
+        session.session_id,
+        "describe this image",
+        "deepseek-chat",
+        str(tmp_path),
+        stream_id,
+        [attachment],
+        model_provider="deepseek",
+    )
+
+    assert run_calls == []
+    reloaded = models.Session.load(session.session_id)
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
+    assert reloaded.messages[0]["content"] == "describe this image"
+    assert reloaded.messages[0]["attachments"] == [attachment]
+    assert reloaded.messages[1]["_error"] is True
+    assert reloaded.messages[1]["error_type"] == "vision_analysis_error"
+    serialized = json.dumps(reloaded.messages, ensure_ascii=False)
+    assert "Response interrupted" not in serialized
+    assert "/private/provider/path" not in serialized
 
 
 def test_secret_like_attachment_is_not_extracted(tmp_path, monkeypatch):
