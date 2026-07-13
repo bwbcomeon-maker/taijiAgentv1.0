@@ -16,6 +16,7 @@ from api.turn_journal import append_turn_journal_event, read_turn_journal
 from api.config import STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
+    _gateway_run_request_body,
     _gateway_http_error_event,
     _gateway_sse_error_event,
     _gateway_sse_delta,
@@ -97,6 +98,24 @@ def test_gateway_sse_delta_extracts_openai_chat_chunks():
     assert _gateway_sse_delta({"choices": [{"delta": {"content": "hel"}}]}) == "hel"
     assert _gateway_sse_delta({"choices": [{"message": {"content": "done"}}]}) == "done"
     assert _gateway_sse_delta({"choices": [{"delta": {}}]}) == ""
+
+
+def test_gateway_run_request_body_uses_canonical_user_message_array():
+    result = _gateway_run_request_body(
+        {
+            "model": "deepseek-chat",
+            "provider": "deepseek",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "prepared visual context"},
+            ],
+        },
+        session_id="session-a",
+    )
+
+    assert result["input"] == [
+        {"role": "user", "content": "prepared visual context"}
+    ]
 
 
 def test_gateway_stream_usage_normalizes_token_names():
@@ -510,6 +529,153 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, monkeypatch):
+    from tools import vision_tools
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    attachment_root = tmp_path / "attachments"
+    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image_path = uploaded_dir / "photo.png"
+    image_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
+    cfg = {
+        "agent": {"image_input_mode": "auto"},
+        "model": {"provider": "deepseek", "default": "deepseek-chat", "supports_vision": False},
+        "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
+    }
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {
+        "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+    vision_calls = []
+
+    async def fake_vision_analyze_tool(**kwargs):
+        vision_calls.append(kwargs)
+        return json.dumps({"success": True, "analysis": "a red warning sign"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
+    captured = {}
+
+    class StartResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return b'{"run_id":"remote-vision"}'
+
+    class EventResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            yield b'data: {"event":"run.completed","output":"described"}\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        if req.full_url.endswith("/v1/runs"):
+            captured["run"] = json.loads(req.data.decode("utf-8"))
+            return StartResponse()
+        assert req.full_url.endswith("/events")
+        return EventResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    s = new_session()
+    stream_id = "stream-gateway-vision-runs"
+    s.active_stream_id = stream_id
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "What is shown?",
+        "deepseek-chat",
+        str(tmp_path / "workspace"),
+        stream_id,
+        [{"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}],
+        model_provider="deepseek",
+    )
+
+    assert len(vision_calls) == 1
+    assert captured["run"]["provider"] == "deepseek"
+    assert captured["run"]["model"] == "deepseek-chat"
+    content = captured["run"]["input"][0]["content"]
+    assert "a red warning sign" in content
+    assert "What is shown?" in content
+    assert content != "What is shown?"
+    assert str(image_path) not in content
+    assert "image_url" not in content
+    assert "base64" not in content
+
+
+def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monkeypatch):
+    from tools import vision_tools
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    attachment_root = tmp_path / "attachments"
+    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image_path = uploaded_dir / "photo.png"
+    image_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
+    cfg = {
+        "agent": {"image_input_mode": "text"},
+        "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
+    }
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {
+        "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+
+    async def failed_vision(**_kwargs):
+        return json.dumps({"success": False, "analysis": "provider secret /private/path"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", failed_vision)
+    urlopen_calls = []
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: urlopen_calls.append((args, kwargs)),
+    )
+    s = new_session()
+    stream_id = "stream-gateway-vision-error"
+    s.active_stream_id = stream_id
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "describe",
+        "deepseek-chat",
+        str(tmp_path / "workspace"),
+        stream_id,
+        [{"name": image_path.name, "path": str(image_path), "mime": "image/png", "is_image": True}],
+        model_provider="deepseek",
+    )
+
+    assert urlopen_calls == []
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    errors = [data for name, data in events if name == "apperror"]
+    assert errors[-1]["type"] == "vision_analysis_error"
+    public_error = json.dumps(errors[-1], ensure_ascii=False)
+    assert str(image_path) not in public_error
+    assert "provider secret" not in public_error
 
 
 def test_gateway_chat_worker_injects_document_attachment_context(tmp_path, monkeypatch):

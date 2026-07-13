@@ -429,7 +429,7 @@ def _gateway_run_request_body(
                 system_parts.append(str(content))
     run_body = {
         "model": body.get("model") or "default",
-        "input": user_message,
+        "input": [{"role": "user", "content": user_message}],
         "session_id": session_id,
     }
     if body.get("provider"):
@@ -713,9 +713,11 @@ def _run_gateway_chat_streaming(
         try:
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                WebUIChatInputError,
                 _load_webui_prefill_context,
                 _prefill_messages_with_webui_context,
                 _public_prefill_context_status,
+                prepare_webui_chat_input,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -735,42 +737,23 @@ def _run_gateway_chat_streaming(
         url = f"{base_url}/v1/chat/completions"
         headers = _gateway_request_headers(session_id, api_key, event_stream=True)
         message_text = str(msg_text or "")
-        message_content: Any = message_text
-        if attachments:
-            try:
-                from api.attachment_context import build_attachment_context
-                from api.streaming import _build_native_multimodal_message
-
-                text_attachments = [
-                    att for att in attachments
-                    if isinstance(att, dict)
-                    and not bool(att.get("is_image"))
-                    and not str(att.get("mime") or "").strip().lower().startswith("image/")
-                ]
-                if text_attachments:
-                    attachment_context = build_attachment_context(
-                        text_attachments,
-                        workspace=str(workspace),
-                        cfg=cfg,
-                        image_mode="native",
-                    )
-                    if attachment_context.text_context:
-                        message_text = f"{attachment_context.text_context}\n\n{message_text}".strip()
-                message_content = _build_native_multimodal_message(
-                    "",
-                    message_text,
-                    attachments,
-                    str(workspace),
-                    cfg=cfg,
-                )
-            except Exception:
-                logger.warning("Failed to build gateway attachment context", exc_info=True)
-                message_content = (
-                    "[Uploaded file context]\n"
-                    "Attachment processing failed before the gateway model call. "
-                    "Tell the user the uploaded attachment could not be analyzed this turn.\n\n"
-                    f"{message_text}"
-                ).strip()
+        try:
+            message_content: Any = prepare_webui_chat_input(
+                message_text,
+                attachments,
+                workspace=str(workspace),
+                cfg=cfg,
+                provider=model_provider,
+                model=model,
+            )
+        except WebUIChatInputError as exc:
+            record_turn_interrupted(str(exc.payload.get("type") or "chat_input_error"))
+            put_gateway_event("apperror", exc.payload)
+            return
+        if cancel_event.is_set():
+            record_turn_interrupted("cancelled")
+            put_gateway_event("cancel", {"message": "Cancelled by user"})
+            return
         body = {
             "model": model or "default",
             "stream": True,

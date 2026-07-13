@@ -5,7 +5,10 @@ leave non-image files as opaque absolute paths. The agent needs bounded
 content context for documents and explicit image routing status.
 """
 from pathlib import Path
+import json
 import zipfile
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -158,6 +161,237 @@ def test_webui_image_auto_mode_respects_supports_vision_false():
     }
 
     assert _resolve_image_input_mode(cfg) == "text"
+
+
+def _text_vision_config() -> dict:
+    return {
+        "agent": {"image_input_mode": "auto"},
+        "model": {
+            "provider": "deepseek",
+            "default": "deepseek-chat",
+            "supports_vision": False,
+        },
+        "auxiliary": {
+            "vision": {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+            }
+        },
+    }
+
+
+def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
+    tmp_path, monkeypatch
+):
+    from api.streaming import prepare_webui_chat_input
+    from tools import vision_tools
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    images = [session_dir / "first.png", session_dir / "second.png"]
+    for image in images:
+        _make_png(image)
+
+    calls = []
+
+    async def fake_vision_analyze_tool(*, image_url, user_prompt, model=None):
+        calls.append((image_url, user_prompt, model))
+        return json.dumps({"success": True, "analysis": f"analysis-{len(calls)}"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
+
+    result = prepare_webui_chat_input(
+        "compare them",
+        [
+            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+            for image in images
+        ],
+        workspace=str(tmp_path / "workspace"),
+        cfg=_text_vision_config(),
+        provider="deepseek",
+        model="deepseek-chat",
+    )
+
+    assert isinstance(result, str)
+    assert [Path(call[0]).name for call in calls] == ["first.png", "second.png"]
+    assert all(call[2] is None for call in calls)
+    assert all("[敏感信息已隐藏]" in call[1] for call in calls)
+    assert result.index("analysis-1") < result.index("analysis-2")
+    assert "compare them" in result
+    assert str(session_dir) not in result
+    assert "image_url" not in result
+    assert "base64" not in result
+
+
+@pytest.mark.parametrize(
+    "vision_result",
+    [
+        json.dumps({"success": False, "analysis": "provider leaked /private/path"}),
+        json.dumps({"success": True, "analysis": ""}),
+    ],
+)
+def test_prepare_webui_chat_input_blocks_failed_or_empty_vision_result(
+    tmp_path, monkeypatch, vision_result
+):
+    from api.streaming import WebUIChatInputError, prepare_webui_chat_input
+    from tools import vision_tools
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = session_dir / "photo.png"
+    _make_png(image)
+
+    async def fake_vision_analyze_tool(**_kwargs):
+        return vision_result
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
+
+    with pytest.raises(WebUIChatInputError) as raised:
+        prepare_webui_chat_input(
+            "describe",
+            [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+            workspace=str(tmp_path / "workspace"),
+            cfg=_text_vision_config(),
+            provider="deepseek",
+            model="deepseek-chat",
+        )
+
+    assert raised.value.payload["type"] == "vision_analysis_error"
+    assert str(image) not in json.dumps(raised.value.payload, ensure_ascii=False)
+    assert "/private/path" not in json.dumps(raised.value.payload, ensure_ascii=False)
+
+
+def test_prepare_webui_chat_input_blocks_vision_exception_and_stops_later_images(
+    tmp_path, monkeypatch
+):
+    from api.streaming import WebUIChatInputError, prepare_webui_chat_input
+    from tools import vision_tools
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    images = [session_dir / "first.png", session_dir / "second.png"]
+    for image in images:
+        _make_png(image)
+    calls = []
+
+    async def failing_vision(**kwargs):
+        calls.append(kwargs["image_url"])
+        raise RuntimeError("secret provider error /private/path")
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", failing_vision)
+
+    with pytest.raises(WebUIChatInputError) as raised:
+        prepare_webui_chat_input(
+            "compare",
+            [
+                {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+                for image in images
+            ],
+            workspace=str(tmp_path / "workspace"),
+            cfg=_text_vision_config(),
+            provider="deepseek",
+            model="deepseek-chat",
+        )
+
+    assert raised.value.payload["type"] == "vision_analysis_error"
+    assert len(calls) == 1
+    assert "secret provider error" not in json.dumps(raised.value.payload, ensure_ascii=False)
+
+
+def test_prepare_webui_chat_input_requires_auxiliary_vision_for_text_mode(
+    tmp_path, monkeypatch
+):
+    from api.streaming import WebUIChatInputError, prepare_webui_chat_input
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = session_dir / "photo.png"
+    _make_png(image)
+
+    with pytest.raises(WebUIChatInputError) as raised:
+        prepare_webui_chat_input(
+            "describe",
+            [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+            workspace=str(tmp_path / "workspace"),
+            cfg={"agent": {"image_input_mode": "text"}},
+            provider="deepseek",
+            model="deepseek-chat",
+        )
+
+    assert raised.value.payload["type"] == "vision_configuration_error"
+
+
+def test_prepare_webui_chat_input_preserves_document_and_vision_context(
+    tmp_path, monkeypatch
+):
+    from api.streaming import prepare_webui_chat_input
+    from tools import vision_tools
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    image = session_dir / "photo.png"
+    doc = session_dir / "notes.txt"
+    _make_png(image)
+    doc.write_text("document-body", encoding="utf-8")
+
+    async def fake_vision(**_kwargs):
+        return json.dumps({"success": True, "analysis": "visual-description"})
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision)
+    result = prepare_webui_chat_input(
+        "summarize",
+        [
+            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True},
+            {"name": doc.name, "path": str(doc), "mime": "text/plain", "is_image": False},
+        ],
+        workspace=str(tmp_path / "workspace"),
+        cfg=_text_vision_config(),
+        provider="deepseek",
+        model="deepseek-chat",
+    )
+
+    assert "document-body" in result
+    assert "visual-description" in result
+    assert "summarize" in result
+
+
+def test_prepare_webui_chat_input_keeps_native_images_as_multimodal_parts(
+    tmp_path, monkeypatch
+):
+    from api.streaming import prepare_webui_chat_input
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    images = [session_dir / "first.png", session_dir / "second.png"]
+    for image in images:
+        _make_png(image)
+
+    result = prepare_webui_chat_input(
+        "compare",
+        [
+            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+            for image in images
+        ],
+        workspace=str(tmp_path / "workspace"),
+        cfg={"agent": {"image_input_mode": "native"}},
+        provider="openai",
+        model="gpt-4o",
+    )
+
+    assert result[0] == {"type": "text", "text": "compare"}
+    assert [part["type"] for part in result[1:]] == ["image_url", "image_url"]
 
 
 def test_secret_like_attachment_is_not_extracted(tmp_path, monkeypatch):

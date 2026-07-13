@@ -1264,7 +1264,31 @@ def _resolve_image_input_mode(cfg: dict, *, provider: str | None = None, model: 
     return "native"
 
 
-def _enrich_webui_images_with_vision(agent, user_text: str, image_items: list[dict[str, str]]) -> str:
+class WebUIChatInputError(Exception):
+    """Structured, user-safe failure raised before a main model request."""
+
+    def __init__(self, payload: dict):
+        super().__init__(str(payload.get("type") or "chat_input_error"))
+        self.payload = payload
+
+
+def _vision_input_error(error_type: str) -> WebUIChatInputError:
+    if error_type == "vision_configuration_error":
+        return WebUIChatInputError({
+            "label": "图片理解能力未配置",
+            "type": "vision_configuration_error",
+            "message": "当前主模型不能直接识图，且尚未配置辅助视觉模型。",
+            "hint": "请在模型配置中启用辅助视觉模型后重试，或切换到支持图片输入的主模型。",
+        })
+    return WebUIChatInputError({
+        "label": "图片分析失败",
+        "type": "vision_analysis_error",
+        "message": "辅助视觉模型未能完成图片分析，本轮请求已停止。",
+        "hint": "请检查辅助视觉模型配置、网络和账号状态后重试。",
+    })
+
+
+def _enrich_webui_images_with_vision(user_text: str, image_items: list[dict[str, str]]) -> str:
     """Pre-analyze uploaded images for text-mode image routing.
 
     This mirrors the agent-side vision enrichment but keeps local filesystem
@@ -1280,28 +1304,28 @@ def _enrich_webui_images_with_vision(agent, user_text: str, image_items: list[di
         prompt = (
             "Describe everything visible in this image in thorough detail. "
             "Include any text, code, data, objects, people, layout, colors, "
-            "and any other notable visual information."
+            "and any other notable visual information. Do not transcribe API keys, "
+            "tokens, passwords, or private keys verbatim; replace them with "
+            "[敏感信息已隐藏]."
         )
         parts = []
         for item in image_items:
             name = str(item.get("name") or "image").strip() or "image"
             path = str(item.get("path") or "").strip()
             if not path:
-                continue
+                raise _vision_input_error("vision_analysis_error")
             try:
                 result_json = await vision_analyze_tool(image_url=path, user_prompt=prompt)
                 result = json.loads(result_json)
-                if result.get("success"):
-                    analysis = sanitize_context(str(result.get("analysis") or "").strip())
-                    if analysis:
-                        parts.append(f"[Uploaded image: {name}]\n{analysis}")
-                        continue
-                parts.append(f"[Uploaded image: {name}] 图片已上传，但本轮视觉分析没有返回可用内容。请如实告知用户。")
+                analysis = sanitize_context(str(result.get("analysis") or "").strip())
+                if not result.get("success") or not analysis:
+                    raise _vision_input_error("vision_analysis_error")
+                parts.append(f"[Uploaded image: {name}]\n{analysis}")
+            except WebUIChatInputError:
+                raise
             except Exception as exc:
                 logger.warning("WebUI image attachment vision analysis failed for %s: %s", name, exc)
-                parts.append(f"[Uploaded image: {name}] 图片已上传，但本轮视觉分析失败。请如实告知用户当前无法分析这张图片。")
-        if not parts:
-            return user_text
+                raise _vision_input_error("vision_analysis_error") from exc
         prefix = "[Uploaded image context]\n" + "\n\n".join(parts)
         return f"{prefix}\n\n{user_text}" if user_text else prefix
 
@@ -1313,6 +1337,66 @@ def _enrich_webui_images_with_vision(agent, user_text: str, image_items: list[di
             return loop.run_until_complete(_run())
         finally:
             loop.close()
+
+
+def prepare_webui_chat_input(
+    msg_text: str,
+    attachments,
+    *,
+    workspace: str,
+    cfg: dict,
+    provider: str | None = None,
+    model: str | None = None,
+    workspace_ctx: str = "",
+):
+    """Prepare one WebUI turn before selecting the Legacy or Gateway transport.
+
+    Each validated image is either represented by a native image part or by a
+    successful auxiliary-vision description. Any image failure aborts the turn
+    before the main model can be called.
+    """
+    text = str(msg_text or "")
+    if not attachments:
+        return workspace_ctx + text
+
+    image_mode = _resolve_image_input_mode(cfg, provider=provider, model=model)
+    vision_available = has_configured_vision(cfg)
+    attachment_context = build_attachment_context(
+        attachments,
+        workspace=workspace,
+        cfg=cfg,
+        image_mode=image_mode,
+        vision_available=vision_available,
+    )
+    if image_mode == "text" and attachment_context.image_items:
+        if not vision_available:
+            raise _vision_input_error("vision_configuration_error")
+        text = _enrich_webui_images_with_vision(text, attachment_context.image_items)
+    if attachment_context.text_context:
+        text = f"{attachment_context.text_context}\n\n{text}".strip()
+
+    prepared = _build_native_multimodal_message(
+        workspace_ctx,
+        text,
+        attachments,
+        workspace,
+        cfg=cfg,
+        provider=provider,
+        model=model,
+    )
+    if image_mode == "native" and attachment_context.image_items:
+        native_count = sum(
+            1 for part in prepared
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ) if isinstance(prepared, list) else 0
+        if native_count != len(attachment_context.image_items):
+            raise WebUIChatInputError({
+                "label": "图片附件不可用",
+                "type": "image_attachment_error",
+                "message": "一个或多个图片附件无法安全读取，本轮请求已停止。",
+                "hint": "请重新上传有效的图片文件后重试。",
+            })
+    return prepared
 
 
 def _build_native_multimodal_message(
@@ -5411,42 +5495,31 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            if attachments:
-                try:
-                    _image_mode = _resolve_image_input_mode(_cfg, provider=model_provider, model=model)
-                    _vision_available = has_configured_vision(_cfg)
-                    _attachment_context = build_attachment_context(
-                        attachments,
-                        workspace=workspace,
-                        cfg=_cfg,
-                        image_mode=_image_mode,
-                        vision_available=_vision_available,
-                    )
-                    if _image_mode == "text" and _vision_available and _attachment_context.image_items:
-                        _agent_msg_text = _enrich_webui_images_with_vision(
-                            agent,
-                            _agent_msg_text,
-                            _attachment_context.image_items,
-                        )
-                    if _attachment_context.text_context:
-                        _agent_msg_text = f"{_attachment_context.text_context}\n\n{_agent_msg_text}".strip()
-                except Exception as exc:
-                    logger.warning("Failed to build uploaded attachment context: %s", exc, exc_info=True)
-                    _agent_msg_text = (
-                        "[Uploaded file context]\n"
-                        "Attachment processing failed before the model call. "
-                        "Tell the user the uploaded attachment could not be analyzed this turn.\n\n"
-                        f"{_agent_msg_text}"
-                    ).strip()
-            user_message = _build_native_multimodal_message(
-                workspace_ctx,
-                _agent_msg_text,
-                attachments,
-                workspace,
-                cfg=_cfg,
-                provider=model_provider,
-                model=model,
-            )
+            try:
+                user_message = prepare_webui_chat_input(
+                    _agent_msg_text,
+                    attachments,
+                    workspace=workspace,
+                    cfg=_cfg,
+                    provider=model_provider,
+                    model=model,
+                    workspace_ctx=workspace_ctx,
+                )
+            except WebUIChatInputError as exc:
+                put('apperror', exc.payload)
+                return
+            if cancel_event.is_set():
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
+                if ephemeral:
+                    _cleanup_ephemeral_cancelled_turn(s)
+                else:
+                    with _agent_lock:
+                        _finalize_cancelled_turn(s, ephemeral=False)
+                put('cancel', {'message': 'Cancelled by user'})
+                return
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
