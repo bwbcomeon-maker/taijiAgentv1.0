@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import importlib
 import json
@@ -1085,10 +1086,24 @@ def get_image_gen_config() -> dict[str, Any]:
     active_options = image_cfg.get("options")
     if not isinstance(active_options, dict):
         active_options = {}
-    public_options = {
-        key: str(active_options.get(key) or "").strip()
-        for key in ("endpoint_mode", "workspace_id", "region", "base_url")
-        if str(active_options.get(key) or "").strip()
+    provider_rows = _image_gen_provider_rows(active_provider)
+    active_public_provider = _public_image_gen_provider_id(active_provider)
+    active_row = next(
+        (row for row in provider_rows if str(row.get("id") or "") == active_public_provider),
+        {},
+    )
+    endpoint_names = {
+        str(field.get("name") or "").strip()
+        for field in (active_row.get("endpoint_fields") or [])
+        if isinstance(field, dict) and not bool(field.get("secret"))
+    }
+    if not active_row and active_provider == "dashscope":
+        endpoint_names.update({"endpoint_mode", "workspace_id", "region", "base_url"})
+    endpoint_names.discard("")
+    endpoint_values = {
+        name: str(active_options.get(name) or "").strip()
+        for name in endpoint_names
+        if name in active_options
     }
     return {
         "ok": True,
@@ -1099,13 +1114,14 @@ def get_image_gen_config() -> dict[str, Any]:
             "model": active_model,
             "use_gateway": bool(image_cfg.get("use_gateway")),
             "credential_ref": str(image_cfg.get("credential_ref") or "").strip(),
-            "options": public_options,
+            "options": dict(endpoint_values),
+            "endpoint_values": endpoint_values,
             "verification": _public_image_gen_verification(
                 image_cfg,
                 profile=_active_profile_name(),
             ),
         },
-        "providers": _image_gen_provider_rows(active_provider),
+        "providers": provider_rows,
         "custom_image_providers": get_custom_image_provider_configs().get("providers", []),
     }
 
@@ -2262,13 +2278,15 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             workspace_prefix=workspace_id,
             custom_url=base_url,
         )
-        if not credential_ref and not str(api_key or "").strip():
-            credential_ref = default_credential_ref(
-                provider_id,
-                config_data=_load_yaml_config_file(_get_config_path()),
-            )
-        if credential_ref:
-            credential_ref = normalize_credential_id(credential_ref)
+        canonical_endpoint_values = {
+            "endpoint_mode": endpoint_mode,
+            "region": region,
+            "workspace_id": workspace_id,
+            "base_url": base_url,
+        }
+        for name in tuple(endpoint_updates):
+            if name in canonical_endpoint_values:
+                endpoint_updates[name] = canonical_endpoint_values[name]
     elif named_custom_entry is not None:
         if api_key is not None and str(api_key).strip():
             raise ValueError("命名式外部识图密钥请在 Provider 管理中更新。")
@@ -2281,6 +2299,11 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
+            original_config = copy.deepcopy(config_data)
+            if provider_id == "alibaba" and not credential_ref and not str(api_key or "").strip():
+                credential_ref = default_credential_ref(provider_id, config_data=config_data)
+            if credential_ref:
+                credential_ref = normalize_credential_id(credential_ref)
             if credential_ref:
                 row = load_credential(credential_ref, config_data=config_data)
                 if provider_family(row.get("provider_family")) != provider_family(provider_id):
@@ -2298,14 +2321,25 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             vision_cfg = auxiliary.get("vision")
             if not isinstance(vision_cfg, dict):
                 vision_cfg = {}
+            previous_provider = str(vision_cfg.get("provider") or "").strip().lower()
+            owned_names = {
+                str(name).strip()
+                for name in (vision_cfg.get("endpoint_field_names") or [])
+                if str(name).strip()
+            }
+            previous_meta = _VISION_PROVIDER_META.get(previous_provider) or {}
+            owned_names.update(
+                str(field.get("name") or "").strip()
+                for field in (previous_meta.get("endpoint_fields") or [])
+                if isinstance(field, dict) and not bool(field.get("secret"))
+            )
+            owned_names.discard("")
+            for name in owned_names:
+                vision_cfg.pop(name, None)
             vision_cfg["provider"] = provider_id
             vision_cfg["model"] = model_id
             if provider_id == "alibaba":
                 vision_cfg["credential_ref"] = credential_ref
-                vision_cfg["endpoint_mode"] = endpoint_mode
-                vision_cfg["region"] = region
-                vision_cfg["workspace_id"] = workspace_id
-                vision_cfg["base_url"] = base_url
                 vision_cfg.pop("api_key", None)
                 vision_cfg.pop("api_mode", None)
             elif provider_id == "custom":
@@ -2324,16 +2358,15 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 vision_cfg.pop("api_mode", None)
             if provider_id != "alibaba":
                 vision_cfg.pop("credential_ref", None)
-                vision_cfg.pop("endpoint_mode", None)
-                vision_cfg.pop("region", None)
-                vision_cfg.pop("workspace_id", None)
             for name, value in endpoint_updates.items():
-                if name in {"endpoint_mode", "region", "workspace_id", "base_url"}:
-                    continue
                 if value:
                     vision_cfg[name] = value
                 else:
                     vision_cfg.pop(name, None)
+            if endpoint_updates:
+                vision_cfg["endpoint_field_names"] = sorted(endpoint_updates)
+            else:
+                vision_cfg.pop("endpoint_field_names", None)
             auxiliary["vision"] = vision_cfg
             config_data["auxiliary"] = auxiliary
             try:
@@ -2344,6 +2377,10 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 if env_touched and env_var and env_snapshot is not None:
                     _restore_credential_env(env_path, env_var, env_snapshot)
+                try:
+                    _save_yaml_config_file(config_path, original_config)
+                except Exception:
+                    logger.exception("Failed to restore vision configuration after save failure")
                 raise
     reload_config()
     invalidate_models_cache()
@@ -2680,15 +2717,8 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             raw_value = credentials.get(env_var)
         if raw_value is not None and str(raw_value).strip():
             inline_secret_supplied = True
-    if provider_id == "dashscope" and not credential_ref and not inline_secret_supplied:
-        credential_ref = default_credential_ref(
-            provider_id,
-            config_data=_load_yaml_config_file(_get_config_path()),
-        )
     if credential_ref and inline_secret_supplied:
         raise ValueError("credential_ref and api_key cannot be used together")
-    if credential_ref:
-        credential_ref = normalize_credential_id(credential_ref)
     env_updates: dict[str, str] = {}
     option_updates: dict[str, str] = {}
     legacy_api_key_consumed = False
@@ -2731,6 +2761,11 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
+            original_config = copy.deepcopy(config_data)
+            if provider_id == "dashscope" and not credential_ref and not inline_secret_supplied:
+                credential_ref = default_credential_ref(provider_id, config_data=config_data)
+            if credential_ref:
+                credential_ref = normalize_credential_id(credential_ref)
             if credential_ref:
                 row = load_credential(credential_ref, config_data=config_data)
                 if provider_family(row.get("provider_family")) != provider_family(provider_id):
@@ -2748,6 +2783,25 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                 image_cfg = config_data.get("image_gen")
                 if not isinstance(image_cfg, dict):
                     image_cfg = {}
+                previous_provider = str(image_cfg.get("provider") or "").strip().lower()
+                previous_public_provider = _public_image_gen_provider_id(previous_provider)
+                previous_row = next(
+                    (row for row in rows if str(row.get("id") or "") == previous_public_provider),
+                    {},
+                )
+                owned_names = {
+                    str(name).strip()
+                    for name in (image_cfg.get("endpoint_field_names") or [])
+                    if str(name).strip()
+                }
+                owned_names.update(
+                    str(field.get("name") or "").strip()
+                    for field in (previous_row.get("endpoint_fields") or [])
+                    if isinstance(field, dict) and not bool(field.get("secret"))
+                )
+                if not previous_row and previous_provider == "dashscope":
+                    owned_names.update({"endpoint_mode", "workspace_id", "region", "base_url"})
+                owned_names.discard("")
                 image_cfg["provider"] = provider_id
                 if model_id:
                     image_cfg["model"] = model_id
@@ -2757,19 +2811,31 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                 else:
                     image_cfg.pop("credential_ref", None)
                 image_cfg.pop("api_key", None)
-                if option_updates:
-                    options = image_cfg.get("options")
-                    if not isinstance(options, dict):
-                        options = {}
-                    for name, value in option_updates.items():
-                        if value:
-                            options[name] = value
-                        else:
-                            options.pop(name, None)
-                    if options:
-                        image_cfg["options"] = options
+                options = image_cfg.get("options")
+                if not isinstance(options, dict):
+                    options = {}
+                for name in owned_names:
+                    options.pop(name, None)
+                for name, value in option_updates.items():
+                    if value:
+                        options[name] = value
                     else:
-                        image_cfg.pop("options", None)
+                        options.pop(name, None)
+                if options:
+                    image_cfg["options"] = options
+                else:
+                    image_cfg.pop("options", None)
+                current_endpoint_names = sorted(
+                    str(field.get("name") or "").strip()
+                    for field in endpoint_fields
+                    if isinstance(field, dict)
+                    and not bool(field.get("secret"))
+                    and str(field.get("name") or "").strip()
+                )
+                if current_endpoint_names:
+                    image_cfg["endpoint_field_names"] = current_endpoint_names
+                else:
+                    image_cfg.pop("endpoint_field_names", None)
                 config_data["image_gen"] = image_cfg
                 _save_yaml_config_file(config_path, config_data)
             except Exception:
@@ -2782,6 +2848,10 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                                 "Failed to restore image generation credential %s",
                                 env_var,
                             )
+                try:
+                    _save_yaml_config_file(config_path, original_config)
+                except Exception:
+                    logger.exception("Failed to restore image generation configuration after save failure")
                 raise
     reload_config()
     invalidate_models_cache()

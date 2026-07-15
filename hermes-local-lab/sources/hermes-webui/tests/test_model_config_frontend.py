@@ -401,6 +401,7 @@ const elements={
  platformCredentialLabel:control('platformCredentialLabel','共享凭据'),
  platformCredentialFamily:control('platformCredentialFamily','alibaba_dashscope'),
  platformCredentialSecret:control('platformCredentialSecret','rotated-secret'),
+ platformCredentialDefault:control('platformCredentialDefault'),
  platformCredentialError:control('platformCredentialError'),
  platformCredentialListStatus:control('platformCredentialListStatus'),
  platformCredentialEditor:control('platformCredentialEditor'),
@@ -415,7 +416,8 @@ const elements={
  visionConfigModel:control('visionConfigModel','vision-draft'),
  imageGenConfigModel:control('imageGenConfigModel','image-draft')
 };
-const editorControls=[elements.platformCredentialLabel,elements.platformCredentialFamily,elements.platformCredentialSecret,
+elements.platformCredentialDefault.checked=true;
+const editorControls=[elements.platformCredentialLabel,elements.platformCredentialFamily,elements.platformCredentialSecret,elements.platformCredentialDefault,
  elements.btnSavePlatformCredential,elements.btnCancelPlatformCredential];
 elements.platformCredentialEditor.querySelectorAll=()=>editorControls;
 const action=control('update-action');
@@ -456,8 +458,9 @@ let savePromise=new Promise(resolve=>{saveResolve=resolve;});
 let deleteResolve,deleteReject;
 let deletePromise=new Promise((resolve,reject)=>{deleteResolve=resolve;deleteReject=reject;});
 let apiMode='save';
-const api=(url)=>{
- if(url==='/api/provider-credentials'&&apiMode==='save') return savePromise;
+let savePayloads=[];
+const api=(url,options)=>{
+ if(url==='/api/provider-credentials'&&apiMode==='save'){savePayloads.push(JSON.parse(options.body));return savePromise;}
  if(url.startsWith('/api/provider-credentials/')&&apiMode==='delete') return deletePromise;
  throw new Error('unexpected '+url);
 };
@@ -477,6 +480,7 @@ async function run(){
 
  elements.platformCredentialSecret.value='old-request-secret';
  elements.platformCredentialLabel.value='旧请求';
+ elements.platformCredentialDefault.checked=false;
  savePromise=new Promise(resolve=>{saveResolve=resolve;});
  const lateRun=savePlatformCredential();
  await Promise.resolve();
@@ -516,7 +520,7 @@ async function run(){
  deleteReject(new Error('凭据正在使用'));
  await failedRun;
  const deleteFailed={message:elements.platformCredentialListStatus.textContent,focused:deleteAction.focused,confirmCalls};
- return {saveDuring,saveAfter,lateAfter,failedSave,cancelled,deleteDuring,deleteAfter,deleteFailed};
+ return {saveDuring,saveAfter,lateAfter,failedSave,cancelled,deleteDuring,deleteAfter,deleteFailed,savePayloads};
 }
 run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{console.error(err);process.exit(1);});
 """
@@ -1030,8 +1034,10 @@ def test_image_capability_has_visible_safe_platform_credential_surface():
         'id="platformCredentialEditor"',
         'id="platformCredentialLabel"',
         'id="platformCredentialSecret"',
+        'id="platformCredentialDefault"',
         '平台凭据',
         '新增独立凭据',
+        '设为该平台默认凭据',
         '使用范围',
     ):
         assert marker in INDEX_HTML
@@ -1285,7 +1291,7 @@ def test_credential_save_delete_sessions_do_not_clobber_newer_drafts(tmp_path):
     result = _run_credential_sessions(tmp_path)
 
     assert result["saveDuring"] == {
-        "editor": [True] * 5,
+        "editor": [True] * 6,
         "add": True,
         "actions": [True, True],
         "busy": "true",
@@ -1322,6 +1328,28 @@ def test_credential_save_delete_sessions_do_not_clobber_newer_drafts(tmp_path):
         "focused": True,
         "confirmCalls": 3,
     }
+    assert result["savePayloads"][0]["default"] is True
+    assert result["savePayloads"][1]["default"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_default_credential_list_badge_and_editor_state_are_rendered(tmp_path):
+    driver = tmp_path / "default-credential-ui.js"
+    driver.write_text(r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const start=source.search(new RegExp('function\\s+'+name+'\\s*\\('));if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),d=1;i++;while(d&&i<source.length){if(source[i]==='{')d++;else if(source[i]==='}')d--;i++;}return source.slice(start,i);}
+function el(tag='div'){return {tagName:tag.toUpperCase(),value:'',checked:false,hidden:false,disabled:false,dataset:{},children:[],attrs:{},textContent:'',className:'',isConnected:true,appendChild(c){this.children.push(c);return c;},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},focus(){this.focused=true;},querySelectorAll(){return [];},set innerHTML(_){this.children=[];}};}
+const ids=['modelConfigPlatformCredentialList','platformCredentialId','platformCredentialLabel','platformCredentialFamily','platformCredentialSecret','platformCredentialDefault','platformCredentialError','platformCredentialListStatus','platformCredentialEditor','btnAddPlatformCredential'];const elements={};ids.forEach(id=>elements[id]=el(id.includes('List')?'div':'input'));
+const $=id=>elements[id]||null;let currentUpdate=null;const document={createElement:tag=>el(tag),querySelector:()=>currentUpdate};const setTimeout=fn=>fn();
+let _modelConfigData={provider_credentials:[{id:'alibaba-default',provider_family:'alibaba_dashscope',label:'共享凭据',configured:true,default:true,used_by:[]}]};let _platformCredentialSaveSession=null,_platformCredentialDeleteSession=null,_platformCredentialReturnCapability='',_platformCredentialReturnFocus=null,_platformCredentialEditorGeneration=0;
+const _credentialUsageLabel=()=>'尚未绑定',_uniqueCredentialId=()=>'',_defaultCredentialId=()=>'',_setFieldError=()=>{},toggleModelConfigSection=()=>{},deletePlatformCredential=()=>{};
+for(const name of ['_renderPlatformCredentials','openPlatformCredentialEditor'])eval(extractFunc(name));
+_renderPlatformCredentials(_modelConfigData);const item=elements.modelConfigPlatformCredentialList.children[0],title=item.children[0].children[0],meta=item.children[0].children[1],update=item.children[1].children[0];currentUpdate=update;update.onclick();
+process.stdout.write(JSON.stringify({badge:title.children[0].textContent,meta:meta.textContent,checked:elements.platformCredentialDefault.checked,expanded:update.attrs['aria-expanded']}));
+""", encoding="utf-8")
+    result = subprocess.run([NODE, str(driver), str(ROOT / "static" / "panels.js")], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"badge": "默认", "meta": "已保存 · 该平台默认凭据 · 使用范围：尚未绑定", "checked": True, "expanded": "true"}
 
 
 def test_vision_verification_has_visible_accessible_status_and_action():
@@ -1576,7 +1604,7 @@ _syncImageCapabilityEndpointFields('vision');
 const initialDirty=_imageCapabilityEndpointValuesChanged('vision');const box=elements.visionConfigEndpointFields;let tenant=box.children[0].children[1],route=box.children[1].children[1];tenant.value='tenant-a';route.value='blue';_syncImageCapabilityEndpointFields('vision');tenant=box.children[0].children[1];route=box.children[1].children[1];
 _captureImageCapabilityProviderDraft('vision','alibaba');tenant.value='';route.value='';_restoreImageCapabilityProviderDraft('vision','alibaba');
 const values=_collectImageCapabilityEndpointValues('vision');
-const before={initialDirty,count:box.children.length,tenantTag:tenant.tagName,tenantOptions:tenant.options.map(o=>o.value),tenantLabel:box.children[0].children[0].textContent,tenantHelp:box.children[0].children[2].textContent,tenantRequired:tenant.required,routeTag:route.tagName,routePlaceholder:route.placeholder,values,knownLabel:elements.visionConfigRegionRow.children[0].textContent,knownRequired:elements.visionConfigRegion.required,knownValues:elements.visionConfigRegion.options.map(o=>o.value),knownTexts:elements.visionConfigRegion.options.map(o=>o.textContent)};
+const knownHelp=elements.visionConfigRegionRow.children.find(c=>c.dataset.endpointHelp);const before={initialDirty,count:box.children.length,tenantTag:tenant.tagName,tenantOptions:tenant.options.map(o=>o.value),tenantLabel:box.children[0].children[0].textContent,tenantHelp:box.children[0].children[2].textContent,tenantRequired:tenant.required,routeTag:route.tagName,routePlaceholder:route.placeholder,values,knownLabel:elements.visionConfigRegionRow.children[0].textContent,knownRequired:elements.visionConfigRegion.required,knownValues:elements.visionConfigRegion.options.map(o=>o.value),knownTexts:elements.visionConfigRegion.options.map(o=>o.textContent),knownHelpId:knownHelp&&knownHelp.id,knownDescribedBy:elements.visionConfigRegion.attrs['aria-describedby']};
 providerRow={id:'alibaba',endpoint_fields:[{name:'region',label:'地域',required:false,options:['cn-beijing']}]};_syncImageCapabilityEndpointFields('vision');before.removed=box.children.length;process.stdout.write(JSON.stringify(before));
 """,
         encoding="utf-8",
@@ -1604,6 +1632,8 @@ providerRow={id:'alibaba',endpoint_fields:[{name:'region',label:'地域',require
         "knownRequired": True,
         "knownValues": ["cn-beijing", "ap-southeast-1"],
         "knownTexts": ["北京", "新加坡"],
+        "knownHelpId": "visionConfigRegionEndpointHelp",
+        "knownDescribedBy": "visionConfigEndpointError visionConfigRegionEndpointHelp",
         "removed": 0,
     }
 

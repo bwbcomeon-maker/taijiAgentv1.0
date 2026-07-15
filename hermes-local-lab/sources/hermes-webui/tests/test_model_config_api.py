@@ -70,7 +70,7 @@ def test_active_profile_name_uses_real_profile_api(monkeypatch):
 
 
 def test_provider_credential_secret_stays_out_of_yaml_and_public_response(monkeypatch, tmp_path):
-    _use_home(monkeypatch, tmp_path)
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.delenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", raising=False)
     (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=legacy-key\n", encoding="utf-8")
 
@@ -462,6 +462,113 @@ def test_image_schema_endpoint_fields_are_saved_as_options(monkeypatch, tmp_path
     )
 
     assert _read_config(tmp_path)["image_gen"]["options"] == {"tenant": "tenant-a", "route": "blue"}
+
+
+def test_image_endpoint_values_round_trip_unknown_schema_fields(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    provider = {
+        "id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable",
+        "default_model": "m", "models": [{"id": "m"}], "credential_fields": [],
+        "endpoint_fields": [
+            {"name": "tenant", "required": True, "secret": False},
+            {"name": "route", "required": False, "secret": False},
+            {"name": "unsafe_token", "required": False, "secret": True},
+        ],
+    }
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [provider])
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"tenant": "tenant-a", "route": "green", "unsafe_token": "must-not-echo"}})
+
+    result = model_config.get_image_gen_config()
+
+    assert result["image_gen"]["endpoint_values"] == {"tenant": "tenant-a", "route": "green"}
+    assert "must-not-echo" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_endpoint_ownership_cleans_stale_fields_without_deleting_unowned_options(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    base = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "m", "models": [{"id": "m"}], "credential_fields": []}
+    active = {"row": dict(base, endpoint_fields=[{"name": "tenant", "required": False, "secret": False}, {"name": "route", "required": False, "secret": False}])}
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [active["row"]])
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"tenant": "a", "route": "blue"}})
+    saved = _read_config(tmp_path)
+    saved["image_gen"]["options"]["temperature"] = "0.3"
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(saved), encoding="utf-8")
+    active["row"] = dict(base, endpoint_fields=[{"name": "region", "required": False, "secret": False}])
+
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"region": "cn-beijing"}})
+    image = _read_config(tmp_path)["image_gen"]
+
+    assert image["options"] == {"temperature": "0.3", "region": "cn-beijing"}
+    assert image["endpoint_field_names"] == ["region"]
+
+
+def test_vision_endpoint_ownership_preserves_unowned_fields(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    meta = dict(model_config._VISION_PROVIDER_META["alibaba"])
+    meta["endpoint_fields"] = [{"name": "tenant", "required": False, "secret": False}]
+    monkeypatch.setitem(model_config._VISION_PROVIDER_META, "alibaba", meta)
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({"auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus", "tenant": "old", "route": "stale", "endpoint_field_names": ["tenant", "route"], "temperature": "0.2"}}}), encoding="utf-8")
+
+    model_config.set_vision_config({"provider": "alibaba", "model": "qwen3-vl-plus", "tenant": "new"})
+    vision = _read_config(tmp_path)["auxiliary"]["vision"]
+
+    assert vision["tenant"] == "new"
+    assert "route" not in vision
+    assert vision["temperature"] == "0.2"
+    assert vision["endpoint_field_names"] == ["tenant"]
+
+
+def test_endpoint_cleanup_rolls_back_when_yaml_save_fails(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    original = {"image_gen": {"provider": "dashscope", "model": "m", "endpoint_field_names": ["tenant"], "options": {"tenant": "old", "temperature": "0.4"}}}
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(original), encoding="utf-8")
+    provider = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "m", "models": [{"id": "m"}], "credential_fields": [], "endpoint_fields": [{"name": "region", "required": False, "secret": False}]}
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [provider])
+    original_save = model_config._save_yaml_config_file
+    failed = {"value": False}
+
+    def partial_save_then_fail(path, data):
+        original_save(path, data)
+        if not failed["value"]:
+            failed["value"] = True
+            raise OSError("disk full")
+
+    monkeypatch.setattr(model_config, "_save_yaml_config_file", partial_save_then_fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"region": "cn-beijing"}})
+
+    assert _read_config(tmp_path) == original
+
+
+def test_concurrent_default_unset_cannot_be_followed_by_stale_lazy_binding(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential({"id": "alibaba-default", "provider": "alibaba", "api_key": "named-secret", "default": True})
+    before_unset_save = threading.Event()
+    release_unset = threading.Event()
+    original_save = model_config._save_yaml_config_file
+
+    def pause_before_unset_save(path, data):
+        rows = data.get("provider_credentials") if isinstance(data, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows else {}
+        if row.get("id") == "alibaba-default" and not row.get("default"):
+            before_unset_save.set()
+            assert release_unset.wait(timeout=3)
+        return original_save(path, data)
+
+    monkeypatch.setattr(model_config, "_save_yaml_config_file", pause_before_unset_save)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        unset = pool.submit(model_config.upsert_provider_credential, {"id": "alibaba-default", "provider": "alibaba", "default": False})
+        assert before_unset_save.wait(timeout=2)
+        bind = pool.submit(model_config.set_vision_config, {"provider": "alibaba", "model": "qwen3-vl-plus"})
+        time.sleep(0.1)
+        release_unset.set()
+        unset.result(timeout=3)
+        bind.result(timeout=3)
+
+    saved = _read_config(tmp_path)
+    assert saved["provider_credentials"][0].get("default") is not True
+    assert saved["auxiliary"]["vision"].get("credential_ref", "") == ""
 
 
 def test_lazy_default_binding_rolls_back_when_config_save_fails(monkeypatch, tmp_path):
@@ -1371,8 +1478,8 @@ def test_alibaba_vision_config_persists_named_credential_and_beijing_endpoint(mo
         "credential_ref": "alibaba-default",
         "endpoint_mode": "public",
         "region": "cn-beijing",
-        "workspace_id": "",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "endpoint_field_names": ["base_url", "endpoint_mode", "region", "workspace_id"],
     }
     assert result["vision"]["credential_ref"] == "alibaba-default"
     assert result["vision"]["endpoint_mode"] == "public"

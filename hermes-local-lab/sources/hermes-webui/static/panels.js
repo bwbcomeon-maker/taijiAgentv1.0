@@ -8521,8 +8521,9 @@ function _renderPlatformCredentials(data){
   copy.className='model-config-platform-credential-copy';
   const title=document.createElement('strong');
   title.textContent=String(row.label||row.id||'未命名凭据');
+  if(row.default){const badge=document.createElement('span');badge.className='model-config-default-badge';badge.textContent='默认';title.appendChild(badge);}
   const meta=document.createElement('span');
-  meta.textContent=(row.configured?'已保存':'待填写')+' · 使用范围：'+_credentialUsageLabel(row.used_by);
+  meta.textContent=(row.configured?'已保存':'待填写')+(row.default?' · 该平台默认凭据':'')+' · 使用范围：'+_credentialUsageLabel(row.used_by);
   copy.appendChild(title);
   copy.appendChild(meta);
   const actions=document.createElement('div');
@@ -8647,6 +8648,7 @@ function openPlatformCredentialEditor(credentialId,returnCapability,returnFocus)
  const label=$('platformCredentialLabel');
  const family=$('platformCredentialFamily');
  const secret=$('platformCredentialSecret');
+ const defaultInput=$('platformCredentialDefault');
  if(id) id.value=String((row&&row.id)||_uniqueCredentialId(_defaultCredentialId(_platformCredentialReturnCapability)));
  if(label) label.value=String((row&&row.label)||'');
  if(family){
@@ -8654,7 +8656,8 @@ function openPlatformCredentialEditor(credentialId,returnCapability,returnFocus)
   family.disabled=!!row;
  }
  if(secret) secret.value='';
- _setFieldError('platformCredentialError','',['platformCredentialLabel','platformCredentialFamily','platformCredentialSecret']);
+ if(defaultInput) defaultInput.checked=!!(row&&row.default);
+ _setFieldError('platformCredentialError','',['platformCredentialLabel','platformCredentialFamily','platformCredentialSecret','platformCredentialDefault']);
  _setFieldError('platformCredentialListStatus','',[]);
  toggleModelConfigSection('platformCredentialEditor',true);
  const add=$('btnAddPlatformCredential');
@@ -8683,10 +8686,11 @@ async function savePlatformCredential(){
  const id=(($('platformCredentialId')||{}).value||'').trim();
  const label=(($('platformCredentialLabel')||{}).value||'').trim();
  const providerFamily=(($('platformCredentialFamily')||{}).value||'').trim();
+ const makeDefault=!!(($('platformCredentialDefault')||{}).checked);
  const secretInput=$('platformCredentialSecret');
  const apiKey=String((secretInput&&secretInput.value)||'').trim();
  if(_platformCredentialSaveSession||_platformCredentialDeleteSession) return;
- _setFieldError('platformCredentialError','',['platformCredentialLabel','platformCredentialFamily','platformCredentialSecret']);
+ _setFieldError('platformCredentialError','',['platformCredentialLabel','platformCredentialFamily','platformCredentialSecret','platformCredentialDefault']);
  if(!id||!label||!providerFamily){
   _setFieldError('platformCredentialError','请完整填写凭据名称和平台。',['platformCredentialLabel','platformCredentialFamily']);
   return;
@@ -8703,7 +8707,7 @@ async function savePlatformCredential(){
  _platformCredentialSaveSession=session;
  _setPlatformCredentialActionsBusy(true);
  try{
-  const payload={id,label,provider_family:providerFamily,auth_type:'api_key'};
+  const payload={id,label,provider_family:providerFamily,auth_type:'api_key',default:makeDefault};
   if(apiKey) payload.api_key=apiKey;
   const result=await api('/api/provider-credentials',{method:'POST',body:JSON.stringify(payload)});
   if(!_platformCredentialSessionIsCurrent(session)) return;
@@ -8725,7 +8729,7 @@ async function savePlatformCredential(){
   if(typeof showToast==='function') showToast('平台凭据已保存');
  }catch(e){
   if(!_platformCredentialSessionIsCurrent(session)) return;
-  _setFieldError('platformCredentialError','凭据保存失败：'+(e.message||e),['platformCredentialSecret']);
+  _setFieldError('platformCredentialError','凭据保存失败：'+(e.message||e),['platformCredentialSecret','platformCredentialDefault']);
   if(typeof showToast==='function') showToast('凭据保存失败',5000,'error');
  }finally{
   if(_platformCredentialSaveSession===session){
@@ -8803,7 +8807,7 @@ function _renderCapabilityCredentialOptions(capability,providerId,currentRef){
  rows.filter(row=>String(row&&row.provider_family||'')===family).forEach(row=>{
   const opt=document.createElement('option');
   opt.value=String(row.id||'');
-  opt.textContent=String(row.label||row.id||'')+(row.configured?' · 已保存':' · 待填写');
+  opt.textContent=String(row.label||row.id||'')+(row.default?' · 默认':'')+(row.configured?' · 已保存':' · 待填写');
   select.appendChild(opt);
  });
  const independent=document.createElement('option');
@@ -8920,7 +8924,18 @@ function _applyEndpointFieldMetadata(capability,field,row,control){
  if(row&&field.description&&!help){
   help=document.createElement('div');help.className='model-config-hint';help.dataset.endpointHelp='true';row.appendChild(help);
  }
- if(help) help.textContent=String(field.description||'');
+ const described=String((control.getAttribute?control.getAttribute('aria-describedby'):(control.attrs&&control.attrs['aria-describedby']))||'')
+  .split(/\s+/).filter(id=>id&&!id.endsWith('EndpointHelp'));
+ const errorId=(capability==='vision'?'visionConfig':'imageGenConfig')+'EndpointError';
+ if(!described.includes(errorId)) described.push(errorId);
+ if(help&&field.description){
+  help.id=String(control.id||_endpointFieldInputId(capability,name))+'EndpointHelp';
+  help.textContent=String(field.description);described.push(help.id);
+ }else if(help){
+  if(help.remove) help.remove();else{help.textContent='';help.hidden=true;delete help.dataset.endpointHelp;}
+ }
+ if(described.length) control.setAttribute('aria-describedby',described.join(' '));
+ else control.removeAttribute('aria-describedby');
 }
 
 function _imageCapabilityEndpointSavedValues(capability){
@@ -8929,7 +8944,9 @@ function _imageCapabilityEndpointSavedValues(capability){
   return vision.endpoint_values&&typeof vision.endpoint_values==='object'
    ?vision.endpoint_values:vision;
  }
- return (((_modelConfigData&&_modelConfigData.image_gen)||{}).options||{});
+ const imageGen=(_modelConfigData&&_modelConfigData.image_gen)||{};
+ return imageGen.endpoint_values&&typeof imageGen.endpoint_values==='object'
+  ?imageGen.endpoint_values:(imageGen.options||{});
 }
 
 function _imageCapabilityEndpointValuesChanged(capability){
@@ -8951,6 +8968,12 @@ function _renderImageCapabilityEndpointSchema(capability,providerRow){
   if(!known||!known.control) return;
   known.control.removeAttribute('data-endpoint-field');
   known.control.removeAttribute('data-endpoint-capability');
+  const described=String((known.control.getAttribute?known.control.getAttribute('aria-describedby'):(known.control.attrs&&known.control.attrs['aria-describedby']))||'')
+   .split(/\s+/).filter(id=>id&&!id.endsWith('EndpointHelp'));
+  if(described.length) known.control.setAttribute('aria-describedby',described.join(' '));
+  else known.control.removeAttribute('aria-describedby');
+  const help=known.row&&known.row.querySelector?known.row.querySelector('[data-endpoint-help]'):null;
+  if(help){if(help.remove)help.remove();else{help.textContent='';help.hidden=true;delete help.dataset.endpointHelp;}}
   delete known.control.dataset.endpointField;delete known.control.dataset.endpointCapability;
   known.control.required=false;
  });
@@ -10275,7 +10298,8 @@ function _platformCredentialEditorHasUnsavedChanges(){
   ?_modelConfigData.provider_credentials.find(item=>String(item&&item.id||'')===id):null;
  return !!String((($('platformCredentialSecret')||{}).value)||'').trim()
   || String((($('platformCredentialLabel')||{}).value)||'').trim()!==String(row&&row.label||'').trim()
-  || String((($('platformCredentialFamily')||{}).value)||'').trim()!==String(row&&row.provider_family||'').trim();
+  || String((($('platformCredentialFamily')||{}).value)||'').trim()!==String(row&&row.provider_family||'').trim()
+  || !!(($('platformCredentialDefault')||{}).checked)!==!!(row&&row.default);
 }
 
 function _imageGenCredentialDraftHasValues(){
@@ -10314,6 +10338,7 @@ function _modelConfigDraftIdentity(){
   'imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl',
   'platformCredentialId','platformCredentialLabel','platformCredentialFamily','platformCredentialSecret'];
  const values=ids.map(id=>String((($(id)||{}).value)||''));
+ values.push('platform-default='+String(!!(($('platformCredentialDefault')||{}).checked)));
  document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
   values.push(String(input.dataset.imageGenCredential||'')+'='+String(input.value||''));
  });

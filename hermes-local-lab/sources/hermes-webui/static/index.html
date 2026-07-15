@@ -1502,6 +1502,13 @@
                         </div>
                         <div class="model-config-hint" id="platformCredentialSecretHint">密钥只保存在本机，页面不会回显。</div>
                       </div>
+                      <div class="model-config-field model-config-checkbox-field">
+                        <label for="platformCredentialDefault">
+                          <input id="platformCredentialDefault" type="checkbox" aria-describedby="platformCredentialDefaultHint platformCredentialError">
+                          <span>设为该平台默认凭据</span>
+                        </label>
+                        <div class="model-config-hint" id="platformCredentialDefaultHint">未显式选择凭据时，识图和生图会使用该平台唯一的默认凭据。</div>
+                      </div>
                       <p class="model-config-field-error" id="platformCredentialError" aria-live="polite"></p>
                       <div class="model-config-actions">
                         <button class="sm-btn" id="btnSavePlatformCredential" type="button" onclick="savePlatformCredential()">保存凭据</button>
