@@ -1680,6 +1680,36 @@ def test_alibaba_single_key_configures_public_vision_and_image_atomically(
             "diagnostic_id": "",
         },
     }
+    public_dump = json.dumps(result, ensure_ascii=False)
+    assert "single-test-key" not in public_dump
+    assert "secret_env" not in public_dump
+    reserved = next(
+        row
+        for row in result["provider_credentials"]
+        if row["id"] == "taiji-alibaba-quick"
+    )
+    assert reserved["configured"] is True
+    assert set(reserved["used_by"]) == {"auxiliary.vision", "image_gen"}
+    assert "secret_env" not in reserved
+    vision_provider = next(
+        row for row in result["vision_providers"] if row["id"] == "alibaba"
+    )
+    assert vision_provider["key_status"]["configured"] is True
+    assert {row["id"] for row in vision_provider["models"]} == {
+        "qwen3-vl-plus",
+        "qwen3-vl-flash",
+        "qwen2.5-vl-72b-instruct",
+    }
+    image_provider = next(
+        row
+        for row in result["image_gen_providers"]
+        if row["id"] == "dashscope"
+    )
+    assert image_provider["key_status"]["configured"] is True
+    assert {row["id"] for row in image_provider["models"]} == {
+        "qwen-image-2.0-pro",
+        "qwen-image",
+    }
     assert vision_invalidations == [True]
     assert image_invalidations == [True]
 
@@ -1886,6 +1916,67 @@ def test_alibaba_single_key_reports_refresh_pending_after_committed_save(
         "taiji-alibaba-quick"
     )
     assert saved["image_gen"]["credential_ref"] == "taiji-alibaba-quick"
+
+
+def test_alibaba_single_key_public_metadata_failure_uses_safe_fallback(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(
+        model_config,
+        "get_provider_credentials_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("metadata failed")),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_vision_provider_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("vision metadata failed")
+        ),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("image metadata failed")
+        ),
+    )
+
+    result = model_config.set_alibaba_image_capabilities(
+        {
+            "api_key": "fallback-test-key",
+            "vision_model": "qwen3-vl-plus",
+            "image_model": "qwen-image-2.0-pro",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["refresh_pending"] is True
+    assert set(result["warnings"]) == {
+        "provider_credentials_refresh_pending",
+        "vision_provider_metadata_refresh_pending",
+        "image_gen_provider_metadata_refresh_pending",
+    }
+    assert result["provider_credentials"] == [
+        {
+            "id": "taiji-alibaba-quick",
+            "provider_family": "alibaba_dashscope",
+            "label": "阿里百炼快速配置",
+            "auth_type": "api_key",
+            "default": False,
+            "configured": True,
+            "used_by": ["auxiliary.vision", "image_gen"],
+        }
+    ]
+    assert result["vision_providers"][0]["id"] == "alibaba"
+    assert result["vision_providers"][0]["key_status"]["configured"] is True
+    assert len(result["vision_providers"][0]["models"]) == 3
+    assert result["image_gen_providers"][0]["id"] == "dashscope"
+    assert result["image_gen_providers"][0]["key_status"]["configured"] is True
+    assert len(result["image_gen_providers"][0]["models"]) == 2
+    public_dump = json.dumps(result, ensure_ascii=False)
+    assert "fallback-test-key" not in public_dump
+    assert "secret_env" not in public_dump
 
 
 def test_alibaba_vision_config_rejects_model_outside_server_allowlist(monkeypatch, tmp_path):

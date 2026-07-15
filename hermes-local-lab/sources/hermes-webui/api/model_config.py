@@ -2633,6 +2633,86 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
             },
         },
     }
+
+    fallback_credentials = [
+        {
+            "id": _ALIBABA_QUICK_CREDENTIAL_ID,
+            "provider_family": "alibaba_dashscope",
+            "label": "阿里百炼快速配置",
+            "auth_type": "api_key",
+            "default": False,
+            "configured": bool(key_status.get("configured")),
+            "used_by": ["auxiliary.vision", "image_gen"],
+        }
+    ]
+    vision_meta = _VISION_PROVIDER_META["alibaba"]
+    fallback_vision_providers = [
+        {
+            "id": "alibaba",
+            "name": str(vision_meta.get("name") or "阿里百炼 Qwen-VL"),
+            "description": str(vision_meta.get("description") or ""),
+            "active": True,
+            "available": False,
+            "key_status": dict(key_status),
+            "models": list(vision_meta.get("models") or []),
+            "default_model": str(vision_meta.get("default_model") or ""),
+        }
+    ]
+    image_meta = _IMAGE_GEN_FALLBACK_META["dashscope"]
+    fallback_image_gen_providers = [
+        {
+            "id": "dashscope",
+            "name": str(image_meta.get("name") or "通义 Qwen-Image"),
+            "active": True,
+            "available": False,
+            "can_attempt": bool(key_status.get("configured")),
+            "key_status": dict(key_status),
+            "models": list(image_meta.get("models") or []),
+            "default_model": str(image_meta.get("default_model") or ""),
+        }
+    ]
+
+    try:
+        credential_payload = get_provider_credentials_config()
+        credential_rows = credential_payload.get("credentials")
+        if not isinstance(credential_rows, list) or not any(
+            isinstance(row, dict)
+            and row.get("id") == _ALIBABA_QUICK_CREDENTIAL_ID
+            for row in credential_rows
+        ):
+            raise ValueError("reserved credential metadata is unavailable")
+        response["provider_credentials"] = credential_rows
+    except Exception:
+        logger.warning("Alibaba quick setup credential metadata refresh failed")
+        warnings.append("provider_credentials_refresh_pending")
+        response["provider_credentials"] = fallback_credentials
+
+    try:
+        vision_provider_rows = _vision_provider_rows("alibaba", vision_cfg)
+        if not isinstance(vision_provider_rows, list) or not any(
+            isinstance(row, dict) and row.get("id") == "alibaba"
+            for row in vision_provider_rows
+        ):
+            raise ValueError("Alibaba vision provider metadata is unavailable")
+        response["vision_providers"] = vision_provider_rows
+    except Exception:
+        logger.warning("Alibaba quick setup vision provider metadata refresh failed")
+        warnings.append("vision_provider_metadata_refresh_pending")
+        response["vision_providers"] = fallback_vision_providers
+
+    try:
+        image_provider_rows = _image_gen_provider_rows("dashscope")
+        if not isinstance(image_provider_rows, list) or not any(
+            isinstance(row, dict) and row.get("id") == "dashscope"
+            for row in image_provider_rows
+        ):
+            raise ValueError("DashScope image provider metadata is unavailable")
+        response["image_gen_providers"] = image_provider_rows
+    except Exception:
+        logger.warning("Alibaba quick setup image provider metadata refresh failed")
+        warnings.append("image_gen_provider_metadata_refresh_pending")
+        response["image_gen_providers"] = fallback_image_gen_providers
+
     if warnings:
         response["refresh_pending"] = True
         response["warnings"] = warnings
