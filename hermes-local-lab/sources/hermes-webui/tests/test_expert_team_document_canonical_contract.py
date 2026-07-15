@@ -96,6 +96,7 @@ def test_canonical_snapshot_is_exact_normalized_artifact_projection(tmp_path):
     [
         ("# 错误标题\n\n正文。\n", "title_mismatch"),
         (f"# {TITLE}\n\n本阶段由负责专家完成 Stage 4 复核交付。\n", "workflow_text_leaked"),
+        (f"# {TITLE}\n\n## 工作开展情况\n\n待补充。\n", "placeholder_detected"),
     ],
 )
 def test_semantic_gates_reject_title_drift_and_workflow_language(tmp_path, markdown, code):
@@ -111,6 +112,70 @@ def test_semantic_gates_reject_title_drift_and_workflow_language(tmp_path, markd
 
     assert report["status"] == "failed"
     assert code in {issue["code"] for issue in report["issues"]}
+
+
+def test_semantic_gates_reject_document_type_drift_and_unsupported_claims(tmp_path):
+    from api.expert_teams.documents import write_semantic_gates_snapshot
+
+    brief = _brief()
+    artifact = _artifact()
+    artifact["payload"] = {
+        "document_type": "research_report",
+        "review_report": {"unsupported_claim_ids": ["claim-9"]},
+    }
+    report = write_semantic_gates_snapshot(
+        tmp_path,
+        brief=brief,
+        artifact=artifact,
+        approved_inputs=[],
+    )
+
+    issues = {item["code"]: item for item in report["issues"]}
+    assert report["semantic_status"] == "failed"
+    assert report["evidence_status"] == "failed"
+    assert issues["document_type_mismatch"]["issue_id"].startswith("semantic:document_type_mismatch:")
+    assert issues["unsupported_claim"]["target_id"] == "claim:claim-9"
+
+
+def test_layered_quality_report_has_seven_independent_hash_bound_statuses(tmp_path):
+    from api.expert_teams.documents import write_layered_quality_report
+
+    report, path = write_layered_quality_report(
+        tmp_path,
+        semantic_gates={
+            "brief_status": "passed",
+            "semantic_status": "passed",
+            "evidence_status": "passed",
+            "issues": [],
+        },
+        automatic_quality={
+            "schemaVersion": "docx-engine-v2/automatic-quality-v1",
+            "assetStatus": "passed",
+            "renderStatus": "passed_with_warnings",
+            "issues": [{
+                "issueId": "automatic:render:template_markers:123456789abc",
+                "code": "template_markers",
+                "severity": "warning",
+                "completionBlocking": True,
+                "message": "marker warning",
+            }],
+        },
+    )
+
+    assert path.is_file()
+    assert report["statuses"] == {
+        "brief": "passed",
+        "semantic": "passed",
+        "evidence": "passed",
+        "asset": "passed",
+        "render": "passed_with_warnings",
+        "office": "pending",
+        "delivery": "pending",
+    }
+    assert report["status"] == "blocked"
+    assert report["report_sha256"] == __import__("hashlib").sha256(
+        json.dumps({key: value for key, value in report.items() if key != "report_sha256"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def test_render_binding_contains_pre_office_identity_and_no_future_acceptance(tmp_path):
@@ -132,7 +197,15 @@ def test_render_binding_contains_pre_office_identity_and_no_future_acceptance(tm
     quality = tmp_path / "delivery" / "quality-report.json"
     document.parent.mkdir(parents=True)
     document.write_bytes(b"PK\x03\x04canonical-docx")
-    quality.write_text('{"status":"passed"}\n', encoding="utf-8")
+    quality.write_text(json.dumps({
+        "status": "passed",
+        "automaticQuality": {
+            "schemaVersion": "docx-engine-v2/automatic-quality-v1",
+            "assetStatus": "passed",
+            "renderStatus": "passed",
+            "issues": [],
+        },
+    }) + "\n", encoding="utf-8")
     render_input = build_render_input_binding(
         brief=brief,
         artifact=artifact,
@@ -166,6 +239,7 @@ def test_render_binding_contains_pre_office_identity_and_no_future_acceptance(tm
     assert binding["stage_attempt"] == 4
     assert binding["delivery_attempt"] == 2
     assert binding["document_revision"] == 1
+    assert binding["layered_quality_report"]["path"] == "reviews/enterprise-quality-report.json"
     assert "acceptance_sha256" not in json.dumps(binding)
 
     changed_renderer = _renderer("2.0.1")

@@ -43,6 +43,33 @@ const CHECK_IDS = [
   'wps_visual',
 ];
 
+const ASSET_CHECK_IDS = new Set([
+  'asset_semantics',
+  'logical_figure_identity',
+  'image_coverage',
+  'figure_dimensions',
+  'table_coverage',
+  'table_content',
+  'image_instructions',
+]);
+const RENDER_CHECK_IDS = new Set([
+  'schema',
+  'source_original',
+  'source_replay',
+  'docx_zip',
+  'docx_xml',
+  'footer_portability',
+  'cover_layout',
+  'template_markers',
+  'table_placement',
+  'table_caption',
+  'block_order',
+  'figure_id_metadata',
+  'figure_placement',
+  'figure_caption',
+  'delivery_files',
+]);
+
 const REQUIRED_ENTRIES = [
   'document.docx',
   'delivery-package.json',
@@ -1852,7 +1879,7 @@ function addFigureDimensionsCheck({ addCheck, documentXml, renderPlan }) {
 
   const images = renderPlan.templateData?.images || [];
   if (images.length === 0) {
-    addCheck('figure_dimensions', 'passed_with_warnings', 'No images were present in render-plan.json.');
+    addCheck('figure_dimensions', 'passed', 'No images were present; this check is not applicable.');
     return;
   }
 
@@ -2141,7 +2168,7 @@ function addTableContentCheck({ addCheck, documentXml, sourcePackage, assetPacka
 
   const tables = sourcePackage.tables || [];
   if (tables.length === 0) {
-    addCheck('table_content', 'passed_with_warnings', 'No tables were present in source-package.json.');
+    addCheck('table_content', 'passed', 'No tables were present; this check is not applicable.');
     return;
   }
 
@@ -2170,7 +2197,7 @@ function addTablePlacementCheck({ addCheck, documentXml, renderPlan }) {
 
   const tables = renderPlan.tables || [];
   if (tables.length === 0) {
-    addCheck('table_placement', 'passed_with_warnings', 'No tables were present in render-plan.json.');
+    addCheck('table_placement', 'passed', 'No tables were present; this check is not applicable.');
     return;
   }
 
@@ -2199,7 +2226,7 @@ function addTableCaptionCheck({ addCheck, documentXml, renderPlan }) {
 
   const tables = renderPlan.tables || [];
   if (tables.length === 0) {
-    addCheck('table_caption', 'passed_with_warnings', 'No tables were present in render-plan.json.');
+    addCheck('table_caption', 'passed', 'No tables were present; this check is not applicable.');
     return;
   }
 
@@ -2251,7 +2278,7 @@ function addFigureIdMetadataCheck({ addCheck, documentXml, renderPlan }) {
 
   const figureIds = collectFigureIds(renderPlan);
   if (figureIds.length === 0) {
-    addCheck('figure_id_metadata', 'passed_with_warnings', 'No figures or images were present in render-plan.json.');
+    addCheck('figure_id_metadata', 'passed', 'No figures were present; this check is not applicable.');
     return;
   }
 
@@ -2291,7 +2318,7 @@ function addFigurePlacementCheck({ addCheck, documentXml, renderPlan }) {
 
   const images = renderPlan.templateData?.images || [];
   if (images.length === 0) {
-    addCheck('figure_placement', 'passed_with_warnings', 'No images were present in render-plan.json.');
+    addCheck('figure_placement', 'passed', 'No images were present; this check is not applicable.');
     return;
   }
 
@@ -2320,7 +2347,7 @@ function addFigureCaptionCheck({ addCheck, documentXml, renderPlan }) {
 
   const images = renderPlan.templateData?.images || [];
   if (images.length === 0) {
-    addCheck('figure_caption', 'passed_with_warnings', 'No images were present in render-plan.json.');
+    addCheck('figure_caption', 'passed', 'No images were present; this check is not applicable.');
     return;
   }
 
@@ -3188,9 +3215,55 @@ function buildReport(checksById, warnings, failures) {
     schemaVersion: 'docx-engine-v2/validation-report',
     status,
     checks,
+    automaticQuality: buildAutomaticQuality(checks),
     warnings: uniqueStrings(warnings),
     failures: uniqueStrings(failures),
   };
+}
+
+function buildAutomaticQuality(checks = []) {
+  const relevantChecks = (checks || []).filter(
+    (check) => ASSET_CHECK_IDS.has(check.id) || RENDER_CHECK_IDS.has(check.id)
+  );
+  const issues = [];
+  for (const check of relevantChecks) {
+    if (check.status === 'passed') {
+      continue;
+    }
+    const domain = ASSET_CHECK_IDS.has(check.id) ? 'asset' : 'render';
+    const typedIssues = Array.isArray(check.issues) && check.issues.length > 0
+      ? check.issues
+      : [{ code: check.id, message: check.message || `${check.id} ${check.status}` }];
+    for (const issue of typedIssues) {
+      const code = String(issue.code || check.id);
+      const message = String(issue.message || check.message || `${check.id} ${check.status}`);
+      const target = JSON.stringify({ code, domain, issue, message });
+      issues.push({
+        issueId: `automatic:${domain}:${code}:${crypto.createHash('sha256').update(target).digest('hex').slice(0, 12)}`,
+        code,
+        domain,
+        severity: check.status === 'failed' ? 'blocking' : 'warning',
+        completionBlocking: true,
+        message,
+      });
+    }
+  }
+  return {
+    schemaVersion: 'docx-engine-v2/automatic-quality-v1',
+    assetStatus: automaticDomainStatus(relevantChecks.filter((check) => ASSET_CHECK_IDS.has(check.id))),
+    renderStatus: automaticDomainStatus(relevantChecks.filter((check) => RENDER_CHECK_IDS.has(check.id))),
+    issues: issues.sort((left, right) => left.issueId.localeCompare(right.issueId)),
+  };
+}
+
+function automaticDomainStatus(checks) {
+  if (checks.some((check) => check.status === 'failed')) {
+    return 'failed';
+  }
+  if (checks.some((check) => check.status === 'passed_with_warnings' || check.status === 'not_verified')) {
+    return 'passed_with_warnings';
+  }
+  return 'passed';
 }
 
 function normalizeWpsStatus(status) {
@@ -3286,4 +3359,4 @@ function readZipEntries(filePath) {
   return readZipEntriesFromBuffer(fs.readFileSync(filePath));
 }
 
-module.exports = { logicalFigureIdentityIssues, validateDeliveryPackage };
+module.exports = { buildAutomaticQuality, logicalFigureIdentityIssues, validateDeliveryPackage };

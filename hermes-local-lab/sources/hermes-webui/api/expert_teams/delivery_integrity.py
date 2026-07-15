@@ -312,6 +312,7 @@ def validated_binding_for_identity(workspace: Path, identity: dict) -> dict:
             ("canonical_markdown", "canonical/document.md"),
             ("asset_manifest", "assets/asset-manifest.json"),
             ("semantic_gates", "reviews/semantic-gates.json"),
+            ("layered_quality_report", "reviews/enterprise-quality-report.json"),
             ("document", "delivery/document.docx"),
             ("automatic_quality_report", "delivery/quality-report.json"),
         )
@@ -569,7 +570,13 @@ def delivery_digest_set(
                 raise DeliveryIntegrityError(f"expert-team delivery snapshot contains a non-regular file: {child}")
             candidates.append(child)
     if enterprise:
-        for relative in ("brief.json", "canonical/artifact.json", "assets/asset-manifest.json", "reviews/semantic-gates.json"):
+        for relative in (
+            "brief.json",
+            "canonical/artifact.json",
+            "assets/asset-manifest.json",
+            "reviews/semantic-gates.json",
+            "reviews/enterprise-quality-report.json",
+        ):
             child = attempt_root / relative
             if path_contains_symlink(root, child) or not child.is_file():
                 raise DeliveryIntegrityError(f"enterprise delivery snapshot is missing {relative}")

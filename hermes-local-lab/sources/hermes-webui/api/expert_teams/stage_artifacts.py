@@ -593,6 +593,23 @@ def document_purity_issues(markdown):
     return issues
 
 
+def unresolved_quality_issues(artifact):
+    """Project model-produced stage issues into stable, non-waivable upstream targets."""
+
+    result = []
+    for issue in artifact.get("blocking_issues") or []:
+        if not isinstance(issue, dict) or issue.get("severity") not in {"blocking", "error", "warning"}:
+            continue
+        result.append(
+            {
+                "code": "upstream_stage_issue",
+                "target_id": f"stage-issue:{issue.get('issue_id') or 'unknown'}",
+                "message": str(issue.get("message") or "阶段产物仍有未解决问题"),
+            }
+        )
+    return result
+
+
 def artifact_digest(artifact):
     payload = {key: value for key, value in artifact.items() if key != "sha256"}
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

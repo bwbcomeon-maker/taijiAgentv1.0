@@ -19,6 +19,7 @@ const { createDocumentJob, transitionJob } = require('../src/domain/document-job
 const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
 const {
+  buildAutomaticQuality,
   logicalFigureIdentityIssues,
   validateDeliveryPackage,
 } = require('../src/validation/validate-delivery-package');
@@ -348,6 +349,23 @@ test('logical figure identity reports a typed issue instead of silently deleting
       figureIds: ['fig-001', 'fig-002'],
     },
   ]);
+});
+
+test('automatic quality separates asset and render status with stable blocking targets', () => {
+  const quality = buildAutomaticQuality([
+    { id: 'logical_figure_identity', status: 'passed_with_warnings', message: 'duplicate occurrence' },
+    { id: 'docx_xml', status: 'passed' },
+    { id: 'template_markers', status: 'failed', message: 'template marker remains' },
+    { id: 'wps_visual', status: 'not_verified', message: 'manual gate pending' },
+  ]);
+
+  assert.equal(quality.schemaVersion, 'docx-engine-v2/automatic-quality-v1');
+  assert.equal(quality.assetStatus, 'passed_with_warnings');
+  assert.equal(quality.renderStatus, 'failed');
+  assert.equal(quality.issues.length, 2);
+  assert.match(quality.issues[0].issueId, /^automatic:/);
+  assert.ok(quality.issues.every((issue) => issue.completionBlocking === true));
+  assert.equal(quality.issues.some((issue) => issue.code === 'wps_visual'), false);
 });
 
 test('equal image digests with different logical ids are reported as suspected duplicates', () => {

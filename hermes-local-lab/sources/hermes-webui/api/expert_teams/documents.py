@@ -133,7 +133,8 @@ def write_semantic_gates_snapshot(
 ) -> dict:
     """Evaluate enterprise semantics once and persist an immutable upstream report."""
 
-    del approved_inputs  # Evidence details are expanded in the layered-quality task.
+    from .stage_artifacts import unresolved_quality_issues
+
     markdown = _normalized_markdown(artifact.get("deliverable_markdown"))
     headings = re.findall(r"(?m)^#\s+(.+?)\s*$", markdown)
     issues = []
@@ -141,15 +142,42 @@ def write_semantic_gates_snapshot(
         issues.append(_semantic_issue("title_mismatch", "document:h1", "正文唯一 H1 与确认标题不一致"))
     if artifact.get("artifact_type") not in {"reviewed_document", "reviewed_research_document"}:
         issues.append(_semantic_issue("document_type_mismatch", "artifact:type", "交付正文不是已复核文档"))
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    payload_document_type = str(payload.get("document_type") or "").strip()
+    if payload_document_type and payload_document_type != str(brief.get("document_type") or ""):
+        issues.append(_semantic_issue("document_type_mismatch", "payload:document_type", "正文文种与确认 Brief 不一致"))
     if _WORKFLOW_TEXT.search(markdown):
         issues.append(_semantic_issue("workflow_text_leaked", "document:body", "正文包含内部阶段或专家协作话术"))
     if _PLACEHOLDER_TEXT.search(markdown):
         issues.append(_semantic_issue("placeholder_detected", "document:body", "正文包含未处置占位符"))
+    review_report = payload.get("review_report") if isinstance(payload.get("review_report"), dict) else {}
+    unsupported_claim_ids = [
+        str(item).strip()
+        for item in review_report.get("unsupported_claim_ids") or []
+        if str(item).strip()
+    ]
+    evidence_issues = [
+        _semantic_issue("unsupported_claim", f"claim:{claim_id}", "正文包含未获得证据支持的 claim")
+        for claim_id in unsupported_claim_ids
+    ]
+    usage = payload.get("claim_usage") if isinstance(payload.get("claim_usage"), list) else payload.get("fact_usage")
+    if isinstance(usage, list) and usage and not approved_inputs:
+        for item in usage:
+            if not isinstance(item, dict):
+                continue
+            claim_id = str(item.get("claim_id") or item.get("fact_id") or "").strip()
+            if claim_id:
+                evidence_issues.append(
+                    _semantic_issue("claim_without_approved_source", f"claim:{claim_id}", "正文 claim 未绑定批准来源")
+                )
+    issues.extend(evidence_issues)
+    for item in unresolved_quality_issues(artifact):
+        issues.append(_semantic_issue(item["code"], item["target_id"], item["message"]))
     report = {
         "schema_version": "expert-semantic-gates/v1",
         "brief_status": "passed" if brief.get("status") == "confirmed" else "failed",
         "semantic_status": "passed" if not issues else "failed",
-        "evidence_status": "passed",
+        "evidence_status": "passed" if not evidence_issues else "failed",
         "status": "passed" if brief.get("status") == "confirmed" and not issues else "failed",
         "artifact_id": str(artifact.get("artifact_id") or ""),
         "artifact_sha256": str(artifact.get("sha256") or ""),
@@ -160,6 +188,54 @@ def write_semantic_gates_snapshot(
     path = Path(delivery_dir).expanduser().resolve() / "reviews" / "semantic-gates.json"
     _immutable_json(path, report, label="semantic gates")
     return report
+
+
+def write_layered_quality_report(
+    delivery_dir: Path,
+    *,
+    semantic_gates: dict,
+    automatic_quality: dict,
+) -> tuple[dict, Path]:
+    """Persist the seven independent enterprise quality statuses and stable targets."""
+
+    automatic = automatic_quality if isinstance(automatic_quality, dict) else {}
+    issues = deepcopy(semantic_gates.get("issues") or [])
+    for item in automatic.get("issues") or []:
+        if not isinstance(item, dict):
+            continue
+        issues.append(
+            {
+                "issue_id": str(item.get("issueId") or item.get("issue_id") or ""),
+                "code": str(item.get("code") or "automatic_quality_issue"),
+                "severity": str(item.get("severity") or "warning"),
+                "target_id": str(item.get("issueId") or item.get("issue_id") or item.get("code") or "automatic"),
+                "owner": "document-renderer" if item.get("domain") == "render" else "document-author",
+                "message": str(item.get("message") or item.get("code") or "automatic quality issue"),
+                "disposition": "unresolved",
+                "completion_blocking": True,
+            }
+        )
+    statuses = {
+        "brief": str(semantic_gates.get("brief_status") or "failed"),
+        "semantic": str(semantic_gates.get("semantic_status") or "failed"),
+        "evidence": str(semantic_gates.get("evidence_status") or "failed"),
+        "asset": str(automatic.get("assetStatus") or "failed"),
+        "render": str(automatic.get("renderStatus") or "failed"),
+        "office": "pending",
+        "delivery": "pending",
+    }
+    upstream = [statuses[key] for key in ("brief", "semantic", "evidence", "asset", "render")]
+    overall = "blocked" if any(status != "passed" for status in upstream) else "pending"
+    report = {
+        "schema_version": "expert-enterprise-quality/v1",
+        "status": overall,
+        "statuses": statuses,
+        "issues": issues,
+    }
+    report["report_sha256"] = _sha256_payload(report)
+    path = Path(delivery_dir).expanduser().resolve() / "reviews" / "enterprise-quality-report.json"
+    _immutable_json(path, report, label="enterprise quality report")
+    return report, path
 
 
 def prepare_canonical_delivery_inputs(
@@ -330,6 +406,20 @@ def build_delivery_binding_v2(
         raise FinalDocumentDeliveryError("delivery output path is not canonical")
     if not expected_document.is_file() or not expected_quality.is_file():
         raise FinalDocumentDeliveryError("delivery output is missing")
+    try:
+        automatic_report = json.loads(expected_quality.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FinalDocumentDeliveryError("automatic quality report is invalid") from exc
+    automatic_quality = automatic_report.get("automaticQuality")
+    if not isinstance(automatic_quality, dict):
+        raise FinalDocumentDeliveryError("automatic quality layers are missing")
+    layered_quality, layered_quality_path = write_layered_quality_report(
+        root,
+        semantic_gates=semantic_gates,
+        automatic_quality=automatic_quality,
+    )
+    if any(layered_quality["statuses"][key] != "passed" for key in ("brief", "semantic", "evidence", "asset", "render")):
+        raise FinalDocumentDeliveryError("enterprise quality gates have not passed")
     binding = {
         "schema_version": "expert-delivery-binding/v2",
         "session_id": str(session_id).strip(),
@@ -348,6 +438,10 @@ def build_delivery_binding_v2(
         "renderer": render_input["renderer"],
         "document": {"path": "delivery/document.docx", "sha256": sha256_file(expected_document)},
         "automatic_quality_report": {"path": "delivery/quality-report.json", "sha256": sha256_file(expected_quality)},
+        "layered_quality_report": {
+            "path": "reviews/enterprise-quality-report.json",
+            "sha256": sha256_file(layered_quality_path),
+        },
     }
     _immutable_json(root / "expert-team-delivery.json", binding, label="delivery binding")
     return binding

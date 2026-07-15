@@ -654,6 +654,10 @@ const schemas = {
             id: { type: 'string', minLength: 1 },
             status: { enum: STATUSES.check },
             message: { type: 'string' },
+            issues: {
+              type: 'array',
+              items: metadataSchema,
+            },
             reviewedAt: { type: 'string' },
             reviewedBy: { type: 'string' },
             documentSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
@@ -677,6 +681,20 @@ const schemas = {
       },
       warnings: stringArraySchema,
       failures: stringArraySchema,
+      automaticQuality: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['schemaVersion', 'assetStatus', 'renderStatus', 'issues'],
+        properties: {
+          schemaVersion: { const: 'docx-engine-v2/automatic-quality-v1' },
+          assetStatus: { enum: STATUSES.check },
+          renderStatus: { enum: STATUSES.check },
+          issues: {
+            type: 'array',
+            items: metadataSchema,
+          },
+        },
+      },
       documentMetadata: documentMetadataV1Schema,
       canonicalBinding: canonicalBindingV1Schema,
       rendererIdentity: rendererIdentityV1Schema,
