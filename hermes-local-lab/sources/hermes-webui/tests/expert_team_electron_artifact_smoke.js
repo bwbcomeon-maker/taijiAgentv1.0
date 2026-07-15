@@ -394,6 +394,7 @@ async function main() {
       window.__expertTeamPollResponses = [];
       window.__expertTeamRejectRevision409 = false;
       window.__expertTeamRevision409Count = 0;
+      window.__expertTeamRevision409Run = null;
       api = async (url, options) => {
         if (String(url).startsWith("/api/expert-teams/run?") && window.__expertTeamRunFixtureCurrent) {
           window.__expertTeamPollRequestCount += 1;
@@ -406,6 +407,7 @@ async function main() {
           window.__expertTeamRevision409Count += 1;
           const error = new Error("状态已更新，请核对后重试。");
           error.status = 409;
+          error.payload = { run: window.__expertTeamRevision409Run };
           throw error;
         }
         return originalApi(url, options);
@@ -439,6 +441,16 @@ async function main() {
       const bodyRect = body?.getBoundingClientRect();
       const tabsRect = tabs?.getBoundingClientRect();
       const cardRect = card?.getBoundingClientRect();
+      const workbench = document.querySelector("#expertTeamWorkspacePanel");
+      const workbenchRect = workbench?.getBoundingClientRect();
+      const tabRects = Array.from(tabs?.querySelectorAll("[role='tab']") || []).map((tab) => tab.getBoundingClientRect());
+      const tabsReachable = Boolean(workbenchRect && tabRects.length === 3 && tabRects.every((rect) => rect.left >= workbenchRect.left && rect.right <= workbenchRect.right && rect.top >= workbenchRect.top && rect.bottom <= workbenchRect.bottom));
+      switchExpertTeamWorkspaceTab(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='task']"));
+      const primaryAction = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='task'] [data-expert-team-action]");
+      primaryAction?.scrollIntoView({ block: "nearest" });
+      const primaryRect = primaryAction?.getBoundingClientRect();
+      const primaryActionReachable = Boolean(primaryRect && workbenchRect && primaryRect.left >= workbenchRect.left && primaryRect.right <= workbenchRect.right && primaryRect.top >= workbenchRect.top && primaryRect.bottom <= workbenchRect.bottom);
+      switchExpertTeamWorkspaceTab(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']"));
       return {
         text: panel?.textContent.replace(/\s+/g, " ").trim() || "",
         hasVerticalList: Boolean(list),
@@ -451,10 +463,13 @@ async function main() {
         hasHorizontalStrip: Boolean(panel?.querySelector(".expert-team-member-strip")),
         scrollWidth: list ? list.scrollWidth : 0,
         clientWidth: list ? list.clientWidth : 0,
+        bodyNoHorizontalOverflow: body ? body.scrollWidth <= body.clientWidth + 1 : false,
+        tabsReachable,
+        primaryActionReachable,
       };
     });
     assertState(
-      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && !contentTeamLayout.text.includes("generated_invalid"),
+      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && contentTeamLayout.bodyNoHorizontalOverflow && contentTeamLayout.tabsReachable && contentTeamLayout.primaryActionReachable && !contentTeamLayout.text.includes("generated_invalid"),
       "Process tab does not show the 5-person content team with Chinese states",
       contentTeamLayout
     );
@@ -465,6 +480,17 @@ async function main() {
       const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
       const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='process']");
       const list = panel?.querySelector(".expert-team-member-list");
+      const tabs = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-tabs");
+      const workbench = document.querySelector("#expertTeamWorkspacePanel");
+      const workbenchRect = workbench?.getBoundingClientRect();
+      const tabRects = Array.from(tabs?.querySelectorAll("[role='tab']") || []).map((tab) => tab.getBoundingClientRect());
+      const tabsReachable = Boolean(workbenchRect && tabRects.length === 3 && tabRects.every((rect) => rect.left >= workbenchRect.left && rect.right <= workbenchRect.right && rect.top >= workbenchRect.top && rect.bottom <= workbenchRect.bottom));
+      switchExpertTeamWorkspaceTab(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='task']"));
+      const primaryAction = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='task'] [data-expert-team-action]");
+      primaryAction?.scrollIntoView({ block: "nearest" });
+      const primaryRect = primaryAction?.getBoundingClientRect();
+      const primaryActionReachable = Boolean(primaryRect && workbenchRect && primaryRect.left >= workbenchRect.left && primaryRect.right <= workbenchRect.right && primaryRect.top >= workbenchRect.top && primaryRect.bottom <= workbenchRect.bottom);
+      switchExpertTeamWorkspaceTab(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']"));
       return {
         text: panel?.textContent.replace(/\s+/g, " ").trim() || "",
         rowCount: panel?.querySelectorAll(".expert-team-member-row").length || 0,
@@ -472,10 +498,13 @@ async function main() {
         noBodyOverflow: body ? body.scrollHeight <= body.clientHeight + 4 : false,
         scrollWidth: list ? list.scrollWidth : 0,
         clientWidth: list ? list.clientWidth : 0,
+        bodyNoHorizontalOverflow: body ? body.scrollWidth <= body.clientWidth + 1 : false,
+        tabsReachable,
+        primaryActionReachable,
       };
     });
     assertState(
-      researchTeamLayout.text.includes("深度材料研究团") && researchTeamLayout.rowCount === 6 && researchTeamLayout.avatarCount >= 6 && researchTeamLayout.scrollWidth <= researchTeamLayout.clientWidth + 1,
+      researchTeamLayout.text.includes("深度材料研究团") && researchTeamLayout.rowCount === 6 && researchTeamLayout.avatarCount >= 6 && researchTeamLayout.scrollWidth <= researchTeamLayout.clientWidth + 1 && researchTeamLayout.bodyNoHorizontalOverflow && researchTeamLayout.tabsReachable && researchTeamLayout.primaryActionReachable,
       "Process tab does not dynamically render the 6-person research team",
       researchTeamLayout
     );
@@ -704,26 +733,35 @@ async function main() {
       input.setSelectionRange(5, 12);
       window.__expertTeamRejectRevision409 = true;
       window.__expertTeamRevision409Count = 0;
+      window.__expertTeamRevision409Run = window.__expertTeamRunFixture(S.session.session_id, "awaiting_review", {
+        run_id: "electron-poll-409-run",
+        version: 21,
+        stageAttempt: 2,
+        artifactAttempt: 2,
+        executionAttempt: 2,
+        briefRevision: 2,
+        reviewId: "review-409-new",
+        officeReviewId: "office-review-409-new",
+      });
     });
     await page.click("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) button");
     await page.waitForFunction(() => window.__expertTeamRevision409Count >= 1, { timeout: 5000 });
     const conflictState = await page.evaluate(() => {
-      const input = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea");
+      const recovery = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-recoverable-draft] [data-expert-team-draft-copy]");
+      const editableValues = Array.from(document.querySelectorAll("#expertTeamWorkspacePanel textarea:not([readonly])")).map((input) => input.value);
       window.__expertTeamRejectRevision409 = false;
       return {
         requests: window.__expertTeamRevision409Count,
-        value: input?.value || "",
-        expanded: Boolean(input),
-        focused: document.activeElement === input,
-        selectionStart: input?.selectionStart,
-        selectionEnd: input?.selectionEnd,
+        recoveryValue: recovery?.value || "",
+        editableValues,
       };
     });
     assertState(
-      conflictState.requests === 1 && conflictState.value === "POLL-409-DRAFT-29C1" && conflictState.expanded && conflictState.selectionStart === 5 && conflictState.selectionEnd === 12,
-      "409 conflict did not preserve the complete review draft",
+      conflictState.requests === 1 && conflictState.recoveryValue === "POLL-409-DRAFT-29C1" && !conflictState.editableValues.some((value) => value.includes("POLL-409-DRAFT-29C1")),
+      "409 authoritative identity advance restored an old draft into the new editable form",
       conflictState
     );
+    await page.evaluate(() => document.querySelector("[data-expert-team-recoverable-draft]")?.scrollIntoView({ block: "center" }));
     await page.screenshot({ path: path.join(outDir, "expert-team-polling-409-preserved.png"), fullPage: false });
 
     await page.click("#expertTeamWorkspacePanel .expert-team-result-card [data-expert-team-action='view_result']");

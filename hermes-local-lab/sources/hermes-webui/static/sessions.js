@@ -968,10 +968,22 @@ const _WRITEFLOW_STATUS_REFRESH_MS = 5000;
 let _writeflowStatusRefreshTimer = null;
 let _writeflowStatusRefreshSid = '';
 const _expertTeamLatestAppliedVersionByRun=new Map();
+const _EXPERT_TEAM_VERSION_LIMIT=64;
+
+function _rememberExpertTeamAppliedVersion(runId,version){
+  _expertTeamLatestAppliedVersionByRun.delete(runId);
+  _expertTeamLatestAppliedVersionByRun.set(runId,version);
+  while(_expertTeamLatestAppliedVersionByRun.size>_EXPERT_TEAM_VERSION_LIMIT){
+    const candidate=Array.from(_expertTeamLatestAppliedVersionByRun.keys()).find(key=>key!==runId);
+    if(!candidate)break;
+    _expertTeamLatestAppliedVersionByRun.delete(candidate);
+  }
+}
 
 function _writeflowRunIsActive(run){
   const status=String(run&&run.status||'').toLowerCase();
-  return !!(run&&run.run_id)&&!['done','error','blocked'].includes(status);
+  const workflowState=String(run&&run.workflow_state||'').toLowerCase();
+  return !!(run&&run.run_id)&&!['done','error','blocked'].includes(status)&&!['completed','cancelled','failed'].includes(workflowState);
 }
 
 function _stopWriteflowStatusRefresh(){
@@ -989,6 +1001,8 @@ function _isWriteflowHydrationForActiveSession(sid){
 function _resetWriteflowDockForSessionChange(_reason){
   if(typeof window!=='undefined') window._pendingWriteflowStatusCard=null;
   _stopWriteflowStatusRefresh();
+  _expertTeamLatestAppliedVersionByRun.clear();
+  if(typeof clearExpertTeamWorkspaceDraftState==='function')clearExpertTeamWorkspaceDraftState();
   _removeWriteflowStatusCardsFromMessages();
   if(typeof clearWriteflowStatusDock==='function') clearWriteflowStatusDock();
 }
@@ -1032,7 +1046,8 @@ async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
     : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);
   if(!card)return {status:'preserved',reason:'invalid_response'};
   if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
-  _expertTeamLatestAppliedVersionByRun.set(runId,runVersion);
+  if(_writeflowRunIsActive(run))_rememberExpertTeamAppliedVersion(runId,runVersion);
+  else _expertTeamLatestAppliedVersionByRun.delete(runId);
   _scheduleWriteflowStatusRefresh(sid,run);
   _removeWriteflowStatusCardsFromMessages();
   if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();

@@ -1282,6 +1282,34 @@ function _expertTeamWorkspaceControlKey(control,index){
 }
 
 const _expertTeamWorkspaceDraftStore=new Map();
+const _EXPERT_TEAM_WORKSPACE_DRAFT_LIMIT=24;
+
+function _expertTeamTrimWorkspaceDraftStore(activeKey){
+  while(_expertTeamWorkspaceDraftStore.size>_EXPERT_TEAM_WORKSPACE_DRAFT_LIMIT){
+    const candidate=Array.from(_expertTeamWorkspaceDraftStore.keys()).find(key=>key!==activeKey);
+    if(!candidate)break;
+    _expertTeamWorkspaceDraftStore.delete(candidate);
+  }
+  return _expertTeamWorkspaceDraftStore.size;
+}
+
+function _expertTeamClearWorkspaceDrafts(options={}){
+  const sessionId=String(options.sessionId||'');
+  const runId=String(options.runId||'');
+  Array.from(_expertTeamWorkspaceDraftStore.entries()).forEach(([key,draft])=>{
+    const state=draft&&draft.state||{};
+    if((!sessionId||String(state.sessionId||'')===sessionId)&&(!runId||String(state.runId||'')===runId)){
+      _expertTeamWorkspaceDraftStore.delete(key);
+    }
+  });
+  return _expertTeamWorkspaceDraftStore.size;
+}
+
+function clearExpertTeamWorkspaceDraftState(options={}){
+  if(!options.sessionId&&!options.runId)_expertTeamWorkspaceDraftStore.clear();
+  else _expertTeamClearWorkspaceDrafts(options);
+  return true;
+}
 
 function _expertTeamWorkspaceFormKind(root){
   if(!root||!root.querySelector)return 'workspace';
@@ -1351,7 +1379,12 @@ function _expertTeamCaptureWorkspaceDraft(panel,card){
     serverVersion:Number(state.serverVersion||card&&card.version||0),
     state,
   };
-  if(identity&&dirty)_expertTeamWorkspaceDraftStore.set(_expertTeamWorkspaceDraftKey(formKind,identity),draft);
+  if(identity&&dirty){
+    const draftKey=_expertTeamWorkspaceDraftKey(formKind,identity);
+    _expertTeamWorkspaceDraftStore.delete(draftKey);
+    _expertTeamWorkspaceDraftStore.set(draftKey,draft);
+    _expertTeamTrimWorkspaceDraftStore(draftKey);
+  }
   return draft;
 }
 
@@ -1388,7 +1421,7 @@ function _expertTeamMergeDirtyWorkspace(panel,card,draft,popoverState){
 
 function captureExpertTeamWorkspaceFormState(root){
   const scope=root&&root.querySelector?(root.querySelector('.expert-team-panel-inner')||root):null;
-  const state={sessionId:'',runId:'',stageId:'',stageAttempt:0,artifactAttempt:0,executionAttempt:0,briefRevision:0,reviewId:'',officeReviewId:'',questionId:'',inputId:'',serverVersion:0,activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
+  const state={identity:'',sessionId:'',runId:'',stageId:'',stageAttempt:0,artifactAttempt:0,executionAttempt:0,briefRevision:0,reviewId:'',officeReviewId:'',questionId:'',inputId:'',serverVersion:0,activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
   if(!scope||!scope.querySelectorAll||typeof document==='undefined')return state;
   const panel=(scope.closest&&scope.closest('.expert-team-workspace-panel'))||(root&&root.classList&&root.classList.contains('expert-team-workspace-panel')?root:null);
   state.sessionId=String((panel&&panel.dataset&&panel.dataset.expertTeamSourceSessionId)||(root&&root.dataset&&root.dataset.expertTeamSourceSessionId)||'');
@@ -1450,26 +1483,16 @@ function captureExpertTeamWorkspaceFormState(root){
       ||'';
     return `${owner}::${String(choice.dataset&&choice.dataset.expertTeamStageInputChoice||'')}`;
   });
+  state.identity=_expertTeamWorkspaceIdentity(null,state);
   return state;
 }
 
 function _expertTeamWorkspaceFormStateMatchesCard(card,state,root){
   state=state||{};
-  const sourceSessionId=String((card&&card.sourceSessionId)||(card&&card.source_session_id)||'');
-  const runId=String((card&&card.runId)||(card&&card.sessionId)||'');
-  const stageId=String((card&&card.currentStageId)||'');
-  const inputId=String((card&&card.pendingInputId)||(card&&card.pendingInput&&card.pendingInput.id)||'');
-  if(state.sessionId&&state.sessionId!==sourceSessionId)return false;
-  if(state.runId&&state.runId!==runId)return false;
-  if(state.stageId&&state.stageId!==stageId)return false;
-  if(state.inputId&&state.inputId!==inputId)return false;
-  if(state.questionId){
-    const pendingInCard=Array.isArray(card&&card.questions)&&card.questions.some(question=>
-      String(question&&question.id||'')===state.questionId&&String(question&&question.status||'pending')==='pending'
-    );
-    if(!pendingInCard)return false;
-  }
-  return true;
+  const authorityCard=card||((typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||null);
+  if(!authorityCard)return false;
+  const capturedIdentity=String(state.identity||_expertTeamWorkspaceIdentity(null,state));
+  return _expertTeamWorkspaceIdentity(authorityCard,{})===String(capturedIdentity||'');
 }
 
 function restoreExpertTeamWorkspaceFormState(root,state,card){
@@ -1521,6 +1544,7 @@ function restoreExpertTeamWorkspaceFormState(root,state,card){
 if(typeof window!=='undefined'){
   window.captureExpertTeamWorkspaceFormState=captureExpertTeamWorkspaceFormState;
   window.restoreExpertTeamWorkspaceFormState=restoreExpertTeamWorkspaceFormState;
+  window.clearExpertTeamWorkspaceDraftState=clearExpertTeamWorkspaceDraftState;
 }
 
 function _expertTeamWorkspaceActiveTab(root){
@@ -1665,6 +1689,7 @@ function _expertTeamRememberRecoverableDraft(card,state){
     questionId:String(draft.questionId||''),
     label:String(draft.label||'上一项确认'),
     text:String(draft.text||''),
+    draftKey:String(state.draftKey||''),
   };
   return true;
 }
@@ -1703,6 +1728,8 @@ async function copyExpertTeamRecoverableDraft(trigger){
 }
 
 function dismissExpertTeamRecoverableDraft(trigger){
+  const draftKey=String(_expertTeamRecoverableDraft&&_expertTeamRecoverableDraft.draftKey||'');
+  if(draftKey)_expertTeamWorkspaceDraftStore.delete(draftKey);
   _expertTeamRecoverableDraft=null;
   const root=trigger&&trigger.closest?trigger.closest('[data-expert-team-recoverable-draft]'):null;
   if(root&&root.remove)root.remove();
@@ -2391,8 +2418,8 @@ function mountExpertTeamWorkspacePanel(card){
   const incomingIdentity=_expertTeamWorkspaceIdentity(card,{});
   const sameIdentity=!!(draft&&draft.identity&&draft.identity===incomingIdentity);
   if(!canRestoreForm||!sameIdentity){
+    if(draft)formState.draftKey=_expertTeamWorkspaceDraftKey(draft.formKind,draft.identity);
     _expertTeamRememberRecoverableDraft(card,formState);
-    if(draft)_expertTeamWorkspaceDraftStore.delete(_expertTeamWorkspaceDraftKey(draft.formKind,draft.identity));
   }
   panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
   panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||'';
@@ -3583,6 +3610,9 @@ function renderExpertTeamStatusSurface(card){
   if(typeof window!=='undefined')window._activeExpertTeamStatusCard=card;
   _hideExpertTeamLegacyDock();
   mountExpertTeamWorkspacePanel(card);
+  if(['completed','cancelled','failed'].includes(String(card.status||''))){
+    _expertTeamClearWorkspaceDrafts({runId:String(card.runId||card.sessionId||'')});
+  }
   _syncExpertTeamBlankCollapseListener(false);
   _syncExpertTeamQuestionPopover(card);
   return _syncExpertTeamWorkspacePanelVisibility();

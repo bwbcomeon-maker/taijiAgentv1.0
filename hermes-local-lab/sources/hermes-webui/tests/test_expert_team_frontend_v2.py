@@ -468,6 +468,8 @@ def test_silent_poll_always_fetches_authoritative_run_even_with_a_focused_local_
         }};
         const _isWriteflowHydrationForActiveSession=(sid)=>sid==='session-1';
         const _expertTeamLatestAppliedVersionByRun=new Map();
+        const _writeflowRunIsActive=()=>true;
+        const _rememberExpertTeamAppliedVersion=(runId,version)=>_expertTeamLatestAppliedVersionByRun.set(runId,version);
         const shouldPreserveExpertTeamDraftDock=()=>true;
         const _expertTeamStatusCardFromRun=(run)=>({{runId:run.run_id,state:run.workflow_state}});
         const renderExpertTeamStatusSurface=(card)=>rendered.push(card);
@@ -604,6 +606,86 @@ def test_workspace_identity_changes_for_same_stage_attempt_brief_review_and_offi
         assert part in result["key"]
 
 
+def test_restore_requires_the_complete_captured_identity_and_mutations_snapshot_the_panel():
+    match_start = UI_JS.index("function _expertTeamWorkspaceFormStateMatchesCard")
+    match_end = UI_JS.index("function restoreExpertTeamWorkspaceFormState", match_start)
+    match = UI_JS[match_start:match_end]
+    assert "state.identity" in UI_JS
+    assert "_expertTeamWorkspaceIdentity(authorityCard,{})" in match
+    assert "const capturedIdentity=String(state.identity" in match
+    assert "===String(capturedIdentity||'')" in match
+    capture = _function_body(
+        ACTIONS_JS,
+        "function captureMutationFormState",
+        "function restoreMutationFormState",
+    )
+    assert "#expertTeamWorkspacePanel" in capture
+
+
+def test_complete_identity_match_rejects_same_stage_authoritative_advances():
+    identity_start = UI_JS.index("function _expertTeamWorkspaceIdentity")
+    identity_end = UI_JS.index("function _expertTeamWorkspaceDraftKey", identity_start)
+    match_start = UI_JS.index("function _expertTeamWorkspaceFormStateMatchesCard")
+    match_end = UI_JS.index("function restoreExpertTeamWorkspaceFormState", match_start)
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            {UI_JS[identity_start:identity_end]}
+            {UI_JS[match_start:match_end]}
+            const base={{sourceSessionId:'s',runId:'r',currentStageId:'stage',pendingInputId:'item',questions:[],draftIdentity:{{stageAttempt:1,artifactAttempt:1,executionAttempt:1,briefRevision:1,reviewId:'review-1',officeReviewId:'office-1'}}}};
+            const state={{identity:_expertTeamWorkspaceIdentity(base,{{}})}};
+            const card=(delta)=>({{...base,draftIdentity:{{...base.draftIdentity,...delta}}}});
+            console.log(JSON.stringify({{
+              stable:_expertTeamWorkspaceFormStateMatchesCard(base,state),
+              attempt:_expertTeamWorkspaceFormStateMatchesCard(card({{stageAttempt:2}}),state),
+              brief:_expertTeamWorkspaceFormStateMatchesCard(card({{briefRevision:2}}),state),
+              review:_expertTeamWorkspaceFormStateMatchesCard(card({{reviewId:'review-2'}}),state),
+              office:_expertTeamWorkspaceFormStateMatchesCard(card({{officeReviewId:'office-2'}}),state),
+            }}));
+            """
+        )
+    )
+    assert result == {"stable": True, "attempt": False, "brief": False, "review": False, "office": False}
+
+
+def test_draft_and_version_maps_have_bounded_lifecycle_without_evicting_active_dirty_state():
+    for token in (
+        "_EXPERT_TEAM_WORKSPACE_DRAFT_LIMIT",
+        "function _expertTeamTrimWorkspaceDraftStore",
+        "function _expertTeamClearWorkspaceDrafts",
+        "clearExpertTeamWorkspaceDraftState",
+        "_EXPERT_TEAM_VERSION_LIMIT",
+        "function _rememberExpertTeamAppliedVersion",
+        "_expertTeamLatestAppliedVersionByRun.clear()",
+    ):
+        assert token in UI_JS or token in SESSIONS_JS
+    assert "_expertTeamClearWorkspaceDrafts({runId" in UI_JS
+    dismiss = _function_body(UI_JS, "function dismissExpertTeamRecoverableDraft", "function _expertTeamCanRestoreQuestionPopover")
+    assert "_expertTeamWorkspaceDraftStore.delete" in dismiss
+
+    block_start = UI_JS.index("const _expertTeamWorkspaceDraftStore=new Map()")
+    block_end = UI_JS.index("function _expertTeamWorkspaceFormKind", block_start)
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            {UI_JS[block_start:block_end]}
+            for(let index=0;index<40;index++)_expertTeamWorkspaceDraftStore.set(`draft-${{index}}`,{{identity:`identity-${{index}}`,dirty:true}});
+            _expertTeamTrimWorkspaceDraftStore('draft-0');
+            console.log(JSON.stringify({{size:_expertTeamWorkspaceDraftStore.size,active:_expertTeamWorkspaceDraftStore.has('draft-0')}}));
+            """
+        )
+    )
+    assert result["size"] <= 24
+    assert result["active"] is True
+
+
+def test_electron_contract_restores_new_ia_horizontal_and_reachability_gates():
+    smoke = (REPO_ROOT / "tests" / "expert_team_electron_artifact_smoke.js").read_text(encoding="utf-8")
+    for token in ("bodyNoHorizontalOverflow", "tabsReachable", "primaryActionReachable"):
+        assert smoke.count(token) >= 2
+    assert "scrollWidth <= body.clientWidth" in smoke
+
+
 def test_dirty_same_identity_reuses_editable_subtree_and_stage_advance_moves_draft_to_recovery():
     mount = _function_body(UI_JS, "function mountExpertTeamWorkspacePanel", "function _expertTeamWorkspaceStorageKey")
     for token in (
@@ -641,6 +723,8 @@ def test_overlapping_poll_responses_never_render_an_older_run_version():
             const api=()=>new Promise(resolve=>resolvers.push(resolve));
             const _isWriteflowHydrationForActiveSession=()=>true;
             const _expertTeamLatestAppliedVersionByRun=new Map();
+            const _writeflowRunIsActive=()=>true;
+            const _rememberExpertTeamAppliedVersion=(runId,version)=>_expertTeamLatestAppliedVersionByRun.set(runId,version);
             const _expertTeamStatusCardFromRun=(run)=>({{runId:run.run_id,version:run.version}});
             const renderExpertTeamStatusSurface=(card)=>rendered.push(card.version);
             const _scheduleWriteflowStatusRefresh=()=>{{}};
@@ -747,7 +831,7 @@ def test_form_state_restore_keeps_same_question_draft_but_never_leaks_it_to_next
           }};
         }}
         const scope={{
-          dataset:{{expertTeamRunId:'run-1'}},
+          dataset:{{expertTeamRunId:'run-1',expertTeamInputId:'q1'}},
           querySelector:(selector)=>selector==='[data-expert-team-workspace-tab].is-active'?activeTab:(selector==='.expert-team-panel-expanded-body'?scroller:null),
           querySelectorAll:(selector)=>selector==='textarea,input,select'?controls:[],
         }};
@@ -770,7 +854,7 @@ def test_form_state_restore_keeps_same_question_draft_but_never_leaks_it_to_next
 
 
 def test_authority_match_never_uses_the_old_dom_to_keep_an_advanced_question_alive():
-    start = UI_JS.index("function _expertTeamWorkspaceFormStateMatchesCard")
+    start = UI_JS.index("function _expertTeamWorkspaceIdentity")
     end = UI_JS.index("function restoreExpertTeamWorkspaceFormState", start)
     matcher = UI_JS[start:end]
     source = textwrap.dedent(

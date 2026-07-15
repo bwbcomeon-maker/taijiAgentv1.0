@@ -91,7 +91,9 @@
     }
   }
   function captureMutationFormState(btn){
-    const root=btn&&btn.closest&&btn.closest('[data-expert-team-run-id]');
+    const buttonRoot=btn&&btn.closest&&btn.closest('[data-expert-team-run-id]');
+    const panel=(typeof document!=='undefined'&&document.querySelector&&document.querySelector('#expertTeamWorkspacePanel'))||null;
+    const root=panel||buttonRoot;
     if(typeof captureExpertTeamWorkspaceFormState==='function')return {root,state:captureExpertTeamWorkspaceFormState(root)};
     return {root,state:null};
   }
