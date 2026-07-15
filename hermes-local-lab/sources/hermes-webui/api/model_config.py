@@ -479,9 +479,9 @@ _BUILTIN_IMAGE_GEN_MODULES: tuple[str, ...] = (
 
 def _active_profile_name() -> str:
     try:
-        from api.profiles import get_active_profile
+        from api.profiles import get_active_profile_name
 
-        profile = get_active_profile()
+        profile = get_active_profile_name()
         return str(profile or "default")
     except Exception:
         return "default"

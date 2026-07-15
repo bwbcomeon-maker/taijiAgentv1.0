@@ -59,6 +59,15 @@ def _read_config(tmp_path):
     return yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8")) or {}
 
 
+def test_active_profile_name_uses_real_profile_api(monkeypatch):
+    monkeypatch.setattr(profiles, "taiji_single_runtime_mode", lambda: False)
+    profiles.set_request_profile("named-profile")
+    try:
+        assert model_config._active_profile_name() == "named-profile"
+    finally:
+        profiles.clear_request_profile()
+
+
 def test_provider_credential_secret_stays_out_of_yaml_and_public_response(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     monkeypatch.delenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", raising=False)

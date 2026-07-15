@@ -117,6 +117,7 @@ def image_gen_secret_env(
                     return expected
         except ValueError:
             return ""
+        return ""
     if provider.startswith("custom:"):
         return str(active_custom_provider_identity(provider, config_data).get("api_key_env") or "")
     return IMAGE_GEN_KEY_ENV.get(provider, "")
