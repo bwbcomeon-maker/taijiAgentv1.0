@@ -4252,6 +4252,26 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneModels .model-config-image-capabilities-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:0;}
 #settingsPaneModels .model-config-image-capabilities-head>div{min-width:0;}
 #settingsPaneModels .model-config-image-capabilities-head .btn-tiny{min-height:30px;padding:0 10px;border-radius:9px;font-weight:850;white-space:nowrap;}
+#settingsPaneModels .model-config-alibaba-quick{display:grid;gap:12px;min-width:0;border:1px solid rgba(125,205,180,.95);border-radius:16px;background:linear-gradient(135deg,#f4fcf8,#fff);padding:15px;}
+#settingsPaneModels .model-config-alibaba-quick-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;}
+#settingsPaneModels .model-config-alibaba-quick-head>div{display:grid;gap:4px;min-width:0;}
+#settingsPaneModels .model-config-alibaba-quick-head strong{color:#0d5f45;font-size:16px;line-height:1.25;font-weight:900;}
+#settingsPaneModels .model-config-alibaba-quick-head span:not(.model-config-pill){max-width:760px;color:#58766c;font-size:12px;line-height:1.48;font-weight:700;}
+#settingsPaneModels .model-config-alibaba-quick-grid{display:grid;grid-template-columns:minmax(220px,1.35fr) repeat(2,minmax(160px,1fr));gap:10px;align-items:end;min-width:0;}
+#settingsPaneModels .model-config-alibaba-quick label{color:#496d61;font-size:11px;line-height:1.2;font-weight:850;}
+#settingsPaneModels .model-config-alibaba-quick input,
+#settingsPaneModels .model-config-alibaba-quick select{width:100%;min-width:0;min-height:44px;box-sizing:border-box;border:1px solid rgba(166,207,193,.95);border-radius:10px;background:#fff;color:#173f33;font:inherit;font-size:12px;padding:8px 10px;}
+#settingsPaneModels .model-config-alibaba-quick input:focus,
+#settingsPaneModels .model-config-alibaba-quick select:focus{outline:none;border-color:#168f72;box-shadow:0 0 0 3px rgba(22,143,114,.15);}
+#settingsPaneModels .model-config-alibaba-quick button:focus-visible{outline:2px solid #14775f;outline-offset:2px;}
+#settingsPaneModels .model-config-alibaba-quick :disabled{cursor:not-allowed;opacity:.65;}
+#settingsPaneModels .model-config-alibaba-quick-actions{justify-content:flex-end;}
+#settingsPaneModels .model-config-alibaba-quick-actions .sm-btn{min-height:44px;min-width:148px;padding:0 18px;justify-content:center;}
+#settingsPaneModels .model-config-alibaba-quick-status{display:grid;grid-template-columns:minmax(220px,1.25fr) repeat(2,minmax(150px,1fr));gap:8px 12px;align-items:center;border:1px solid rgba(199,222,214,.95);border-radius:12px;background:#fff;padding:10px 12px;color:#58766c;font-size:11px;line-height:1.4;font-weight:750;}
+#settingsPaneModels .model-config-alibaba-quick-status strong{color:#214f40;font-size:12px;font-weight:900;}
+#settingsPaneModels .model-config-alibaba-quick-status[data-state="ok"]{border-color:#9bd7bc;background:#f7fcf9;}
+#settingsPaneModels .model-config-alibaba-quick-status[data-state="warn"]{border-color:#e4c36c;background:#fff9e8;color:#795f1f;}
+#settingsPaneModels .model-config-alibaba-quick-status[data-state="danger"]{border-color:#efaaa8;background:#fff4f4;color:#9b3532;}
 #settingsPaneModels .model-config-platform-credentials{display:grid;gap:10px;border:1px solid rgba(184,215,236,.95);border-radius:14px;background:linear-gradient(90deg,#f7fcff,#fff);padding:12px;min-width:0;}
 #settingsPaneModels .model-config-platform-credentials-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;}
 #settingsPaneModels .model-config-platform-credentials-head>div{display:grid;gap:3px;min-width:0;}
@@ -4275,7 +4295,8 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneModels .model-config-capability-card[data-state="warn"]{border-color:#e5c36b;background:linear-gradient(180deg,#fff9e8,#fff 44%);}
 #settingsPaneModels .model-config-capability-card[data-state="ok"]{border-color:#a9dfbf;background:#fff;}
 #settingsPaneModels .model-config-capability-card .model-config-facts{grid-template-columns:repeat(3,minmax(0,1fr));}
-#settingsPaneModels .model-config-image-advanced{border-top:1px solid rgba(222,235,245,.9);margin-top:0;}
+#settingsPaneModels .model-config-image-advanced{gap:12px;border-top:1px solid rgba(222,235,245,.9);margin-top:0;}
+#settingsPaneModels .model-config-image-advanced-tools{display:grid;gap:8px;padding-top:4px;}
 #settingsPaneModels .model-config-advanced-copy{display:grid;gap:4px;}
 #settingsPaneModels .model-config-advanced-copy strong{color:#0d3158;font-size:14px;line-height:1.25;font-weight:900;}
 #settingsPaneModels .model-config-advanced-copy span{color:#71869f;font-size:12px;line-height:1.35;font-weight:700;}
@@ -4358,6 +4379,14 @@ main.main > #mainPlugin{display:none;}
  #settingsPaneModels .model-config-license-strip>.model-config-actions{justify-self:stretch;justify-items:start;max-width:none;}
  #settingsPaneModels .model-config-license-toolbar{justify-content:flex-start;}
  #settingsPaneModels .model-config-license-online-note{justify-content:flex-start;text-align:left;}
+}
+@media(max-width:760px){
+ #settingsPaneModels .model-config-alibaba-quick-grid,
+ #settingsPaneModels .model-config-alibaba-quick-status{grid-template-columns:1fr;}
+ #settingsPaneModels .model-config-alibaba-quick-head{display:grid;grid-template-columns:1fr;}
+ #settingsPaneModels .model-config-alibaba-quick-head .model-config-pill{justify-self:start;}
+ #settingsPaneModels .model-config-alibaba-quick-actions,
+ #settingsPaneModels .model-config-alibaba-quick-actions .sm-btn{width:100%;}
 }
 @media (max-width:700px){
  #settingsPaneModels .model-config-facts{grid-template-columns:1fr;}

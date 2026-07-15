@@ -8291,6 +8291,168 @@ function _modelConfigImageProviderRow(providerId,data){
  return rows.find(p=>String(p&&p.id||'')===id)||null;
 }
 
+function _alibabaQuickModels(data,capability){
+ const vision=capability==='vision';
+ const rows=vision
+  ?(Array.isArray(data&&data.vision_providers)?data.vision_providers:[])
+  :(Array.isArray(data&&data.image_gen_providers)?data.image_gen_providers:[]);
+ const providerId=vision?'alibaba':'dashscope';
+ const fallback=vision?'qwen3-vl-plus':'qwen-image-2.0-pro';
+ const provider=rows.find(row=>String(row&&row.id||'')===providerId)||null;
+ const models=[];
+ const seen=new Set();
+ (provider&&Array.isArray(provider.models)?provider.models:[]).forEach(model=>{
+  const id=typeof model==='string'?model:String(model&&model.id||'').trim();
+  if(!id||seen.has(id)) return;
+  seen.add(id);
+  models.push({id,label:typeof model==='string'?model:String(model&&model.label||model.id||id)});
+ });
+ if(!models.length) models.push({id:fallback,label:fallback});
+ return models;
+}
+
+function _populateAlibabaQuickSelect(select,models,preferred,fallback){
+ if(!select) return '';
+ select.innerHTML='';
+ (models||[]).forEach(model=>{
+  const id=String(model&&model.id||'').trim();
+  if(!id) return;
+  const option=document.createElement('option');
+  option.value=id;
+  option.textContent=String(model&&model.label||id);
+  select.appendChild(option);
+ });
+ const values=Array.from(select.options||[]).map(option=>String(option.value||''));
+ const requested=String(preferred||'').trim();
+ const safeFallback=String(fallback||'').trim();
+ select.value=values.includes(requested)?requested:(values.includes(safeFallback)?safeFallback:(values[0]||''));
+ select.dataset.savedValue=select.value;
+ return select.value;
+}
+
+function _safeAlibabaQuickMessage(value,secret){
+ let message=String(value&&value.message||value||'请稍后重试。').trim();
+ const submitted=String(secret||'');
+ if(submitted) message=message.split(submitted).join('API Key');
+ return message.slice(0,240)||'请稍后重试。';
+}
+
+function _setAlibabaQuickStatus(summary,vision,image,state){
+ const host=$('alibabaQuickConfigStatus');
+ const summaryEl=$('alibabaQuickConfigSummary');
+ const visionEl=$('alibabaQuickVisionStatus');
+ const imageEl=$('alibabaQuickImageStatus');
+ if(summaryEl) summaryEl.textContent=String(summary||'');
+ if(visionEl) visionEl.textContent=String(vision||'');
+ if(imageEl) imageEl.textContent=String(image||'');
+ if(host) host.dataset.state=state||'neutral';
+}
+
+function _setAlibabaQuickBusy(busy){
+ const active=!!busy;
+ ['alibabaQuickApiKey','alibabaQuickVisionModel','alibabaQuickImageModel'].forEach(id=>{
+  const control=$(id);if(control) control.disabled=active;
+ });
+ const button=$('btnSaveVerifyAlibaba');
+ if(button){
+  button.disabled=active;
+  button.setAttribute('aria-busy',active?'true':'false');
+  button.textContent=active?'保存并验证中…':'保存并验证';
+ }
+}
+
+function _onAlibabaQuickModelChange(){
+ _setAlibabaQuickStatus('模型选择已更改，保存并验证后生效。','识图：待重新验证','生图：待重新验证','warn');
+}
+
+function _syncAlibabaQuickConfig(data){
+ const visionSelect=$('alibabaQuickVisionModel');
+ const imageSelect=$('alibabaQuickImageModel');
+ const keyInput=$('alibabaQuickApiKey');
+ const vision=(data&&data.vision)||{};
+ const image=(data&&data.image_gen)||{};
+ const visionCurrent=String(vision.provider||'')==='alibaba'?vision.model:'';
+ const imageCurrent=String(image.provider||'')==='dashscope'?image.model:'';
+ _populateAlibabaQuickSelect(visionSelect,_alibabaQuickModels(data,'vision'),visionCurrent,'qwen3-vl-plus');
+ _populateAlibabaQuickSelect(imageSelect,_alibabaQuickModels(data,'image'),imageCurrent,'qwen-image-2.0-pro');
+ if(keyInput) keyInput.value='';
+ if(visionSelect) visionSelect.onchange=_onAlibabaQuickModelChange;
+ if(imageSelect) imageSelect.onchange=_onAlibabaQuickModelChange;
+ const visionVerified=String(vision.provider||'')==='alibaba'
+  &&String(vision.model||'')===String(visionSelect&&visionSelect.value||'')
+  &&String(vision.verification&&vision.verification.status||'')==='verified';
+ const imageVerified=String(image.provider||'')==='dashscope'
+  &&String(image.model||'')===String(imageSelect&&imageSelect.value||'')
+  &&String(image.verification&&image.verification.status||'')==='verified';
+ if(visionVerified&&imageVerified){
+  _setAlibabaQuickStatus('识图和生图均已验证','识图：已验证','生图：已验证','ok');
+ }else{
+  _setAlibabaQuickStatus('填写一份 API Key，选择模型后保存并验证。',visionVerified?'识图：已验证':'识图：尚未验证',imageVerified?'生图：已验证':'生图：尚未验证','neutral');
+ }
+}
+
+function _mergeAlibabaQuickConfigResponse(result){
+ if(!_modelConfigData) _modelConfigData={};
+ const data=result||{};
+ if(data.vision) _modelConfigData.vision=Object.assign({},_modelConfigData.vision||{},data.vision);
+ if(data.image_gen) _modelConfigData.image_gen=Object.assign({},_modelConfigData.image_gen||{},data.image_gen);
+ if(Array.isArray(data.vision_providers)) _modelConfigData.vision_providers=data.vision_providers;
+ if(Array.isArray(data.image_gen_providers)) _modelConfigData.image_gen_providers=data.image_gen_providers;
+}
+
+async function _testAlibabaQuickCapability(endpoint,capability,secret){
+ try{
+  const result=await api(endpoint,{method:'POST',body:'{}',timeoutMs:capability==='vision'?150000:210000});
+  const verification=result||{};
+  const target=capability==='vision'?(_modelConfigData.vision||{}):(_modelConfigData.image_gen||{});
+  target.verification=verification;
+  return {ok:!!(verification.ok&&String(verification.status||'')==='verified'),message:_safeAlibabaQuickMessage(verification.message||'',secret)};
+ }catch(error){
+  const target=capability==='vision'?(_modelConfigData.vision||{}):(_modelConfigData.image_gen||{});
+  target.verification={status:'failed',message:'验证请求失败'};
+  return {ok:false,message:_safeAlibabaQuickMessage(error,secret)};
+ }
+}
+
+async function saveAndVerifyAlibabaImageCapabilities(){
+ const keyInput=$('alibabaQuickApiKey');
+ const secret=String(keyInput&&keyInput.value||'').trim();
+ const visionModel=String((($('alibabaQuickVisionModel')||{}).value)||'').trim();
+ const imageModel=String((($('alibabaQuickImageModel')||{}).value)||'').trim();
+ if(!visionModel||!imageModel){
+  _setAlibabaQuickStatus('请先选择识图和生图模型。','识图：未开始','生图：未开始','danger');
+  return;
+ }
+ const payload={vision_model:visionModel,image_model:imageModel};
+ if(secret) payload.api_key=secret;
+ _setAlibabaQuickBusy(true);
+ _setAlibabaQuickStatus('正在保存配置…','识图：等待验证','生图：等待验证','warn');
+ try{
+  const saved=await api('/api/image-capabilities/alibaba',{method:'POST',body:JSON.stringify(payload)});
+  _mergeAlibabaQuickConfigResponse(saved);
+  _renderVisionConfigSummary(_modelConfigData);
+  _renderImageGenConfigSummary(_modelConfigData);
+  _setAlibabaQuickStatus('配置已保存，正在验证…','识图：正在验证','生图：等待验证','warn');
+  const visionResult=await _testAlibabaQuickCapability('/api/vision/test','vision',secret);
+  _renderVisionConfigSummary(_modelConfigData);
+  _setAlibabaQuickStatus('配置已保存，正在验证…',visionResult.ok?'识图：已验证':('识图：'+visionResult.message),'生图：正在验证','warn');
+  const imageResult=await _testAlibabaQuickCapability('/api/image-gen/test','image',secret);
+  _renderImageGenConfigSummary(_modelConfigData);
+  const visionStatus=visionResult.ok?'识图：已验证':('识图：'+visionResult.message);
+  const imageStatus=imageResult.ok?'生图：已验证':('生图：'+imageResult.message);
+  if(visionResult.ok&&imageResult.ok){
+   _setAlibabaQuickStatus('识图和生图均已验证',visionStatus,imageStatus,'ok');
+  }else{
+   _setAlibabaQuickStatus('配置已保存，但部分能力验证失败，请按下方提示重试。',visionStatus,imageStatus,'warn');
+  }
+ }catch(error){
+  _setAlibabaQuickStatus('保存失败：'+_safeAlibabaQuickMessage(error,secret),'识图：未验证','生图：未验证','danger');
+ }finally{
+  if(keyInput) keyInput.value='';
+  _setAlibabaQuickBusy(false);
+ }
+}
+
 function _imageGenCredentialInputId(name){
  return 'imageGenCredential__'+String(name||'').replace(/[^A-Za-z0-9_-]+/g,'_');
 }
@@ -10233,6 +10395,7 @@ function _renderModelConfigPanel(data){
  _bindImageGenConfigEditInvalidation();
  _renderCustomVisionProviderList(data);
  _renderCustomImageProviderList(data);
+ _syncAlibabaQuickConfig(data);
 }
 
 let _taijiLicenseData=null;
@@ -10421,7 +10584,12 @@ function _modelConfigAnySecretDraft(){
 function _modelConfigHasUnsavedChanges(){
  if(_modelConfigAnySecretDraft()) return true;
  if(!_modelConfigData) return false;
+ const quickVision=$('alibabaQuickVisionModel');
+ const quickImage=$('alibabaQuickImageModel');
+ const quickChanged=!!((quickVision&&String(quickVision.value||'')!==String(quickVision.dataset.savedValue||''))
+  ||(quickImage&&String(quickImage.value||'')!==String(quickImage.dataset.savedValue||'')));
  return _modelConfigMainHasUnsavedChanges()
+  || quickChanged
   || _visionConfigHasUnsavedChanges()
   || _imageGenConfigHasUnsavedChanges()
   || _imageGenCredentialDraftHasValues()
@@ -10432,6 +10600,7 @@ function _modelConfigHasUnsavedChanges(){
 
 function _modelConfigDraftIdentity(){
  const ids=['modelConfigProvider','modelConfigModel','modelConfigBaseUrl','modelConfigApiKey',
+  'alibabaQuickApiKey','alibabaQuickVisionModel','alibabaQuickImageModel',
   'visionConfigProvider','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey','visionConfigCredential',
   'visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId',
   'imageGenConfigProvider','imageGenConfigModel','imageGenConfigApiKey','imageGenConfigCredential',

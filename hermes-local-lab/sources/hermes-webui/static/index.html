@@ -1468,10 +1468,46 @@
                   <div class="model-config-panel-head model-config-image-capabilities-head">
                     <div>
                       <strong>图片能力</strong>
-                      <span>看图识别和生成图片是两套能力，分别配置，互不误伤。</span>
+                      <span>阿里云百炼可以用一份 API Key 同时配置识图和生图；其他平台放在高级配置。</span>
                     </div>
                     <button class="btn-tiny" type="button" data-model-config-toggle="modelConfigImageAdvanced" aria-expanded="false" aria-controls="modelConfigImageAdvanced" onclick="toggleModelConfigSection('modelConfigImageAdvanced')">高级图片模型</button>
                   </div>
+                  <section class="model-config-alibaba-quick" id="modelConfigAlibabaQuickSetup" aria-labelledby="modelConfigAlibabaQuickTitle">
+                    <div class="model-config-alibaba-quick-head">
+                      <div>
+                        <strong id="modelConfigAlibabaQuickTitle">阿里云百炼快速配置</strong>
+                        <span id="alibabaQuickApiKeyHint">自动使用阿里云百炼中国区，同一 Key 同时用于识图和生图。密钥只保存在本机，留空保留已有密钥。</span>
+                      </div>
+                      <span class="model-config-pill" data-state="ok">推荐</span>
+                    </div>
+                    <div class="model-config-alibaba-quick-grid">
+                      <div class="model-config-field model-config-alibaba-key-field">
+                        <label for="alibabaQuickApiKey">API Key</label>
+                        <div class="model-config-secret-row">
+                          <input id="alibabaQuickApiKey" type="password" placeholder="粘贴 API Key，留空保留现有密钥" autocomplete="off" data-secret-field="true" aria-describedby="alibabaQuickApiKeyHint alibabaQuickCostHint">
+                          <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('alibabaQuickApiKey')">粘贴</button>
+                        </div>
+                      </div>
+                      <div class="model-config-field">
+                        <label for="alibabaQuickVisionModel">识图模型</label>
+                        <select id="alibabaQuickVisionModel" aria-describedby="alibabaQuickApiKeyHint alibabaQuickConfigSummary"></select>
+                      </div>
+                      <div class="model-config-field">
+                        <label for="alibabaQuickImageModel">生图模型</label>
+                        <select id="alibabaQuickImageModel" aria-describedby="alibabaQuickApiKeyHint alibabaQuickCostHint alibabaQuickConfigSummary"></select>
+                      </div>
+                    </div>
+                    <p class="model-config-hint" id="alibabaQuickCostHint">保存后会执行一次真实识图和生图验证；生图验证会产生少量费用。</p>
+                    <div class="model-config-actions model-config-alibaba-quick-actions">
+                      <button class="sm-btn" id="btnSaveVerifyAlibaba" type="button" aria-describedby="alibabaQuickCostHint alibabaQuickConfigSummary" aria-busy="false" onclick="saveAndVerifyAlibabaImageCapabilities()">保存并验证</button>
+                    </div>
+                    <div class="model-config-alibaba-quick-status" id="alibabaQuickConfigStatus" data-state="neutral" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+                      <strong id="alibabaQuickConfigSummary">等待配置。</strong>
+                      <span id="alibabaQuickVisionStatus">识图：尚未验证</span>
+                      <span id="alibabaQuickImageStatus">生图：尚未验证</span>
+                    </div>
+                  </section>
+                  <div class="model-config-collapsible model-config-image-advanced" id="modelConfigImageAdvanced" hidden>
                   <section class="model-config-platform-credentials" id="modelConfigPlatformCredentials" aria-labelledby="modelConfigPlatformCredentialsTitle">
                     <div class="model-config-platform-credentials-head">
                       <div>
@@ -1677,7 +1713,7 @@
                       <p class="model-config-hint" id="imageGenConfigVerificationStatus" aria-live="polite">尚未检查生图配置。</p>
                     </section>
                   </div>
-                  <div class="model-config-collapsible model-config-image-advanced" id="modelConfigImageAdvanced" hidden>
+                  <div class="model-config-image-advanced-tools">
                     <div class="model-config-advanced-copy">
                       <strong>高级图片模型</strong>
                       <span>只有需要接入更多生图服务、维护外部端点或查看国产模板时才打开。</span>
@@ -1690,6 +1726,7 @@
                     <div class="model-config-template-row" aria-label="国产图片模型模板">
                       <span>通义万相</span><span>豆包 Seedream</span><span>百度千帆</span><span>腾讯混元</span><span>智谱 GLM-Image</span><span>MiniMax</span><span>讯飞 HiDream</span><span>可灵</span><span>自定义 HTTP</span>
                     </div>
+                  </div>
                   </div>
                 </section>
 	              </div>
