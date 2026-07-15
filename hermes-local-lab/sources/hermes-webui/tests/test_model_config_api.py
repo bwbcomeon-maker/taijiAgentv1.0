@@ -631,6 +631,33 @@ def test_provider_credential_routes_map_validation_errors_to_400(monkeypatch):
     assert responses == [("凭据无效", 400), ("凭据正在使用", 400)]
 
 
+def test_alibaba_image_capabilities_route_saves_single_key_payload(monkeypatch):
+    responses = []
+    body = {
+        "api_key": "route-test-key",
+        "vision_model": "qwen3-vl-plus",
+        "image_model": "qwen-image-2.0-pro",
+    }
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, *args, **kwargs: responses.append(payload) or True,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "set_alibaba_image_capabilities",
+        lambda payload: {"ok": True, "received": payload},
+        raising=False,
+    )
+
+    assert routes.handle_post(
+        object(), SimpleNamespace(path="/api/image-capabilities/alibaba")
+    ) is True
+    assert responses == [{"ok": True, "received": body}]
+
+
 def test_custom_vision_provider_routes_map_validation_errors_to_400(monkeypatch):
     responses = []
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -1511,6 +1538,173 @@ def test_alibaba_vision_config_requires_explicit_international_region(monkeypatc
     assert (
         _read_config(tmp_path)["auxiliary"]["vision"]["base_url"]
         == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    )
+
+
+def test_alibaba_single_key_configures_public_vision_and_image_atomically(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": "deepseek", "default": "deepseek-chat"},
+                "auxiliary": {
+                    "vision": {
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-flash",
+                        "credential_ref": "old-ref",
+                        "endpoint_mode": "workspace",
+                        "workspace_id": "old-workspace",
+                    }
+                },
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": "qwen-image",
+                    "credential_ref": "old-ref",
+                    "options": {
+                        "workspace_id": "old-workspace",
+                        "base_url": "https://old.example",
+                        "temperature": "0.4",
+                    },
+                },
+                "unrelated": {"keep": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    vision_invalidations = []
+    image_invalidations = []
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda: vision_invalidations.append(True),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda: image_invalidations.append(True),
+    )
+
+    result = model_config.set_alibaba_image_capabilities(
+        {
+            "api_key": "single-test-key",
+            "vision_model": "qwen3-vl-plus",
+            "image_model": "qwen-image-2.0-pro",
+        }
+    )
+
+    saved = _read_config(tmp_path)
+    assert saved["model"] == {
+        "provider": "deepseek",
+        "default": "deepseek-chat",
+    }
+    assert saved["unrelated"] == {"keep": True}
+    assert saved["auxiliary"]["vision"] == {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+        "endpoint_field_names": ["base_url", "endpoint_mode", "region"],
+    }
+    assert saved["image_gen"] == {
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+        "use_gateway": False,
+        "options": {
+            "temperature": "0.4",
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+        },
+        "endpoint_field_names": ["endpoint_mode", "region"],
+    }
+    assert "DASHSCOPE_API_KEY=single-test-key" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    assert "single-test-key" not in json.dumps(result, ensure_ascii=False)
+    assert result["vision"]["model"] == "qwen3-vl-plus"
+    assert result["image_gen"]["model"] == "qwen-image-2.0-pro"
+    assert vision_invalidations == [True]
+    assert image_invalidations == [True]
+
+
+def test_alibaba_single_key_blank_key_preserves_existing_secret(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=existing-test-key\n", encoding="utf-8"
+    )
+
+    result = model_config.set_alibaba_image_capabilities(
+        {
+            "api_key": "",
+            "vision_model": "qwen3-vl-flash",
+            "image_model": "qwen-image",
+        }
+    )
+
+    assert "DASHSCOPE_API_KEY=existing-test-key" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    assert "existing-test-key" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"vision_model": "unknown-vl", "image_model": "qwen-image"},
+        {"vision_model": "qwen3-vl-plus", "image_model": "unknown-image"},
+    ],
+)
+def test_alibaba_single_key_rejects_models_outside_allowlists(
+    monkeypatch, tmp_path, payload
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=existing-test-key\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="model"):
+        model_config.set_alibaba_image_capabilities(payload)
+
+
+def test_alibaba_single_key_rolls_back_env_and_config_on_save_failure(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    original = {"unrelated": {"keep": True}}
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original), encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=old-test-key\n", encoding="utf-8"
+    )
+    original_save = model_config._save_yaml_config_file
+    calls = []
+
+    def fail_first_save(path, data):
+        calls.append(True)
+        if len(calls) == 1:
+            path.write_text("partial: true\n", encoding="utf-8")
+            raise OSError("disk full")
+        return original_save(path, data)
+
+    monkeypatch.setattr(model_config, "_save_yaml_config_file", fail_first_save)
+
+    with pytest.raises(OSError, match="disk full"):
+        model_config.set_alibaba_image_capabilities(
+            {
+                "api_key": "new-test-key",
+                "vision_model": "qwen3-vl-plus",
+                "image_model": "qwen-image-2.0-pro",
+            }
+        )
+
+    assert _read_config(tmp_path) == original
+    assert (tmp_path / ".env").read_text(encoding="utf-8").strip() == (
+        "DASHSCOPE_API_KEY=old-test-key"
     )
 
 

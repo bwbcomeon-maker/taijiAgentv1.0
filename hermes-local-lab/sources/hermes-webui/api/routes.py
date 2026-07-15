@@ -11248,6 +11248,16 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as exc:
             return bad(handler, str(exc), status=500)
 
+    if parsed.path == "/api/image-capabilities/alibaba":
+        from api.model_config import set_alibaba_image_capabilities
+
+        try:
+            return j(handler, set_alibaba_image_capabilities(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except (RuntimeError, OSError) as exc:
+            return bad(handler, str(exc), status=500)
+
     if parsed.path == "/api/provider-credentials":
         from api.model_config import upsert_provider_credential
 

@@ -131,7 +131,7 @@ def test_image_root_and_generation_path_are_not_duplicated():
     ) == generation_url
 
 
-def test_builds_workspace_image_urls_and_rejects_public_mode():
+def test_builds_workspace_and_public_image_urls():
     root = build_image_root_url(
         endpoint_mode="workspace",
         region="ap-southeast-1",
@@ -143,5 +143,12 @@ def test_builds_workspace_image_urls_and_rejects_public_mode():
         region="ap-southeast-1",
         workspace_prefix="llm-demo",
     ) == root + "/api/v1/services/aigc/multimodal-generation/generation"
-    with pytest.raises(ValueError, match="public"):
-        build_image_generation_url(endpoint_mode="public", region="cn-beijing")
+    assert build_image_root_url(
+        endpoint_mode="public", region="cn-beijing"
+    ) == "https://dashscope.aliyuncs.com"
+    assert build_image_generation_url(
+        endpoint_mode="public", region="ap-southeast-1"
+    ) == (
+        "https://dashscope-intl.aliyuncs.com"
+        "/api/v1/services/aigc/multimodal-generation/generation"
+    )

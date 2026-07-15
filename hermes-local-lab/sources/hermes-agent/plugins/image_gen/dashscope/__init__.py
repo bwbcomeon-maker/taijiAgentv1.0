@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
+import re
+import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 import yaml
@@ -34,7 +37,7 @@ from plugins.image_gen.domestic_common import (
     post_json,
     validate_prompt,
 )
-from tools.url_safety import is_safe_url
+from tools.url_safety import is_always_blocked_url, is_safe_url
 
 DEFAULT_MODEL = "qwen-image-2.0-pro"
 TIMEOUT_SECONDS = 180
@@ -49,6 +52,10 @@ _IMAGE_EXTENSIONS = {
     "image/gif": "gif",
 }
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_DASHSCOPE_OSS_ACCELERATE_HOST_RE = re.compile(
+    r"^dashscope-[a-z0-9]+\.oss-accelerate\.aliyuncs\.com$"
+)
+_PROXY_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
 
 class DashScopeConfigurationError(RuntimeError):
@@ -57,6 +64,42 @@ class DashScopeConfigurationError(RuntimeError):
 
 def _post_without_redirects(url: str, **kwargs: Any):
     return requests.post(url, allow_redirects=False, **kwargs)
+
+
+def _is_safe_dashscope_image_url(url: str) -> bool:
+    """Validate a result URL, including the provider's proxy Fake-IP host."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+        hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        return False
+    if is_always_blocked_url(url):
+        return False
+    if is_safe_url(url):
+        return True
+    if not _DASHSCOPE_OSS_ACCELERATE_HOST_RE.fullmatch(hostname):
+        return False
+    try:
+        answers = socket.getaddrinfo(
+            hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+        resolved = [ipaddress.ip_address(answer[4][0]) for answer in answers]
+    except (OSError, ValueError):
+        return False
+    return bool(resolved) and all(
+        isinstance(address, ipaddress.IPv4Address)
+        and address in _PROXY_BENCHMARK_NETWORK
+        for address in resolved
+    )
 
 
 def _save_safe_image_url(
@@ -69,7 +112,7 @@ def _save_safe_image_url(
     for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
         # Standard DNS preflight cannot pin the request's DNS result; a
         # rebinding TOCTOU window remains between this check and connect.
-        if not is_safe_url(current_url):
+        if not _is_safe_dashscope_image_url(current_url):
             raise ValueError("DashScope image URL failed safety validation")
         response = requests.get(
             current_url,
@@ -187,6 +230,19 @@ def _option_value(
     return str(options.get(name) or "").strip()
 
 
+def _effective_endpoint_mode(*, image_cfg: dict[str, Any] | None = None) -> str:
+    explicit = _option_value(
+        "endpoint_mode", "DASHSCOPE_ENDPOINT_MODE", image_cfg=image_cfg
+    ).lower()
+    if explicit:
+        return explicit
+    if _option_value(
+        "workspace_id", "DASHSCOPE_WORKSPACE_ID", image_cfg=image_cfg
+    ):
+        return "workspace"
+    return "public"
+
+
 class DashScopeQwenImageProvider(ImageGenProvider):
     @property
     def name(self) -> str:
@@ -205,14 +261,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             endpoint = self._endpoint(image_cfg=image_cfg)
         except (DashScopeConfigurationError, ValueError):
             return False
-        endpoint_mode = (
-            _option_value(
-                "endpoint_mode",
-                "DASHSCOPE_ENDPOINT_MODE",
-                image_cfg=image_cfg,
-            )
-            or "workspace"
-        )
+        endpoint_mode = _effective_endpoint_mode(image_cfg=image_cfg)
         if endpoint_mode.strip().lower() == "custom":
             return is_safe_url(endpoint)
         return True
@@ -256,10 +305,11 @@ class DashScopeQwenImageProvider(ImageGenProvider):
                     label="Endpoint Mode",
                     required=False,
                     secret=False,
-                    placeholder="workspace",
+                    placeholder="public",
                 )
                 | {
                     "options": [
+                        {"value": "public", "label": "公共端点（推荐）"},
                         {"value": "workspace", "label": "业务空间专属端点"},
                         {"value": "custom", "label": "自定义 Base URL"},
                     ]
@@ -308,10 +358,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
 
     def _endpoint(self, *, image_cfg: dict[str, Any] | None = None) -> str:
         return build_image_generation_url(
-            endpoint_mode=_option_value(
-                "endpoint_mode", "DASHSCOPE_ENDPOINT_MODE", image_cfg=image_cfg
-            )
-            or "workspace",
+            endpoint_mode=_effective_endpoint_mode(image_cfg=image_cfg),
             workspace_prefix=_option_value(
                 "workspace_id", "DASHSCOPE_WORKSPACE_ID", image_cfg=image_cfg
             ),
@@ -362,14 +409,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         missing = []
         if not api_key:
             missing.append("DASHSCOPE_API_KEY")
-        endpoint_mode = (
-            _option_value(
-                "endpoint_mode",
-                "DASHSCOPE_ENDPOINT_MODE",
-                image_cfg=image_cfg,
-            )
-            or "workspace"
-        )
+        endpoint_mode = _effective_endpoint_mode(image_cfg=image_cfg)
         if endpoint_mode == "workspace" and not _option_value(
             "workspace_id", "DASHSCOPE_WORKSPACE_ID", image_cfg=image_cfg
         ):

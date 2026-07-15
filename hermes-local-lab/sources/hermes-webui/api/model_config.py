@@ -2409,6 +2409,149 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     return get_vision_config()
 
 
+def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
+    """Configure Alibaba vision and image generation with one shared API key."""
+    vision_model = str(body.get("vision_model") or "qwen3-vl-plus").strip()
+    image_model = str(body.get("image_model") or "qwen-image-2.0-pro").strip()
+    vision_models = {
+        str(row.get("id") or "").strip()
+        for row in _VISION_PROVIDER_META["alibaba"].get("models", [])
+        if isinstance(row, dict)
+    }
+    image_models = {
+        str(row.get("id") or "").strip()
+        for row in _IMAGE_GEN_FALLBACK_META["dashscope"].get("models", [])
+        if isinstance(row, dict)
+    }
+    if vision_model not in vision_models:
+        raise ValueError(f"unknown Alibaba vision model: {vision_model}")
+    if image_model not in image_models:
+        raise ValueError(f"unknown Alibaba image model: {image_model}")
+
+    secret_value = str(body.get("api_key") or "").strip()
+    env_path = _get_hermes_home() / ".env"
+    if not secret_value and not _key_status_for_env("DASHSCOPE_API_KEY").get(
+        "configured"
+    ):
+        raise ValueError("api_key is required")
+
+    config_path = _get_config_path()
+    with credential_transaction():
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
+            original_config = copy.deepcopy(config_data)
+            env_snapshot = (
+                _credential_env_snapshot(env_path, "DASHSCOPE_API_KEY")
+                if secret_value
+                else None
+            )
+            env_touched = False
+            try:
+                if secret_value:
+                    env_touched = True
+                    _write_env_file(env_path, {"DASHSCOPE_API_KEY": secret_value})
+
+                auxiliary = config_data.get("auxiliary")
+                if not isinstance(auxiliary, dict):
+                    auxiliary = {}
+                vision_cfg = auxiliary.get("vision")
+                if not isinstance(vision_cfg, dict):
+                    vision_cfg = {}
+                for name in (
+                    "credential_ref",
+                    "workspace_id",
+                    "api_key",
+                    "api_mode",
+                ):
+                    vision_cfg.pop(name, None)
+                vision_cfg.update(
+                    {
+                        "provider": "alibaba",
+                        "model": vision_model,
+                        "base_url": build_vision_base_url(
+                            endpoint_mode="public", region="cn-beijing"
+                        ),
+                        "endpoint_mode": "public",
+                        "region": "cn-beijing",
+                        "endpoint_field_names": [
+                            "base_url",
+                            "endpoint_mode",
+                            "region",
+                        ],
+                    }
+                )
+                auxiliary["vision"] = vision_cfg
+                config_data["auxiliary"] = auxiliary
+
+                image_cfg = config_data.get("image_gen")
+                if not isinstance(image_cfg, dict):
+                    image_cfg = {}
+                image_cfg.pop("credential_ref", None)
+                image_cfg.pop("api_key", None)
+                options = image_cfg.get("options")
+                if not isinstance(options, dict):
+                    options = {}
+                options.pop("workspace_id", None)
+                options.pop("base_url", None)
+                options.update(
+                    {"endpoint_mode": "public", "region": "cn-beijing"}
+                )
+                image_cfg.update(
+                    {
+                        "provider": "dashscope",
+                        "model": image_model,
+                        "use_gateway": False,
+                        "options": options,
+                        "endpoint_field_names": ["endpoint_mode", "region"],
+                    }
+                )
+                config_data["image_gen"] = image_cfg
+                _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_touched and env_snapshot is not None:
+                    try:
+                        _restore_credential_env(
+                            env_path, "DASHSCOPE_API_KEY", env_snapshot
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to restore Alibaba single-key credential"
+                        )
+                try:
+                    _save_yaml_config_file(config_path, original_config)
+                except Exception:
+                    logger.exception(
+                        "Failed to restore Alibaba image capabilities configuration"
+                    )
+                raise
+
+    reload_config()
+    invalidate_models_cache()
+    _invalidate_vision_verification()
+    _invalidate_image_gen_verification()
+    key_status = _key_status_for_env("DASHSCOPE_API_KEY")
+    return {
+        "ok": True,
+        "vision": {
+            "provider": "alibaba",
+            "model": vision_model,
+            "base_url": build_vision_base_url(
+                endpoint_mode="public", region="cn-beijing"
+            ),
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+            "key_status": key_status,
+        },
+        "image_gen": {
+            "provider": "dashscope",
+            "model": image_model,
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+            "key_status": key_status,
+        },
+    }
+
+
 def get_custom_vision_provider_configs() -> dict[str, Any]:
     config_data = _load_yaml_config_file(_get_config_path())
     auxiliary = config_data.get("auxiliary")

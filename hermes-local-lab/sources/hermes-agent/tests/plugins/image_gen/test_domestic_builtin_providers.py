@@ -74,7 +74,8 @@ class TestDashScopeQwenImageProvider:
             "DASHSCOPE_BASE_URL",
         ]
         fields = {field["name"]: field for field in schema["credential_fields"]}
-        assert fields["endpoint_mode"]["placeholder"] == "workspace"
+        assert fields["endpoint_mode"]["placeholder"] == "public"
+        assert fields["endpoint_mode"]["options"][0]["value"] == "public"
         assert fields["workspace_id"]["placeholder"] == "llm-demo"
 
 
@@ -103,7 +104,32 @@ class TestDashScopeQwenImageProvider:
         assert result["success"] is False
         assert result["error_type"] == "auth_required"
         assert "DASHSCOPE_API_KEY" in result["error"]
-        assert "DASHSCOPE_WORKSPACE_ID" in result["error"]
+        assert "DASHSCOPE_WORKSPACE_ID" not in result["error"]
+
+    def test_api_key_only_posts_to_beijing_public_endpoint(self, monkeypatch):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        payload = {"output": {"image": "https://dashscope/result.png"}}
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.post",
+                return_value=_response(payload),
+            ) as mock_post,
+            patch(
+                "plugins.image_gen.dashscope._save_safe_image_url",
+                return_value=Path("/tmp/result.png"),
+            ),
+        ):
+            provider = DashScopeQwenImageProvider()
+            assert provider.is_available() is True
+            result = provider.generate("A city skyline")
+
+        assert result["success"] is True
+        assert mock_post.call_args.args[0] == (
+            "https://dashscope.aliyuncs.com/api/v1/services/"
+            "aigc/multimodal-generation/generation"
+        )
 
     def test_empty_prompt_returns_invalid_argument(self, monkeypatch):
         monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
@@ -466,6 +492,87 @@ class TestDashScopeQwenImageProvider:
         assert base64.b64decode(mock_save.call_args.args[0]) == b"safe"
         assert mock_save.call_args.kwargs["extension"] == "png"
 
+    def test_safe_image_download_allows_dashscope_oss_fake_ip(self, monkeypatch):
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
+            ],
+        )
+        image = _download_response(
+            headers={"Content-Type": "image/png", "Content-Length": "4"},
+            chunks=(b"safe",),
+        )
+        from plugins.image_gen.dashscope import _save_safe_image_url
+
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.get", return_value=image
+            ) as mock_get,
+            patch(
+                "plugins.image_gen.dashscope.save_b64_image",
+                return_value=Path("/tmp/safe.png"),
+            ),
+        ):
+            saved = _save_safe_image_url(
+                "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
+            )
+
+        assert saved == Path("/tmp/safe.png")
+        assert mock_get.call_args.kwargs["allow_redirects"] is False
+
+    @pytest.mark.parametrize("private_ip", ["127.0.0.1", "10.0.0.8", "192.168.1.9"])
+    def test_dashscope_oss_exception_only_allows_proxy_benchmark_range(
+        self, monkeypatch, private_ip
+    ):
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (private_ip, 0))
+            ],
+        )
+        from plugins.image_gen.dashscope import _save_safe_image_url
+
+        with (
+            patch("plugins.image_gen.dashscope.requests.get") as mock_get,
+            pytest.raises(ValueError, match="safety"),
+        ):
+            _save_safe_image_url(
+                "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
+            )
+        mock_get.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png",
+            "https://user@dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png",
+            "https://dashscope-7c2c.oss-accelerate.aliyuncs.com:8443/output.png",
+            "https://dashscope-7c2c.oss-accelerate.aliyuncs.com.evil.example/output.png",
+            "https://metadata.google.internal/latest/meta-data",
+        ],
+    )
+    def test_safe_image_download_never_weakens_url_safety_floor(
+        self, monkeypatch, url
+    ):
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
+            ],
+        )
+        from plugins.image_gen.dashscope import _save_safe_image_url
+
+        with (
+            patch("plugins.image_gen.dashscope.requests.get") as mock_get,
+            pytest.raises(ValueError, match="safety"),
+        ):
+            _save_safe_image_url(url)
+        mock_get.assert_not_called()
+
     @pytest.mark.parametrize(
         "base_url",
         ["https://gateway.example.com:not-a-port", "https://gateway.example.com:0"],
@@ -542,7 +649,8 @@ class TestDashScopeQwenImageProvider:
     @pytest.mark.parametrize(
         ("values", "available"),
         [
-            ({"DASHSCOPE_API_KEY": "key"}, False),
+            ({"DASHSCOPE_API_KEY": "key"}, True),
+            ({"DASHSCOPE_API_KEY": "key", "DASHSCOPE_ENDPOINT_MODE": "public"}, True),
             ({"DASHSCOPE_API_KEY": "key", "DASHSCOPE_ENDPOINT_MODE": "workspace"}, False),
             (
                 {

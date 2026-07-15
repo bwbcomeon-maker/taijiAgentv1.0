@@ -114,7 +114,7 @@ def build_image_root_url(
     """Build a Qwen-Image root URL for supported endpoint modes."""
     mode = _normalize_mode(endpoint_mode)
     if mode == "public":
-        raise ValueError("Qwen-Image public endpoint is not supported without an official contract")
+        return PUBLIC_ROOTS[normalize_region(region)]
     if mode == "custom":
         url = validate_https_url(custom_url)
         parsed = urlparse(url)

@@ -4,7 +4,7 @@
 
 **Goal:** 让阿里百炼的一份凭据可安全复用于识图和生图，同时允许同平台独立 Key 与多平台专用凭据并存，并用真实探测区分“已配置”和“已验证”。
 
-**Architecture:** 新增本地凭据档案和 `credential_ref`；能力配置只引用凭据。阿里端点由统一 helper 构造；识图复用现有严格目标探测，生图复制同一状态机；旧 `DASHSCOPE_*` 采用 lazy fallback。
+**Architecture:** 默认阿里路径使用一个 `DASHSCOPE_API_KEY` 原子配置识图和生图，服务端固定 `public + cn-beijing`，前端只让用户选两个模型。命名凭据、Workspace/custom 端点保留在高级路径。阿里端点由统一 helper 构造；识图复用现有严格目标探测，生图复制同一状态机；旧 `DASHSCOPE_*` 采用 lazy fallback。
 
 **Tech Stack:** Python、YAML、Hermes Provider/ImageGenProvider、原生 JavaScript/HTML/CSS、pytest、Node、Electron。
 
@@ -70,7 +70,7 @@ def resolve_api_key(provider, credential_ref="", *, config_data=None) -> str:
 
 **Files:** Create `agent/alibaba_endpoints.py`、`tests/agent/test_alibaba_endpoints.py`; modify DashScope 插件及测试。
 
-- [ ] 写 RED：北京 Workspace VL URL、新加坡公共 VL URL、自定义 URL 必须 HTTPS、`llm-` Workspace 合法、未知地域拒绝、路径不重复追加。
+- [ ] 写 RED：北京/新加坡公共 VL 与生图 URL、北京 Workspace VL URL、自定义 URL 必须 HTTPS、`llm-` Workspace 合法、未知地域拒绝、路径不重复追加。
 - [ ] 实现：
 
 ```python
@@ -91,6 +91,8 @@ def build_vision_base_url(mode, region, workspace_id, custom_url):
 def build_image_root_url(mode, region, workspace_id, custom_url):
     if mode == "custom":
         return validate_https_url(custom_url)
+    if mode == "public":
+        return PUBLIC_ROOTS[normalize_region(region)]
     return f"https://{validate_workspace_prefix(workspace_id)}.{normalize_region(region)}.maas.aliyuncs.com"
 ```
 
@@ -156,6 +158,13 @@ def build_image_root_url(mode, region, workspace_id, custom_url):
 - [ ] 运行 `pytest -q hermes-local-lab/sources/hermes-webui/tests/test_model_config_frontend.py`。
 - [ ] Commit：`feat: unify image capability configuration UX`。
 
+默认阿里简单路径的补充验收约束：
+
+- [ ] 写 RED：`POST /api/image-capabilities/alibaba` 只接收 `api_key/vision_model/image_model`，空 Key 表示保留，未知模型拒绝，任一写入失败同时回滚 YAML 和 `.env`。
+- [ ] 原子写入识图 `alibaba/qwen-vl/public/cn-beijing` 与生图 `dashscope/qwen-image/public/cn-beijing`，清理两能力的 Workspace/Base URL/凭据引用旧字段，保留其他配置。
+- [ ] 默认页面只显示 API Key 和两个模型选择；Region、Workspace、Base URL 仅在高级路径中出现。
+- [ ] DashScope 生图结果下载仅对严格的 `dashscope-<id>.oss-accelerate.aliyuncs.com` HTTPS 主机允许代理 Fake-IP；重定向、metadata、content-type 和 25MB 限制全部保留。
+
 ---
 
 ### Task 7：命名式自定义识图 Provider
@@ -214,4 +223,3 @@ def build_image_root_url(mode, region, workspace_id, custom_url):
 - 类型统一：`credential_ref/provider_family/endpoint_mode/region/workspace_id/base_url/transport` 全程一致。
 - 发布切片：Tasks 1-6 解决百炼可靠接入；Tasks 7-8 完成多平台扩展；Tasks 9-10 完成验收。
 - 计划中没有要求调用不存在的旧 API；所有新 API 均明确列为待实现。
-

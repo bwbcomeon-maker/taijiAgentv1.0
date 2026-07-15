@@ -4,7 +4,7 @@
 
 让太极智能体同时满足两类场景：
 
-1. 阿里云百炼同一业务空间的一份 API Key，可被识图和生图复用；识图与生图仍分别选择模型和接口。
+1. 阿里云百炼的一份 API Key，默认通过北京公共端点同时供识图和生图复用；识图与生图仍分别显式选择模型。
 2. 不同平台、同一平台不同业务空间或不同用途的专用 Key，可以并存且不会互相覆盖。
 
 本设计只处理图片理解与图片生成配置链路，不改主聊天模型选择逻辑，不引入云端凭据同步。
@@ -41,35 +41,23 @@ API Key 只负责鉴权，不能承担模型或能力自动路由。相同 Provi
 ## 4. 目标配置模型
 
 ```yaml
-provider_credentials:
-  - id: alibaba-default
-    provider_family: alibaba_dashscope
-    label: 阿里云百炼默认凭据
-    auth_type: api_key
-    secret_env: TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY
-
 auxiliary:
   vision:
     provider: alibaba
-    credential_ref: alibaba-default
-    endpoint_mode: workspace
+    endpoint_mode: public
     region: cn-beijing
-    workspace_id: llm-example
-    base_url: https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     model: qwen3-vl-plus
 
 image_gen:
   provider: dashscope
-  credential_ref: alibaba-default
-  endpoint_mode: workspace
   model: qwen-image-2.0-pro
   options:
+    endpoint_mode: public
     region: cn-beijing
-    workspace_id: llm-example
-    base_url: https://llm-example.cn-beijing.maas.aliyuncs.com
 ```
 
-配置文件只保存凭据元数据和环境变量名，不保存明文 Secret。明文继续保存在本机 `$HERMES_HOME/.env`。
+默认简单路径把唯一密钥保存为本机 `$HERMES_HOME/.env` 中的 `DASHSCOPE_API_KEY`，配置文件不保存明文 Secret。已有的命名凭据、Workspace 专属端点和自定义端点继续保留为高级配置，不出现在默认表单中。
 
 ## 5. 凭据解析规则
 
@@ -120,6 +108,8 @@ image_gen:
 
 ### 7.2 生图
 
+- 北京公共根地址：`https://dashscope.aliyuncs.com`
+- 新加坡公共根地址：`https://dashscope-intl.aliyuncs.com`
 - 业务空间根地址：`https://{WorkspaceId}.{Region}.maas.aliyuncs.com`
 - 同步生图路径：`/api/v1/services/aigc/multimodal-generation/generation`
 - UI 允许粘贴完整根地址，不猜测 Workspace 必须以 `ws-` 开头。
@@ -158,6 +148,10 @@ failed
 
 ## 9. 目标 UI
 
+阿里百炼默认路径只显示三项：一个 API Key、识图模型下拉选择、生图模型下拉选择。一次保存必须原子更新两项能力，默认固定 `public + cn-beijing`，不要求用户填写 Workspace、Region 或 Base URL。
+
+其他平台专用 Key、同平台独立 Key、Workspace 专属端点与自定义 Base URL 仍从“高级配置”进入，保持既有能力与兼容性。
+
 “图片能力”顶部增加“平台凭据”区：
 
 ```text
@@ -185,6 +179,7 @@ failed
 - 禁止把未知内置模型静默替换为默认模型。
 - 内置 Provider 的模型必须在服务端允许列表中；自定义 Provider 可手填并标记“自定义模型 ID”。
 - URL 仅允许 `https`；开发环境的自定义本地 Provider 可显式允许 loopback HTTP。
+- DashScope 生图返回的 `dashscope-<id>.oss-accelerate.aliyuncs.com` 可在本机代理 Fake-IP 环境中窄化放行；必须是 HTTPS、默认 443、无 userinfo，每次重定向都重新验证，metadata 安全底线、类型和大小限制不得放宽。
 - 错误码至少区分：`credential_missing`、`endpoint_invalid`、`region_mismatch`、`model_not_allowed`、`authentication_failed`、`rate_limited`、`provider_unavailable`、`probe_superseded`。
 - 修改被多个能力引用的凭据前显示影响范围；保存成功后所有引用该凭据的验证状态立即失效。
 
@@ -204,4 +199,3 @@ failed
 - 不在本次重构主聊天 Provider 配置。
 - 不一次性重写全部历史图片 Provider。
 - 不把“字段齐全”表述为“真实可用”。
-
