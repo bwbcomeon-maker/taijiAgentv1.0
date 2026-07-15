@@ -8390,6 +8390,8 @@ function _invalidateAlibabaQuickOperation(message){
  if(!operation) return false;
  _alibabaQuickOperationGeneration++;
  _alibabaQuickOperation=null;
+ const keyInput=$('alibabaQuickApiKey');
+ if(keyInput&&operation.secret&&String(keyInput.value||'').trim()===operation.secret) keyInput.value='';
  _setAlibabaQuickBusy(false);
  const summary=String(message||'图片模型配置在验证期间已更改，本次结果已忽略，请重新验证。');
  _setAlibabaQuickStatus(summary,'识图：待重新验证','生图：待重新验证','warn');
@@ -8454,6 +8456,7 @@ function _mergeAlibabaQuickConfigResponse(result){
  }
  _modelConfigData.vision=Object.assign({},data.vision);
  _modelConfigData.image_gen=Object.assign({},data.image_gen,{options:Object.assign({},data.image_gen.options||{})});
+ if(Array.isArray(data.provider_credentials)) _modelConfigData.provider_credentials=data.provider_credentials;
  if(Array.isArray(data.vision_providers)) _modelConfigData.vision_providers=data.vision_providers;
  if(Array.isArray(data.image_gen_providers)) _modelConfigData.image_gen_providers=data.image_gen_providers;
 }
@@ -8500,6 +8503,7 @@ async function saveAndVerifyAlibabaImageCapabilities(){
  if(secret) payload.api_key=secret;
  const operation={
   generation:++_alibabaQuickOperationGeneration,
+  secret,
   expectedIdentity:'',
   expected:{vision:{provider:'alibaba',model:visionModel},image:{provider:'dashscope',model:imageModel}}
  };
@@ -8514,6 +8518,11 @@ async function saveAndVerifyAlibabaImageCapabilities(){
   _renderModelConfigPanel(_modelConfigData);
   operation.expectedIdentity=_alibabaQuickConfigIdentity(_modelConfigData);
   if(!_alibabaQuickOperationIsCurrent(operation)) return;
+  if(saved&&((saved.refresh_pending===true)||(Array.isArray(saved.warnings)&&saved.warnings.length))){
+   _setAlibabaQuickStatus('配置已保存，但运行时刷新待处理，请刷新状态或重启应用后再验证。',
+    '识图：刷新后再验证','生图：刷新后再验证','warn');
+   return;
+  }
   _setAlibabaQuickStatus('配置已保存，正在验证…','识图：正在验证','生图：等待验证','warn');
   const visionResult=await _testAlibabaQuickCapability('/api/vision/test','vision',secret,operation);
   if(visionResult.aborted) return;
@@ -8534,8 +8543,10 @@ async function saveAndVerifyAlibabaImageCapabilities(){
    _setAlibabaQuickStatus('保存失败：'+_safeAlibabaQuickMessage(error,secret),'识图：未验证','生图：未验证','danger');
   }
  }finally{
-  if(keyInput) keyInput.value='';
-  if(_alibabaQuickOperation===operation){
+  const current=_alibabaQuickOperation===operation;
+  const ownsInput=!!(keyInput&&operation.secret&&String(keyInput.value||'').trim()===operation.secret);
+  if(ownsInput&&(current||!_alibabaQuickOperation)) keyInput.value='';
+  if(current){
    _alibabaQuickOperation=null;
    _setAlibabaQuickBusy(false);
   }
