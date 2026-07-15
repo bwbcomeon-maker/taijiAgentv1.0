@@ -58,6 +58,48 @@ const sourceRefSchema = {
 
 const sha256Schema = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 
+const documentMetadataV1Schema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['title', 'documentType', 'client', 'issuer', 'compiler', 'versionLabel', 'classification', 'classificationLabel', 'documentDate'],
+  properties: {
+    title: { type: 'string', minLength: 1 },
+    documentType: { type: 'string', minLength: 1 },
+    client: { type: 'string' },
+    issuer: { type: 'string', minLength: 1 },
+    compiler: { type: 'string', minLength: 1 },
+    versionLabel: { type: 'string', minLength: 1 },
+    classification: { type: 'string', minLength: 1 },
+    classificationLabel: { type: 'string' },
+    documentDate: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+  },
+};
+
+const canonicalBindingV1Schema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['artifactId', 'artifactSha256', 'briefRevision', 'briefSha256'],
+  properties: {
+    artifactId: { type: 'string', minLength: 1 },
+    artifactSha256: sha256Schema,
+    briefRevision: { type: 'integer', minimum: 1 },
+    briefSha256: sha256Schema,
+  },
+};
+
+const rendererIdentityV1Schema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name', 'version', 'buildSha256', 'profileId', 'profileSha256'],
+  properties: {
+    name: { const: 'docx-engine-v2' },
+    version: { type: 'string', minLength: 1 },
+    buildSha256: sha256Schema,
+    profileId: { type: 'string', minLength: 1 },
+    profileSha256: sha256Schema,
+  },
+};
+
 const pathEntrySchema = {
   type: 'object',
   additionalProperties: false,
@@ -359,6 +401,33 @@ const templateManifestSchema = {
 };
 
 const schemas = {
+  DocumentMetadataV1: documentMetadataV1Schema,
+  CanonicalBindingV1: canonicalBindingV1Schema,
+  RendererIdentityV1: rendererIdentityV1Schema,
+  RenderInputBindingV1: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['schemaVersion', 'brief', 'canonicalArtifact', 'canonicalMarkdownSha256', 'assetManifestSha256', 'semanticGatesSha256', 'template', 'rendererIdentity'],
+    properties: {
+      schemaVersion: { const: 'render-input-binding/v1' },
+      brief: {
+        type: 'object', additionalProperties: false, required: ['revision', 'sha256'],
+        properties: { revision: { type: 'integer', minimum: 1 }, sha256: sha256Schema },
+      },
+      canonicalArtifact: {
+        type: 'object', additionalProperties: false, required: ['artifactId', 'sha256'],
+        properties: { artifactId: { type: 'string', minLength: 1 }, sha256: sha256Schema },
+      },
+      canonicalMarkdownSha256: sha256Schema,
+      assetManifestSha256: sha256Schema,
+      semanticGatesSha256: sha256Schema,
+      template: {
+        type: 'object', additionalProperties: false, required: ['id', 'version', 'packageSha256'],
+        properties: { id: { type: 'string', minLength: 1 }, version: { type: 'string', minLength: 1 }, packageSha256: sha256Schema },
+      },
+      rendererIdentity: rendererIdentityV1Schema,
+    },
+  },
   DocumentJob: {
     type: 'object',
     additionalProperties: false,
@@ -398,6 +467,11 @@ const schemas = {
       },
       warnings: stringArraySchema,
       failures: stringArraySchema,
+      documentMetadata: documentMetadataV1Schema,
+      canonicalBinding: canonicalBindingV1Schema,
+      rendererIdentity: rendererIdentityV1Schema,
+      renderInputBinding: { type: 'object', additionalProperties: true },
+      renderInputFingerprint: sha256Schema,
     },
   },
 
@@ -508,6 +582,12 @@ const schemas = {
       schemaVersion: { const: 'docx-engine-v2/render-plan' },
       jobId: { type: 'string', minLength: 1 },
       templateId: { type: 'string', minLength: 1 },
+      documentMetadata: documentMetadataV1Schema,
+      canonicalBinding: canonicalBindingV1Schema,
+      rendererIdentity: rendererIdentityV1Schema,
+      renderInputBinding: { type: 'object', additionalProperties: true },
+      renderInputFingerprint: sha256Schema,
+      assetManifestPath: { type: 'string', minLength: 1 },
       sections: {
         type: 'array',
         items: sectionSchema,
@@ -585,6 +665,10 @@ const schemas = {
       },
       warnings: stringArraySchema,
       failures: stringArraySchema,
+      documentMetadata: documentMetadataV1Schema,
+      canonicalBinding: canonicalBindingV1Schema,
+      rendererIdentity: rendererIdentityV1Schema,
+      renderInputFingerprint: sha256Schema,
     },
   },
 
@@ -608,6 +692,7 @@ const schemas = {
           jobManifest: sha256Schema,
           templateManifest: sha256Schema,
           renderPlan: sha256Schema,
+          renderInputBinding: sha256Schema,
         },
       },
       replayedDocumentPath: { type: 'string' },
@@ -689,6 +774,7 @@ const schemas = {
           qualityReport: sha256Schema,
           replayReport: sha256Schema,
           imageInstructions: sha256Schema,
+          renderInputBinding: sha256Schema,
         },
       },
       files: {
@@ -720,6 +806,7 @@ const schemas = {
           qualityReport: { type: 'string', minLength: 1 },
           replayReport: { type: 'string', minLength: 1 },
           imageInstructions: { type: 'string', minLength: 1 },
+          renderInputBinding: { type: 'string', minLength: 1 },
         },
       },
       status: { enum: STATUSES.delivery },

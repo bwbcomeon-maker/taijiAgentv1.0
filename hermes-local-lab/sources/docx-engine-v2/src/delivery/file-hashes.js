@@ -16,6 +16,7 @@ const HASHED_FILE_ROLES = [
 ];
 const OPTIONAL_HASHED_FILE_ROLES = [
   'replayReport',
+  'renderInputBinding',
 ];
 const REPLAY_INPUT_FILE_ROLES = [
   'document',

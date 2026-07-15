@@ -1,6 +1,6 @@
 const { validateDomainObject } = require('../domain/validate');
 
-function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) {
+function buildRenderPlan({ sourcePackage, templatePackage, assetPackage, documentMetadata, canonicalBinding, rendererIdentity, renderInputBinding, renderInputFingerprint, assetManifestPath = '' } = {}) {
   if (!sourcePackage) {
     throw new Error('sourcePackage is required.');
   }
@@ -20,6 +20,12 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
       ? `job-${sourcePackage.sourceRef.sha256.slice(0, 12)}`
       : 'job-render-plan',
     templateId: templatePackage.templateId || templatePackage.id,
+    ...(documentMetadata ? { documentMetadata } : {}),
+    ...(canonicalBinding ? { canonicalBinding } : {}),
+    ...(rendererIdentity ? { rendererIdentity } : {}),
+    ...(renderInputBinding ? { renderInputBinding } : {}),
+    ...(renderInputFingerprint ? { renderInputFingerprint } : {}),
+    ...(assetManifestPath ? { assetManifestPath } : {}),
     sections: (sourcePackage.sections || []).map((section) => ({
       ...section,
       blockIds: [...(section.blockIds || [])],
@@ -60,7 +66,7 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
       };
     }),
     templateData: {
-      title: sourcePackage.title || '',
+      title: documentMetadata?.title || sourcePackage.title || '',
       sections: buildTemplateSections(sourcePackage, assetPackage, templateImageBindings.figureIdBySourceImageId),
       images: templateImages,
       tables: (assetPackage.tables || []).map((table, index) => {
@@ -82,6 +88,10 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage } = {}) 
       metadata: {
         templateId: templatePackage.templateId || templatePackage.id,
         assetDir: assetPackage.assetDir,
+        ...(documentMetadata ? { documentMetadata } : {}),
+        ...(canonicalBinding ? { canonicalBinding } : {}),
+        ...(rendererIdentity ? { rendererIdentity } : {}),
+        ...(renderInputFingerprint ? { renderInputFingerprint } : {}),
       },
     },
     warnings: [],

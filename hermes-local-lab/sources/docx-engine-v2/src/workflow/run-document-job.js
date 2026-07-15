@@ -1,11 +1,12 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 
 const { buildDeliveryFileSha256, refreshDeliveryPackageFileHashes } = require('../delivery/file-hashes');
 const { packageAssets } = require('../assets/package-assets');
 const { writeDeliveryPackage } = require('../delivery/write-delivery-package');
-const { createDocumentJob, transitionJob } = require('../domain/document-job');
+const { canonicalSha256, createDocumentJob, transitionJob } = require('../domain/document-job');
 const { validateDomainObject } = require('../domain/validate');
 const { buildRenderPlan } = require('../planning/build-render-plan');
 const { postprocessDocx } = require('../rendering/postprocess-docx');
@@ -26,6 +27,12 @@ async function runDocumentJob({
   assetDir = '',
   deliveryDir,
   workspaceRoot = os.tmpdir(),
+  documentMetadata,
+  canonicalBinding,
+  rendererIdentity,
+  renderInputBinding,
+  renderInputFingerprint,
+  assetManifestPath = '',
 } = {}) {
   if (!templateId) {
     throw new Error('templateId is required.');
@@ -57,6 +64,11 @@ async function runDocumentJob({
       templateId,
       workspace,
       inputs: buildInputs({ sourcePath: absoluteSourcePath, assetDir }),
+      documentMetadata,
+      canonicalBinding,
+      rendererIdentity,
+      renderInputBinding,
+      renderInputFingerprint,
     });
     job = transitionJob(job, 'source_normalized', {
       warnings: collectWarnings(sourcePackage.warnings),
@@ -64,6 +76,19 @@ async function runDocumentJob({
 
     const templatePackage = getTemplatePackage(templateId, { rootDir: path.resolve(engineRoot) });
     assertTemplatePackageValid(templatePackage);
+    const enterpriseContract = { documentMetadata, canonicalBinding, rendererIdentity, renderInputBinding, renderInputFingerprint };
+    if (Object.values(enterpriseContract).some(Boolean)) {
+      validateEnterpriseJobContract(enterpriseContract, templatePackage, {
+        sourceSha256: sourcePackage.sourceRef.sha256,
+        assetManifestSha256: assetManifestPath && fs.existsSync(assetManifestPath)
+          ? crypto.createHash('sha256').update(fs.readFileSync(assetManifestPath)).digest('hex')
+          : '',
+      });
+      const actualRenderer = describeRendererIdentity({ engineRoot, profileId: rendererIdentity.profileId });
+      if (canonicalSha256(actualRenderer) !== canonicalSha256(rendererIdentity)) {
+        throw new ContractFailure('renderer_identity_changed', 'Renderer identity changed before rendering.');
+      }
+    }
     assertSourceMeetsTemplateRequirements({ sourcePackage, templatePackage });
     job = transitionJob(job, 'template_selected', {
       templateId: templatePackage.templateId,
@@ -78,7 +103,7 @@ async function runDocumentJob({
       warnings: [...job.warnings, ...collectWarnings(assetPackage.warnings)],
     });
 
-    const renderPlan = buildRenderPlan({ sourcePackage, templatePackage, assetPackage });
+    const renderPlan = buildRenderPlan({ sourcePackage, templatePackage, assetPackage, documentMetadata, canonicalBinding, rendererIdentity, renderInputBinding, renderInputFingerprint, assetManifestPath });
     job = transitionJob(job, 'render_planned', {
       jobId: renderPlan.jobId,
       warnings: [...job.warnings, ...collectWarnings(renderPlan.warnings)],
@@ -111,7 +136,7 @@ async function runDocumentJob({
       qualityReport: initialQualityReport(),
     });
 
-    const qualityReport = validateDeliveryPackage({ deliveryDir: validationDeliveryDir });
+    const qualityReport = attachContractTrace(validateDeliveryPackage({ deliveryDir: validationDeliveryDir }), job);
     if (qualityReport.status === 'failed') {
       return persistFailureArtifacts({
         deliveryDir: absoluteDeliveryDir,
@@ -151,7 +176,7 @@ async function runDocumentJob({
       qualityReport,
       manifestDeliveryDir: absoluteDeliveryDir,
     });
-    const finalQualityReport = validateDeliveryPackage({ deliveryDir: finalDeliveryDir });
+    const finalQualityReport = attachContractTrace(validateDeliveryPackage({ deliveryDir: finalDeliveryDir }), job);
     fs.writeFileSync(
       path.join(finalDeliveryDir, 'quality-report.json'),
       `${JSON.stringify(finalQualityReport, null, 2)}\n`,
@@ -191,10 +216,10 @@ async function runDocumentJob({
       manifestDeliveryDir: absoluteDeliveryDir,
       replayReport,
     });
-    const replayBoundQualityReport = validateDeliveryPackage({
+    const replayBoundQualityReport = attachContractTrace(validateDeliveryPackage({
       deliveryDir: finalDeliveryDir,
       requireReplayReport: true,
-    });
+    }), job);
     fs.writeFileSync(
       path.join(finalDeliveryDir, 'quality-report.json'),
       `${JSON.stringify(replayBoundQualityReport, null, 2)}\n`,
@@ -219,7 +244,7 @@ async function runDocumentJob({
     return persistFailureArtifacts({
       deliveryDir: absoluteDeliveryDir,
       result: failureResult({
-        code: stage === 'render' ? 'render_failed' : 'validation_failed',
+        code: error.code || (stage === 'render' ? 'render_failed' : 'validation_failed'),
         message: error.message,
         job,
         stage,
@@ -229,6 +254,98 @@ async function runDocumentJob({
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
+}
+
+class ContractFailure extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function validateEnterpriseJobContract(contract, templatePackage, observed = {}) {
+  const required = [
+    ['DocumentMetadataV1', contract.documentMetadata, 'brief_incomplete'],
+    ['CanonicalBindingV1', contract.canonicalBinding, 'canonical_binding_invalid'],
+    ['RendererIdentityV1', contract.rendererIdentity, 'renderer_identity_invalid'],
+    ['RenderInputBindingV1', contract.renderInputBinding, 'render_input_binding_invalid'],
+  ];
+  for (const [schemaName, value, code] of required) {
+    const validation = validateDomainObject(schemaName, value || {});
+    if (!validation.ok) {
+      throw new ContractFailure(code, `${schemaName} validation failed: ${JSON.stringify(validation.errors)}`);
+    }
+  }
+  if (!(templatePackage?.manifest?.documentTypes || []).includes(contract.documentMetadata.documentType)) {
+    throw new ContractFailure('template_selection_required', 'Template is incompatible with document type.');
+  }
+  const binding = contract.renderInputBinding;
+  if (
+    binding.canonicalArtifact.artifactId !== contract.canonicalBinding.artifactId
+    || binding.canonicalArtifact.sha256 !== contract.canonicalBinding.artifactSha256
+    || binding.brief.revision !== contract.canonicalBinding.briefRevision
+    || binding.brief.sha256 !== contract.canonicalBinding.briefSha256
+  ) {
+    throw new ContractFailure('canonical_binding_invalid', 'Canonical binding does not match render input binding.');
+  }
+  if (binding.template.id !== (templatePackage.templateId || templatePackage.id || templatePackage.manifest?.id)) {
+    throw new ContractFailure('template_selection_required', 'Render input template identity changed.');
+  }
+  if (canonicalSha256(binding.rendererIdentity) !== canonicalSha256(contract.rendererIdentity)) {
+    throw new ContractFailure('renderer_identity_invalid', 'Render input renderer identity changed.');
+  }
+  if (observed.sourceSha256 && binding.canonicalMarkdownSha256 !== observed.sourceSha256) {
+    throw new ContractFailure('canonical_hash_mismatch', 'Canonical Markdown hash does not match source bytes.');
+  }
+  if (observed.assetManifestSha256 && binding.assetManifestSha256 !== observed.assetManifestSha256) {
+    throw new ContractFailure('asset_manifest_hash_mismatch', 'Asset manifest hash does not match render input binding.');
+  }
+  if (!/^[a-f0-9]{64}$/.test(String(contract.renderInputFingerprint || ''))) {
+    throw new ContractFailure('render_input_binding_invalid', 'Render input fingerprint is invalid.');
+  }
+  if (canonicalSha256(contract.renderInputBinding) !== contract.renderInputFingerprint) {
+    throw new ContractFailure('render_input_fingerprint_mismatch', 'Render input fingerprint does not match canonical JSON.');
+  }
+  return true;
+}
+
+function describeRendererIdentity({ engineRoot = path.resolve(__dirname, '../..'), profileId = 'enterprise-default' } = {}) {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(engineRoot, 'package.json'), 'utf8'));
+  const digest = crypto.createHash('sha256');
+  for (const filePath of collectFiles(path.join(engineRoot, 'src'))) {
+    digest.update(path.relative(engineRoot, filePath).replaceAll(path.sep, '/'));
+    digest.update('\0');
+    digest.update(fs.readFileSync(filePath));
+    digest.update('\0');
+  }
+  return {
+    name: 'docx-engine-v2',
+    version: String(packageJson.version || ''),
+    buildSha256: digest.digest('hex'),
+    profileId,
+    profileSha256: canonicalSha256({ engineVersion: String(packageJson.version || ''), profileId }),
+  };
+}
+
+function collectFiles(root) {
+  const rows = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const target = path.join(root, entry.name);
+    if (entry.isDirectory()) rows.push(...collectFiles(target));
+    else if (entry.isFile()) rows.push(target);
+  }
+  return rows.sort();
+}
+
+function attachContractTrace(report, job) {
+  if (!job?.documentMetadata) return report;
+  return {
+    ...report,
+    documentMetadata: job.documentMetadata,
+    canonicalBinding: job.canonicalBinding,
+    rendererIdentity: job.rendererIdentity,
+    renderInputFingerprint: job.renderInputFingerprint,
+  };
 }
 
 function assertTemplatePackageValid(templatePackage) {
@@ -504,6 +621,8 @@ function moveVerifiedDelivery({ fromDir, toDir }) {
 
 module.exports = {
   runDocumentJob,
+  describeRendererIdentity,
+  validateEnterpriseJobContract,
   inferSourceType,
   assertSourceMeetsTemplateRequirements,
   initialQualityReport,

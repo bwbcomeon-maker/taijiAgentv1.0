@@ -28,6 +28,52 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/file/open" in routes_py
 
 
+def test_expert_delivery_bridge_passes_canonical_contract_as_json(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+
+    source = tmp_path / "canonical.md"
+    assets = tmp_path / "assets"
+    source.write_text("# 月度汇报\n", encoding="utf-8")
+    assets.mkdir()
+    out_dir = tmp_path / ".taiji" / "expert-team-deliveries" / "run-1" / "delivery" / "attempt-1" / "delivery"
+    captured = {}
+
+    def fake_run(args, **_kwargs):
+        captured["args"] = args
+        return SimpleNamespace(returncode=1, stdout='{"ok":false,"code":"brief_incomplete","message":"bad"}\n', stderr="")
+
+    monkeypatch.setattr(docx_engine_v2, "run_engine", fake_run)
+    payload, status = docx_engine_v2._create_expert_delivery_job(
+        {
+            "template_id": "enterprise-work-report",
+            "source_path": str(source),
+            "asset_dir": str(assets),
+            "out_dir": str(out_dir),
+            "document_metadata": {"title": "月度汇报"},
+            "canonical_binding": {"artifactId": "polish:1"},
+            "renderer_identity": {"name": "docx-engine-v2"},
+            "render_input_binding": {"schemaVersion": "render-input-binding/v1"},
+            "render_input_fingerprint": "f" * 64,
+        },
+        tmp_path,
+        run_id="run-1",
+        stage_id="delivery",
+        attempt=1,
+    )
+
+    assert status == 400 and payload["code"] == "brief_incomplete"
+    for flag in ("--document-metadata-json", "--canonical-binding-json", "--renderer-identity-json", "--render-input-binding-json", "--render-input-fingerprint"):
+        assert flag in captured["args"]
+
+
+def test_python_and_node_use_same_canonical_json_digest():
+    from api.expert_teams.documents import _sha256_payload
+
+    assert _sha256_payload({"b": 2, "nested": {"y": 2, "x": 1}, "a": 1}) == (
+        "13c79d4b0b5375d4f715181ba6cedbb6603108855f68f061983f33693b87a75c"
+    )
+
+
 def test_begin_office_review_route_uses_server_trusted_profile_identity(monkeypatch, tmp_path):
     from api import routes
 

@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const { STATUSES } = require('./schemas');
 
 const ALLOWED_TRANSITIONS = {
@@ -12,8 +13,22 @@ const ALLOWED_TRANSITIONS = {
   failed: [],
 };
 
-function createDocumentJob({ jobId, sourceRef, templateId = '', workspace, inputs = [] }) {
-  return {
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function canonicalSha256(value) {
+  return crypto.createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+}
+
+function createDocumentJob({ jobId, sourceRef, templateId = '', workspace, inputs = [], documentMetadata, canonicalBinding, rendererIdentity, renderInputBinding, renderInputFingerprint }) {
+  const job = {
     jobId,
     createdAt: new Date().toISOString(),
     sourceRef,
@@ -25,6 +40,12 @@ function createDocumentJob({ jobId, sourceRef, templateId = '', workspace, input
     warnings: [],
     failures: [],
   };
+  if (documentMetadata) job.documentMetadata = documentMetadata;
+  if (canonicalBinding) job.canonicalBinding = canonicalBinding;
+  if (rendererIdentity) job.rendererIdentity = rendererIdentity;
+  if (renderInputBinding) job.renderInputBinding = renderInputBinding;
+  if (renderInputFingerprint) job.renderInputFingerprint = renderInputFingerprint;
+  return job;
 }
 
 function transitionJob(job, status, updates = {}) {
@@ -44,4 +65,4 @@ function transitionJob(job, status, updates = {}) {
   return { ...job, ...updates, status };
 }
 
-module.exports = { createDocumentJob, transitionJob };
+module.exports = { canonicalJson, canonicalSha256, createDocumentJob, transitionJob };

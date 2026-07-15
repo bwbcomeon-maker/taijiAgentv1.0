@@ -4,6 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { createDocumentJob, transitionJob } = require('../src/domain/document-job');
+const { canonicalSha256 } = require('../src/domain/document-job');
 const { validateDomainObject } = require('../src/domain/validate');
 
 test('DocumentJob contract accepts a complete render job', () => {
@@ -112,6 +113,40 @@ test('validateDomainObject exposes Ajv error diagnostics', () => {
   assert.equal(typeof result.errors[0].keyword, 'string');
   assert.equal(typeof result.errors[0].schemaPath, 'string');
   assert.equal(typeof result.errors[0].params, 'object');
+});
+
+test('enterprise metadata and canonical bindings are strict domain objects', () => {
+  const metadata = {
+    title: '迎峰度夏保供电重点工作月度汇报',
+    documentType: 'work_report',
+    client: '国家电网有限公司',
+    issuer: '办公室',
+    compiler: '北京太极信息系统技术有限公司',
+    versionLabel: 'V1.0',
+    classification: 'internal',
+    classificationLabel: '内部资料',
+    documentDate: '2026-07-15',
+  };
+  const canonicalBinding = {
+    artifactId: 'polish:1', artifactSha256: 'a'.repeat(64), briefRevision: 3, briefSha256: 'b'.repeat(64),
+  };
+  const rendererIdentity = {
+    name: 'docx-engine-v2', version: '0.1.0', buildSha256: 'c'.repeat(64),
+    profileId: 'enterprise-default', profileSha256: 'd'.repeat(64),
+  };
+
+  assert.equal(validateDomainObject('DocumentMetadataV1', metadata).ok, true);
+  assert.equal(validateDomainObject('CanonicalBindingV1', canonicalBinding).ok, true);
+  assert.equal(validateDomainObject('RendererIdentityV1', rendererIdentity).ok, true);
+  assert.equal(validateDomainObject('DocumentMetadataV1', { ...metadata, title: '' }).ok, false);
+  assert.equal(validateDomainObject('CanonicalBindingV1', { ...canonicalBinding, artifactSha256: 'bad' }).ok, false);
+});
+
+test('canonical digest is independent of JSON key insertion order', () => {
+  assert.equal(
+    canonicalSha256({ b: 2, nested: { y: 2, x: 1 }, a: 1 }),
+    canonicalSha256({ a: 1, nested: { x: 1, y: 2 }, b: 2 })
+  );
 });
 
 test('SourcePackage contract models normalized source structure', () => {

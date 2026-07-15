@@ -7,6 +7,8 @@ const { spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 const test = require('node:test');
 const yazl = require('yazl');
+const { validateEnterpriseJobContract } = require('../src/workflow/run-document-job');
+const { canonicalSha256 } = require('../src/domain/document-job');
 
 const ENGINE_ROOT = path.join(__dirname, '..');
 const RUN_JOB = path.join(ENGINE_ROOT, 'src', 'cli', 'run-job.js');
@@ -130,6 +132,40 @@ function assertFailureArtifacts({ deliveryDir, payload, messagePattern }) {
   assert.equal(payload.jobManifestPath, path.join(deliveryDir, 'job.manifest.json'));
   assert.equal(payload.failureReportPath, path.join(deliveryDir, 'failure-report.json'));
 }
+
+test('enterprise job contract returns typed metadata and template failures', () => {
+  const base = {
+    documentMetadata: {
+      title: '月度汇报', documentType: 'work_report', client: '客户', issuer: '办公室', compiler: '编制单位',
+      versionLabel: 'V1.0', classification: 'internal', classificationLabel: '内部资料', documentDate: '2026-07-15',
+    },
+    canonicalBinding: { artifactId: 'polish:1', artifactSha256: 'a'.repeat(64), briefRevision: 3, briefSha256: 'b'.repeat(64) },
+    rendererIdentity: { name: 'docx-engine-v2', version: '0.1.0', buildSha256: 'c'.repeat(64), profileId: 'enterprise-default', profileSha256: 'd'.repeat(64) },
+    renderInputBinding: {
+      schemaVersion: 'render-input-binding/v1',
+      brief: { revision: 3, sha256: 'b'.repeat(64) },
+      canonicalArtifact: { artifactId: 'polish:1', sha256: 'a'.repeat(64) },
+      canonicalMarkdownSha256: 'e'.repeat(64), assetManifestSha256: '1'.repeat(64), semanticGatesSha256: '2'.repeat(64),
+      template: { id: 'enterprise-work-report', version: '1.0.0', packageSha256: '3'.repeat(64) },
+      rendererIdentity: { name: 'docx-engine-v2', version: '0.1.0', buildSha256: 'c'.repeat(64), profileId: 'enterprise-default', profileSha256: 'd'.repeat(64) },
+    },
+    renderInputFingerprint: 'f'.repeat(64),
+  };
+  const valid = { ...base, renderInputFingerprint: canonicalSha256(base.renderInputBinding) };
+  assert.equal(validateEnterpriseJobContract(valid, { templateId: 'enterprise-work-report', manifest: { documentTypes: ['work_report'] } }), true);
+  assert.throws(
+    () => validateEnterpriseJobContract({ ...base, documentMetadata: { ...base.documentMetadata, issuer: '' } }, { templateId: 'enterprise-work-report', manifest: { documentTypes: ['work_report'] } }),
+    (error) => error.code === 'brief_incomplete'
+  );
+  assert.throws(
+    () => validateEnterpriseJobContract(base, { templateId: 'enterprise-work-report', manifest: { documentTypes: ['research_report'] } }),
+    (error) => error.code === 'template_selection_required'
+  );
+  assert.throws(
+    () => validateEnterpriseJobContract({ ...base, renderInputFingerprint: '0'.repeat(64) }, { templateId: 'enterprise-work-report', manifest: { documentTypes: ['work_report'] } }),
+    (error) => error.code === 'render_input_fingerprint_mismatch'
+  );
+});
 
 test('run-job requires explicit template selection and does not create delivery output', (t) => {
   const root = makeTempWorkspace(t);

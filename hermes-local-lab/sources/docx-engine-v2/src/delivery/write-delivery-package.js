@@ -59,6 +59,9 @@ function writeDeliveryPackage({
   const deliveryAssetPackage = normalizeAssetPackageForDelivery(assetPackage);
   writeJson(path.join(deliveryDir, 'asset-package.json'), deliveryAssetPackage);
   writeJson(path.join(deliveryDir, 'render-plan.json'), renderPlan);
+  if (job?.renderInputBinding) {
+    writeJson(path.join(deliveryDir, 'render-input-binding.json'), job.renderInputBinding);
+  }
   writeJson(path.join(deliveryDir, 'quality-report.json'), qualityReport || emptyQualityReport());
   fs.writeFileSync(
     path.join(deliveryDir, 'README-图片调整说明.md'),
@@ -83,6 +86,7 @@ function writeDeliveryPackage({
       renderPlan: 'render-plan.json',
       qualityReport: 'quality-report.json',
       imageInstructions: 'README-图片调整说明.md',
+      ...(job?.renderInputBinding ? { renderInputBinding: 'render-input-binding.json' } : {}),
     },
     status: 'delivered',
   };
@@ -90,6 +94,13 @@ function writeDeliveryPackage({
     deliveryDir,
     files: deliveryPackage.files,
   });
+  if (deliveryPackage.files.renderInputBinding) {
+    Object.assign(deliveryPackage.fileSha256, buildDeliveryFileSha256({
+      deliveryDir,
+      files: deliveryPackage.files,
+      roles: ['renderInputBinding'],
+    }));
+  }
   deliveryPackage.documentSha256 = deliveryPackage.fileSha256.document;
   deliveryPackage.sourceSha256 = deliveryPackage.fileSha256.source;
   const validation = validateDomainObject('DeliveryPackage', deliveryPackage);

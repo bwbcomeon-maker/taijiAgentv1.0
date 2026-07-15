@@ -47,6 +47,19 @@ def list_templates() -> dict[str, Any]:
     return payload
 
 
+def describe_renderer_identity(profile_id: str = "enterprise-default") -> dict[str, Any]:
+    """Return the exact side-effect-free renderer build/profile identity."""
+
+    completed = run_engine(
+        [str(_engine_cli("describe-renderer.js")), "--profile-id", str(profile_id or "enterprise-default")]
+    )
+    payload = _payload_from_completed(completed, default_code="renderer_identity_unavailable")
+    identity = payload.get("rendererIdentity")
+    if completed.returncode != 0 or not isinstance(identity, dict):
+        raise DocxEngineV2Error(str(payload.get("message") or "Renderer identity is unavailable"))
+    return identity
+
+
 def install_template(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
     workspace = Path(workspace).expanduser().resolve()
     try:
@@ -160,6 +173,31 @@ def _create_job_impl(
                 allowed_absolute_roots=roots,
             )
             args.extend(["--asset-dir", str(asset_dir)])
+        contract_json_fields = (
+            ("document_metadata", "documentMetadata", "--document-metadata-json"),
+            ("canonical_binding", "canonicalBinding", "--canonical-binding-json"),
+            ("renderer_identity", "rendererIdentity", "--renderer-identity-json"),
+            ("render_input_binding", "renderInputBinding", "--render-input-binding-json"),
+        )
+        for snake_name, camel_name, flag in contract_json_fields:
+            value = payload.get(snake_name, payload.get(camel_name))
+            if value is not None:
+                if not isinstance(value, dict):
+                    raise ValueError(f"{snake_name} must be an object")
+                args.extend([flag, json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))])
+        fingerprint = _first_text(payload, "render_input_fingerprint", "renderInputFingerprint")
+        if fingerprint:
+            args.extend(["--render-input-fingerprint", fingerprint])
+        asset_manifest_raw = _first_text(payload, "asset_manifest_path", "assetManifestPath")
+        if asset_manifest_raw:
+            asset_manifest = _resolve_workspace_path(
+                workspace,
+                asset_manifest_raw,
+                field="asset_manifest_path",
+                must_exist=True,
+                allowed_absolute_roots=roots,
+            )
+            args.extend(["--asset-manifest", str(asset_manifest)])
     except (FileNotFoundError, OSError, ValueError) as exc:
         return _error_payload("validation_failed", str(exc)), 400
 
@@ -1092,7 +1130,20 @@ def _error_payload(code: str, message: str) -> dict[str, Any]:
 
 def _status_for_engine_failure(payload: dict[str, Any]) -> int:
     code = str(payload.get("code") or "")
-    if code in {"template_selection_required", "template_install_failed", "validation_failed", "wps_visual_record_failed"}:
+    if code in {
+        "template_selection_required",
+        "template_install_failed",
+        "validation_failed",
+        "wps_visual_record_failed",
+        "brief_incomplete",
+        "canonical_binding_invalid",
+        "canonical_hash_mismatch",
+        "asset_manifest_hash_mismatch",
+        "renderer_identity_invalid",
+        "renderer_identity_changed",
+        "render_input_binding_invalid",
+        "render_input_fingerprint_mismatch",
+    }:
         return 400
     return 500
 

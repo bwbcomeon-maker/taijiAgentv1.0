@@ -47,6 +47,12 @@ async function main() {
     sourceType: args.sourceType,
     assetDir: args.assetDir || '',
     deliveryDir: path.resolve(args.outDir),
+    documentMetadata: args.documentMetadata,
+    canonicalBinding: args.canonicalBinding,
+    rendererIdentity: args.rendererIdentity,
+    renderInputBinding: args.renderInputBinding,
+    renderInputFingerprint: args.renderInputFingerprint,
+    assetManifestPath: args.assetManifestPath,
   });
 
   if (!result.ok) {
@@ -69,6 +75,12 @@ function parseArgs(argv) {
     assetDir: '',
     outDir: '',
     json: false,
+    documentMetadata: undefined,
+    canonicalBinding: undefined,
+    rendererIdentity: undefined,
+    renderInputBinding: undefined,
+    renderInputFingerprint: '',
+    assetManifestPath: '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -94,12 +106,38 @@ function parseArgs(argv) {
     } else if (arg === '--out-dir') {
       parsed.outDir = next || '';
       index += 1;
+    } else if (arg === '--document-metadata-json') {
+      parsed.documentMetadata = parseJsonArgument(next, arg);
+      index += 1;
+    } else if (arg === '--canonical-binding-json') {
+      parsed.canonicalBinding = parseJsonArgument(next, arg);
+      index += 1;
+    } else if (arg === '--renderer-identity-json') {
+      parsed.rendererIdentity = parseJsonArgument(next, arg);
+      index += 1;
+    } else if (arg === '--render-input-binding-json') {
+      parsed.renderInputBinding = parseJsonArgument(next, arg);
+      index += 1;
+    } else if (arg === '--render-input-fingerprint') {
+      parsed.renderInputFingerprint = next || '';
+      index += 1;
+    } else if (arg === '--asset-manifest') {
+      parsed.assetManifestPath = next || '';
+      index += 1;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
   return parsed;
+}
+
+function parseJsonArgument(value, flag) {
+  try {
+    return JSON.parse(value || '');
+  } catch (error) {
+    throw new Error(`${flag} must contain valid JSON: ${error.message}`);
+  }
 }
 
 function toCliPayload(result) {
