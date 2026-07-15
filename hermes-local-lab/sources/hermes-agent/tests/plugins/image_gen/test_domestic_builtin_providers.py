@@ -135,6 +135,10 @@ class TestDashScopeQwenImageProvider:
         assert mock_post.call_args.kwargs["json"]["parameters"]["size"] == "1664*928"
 
     def test_named_credential_is_used_for_availability_and_generation(self, monkeypatch):
+        monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
+        monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://legacy.example.com")
+        monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "legacy-workspace")
+        monkeypatch.setenv("DASHSCOPE_REGION", "ap-southeast-1")
         monkeypatch.setenv(
             "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", "named-dashscope-secret"
         )
@@ -177,6 +181,32 @@ class TestDashScopeQwenImageProvider:
             mock_post.call_args.kwargs["headers"]["Authorization"]
             == "Bearer named-dashscope-secret"
         )
+        assert mock_post.call_args.args[0] == (
+            "https://llm-demo.cn-beijing.maas.aliyuncs.com/api/v1/services/"
+            "aigc/multimodal-generation/generation"
+        )
+
+    def test_named_credential_config_load_failure_never_uses_legacy_state(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-must-not-be-used")
+        monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "legacy-workspace")
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        with (
+            patch(
+                "hermes_cli.config.load_config",
+                side_effect=OSError("config unavailable"),
+            ),
+            patch("plugins.image_gen.dashscope.requests.post") as mock_post,
+        ):
+            provider = DashScopeQwenImageProvider()
+            assert provider.is_available() is False
+            result = provider.generate("A city skyline")
+
+        assert result["success"] is False
+        assert result["error_type"] == "configuration_error"
+        mock_post.assert_not_called()
 
     def test_named_credential_never_falls_back_to_legacy_key(self, monkeypatch):
         monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-must-not-be-used")

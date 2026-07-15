@@ -1752,28 +1752,47 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                 row = load_credential(credential_ref, config_data=config_data)
                 if provider_family(row.get("provider_family")) != provider_family(provider_id):
                     raise ValueError("所选凭据不属于当前 Provider。")
-            if env_updates:
-                _write_env_file(_get_hermes_home() / ".env", env_updates)
-            image_cfg = config_data.get("image_gen")
-            if not isinstance(image_cfg, dict):
-                image_cfg = {}
-            image_cfg["provider"] = provider_id
-            if model_id:
-                image_cfg["model"] = model_id
-            image_cfg["use_gateway"] = False
-            if provider_id == "dashscope":
-                image_cfg["credential_ref"] = credential_ref
-            else:
-                image_cfg.pop("credential_ref", None)
-            image_cfg.pop("api_key", None)
-            if option_updates:
-                options = image_cfg.get("options")
-                if not isinstance(options, dict):
-                    options = {}
-                options.update(option_updates)
-                image_cfg["options"] = options
-            config_data["image_gen"] = image_cfg
-            _save_yaml_config_file(config_path, config_data)
+            env_path = _get_hermes_home() / ".env"
+            env_snapshots = {
+                env_var: _credential_env_snapshot(env_path, env_var)
+                for env_var in env_updates
+            }
+            env_touched = False
+            try:
+                if env_updates:
+                    env_touched = True
+                    _write_env_file(env_path, env_updates)
+                image_cfg = config_data.get("image_gen")
+                if not isinstance(image_cfg, dict):
+                    image_cfg = {}
+                image_cfg["provider"] = provider_id
+                if model_id:
+                    image_cfg["model"] = model_id
+                image_cfg["use_gateway"] = False
+                if provider_id == "dashscope":
+                    image_cfg["credential_ref"] = credential_ref
+                else:
+                    image_cfg.pop("credential_ref", None)
+                image_cfg.pop("api_key", None)
+                if option_updates:
+                    options = image_cfg.get("options")
+                    if not isinstance(options, dict):
+                        options = {}
+                    options.update(option_updates)
+                    image_cfg["options"] = options
+                config_data["image_gen"] = image_cfg
+                _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_touched:
+                    for env_var, snapshot in env_snapshots.items():
+                        try:
+                            _restore_credential_env(env_path, env_var, snapshot)
+                        except Exception:
+                            logger.exception(
+                                "Failed to restore image generation credential %s",
+                                env_var,
+                            )
+                raise
     reload_config()
     invalidate_models_cache()
     return get_image_gen_config()

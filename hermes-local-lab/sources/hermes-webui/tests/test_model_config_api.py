@@ -701,6 +701,50 @@ def test_dashscope_image_rejects_named_ref_with_inline_api_key(monkeypatch, tmp_
     assert "must-not-write" not in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
+def test_legacy_dashscope_inline_key_rolls_back_when_yaml_save_fails(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [_dashscope_image_provider_row()],
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=old-legacy-secret\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "old-legacy-secret")
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"image_gen": {"provider": "dashscope", "model": "qwen-image"}}
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(model_config, "_save_yaml_config_file", fail_save)
+
+    with pytest.raises(OSError, match="disk full"):
+        model_config.set_image_gen_config(
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "api_key": "new-secret-must-roll-back",
+            }
+        )
+
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == (
+        "DASHSCOPE_API_KEY=old-legacy-secret\n"
+    )
+    assert os.environ["DASHSCOPE_API_KEY"] == "old-legacy-secret"
+    assert _read_config(tmp_path)["image_gen"] == {
+        "provider": "dashscope",
+        "model": "qwen-image",
+    }
+
+
 def test_concurrent_image_binding_and_credential_delete_cannot_leave_dangling_ref(
     monkeypatch, tmp_path
 ):
