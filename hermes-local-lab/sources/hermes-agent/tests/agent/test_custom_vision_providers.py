@@ -195,3 +195,26 @@ def test_named_custom_vision_runtime_fails_closed_for_unsafe_dns(tmp_path, monke
     with pytest.raises(ValueError, match="unsafe custom vision endpoint"):
         _resolve_task_provider_model("vision")
     os.environ.pop("TAIJI_VISION_CUSTOM_RELAY_API_KEY", None)
+
+
+def test_named_anthropic_vision_refuses_openai_wire_fallback(monkeypatch):
+    raw_client = object()
+    monkeypatch.setattr("agent.auxiliary_client.OpenAI", lambda **_kwargs: raw_client)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._maybe_wrap_anthropic",
+        lambda client, *_args, **_kwargs: client,
+    )
+    from agent.auxiliary_client import resolve_provider_client
+
+    client, model = resolve_provider_client(
+        "custom",
+        "relay-vl",
+        explicit_base_url="https://relay.example.com/anthropic",
+        explicit_api_key="relay-secret",
+        api_mode="anthropic_messages",
+        follow_redirects=False,
+        is_vision=True,
+    )
+
+    assert client is None
+    assert model is None

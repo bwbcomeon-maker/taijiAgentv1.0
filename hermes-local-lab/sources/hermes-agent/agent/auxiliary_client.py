@@ -3394,7 +3394,7 @@ def resolve_provider_client(
 
                 extra["http_client"] = httpx.Client(follow_redirects=follow_redirects)
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
-            client = _maybe_wrap_anthropic(
+            wrapped_client = _maybe_wrap_anthropic(
                 client,
                 final_model,
                 custom_key,
@@ -3402,6 +3402,17 @@ def resolve_provider_client(
                 api_mode,
                 follow_redirects=follow_redirects,
             )
+            if (
+                api_mode == "anthropic_messages"
+                and follow_redirects is False
+                and wrapped_client is client
+            ):
+                logger.warning(
+                    "Strict custom vision endpoint requires Anthropic Messages "
+                    "support; refusing OpenAI-wire fallback"
+                )
+                return None, None
+            client = wrapped_client
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
         # Try custom first, then API-key providers (Codex excluded here:
