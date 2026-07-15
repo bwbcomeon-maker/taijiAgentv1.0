@@ -1926,6 +1926,33 @@ def test_office_mutations_send_only_server_derived_refs_and_validate_decision_fa
     assert result["wrongRole"]["code"] == "trusted_reviewer_required"
 
 
+def test_office_primary_submit_binds_real_safe_record_handler_and_tracks_all_dirty_fields():
+    ui = EXPERT_UI_JS
+    actions = ACTIONS_JS
+    assert 'data-office-submit' in ui
+    assert 'onclick="submitExpertTeamOfficeAcceptance(this);event.stopPropagation()"' in ui
+    submit = _function_body(
+        actions,
+        'async function submitExpertTeamOfficeAcceptance',
+        'async function submitExpertTeamOfficeRevision',
+    )
+    assert 'validateExpertTeamOfficeSubmission' in submit
+    assert "api('/api/docx-engine-v2/quality/wps-visual'" in submit
+    assert 'officeSubmissionMutationPayload' in submit
+    assert 'aria-busy' in submit and 'disabled' in submit
+    payload = _function_body(
+        actions,
+        'function officeSubmissionMutationPayload',
+        'function officeRevisionMutationPayload',
+    )
+    for forbidden in ('reviewer', 'principal', 'role', 'review_token', 'delivery_dir', 'document_path', 'evidence_files'):
+        assert forbidden not in payload
+    dirty = _function_body(actions, 'function officeDrawerDraftState', 'function closeExpertTeamOfficeDrawer')
+    assert 'data-office-waiver-reason' in dirty
+    assert 'data-office-revision-issue' in dirty
+    assert 'data-office-checklist' in dirty
+
+
 def test_presenter_maps_safe_office_review_view_into_workspace_card():
     source = textwrap.dedent(
         """

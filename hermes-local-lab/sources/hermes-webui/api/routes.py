@@ -18637,10 +18637,28 @@ def _handle_docx_engine_v2_package_draft(handler, body):
 
 
 def _handle_docx_engine_v2_wps_visual_acceptance(handler, body):
+    from api.expert_teams.trusted_identity import TrustedIdentityError, resolve_trusted_principal
+
     try:
         workspace = _docx_engine_v2_workspace(body)
-        payload, status = docx_engine_v2.record_wps_visual_acceptance(body, workspace)
+        principal = None
+        if str(body.get("run_id") or "").strip() and not str(body.get("delivery_dir") or body.get("deliveryDir") or "").strip():
+            principal = resolve_trusted_principal(
+                {"identity_session_id": _expert_identity_session(handler)},
+                "document-reviewer",
+                int(time.time()),
+            )
+        if principal is None:
+            payload, status = docx_engine_v2.record_wps_visual_acceptance(body, workspace)
+        else:
+            payload, status = docx_engine_v2.record_wps_visual_acceptance(
+                body,
+                workspace,
+                trusted_principal=principal,
+            )
         return j(handler, payload, status=status)
+    except TrustedIdentityError as e:
+        return j(handler, {"ok": False, "code": e.code, "error": str(e)}, status=403)
     except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
     except subprocess.TimeoutExpired as e:

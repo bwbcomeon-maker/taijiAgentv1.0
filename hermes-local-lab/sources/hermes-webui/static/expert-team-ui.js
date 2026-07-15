@@ -279,8 +279,9 @@
       <fieldset><legend>1. 选择验收结论</legend><label><input type="radio" name="office-decision" value="passed"> 通过</label><label><input type="radio" name="office-decision" value="passed_with_conditions"> 有条件通过</label><label><input type="radio" name="office-decision" value="failed"> 不通过</label></fieldset>
       <fieldset><legend>2. 完成 9 项检查</legend>${Object.entries(OFFICE_CHECKLIST_LABELS).map(([key,label])=>`<label><input type="checkbox" data-office-checklist="${safeEsc(key)}" ${checklist[key]==='passed'?'checked':''}> ${safeEsc(label)}</label>`).join('')}</fieldset>
       <section aria-label="结构化问题"><h3>3. 结构化问题</h3>${issueHtml}</section>
+      <label><span>4. 验收备注</span><textarea rows="3" data-office-note placeholder="说明使用 WPS/Word 打开、逐页检查及已核对的版式区域"></textarea></label>
       <div class="expert-team-office-impact" role="status">退回修改只发送已选 issue ID；影响范围和返修阶段由服务端派生。</div></div>
-      <div class="expert-team-office-drawer-actions"><button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="submitExpertTeamOfficeRevision(this);event.stopPropagation()">退回专家团修改</button><button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-submit ${reviewerReady?'':'disabled aria-disabled="true"'}>提交验收</button></div>
+      <div class="expert-team-office-drawer-actions"><button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="submitExpertTeamOfficeRevision(this);event.stopPropagation()">退回专家团修改</button><button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-submit onclick="submitExpertTeamOfficeAcceptance(this);event.stopPropagation()" ${reviewerReady?'':'disabled aria-disabled="true"'}>提交验收</button></div>
       <p class="expert-team-office-live" aria-live="polite" data-office-live></p>
     </aside>`;
   }

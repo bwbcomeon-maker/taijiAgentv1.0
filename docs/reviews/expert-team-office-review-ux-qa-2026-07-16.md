@@ -2,7 +2,7 @@
 
 ## 状态
 
-带限制完成。未发现 P0/P1；自动可访问性和像素级视觉回归未配置。
+代码实现与确定性自动化已通过；真实企业 IdP 和目标环境 WPS/Word 尚未验收，因此不具备“企业发布已完成”的结论。自动可访问性和像素级视觉回归未配置。
 
 ## 变更范围
 
@@ -28,10 +28,13 @@
 - 退回修改：先确认服务端派生影响，再只提交 issue IDs。
 - 轮询替换 DOM 后关闭抽屉：焦点返回当前 live trigger。
 - 脏草稿 Escape 保护：取消关闭保持抽屉，确认后关闭。
+- “提交验收”真实点击：passed、passed_with_conditions、failed 各恰好调用一次既有记录 endpoint，双击不重复提交。
+- token 过期：显示可恢复错误，保留结论、9 项 checklist、备注和结构化问题草稿。
+- 只填写 waiver 理由或勾选返修/checklist 后按 Escape 均触发脏数据保护。
 
 ## 功能契约摘要
 
-Office summary/drawer、waiver 和 revision 全部有可见入口、状态反馈、错误恢复、禁用态和 Electron 证据。blocking、unknown severity 以及 stage/semantic/automatic 目标不显示授权入口。
+Office summary/drawer、主提交、waiver 和 revision 均有可见入口、状态反馈、错误恢复、禁用态和确定性 Electron 证据。blocking、unknown severity 以及 stage/semantic/automatic 目标不显示授权入口。Electron 中的 API 和身份为受控 mock，不代表真实企业系统验收。
 
 ## 真实浏览器测试证据
 
@@ -39,7 +42,7 @@ Office summary/drawer、waiver 和 revision 全部有可见入口、状态反馈
 
 ## 截图情况
 
-已目视检查 `/tmp/expert-team-office-qa/expert-team-office-review-drawer.png`。首轮发现抽屉透明/层级裁剪 P1，改为 body portal 和项目真实主题 token 后复验不透明、主次清楚。
+已目视检查 `/tmp/expert-team-office-submit-qa/expert-team-office-review-drawer.png`。首轮发现抽屉透明/层级裁剪 P1，改为 body portal 和项目真实主题 token 后复验不透明、主次清楚。
 
 ## 可访问性检查
 
@@ -53,10 +56,10 @@ Office summary/drawer、waiver 和 revision 全部有可见入口、状态反馈
 
 | 检查项 | 结果 |
 |---|---|
-| Task 5 完整 pytest 回归（含 frontend 与 trusted identity） | 186 passed，1 个既有 `audioop` 弃用警告 |
+| Task 5 完整 pytest 回归（含 DOCX route、frontend 与 trusted identity） | 221 passed，1 个既有 `audioop` 弃用警告 |
 | `npm run lint:runtime` | 通过 |
 | `git diff --check` | 通过 |
-| Electron smoke | 通过，18 张截图 |
+| Electron smoke | 确定性 mock 环境通过，18 张截图；不等同于真实 IdP/WPS 终验 |
 
 ## 问题列表
 

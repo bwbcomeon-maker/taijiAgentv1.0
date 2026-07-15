@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,101 @@ class DocxEngineV2Error(RuntimeError):
 
 class _ExpertDeliveryImmutable(DocxEngineV2Error):
     pass
+
+
+_ACTIVE_OFFICE_REVIEW_TOKENS: dict[tuple[str, str, str], str] = {}
+_ACTIVE_OFFICE_REVIEW_TOKENS_LOCK = threading.RLock()
+
+
+def _office_review_token_key(workspace: Path, run: dict) -> tuple[str, str, str]:
+    return (
+        str(Path(workspace).expanduser().resolve()),
+        str(run.get("session_id") or "").strip(),
+        str(run.get("run_id") or "").strip(),
+    )
+
+
+def _remember_active_office_review_token(workspace: Path, run: dict, token: str) -> None:
+    key = _office_review_token_key(workspace, run)
+    if not all(key) or not str(token or "").strip():
+        raise ValueError("active Office review identity is incomplete")
+    with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
+        _ACTIVE_OFFICE_REVIEW_TOKENS[key] = str(token).strip()
+
+
+def _forget_active_office_review_token(key: tuple[str, str, str] | None) -> None:
+    if key:
+        with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
+            _ACTIVE_OFFICE_REVIEW_TOKENS.pop(key, None)
+
+
+def _expand_structured_office_submission(
+    payload: dict,
+    workspace: Path,
+    *,
+    trusted_principal: dict | None,
+) -> dict:
+    import hashlib
+    from api.expert_teams.delivery_integrity import canonical_delivery_dir
+    from api.expert_teams.storage import read_run
+
+    allowed = {
+        "session_id", "run_id", "expected_version", "status", "checklist", "issues", "note", "idempotency_key",
+    }
+    unexpected = sorted(set(payload) - allowed)
+    if unexpected:
+        raise ValueError(f"structured Office submission contains unsupported fields: {', '.join(unexpected)}")
+    principal = trusted_principal if isinstance(trusted_principal, dict) else {}
+    if "document-reviewer" not in (principal.get("roles") or []):
+        raise ValueError("trusted document reviewer is required")
+    root = Path(workspace).expanduser().resolve()
+    session_id = _first_text(payload, "session_id")
+    run_id = _first_text(payload, "run_id")
+    run = read_run(root, run_id)
+    if str(run.get("session_id") or "") != session_id:
+        raise ValueError("structured Office submission session does not match run")
+    if int(payload.get("expected_version") or -1) != int(run.get("version") or 0):
+        raise ValueError("structured Office submission version conflict")
+    ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+    attempt = int(ref.get("delivery_attempt") or 0)
+    if attempt < 1:
+        raise ValueError("structured Office submission has no current delivery")
+    key = _office_review_token_key(root, run)
+    with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
+        token = str(_ACTIVE_OFFICE_REVIEW_TOKENS.get(key) or "")
+    if not token:
+        raise ValueError("active Office review token is required")
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    evidence_dir = root / ".taiji" / "wps-evidence" / token_hash
+    evidence_files = sorted(
+        str(path) for path in evidence_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf"}
+    ) if evidence_dir.is_dir() else []
+    if not evidence_files:
+        raise ValueError("active Office review evidence is required")
+    checklist = payload.get("checklist") if isinstance(payload.get("checklist"), dict) else {}
+    visual_checks = []
+    mapping = {
+        "document_opened": "document_opened", "title_and_cover_match": "layout_reviewed",
+        "headers_footers_pagination": "layout_reviewed", "genre_and_structure_match": "content_order_reviewed",
+        "content_order_correct": "content_order_reviewed", "no_placeholders_or_workflow_text": "content_order_reviewed",
+        "figures_unique_and_readable": "figures_reviewed", "tables_readable": "tables_reviewed",
+        "citations_readable": "citations_reviewed",
+    }
+    for key_name, check_name in mapping.items():
+        if checklist.get(key_name) == "passed" and check_name not in visual_checks:
+            visual_checks.append(check_name)
+    return {
+        "session_id": session_id,
+        "delivery_dir": str(canonical_delivery_dir(root, run_id, "delivery", attempt)),
+        "status": _first_text(payload, "status"),
+        "note": _first_text(payload, "note"),
+        "visual_checks": visual_checks,
+        "issues": payload.get("issues") if isinstance(payload.get("issues"), list) else [],
+        "review_token": token,
+        "evidence_files": evidence_files,
+        "attested_actual_office_review": True,
+    }
 
 
 def engine_root() -> Path:
@@ -398,6 +494,11 @@ def begin_office_review(
                 open_document=open_document or open_document_with_os,
                 trusted_principal=trusted_principal,
             )
+            _remember_active_office_review_token(
+                root,
+                {"run_id": identity["run_id"], "session_id": binding["session_id"]},
+                token,
+            )
     except _ExpertDeliveryImmutable as exc:
         return _error_payload("expert_delivery_immutable", str(exc)), 409
     except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
@@ -415,8 +516,24 @@ def begin_office_review(
     }, 200
 
 
-def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[str, Any], int]:
+def record_wps_visual_acceptance(
+    payload: dict,
+    workspace: Path,
+    *,
+    trusted_principal: dict | None = None,
+) -> tuple[dict[str, Any], int]:
     workspace = Path(workspace).expanduser().resolve()
+    structured_token_key = None
+    if _first_text(payload, "run_id") and not _first_text(payload, "delivery_dir", "deliveryDir"):
+        structured_token_key = (str(workspace), _first_text(payload, "session_id"), _first_text(payload, "run_id"))
+        try:
+            payload = _expand_structured_office_submission(
+                payload,
+                workspace,
+                trusted_principal=trusted_principal,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return _error_payload("office_review_session_invalid", str(exc)), 409 if "version conflict" in str(exc) else 400
     delivery_raw = _first_text(payload, "delivery_dir", "deliveryDir")
     try:
         delivery_dir = _resolve_workspace_path(
@@ -563,6 +680,14 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
                 _first_text(payload, "review_token", "reviewToken"),
                 binding=office_binding,
             )
+            if isinstance(trusted_principal, dict):
+                trusted_subject = str(trusted_principal.get("subject") or "")
+                token_subject = str((token_state.get("reviewer_identity") or {}).get("subject") or "")
+                if not trusted_subject or trusted_subject != token_subject:
+                    return _error_payload(
+                        "trusted_reviewer_mismatch",
+                        "active Office reviewer does not match the authenticated principal",
+                    ), 403
         except OfficeReviewTokenUsed as exc:
             return _error_payload("office_review_token_used", str(exc)), 409
         except (DeliveryIntegrityError, FileNotFoundError, OSError, ValueError) as exc:
@@ -632,6 +757,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
                 consume_review_token(token_state_path, consumed_state)
             except (DeliveryIntegrityError, OSError, ValueError) as exc:
                 return _error_payload("office_acceptance_invalid", str(exc)), 400
+            _forget_active_office_review_token(structured_token_key)
             return {
                 "ok": True,
                 "office_status": acceptance["decision"],

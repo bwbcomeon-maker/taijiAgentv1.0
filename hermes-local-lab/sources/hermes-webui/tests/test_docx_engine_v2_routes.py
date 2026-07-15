@@ -760,6 +760,30 @@ def test_docx_engine_v2_records_wps_visual_acceptance(monkeypatch, tmp_path):
     assert result["payload"]["quality_report"]["checks"][0]["status"] == "passed"
 
 
+def test_structured_office_route_resolves_reviewer_and_reuses_wps_record_endpoint(monkeypatch, tmp_path):
+    from api.expert_teams import trusted_identity
+
+    routes = _patch_route_json(monkeypatch, tmp_path)
+    principal = {"subject": "reviewer-sub", "roles": ["document-reviewer"]}
+    captured = {}
+    monkeypatch.setattr(routes, "_expert_identity_session", lambda _handler: "identity-session")
+    monkeypatch.setattr(trusted_identity, "resolve_trusted_principal", lambda context, role, now: principal)
+
+    def fake_record(payload, workspace, *, trusted_principal=None):
+        captured.update(payload=payload, workspace=workspace, principal=trusted_principal)
+        return {"ok": True, "office_status": "passed"}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "record_wps_visual_acceptance", fake_record)
+    body = {
+        "session_id": "sid-safe", "run_id": "run-safe", "expected_version": 7,
+        "status": "passed", "checklist": {}, "issues": [], "note": "已用 WPS 打开并逐页检查目录和版式。",
+        "idempotency_key": "office-submit-1",
+    }
+    result = routes._handle_docx_engine_v2_wps_visual_acceptance(object(), body)
+    assert result["status"] == 200
+    assert captured == {"payload": body, "workspace": tmp_path.resolve(), "principal": principal}
+
+
 def test_docx_engine_v2_wps_visual_cli_validation_failure_returns_400(monkeypatch, tmp_path):
     from api import docx_engine_v2
     import json
@@ -966,3 +990,33 @@ def test_legacy_figure_adjustment_replace_delegates_to_v2(monkeypatch, tmp_path)
     assert result["payload"]["action"] == "replace"
     assert called["workspace"] == tmp_path.resolve()
     assert called["payload"]["out_path"] == "delivery/updated.docx"
+
+
+def test_structured_office_submission_derives_token_and_paths_server_side(monkeypatch, tmp_path):
+    import hashlib
+    from api import docx_engine_v2
+    from api.expert_teams import storage
+
+    run = {
+        "run_id": "run-safe-office", "session_id": "sid-safe-office", "version": 7,
+        "current_delivery_manifest_ref": {"delivery_attempt": 2},
+    }
+    monkeypatch.setattr(storage, "read_run", lambda _workspace, _run_id: run)
+    token = "server-only-review-token"
+    docx_engine_v2._remember_active_office_review_token(tmp_path, run, token)
+    evidence_dir = tmp_path / ".taiji" / "wps-evidence" / hashlib.sha256(token.encode()).hexdigest()
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "page-1.png").write_bytes(b"fresh evidence")
+    incoming = {
+        "session_id": "sid-safe-office", "run_id": "run-safe-office", "expected_version": 7,
+        "status": "passed", "checklist": {"document_opened": "passed"}, "issues": [],
+        "note": "已用 WPS 打开并逐页检查目录和版式。", "idempotency_key": "office-submit-1",
+    }
+    expanded = docx_engine_v2._expand_structured_office_submission(
+        incoming, tmp_path, trusted_principal={"subject": "reviewer-sub", "roles": ["document-reviewer"]},
+    )
+    assert expanded["delivery_dir"].endswith("run-safe-office/delivery/attempt-2/delivery")
+    assert expanded["review_token"] == token
+    assert expanded["evidence_files"] == [str(evidence_dir / "page-1.png")]
+    assert expanded["attested_actual_office_review"] is True
+    assert set(incoming).isdisjoint({"reviewer", "principal", "role", "review_token", "delivery_dir", "document_path", "evidence_files"})
