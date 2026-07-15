@@ -2181,47 +2181,66 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
     requested_id = normalize_custom_vision_provider_id(body.get("id") or body.get("provider_id"))
     api_key = body.get("api_key")
     config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        existing_entries = config_data.get("custom_vision_providers")
-        if not isinstance(existing_entries, list):
-            existing_entries = []
-        existing = next(
-            (
-                item for item in existing_entries
-                if isinstance(item, dict)
-                and normalize_custom_vision_provider_id(item.get("id")) == requested_id
-            ),
-            {},
-        )
-        merged = dict(existing)
-        merged.update({key: value for key, value in body.items() if key != "api_key"})
-        merged["id"] = requested_id
-        normalized = normalize_custom_vision_provider_entry(merged)
-        if not is_custom_vision_base_url_safe(normalized["base_url"]):
-            raise ValueError("外部识图 Base URL 无法通过公网安全校验。")
-        if api_key is not None and str(api_key).strip():
-            _write_env_file(
-                _get_hermes_home() / ".env",
-                {normalized["api_key_env"]: str(api_key).strip()},
-            )
-        updated = []
-        for item in existing_entries:
-            if not isinstance(item, dict):
-                continue
+    env_path = _get_hermes_home() / ".env"
+    with credential_transaction():
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
+            existing_entries = config_data.get("custom_vision_providers")
+            if not isinstance(existing_entries, list):
+                existing_entries = []
+            existing = {}
+            for item in existing_entries:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    item_id = normalize_custom_vision_provider_id(item.get("id"))
+                except ValueError:
+                    continue
+                if item_id == requested_id:
+                    existing = item
+                    break
+            merged = dict(existing)
+            merged.update({key: value for key, value in body.items() if key != "api_key"})
+            merged["id"] = requested_id
+            normalized = normalize_custom_vision_provider_entry(merged)
+            if not is_custom_vision_base_url_safe(normalized["base_url"]):
+                raise ValueError("外部识图 Base URL 无法通过公网安全校验。")
+            env_snapshot = _credential_env_snapshot(env_path, normalized["api_key_env"])
+            env_touched = False
             try:
-                item_id = normalize_custom_vision_provider_id(item.get("id"))
-            except ValueError:
-                continue
-            if item_id != requested_id:
-                updated.append(item)
-        updated.append(normalized)
-        config_data["custom_vision_providers"] = updated
-        _save_yaml_config_file(config_path, config_data)
+                if api_key is not None and str(api_key).strip():
+                    env_touched = True
+                    _write_env_file(
+                        env_path,
+                        {normalized["api_key_env"]: str(api_key).strip()},
+                    )
+                updated = []
+                for item in existing_entries:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        item_id = normalize_custom_vision_provider_id(item.get("id"))
+                    except ValueError:
+                        continue
+                    if item_id != requested_id:
+                        updated.append(item)
+                updated.append(normalized)
+                config_data["custom_vision_providers"] = updated
+                _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_touched:
+                    _restore_credential_env(
+                        env_path,
+                        normalized["api_key_env"],
+                        env_snapshot,
+                    )
+                raise
     reload_config()
     invalidate_models_cache()
     _invalidate_vision_verification()
     row = custom_vision_provider_public_row(normalized)
+    row["key_status"] = _key_status_for_env(normalized["api_key_env"])
+    row["available"] = bool(row["key_status"].get("configured"))
     return {
         "ok": True,
         "provider": row,

@@ -8203,6 +8203,9 @@ let _platformCredentialSaveSession=null;
 let _platformCredentialDeleteGeneration=0;
 let _platformCredentialDeleteSession=null;
 let _modelConfigLoadGeneration=0;
+let _customVisionProviderBusy=false;
+let _customVisionProviderGeneration=0;
+let _customVisionProviderReturnFocus=null;
 const _imageCapabilityProviderDrafts={vision:{},image:{}};
 let _modelConfigAuxProviders=[];
 let _modelConfigAuxOriginalConfig=null;
@@ -8426,6 +8429,11 @@ function _modelConfigCustomImageRows(data){
   rows.push(Object.assign({},row,{id,provider_id:'custom:'+id}));
  });
  return rows;
+}
+
+function _modelConfigCustomVisionRows(data){
+ const rows=Array.isArray(data&&data.vision_providers)?data.vision_providers:[];
+ return rows.filter(row=>row&&row.custom&&String(row.id||'').startsWith('custom:'));
 }
 
 function _customImageProviderLabel(row){
@@ -8827,7 +8835,10 @@ function _renderImageCapabilityEndpointPreview(capability){
  let value='';
  let problem='';
  const alibaba=capability==='vision'?provider==='alibaba':provider==='dashscope';
- if(!alibaba){
+ const namedCustomVision=capability==='vision'&&provider.startsWith('custom:');
+ if(namedCustomVision){
+  value='由已保存的命名式 Provider 管理端点';
+ }else if(!alibaba){
   value=_safeEndpointPreview(baseUrl);
   if(baseUrl&&!value) problem='Base URL 必须是完整的 HTTPS 地址。';
  }else if(endpointMode==='workspace'){
@@ -8866,10 +8877,11 @@ function _syncImageCapabilityEndpointFields(capability){
  const regionRow=$(prefix+'RegionRow');
  const workspaceRow=$(prefix+'WorkspaceRow');
  const baseRow=$(prefix+'BaseUrlRow');
+ const namedCustomVision=capability==='vision'&&provider.startsWith('custom:');
  if(modeRow) modeRow.hidden=!alibaba;
  if(regionRow) regionRow.hidden=!alibaba||endpointMode==='custom';
  if(workspaceRow) workspaceRow.hidden=!alibaba||endpointMode!=='workspace';
- if(baseRow) baseRow.hidden=alibaba?endpointMode!=='custom':capability!=='vision';
+ if(baseRow) baseRow.hidden=namedCustomVision||(alibaba?endpointMode!=='custom':capability!=='vision');
  _renderImageCapabilityEndpointPreview(capability);
 }
 
@@ -9165,6 +9177,190 @@ async function openImageGenKeyEditor(){
 async function openVisionConfigKeyEditor(){
  openModelConfigSecretEditor('visionConfigEdit','visionConfigApiKey');
  await pasteSecretToInput('visionConfigApiKey');
+}
+
+function _customVisionProviderDraftId(name,baseUrl){
+ const source=String(name||'').trim()||String(baseUrl||'').trim()||'vision-provider';
+ let slug=source.toLowerCase().replace(/^https?:\/\//,'').replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'');
+ if(!slug||!/^[a-z0-9]/.test(slug)) slug='vision-provider';
+ return slug.slice(0,63).replace(/-+$/,'')||'vision-provider';
+}
+
+function _resetCustomVisionProviderForm(){
+ const defaults={customVisionProviderId:'',customVisionProviderName:'',customVisionProviderBaseUrl:'',
+  customVisionProviderModels:'',customVisionProviderDefaultModel:'',customVisionProviderApiKey:''};
+ Object.keys(defaults).forEach(id=>{const el=$(id);if(el) el.value=defaults[id];});
+ const transport=$('customVisionProviderTransport');
+ if(transport) transport.value='openai_chat_completions';
+ _setFieldError('customVisionProviderError','',['customVisionProviderName','customVisionProviderTransport',
+  'customVisionProviderBaseUrl','customVisionProviderModels','customVisionProviderDefaultModel','customVisionProviderApiKey']);
+}
+
+function _customVisionProviderPayload(){
+ const name=(($('customVisionProviderName')||{}).value||'').trim();
+ const baseUrl=(($('customVisionProviderBaseUrl')||{}).value||'').trim();
+ const models=_splitCustomImageProviderModels((($('customVisionProviderModels')||{}).value||'').trim());
+ const id=(($('customVisionProviderId')||{}).value||'').trim()||_customVisionProviderDraftId(name,baseUrl);
+ const payload={id,name,base_url:baseUrl,models,
+  default_model:(($('customVisionProviderDefaultModel')||{}).value||'').trim()||models[0]||'',
+  transport:(($('customVisionProviderTransport')||{}).value||'openai_chat_completions').trim()};
+ const apiKey=(($('customVisionProviderApiKey')||{}).value||'').trim();
+ if(apiKey) payload.api_key=apiKey;
+ return payload;
+}
+
+function _customVisionProviderDraftIdentity(){
+ const payload=_customVisionProviderPayload();
+ delete payload.api_key;
+ return JSON.stringify(payload);
+}
+
+function _setCustomVisionProviderBusy(busy){
+ _customVisionProviderBusy=!!busy;
+ const panel=$('customVisionProviderPanel');
+ if(panel) panel.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
+ const list=$('customVisionProviderList');
+ if(list&&busy) list.querySelectorAll('button').forEach(control=>{control.disabled=true;});
+ if(list&&!busy&&_modelConfigData) _renderCustomVisionProviderList(_modelConfigData);
+ const save=$('btnSaveCustomVisionProvider');
+ if(save) save.setAttribute('aria-busy',busy?'true':'false');
+}
+
+function openCustomVisionProviderEditor(providerId){
+ if(_customVisionProviderBusy){
+  _setFieldError('customVisionProviderError','识图 Provider 请求正在处理，请稍候。',[]);
+  return false;
+ }
+ if(_settingsSection!=='providers') switchSettingsSection('providers');
+ _customVisionProviderReturnFocus=document.activeElement;
+ const normalized=String(providerId||'').replace(/^custom:/,'').trim();
+ const row=_modelConfigCustomVisionRows(_modelConfigData).find(item=>String(item.id||'').replace(/^custom:/,'')===normalized)||null;
+ _resetCustomVisionProviderForm();
+ if(row){
+  const models=Array.isArray(row.models)?row.models.map(item=>String(item&&item.id||item||'')):[];
+  const values={customVisionProviderId:normalized,customVisionProviderName:row.name||'',
+   customVisionProviderBaseUrl:row.base_url||'',customVisionProviderModels:models.join(', '),
+   customVisionProviderDefaultModel:row.default_model||models[0]||'',customVisionProviderTransport:row.transport||'openai_chat_completions'};
+  Object.keys(values).forEach(id=>{const el=$(id);if(el) el.value=values[id];});
+ }
+ toggleModelConfigSection('customVisionProviderPanel',true);
+ const manage=$('btnManageCustomVisionProviders');
+ if(manage) manage.setAttribute('aria-expanded','true');
+ const panel=$('customVisionProviderPanel');
+ if(panel) panel.dataset.originalDraft=_customVisionProviderDraftIdentity();
+ const focus=$('customVisionProviderName')||$('customVisionProviderBaseUrl');
+ if(focus) setTimeout(()=>focus.focus(),0);
+ return true;
+}
+
+async function closeCustomVisionProviderEditor(force){
+ if(_customVisionProviderBusy) return false;
+ const panel=$('customVisionProviderPanel');
+ const apiKey=(($('customVisionProviderApiKey')||{}).value||'').trim();
+ const dirty=panel&&(apiKey||String(panel.dataset.originalDraft||'')!==_customVisionProviderDraftIdentity());
+ if(dirty&&!force){
+  const discard=await showConfirmDialog({title:'放弃外部识图草稿？',message:'未保存的端点、模型和密钥输入将丢失。',confirmLabel:'放弃',danger:true,focusCancel:true});
+  if(!discard) return false;
+ }
+ _resetCustomVisionProviderForm();
+ toggleModelConfigSection('customVisionProviderPanel',false);
+ const manage=$('btnManageCustomVisionProviders');
+ if(manage) manage.setAttribute('aria-expanded','false');
+ const target=_customVisionProviderReturnFocus&&_customVisionProviderReturnFocus.isConnected!==false
+  ?_customVisionProviderReturnFocus:manage;
+ if(target&&!target.hidden&&!target.disabled) target.focus();
+ _customVisionProviderReturnFocus=null;
+ return true;
+}
+
+function _renderCustomVisionProviderList(data){
+ const list=$('customVisionProviderList');
+ if(!list) return;
+ const rows=_modelConfigCustomVisionRows(data);
+ list.innerHTML='';
+ if(!rows.length){
+  const empty=document.createElement('div');
+  empty.className='custom-image-provider-empty';
+  empty.textContent='尚未添加外部识图 Provider。';
+  list.appendChild(empty);
+  return;
+ }
+ rows.forEach(row=>{
+  const item=document.createElement('div');item.className='custom-image-provider-row';
+  const copy=document.createElement('div');copy.className='custom-image-provider-copy';
+  const title=document.createElement('strong');title.textContent=(row.name||row.id)+' · '+row.id;
+  const meta=document.createElement('span');meta.textContent=(row.transport_label||'兼容协议')+' · '+(row.available?'已配置':'待配置');
+  copy.appendChild(title);copy.appendChild(meta);
+  const actions=document.createElement('div');actions.className='custom-image-provider-actions';
+  const edit=document.createElement('button');edit.className='btn-tiny';edit.type='button';edit.textContent='编辑';
+  edit.setAttribute('aria-label','编辑 '+(row.name||row.id));edit.onclick=()=>openCustomVisionProviderEditor(row.id);
+  const del=document.createElement('button');del.className='btn-tiny';del.type='button';del.textContent='删除';
+  del.setAttribute('aria-label','删除 '+(row.name||row.id));del.disabled=!!row.active;
+  if(row.active) del.title='正在使用，请先切换识图配置';
+  del.onclick=()=>deleteCustomVisionProviderConfig(row.id,del);
+  actions.appendChild(edit);actions.appendChild(del);item.appendChild(copy);item.appendChild(actions);list.appendChild(item);
+ });
+}
+
+async function saveCustomVisionProviderConfig(){
+ if(_customVisionProviderBusy) return;
+ const payload=_customVisionProviderPayload();
+ _setFieldError('customVisionProviderError','',['customVisionProviderName','customVisionProviderTransport',
+  'customVisionProviderBaseUrl','customVisionProviderModels','customVisionProviderDefaultModel','customVisionProviderApiKey']);
+ if(!payload.name||!payload.base_url||!payload.models.length){
+  _setFieldError('customVisionProviderError','请完整填写名称、HTTPS Base URL 和模型 ID。',
+   ['customVisionProviderName','customVisionProviderBaseUrl','customVisionProviderModels']);
+  return;
+ }
+ const generation=++_customVisionProviderGeneration;
+ _setCustomVisionProviderBusy(true);
+ try{
+  const result=await api('/api/vision/custom-providers',{method:'POST',body:JSON.stringify(payload)});
+  if(generation!==_customVisionProviderGeneration) return;
+  const builtins=(_modelConfigData.vision_providers||[]).filter(row=>!row.custom);
+  _modelConfigData.vision_providers=builtins.concat(result.providers||[]);
+  if(_modelConfigData.vision&&_modelConfigData.vision.provider==='custom:'+payload.id){
+   _invalidateVisionTest();
+   _modelConfigData.vision.verification={status:'configured_unverified',message:'Provider 已更新，请重新测试识图。'};
+  }
+  const secret=$('customVisionProviderApiKey');if(secret) secret.value='';
+  _renderCustomVisionProviderList(_modelConfigData);_renderModelConfigPanel(_modelConfigData);
+  _setCustomVisionProviderBusy(false);
+  await closeCustomVisionProviderEditor(true);
+  if(typeof showToast==='function') showToast('外部识图 Provider 已保存');
+ }catch(e){
+  if(generation!==_customVisionProviderGeneration) return;
+  _setFieldError('customVisionProviderError','保存失败：'+(e.message||e),['customVisionProviderBaseUrl','customVisionProviderApiKey']);
+  if(typeof showToast==='function') showToast('保存外部识图 Provider 失败',5000,'error');
+ }finally{
+  if(generation===_customVisionProviderGeneration) _setCustomVisionProviderBusy(false);
+ }
+}
+
+async function deleteCustomVisionProviderConfig(providerId,trigger){
+ if(_customVisionProviderBusy) return;
+ const row=_modelConfigCustomVisionRows(_modelConfigData).find(item=>item.id===providerId);
+ if(row&&row.active){
+  _setFieldError('customVisionProviderError','该 Provider 正在使用，请先切换识图配置。',[]);return;
+ }
+ const ok=await showConfirmDialog({title:'删除外部识图 Provider？',message:'删除配置后需重新添加才能使用。',confirmLabel:'删除',danger:true,focusCancel:true});
+ if(!ok){if(trigger) trigger.focus();return;}
+ const generation=++_customVisionProviderGeneration;_setCustomVisionProviderBusy(true);
+ try{
+  const id=String(providerId||'').replace(/^custom:/,'');
+  const result=await api('/api/vision/custom-providers/'+encodeURIComponent(id),{method:'DELETE'});
+  if(generation!==_customVisionProviderGeneration) return;
+  const builtins=(_modelConfigData.vision_providers||[]).filter(item=>!item.custom);
+  _modelConfigData.vision_providers=builtins.concat(result.providers||[]);
+  _renderCustomVisionProviderList(_modelConfigData);_renderModelConfigPanel(_modelConfigData);
+  if(typeof showToast==='function') showToast('外部识图 Provider 已删除');
+ }catch(e){
+  _setFieldError('customVisionProviderError','删除失败：'+(e.message||e),[]);
+  if(typeof showToast==='function') showToast('删除外部识图 Provider 失败',5000,'error');
+ }finally{
+  if(generation===_customVisionProviderGeneration) _setCustomVisionProviderBusy(false);
+  if(trigger&&trigger.isConnected!==false) trigger.focus();
+ }
 }
 
 function _resetCustomImageProviderForm(){
@@ -9517,11 +9713,14 @@ function _syncVisionConfigControls(){
  _setDatalistOptions('visionConfigModelOptions',models);
  const envVar=provider&&provider.key_status&&provider.key_status.env_var;
  const named=_providerSupportsNamedCredential('vision',providerId);
+ const namedCustom=providerId.startsWith('custom:');
  if(named) _renderCapabilityCredentialOptions('vision',providerId,((_modelConfigData.vision||{}).credential_ref||''));
- if(keyRow) keyRow.hidden=named||!envVar;
+ if(keyRow) keyRow.hidden=named||namedCustom||!envVar;
  if(hint){
   if(named){
    hint.textContent='阿里百炼密钥请在上方“平台凭据”中管理。';
+  }else if(namedCustom){
+   hint.textContent='该命名式 Provider 使用独立本机密钥；请在“管理外部识图”中更新。';
   }else if(envVar){
    hint.textContent=_modelConfigKeyLabel(provider.key_status)+' · 保存后只写入本机凭据区。';
   }else{
@@ -9715,6 +9914,7 @@ function _renderModelConfigPanel(data){
  if(imageBase) imageBase.value=imageOptions.endpoint_mode==='custom'?(imageOptions.base_url||''):'';
  _syncImageGenConfigControls();
  _bindImageGenConfigEditInvalidation();
+ _renderCustomVisionProviderList(data);
  _renderCustomImageProviderList(data);
 }
 

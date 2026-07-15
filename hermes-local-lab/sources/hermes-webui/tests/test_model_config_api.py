@@ -208,6 +208,35 @@ def test_provider_credential_routes_map_validation_errors_to_400(monkeypatch):
     assert responses == [("凭据无效", 400), ("凭据正在使用", 400)]
 
 
+def test_custom_vision_provider_routes_map_validation_errors_to_400(monkeypatch):
+    responses = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"id": "relay"})
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: responses.append((message, status)) or True,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "set_custom_vision_provider_config",
+        lambda _body: (_ for _ in ()).throw(ValueError("transport 无效")),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "delete_custom_vision_provider_config",
+        lambda _provider_id: (_ for _ in ()).throw(ValueError("Provider 正在使用")),
+    )
+
+    assert routes.handle_post(
+        object(), SimpleNamespace(path="/api/vision/custom-providers")
+    ) is True
+    assert routes.handle_delete(
+        object(), SimpleNamespace(path="/api/vision/custom-providers/relay")
+    ) is True
+    assert responses == [("transport 无效", 400), ("Provider 正在使用", 400)]
+
+
 def test_provider_credential_in_use_cannot_be_deleted(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     (tmp_path / "config.yaml").write_text(
@@ -1692,6 +1721,36 @@ def test_custom_vision_provider_rejects_unknown_transport(monkeypatch, tmp_path)
         })
 
 
+def test_custom_vision_provider_restores_secret_when_metadata_save_fails(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (tmp_path / ".env").write_text(
+        "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=old-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_save_yaml_config_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        model_config.set_custom_vision_provider_config({
+            "id": "router",
+            "name": "Router Vision",
+            "base_url": "https://vision.example.com/v1",
+            "models": ["router-vl"],
+            "transport": "openai_chat_completions",
+            "api_key": "new-secret",
+        })
+
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "old-secret" in env_text
+    assert "new-secret" not in env_text
+
+
 def test_named_custom_vision_provider_appears_in_vision_config(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "router-secret")
@@ -1718,6 +1777,38 @@ def test_named_custom_vision_provider_appears_in_vision_config(monkeypatch, tmp_
     assert row["transport"] == "openai_chat_completions"
     assert result["vision"]["key_status"]["env_var"] == "TAIJI_VISION_CUSTOM_ROUTER_API_KEY"
     assert "router-secret" not in json.dumps(result, ensure_ascii=False)
+    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
+
+
+def test_selecting_named_custom_vision_provider_stores_only_reference_and_model(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "router-secret")
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({
+            "custom_vision_providers": [{
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "models": ["router-vl"],
+                "transport": "anthropic_messages",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    result = model_config.set_vision_config({
+        "provider": "custom:router",
+        "model": "router-vl",
+        "base_url": "https://attacker.invalid/v1",
+    })
+
+    stored = _read_config(tmp_path)["auxiliary"]["vision"]
+    assert stored == {"provider": "custom:router", "model": "router-vl"}
+    assert result["vision"]["base_url"] == "https://vision.example.com/v1"
+    assert result["vision"]["api_mode"] == "anthropic_messages"
+    assert "router-secret" not in json.dumps(result)
     os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
 
 

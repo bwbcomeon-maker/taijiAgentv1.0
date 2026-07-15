@@ -14,6 +14,78 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
+_CUSTOM_VISION_PROVIDER_DRIVER = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){
+ const re=new RegExp('(?:async\\s+)?function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);if(start<0) throw new Error(name+' not found');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+function element(id,value=''){
+ return {id,value,disabled:false,hidden:false,dataset:{},textContent:'',isConnected:true,focused:false,attrs:{},
+  setAttribute(k,v){this.attrs[k]=v;},focus(){this.focused=true;},querySelectorAll(){return [];}};
+}
+const ids=['customVisionProviderPanel','customVisionProviderId','customVisionProviderName','customVisionProviderTransport',
+ 'customVisionProviderBaseUrl','customVisionProviderModels','customVisionProviderDefaultModel','customVisionProviderApiKey',
+ 'customVisionProviderError','btnSaveCustomVisionProvider','btnManageCustomVisionProviders','customVisionProviderList'];
+const elements={};for(const id of ids) elements[id]=element(id);
+elements.customVisionProviderPanel.querySelectorAll=()=>ids.slice(1,9).map(id=>elements[id]);
+elements.customVisionProviderList.querySelectorAll=()=>[];
+elements.customVisionProviderName.value='Relay Vision';
+elements.customVisionProviderBaseUrl.value='https://relay.example.com/v1';
+elements.customVisionProviderModels.value='relay-vl';
+elements.customVisionProviderTransport.value='openai_chat_completions';
+const $=id=>elements[id]||null;
+const document={activeElement:element('returnButton'),createElement:tag=>element(tag)};
+const _settingsSection='providers';
+const switchSettingsSection=()=>{};
+const toggleModelConfigSection=(id,open)=>{elements[id].hidden=!open;};
+const _setFieldError=(id,message)=>{elements[id].textContent=message;};
+const _splitCustomImageProviderModels=value=>String(value||'').split(',').map(v=>v.trim()).filter(Boolean);
+const _renderCustomVisionProviderList=()=>{};
+const _renderModelConfigPanel=()=>{};
+const _renderVisionConfigSummary=()=>{};
+const _invalidateVisionTest=()=>{};
+const showToast=()=>{};
+let confirmResult=true;
+const showConfirmDialog=async()=>confirmResult;
+let apiCalls=[];
+const api=async(url,options)=>{apiCalls.push({url,options});return {providers:[{id:'custom:relay',name:'Relay Vision',custom:true,active:false}]};};
+let _customVisionProviderBusy=false;
+let _customVisionProviderGeneration=0;
+let _customVisionProviderReturnFocus=null;
+let _modelConfigData={vision:{provider:'alibaba',model:'qwen3-vl-plus'},vision_providers:[{id:'alibaba'}]};
+for(const name of ['_modelConfigCustomVisionRows','_customVisionProviderDraftId','_resetCustomVisionProviderForm',
+ '_customVisionProviderPayload','_customVisionProviderDraftIdentity','_setCustomVisionProviderBusy',
+ 'openCustomVisionProviderEditor','closeCustomVisionProviderEditor','saveCustomVisionProviderConfig',
+ 'deleteCustomVisionProviderConfig']) eval(extractFunc(name));
+
+async function run(scenario){
+ if(scenario==='save'){
+  await saveCustomVisionProviderConfig();
+  return {apiCalls,busy:_customVisionProviderBusy,hidden:elements.customVisionProviderPanel.hidden,
+   secret:elements.customVisionProviderApiKey.value,focused:elements.btnManageCustomVisionProviders.focused};
+ }
+ if(scenario==='active-delete'){
+  _modelConfigData.vision_providers=[{id:'custom:relay',name:'Relay',custom:true,active:true}];
+  await deleteCustomVisionProviderConfig('custom:relay',document.activeElement);
+  return {apiCalls,error:elements.customVisionProviderError.textContent};
+ }
+ openCustomVisionProviderEditor();
+ elements.customVisionProviderName.value='Changed draft';
+ confirmResult=false;
+ const first=await closeCustomVisionProviderEditor();
+ confirmResult=true;
+ const second=await closeCustomVisionProviderEditor();
+ return {first,second,hidden:elements.customVisionProviderPanel.hidden,focused:document.activeElement.focused};
+}
+run(process.argv[3]).then(value=>process.stdout.write(JSON.stringify(value))).catch(err=>{console.error(err);process.exit(1);});
+"""
+
+
 _VISION_RACE_DRIVER = r"""
 const fs=require('fs');
 const source=fs.readFileSync(process.argv[2],'utf8');
@@ -756,6 +828,60 @@ def test_image_generation_custom_provider_management_has_visible_entry():
     assert "saveCustomImageProviderConfig" in PANELS_JS
     assert "deleteCustomImageProviderConfig" in PANELS_JS
     assert "/api/image-gen/custom-providers" in PANELS_JS
+
+
+def test_named_custom_vision_provider_management_has_visible_accessible_entry():
+    for marker in (
+        'id="btnManageCustomVisionProviders"',
+        'id="customVisionProviderPanel"',
+        'id="customVisionProviderTransport"',
+        '兼容协议',
+        'OpenAI Chat Completions',
+        'Anthropic Messages',
+    ):
+        assert marker in INDEX_HTML
+    assert "任意平台" not in INDEX_HTML
+    for marker in (
+        "saveCustomVisionProviderConfig",
+        "deleteCustomVisionProviderConfig",
+        "/api/vision/custom-providers",
+        "_setCustomVisionProviderBusy",
+        "customVisionProviderError",
+        "_customVisionProviderDraftIdentity",
+        "originalDraft",
+        "closeCustomVisionProviderEditor",
+        "_customVisionProviderReturnFocus",
+        "row.active",
+    ):
+        assert marker in PANELS_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("scenario", ["save", "active-delete", "dirty-close"])
+def test_named_custom_vision_provider_interactions(tmp_path, scenario):
+    driver = tmp_path / "custom-vision-provider-driver.js"
+    driver.write_text(_CUSTOM_VISION_PROVIDER_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    if scenario == "save":
+        assert payload["apiCalls"][0]["url"] == "/api/vision/custom-providers"
+        assert payload["busy"] is False
+        assert payload["hidden"] is True
+        assert payload["secret"] == ""
+        assert payload["focused"] is True
+    elif scenario == "active-delete":
+        assert payload["apiCalls"] == []
+        assert "正在使用" in payload["error"]
+    else:
+        assert payload["first"] is False
+        assert payload["second"] is True
+        assert payload["hidden"] is True
+        assert payload["focused"] is True
 
 
 def test_settings_menu_does_not_add_auth_keys_section():

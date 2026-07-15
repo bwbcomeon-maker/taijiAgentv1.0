@@ -1527,6 +1527,7 @@
                       <p class="model-config-hint">测试图片会发送给你配置的外部视觉服务；请勿上传密钥或隐私截图。</p>
                       <div class="model-config-actions">
                         <button class="sm-btn" id="btnEditVisionConfig" type="button" data-model-config-toggle="visionConfigEdit" aria-expanded="false" aria-controls="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
+                        <button class="btn-tiny" id="btnManageCustomVisionProviders" type="button" aria-expanded="false" aria-controls="customVisionProviderPanel" onclick="openCustomVisionProviderEditor()">管理外部识图</button>
                       </div>
                       <div class="model-config-collapsible" id="visionConfigEdit" hidden>
                         <div class="model-config-field" id="visionConfigCredentialRow">
@@ -1741,6 +1742,64 @@
 	                </div>
 	                <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
 	                  No configurable providers found.
+	                </div>
+	              </section>
+	              <section class="provider-image-services">
+	                <div class="provider-management-head">
+	                  <div>
+	                    <strong>外部识图 Provider</strong>
+	                    <span>仅接入已明确兼容 OpenAI Chat Completions 或 Anthropic Messages 的视觉端点。</span>
+	                  </div>
+	                  <button class="btn-tiny" type="button" onclick="openCustomVisionProviderEditor()">添加识图 Provider</button>
+	                </div>
+	                <div class="custom-image-provider-list" id="customVisionProviderList" aria-live="polite"></div>
+	              </section>
+	              <section class="model-config-collapsible custom-image-provider-panel" id="customVisionProviderPanel" hidden aria-labelledby="customVisionProviderPanelTitle">
+	                <div class="provider-management-head">
+	                  <div>
+	                    <strong id="customVisionProviderPanelTitle">外部识图 Provider 配置</strong>
+	                    <span>每个 Provider 使用独立本机密钥；原生私有协议请使用内置专用适配器。</span>
+	                  </div>
+	                </div>
+	                <div class="custom-image-provider-grid">
+	                  <input id="customVisionProviderId" type="hidden" autocomplete="off">
+	                  <div>
+	                    <label for="customVisionProviderName">名称</label>
+	                    <input id="customVisionProviderName" placeholder="例如：公司视觉网关" autocomplete="off" aria-describedby="customVisionProviderError">
+	                  </div>
+	                  <div>
+	                    <label for="customVisionProviderTransport">兼容协议</label>
+	                    <select id="customVisionProviderTransport" aria-describedby="customVisionProviderProtocolHint customVisionProviderError">
+	                      <option value="openai_chat_completions">OpenAI Chat Completions</option>
+	                      <option value="anthropic_messages">Anthropic Messages</option>
+	                    </select>
+	                    <div class="model-config-hint" id="customVisionProviderProtocolHint">请按服务文档选择已明确兼容的协议。</div>
+	                  </div>
+	                  <div class="span-2">
+	                    <label for="customVisionProviderBaseUrl">HTTPS Base URL</label>
+	                    <input id="customVisionProviderBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off" aria-describedby="customVisionProviderError">
+	                  </div>
+	                  <div class="span-2">
+	                    <label for="customVisionProviderModels">模型 ID</label>
+	                    <input id="customVisionProviderModels" placeholder="多个模型用逗号分隔" autocomplete="off" aria-describedby="customVisionProviderError">
+	                  </div>
+	                  <div>
+	                    <label for="customVisionProviderDefaultModel">默认模型</label>
+	                    <input id="customVisionProviderDefaultModel" placeholder="留空使用首个模型" autocomplete="off" aria-describedby="customVisionProviderError">
+	                  </div>
+	                  <div>
+	                    <label for="customVisionProviderApiKey">API 密钥</label>
+	                    <div class="model-config-secret-row">
+	                      <input id="customVisionProviderApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true" aria-describedby="customVisionProviderError">
+	                      <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('customVisionProviderApiKey')">粘贴</button>
+	                    </div>
+	                  </div>
+	                </div>
+	                <p class="model-config-field-error" id="customVisionProviderError" aria-live="assertive"></p>
+	                <div class="model-config-actions">
+	                  <button class="sm-btn" id="btnSaveCustomVisionProvider" type="button" onclick="saveCustomVisionProviderConfig()">保存识图 Provider</button>
+	                  <button class="btn-tiny" id="btnCancelCustomVisionProvider" type="button" onclick="closeCustomVisionProviderEditor()">取消</button>
+	                  <button class="btn-tiny" type="button" onclick="openCustomVisionProviderEditor()">新建</button>
 	                </div>
 	              </section>
 	              <section class="provider-image-services">
