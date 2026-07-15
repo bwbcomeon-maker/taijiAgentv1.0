@@ -1604,6 +1604,128 @@ def reserve_stage_attempt(
         return write_run(workspace, _sync_derived(next_run)), reservation, True
 
 
+def _pending_system_descriptor(run: dict) -> dict:
+    descriptor = run.get("pending_system_stage")
+    if not isinstance(descriptor, dict) or descriptor.get("executor") != "system":
+        raise ExpertTeamStateConflict(
+            "system_step_contract_missing",
+            "expert team has no declared pending system stage",
+            run,
+        )
+    template = get_template(str(run.get("team_id") or ""))
+    candidates = [
+        item for item in (template.get("tasks") or []) + (template.get("post_approval_system_steps") or [])
+        if isinstance(item, dict) and item.get("executor") == "system"
+    ]
+    canonical = next((item for item in candidates if item.get("id") == descriptor.get("id")), None)
+    if canonical != descriptor:
+        raise ExpertTeamStateConflict(
+            "system_step_contract_missing",
+            "pending system stage does not match the server catalog",
+            run,
+        )
+    return deepcopy(descriptor)
+
+
+def reserve_system_stage_attempt(
+    workspace: Path,
+    run_id: str,
+    *,
+    idempotency_key: str,
+) -> tuple[dict, dict, dict, bool]:
+    with _run_mutation_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        _require_mutable_v2(run)
+        if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+            raise ExpertTeamStateConflict("system_stage_not_available", "legacy run has no system dispatcher", run)
+        if str(run.get("workflow_state") or "") != "delivery_validation_required":
+            raise ExpertTeamStateConflict("stale_state", "system stage is not ready for dispatch", run)
+        descriptor = _pending_system_descriptor(run)
+        approved = run.get("approved_stage_artifact_refs") if isinstance(run.get("approved_stage_artifact_refs"), dict) else {}
+        input_refs = []
+        for dependency in descriptor.get("depends_on") or []:
+            ref = approved.get(dependency)
+            if not isinstance(ref, dict):
+                raise ExpertTeamStateConflict(
+                    "approved_dependency_missing",
+                    f"system stage is missing approved dependency {dependency}",
+                    run,
+                )
+            input_refs.append(
+                {"ref_type": "stage_artifact", "artifact_id": ref["artifact_id"], "sha256": ref["sha256"]}
+            )
+        next_run, reservation, created = _reserve_stage_attempt_in_run(
+            run,
+            stage=descriptor,
+            executor="system",
+            input_refs=input_refs,
+            idempotency_key=idempotency_key,
+        )
+        if not created:
+            return _sync_derived(run), descriptor, reservation, False
+        next_run["version"] = int(run.get("version") or 0) + 1
+        next_run["updated_at"] = _now()
+        stored = write_run(workspace, _sync_derived(next_run))
+        return stored, descriptor, reservation, True
+
+
+def complete_system_stage_attempt(
+    workspace: Path,
+    run_id: str,
+    *,
+    reservation_id: str,
+    artifact: dict,
+) -> dict:
+    from .stage_artifacts import StageArtifactError, validate_stage_artifact
+
+    with _run_mutation_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        descriptor = _pending_system_descriptor(run)
+        reservation = run.get("current_stage_attempt_reservation")
+        if not isinstance(reservation, dict) or reservation.get("reservation_id") != reservation_id:
+            raise ExpertTeamStateConflict("stage_attempt_identity_mismatch", "system reservation changed", run)
+        if reservation.get("executor") != "system" or reservation.get("stage_id") != descriptor.get("id"):
+            raise ExpertTeamStateConflict("stage_attempt_identity_mismatch", "system reservation identity changed", run)
+        try:
+            validate_stage_artifact(
+                artifact,
+                brief=run.get("document_brief") or {},
+                approved_inputs=reservation.get("input_refs") or [],
+            )
+        except StageArtifactError as exc:
+            raise ExpertTeamStateConflict(exc.code, "system artifact validation failed", run) from exc
+        if (
+            artifact.get("stage_id") != descriptor.get("id")
+            or artifact.get("artifact_type") != descriptor.get("artifact_type")
+            or int(artifact.get("stage_attempt") or 0) != int(reservation.get("stage_attempt") or 0)
+            or artifact.get("input_refs") != reservation.get("input_refs")
+            or artifact.get("validation_status") != "valid"
+        ):
+            raise ExpertTeamStateConflict("system_artifact_identity_mismatch", "system artifact does not match reservation", run)
+        if any(
+            issue.get("severity") in {"blocking", "error", "warning"}
+            for issue in artifact.get("blocking_issues") or []
+            if isinstance(issue, dict)
+        ):
+            raise ExpertTeamStateConflict("system_artifact_blocked", "system artifact has unresolved issues", run)
+        if any(item.get("artifact_id") == artifact.get("artifact_id") for item in run.get("stage_artifacts") or []):
+            raise ExpertTeamStateConflict("stage_artifact_immutable_conflict", "system artifact already exists", run)
+        run.setdefault("stage_artifacts", []).append(deepcopy(artifact))
+        run["current_stage_artifact_ref"] = {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+            "stage_attempt": artifact["stage_attempt"],
+        }
+        run["pending_system_stage_result"] = "generated_valid"
+        return _transition(
+            workspace,
+            run,
+            "awaiting_review",
+            "system_stage_completed",
+            _stage_reservation_status_patch(run, "generated_valid"),
+        )
+
+
 def _stage_reservation_status_patch(run: dict, status: str) -> dict:
     current = run.get("current_stage_attempt_reservation")
     if not isinstance(current, dict) or not current.get("reservation_id"):
@@ -3075,6 +3197,21 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
             "brief_revision": int(brief.get("confirmed_revision") or 0),
             "brief_sha256": str(brief.get("confirmed_sha256") or ""),
         }
+        template = get_template(str(run.get("team_id") or ""))
+        system_descriptors = [
+            item
+            for item in (template.get("tasks") or []) + (template.get("post_approval_system_steps") or [])
+            if isinstance(item, dict)
+            and item.get("executor") == "system"
+            and stage_id in (item.get("depends_on") or [])
+        ]
+        if len(system_descriptors) != 1:
+            raise ExpertTeamStateConflict(
+                "system_step_contract_missing",
+                "approved canonical document has no unique declared delivery stage",
+                run,
+            )
+        run["pending_system_stage"] = deepcopy(system_descriptors[0])
     index = int(run.get("current_stage_index") or 0)
     run["current_stage_index"] = index + 1
     _record_action(run, body, "approve_stage")

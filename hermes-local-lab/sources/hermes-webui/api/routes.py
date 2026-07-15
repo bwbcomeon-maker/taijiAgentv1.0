@@ -7,6 +7,7 @@ import html as _html
 import copy
 import io
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -2402,6 +2403,53 @@ def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
     return outcome
 
 
+def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict, int]:
+    from api import expert_teams
+    from api.expert_teams.system_stages import (
+        SystemStageError,
+        dispatch_system_stage,
+        get_system_stage_registry,
+    )
+
+    pending = run.get("pending_system_stage") if isinstance(run.get("pending_system_stage"), dict) else {}
+    canonical = run.get("canonical_document_ref") if isinstance(run.get("canonical_document_ref"), dict) else {}
+    lineage = hashlib.sha256(
+        json.dumps(
+            {
+                "run_id": run.get("run_id"),
+                "stage_id": pending.get("id"),
+                "canonical_sha256": canonical.get("sha256"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    try:
+        reserved_run, descriptor, reservation, _created = expert_teams.reserve_system_stage_attempt(
+            workspace,
+            str(run.get("run_id") or ""),
+            idempotency_key=f"system-stage-{lineage}",
+        )
+        result = dispatch_system_stage(
+            reserved_run,
+            descriptor,
+            reservation,
+            registry=get_system_stage_registry(),
+        )
+        completed = expert_teams.complete_system_stage_attempt(
+            workspace,
+            str(run.get("run_id") or ""),
+            reservation_id=str(reservation.get("reservation_id") or ""),
+            artifact=result["artifact"],
+        )
+        return {"ok": True, "run": completed, "system_stage": True}, 200
+    except SystemStageError as exc:
+        current = expert_teams.read_expert_team_run(workspace, str(run.get("run_id") or ""))
+        return {"ok": False, "code": exc.code, "error": str(exc), "run": current}, 503
+    except expert_teams.ExpertTeamStateConflict as exc:
+        return {"ok": False, "code": exc.code, "error": str(exc), "run": exc.run or run}, 409
+
+
 def _start_expert_team_execution(
     workspace: Path,
     run: dict,
@@ -2443,6 +2491,12 @@ def _start_expert_team_execution(
     if not sid:
         error = "expert team session_id is required"
         return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 400
+    if (
+        str(run.get("contract_version") or "") == "expert-team-contract/v1"
+        and isinstance(run.get("pending_system_stage"), dict)
+        and (run.get("pending_system_stage") or {}).get("executor") == "system"
+    ):
+        return _dispatch_expert_team_system_stage(workspace, run)
     try:
         session = get_session(sid)
     except KeyError:
@@ -12045,7 +12099,7 @@ def handle_post(handler, parsed) -> bool:
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
             if (
                 str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
-                and str(run.get("workflow_state") or "") == "ready_to_generate"
+                and str(run.get("workflow_state") or "") in {"ready_to_generate", "delivery_validation_required"}
             ):
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
                 payload.update(stream_payload)

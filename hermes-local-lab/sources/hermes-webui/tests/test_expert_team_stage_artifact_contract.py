@@ -762,3 +762,157 @@ def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_d
     }
     assert approved["workflow_state"] == "delivery_validation_required"
     assert approved.get("completion_integrity") is None
+    assert approved["pending_system_stage"] == {
+        "id": "delivery",
+        "title": "交付确认",
+        "phase": "交付确认",
+        "worker_id": "delivery",
+        "worker_name": "交付复核专家",
+        "executor": "system",
+        "artifact_type": "delivery_manifest",
+        "depends_on": ["polish"],
+    }
+
+
+def test_system_delivery_dispatch_never_uses_gateway_and_fails_closed_without_adapter(monkeypatch, tmp_path):
+    from api import expert_teams
+    from api import routes
+    from api.expert_teams import trusted_identity
+    from api.expert_teams.stage_artifacts import build_stage_artifact, parse_stage_response
+    from api.expert_teams.system_stages import SystemStageError, SystemStageRegistry, dispatch_system_stage
+
+    # Reuse the semantic-review path to create a real canonical pointer and pending descriptor.
+    run = _contract_run_ready_for_attempt(tmp_path, stage_index=3)
+    input_refs = [
+        {"ref_type": "stage_artifact", "artifact_id": "materials:1", "sha256": "1" * 64},
+        {"ref_type": "stage_artifact", "artifact_id": "draft:1", "sha256": "2" * 64},
+    ]
+    reserved = expert_teams.reserve_expert_team_execution_start(
+        tmp_path, run["run_id"], expected_version=run["version"], runtime_adapter="RunnerRuntimeAdapter", input_refs=input_refs
+    )
+    generating = expert_teams.mark_expert_team_execution_started(
+        tmp_path, run["run_id"], {"stream_id": "stream-system-pre", "execution_start_id": reserved["execution_start_id"]}
+    )
+    payload = {
+        "title": _brief()["exact_title"], "document_type": "work_report",
+        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "fact_usage": [], "asset_requests": [],
+        "review_report": {
+            "schema_version": "content-review-report/v1",
+            "checks": {key: "passed" for key in ("brief_alignment", "fact_traceability", "document_purity", "confidentiality", "document_structure")},
+            "issues": [], "change_summary": ["通过"], "unresolved_issue_ids": [],
+        },
+        "open_issues": [],
+    }
+    reviewed = expert_teams.mark_expert_team_execution_complete(
+        tmp_path, run["run_id"],
+        {"stream_id": generating["execution_stream_id"], "stage_id": "polish", "attempt": generating["execution_attempt"], "id": "review-system", "kind": "chat", "content": _raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文。")},
+    )
+    resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False)
+    resolver._config = {"enabled": True}
+    identity_session = resolver.install_test_principal(
+        {"subject": "approver", "display_name": "审批人", "roles": ["document-approver"], "expires_at": int(time.time()) + 3600}
+    )
+    monkeypatch.setattr(trusted_identity, "get_trusted_identity_resolver", lambda: resolver)
+    approved = expert_teams.approve_expert_team_stage(
+        tmp_path,
+        {"session_id": reviewed["session_id"], "run_id": reviewed["run_id"], "stage_id": "polish", "expected_version": reviewed["version"], "idempotency_key": "approve-system", "trusted_identity_session_id": identity_session},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Gateway/model resolution must stay at zero")),
+    )
+    unavailable_payload, unavailable_status = routes._start_expert_team_execution(tmp_path, approved, {})
+    assert unavailable_status == 503
+    assert unavailable_payload["code"] == "delivery_contract_unavailable"
+    reserved_run = unavailable_payload["run"]
+    descriptor = reserved_run["pending_system_stage"]
+    system_reservation = reserved_run["current_stage_attempt_reservation"]
+    with pytest.raises(SystemStageError) as unavailable:
+        dispatch_system_stage(reserved_run, descriptor, system_reservation, registry=SystemStageRegistry())
+    assert unavailable.value.code == "delivery_contract_unavailable"
+
+    manifest_payload = {
+        "schema_version": "delivery-manifest/v1",
+        "delivery_binding_path": "attempt-1/expert-team-delivery.json",
+        "delivery_binding_sha256": "d" * 64,
+        "render_input_fingerprint": "e" * 64,
+        "delivery_attempt": 1,
+        "document_revision": 1,
+        "automatic_check_summary": {"status": "passed", "passed_count": 5, "failed_count": 0, "warning_count": 0, "blocking_count": 0},
+        "office_review_required": True,
+    }
+    parsed = parse_stage_response(_raw("delivery_manifest", manifest_payload), artifact_type="delivery_manifest", requires_document=False)
+    artifact = build_stage_artifact(
+        parsed, stage_id="delivery", stage_attempt=system_reservation["stage_attempt"],
+        brief=reserved_run["document_brief"], input_refs=system_reservation["input_refs"], now="2026-07-15T10:00:00+08:00",
+    )
+    calls = []
+    result = dispatch_system_stage(
+        reserved_run,
+        descriptor,
+        system_reservation,
+        registry=SystemStageRegistry({"delivery": lambda request: calls.append(request) or {"artifact": artifact}}),
+    )
+    assert len(calls) == 1
+    assert set(calls[0]) == {
+        "schema_version", "session_id", "run_id", "stage_id", "stage_attempt", "descriptor",
+        "brief_ref", "canonical_document_ref", "approved_input_refs",
+    }
+    assert "stage_outputs" not in json.dumps(calls[0], ensure_ascii=False)
+    completed = expert_teams.complete_system_stage_attempt(
+        tmp_path, approved["run_id"], reservation_id=system_reservation["reservation_id"], artifact=result["artifact"]
+    )
+    assert completed["current_stage_artifact_ref"]["artifact_id"] == "delivery:1"
+    assert completed["workflow_state"] == "awaiting_review"
+
+
+def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_changing_six_step_progress(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.catalog import get_template
+    from api.expert_teams.storage import read_run, write_run
+    from api.expert_teams.system_stages import SystemStageError, SystemStageRegistry, dispatch_system_stage
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "contract_version": "expert-team-contract/v1",
+            "session_id": "sid-research-system",
+            "team_id": "deep-research-team",
+            "document_type": "research_report",
+            "template_id": "research_report",
+            "prompt": "研究企业 AI 办公落地",
+            "document_brief_seed": {
+                "document_control": {"render_template_id": "enterprise-research-report"}
+            },
+        },
+    )
+    stored = read_run(tmp_path, run["run_id"])
+    brief = _research_brief()
+    stored.update(
+        {
+            "workflow_state": "delivery_validation_required",
+            "document_brief": brief,
+            "current_stage_index": 6,
+            "pending_system_stage": get_template("deep-research-team")["post_approval_system_steps"][0],
+            "approved_stage_artifact_refs": {"review": {"artifact_id": "review:1", "sha256": "a" * 64}},
+            "canonical_document_ref": {
+                "artifact_id": "review:1",
+                "sha256": "a" * 64,
+                "brief_revision": brief["confirmed_revision"],
+                "brief_sha256": brief["confirmed_sha256"],
+            },
+        }
+    )
+    stored = write_run(tmp_path, stored)
+    reserved_run, descriptor, reservation, created = expert_teams.reserve_system_stage_attempt(
+        tmp_path, stored["run_id"], idempotency_key="research-hidden-delivery"
+    )
+    assert created is True
+    assert len(reserved_run["tasks"]) == 6
+    assert descriptor["visible_progress"] is False
+    assert reservation["stage_attempt"] == 1
+    with pytest.raises(SystemStageError) as unavailable:
+        dispatch_system_stage(reserved_run, descriptor, reservation, registry=SystemStageRegistry())
+    assert unavailable.value.code == "delivery_contract_unavailable"
