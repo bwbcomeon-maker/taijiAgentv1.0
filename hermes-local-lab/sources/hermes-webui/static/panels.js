@@ -6536,15 +6536,26 @@ function _hideSettingsPanel(){
 }
 
 // Close with unsaved-changes check. If dirty, show a confirm dialog.
-function _closeSettingsPanel(){
-  if(typeof _clearModelConfigSecrets==='function') _clearModelConfigSecrets();
+async function _closeSettingsPanel(){
+  const modelDirty=typeof _modelConfigHasUnsavedChanges==='function'&&_modelConfigHasUnsavedChanges();
+  if(modelDirty){
+    const confirmed=await showConfirmDialog({title:'放弃未保存的模型配置？',message:_settingsDirty?'离开设置后，当前模型草稿、凭据以及其他未保存设置都将被放弃。':'离开设置后，当前模型、识图、生图和凭据草稿将被清除。',confirmLabel:'放弃并离开',danger:true,focusCancel:true});
+    if(!confirmed) return false;
+    _clearModelConfigSecrets('all');
+    _discardImageCapabilityProviderDrafts();
+    _settingsDirty=false;
+    _revertSettingsPreview();
+    _hideSettingsPanel();
+    return true;
+  }
   if(!_settingsDirty){
     _revertSettingsPreview();
     _hideSettingsPanel();
-    return;
+    return true;
   }
   _pendingSettingsTargetPanel = _pendingSettingsTargetPanel || 'chat';
   _showSettingsUnsavedBar();
+  return false;
 }
 
 // Revert live DOM/localStorage to what they were when the panel opened
@@ -7400,7 +7411,7 @@ async function loadProvidersPanel(){
     const quotaCard=_buildProviderQuotaCard(quota);
     if(quotaCard) list.appendChild(quotaCard);
     if(modelConfig){
-     _modelConfigData=modelConfig;
+     if(!_modelConfigData||!_modelConfigHasUnsavedChanges()) _modelConfigData=modelConfig;
      _renderProviderImageGenSettings(modelConfig);
     }else{
      _renderProviderImageGenSettings(_modelConfigData);
@@ -8678,7 +8689,7 @@ async function savePlatformCredential(){
   const result=await api('/api/provider-credentials',{method:'POST',body:JSON.stringify(payload)});
   if(!_platformCredentialSessionIsCurrent(session)) return;
   _applyProviderCredentialResult(result,{id,existing,apiKey});
-  _clearModelConfigSecrets();
+  _clearModelConfigSecrets('platform');
   _renderPlatformCredentials(_modelConfigData);
   const capability=_platformCredentialReturnCapability;
   const visionSelect=$('visionConfigCredential');
@@ -9307,7 +9318,6 @@ function _renderProviderImageGenSettings(data){
  const overview=$('providerImageGenOverview');
  const licenseOverview=$('providerLicenseOverview');
  const cfg=data||_modelConfigData||{};
- if(data) _modelConfigData=data;
  if(licenseOverview){
   licenseOverview.textContent=_taijiLicenseData?_taijiLicenseStatusLabel(_taijiLicenseData):'跟随模型配置页';
  }
@@ -9392,7 +9402,6 @@ async function _selectImageProviderFromProviders(providerId,modelId){
 async function refreshProviderImageGenStatus(){
  try{
   const data=await api('/api/model-config');
-  _renderModelConfigPanel(data);
   _renderProviderImageGenSettings(data);
   if(typeof showToast==='function') showToast('图片生成提供商状态已刷新');
  }catch(e){
@@ -9883,7 +9892,16 @@ function _imageGenCredentialDraftHasValues(){
  return dirty;
 }
 
+function _modelConfigAnySecretDraft(){
+ let dirty=false;
+ document.querySelectorAll('[data-secret-field="true"]').forEach(input=>{
+  if(String(input.value||'').trim()) dirty=true;
+ });
+ return dirty;
+}
+
 function _modelConfigHasUnsavedChanges(){
+ if(_modelConfigAnySecretDraft()) return true;
  if(!_modelConfigData) return false;
  return _modelConfigMainHasUnsavedChanges()
   || _visionConfigHasUnsavedChanges()
@@ -9908,17 +9926,39 @@ function _modelConfigDraftIdentity(){
  return JSON.stringify(values);
 }
 
-function _clearModelConfigSecrets(){
- document.querySelectorAll('[data-secret-field="true"]').forEach(input=>{input.value='';});
- ['vision','image'].forEach(capability=>{
-  Object.values(_imageCapabilityProviderDrafts[capability]).forEach(draft=>{
-   if(!draft) return;
-   draft.ApiKey='';
-   (draft.CredentialSecretKeys||[]).forEach(key=>{
-    if(draft.Credentials) draft.Credentials[key]='';
-   });
+function _clearCapabilityProviderDraftSecrets(capability,providerId){
+ const drafts=_imageCapabilityProviderDrafts[capability]||{};
+ const ids=providerId?[String(providerId)]:Object.keys(drafts);
+ ids.forEach(id=>{
+  const draft=drafts[id];
+  if(!draft) return;
+  draft.ApiKey='';
+  (draft.CredentialSecretKeys||[]).forEach(key=>{
+   if(draft.Credentials) draft.Credentials[key]='';
   });
  });
+}
+
+function _clearModelConfigSecrets(scope,providerId){
+ const target=String(scope||'all');
+ const clear=id=>{const input=$(id);if(input) input.value='';};
+ if(target==='all'){
+  document.querySelectorAll('[data-secret-field="true"]').forEach(input=>{input.value='';});
+  _clearCapabilityProviderDraftSecrets('vision');
+  _clearCapabilityProviderDraftSecrets('image');
+  return;
+ }
+ if(target==='platform') clear('platformCredentialSecret');
+ if(target==='main') clear('modelConfigApiKey');
+ if(target==='vision'){
+  clear('visionConfigApiKey');
+  _clearCapabilityProviderDraftSecrets('vision',providerId||(($('visionConfigProvider')||{}).value||''));
+ }
+ if(target==='image'){
+  clear('imageGenConfigApiKey');
+  document.querySelectorAll('[data-image-gen-credential][data-secret-field="true"]').forEach(input=>{input.value='';});
+  _clearCapabilityProviderDraftSecrets('image',providerId||(($('imageGenConfigProvider')||{}).value||''));
+ }
 }
 
 function _discardImageCapabilityProviderDrafts(){
@@ -9949,7 +9989,7 @@ async function loadModelConfigPanel(force,options){
  if(force&&dirtyBeforeLoad&&!opts.skipDirtyConfirm){
   const confirmed=await showConfirmDialog({title:'刷新并放弃未保存草稿？',message:'刷新后将使用服务器上的配置，当前编辑内容和未保存密钥会被清除。',confirmLabel:'刷新并放弃',danger:true,focusCancel:true});
   if(!confirmed) return _modelConfigData;
-  _clearModelConfigSecrets();
+  _clearModelConfigSecrets('all');
   _discardImageCapabilityProviderDrafts();
  }
  const draftIdentityAtStart=_modelConfigDraftIdentity();
@@ -9962,7 +10002,7 @@ async function loadModelConfigPanel(force,options){
    _setModelConfigDraftStatus('检测到未保存草稿，已保留当前编辑内容；服务器状态未覆盖页面。');
    return _modelConfigData;
   }
-  _clearModelConfigSecrets();
+  _clearModelConfigSecrets('all');
   _renderModelConfigPanel(data);
   _setModelConfigDraftStatus('');
   await _loadModelConfigAuxiliaryModels();
@@ -10020,7 +10060,7 @@ async function saveMainModelConfig(){
   const payload={provider,model,base_url:baseUrl};
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload)});
-  _clearModelConfigSecrets();
+  _clearModelConfigSecrets('main');
   if(_modelConfigData&&data&&data.main){
    _modelConfigData.profile=data.profile||_modelConfigData.profile;
    _modelConfigData.main=data.main;
@@ -10067,7 +10107,8 @@ async function saveVisionConfig(){
   if(credentialRef) payload.credential_ref=credentialRef;
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
-  _clearModelConfigSecrets();
+  _clearModelConfigSecrets('vision',provider);
+  delete _imageCapabilityProviderDrafts.vision[provider];
   if(_modelConfigData&&data&&data.vision){
    _modelConfigData.profile=data.profile||_modelConfigData.profile;
    _modelConfigData.vision=data.vision;
@@ -10175,7 +10216,8 @@ async function saveImageGenConfig(){
   if(apiKey) payload.api_key=apiKey;
   if(Object.keys(credentials).length) payload.credentials=credentials;
   const data=await api('/api/image-gen/config',{method:'POST',body:JSON.stringify(payload)});
-  _clearModelConfigSecrets();
+  _clearModelConfigSecrets('image',provider);
+  delete _imageCapabilityProviderDrafts.image[provider];
   if(_modelConfigData&&data&&data.image_gen){
    _modelConfigData.profile=data.profile||_modelConfigData.profile;
    _modelConfigData.image_gen=data.image_gen;

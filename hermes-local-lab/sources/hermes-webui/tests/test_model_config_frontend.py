@@ -468,9 +468,11 @@ let _modelConfigLoadGeneration=0;
 const _imageCapabilityProviderDrafts={vision:{},image:{}};
 let _platformCredentialSaveSession=null,_platformCredentialDeleteSession=null;
 let _platformCredentialReturnCapability='',_platformCredentialReturnFocus=null;
-let renderCount=0,apiCount=0,confirmCount=0,confirmResult=false,resolveLoad;
+let _settingsDirty=false;
+let renderCount=0,providerRenderCount=0,apiCount=0,confirmCount=0,confirmResult=false,resolveLoad,hideCount=0;
 let pendingLoad=new Promise(resolve=>{resolveLoad=resolve;});
 const _renderModelConfigPanel=data=>{renderCount++;_modelConfigData=data;};
+const _renderProviderImageGenSettings=()=>{providerRenderCount++;};
 const _loadModelConfigAuxiliaryModels=async()=>{};
 const _bindTaijiLicenseControls=()=>{};
 const loadTaijiLicenseStatus=async()=>{};
@@ -478,13 +480,17 @@ const showToast=()=>{};
 const showConfirmDialog=async()=>{confirmCount++;return confirmResult;};
 const toggleModelConfigSection=(id,open)=>{if(elements[id]) elements[id].hidden=!open;};
 const _restorePlatformCredentialFocus=()=>{};
+const _revertSettingsPreview=()=>{};
+const _hideSettingsPanel=()=>{hideCount++;};
+const _showSettingsUnsavedBar=()=>{};
 const api=async()=>{apiCount++;return await pendingLoad;};
 for(const name of ['_providerSupportsNamedCredential','_imageCapabilityCredentialRef','_syncPlatformCredentialSurface',
  '_collectImageGenCredentials','_captureImageCapabilityProviderDraft','_restoreImageCapabilityProviderDraft',
  '_visionConfigHasUnsavedChanges','_imageGenConfigHasUnsavedChanges','_modelConfigMainHasUnsavedChanges',
- '_platformCredentialEditorHasUnsavedChanges','_imageGenCredentialDraftHasValues','_modelConfigHasUnsavedChanges',
- '_modelConfigDraftIdentity','_clearModelConfigSecrets','_discardImageCapabilityProviderDrafts',
- '_setModelConfigDraftStatus','closePlatformCredentialEditor','loadModelConfigPanel']) eval(extractFunc(name));
+ '_platformCredentialEditorHasUnsavedChanges','_imageGenCredentialDraftHasValues','_modelConfigAnySecretDraft','_modelConfigHasUnsavedChanges',
+ '_modelConfigDraftIdentity','_clearCapabilityProviderDraftSecrets','_clearModelConfigSecrets','_discardImageCapabilityProviderDrafts',
+ '_setModelConfigDraftStatus','closePlatformCredentialEditor','loadModelConfigPanel','refreshProviderImageGenStatus',
+ '_closeSettingsPanel']) eval(extractFunc(name));
 
 async function run(){
  elements.platformCredentialEditor.hidden=false; elements.platformCredentialSecret.value='cancel-secret';
@@ -532,10 +538,39 @@ async function run(){
  confirmResult=true;
  await loadModelConfigPanel(true);
  const accepted={apiCount,confirmCount,renderCount,secrets:secretFields.map(item=>item.value)};
- secretFields.forEach(item=>item.value='again');
- _clearModelConfigSecrets();
+ function resetScopeSecrets(){
+  secretFields.forEach((item,index)=>{item.value='scope-'+index;});
+  _imageCapabilityProviderDrafts.vision={zai:{ApiKey:'vision-draft-secret'}};
+  _imageCapabilityProviderDrafts.image={doubao:{ApiKey:'image-draft-legacy',Credentials:{api_key:'image-draft-secret'},CredentialSecretKeys:['api_key']}};
+ }
+ const scopeMatrix={};
+ for(const scope of ['platform','main','vision','image']){
+  resetScopeSecrets();
+  _clearModelConfigSecrets(scope,scope==='vision'?'zai':(scope==='image'?'doubao':''));
+  scopeMatrix[scope]={dom:secretFields.map(item=>item.value),visionDraft:_imageCapabilityProviderDrafts.vision.zai.ApiKey,
+   imageLegacy:_imageCapabilityProviderDrafts.image.doubao.ApiKey,imageDraft:_imageCapabilityProviderDrafts.image.doubao.Credentials.api_key};
+ }
+ resetScopeSecrets();
+ _clearModelConfigSecrets('all');
  const cleared=secretFields.every(item=>item.value==='');
- return {cancelSecretCleared,unsupported,alibabaVisible,dashscopeVisible,providerDrafts,initialDirty,lateDirty,lateGuard,returnGuard,cancelled,accepted,cleared};
+
+ elements.modelConfigModel.value='close-draft'; elements.modelConfigApiKey.value='close-secret';
+ confirmResult=false;
+ const closeCancelled=await _closeSettingsPanel();
+ const closeCancel={result:closeCancelled,hideCount,model:elements.modelConfigModel.value,secret:elements.modelConfigApiKey.value};
+ confirmResult=true;
+ const closeConfirmed=await _closeSettingsPanel();
+ const closeConfirm={result:closeConfirmed,hideCount,secret:elements.modelConfigApiKey.value};
+
+ elements.modelConfigModel.value='provider-refresh-draft';
+ pendingLoad=Promise.resolve({profile:'default',main:{provider:'openai',model:'server-replacement'},image_gen:{provider:'doubao'},image_gen_providers:[]});
+ const baselineBefore=_modelConfigData.main.model;
+ const renderBefore=renderCount;
+ await refreshProviderImageGenStatus();
+ const providerRefresh={draft:elements.modelConfigModel.value,baseline:_modelConfigData.main.model,baselineBefore,
+  modelRenderDelta:renderCount-renderBefore,providerRenderCount};
+ return {cancelSecretCleared,unsupported,alibabaVisible,dashscopeVisible,providerDrafts,initialDirty,lateDirty,
+  lateGuard,returnGuard,cancelled,accepted,scopeMatrix,cleared,closeCancel,closeConfirm,providerRefresh};
 }
 run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{console.error(err);process.exit(1);});
 """
@@ -872,6 +907,26 @@ def test_model_config_load_and_secret_lifecycle_have_explicit_guards():
     )[0]
     assert "_clearModelConfigSecrets" in close_settings
     assert "_clearModelConfigSecrets" in hide_settings
+    assert "showConfirmDialog" in close_settings
+    assert "_modelConfigHasUnsavedChanges" in close_settings
+
+
+def test_secret_cleanup_is_scoped_and_provider_refresh_does_not_replace_model_baseline():
+    for marker in (
+        "_clearModelConfigSecrets('platform')",
+        "_clearModelConfigSecrets('main')",
+        "_clearModelConfigSecrets('vision'",
+        "_clearModelConfigSecrets('image'",
+    ):
+        assert marker in PANELS_JS
+    refresh_body = PANELS_JS.split("async function refreshProviderImageGenStatus", 1)[1].split(
+        "function _splitCustomImageProviderModels", 1
+    )[0]
+    assert "_renderModelConfigPanel" not in refresh_body
+    provider_render_body = PANELS_JS.split("function _renderProviderImageGenSettings", 1)[1].split(
+        "async function _selectImageProviderFromProviders", 1
+    )[0]
+    assert "_modelConfigData=data" not in provider_render_body
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -913,7 +968,45 @@ def test_provider_scope_load_generation_and_secret_cleanup_are_state_safe(tmp_pa
         "renderCount": 1,
         "secrets": ["", "", "", "", ""],
     }
+    assert result["scopeMatrix"]["platform"] == {
+        "dom": ["scope-0", "scope-1", "scope-2", "", "scope-4"],
+        "visionDraft": "vision-draft-secret",
+        "imageLegacy": "image-draft-legacy",
+        "imageDraft": "image-draft-secret",
+    }
+    assert result["scopeMatrix"]["main"] == {
+        "dom": ["", "scope-1", "scope-2", "scope-3", "scope-4"],
+        "visionDraft": "vision-draft-secret",
+        "imageLegacy": "image-draft-legacy",
+        "imageDraft": "image-draft-secret",
+    }
+    assert result["scopeMatrix"]["vision"] == {
+        "dom": ["scope-0", "", "scope-2", "scope-3", "scope-4"],
+        "visionDraft": "",
+        "imageLegacy": "image-draft-legacy",
+        "imageDraft": "image-draft-secret",
+    }
+    assert result["scopeMatrix"]["image"] == {
+        "dom": ["scope-0", "scope-1", "", "scope-3", ""],
+        "visionDraft": "vision-draft-secret",
+        "imageLegacy": "",
+        "imageDraft": "",
+    }
     assert result["cleared"] is True
+    assert result["closeCancel"] == {
+        "result": False,
+        "hideCount": 0,
+        "model": "close-draft",
+        "secret": "close-secret",
+    }
+    assert result["closeConfirm"] == {"result": True, "hideCount": 1, "secret": ""}
+    assert result["providerRefresh"] == {
+        "draft": "provider-refresh-draft",
+        "baseline": result["providerRefresh"]["baselineBefore"],
+        "baselineBefore": result["providerRefresh"]["baselineBefore"],
+        "modelRenderDelta": 0,
+        "providerRenderCount": 1,
+    }
 
 
 def test_both_image_capability_cards_use_consistent_endpoint_and_test_controls():
