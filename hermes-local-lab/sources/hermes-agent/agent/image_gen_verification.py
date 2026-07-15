@@ -39,6 +39,8 @@ def verification_state_root() -> Path:
 
 
 def active_profile_name() -> str:
+    if str(os.getenv("TAIJI_RUNTIME_HOME") or "").strip():
+        return "default"
     explicit = str(os.getenv("HERMES_PROFILE_NAME") or "").strip()
     if explicit:
         return explicit

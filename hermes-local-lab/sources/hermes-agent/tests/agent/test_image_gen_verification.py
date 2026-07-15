@@ -109,3 +109,25 @@ def test_image_gen_secret_env_named_ref_never_falls_back_to_legacy():
         {"provider_credentials": [valid]},
     ) == "TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY"
     assert image_gen_secret_env("dashscope", "", {}) == "DASHSCOPE_API_KEY"
+
+
+def test_taiji_runtime_forces_default_verification_profile(monkeypatch, tmp_path):
+    from agent.image_gen_verification import active_profile_name
+
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "named-profile")
+    monkeypatch.setenv("HERMES_PROFILE", "worker-profile")
+    assert active_profile_name() == "default"
+
+    monkeypatch.delenv("HERMES_PROFILE_NAME")
+    assert active_profile_name() == "default"
+
+
+def test_non_taiji_runtime_keeps_named_verification_profile(monkeypatch, tmp_path):
+    from agent.image_gen_verification import active_profile_name
+
+    monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "runtime" / "profiles" / "named-profile"))
+    monkeypatch.setenv("HERMES_PROFILE", "worker-profile")
+
+    assert active_profile_name() == "named-profile"
