@@ -17,6 +17,7 @@ const SMOKE_TEST = process.env.TAIJI_DESKTOP_SMOKE_TEST === "1";
 let mainWindow = null;
 let runtimeEnv = null;
 let stopped = false;
+const trustedIdentityWindows = new Set();
 
 const SECURITY_ALLOW_FLAGS = [
   "TAIJI_ALLOW_TERMINAL",
@@ -517,6 +518,56 @@ function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function openTrustedIdentityWindow(url, allowedOrigins) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.reject(new Error("main window is unavailable"));
+  }
+  const authWindow = new BrowserWindow({
+    parent: mainWindow,
+    width: 620,
+    height: 760,
+    minWidth: 480,
+    minHeight: 640,
+    show: true,
+    title: "企业身份安全登录",
+    autoHideMenuBar: true,
+    webPreferences: {
+      session: mainWindow.webContents.session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  trustedIdentityWindows.add(authWindow);
+  authWindow.on("closed", () => trustedIdentityWindows.delete(authWindow));
+  authWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  authWindow.webContents.on("will-navigate", (event, target) => {
+    let callback = false;
+    let trustedProvider = false;
+    try {
+      const parsed = new URL(String(target || ""));
+      const mainOrigin = new URL(mainWindow.webContents.getURL()).origin;
+      callback = parsed.origin === mainOrigin && parsed.pathname === "/api/expert-teams/identity/callback";
+      trustedProvider = allowedOrigins.includes(parsed.origin);
+    } catch (_) {
+      callback = false;
+    }
+    if (!callback && !trustedProvider) event.preventDefault();
+  });
+  authWindow.webContents.on("did-navigate", (_event, target) => {
+    try {
+      const parsed = new URL(String(target || ""));
+      const mainOrigin = new URL(mainWindow.webContents.getURL()).origin;
+      if (parsed.origin === mainOrigin && parsed.pathname === "/api/expert-teams/identity/callback") {
+        setTimeout(() => { if (!authWindow.isDestroyed()) authWindow.close(); }, 1200);
+      }
+    } catch (_) {
+      // Keep the auth window open on an unparseable navigation so the user can close it explicitly.
+    }
+  });
+  return authWindow.loadURL(String(url));
+}
+
 async function createWindow() {
   desktopBootLog("createWindow");
   const labDir = resolveLabDir();
@@ -546,10 +597,11 @@ async function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  const trustedOidcOrigins = normalizeTrustedExternalOrigins(process.env.TAIJI_TRUSTED_OIDC_ORIGINS || "", { allowLocalHttp: !app.isPackaged });
   mainWindow.webContents.setWindowOpenHandler(createExternalWindowOpenHandler(
-    (url) => shell.openExternal(url),
+    (url) => openTrustedIdentityWindow(url, trustedOidcOrigins),
     (error) => desktopBootLog(`external URL open failed: ${error && error.message ? error.message : String(error)}`),
-    normalizeTrustedExternalOrigins(process.env.TAIJI_TRUSTED_OIDC_ORIGINS || "", { allowLocalHttp: !app.isPackaged })
+    trustedOidcOrigins
   ));
   installDesktopPermissionHandlers(mainWindow);
 

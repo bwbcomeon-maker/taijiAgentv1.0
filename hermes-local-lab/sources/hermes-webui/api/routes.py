@@ -9468,9 +9468,13 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/expert-teams/identity/status":
         from api.expert_teams.trusted_identity import get_trusted_identity_resolver
 
+        query = parse_qs(parsed.query or "", keep_blank_values=True)
         return j(
             handler,
-            get_trusted_identity_resolver().status(_expert_identity_session(handler)),
+            get_trusted_identity_resolver().status(
+                _expert_identity_session(handler),
+                str((query.get("flow_id") or [""])[0]),
+            ),
         )
 
     if parsed.path == "/api/expert-teams/identity/callback":

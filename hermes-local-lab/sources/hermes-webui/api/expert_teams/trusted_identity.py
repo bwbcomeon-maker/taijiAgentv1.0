@@ -111,6 +111,7 @@ class TrustedIdentityResolver:
         self._jwks_loader = jwks_loader or _default_jwks_loader
         self._production = bool(production)
         self._flows: dict[str, dict] = {}
+        self._flow_results: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
         self._authorizer_handoffs: dict[str, dict] = {}
         self._authorizer_handoff_claims: dict[str, dict] = {}
@@ -153,6 +154,7 @@ class TrustedIdentityResolver:
             raise ValueError("OIDC redirect URI is not allowlisted")
         now = float(self._clock())
         state = secrets.token_urlsafe(32)
+        flow_id = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
         challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
@@ -169,6 +171,7 @@ class TrustedIdentityResolver:
         with self._lock:
             self._prune(now)
             self._flows[state] = {
+                "flow_id": flow_id,
                 "nonce": nonce,
                 "code_verifier": verifier,
                 "redirect_uri": redirect_uri,
@@ -191,6 +194,7 @@ class TrustedIdentityResolver:
         return {
             "authorization_url": f"{self._config['authorization_endpoint']}?{urlencode(params)}",
             "state": state,
+            "flow_id": flow_id,
             "nonce": nonce,
             "expires_in": int(self._config.get("flow_ttl_seconds") or 300),
         }
@@ -203,33 +207,50 @@ class TrustedIdentityResolver:
             flow = self._flows.pop(str(state or ""), None)
         if not isinstance(flow, dict):
             raise ValueError("OIDC state is invalid or expired")
-        if not str(code or "").strip():
-            raise ValueError("OIDC authorization code is required")
-        token_response = self._token_client(
-            config=deepcopy(self._config),
-            code=str(code),
-            code_verifier=flow["code_verifier"],
-            redirect_uri=flow["redirect_uri"],
-        )
-        token = str((token_response or {}).get("id_token") or "")
-        if not token:
-            raise ValueError("OIDC token response has no ID token")
-        principal = self._verify_id_token(token, expected_nonce=flow["nonce"], now=now)
-        if flow.get("purpose") == "authorizer_handoff":
-            context = flow.get("binding_context") if isinstance(flow.get("binding_context"), dict) else {}
-            if "waiver-authorizer" not in principal.get("roles", []):
-                raise ValueError("trusted authorizer role is required")
-            if principal.get("subject") == context.get("disallowed_principal_id"):
-                raise ValueError("authorizer must be distinct from reviewer")
-        session_id = secrets.token_urlsafe(32)
-        with self._lock:
-            self._sessions[session_id] = deepcopy(principal)
+        flow_id = str(flow.get("flow_id") or "")
+        try:
+            if not str(code or "").strip():
+                raise ValueError("OIDC authorization code is required")
+            token_response = self._token_client(
+                config=deepcopy(self._config),
+                code=str(code),
+                code_verifier=flow["code_verifier"],
+                redirect_uri=flow["redirect_uri"],
+            )
+            token = str((token_response or {}).get("id_token") or "")
+            if not token:
+                raise ValueError("OIDC token response has no ID token")
+            principal = self._verify_id_token(token, expected_nonce=flow["nonce"], now=now)
             if flow.get("purpose") == "authorizer_handoff":
-                context = deepcopy(flow.get("binding_context") or {})
-                self._authorizer_handoffs[session_id] = {
-                    "context": context,
-                    "context_sha256": _digest(_canonical(context)),
+                context = flow.get("binding_context") if isinstance(flow.get("binding_context"), dict) else {}
+                if "waiver-authorizer" not in principal.get("roles", []):
+                    raise ValueError("trusted authorizer role is required")
+                if principal.get("subject") == context.get("disallowed_principal_id"):
+                    raise ValueError("authorizer must be distinct from reviewer")
+            session_id = secrets.token_urlsafe(32)
+            with self._lock:
+                self._sessions[session_id] = deepcopy(principal)
+                self._flow_results[flow_id] = {
+                    "identity_flow_status": "completed",
+                    "session_id": session_id,
+                    "expires_at": now + int(self._config.get("flow_ttl_seconds") or 300),
                 }
+                if flow.get("purpose") == "authorizer_handoff":
+                    context = deepcopy(flow.get("binding_context") or {})
+                    self._authorizer_handoffs[session_id] = {
+                        "context": context,
+                        "context_sha256": _digest(_canonical(context)),
+                    }
+        except Exception as exc:
+            message = str(exc)
+            status = "authorizer_same_as_reviewer" if "distinct from reviewer" in message else "failed"
+            with self._lock:
+                self._flow_results[flow_id] = {
+                    "identity_flow_status": status,
+                    "identity_flow_message": "仍是原验收人，请切换授权人账号" if status == "authorizer_same_as_reviewer" else "企业身份登录未完成",
+                    "expires_at": now + int(self._config.get("flow_ttl_seconds") or 300),
+                }
+            raise
         result = {"session_id": session_id, "redirect_uri": flow["redirect_uri"], "principal": deepcopy(principal)}
         if flow.get("purpose") == "authorizer_handoff":
             result.update({
@@ -307,7 +328,7 @@ class TrustedIdentityResolver:
             raise ValueError("trusted identity role is not authorized")
         return principal
 
-    def status(self, session_id: str | None) -> dict:
+    def status(self, session_id: str | None, flow_id: str | None = None) -> dict:
         if not self._config.get("enabled"):
             return {"enabled": False, "authenticated": False, "provider": "disabled"}
         try:
@@ -316,13 +337,26 @@ class TrustedIdentityResolver:
                 principal = deepcopy(self._sessions.get(str(session_id or "")))
         except Exception:
             principal = None
-        return {
+        result = {
             "enabled": True,
             "authenticated": isinstance(principal, dict),
             "provider": "oidc_pkce",
             "authorizer_handoff_ready": self._config.get("authorizer_handoff_mode") == "select_account",
             "principal": principal if isinstance(principal, dict) else None,
         }
+        with self._lock:
+            flow_result = deepcopy(self._flow_results.get(str(flow_id or "")))
+        if isinstance(flow_result, dict):
+            public_flow = {key: value for key, value in flow_result.items() if key not in {"expires_at", "session_id"}}
+            if public_flow.get("identity_flow_status") == "completed" and not secrets.compare_digest(
+                str(flow_result.get("session_id") or ""), str(session_id or "")
+            ):
+                public_flow = {
+                    "identity_flow_status": "session_mismatch",
+                    "identity_flow_message": "登录结果已被其他身份流程替换，请重试",
+                }
+            result.update(public_flow)
+        return result
 
     def logout(self, session_id: str) -> None:
         with self._lock:
@@ -389,6 +423,9 @@ class TrustedIdentityResolver:
     def _prune(self, now: float) -> None:
         self._flows = {
             key: value for key, value in self._flows.items() if float(value.get("expires_at") or 0) > now
+        }
+        self._flow_results = {
+            key: value for key, value in self._flow_results.items() if float(value.get("expires_at") or 0) > now
         }
         self._sessions = {
             key: value for key, value in self._sessions.items() if float(value.get("expires_at") or 0) > now

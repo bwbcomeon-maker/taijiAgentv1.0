@@ -5396,7 +5396,7 @@ main.main > #mainPlugin{display:none;}
 .expert-team-brief-editor{display:flex;flex-direction:column;gap:12px;margin-top:8px;}.expert-team-brief-editor fieldset{min-width:0;margin:0;padding:10px;border:1px solid var(--taiji-ui-line,var(--border-subtle));border-radius:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}.expert-team-brief-editor legend{padding:0 5px;font-size:12px;font-weight:800;color:var(--text);}.expert-team-brief-field{min-width:0;display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:700;}.expert-team-brief-field textarea,.expert-team-brief-field input{box-sizing:border-box;width:100%;min-height:38px;padding:8px 9px;border:1px solid var(--taiji-ui-line,var(--border));border-radius:8px;background:var(--surface,#fff);color:var(--text);font:inherit;line-height:1.45;resize:vertical;}.expert-team-brief-field textarea{min-height:88px;}.expert-team-brief-field input[aria-invalid="true"],.expert-team-brief-field textarea[aria-invalid="true"]{border-color:#c83d45;box-shadow:0 0 0 2px rgba(200,61,69,.12);}.expert-team-brief-field small{font-size:10px;font-weight:500;line-height:1.4;color:var(--muted);}.expert-team-brief-field [data-expert-team-field-error]:empty{display:none;}.expert-team-brief-field [data-expert-team-field-error]{color:#a92f38;}.expert-team-brief-boundary{grid-column:1/-1;margin:0;font-size:11px;color:var(--muted);}.expert-team-brief-actions{display:flex;justify-content:flex-end;gap:8px;}.expert-team-brief-frozen{padding:10px;border-radius:9px;background:rgba(248,245,232,.84);}.expert-team-brief-frozen p{margin:5px 0 9px;font-size:11px;line-height:1.5;color:var(--muted);}
 .expert-team-identity-status{display:flex;align-items:center;flex-wrap:wrap;gap:7px;padding:8px 9px;border-radius:9px;background:rgba(244,249,250,.9);font-size:11px;line-height:1.4;}.expert-team-identity-status span{flex:1 1 180px;}.expert-team-identity-status button{min-height:36px;border:1px solid var(--taiji-ui-line,var(--border));border-radius:8px;background:var(--surface,#fff);color:var(--accent-text);font-size:11px;font-weight:720;cursor:pointer;}.expert-team-capsule-todo-count{font-size:10px;font-weight:760;color:var(--muted);white-space:nowrap;}
 @media (max-width:700px){.expert-team-completion-gates{grid-template-columns:1fr;}.expert-team-brief-card dl,.expert-team-brief-editor fieldset{grid-template-columns:1fr;}.expert-team-brief-actions{flex-direction:column;}.expert-team-brief-actions button,.expert-team-identity-status button{min-height:44px;width:100%;}}
-.expert-team-tab-panel{min-height:0;display:flex;flex-direction:column;gap:7px;}
+.expert-team-tab-panel{min-height:0;display:flex;flex:0 0 auto;flex-direction:column;gap:7px;}
 .expert-team-tab-panel[hidden]{display:none!important;}
 .expert-team-todo-summary{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;}
 .expert-team-todo-summary span{min-width:0;display:flex;flex-direction:column;gap:4px;}
@@ -11493,7 +11493,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 @media (min-width:901px) and (max-width:1320px){
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) main.main.taiji-real-main #mainChat{
     grid-template-columns:1fr!important;
-    grid-template-rows:min(42vh,320px) minmax(112px,1fr) auto!important;
+    grid-template-rows:min(64vh,580px) minmax(112px,1fr) auto!important;
     gap:12px!important;
     padding:16px!important;
   }
@@ -11501,7 +11501,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
     grid-column:1!important;
     grid-row:1!important;
     height:100%!important;
-    max-height:min(42vh,320px)!important;
+    max-height:min(64vh,580px)!important;
   }
   :root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-expert-team-active:not(.taiji-expert-team-panel-collapsed) .expert-team-workspace-panel .expert-team-panel-inner{
     height:100%!important;
@@ -11699,10 +11699,17 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .expert-team-office-scroll fieldset{display:grid;gap:10px;padding:14px;border:1px solid var(--border);border-radius:12px}
 .expert-team-office-scroll legend{padding:0 6px;font-weight:700}
 .expert-team-office-scroll label{display:flex;align-items:flex-start;gap:8px;line-height:1.45}
+.expert-team-office-new-issue{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(110px,.35fr);gap:12px!important;margin-top:12px}
+.expert-team-office-new-issue legend{grid-column:1/-1}
+.expert-team-office-new-issue label{display:grid;gap:6px}
+.expert-team-office-new-issue label:nth-of-type(n+3),.expert-team-office-new-issue>button{grid-column:1/-1}
+.expert-team-office-new-issue input,.expert-team-office-new-issue select,.expert-team-office-new-issue textarea{width:100%;min-height:42px;padding:9px 10px;border:1px solid var(--border);border-radius:9px;background:var(--bg);color:var(--text)}
+.expert-team-office-drawer-head>button{min-height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:9px;background:var(--hover-bg);color:var(--text);font-weight:650}
 .expert-team-office-issue.is-blocking{border-color:color-mix(in srgb,var(--error) 52%,var(--border))}
 .expert-team-office-issue.is-condition{border-color:color-mix(in srgb,var(--warning) 52%,var(--border))}
 .expert-team-office-issue.is-invalid{border-color:var(--error);background:color-mix(in srgb,var(--error) 7%,transparent)}
 .expert-team-office-impact,.expert-team-office-identity{padding:10px 12px;border-radius:10px;background:var(--hover-bg);color:var(--muted)}
+.expert-team-office-identity{display:flex;align-items:center;justify-content:space-between;gap:12px}.expert-team-office-identity p{margin:0}.expert-team-office-identity button{flex:0 0 auto}
 .expert-team-office-evidence{display:grid;gap:10px;padding:14px;border:1px solid var(--border);border-radius:12px}
 .expert-team-office-evidence h3{margin:0}.expert-team-office-evidence label{display:grid;gap:7px}
 .expert-team-office-evidence input[type="file"]{min-height:44px;padding:8px;border:1px dashed var(--border);border-radius:10px;background:var(--bg)}

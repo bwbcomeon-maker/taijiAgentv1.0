@@ -28,7 +28,7 @@ test("origin configuration rejects paths, userinfo, insecure remote origins and 
   assert.deepEqual(normalizeTrustedExternalOrigins("http://localhost:9000", { allowLocalHttp: true }), ["http://localhost:9000"]);
 });
 
-test("window open handler forwards trusted auth URL to the system browser and denies Electron windows", async () => {
+test("window open handler forwards trusted auth URL to the isolated auth window and denies arbitrary Electron windows", async () => {
   const opened = [];
   const pending = [];
   const handler = createExternalWindowOpenHandler((url) => {
@@ -50,7 +50,9 @@ test("desktop main installs the external URL handler on the isolated BrowserWind
   assert.match(source, /createExternalWindowOpenHandler/);
   assert.match(source, /TAIJI_TRUSTED_OIDC_ORIGINS/);
   assert.match(source, /webContents\.setWindowOpenHandler\(/);
-  assert.match(source, /shell\.openExternal/);
+  assert.match(source, /openTrustedIdentityWindow/);
+  assert.match(source, /session:\s*mainWindow\.webContents\.session/);
+  assert.doesNotMatch(source, /createExternalWindowOpenHandler\(\s*\(url\)\s*=>\s*shell\.openExternal/);
   assert.match(source, /contextIsolation:\s*true/);
   assert.match(source, /nodeIntegration:\s*false/);
   assert.match(source, /sandbox:\s*true/);

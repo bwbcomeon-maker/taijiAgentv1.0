@@ -146,7 +146,14 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "<span>任务</span>" in EXPERT_UI_JS
     assert "<span>成果</span>" in EXPERT_UI_JS
     assert "<span>过程</span>" in EXPERT_UI_JS
-    assert "专家团协作状态" in EXPERT_UI_JS
+    assert "AI 阶段协作状态" in EXPERT_UI_JS
+    assert "不代表独立人工专家审计" in EXPERT_UI_JS
+
+
+def test_current_task_panel_precedes_gates_and_brief_in_the_expanded_workspace():
+    expanded = EXPERT_UI_JS.split('id="expert-team-workspace-expanded"', 1)[1]
+    assert expanded.index("tabPanel('task',todoPanelHtml,true)") < expanded.index("${completionGatesHtml}")
+    assert expanded.index("tabPanel('task',todoPanelHtml,true)") < expanded.index("${briefCardHtml}")
     assert "expert-team-confirmation-wizard" in EXPERT_UI_JS
     assert "需求确认 1/" in EXPERT_UI_JS
     assert "确认并下一题" in EXPERT_UI_JS

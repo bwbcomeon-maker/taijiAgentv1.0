@@ -111,6 +111,53 @@ def test_oidc_pkce_login_produces_safe_reusable_trusted_principal():
     assert "nonce" not in serialized
 
 
+def test_identity_flow_status_is_typed_without_exposing_the_session_secret():
+    now = [time.time()]
+    private, jwk = _key_material()
+    holder = {"private": private, "jwk": jwk, "token": ""}
+    resolver = _resolver(now, holder)
+    start = resolver.start_login(_config()["redirect_uris"][0])
+    claims = {
+        "iss": _config()["issuer"], "aud": _config()["audience"], "sub": "user-001", "name": "张三",
+        "iat": int(now[0]), "exp": int(now[0] + 600), "nonce": start["nonce"], "jti": "flow-jti",
+        "roles": ["document-approver"],
+    }
+    holder["token"] = jwt.encode(claims, private, algorithm="RS256", headers={"kid": jwk["kid"]})
+    completed = resolver.complete_login(state=start["state"], code="authorization-code")
+    status = resolver.status(completed["session_id"], start["flow_id"])
+    assert status["authenticated"] is True
+    assert status["identity_flow_status"] == "completed"
+    assert completed["session_id"] not in json.dumps(status, ensure_ascii=False)
+
+
+def test_identity_flow_completion_is_bound_to_its_own_cookie_session():
+    now = [time.time()]
+    private, jwk = _key_material()
+    holder = {"private": private, "jwk": jwk, "token": ""}
+    resolver = _resolver(now, holder)
+    first = resolver.start_login(_config()["redirect_uris"][0])
+    second = resolver.start_login(_config()["redirect_uris"][0])
+
+    def complete(started, subject):
+        claims = {
+            "iss": _config()["issuer"], "aud": _config()["audience"], "sub": subject, "name": subject,
+            "iat": int(now[0]), "exp": int(now[0] + 600), "nonce": started["nonce"],
+            "jti": f"{subject}-jti", "roles": ["document-approver"],
+        }
+        holder["token"] = jwt.encode(claims, private, algorithm="RS256", headers={"kid": jwk["kid"]})
+        return resolver.complete_login(state=started["state"], code="authorization-code")
+
+    second_result = complete(second, "user-second")
+    assert resolver.status(second_result["session_id"], second["flow_id"])["identity_flow_status"] == "completed"
+    first_result = complete(first, "user-first")
+    mismatched = resolver.status(first_result["session_id"], second["flow_id"])
+    assert mismatched["identity_flow_status"] == "session_mismatch"
+    assert mismatched["authenticated"] is True
+    assert second_result["session_id"] not in json.dumps(mismatched, ensure_ascii=False)
+    reverse_mismatch = resolver.status(second_result["session_id"], first["flow_id"])
+    assert reverse_mismatch["identity_flow_status"] == "session_mismatch"
+
+
 def test_state_nonce_role_signature_issuer_and_algorithm_fail_closed():
     now = [time.time()]
     private, jwk = _key_material()
@@ -239,6 +286,9 @@ def test_authorizer_handoff_requires_provider_switch_and_distinct_principal():
     holder["token"] = jwt.encode(claims, private, algorithm="RS256", headers={"kid": jwk["kid"]})
     with pytest.raises(ValueError, match="distinct"):
         resolver.complete_login(state=started["state"], code="authorization-code")
+    failed_status = resolver.status(None, started["flow_id"])
+    assert failed_status["identity_flow_status"] == "authorizer_same_as_reviewer"
+    assert failed_status["identity_flow_message"] == "仍是原验收人，请切换授权人账号"
     with pytest.raises(ValueError, match="state"):
         resolver.complete_login(state=started["state"], code="authorization-code")
 

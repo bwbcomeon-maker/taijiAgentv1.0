@@ -102,7 +102,7 @@ def build_office_acceptance(
     for issue in issues if isinstance(issues, list) else []:
         if not isinstance(issue, dict):
             raise DeliveryIntegrityError("Office acceptance issue is invalid")
-        if issue.get("severity") not in OFFICE_ISSUE_SEVERITIES:
+        if not isinstance(issue.get("severity"), str) or issue["severity"] not in OFFICE_ISSUE_SEVERITIES:
             raise DeliveryIntegrityError("Office acceptance issue severity is invalid")
         legacy_fields = {"issue_id", "severity", "target", "message"}
         required_fields = {"issue_id", "severity", "category", "description", "expected_fix"}
@@ -114,6 +114,10 @@ def build_office_acceptance(
             raise DeliveryIntegrityError("Office acceptance issue policy category is required")
         if not required_fields <= set(issue) or set(issue) - required_fields - optional_fields:
             raise DeliveryIntegrityError("Office acceptance issue is invalid")
+        if any(not isinstance(issue.get(field), str) or not issue[field].strip() for field in required_fields):
+            raise DeliveryIntegrityError("Office acceptance issue fields must be non-empty strings")
+        if "page" in issue and (not isinstance(issue.get("page"), int) or isinstance(issue.get("page"), bool) or issue["page"] < 1):
+            raise DeliveryIntegrityError("Office acceptance issue page is invalid")
         category = str(issue.get("category") or "")
         policy_severity = OFFICE_POLICY_V1["categories"].get(category)
         if not policy_severity or issue.get("severity") != policy_severity:

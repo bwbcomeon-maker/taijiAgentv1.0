@@ -16,6 +16,7 @@
   let officeAuthorizerAttempt=0;
   let officeAuthorizerAbortController=null;
   const OFFICE_REQUIRED_CHECKS=['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','headers_footers_pagination','no_placeholders_or_workflow_text'];
+  const OFFICE_ISSUE_SEVERITY={file_or_hash_mismatch:'blocking',required_check_failed:'blocking',title_or_genre_mismatch:'blocking',placeholder_content:'blocking',security_issue:'blocking',upstream_gate_issue:'blocking',duplicate_figure:'blocking',visual_alignment:'condition',minor_typography:'condition',pagination_preference:'condition'};
   function officeMutationKey(card,kind){
     const uuid=(typeof crypto!=='undefined'&&crypto&&typeof crypto.randomUUID==='function')?crypto.randomUUID():`${Date.now().toString(36)}-${(++mutationNonce).toString(36)}`;
     return `expert-team:${card.runId}:${card.version}:office:${kind}:${uuid}`;
@@ -31,7 +32,7 @@
       issues:(submission.issues||[]).map(item=>({
         issue_id:String(item&&item.issueId||item&&item.issue_id||''),severity:String(item&&item.severity||''),
         category:String(item&&item.category||''),
-        page:Number(item&&item.page||0),description:String(item&&item.description||''),expected_fix:String(item&&item.expectedFix||item&&item.expected_fix||'')
+        ...(Number(item&&item.page||0)>0?{page:Number(item.page)}:{}),description:String(item&&item.description||''),expected_fix:String(item&&item.expectedFix||item&&item.expected_fix||'')
       })),
       note:String(submission.note||'').trim(),idempotency_key:officeMutationKey(card,'acceptance')
     };
@@ -49,7 +50,7 @@
     const checklist=office.checklist&&typeof office.checklist==='object'?office.checklist:{};
     if(OFFICE_REQUIRED_CHECKS.some(key=>checklist[key]!=='passed'))return {ok:false,code:'office_required_checklist_incomplete',message:'必选检查项全部通过后才能提交'};
     const issues=Array.isArray(office.issues)?office.issues:[];
-    const invalid=issues.some(issue=>!issue||!['blocking','condition'].includes(String(issue.severity||''))||String(issue.targetDomain||issue.target_domain||'')!=='office_issue');
+    const invalid=issues.some(issue=>{const page=Number(issue&&issue.page||0);return !issue||!String(issue.issueId||issue.issue_id||'').trim()||!String(issue.category||'').trim()||!String(issue.description||'').trim()||!String(issue.expectedFix||issue.expected_fix||'').trim()||!['blocking','condition'].includes(String(issue.severity||''))||String(issue.targetDomain||issue.target_domain||'')!=='office_issue'||(page!==0&&(!Number.isInteger(page)||page<1));});
     if(invalid)return {ok:false,code:'office_issue_policy_invalid',message:'存在未识别的问题策略，请刷新后返修'};
     if(decision==='passed'&&issues.length)return {ok:false,code:'office_passed_requires_zero_issues',message:'通过要求零未处置问题'};
     if(decision==='passed_with_conditions'&&(!issues.length||issues.some(issue=>issue.severity!=='condition')))return {ok:false,code:'office_blocking_issue_requires_revision',message:'阻断问题不可豁免，必须返修'};
@@ -78,6 +79,37 @@
     const office=card&&card.officeReview&&typeof card.officeReview==='object'?card.officeReview:{};
     return JSON.stringify({runId:String(card&&card.runId||''),version:Number(card&&card.version||0),reviewId:String(office.reviewId||''),issues:(office.issues||[]).map(item=>[String(item.issueId||''),String(item.severity||''),String(item.category||'')])});
   }
+  function collectExpertTeamOfficeIssues(drawer,card){
+    const existing=Array.isArray(card&&card.officeReview&&card.officeReview.issues)?card.officeReview.issues:[];
+    const drafted=Array.from(drawer&&drawer.querySelectorAll?drawer.querySelectorAll('[data-office-new-issue]'):[]).map((row,index)=>{
+      const category=String(row.querySelector('[data-office-issue-category]')?.value||'');
+      const description=String(row.querySelector('[data-office-issue-description]')?.value||'').trim();
+      const expectedFix=String(row.querySelector('[data-office-issue-expected-fix]')?.value||'').trim();
+      const page=Number(row.querySelector('[data-office-issue-page]')?.value||0);
+      if(!category&&!description&&!expectedFix&&!page)return null;
+      return {issueId:`ui-${String(card&&card.runId||'run')}-${Number(card&&card.version||0)}-${index+1}`,severity:String(OFFICE_ISSUE_SEVERITY[category]||''),targetDomain:'office_issue',category,page,description,expectedFix};
+    }).filter(Boolean);
+    return existing.concat(drafted);
+  }
+  function addExpertTeamOfficeIssue(btn){
+    const drawer=officeDrawer(btn);const list=drawer&&drawer.querySelector('[data-office-new-issues]');const first=list&&list.querySelector('[data-office-new-issue]');
+    if(!list||!first)return false;const row=first.cloneNode(true);row.querySelectorAll('input,textarea,select').forEach(field=>{field.value='';});list.appendChild(row);row.querySelector('select,textarea,input')?.focus();return true;
+  }
+  function removeExpertTeamOfficeIssue(btn){
+    const drawer=officeDrawer(btn);const row=btn&&btn.closest&&btn.closest('[data-office-new-issue]');const list=row&&row.parentNode;if(!row||!list)return false;
+    const rows=Array.from(list.querySelectorAll('[data-office-new-issue]'));const index=rows.indexOf(row);
+    if(rows.length>1){row.remove();const remaining=Array.from(list.querySelectorAll('[data-office-new-issue]'));const target=remaining[Math.min(index,remaining.length-1)]?.querySelector('select,textarea,input')||list.parentNode?.querySelector('[data-office-add-issue]');if(target&&target.focus)target.focus();}
+    else{row.querySelectorAll('input,textarea,select').forEach(field=>{field.value='';});row.querySelector('select,textarea,input')?.focus();}
+    const live=drawer&&drawer.querySelector('[data-office-live]');if(live)live.textContent='已删除该问题草稿。';return true;
+  }
+  async function loginExpertTeamOfficeReviewer(btn){
+    const drawer=officeDrawer(btn);const ok=await startExpertTeamIdentityLogin(btn);if(!ok||!drawer)return false;
+    const identity=(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{};const roles=Array.isArray(identity.principal&&identity.principal.roles)?identity.principal.roles:[];
+    const ready=identity.authenticated===true&&roles.includes('document-reviewer');const status=drawer.querySelector('[data-office-identity-status]');
+    if(status)status.textContent=ready?`当前验收身份：${String(identity.principal.display_name||'已认证用户')}`:'当前身份缺少文档验收权限，请切换账号。';
+    const begin=drawer.querySelector('[data-office-begin]');if(begin){begin.disabled=!ready;begin.setAttribute('aria-disabled',ready?'false':'true');}
+    btn.textContent=ready?'切换验收身份':'登录验收身份';const focusTarget=ready&&begin?begin:btn;if(focusTarget&&focusTarget.focus)focusTarget.focus();return ready;
+  }
   function officeDrawer(btn){return btn&&btn.closest?btn.closest('[data-expert-team-office-drawer]'):null;}
   function openExpertTeamOfficeDrawer(btn){
     const root=btn&&btn.closest?btn.closest('.expert-team-panel-inner'):null;
@@ -105,6 +137,7 @@
       reasons:Array.from(drawer.querySelectorAll('[data-office-waiver-reason]')).map(item=>[String(item.dataset.officeWaiverReason||''),String(item.value||'')]),
       evidenceSelected:Array.from(drawer.querySelector('[data-office-evidence-input]')?.files||[]).map(item=>String(item.name||'')),
       evidenceUploaded:Number(drawer.dataset.officeEvidenceCount||0),
+      newIssues:Array.from(drawer.querySelectorAll('[data-office-new-issue]')).map(row=>Array.from(row.querySelectorAll('input,textarea,select')).map(field=>String(field.value||''))),
       note:String(drawer.querySelector('[data-office-note]')?.value||'')
     });
   }
@@ -180,7 +213,7 @@
     }
     const decision=String(drawer.querySelector('input[name="office-decision"]:checked')?.value||'');
     const checklist=Object.fromEntries(Array.from(drawer.querySelectorAll('[data-office-checklist]')).map(item=>[String(item.dataset.officeChecklist||''),item.checked?'passed':'not_checked']));
-    const submission={identity:card.identityStatus||(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{},decision,checklist,issues:Array.isArray(card.officeReview&&card.officeReview.issues)?card.officeReview.issues:[],note:String(drawer.querySelector('[data-office-note]')?.value||'')};
+    const submission={identity:card.identityStatus||(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{},decision,checklist,issues:collectExpertTeamOfficeIssues(drawer,card),note:String(drawer.querySelector('[data-office-note]')?.value||'')};
     const validation=validateExpertTeamOfficeSubmission(submission);
     if(!validation.ok){if(live)live.textContent=validation.message;if(typeof showToast==='function')showToast(validation.message);return false;}
     btn.disabled=true;btn.setAttribute('aria-busy','true');if(live)live.textContent='正在提交 Office 验收…';
@@ -219,18 +252,18 @@
     try{
       const started=await api('/api/expert-teams/identity/start',{method:'POST',signal,body:JSON.stringify({purpose:'authorizer_handoff',session_id:card.sourceSessionId,run_id:card.runId,redirect_uri:`${location.origin}/api/expert-teams/identity/callback`})});
       if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
-      if(live)live.textContent='请在系统浏览器中切换为授权人账号，完成后返回此处。';
+      if(live)live.textContent='请在安全登录窗口中切换为授权人账号，完成后此处会自动更新。';
       if(typeof window!=='undefined'&&typeof window.open==='function')window.open(started.authorization_url,'_blank','noopener,noreferrer');
       for(let pollIndex=0;pollIndex<120;pollIndex+=1){
         await expertTeamIdentityDelay(1000,signal);
         if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
-        const status=await api('/api/expert-teams/identity/status',{signal});
+        const status=await api('/api/expert-teams/identity/status?flow_id='+encodeURIComponent(String(started&&started.flow_id||'')),{signal});
         if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
         const flow=String(status&&status.identity_flow_status||status&&status.login_state||'');
         if(flow==='authorizer_same_as_reviewer'){if(live)live.textContent='仍是原验收人，请换账号重试';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
-        if(['cancelled','expired','stale','failed'].includes(flow)){if(live)live.textContent=flow==='expired'?'授权登录已过期，请重试；问题草稿已保留。':'授权交接未完成，可重试或退回修改。';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
+        if(['cancelled','expired','stale','failed','session_mismatch'].includes(flow)){if(live)live.textContent=flow==='expired'?'授权登录已过期，请重试；问题草稿已保留。':'授权交接未完成，可重试或退回修改。';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
         const roles=Array.isArray(status&&status.principal&&status.principal.roles)?status.principal.roles:[];
-        if(status&&status.authenticated&&roles.includes('waiver-authorizer')){
+        if(flow==='completed'&&status&&status.authenticated&&roles.includes('waiver-authorizer')){
           const authoritative=(typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||{};
           if(String(authoritative.runId||'')===String(card.runId||'')&&officeAuthoritativeIdentity(authoritative)!==String(drawer._expertTeamOfficeAuthoritativeIdentity||'')){
             if(live)live.textContent='Office 验收数据已更新，已停止旧授权请求；当前草稿已保留。';return false;
@@ -582,7 +615,8 @@
     return {allowed:true,label:String(principal.display_name||'企业审批身份')};
   }
   function applyExpertTeamIdentityStatus(status,returnFocus){
-    const safeStatus=status&&typeof status==='object'?status:{};
+    const raw=status&&typeof status==='object'?status:{};
+    const safeStatus={...raw,authorizerHandoffReady:raw.authorizerHandoffReady===true||raw.authorizer_handoff_ready===true};
     window._expertTeamIdentityStatus=safeStatus;
     if(window._activeExpertTeamStatusCard){
       window._activeExpertTeamStatusCard.identityStatus=safeStatus;
@@ -651,13 +685,13 @@
       const flow=await api('/api/expert-teams/identity/start',{method:'POST',signal:loginAttempt.controller.signal,body:JSON.stringify({redirect_uri:redirectUri,purpose:'login'})});
       if(activeIdentityLoginAttempt!==loginAttempt||loginAttempt.controller.signal.aborted)return false;
       window.open(String(flow&&flow.authorization_url||''),'_blank','noopener,noreferrer');
-      if(typeof showToast==='function')showToast('已请求在系统浏览器中登录，完成后此处会自动更新。');
+      if(typeof showToast==='function')showToast('已打开安全登录窗口，完成后此处会自动更新。');
       for(let attempt=0;attempt<120;attempt+=1){
         await expertTeamIdentityDelay(1000,loginAttempt.controller.signal);
-        const status=await api('/api/expert-teams/identity/status',{signal:loginAttempt.controller.signal});
+        const status=await api('/api/expert-teams/identity/status?flow_id='+encodeURIComponent(String(flow&&flow.flow_id||'')),{signal:loginAttempt.controller.signal});
         if(activeIdentityLoginAttempt!==loginAttempt||loginAttempt.controller.signal.aborted)return false;
-        if(status&&['cancelled','failed'].includes(String(status.identity_flow_status||status.login_state||'')))return false;
-        if(status&&status.authenticated){applyExpertTeamIdentityStatus(status,null);return true;}
+        if(status&&['cancelled','failed','session_mismatch'].includes(String(status.identity_flow_status||status.login_state||'')))return false;
+        if(String(status&&status.identity_flow_status||'')==='completed'&&status&&status.authenticated){applyExpertTeamIdentityStatus(status,null);return true;}
       }
       if(typeof showToast==='function')showToast('企业身份登录已过期，请重新登录。');
       return false;
@@ -879,6 +913,10 @@
     window.officeSubmissionMutationPayload=officeSubmissionMutationPayload;
     window.officeRevisionMutationPayload=officeRevisionMutationPayload;
     window.validateExpertTeamOfficeSubmission=validateExpertTeamOfficeSubmission;
+    window.collectExpertTeamOfficeIssues=collectExpertTeamOfficeIssues;
+    window.addExpertTeamOfficeIssue=addExpertTeamOfficeIssue;
+    window.removeExpertTeamOfficeIssue=removeExpertTeamOfficeIssue;
+    window.loginExpertTeamOfficeReviewer=loginExpertTeamOfficeReviewer;
     window.openExpertTeamOfficeDrawer=openExpertTeamOfficeDrawer;
     window.closeExpertTeamOfficeDrawer=closeExpertTeamOfficeDrawer;
     window.handleExpertTeamOfficeDrawerKeydown=handleExpertTeamOfficeDrawerKeydown;

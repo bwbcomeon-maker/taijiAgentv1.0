@@ -272,7 +272,7 @@ async function submitOfficeAcceptanceScenario(page, { decision, issues, doubleCl
     officeReviewId: `office-submit-${decision}`,
     officeReviewUi: {
       review_id: `office-submit-${decision}`, document_revision: 4, document_sha256: "abcdef0123456789".repeat(4),
-      status: "pending", decision: "pending", validity: "active", checklist, reviewer_label: "王审核", issues,
+      status: "pending", decision: "pending", validity: "active", checklist, reviewer_label: "王审核", issues: [],
       review_session_status: "ready",
     },
   });
@@ -283,6 +283,12 @@ async function submitOfficeAcceptanceScenario(page, { decision, issues, doubleCl
   await page.waitForFunction((count) => window.__officeEvidenceCalls.length === count + 1, evidenceBefore, { timeout: 5000 });
   await page.locator("body > [data-expert-team-office-drawer] [data-office-checklist]").evaluateAll((items) => items.forEach((item) => { item.checked = true; item.dispatchEvent(new Event("change", { bubbles: true })); }));
   await page.check(`body > [data-expert-team-office-drawer] input[name="office-decision"][value="${decision}"]`);
+  if (issues.length) {
+    const issue = issues[0];
+    await page.selectOption("body > [data-expert-team-office-drawer] [data-office-new-issue] [data-office-issue-category]", issue.category);
+    await page.fill("body > [data-expert-team-office-drawer] [data-office-new-issue] [data-office-issue-description]", issue.description);
+    await page.fill("body > [data-expert-team-office-drawer] [data-office-new-issue] [data-office-issue-expected-fix]", issue.expected_fix);
+  }
   await page.fill("body > [data-expert-team-office-drawer] [data-office-note]", "已用 WPS 打开正式文档并逐页检查目录、表格和整体版式。");
   const before = await page.evaluate(() => window.__officeAcceptanceCalls.length);
   await page.evaluate((next) => { window.__officeAcceptanceResults.push(next); }, result);
@@ -572,7 +578,7 @@ async function main() {
           window.__officeHandoffCalls.push(JSON.parse(options.body));
           return { authorization_url: "https://identity.invalid/select-account" };
         }
-        if (String(url) === "/api/expert-teams/identity/status" && window.__officeIdentityStatusQueue.length) {
+        if (String(url).startsWith("/api/expert-teams/identity/status") && window.__officeIdentityStatusQueue.length) {
           return window.__officeIdentityStatusQueue.shift();
         }
         if (String(url) === "/api/expert-teams/waivers/create") {
@@ -665,7 +671,7 @@ async function main() {
       };
     });
     assertState(
-      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && contentTeamLayout.bodyNoHorizontalOverflow && contentTeamLayout.tabsReachable && contentTeamLayout.primaryActionReachable && !contentTeamLayout.text.includes("generated_invalid"),
+      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && contentTeamLayout.text.includes("不代表独立人工专家审计") && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && contentTeamLayout.bodyNoHorizontalOverflow && contentTeamLayout.tabsReachable && contentTeamLayout.primaryActionReachable && !contentTeamLayout.text.includes("generated_invalid"),
       "Process tab does not show the 5-person content team with Chinese states",
       contentTeamLayout
     );
@@ -966,7 +972,7 @@ async function main() {
       "no_placeholders_or_workflow_text", "citations_readable",
     ].map((key) => [key, "not_checked"]));
     await page.evaluate(() => {
-      window._expertTeamIdentityStatus = { enabled: true, authenticated: true, authorizerHandoffReady: true, principal: { display_name: "王审核", roles: ["document-reviewer"] } };
+      window._expertTeamIdentityStatus = { enabled: true, authenticated: true, authorizer_handoff_ready: true, principal: { display_name: "王审核", roles: ["document-reviewer"] } };
     });
     await renderRun(page, "awaiting_review", {
       run_id: "electron-office-first-pending", officeReviewId: "office-first-pending",
@@ -989,7 +995,10 @@ async function main() {
     for (const [decision, submission] of [["passed", passedSubmission], ["passed_with_conditions", conditionedSubmission], ["failed", failedSubmission]]) {
       const payload = submission.payload || {};
       const forbidden = ["reviewer", "principal", "role", "review_token", "delivery_dir", "document_path", "evidence_files"].filter((key) => Object.prototype.hasOwnProperty.call(payload, key));
-      assertState(submission.callCount === 1 && payload.status === decision && payload.expected_version > 0 && payload.idempotency_key && forbidden.length === 0, `Office ${decision} did not submit exactly once with a safe payload`, submission);
+      const issuesValid = decision === "passed"
+        ? Array.isArray(payload.issues) && payload.issues.length === 0
+        : Array.isArray(payload.issues) && payload.issues.length === 1 && ["condition", "blocking"].includes(payload.issues[0].severity) && payload.issues[0].category && payload.issues[0].description && payload.issues[0].expected_fix;
+      assertState(submission.callCount === 1 && payload.status === decision && payload.expected_version > 0 && payload.idempotency_key && issuesValid && forbidden.length === 0, `Office ${decision} did not submit exactly once with a safe structured payload`, submission);
     }
     const expiredSubmission = await submitOfficeAcceptanceScenario(page, {
       decision: "passed_with_conditions", issues: [conditionIssue],
@@ -1045,7 +1054,7 @@ async function main() {
       focused: document.activeElement?.matches('[data-office-waiver-reason="condition-1"]') || false,
     }));
     assertState(sameReviewer.handoffs === 1 && sameReviewer.waivers === 0 && sameReviewer.reason.includes("不影响使用") && sameReviewer.focused, "Same-reviewer SSO did not fail closed while preserving draft focus", sameReviewer);
-    await page.evaluate(() => { window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: true, principal: { display_name: "李授权", roles: ["waiver-authorizer"] } }]; });
+    await page.evaluate(() => { window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: true, identity_flow_status: "completed", principal: { display_name: "李授权", roles: ["waiver-authorizer"] } }]; });
     await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
     await page.waitForFunction(() => window.__officeWaiverCalls.length === 1, { timeout: 5000 });
     const authorized = await page.evaluate(() => ({ handoffs: window.__officeHandoffCalls.length, waiver: window.__officeWaiverCalls[0] }));
@@ -1072,6 +1081,8 @@ async function main() {
     await page.evaluate(() => { window.confirm = window.__officeConfirmOriginal; delete window.__officeConfirmOriginal; });
     await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
     await page.screenshot({ path: path.join(outDir, "expert-team-office-review-drawer.png"), fullPage: false });
+    await page.locator("body > [data-expert-team-office-drawer] [data-office-new-issue]").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(outDir, "expert-team-office-new-issue.png"), fullPage: false });
     await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
 
     await renderRun(page, "awaiting_review", {
@@ -1086,7 +1097,7 @@ async function main() {
     await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
     await page.fill('body > [data-expert-team-office-drawer] [data-office-waiver-reason="condition-1"]', "授权人确认该细微对齐差异不影响正式使用。");
     const waiverBeforeClose = await page.evaluate(() => {
-      window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: true, principal: { display_name: "迟到授权人", roles: ["waiver-authorizer"] } }];
+      window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: true, identity_flow_status: "completed", principal: { display_name: "迟到授权人", roles: ["waiver-authorizer"] } }];
       return window.__officeWaiverCalls.length;
     });
     await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
@@ -1141,6 +1152,18 @@ async function main() {
       await page.evaluate(() => {
         if (typeof showExpertTeamWorkspacePanel === "function") showExpertTeamWorkspacePanel(document.querySelector("#expertTeamWorkspacePanel"));
       });
+      const stageInputFirstView = await page.evaluate(() => {
+        const workbench = document.querySelector("#expertTeamWorkspacePanel")?.getBoundingClientRect();
+        const card = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-input-card")?.getBoundingClientRect();
+        const action = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-input-card .expert-team-primary-action")?.getBoundingClientRect();
+        return { workbench, card, action, scrollTop: document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body")?.scrollTop || 0 };
+      });
+      assertState(
+        stageInputFirstView.scrollTop === 0 && stageInputFirstView.action && stageInputFirstView.workbench &&
+          stageInputFirstView.action.top >= stageInputFirstView.workbench.top && stageInputFirstView.action.bottom <= stageInputFirstView.workbench.bottom,
+        `Stage confirmation primary action is not visible before scrolling at ${width}px`,
+        stageInputFirstView
+      );
       await page.screenshot({ path: path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`), fullPage: false });
       await page.click("#expertTeamWorkspacePanel .expert-team-panel-collapse-toggle");
       await page.screenshot({ path: path.join(outDir, `expert-team-plan-a-capsule-${width}.png`), fullPage: false });
@@ -1160,6 +1183,7 @@ async function main() {
         path.join(outDir, "expert-team-polling-office-review-id-recovery.png"),
         path.join(outDir, "expert-team-polling-409-preserved.png"),
         path.join(outDir, "expert-team-office-review-drawer.png"),
+        path.join(outDir, "expert-team-office-new-issue.png"),
         path.join(outDir, "expert-team-rollout-gate.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),

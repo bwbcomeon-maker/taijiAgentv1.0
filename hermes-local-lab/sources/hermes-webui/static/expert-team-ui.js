@@ -269,21 +269,22 @@
       const policy=officeIssueUiPolicy(issue);
       const issueId=String(issue.issueId||issue.issue_id||'');
       const severity=policy.severity==='blocking'?'阻断问题':(policy.severity==='condition'?'可接受条件':'策略未识别');
-      const actions=policy.released&&identity.authorizerHandoffReady
-        ? `<label><span>授权理由</span><textarea rows="2" data-office-waiver-reason="${safeEsc(issueId)}" placeholder="说明为何可接受该条件"></textarea></label><button type="button" data-office-waiver-issue="${safeEsc(issueId)}" onclick="startExpertTeamOfficeAuthorizerHandoff(this);event.stopPropagation()">交由授权人处理</button>`:'';
+      const actions=policy.released&&(identity.authorizerHandoffReady||identity.authorizer_handoff_ready)
+        ? `<label><span>授权理由</span><textarea rows="2" data-office-waiver-reason="${safeEsc(issueId)}" placeholder="说明为何可接受该条件"></textarea></label><button type="button" class="expert-team-panel-action expert-team-secondary-action" data-office-waiver-issue="${safeEsc(issueId)}" onclick="startExpertTeamOfficeAuthorizerHandoff(this);event.stopPropagation()">交由授权人处理</button>`:'';
       return `<fieldset class="expert-team-office-issue is-${safeEsc(policy.severity)}"><legend>${safeEsc(severity)}</legend><strong>${safeEsc(issue.description||'待处理问题')}</strong><p>${safeEsc(issue.expectedFix||issue.expected_fix||'按结构化问题返修')}</p><label><input type="checkbox" data-office-revision-issue="${safeEsc(issueId)}"> 退回修改</label>${actions}</fieldset>`;
     }).join(''):'<p class="expert-team-office-empty">暂无结构化 Office 问题。</p>';
+    const newIssueHtml=`<fieldset class="expert-team-office-new-issue" data-office-new-issue><legend>人工发现的问题</legend><label><span>问题类别</span><select data-office-issue-category><option value="">请选择</option><optgroup label="阻断问题"><option value="title_or_genre_mismatch">标题或文种不符</option><option value="placeholder_content">存在占位符或流程话术</option><option value="duplicate_figure">图片重复</option><option value="required_check_failed">必检项未通过</option><option value="security_issue">安全或密级问题</option></optgroup><optgroup label="可接受条件"><option value="visual_alignment">版式对齐</option><option value="minor_typography">轻微字体或字号</option><option value="pagination_preference">分页偏好</option></optgroup></select></label><label><span>页码（可选）</span><input type="number" min="1" inputmode="numeric" data-office-issue-page></label><label><span>问题描述</span><textarea rows="2" data-office-issue-description placeholder="说明具体位置和现象"></textarea></label><label><span>预期修复</span><textarea rows="2" data-office-issue-expected-fix placeholder="说明应调整为什么样"></textarea></label><button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="removeExpertTeamOfficeIssue(this);event.stopPropagation()">删除该问题</button></fieldset>`;
     const identityMessage=reviewerReady?`当前验收身份：${safeEsc(principal.displayName||principal.display_name||'已认证用户')}`:'需使用企业验收身份登录';
     return `<aside class="expert-team-office-drawer" role="dialog" aria-modal="true" aria-labelledby="expert-team-office-title" data-expert-team-office-drawer data-office-review-session-status="${reviewSessionReady?'ready':'begin_required'}" hidden onkeydown="handleExpertTeamOfficeDrawerKeydown(event)">
       <div class="expert-team-office-drawer-head"><span><small>Office 二级验收</small><strong id="expert-team-office-title">检查正式 DOCX</strong></span><button type="button" data-office-close aria-label="关闭 Office 验收" onclick="closeExpertTeamOfficeDrawer(this);event.stopPropagation()">关闭</button></div>
-      <div class="expert-team-office-scroll"><p class="expert-team-office-identity" role="status">${identityMessage}</p>
+      <div class="expert-team-office-scroll"><div class="expert-team-office-identity"><p id="expert-team-office-identity-status" role="status" data-office-identity-status>${identityMessage}</p>${reviewSessionReady?'<small>本次复核已绑定验收身份；如需切换，请先关闭并重新开始复核。</small>':`<button type="button" class="expert-team-panel-action expert-team-secondary-action" data-office-identity-login onclick="loginExpertTeamOfficeReviewer(this);event.stopPropagation()">${reviewerReady?'切换验收身份':'登录验收身份'}</button>`}</div>
       <fieldset><legend>1. 选择验收结论</legend><label><input type="radio" name="office-decision" value="passed"> 通过</label><label><input type="radio" name="office-decision" value="passed_with_conditions"> 有条件通过</label><label><input type="radio" name="office-decision" value="failed"> 不通过</label></fieldset>
       <fieldset><legend>2. 完成 9 项检查</legend>${Object.entries(OFFICE_CHECKLIST_LABELS).map(([key,label])=>`<label><input type="checkbox" data-office-checklist="${safeEsc(key)}" ${checklist[key]==='passed'?'checked':''}> ${safeEsc(label)}</label>`).join('')}</fieldset>
-      <section aria-label="结构化问题"><h3>3. 结构化问题</h3>${issueHtml}</section>
+      <section aria-label="结构化问题"><h3>3. 结构化问题</h3>${issueHtml}<div data-office-new-issues>${newIssueHtml}</div><button type="button" class="expert-team-panel-action expert-team-secondary-action" data-office-add-issue onclick="addExpertTeamOfficeIssue(this);event.stopPropagation()">新增一个问题</button></section>
       <section class="expert-team-office-evidence" aria-label="Office 复核证据"><h3>4. 上传复核证据</h3><label><span>选择 PNG、JPEG 或 PDF 证据</span><input type="file" multiple accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf" data-office-evidence-input onchange="uploadExpertTeamOfficeEvidence(this);event.stopPropagation()" ${reviewSessionReady?'':'disabled'}></label><p data-office-evidence-status role="status" aria-live="polite">${reviewSessionReady?'请上传至少 1 份本次复核证据。':'开始可信复核后才能上传。'}</p><ul data-office-evidence-list aria-label="已上传证据"></ul></section>
       <label><span>5. 验收备注</span><textarea rows="3" data-office-note placeholder="说明使用 WPS/Word 打开、逐页检查及已核对的版式区域"></textarea></label>
       <div class="expert-team-office-impact" role="status">退回修改只发送已选 issue ID；影响范围和返修阶段由服务端派生。</div></div>
-      <div class="expert-team-office-drawer-actions"><button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="submitExpertTeamOfficeRevision(this);event.stopPropagation()">退回专家团修改</button>${reviewSessionReady?'':`<button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-begin onclick="beginExpertTeamOfficeReview(this);event.stopPropagation()" ${reviewerReady?'':'disabled aria-disabled="true"'}>打开 DOCX 并开始复核</button>`}<button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-submit onclick="submitExpertTeamOfficeAcceptance(this);event.stopPropagation()" disabled aria-disabled="true">提交验收</button></div>
+      <div class="expert-team-office-drawer-actions"><button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="submitExpertTeamOfficeRevision(this);event.stopPropagation()">退回专家团修改</button>${reviewSessionReady?'':`<button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-begin onclick="beginExpertTeamOfficeReview(this);event.stopPropagation()" aria-describedby="expert-team-office-identity-status" ${reviewerReady?'':'disabled aria-disabled="true"'}>打开 DOCX 并开始复核</button>`}<button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-submit onclick="submitExpertTeamOfficeAcceptance(this);event.stopPropagation()" disabled aria-disabled="true">提交验收</button></div>
       <p class="expert-team-office-live" aria-live="polite" data-office-live></p>
     </aside>`;
   }
@@ -390,16 +391,16 @@
     )||{name:currentWorkerName||currentStage.worker_name||'专家团',role:currentWorker.role||currentStage.phase||'当前阶段负责专家',image:currentWorker.image||''};
     const currentCollaborationState='当前处理';
     const collaborationMembersHtml=members.length
-      ? `<div class="expert-team-member-list expert-team-collaboration-grid" aria-label="专家团成员协作状态">${members.map(member=>{
+      ? `<div class="expert-team-member-list expert-team-collaboration-grid" aria-label="AI 阶段角色协作状态">${members.map(member=>{
           const task=collaborationTaskForMember(member,tasks);
           const isCurrent=!!((member.id&&String(member.id)===currentWorkerId)||(member.name&&String(member.name)===currentWorkerName));
           const state=collaborationMemberState(member,task,isCurrent);
           const roleText=member.role||task&&task.phase||'协作';
           const taskText=task&&task.title?task.title:(task&&task.phase?task.phase:state.label);
-          const label=`${member.name||member.id||'专家'} · ${roleText} · ${state.label}`;
-          return `<span class="expert-team-member-row ${safeEsc(state.tone)}" title="${safeEsc(label)}" aria-label="${safeEsc(label)}">${avatarHtml(member.image,member.name)}<span class="expert-team-member-copy"><strong title="${safeEsc(member.name||member.id||'专家')}">${safeEsc(member.name||member.id||'专家')}</strong><small title="${safeEsc(`${roleText} · ${taskText}`)}">${safeEsc(roleText)} · ${safeEsc(taskText)}</small></span><em class="expert-team-member-state ${safeEsc(state.tone)}">${safeEsc(state.label)}</em></span>`;
+          const label=`${member.name||member.id||'AI 阶段角色'} · ${roleText} · ${state.label}`;
+          return `<span class="expert-team-member-row ${safeEsc(state.tone)}" title="${safeEsc(label)}" aria-label="${safeEsc(label)}">${avatarHtml(member.image,member.name)}<span class="expert-team-member-copy"><strong title="${safeEsc(member.name||member.id||'AI 阶段角色')}">${safeEsc(member.name||member.id||'AI 阶段角色')}</strong><small title="${safeEsc(`${roleText} · ${taskText}`)}">${safeEsc(roleText)} · ${safeEsc(taskText)}</small></span><em class="expert-team-member-state ${safeEsc(state.tone)}">${safeEsc(state.label)}</em></span>`;
         }).join('')}</div>`
-      : '<div class="expert-team-panel-empty">专家团成员将在任务初始化后显示</div>';
+      : '<div class="expert-team-panel-empty">AI 阶段角色将在任务初始化后显示</div>';
     const resultHtml=result&&result.content
       ? `<div class="expert-team-result-card" data-expert-team-result-card="1">
           <span class="expert-team-result-card-icon">文</span>
@@ -491,8 +492,9 @@
           </div>
         </section>`;
     const todoPanelHtml=`${readOnlyHtml}${genericActionHtml}${stageInputHtml}${stageReviewHtml}${todoSummaryCardHtml}`;
-    const collaborationPanelHtml=`<section class="expert-team-panel-section expert-team-collaboration-card" aria-label="专家团协作状态">
-          <div class="expert-team-panel-section-title"><span>专家团协作状态</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
+    const collaborationPanelHtml=`<section class="expert-team-panel-section expert-team-collaboration-card" aria-label="AI 阶段协作状态">
+          <div class="expert-team-panel-section-title"><span>AI 阶段协作状态</span><small>${safeEsc(card&&card.team&&card.team.title||'专家团')}</small></div>
+          <p class="expert-team-panel-detail">以下为同一 AI 系统内的阶段角色，不代表独立人工专家审计。</p>
           <div class="expert-team-collaboration-current">
             ${avatarHtml(currentMember.image,currentMember.name)}
             <span class="expert-team-collaboration-current-copy">
@@ -543,9 +545,6 @@
       </div>
       <div id="expert-team-workspace-expanded" class="expert-team-panel-expanded-body">
         ${recoverableDraftHintHtml}
-        ${completionGatesHtml}
-        ${briefCardHtml}
-        <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
         <nav class="expert-team-panel-tabs" role="tablist" aria-label="专家团工作台视图" onkeydown="handleExpertTeamWorkspaceTabKeydown(event)">
           <button id="expert-team-tab-task" type="button" role="tab" class="is-active" data-expert-team-workspace-tab="task" aria-selected="true" aria-controls="expert-team-tabpanel-task" tabindex="0" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>任务</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>
           <button id="expert-team-tab-result" type="button" role="tab" data-expert-team-workspace-tab="result" aria-selected="false" aria-controls="expert-team-tabpanel-result" tabindex="-1" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成果</span><small>${safeEsc(readyArtifactCount?`${readyArtifactCount} 个可打开`:(presentation.state==='completed'?'可查看':'沉淀中'))}</small></button>
@@ -554,6 +553,9 @@
         ${tabPanel('task',todoPanelHtml,true)}
         ${tabPanel('result',resultPanelHtml,false)}
         ${tabPanel('process',collaborationPanelHtml,false)}
+        ${completionGatesHtml}
+        ${briefCardHtml}
+        <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
       </div>
       ${officeDrawerHtml}
     </div>`;

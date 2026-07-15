@@ -173,6 +173,35 @@ def test_office_acceptance_requires_exact_checklist_identity_and_issue_severity(
     )
     assert conditioned["issues"] == [allowed_condition]
 
+    for field in ("issue_id", "category", "description", "expected_fix"):
+        invalid_issue = {**allowed_condition, field: ""}
+        with pytest.raises(ValueError, match="non-empty strings"):
+            build_office_acceptance(
+                binding=binding, token_state=token, status="passed_with_conditions", checklist=checks,
+                issues=[invalid_issue], evidence=[{"path": "evidence/wps-visual/page-1.png", "sha256": "a" * 64}],
+                note="已检查", now="2026-07-15T11:10:00+08:00",
+            )
+    for field, value in (("issue_id", {}), ("category", 7), ("description", []), ("expected_fix", False)):
+        with pytest.raises(ValueError, match="non-empty strings"):
+            build_office_acceptance(
+                binding=binding, token_state=token, status="passed_with_conditions", checklist=checks,
+                issues=[{**allowed_condition, field: value}], evidence=[{"path": "evidence/wps-visual/page-1.png", "sha256": "a" * 64}],
+                note="已检查", now="2026-07-15T11:10:00+08:00",
+            )
+    for value in ({}, []):
+        with pytest.raises(ValueError, match="severity"):
+            build_office_acceptance(
+                binding=binding, token_state=token, status="passed_with_conditions", checklist=checks,
+                issues=[{**allowed_condition, "severity": value}], evidence=[{"path": "evidence/wps-visual/page-1.png", "sha256": "a" * 64}],
+                note="已检查", now="2026-07-15T11:10:00+08:00",
+            )
+    with pytest.raises(ValueError, match="page"):
+        build_office_acceptance(
+            binding=binding, token_state=token, status="passed_with_conditions", checklist=checks,
+            issues=[{**allowed_condition, "page": 0}], evidence=[{"path": "evidence/wps-visual/page-1.png", "sha256": "a" * 64}],
+            note="已检查", now="2026-07-15T11:10:00+08:00",
+        )
+
 
 def test_office_acceptance_view_exposes_safe_structured_ui_contract_only():
     from api.expert_teams.office_review import office_acceptance_view

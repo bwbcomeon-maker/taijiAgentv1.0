@@ -1104,10 +1104,10 @@ def test_compact_desktop_expert_workspace_reserves_chat_context_and_scrolls_insi
     compact_start = STYLE_CSS.index("@media (min-width:901px) and (max-width:1320px)", STYLE_CSS.index("Expert team desktop split workspace"))
     compact_end = STYLE_CSS.index("\n.expert-team-capsule{", compact_start)
     compact = STYLE_CSS[compact_start:compact_end]
-    assert "grid-template-rows:min(42vh,320px) minmax(112px,1fr) auto!important;" in compact
+    assert "grid-template-rows:min(64vh,580px) minmax(112px,1fr) auto!important;" in compact
     assert "grid-template-rows:minmax(360px,auto)" not in compact
     assert "height:100%!important;" in compact
-    assert "max-height:min(42vh,320px)!important;" in compact
+    assert "max-height:min(64vh,580px)!important;" in compact
     assert "min-height:112px!important;" in compact
     assert "overflow:hidden!important;" in compact
 
@@ -1697,12 +1697,12 @@ def test_identity_runtime_handles_success_cancel_callback_failure_timeout_logout
               const btn=button();let statusCalls=0;
               context.window.open=()=>null;
               context.api=async(path)=>{
-                if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize'};
-                if(path.endsWith('/status')){
+                if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize',flow_id:'flow-1'};
+                if(path.includes('/status?flow_id=')){
                   statusCalls+=1;
                   if(kind==='cancel'&&statusCalls===1)context.window.cancelExpertTeamIdentityLogin(btn);
                   if(kind==='callbackFailure')throw new Error('callback failed');
-                  if(kind==='success'&&statusCalls===2)return {enabled:true,authenticated:true,principal:{display_name:'李工',roles:['document-approver']}};
+                  if(kind==='success'&&statusCalls===2)return {enabled:true,authenticated:true,identity_flow_status:'completed',principal:{display_name:'李工',roles:['document-approver']}};
                   return {enabled:true,authenticated:false};
                 }
                 throw new Error('unexpected '+path);
@@ -1800,7 +1800,7 @@ def test_logout_aborts_old_identity_attempt_and_stale_authenticated_response_is_
     result = _run_node(_actions_harness("""
       context.setTimeout=(fn)=>{fn();return 1;};context.window.location={origin:'http://127.0.0.1:18787'};context.window.open=()=>null;
       let resolveOld;let statusRequested=false;
-      context.api=async(path)=>{if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize'};if(path.endsWith('/status')){statusRequested=true;return new Promise(resolve=>{resolveOld=resolve;});}if(path.endsWith('/logout'))return {ok:true};throw new Error(path);};
+      context.api=async(path)=>{if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize',flow_id:'flow-1'};if(path.includes('/status?flow_id=')){statusRequested=true;return new Promise(resolve=>{resolveOld=resolve;});}if(path.endsWith('/logout'))return {ok:true};throw new Error(path);};
       function button(action){return {disabled:false,isConnected:true,textContent:'身份',dataset:{expertTeamIdentityAction:action},focusCount:0,setAttribute:()=>{},removeAttribute:()=>{},focus(){this.focusCount+=1;}};}
       (async()=>{const loginButton=button('login');const logoutButton=button('logout');const login=context.window.startExpertTeamIdentityLogin(loginButton);while(!statusRequested)await Promise.resolve();const logout=await context.window.logoutExpertTeamIdentity(logoutButton);resolveOld({enabled:true,authenticated:true,principal:{display_name:'旧身份',roles:['document-approver']}});await login;console.log(JSON.stringify({logout,identity:context.window._expertTeamIdentityStatus,loginFocus:loginButton.focusCount,logoutFocus:logoutButton.focusCount}));})();
     """))
@@ -1917,6 +1917,61 @@ def test_structured_office_summary_and_drawer_fail_closed_for_identity_and_issue
     assert "需使用企业验收身份登录" not in result["drawer"]
 
 
+def test_office_drawer_accepts_real_snake_case_authorizer_capability_and_can_add_issues():
+    source = textwrap.dedent(
+        """
+        const fs=require('fs');const vm=require('vm');
+        const context={window:{},console};vm.createContext(context);
+        vm.runInContext(fs.readFileSync('static/expert-team-ui.js','utf8'),context);
+        const drawer=context.window.renderExpertTeamOfficeDrawer({
+          status:'pending',decision:'pending',reviewSessionStatus:'ready',
+          identity:{enabled:true,authenticated:true,authorizer_handoff_ready:true,principal:{display_name:'王审核',roles:['document-reviewer']}},
+          checklist:{},issues:[{issue_id:'condition-1',severity:'condition',target_domain:'office_issue',category:'visual_alignment',description:'对齐偏差',expected_fix:'调整对齐'}]
+        });
+        console.log(JSON.stringify({
+          waiver:drawer.includes('data-office-waiver-issue="condition-1"'),
+          add:drawer.includes('data-office-add-issue'),
+          category:drawer.includes('data-office-issue-category'),
+          description:drawer.includes('data-office-issue-description'),
+          expectedFix:drawer.includes('data-office-issue-expected-fix')
+        }));
+        """
+    )
+    result = _run_node(source)
+    assert result == {'waiver': True, 'add': True, 'category': True, 'description': True, 'expectedFix': True}
+    assert 'data-office-identity-login' in EXPERT_UI_JS
+    assert 'loginExpertTeamOfficeReviewer(this)' in EXPERT_UI_JS
+    assert 'aria-describedby="expert-team-office-identity-status"' in EXPERT_UI_JS
+
+
+def test_pending_office_review_collects_new_structured_issue_for_conditions_or_failure():
+    result = _run_node(
+        _actions_harness(
+            """
+            const values={
+              '[data-office-issue-category]':{value:'visual_alignment'},
+              '[data-office-issue-description]':{value:'第 3 页图表对齐偏差'},
+              '[data-office-issue-expected-fix]':{value:'将图表与正文左边界对齐'},
+              '[data-office-issue-page]':{value:'3'},
+            };
+            const row={querySelector:(selector)=>values[selector]||null};
+            const drawer={querySelectorAll:(selector)=>selector==='[data-office-new-issue]'?[row]:[]};
+            const issues=context.window.collectExpertTeamOfficeIssues(drawer,{runId:'run-1',version:7,officeReview:{issues:[]}});
+            console.log(JSON.stringify(issues));
+            """
+        )
+    )
+    assert result == [{
+        'issueId': 'ui-run-1-7-1',
+        'severity': 'condition',
+        'targetDomain': 'office_issue',
+        'category': 'visual_alignment',
+        'page': 3,
+        'description': '第 3 页图表对齐偏差',
+        'expectedFix': '将图表与正文左边界对齐',
+    }]
+
+
 def test_office_mutations_send_only_server_derived_refs_and_validate_decision_fail_closed():
     source = textwrap.dedent(
         """
@@ -1931,8 +1986,9 @@ def test_office_mutations_send_only_server_derived_refs_and_validate_decision_fa
           checklist:Object.fromEntries(['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','headers_footers_pagination','no_placeholders_or_workflow_text'].map(key=>[key,'passed']))
         };
         console.log(JSON.stringify({waiver,revision,
-          passedIssue:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed',issues:[{issueId:'c',severity:'condition',targetDomain:'office_issue'}]}),
-          conditionsBlocking:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed_with_conditions',issues:[{issueId:'b',severity:'blocking',targetDomain:'office_issue'}]}),
+          passedIssue:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed',issues:[{issueId:'c',severity:'condition',targetDomain:'office_issue',category:'visual_alignment',description:'对齐偏差',expectedFix:'调整对齐'}]}),
+          conditionsBlocking:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed_with_conditions',issues:[{issueId:'b',severity:'blocking',targetDomain:'office_issue',category:'placeholder_content',description:'存在占位符',expectedFix:'删除占位符'}]}),
+          emptyCondition:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed_with_conditions',issues:[{issueId:'c',severity:'condition',targetDomain:'office_issue',category:'visual_alignment',description:'',expectedFix:''}]}),
           wrongRole:context.window.validateExpertTeamOfficeSubmission({...base,identity:{enabled:true,authenticated:true,principal:{roles:['waiver-authorizer']}},decision:'passed',issues:[]})
         }));
         """
@@ -1945,6 +2001,7 @@ def test_office_mutations_send_only_server_derived_refs_and_validate_decision_fa
         assert forbidden not in json.dumps({"waiver": result["waiver"], "revision": result["revision"]})
     assert result["passedIssue"]["code"] == "office_passed_requires_zero_issues"
     assert result["conditionsBlocking"]["code"] == "office_blocking_issue_requires_revision"
+    assert result["emptyCondition"]["code"] == "office_issue_policy_invalid"
     assert result["wrongRole"]["code"] == "trusted_reviewer_required"
 
 
