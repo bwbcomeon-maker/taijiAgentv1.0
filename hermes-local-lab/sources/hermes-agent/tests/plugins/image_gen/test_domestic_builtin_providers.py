@@ -162,6 +162,21 @@ class TestDashScopeQwenImageProvider:
             "https://gateway.example.com/api/v1/services/aigc/multimodal-generation/generation"
         )
 
+    def test_custom_endpoint_with_bad_port_is_unavailable_and_never_requested(self, monkeypatch):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+        monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
+        monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://gateway.example.com:not-a-port")
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        provider = DashScopeQwenImageProvider()
+        assert provider.is_available() is False
+        with (
+            patch("plugins.image_gen.dashscope.requests.post") as mock_post,
+            pytest.raises(ValueError, match="port"),
+        ):
+            provider.generate("A city skyline")
+        mock_post.assert_not_called()
+
     @pytest.mark.parametrize(
         ("values", "available"),
         [

@@ -49,11 +49,39 @@ def test_custom_vision_url_is_normalized():
         "https://gateway.example.com#section",
         "https://127.0.0.1",
         "https://localhost",
+        "https://LOCALHOST.",
+        "https://127.1",
+        "https://2130706433",
+        "https://0x7f000001",
+        "https://[::1]",
+        "https://[fc00::1]",
+        "https://[fe80::1]",
+        "https://999999999999",
+        "https://0xnotanaddress",
     ],
 )
 def test_https_url_rejects_unsafe_or_ambiguous_values(url):
     with pytest.raises(ValueError):
         validate_https_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://gateway.example.com:not-a-port",
+        "https://gateway.example.com:65536",
+        "https://gateway.example.com:-1",
+    ],
+)
+def test_https_url_rejects_invalid_ports(url):
+    with pytest.raises(ValueError, match="port"):
+        validate_https_url(url)
+
+
+def test_https_url_accepts_numeric_port():
+    assert validate_https_url(
+        "https://gateway.example.com:8443"
+    ) == "https://gateway.example.com:8443"
 
 
 def test_workspace_prefix_allows_safe_dns_prefixes():

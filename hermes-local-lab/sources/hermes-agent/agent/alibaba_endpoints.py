@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from urllib.parse import urlparse, urlunparse
 
 DEFAULT_REGION = "cn-beijing"
@@ -29,20 +30,37 @@ def normalize_region(region: str | None) -> str:
 def validate_https_url(value: str | None) -> str:
     """Validate and normalize a query-free HTTPS endpoint URL."""
     candidate = str(value or "").strip()
-    parsed = urlparse(candidate)
-    if parsed.scheme.lower() != "https" or not parsed.hostname:
+    try:
+        parsed = urlparse(candidate)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("Custom Alibaba endpoint contains an invalid host or port") from exc
+    if parsed.scheme.lower() != "https" or not hostname:
         raise ValueError("Custom Alibaba endpoint must be an absolute HTTPS URL")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Custom Alibaba endpoint must not contain userinfo")
     if parsed.query or parsed.fragment or parsed.params:
         raise ValueError("Custom Alibaba endpoint must not contain params, query, or fragment")
-    hostname = parsed.hostname.lower()
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise ValueError("Custom Alibaba endpoint must not use a local host")
+    if hostname.isdigit() and int(hostname, 10) > 0xFFFFFFFF:
+        raise ValueError("Custom Alibaba endpoint contains an invalid numeric IP address")
+    if hostname.startswith("0x"):
+        try:
+            if int(hostname, 16) > 0xFFFFFFFF:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("Custom Alibaba endpoint contains an invalid numeric IP address") from exc
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        address = None
+        try:
+            address = ipaddress.ip_address(socket.inet_aton(hostname))
+        except OSError:
+            address = None
+    if address is None and (re.fullmatch(r"[0-9.]+", hostname) or hostname.startswith("0x")):
+        raise ValueError("Custom Alibaba endpoint contains an invalid numeric IP address")
     if address and not address.is_global:
         raise ValueError("Custom Alibaba endpoint must not use a non-public IP address")
     normalized_path = parsed.path.rstrip("/")
