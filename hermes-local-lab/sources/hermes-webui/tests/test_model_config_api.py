@@ -7,6 +7,7 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
 import yaml
 
 import api.providers as providers
@@ -52,6 +53,121 @@ def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
 
 def _read_config(tmp_path):
     return yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8")) or {}
+
+
+def test_provider_credential_secret_stays_out_of_yaml_and_public_response(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=legacy-key\n", encoding="utf-8")
+
+    result = model_config.upsert_provider_credential(
+        {
+            "id": "Alibaba Default",
+            "provider": "alibaba",
+            "label": "阿里云百炼默认凭据",
+            "api_key": "named-secret-key",
+        }
+    )
+
+    row = _read_config(tmp_path)["provider_credentials"][0]
+    assert row == {
+        "id": "alibaba-default",
+        "provider_family": "alibaba_dashscope",
+        "label": "阿里云百炼默认凭据",
+        "auth_type": "api_key",
+        "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+    }
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY=legacy-key" in env_text
+    assert "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=named-secret-key" in env_text
+    assert set(result["credential"]) == {
+        "id", "provider_family", "label", "auth_type", "configured", "used_by"
+    }
+    public_dump = json.dumps(result, ensure_ascii=False)
+    assert "named-secret-key" not in public_dump
+    assert "secret_env" not in public_dump
+    assert "digest" not in public_dump
+
+
+def test_provider_credentials_report_vision_and_image_gen_usage(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "alibaba-default",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Alibaba default",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                    }
+                ],
+                "auxiliary": {"vision": {"credential_ref": "alibaba-default"}},
+                "image_gen": {"credential_ref": "alibaba-default"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=named-key\n", encoding="utf-8"
+    )
+
+    result = model_config.get_provider_credentials_config()
+
+    assert result["credentials"] == [
+        {
+            "id": "alibaba-default",
+            "provider_family": "alibaba_dashscope",
+            "label": "Alibaba default",
+            "auth_type": "api_key",
+            "configured": True,
+            "used_by": ["auxiliary.vision", "image_gen"],
+        }
+    ]
+
+
+def test_provider_credential_in_use_cannot_be_deleted(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "alibaba-default",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Alibaba default",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                    }
+                ],
+                "image_gen": {"credential_ref": "alibaba-default"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="正在使用"):
+        model_config.delete_provider_credential("alibaba-default")
+
+
+def test_unknown_provider_credential_delete_fails_safely(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="不存在"):
+        model_config.delete_provider_credential("missing")
+
+
+def test_legacy_dashscope_api_key_payload_remains_compatible(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=old-key\n", encoding="utf-8")
+
+    model_config.set_vision_config(
+        {"provider": "alibaba", "model": "qwen3-vl-plus", "api_key": "new-legacy-key"}
+    )
+
+    assert "DASHSCOPE_API_KEY=new-legacy-key" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "api_key" not in _read_config(tmp_path)["auxiliary"]["vision"]
 
 
 def test_main_model_config_writes_deepseek_key_without_echo(monkeypatch, tmp_path):

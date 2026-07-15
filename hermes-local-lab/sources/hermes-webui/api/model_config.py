@@ -22,6 +22,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agent.provider_credentials import (
+    credential_secret_env,
+    normalize_credential_id,
+    provider_family,
+)
+
 from api.config import (
     _cfg_lock,
     _get_config_path,
@@ -92,6 +98,151 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "requires_base_url": True,
     },
 }
+
+
+def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str) -> list[str]:
+    used_by: list[str] = []
+    auxiliary = config_data.get("auxiliary")
+    vision = auxiliary.get("vision") if isinstance(auxiliary, dict) else None
+    image_gen = config_data.get("image_gen")
+    for path, section in (("auxiliary.vision", vision), ("image_gen", image_gen)):
+        if not isinstance(section, dict):
+            continue
+        raw_ref = section.get("credential_ref")
+        try:
+            ref = normalize_credential_id(raw_ref)
+        except ValueError:
+            continue
+        if ref == credential_id:
+            used_by.append(path)
+    return used_by
+
+
+def _public_provider_credential(
+    row: dict[str, Any],
+    *,
+    config_data: dict[str, Any],
+) -> dict[str, Any]:
+    credential_id = normalize_credential_id(row.get("id"))
+    family = provider_family(row.get("provider_family"))
+    secret_env = str(row.get("secret_env") or "").strip()
+    return {
+        "id": credential_id,
+        "provider_family": family,
+        "label": str(row.get("label") or credential_id).strip(),
+        "auth_type": str(row.get("auth_type") or "api_key").strip(),
+        "configured": bool(secret_env and _key_status_for_env(secret_env).get("configured")),
+        "used_by": _provider_credential_used_by(config_data, credential_id),
+    }
+
+
+def get_provider_credentials_config() -> dict[str, Any]:
+    config_data = _load_yaml_config_file(_get_config_path())
+    rows = config_data.get("provider_credentials")
+    credentials: list[dict[str, Any]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                credentials.append(_public_provider_credential(row, config_data=config_data))
+            except ValueError:
+                continue
+    return {
+        "ok": True,
+        "profile": _active_profile_name(),
+        "credentials": credentials,
+    }
+
+
+def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
+    credential_id = normalize_credential_id(body.get("id"))
+    family = provider_family(body.get("provider_family") or body.get("provider"))
+    if not family:
+        raise ValueError("provider_family is required")
+    auth_type = str(body.get("auth_type") or "api_key").strip().lower()
+    if auth_type != "api_key":
+        raise ValueError("only api_key credentials are supported")
+    label = str(body.get("label") or credential_id).strip()
+    secret_env = credential_secret_env(credential_id)
+    secret = body.get("api_key")
+    if secret is None:
+        secret = body.get("secret")
+    secret_value = str(secret or "").strip()
+    if secret_value:
+        _write_env_file(_get_hermes_home() / ".env", {secret_env: secret_value})
+
+    stored = {
+        "id": credential_id,
+        "provider_family": family,
+        "label": label,
+        "auth_type": auth_type,
+        "secret_env": secret_env,
+    }
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        existing = config_data.get("provider_credentials")
+        rows = existing if isinstance(existing, list) else []
+        updated: list[dict[str, Any]] = []
+        replaced = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_id = normalize_credential_id(row.get("id"))
+            except ValueError:
+                updated.append(row)
+                continue
+            if row_id == credential_id:
+                updated.append(stored)
+                replaced = True
+            else:
+                updated.append(row)
+        if not replaced:
+            updated.append(stored)
+        config_data["provider_credentials"] = updated
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    public_config = get_provider_credentials_config()
+    credential = next(row for row in public_config["credentials"] if row["id"] == credential_id)
+    return {"ok": True, "credential": credential}
+
+
+def delete_provider_credential(credential_id: str) -> dict[str, Any]:
+    normalized = normalize_credential_id(credential_id)
+    config_path = _get_config_path()
+    secret_env = ""
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        used_by = _provider_credential_used_by(config_data, normalized)
+        if used_by:
+            raise ValueError("凭据正在使用，不能删除。")
+        existing = config_data.get("provider_credentials")
+        rows = existing if isinstance(existing, list) else []
+        updated: list[dict[str, Any]] = []
+        found = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_id = normalize_credential_id(row.get("id"))
+            except ValueError:
+                updated.append(row)
+                continue
+            if row_id == normalized:
+                found = True
+                secret_env = str(row.get("secret_env") or "").strip()
+                continue
+            updated.append(row)
+        if not found:
+            raise ValueError("凭据不存在。")
+        config_data["provider_credentials"] = updated
+        _save_yaml_config_file(config_path, config_data)
+    if secret_env:
+        _write_env_file(_get_hermes_home() / ".env", {secret_env: None})
+    reload_config()
+    return get_provider_credentials_config()
 _VISION_PROBE_MARKER = "TAIJI-VISION-CHECK-7319"
 _VISION_PROBE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAkAAAAA0CAAAAABH3dgUAAABPElEQVR42u3aYRKCIBAGUO9/6TpAyO4COYrv+1cpwvKasc3jIzKRQwkEIAFIABKARAASgAQgAUgEIAFIHgLoaKT1Web41jnR8T+Ta4xXmWf1+Oi60Vxb1101/8p8zsaPan/2Xm+vAAIIIIAAAmgHQNkCVhaUnei/51E5PwKVXU9v/NFxsrUbGXekvgABBBBAAAEE0F6AMht+NaCVeFbVFyCAAAIIIIB2BxQ1DGcA9Rpf5QUVGmWZDc40JHsbX2noReNkx19Vn1TzESCAAAIIIIA2BzT6+sqb6FXrmL3OHW6is38Az64TIIAAAggggABaDygq3tsAzXz5AAIIIIAAAgigdYAyD4dXGl+VhVYbdG96qH6kKZidC0AAAQQQQADtDEgk/SNHCQQgAUgAEoBEABKABCABSAQgAUjumy803ZPAu+g+xgAAAABJRU5ErkJggg=="
