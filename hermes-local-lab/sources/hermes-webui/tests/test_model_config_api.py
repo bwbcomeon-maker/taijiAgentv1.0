@@ -3026,6 +3026,41 @@ def test_image_gen_probe_requires_literal_true_success(
     assert not generated.exists()
 
 
+def test_image_gen_probe_explains_when_safe_result_download_is_blocked(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: tmp_path / "state.json",
+    )
+    _write_saved_image_gen_config(tmp_path)
+    _install_probe_provider(
+        monkeypatch,
+        _ProbeImageProvider(
+            {
+                "success": False,
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "error_type": "io_error",
+                "error": (
+                    "dashscope image result download failed: "
+                    "DashScope image URL failed safety validation"
+                ),
+            }
+        ),
+    )
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "image_gen_result_url_blocked"
+    assert "已返回图片结果" in result["message"]
+    assert "代理或 DNS" in result["message"]
+    assert "dashscope" not in result["message"].lower()
+
+
 def test_image_gen_probe_verifies_identity_magic_and_removes_probe_file(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     state_path = tmp_path / "image-gen-verification.json"

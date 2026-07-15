@@ -1982,6 +1982,20 @@ def test_image_gen_config() -> dict[str, Any]:
         if isinstance(result, dict):
             cleanup_candidate = _probe_cleanup_candidate(result.get("image"), cache_before)
             generated_image = _owned_probe_image(cleanup_candidate, cache_before)
+            provider_error = str(result.get("error") or "").lower()
+            if (
+                result.get("success") is False
+                and str(result.get("error_type") or "").lower() == "io_error"
+                and (
+                    "failed safety validation" in provider_error
+                    or "private/internal address" in provider_error
+                )
+            ):
+                error_code = "image_gen_result_url_blocked"
+                message = (
+                    "生图服务已返回图片结果，但下载被本机网络安全策略拦截。"
+                    "请检查代理或 DNS 是否把图片域名映射到保留网段后重试。"
+                )
             identity_ok = bool(
                 result.get("success") is True
                 and result.get("provider") == snapshot.provider
