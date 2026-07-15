@@ -112,6 +112,8 @@ class TrustedIdentityResolver:
         self._production = bool(production)
         self._flows: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
+        self._authorizer_handoffs: dict[str, dict] = {}
+        self._consumed_authorizer_handoffs: set[str] = set()
         self._lock = threading.RLock()
         if self._config.get("enabled"):
             self._validate_config()
@@ -221,6 +223,12 @@ class TrustedIdentityResolver:
         session_id = secrets.token_urlsafe(32)
         with self._lock:
             self._sessions[session_id] = deepcopy(principal)
+            if flow.get("purpose") == "authorizer_handoff":
+                context = deepcopy(flow.get("binding_context") or {})
+                self._authorizer_handoffs[session_id] = {
+                    "context": context,
+                    "context_sha256": _digest(_canonical(context)),
+                }
         result = {"session_id": session_id, "redirect_uri": flow["redirect_uri"], "principal": deepcopy(principal)}
         if flow.get("purpose") == "authorizer_handoff":
             result.update({
@@ -318,6 +326,22 @@ class TrustedIdentityResolver:
     def logout(self, session_id: str) -> None:
         with self._lock:
             self._sessions.pop(str(session_id or ""), None)
+            self._authorizer_handoffs.pop(str(session_id or ""), None)
+
+    def consume_authorizer_handoff(self, session_id: str, *, current_context: dict) -> dict:
+        key = str(session_id or "")
+        context = deepcopy(current_context) if isinstance(current_context, dict) else {}
+        with self._lock:
+            if key in self._consumed_authorizer_handoffs:
+                raise ValueError("authorizer handoff was already used")
+            handoff = self._authorizer_handoffs.pop(key, None)
+            if not isinstance(handoff, dict):
+                raise ValueError("authorizer handoff is missing or was already used")
+            self._consumed_authorizer_handoffs.add(key)
+        if handoff.get("context_sha256") != _digest(_canonical(context)) or handoff.get("context") != context:
+            self.logout(key)
+            raise ValueError("identity_flow_stale")
+        return deepcopy(handoff)
 
     def install_test_principal(self, principal: dict) -> str:
         if self._production:
@@ -337,6 +361,9 @@ class TrustedIdentityResolver:
         }
         self._sessions = {
             key: value for key, value in self._sessions.items() if float(value.get("expires_at") or 0) > now
+        }
+        self._authorizer_handoffs = {
+            key: value for key, value in self._authorizer_handoffs.items() if key in self._sessions
         }
 
 

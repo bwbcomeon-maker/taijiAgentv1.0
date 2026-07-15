@@ -249,3 +249,24 @@ def test_authorizer_handoff_requires_provider_switch_and_distinct_principal():
     assert completed["principal"]["subject"] == "authorizer-2"
     assert completed["purpose"] == "authorizer_handoff"
     assert completed["binding_context"] == context
+    resolved = resolver.resolve(completed["session_id"], required_role="waiver-authorizer")
+    assert resolved["subject"] == "authorizer-2"
+    resolver.consume_authorizer_handoff(completed["session_id"], current_context=context)
+    with pytest.raises(ValueError, match="used"):
+        resolver.consume_authorizer_handoff(completed["session_id"], current_context=context)
+
+    started = resolver.start_login(redirect_uri, purpose="authorizer_handoff", binding_context=context)
+    claims.update({"sub": "authorizer-3", "nonce": started["nonce"], "jti": "drift-authorizer"})
+    holder["token"] = jwt.encode(claims, private, algorithm="RS256", headers={"kid": jwk["kid"]})
+    drifted = resolver.complete_login(state=started["state"], code="authorization-code")
+    with pytest.raises(ValueError, match="identity_flow_stale"):
+        resolver.consume_authorizer_handoff(
+            drifted["session_id"], current_context={**context, "acceptance_sha256": "f" * 64}
+        )
+
+
+def test_stage_approval_uses_shared_trusted_principal_entrypoint():
+    runtime_py = (__import__("pathlib").Path(__file__).resolve().parents[1] / "api/expert_teams/runtime.py").read_text()
+    approval_block = runtime_py.split("def _approve_enterprise_stage", 1)[1].split("def approve_expert_team_stage", 1)[0]
+    assert "resolve_trusted_principal(" in approval_block
+    assert "get_trusted_identity_resolver().resolve(" not in approval_block

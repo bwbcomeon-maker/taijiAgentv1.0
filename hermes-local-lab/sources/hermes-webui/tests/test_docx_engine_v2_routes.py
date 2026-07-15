@@ -24,6 +24,7 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/docx-engine-v2/quality/wps-visual" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual/begin" in routes_py
     assert "/api/expert-teams/waivers/create" in routes_py
+    assert "/api/expert-teams/office-revisions/create" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
     assert "/api/file/open" in routes_py

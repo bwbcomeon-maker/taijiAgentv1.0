@@ -613,7 +613,7 @@ def test_contract_approval_requires_trusted_identity_and_records_safe_snapshot(m
     }
     with pytest.raises(expert_teams.ExpertTeamStateConflict) as error:
         expert_teams.approve_expert_team_stage(tmp_path, body)
-    assert error.value.code == "trusted_identity_required"
+    assert error.value.code == "trusted_identity_provider_required"
 
     resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False)
     resolver._config = {"enabled": True}

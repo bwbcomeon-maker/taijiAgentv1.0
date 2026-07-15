@@ -21,6 +21,7 @@ def _completion_fixture(workspace: Path) -> tuple[dict, dict, dict]:
         "contract_version": "expert-team-contract/v1",
         "run_id": "run-completion-reconcile",
         "session_id": "sid-completion-reconcile",
+        "team_id": "content-creator-team",
         "version": 42,
         "workflow_state": "awaiting_review",
         "current_delivery_manifest_ref": {"delivery_attempt": 1},
@@ -109,6 +110,49 @@ def test_enterprise_completion_reconciles_every_prepared_crash_window(tmp_path, 
     assert status["status"] == "passed"
     assert status["transaction_state"] == "committed"
     assert status["summary_closed"] is True
+
+
+@pytest.mark.parametrize(
+    "fault_after",
+    ["acceptance", "waiver_ledger", "token_consumed", "proof", "run_completed"],
+)
+def test_read_expert_team_run_discovers_and_recovers_partial_completion(tmp_path, fault_after):
+    from api import expert_teams
+    from api.expert_teams.office_review import CompletionCrashInjected, reconcile_enterprise_completion
+
+    run, binding, _acceptance = _completion_fixture(tmp_path)
+    with pytest.raises(CompletionCrashInjected):
+        reconcile_enterprise_completion(
+            tmp_path, run=run, binding=binding,
+            binding_sha256=run["current_delivery_manifest_ref"]["delivery_binding_sha256"],
+            now="2026-07-15T10:20:00+08:00", fault_after=fault_after,
+        )
+    recovered = expert_teams.read_expert_team_run(tmp_path, run["run_id"])
+    assert recovered["workflow_state"] == "completed"
+    assert recovered["completion_integrity"]["status"] == "passed"
+    assert recovered["status"] == "done"
+    assert recovered.get("execution_status") != "error"
+
+
+@pytest.mark.parametrize("fault_after", ["acceptance", "proof"])
+def test_execution_truth_start_or_retry_recovers_partial_completion(tmp_path, fault_after):
+    from api import routes
+    from api.expert_teams.office_review import CompletionCrashInjected, reconcile_enterprise_completion
+    from api.expert_teams.storage import read_run
+
+    run, binding, _acceptance = _completion_fixture(tmp_path)
+    with pytest.raises(CompletionCrashInjected):
+        reconcile_enterprise_completion(
+            tmp_path, run=run, binding=binding,
+            binding_sha256=run["current_delivery_manifest_ref"]["delivery_binding_sha256"],
+            now="2026-07-15T10:20:00+08:00", fault_after=fault_after,
+        )
+    recovered = routes._expert_team_run_with_execution_truth(
+        tmp_path, read_run(tmp_path, run["run_id"])
+    )
+    assert recovered["workflow_state"] == "completed"
+    assert recovered["completion_integrity"]["status"] == "passed"
+    assert recovered.get("execution_status") != "error"
 
 
 class _Handler:

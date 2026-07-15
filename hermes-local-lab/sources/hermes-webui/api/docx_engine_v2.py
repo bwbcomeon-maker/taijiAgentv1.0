@@ -599,7 +599,18 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
                     "sizeBytes": target.stat().st_size,
                     "mediaType": _visual_evidence_media_type(target),
                 })
-            checklist = {item: "passed" for item in visual_checks}
+            visual_set = set(visual_checks)
+            checklist = {
+                "document_opened": "passed" if "document_opened" in visual_set else "not_checked",
+                "title_and_cover_match": "passed" if "layout_reviewed" in visual_set else "not_checked",
+                "genre_and_structure_match": "passed" if "content_order_reviewed" in visual_set else "not_checked",
+                "content_order_correct": "passed" if "content_order_reviewed" in visual_set else "not_checked",
+                "figures_unique_and_readable": "passed" if "figures_reviewed" in visual_set else "not_applicable",
+                "tables_readable": "passed" if "tables_reviewed" in visual_set else "not_applicable",
+                "headers_footers_pagination": "passed" if "layout_reviewed" in visual_set else "not_checked",
+                "no_placeholders_or_workflow_text": "passed" if "content_order_reviewed" in visual_set else "not_checked",
+                "citations_readable": "passed" if "citations_reviewed" in visual_set else "not_applicable",
+            }
             try:
                 acceptance = build_office_acceptance(
                     binding=office_binding,

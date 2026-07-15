@@ -28,6 +28,32 @@ from .delivery_integrity import (
 TOKEN_TTL_NS = 15 * 60 * 1_000_000_000
 OFFICE_ACCEPTANCE_STATUSES = {"pending", "passed", "passed_with_conditions", "failed"}
 OFFICE_ISSUE_SEVERITIES = {"condition", "blocking"}
+OFFICE_POLICY_V1 = {
+    "schema_version": "office-policy/v1",
+    "checklist": {
+        "document_opened": "required",
+        "title_and_cover_match": "required",
+        "genre_and_structure_match": "required",
+        "content_order_correct": "required",
+        "figures_unique_and_readable": "optional",
+        "tables_readable": "optional",
+        "headers_footers_pagination": "required",
+        "no_placeholders_or_workflow_text": "required",
+        "citations_readable": "optional",
+    },
+    "categories": {
+        "file_or_hash_mismatch": "blocking",
+        "required_check_failed": "blocking",
+        "title_or_genre_mismatch": "blocking",
+        "placeholder_content": "blocking",
+        "security_issue": "blocking",
+        "upstream_gate_issue": "blocking",
+        "duplicate_figure": "blocking",
+        "visual_alignment": "condition",
+        "minor_typography": "condition",
+        "pagination_preference": "condition",
+    },
+}
 OFFICE_ACCEPTANCE_NAME = "expert-team-wps-acceptance.json"
 WAIVER_LEDGER_NAME = "expert-team-waiver-ledger.json"
 COMPLETION_TRANSACTION_NAME = "expert-team-completion-transaction.json"
@@ -54,11 +80,21 @@ def build_office_acceptance(
         raise DeliveryIntegrityError("enterprise Office binding is required")
     if status not in OFFICE_ACCEPTANCE_STATUSES:
         raise DeliveryIntegrityError("Office acceptance status is invalid")
-    required_checks = {"document_opened", "layout_reviewed", "content_order_reviewed"}
-    if not isinstance(checklist, dict) or not required_checks <= set(checklist):
-        raise DeliveryIntegrityError("Office acceptance checklist is incomplete")
-    if any(value not in {"passed", "not_applicable"} for value in checklist.values()):
+    checklist_policy = OFFICE_POLICY_V1["checklist"]
+    if not isinstance(checklist, dict) or set(checklist) != set(checklist_policy):
+        raise DeliveryIntegrityError("Office acceptance checklist must be complete")
+    allowed_check_values = {"not_checked", "passed", "failed", "not_applicable"}
+    if any(value not in allowed_check_values for value in checklist.values()):
         raise DeliveryIntegrityError("Office acceptance checklist status is invalid")
+    if status in {"passed", "passed_with_conditions"} and any(
+        checklist.get(key) != "passed" for key, disposition in checklist_policy.items() if disposition == "required"
+    ):
+        raise DeliveryIntegrityError("Office acceptance required checklist must pass")
+    if any(
+        checklist.get(key) == "not_applicable" and disposition == "required"
+        for key, disposition in checklist_policy.items()
+    ):
+        raise DeliveryIntegrityError("required Office checklist cannot be not_applicable")
     normalized_issues = []
     for issue in issues if isinstance(issues, list) else []:
         if not isinstance(issue, dict):
@@ -75,10 +111,10 @@ def build_office_acceptance(
             raise DeliveryIntegrityError("Office acceptance issue policy category is required")
         if not required_fields <= set(issue) or set(issue) - required_fields - optional_fields:
             raise DeliveryIntegrityError("Office acceptance issue is invalid")
-        condition_categories = {"visual_alignment", "minor_typography", "pagination_preference"}
         category = str(issue.get("category") or "")
-        if issue.get("severity") == "condition" and category not in condition_categories:
-            raise DeliveryIntegrityError("Office acceptance issue policy forbids condition severity")
+        policy_severity = OFFICE_POLICY_V1["categories"].get(category)
+        if not policy_severity or issue.get("severity") != policy_severity:
+            raise DeliveryIntegrityError("Office acceptance issue severity must match policy")
         normalized_issues.append(dict(issue))
     has_blocking = any(item["severity"] == "blocking" for item in normalized_issues)
     if status == "pending" and normalized_issues:
@@ -112,6 +148,7 @@ def build_office_acceptance(
     }
     return {
         "schema_version": "office-acceptance/v2",
+        "policy_version": OFFICE_POLICY_V1["schema_version"],
         "review_id": "review-" + hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:20],
@@ -158,6 +195,125 @@ def write_office_acceptance(workspace: Path, binding: dict, acceptance: dict) ->
         return path, existing
     _atomic_write_json(path, acceptance)
     return path, dict(acceptance)
+
+
+def build_office_revision_request(
+    *,
+    acceptance: dict,
+    issue_ids: list[str],
+    acceptance_sha256: str,
+    delivery_binding_sha256: str,
+    idempotency_key: str,
+    now: str,
+) -> dict:
+    if acceptance.get("schema_version") != "office-acceptance/v2":
+        raise DeliveryIntegrityError("Office acceptance v2 is required")
+    requested = [str(item or "").strip() for item in issue_ids if str(item or "").strip()]
+    if not requested or len(requested) != len(set(requested)):
+        raise DeliveryIntegrityError("Office revision issue_ids are required and unique")
+    issues = {str(item.get("issue_id") or ""): item for item in acceptance.get("issues") or [] if isinstance(item, dict)}
+    items = []
+    for issue_id in requested:
+        issue = issues.get(issue_id)
+        if not isinstance(issue, dict):
+            raise DeliveryIntegrityError("Office revision issue does not exist")
+        item = {
+            "issue_id": issue_id,
+            "category": str(issue.get("category") or ""),
+            **{
+                key: issue[key]
+                for key in ("section_id", "block_id", "logical_asset_id", "page")
+                if issue.get(key) not in (None, "")
+            },
+            "expected_fix": str(issue.get("expected_fix") or ""),
+        }
+        if not item["category"] or not item["expected_fix"]:
+            raise DeliveryIntegrityError("Office revision issue policy fields are incomplete")
+        items.append(item)
+    identity = {
+        "acceptance_sha256": str(acceptance_sha256),
+        "delivery_binding_sha256": str(delivery_binding_sha256),
+        "issue_ids": requested,
+        "idempotency_key": str(idempotency_key or ""),
+    }
+    return {
+        "schema_version": "office-revision-request/v1",
+        "request_id": "revision-" + hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:20],
+        "delivery_binding_sha256": str(delivery_binding_sha256),
+        "office_acceptance_sha256": str(acceptance_sha256),
+        "items": items,
+        "created_at": str(now),
+    }
+
+
+def create_current_office_revision_request(workspace: Path, body: dict, *, now: str) -> tuple[dict, dict]:
+    from .storage import read_run, run_file_lock, write_run
+
+    forbidden = {"feedback", "note", "message", "expected_fix", "items", "issues"}
+    if forbidden & set(body):
+        raise DeliveryIntegrityError("Office free text and policy fields are server-derived")
+    run_id = str(body.get("run_id") or "").strip()
+    with run_file_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        if str(body.get("session_id") or "") != str(run.get("session_id") or ""):
+            raise DeliveryIntegrityError("Office revision run identity mismatch")
+        if int(body.get("expected_version") or -1) != int(run.get("version") or 0):
+            raise DeliveryIntegrityError("Office revision version conflict")
+        if str(run.get("workflow_state") or "") != "awaiting_review":
+            raise DeliveryIntegrityError("Office revision is only available while awaiting review")
+        ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+        attempt = int(ref.get("delivery_attempt") or 0)
+        root = canonical_attempt_root(workspace, run_id, "delivery", attempt)
+        binding_path = Path(workspace).expanduser().resolve() / str(ref.get("delivery_binding_path") or "")
+        acceptance_path = root / OFFICE_ACCEPTANCE_NAME
+        if not binding_path.is_file() or not acceptance_path.is_file():
+            raise DeliveryIntegrityError("current Office revision evidence is unavailable")
+        binding_sha256 = sha256_file(binding_path)
+        acceptance_sha256 = sha256_file(acceptance_path)
+        if binding_sha256 != str(ref.get("delivery_binding_sha256") or ""):
+            raise DeliveryIntegrityError("current delivery binding changed")
+        acceptance = _read_json_object(acceptance_path, label="Office acceptance")
+        request = build_office_revision_request(
+            acceptance=acceptance,
+            issue_ids=body.get("issue_ids") if isinstance(body.get("issue_ids"), list) else [],
+            acceptance_sha256=acceptance_sha256,
+            delivery_binding_sha256=binding_sha256,
+            idempotency_key=str(body.get("idempotency_key") or ""),
+            now=now,
+        )
+        request_path = root / f"expert-team-office-revision-{request['request_id']}.json"
+        if request_path.is_file():
+            if _read_json_object(request_path, label="Office revision request") != request:
+                raise DeliveryIntegrityError("Office revision request is immutable")
+        else:
+            _atomic_write_json(request_path, request)
+        refs = [deepcopy(item) for item in run.get("office_revision_request_refs") or [] if isinstance(item, dict)]
+        if not any(item.get("request_id") == request["request_id"] for item in refs):
+            refs.append({
+                "request_id": request["request_id"],
+                "path": workspace_relative_path(workspace, request_path),
+                "sha256": sha256_file(request_path),
+                "delivery_attempt": attempt,
+            })
+        run["office_revision_request_refs"] = refs
+        current = run.get("current_delivery_attempt_reservation")
+        if isinstance(current, dict):
+            invalidated = {**deepcopy(current), "status": "invalidated", "updated_at": now}
+            run["current_delivery_attempt_reservation"] = invalidated
+            reservations = [deepcopy(item) for item in run.get("delivery_attempt_reservations") or [] if isinstance(item, dict)]
+            for index, item in enumerate(reservations):
+                if item.get("reservation_id") == invalidated.get("reservation_id"):
+                    reservations[index] = deepcopy(invalidated)
+            run["delivery_attempt_reservations"] = reservations
+        run["current_delivery_manifest_ref"] = None
+        run["current_stage_artifact_ref"] = None
+        run["pending_system_stage_result"] = None
+        run["workflow_state"] = "delivery_validation_required"
+        run["version"] = int(run.get("version") or 0) + 1
+        run["updated_at"] = now
+        return request, write_run(workspace, run)
 
 
 class CompletionCrashInjected(RuntimeError):
@@ -297,6 +453,7 @@ def reconcile_enterprise_completion(
             "committed_at": None,
         }
         _atomic_write_json(paths["transaction"], transaction)
+    completion_time = str(transaction.get("prepared_at") or now)
 
     token_hash = str((acceptance.get("token_provenance") or {}).get("token_hash") or "")
     if token_hash:
@@ -305,7 +462,7 @@ def reconcile_enterprise_completion(
             token_state = _read_json_object(token_path, label="Office token state")
             if token_state.get("state") != "consumed":
                 token_state["state"] = "consumed"
-                token_state["consumed_at"] = str(now)
+                token_state["consumed_at"] = completion_time
                 _atomic_write_json(token_path, token_state)
     _maybe_crash(fault_after, "token_consumed")
 
@@ -321,7 +478,7 @@ def reconcile_enterprise_completion(
         "completion_transaction_id": transaction_id,
         "gate_statuses": {"content": "passed", "document": "passed", "office": "passed"},
         "reviewer": deepcopy(acceptance.get("reviewer") or {}),
-        "completed_at": str(now),
+        "completed_at": completion_time,
     }
     if paths["proof"].is_file():
         if _read_json_object(paths["proof"], label="completion proof") != proof:
@@ -338,21 +495,21 @@ def reconcile_enterprise_completion(
     completed = deepcopy(run)
     completed["workflow_state"] = "completed"
     completed["version"] = max(int(run.get("version") or 0) + 1, int(completed.get("version") or 0))
-    completed["updated_at"] = str(now)
+    completed["updated_at"] = completion_time
     completed["completion_transaction_ref"] = {
         "transaction_id": transaction_id,
         "delivery_attempt": int(binding.get("delivery_attempt") or 0),
     }
     completed["completion_integrity"] = {
         "status": "reconciling",
-        "checked_at": str(now),
+        "checked_at": completion_time,
         "message": "Office completion transaction is being committed.",
     }
     write_run(workspace, completed)
     _maybe_crash(fault_after, "run_completed")
 
     transaction["state"] = "committed"
-    transaction["committed_at"] = str(now)
+    transaction["committed_at"] = completion_time
     _atomic_write_json(paths["transaction"], transaction)
     completed["completion_integrity"] = enterprise_completion_status(workspace, completed)
     return write_run(workspace, completed)

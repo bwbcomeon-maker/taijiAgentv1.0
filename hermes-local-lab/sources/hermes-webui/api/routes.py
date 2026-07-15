@@ -12584,6 +12584,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/expert-teams/waivers/create":
         return _handle_expert_team_waiver_create(handler, body)
 
+    if parsed.path == "/api/expert-teams/office-revisions/create":
+        return _handle_expert_team_office_revision_create(handler, body)
+
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
         return _handle_skill_save(handler, body)
@@ -18670,14 +18673,19 @@ def _handle_docx_engine_v2_begin_office_review(handler, body):
 
 def _handle_expert_team_waiver_create(handler, body):
     from datetime import datetime, timezone
-    from api.expert_teams.trusted_identity import TrustedIdentityError, resolve_trusted_principal
+    from api.expert_teams.trusted_identity import (
+        TrustedIdentityError,
+        get_trusted_identity_resolver,
+        resolve_trusted_principal,
+    )
     from api.expert_teams.waivers import WaiverError, create_current_office_waiver
 
     try:
         session_id = str(body.get("session_id") or "").strip()
         workspace = _expert_team_workspace(session_id or None)
+        identity_session_id = _expert_identity_session(handler)
         principal = resolve_trusted_principal(
-            {"identity_session_id": _expert_identity_session(handler)},
+            {"identity_session_id": identity_session_id},
             "waiver-authorizer",
             int(time.time()),
         )
@@ -18686,6 +18694,9 @@ def _handle_expert_team_waiver_create(handler, body):
             body,
             authorizer=principal,
             now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            consume_authorizer_handoff=lambda context: get_trusted_identity_resolver().consume_authorizer_handoff(
+                identity_session_id, current_context=context
+            ),
         )
         return j(handler, {"ok": True, "waiver": waiver, "run": run}, status=201)
     except TrustedIdentityError as exc:
@@ -18693,6 +18704,27 @@ def _handle_expert_team_waiver_create(handler, body):
     except WaiverError as exc:
         status = 409 if exc.code in {"version_conflict", "waiver_binding_changed"} else 400
         return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return bad(handler, _sanitize_error(exc), 400)
+
+
+def _handle_expert_team_office_revision_create(handler, body):
+    from datetime import datetime, timezone
+    from api.expert_teams.delivery_integrity import DeliveryIntegrityError
+    from api.expert_teams.office_review import create_current_office_revision_request
+
+    try:
+        session_id = str(body.get("session_id") or "").strip()
+        workspace = _expert_team_workspace(session_id or None)
+        request, run = create_current_office_revision_request(
+            workspace,
+            body,
+            now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        )
+        return j(handler, {"ok": True, "revision_request": request, "run": run}, status=201)
+    except DeliveryIntegrityError as exc:
+        status = 409 if "version conflict" in str(exc) else 400
+        return j(handler, {"ok": False, "code": "office_revision_invalid", "error": str(exc)}, status=status)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return bad(handler, _sanitize_error(exc), 400)
 

@@ -36,6 +36,7 @@ from .documents import (
 from .delivery_integrity import (
     BINDING_MANIFEST_NAME,
     BINDING_SCHEMA_VERSION,
+    OFFICE_REVIEW_PROOF_NAME,
     DeliveryIntegrityError,
     binding_manifest_path,
     canonical_attempt_root,
@@ -788,8 +789,13 @@ def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
             "delivery",
             int(ref.get("delivery_attempt") or 0),
         )
-        transaction_path = attempt_root / COMPLETION_TRANSACTION_NAME
-        if binding_path.is_file() and transaction_path.is_file():
+        completion_evidence = (
+            attempt_root / "expert-team-wps-acceptance.json",
+            attempt_root / "expert-team-waiver-ledger.json",
+            attempt_root / OFFICE_REVIEW_PROOF_NAME,
+            attempt_root / COMPLETION_TRANSACTION_NAME,
+        )
+        if binding_path.is_file() and any(path.is_file() for path in completion_evidence):
             try:
                 binding = read_binding_manifest(binding_path)
                 run = reconcile_enterprise_completion(
@@ -1164,6 +1170,9 @@ def _prepare_mutation(
     require_stage: bool = True,
 ) -> tuple[dict, dict | None]:
     run = read_run(workspace, str(body.get("run_id") or ""))
+    # A retry request is also a recovery boundary.  Finish any durable Office
+    # acceptance transaction before evaluating the requested state/version.
+    run = _completion_integrity_for_read(workspace, run)
     _require_mutable_v2(run)
     session_id = str(body.get("session_id") or "").strip()
     if not session_id:
@@ -1362,7 +1371,7 @@ def _sync_derived(run: dict) -> dict:
         if isinstance(run.get("completion_integrity"), dict)
         else {}
     )
-    if state == "completed" and str(completion_integrity.get("status") or "") not in {"", "valid"}:
+    if state == "completed" and str(completion_integrity.get("status") or "") not in {"", "valid", "passed"}:
         run["status"] = "error"
         run["execution_status"] = "error"
     return _with_view(run)
@@ -2501,6 +2510,7 @@ def reconcile_expert_team_run(workspace: Path, run_id: str) -> dict:
     """Persist recoverable states whose external transition lost its final write."""
     run = read_run(workspace, run_id)
     _require_mutable_v2(run)
+    run = _completion_integrity_for_read(workspace, run)
     return _sync_derived(_refresh_artifact_existence(workspace, run))
 
 
@@ -3327,7 +3337,7 @@ def record_expert_team_execution_observation(
 
 def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
     from .stage_artifacts import StageArtifactError, validate_stage_artifact
-    from .trusted_identity import get_trusted_identity_resolver
+    from .trusted_identity import TrustedIdentityError, resolve_trusted_principal
 
     authoritative_stage = _authoritative_stage_for_mutation(run)
     stage_id = str(authoritative_stage.get("task_id") or "")
@@ -3383,14 +3393,14 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
             )
         except (DeliveryIntegrityError, OSError, TypeError, ValueError) as exc:
             raise ExpertTeamStateConflict("office_acceptance_required", str(exc), run) from exc
-    identity_session_id = str(body.get("trusted_identity_session_id") or "").strip()
     try:
-        principal = get_trusted_identity_resolver().resolve(
-            identity_session_id,
-            required_role="document-approver",
+        principal = resolve_trusted_principal(
+            {"identity_session_id": str(body.get("trusted_identity_session_id") or "").strip()},
+            "document-approver",
+            int(time.time()),
         )
-    except (RuntimeError, ValueError) as exc:
-        raise ExpertTeamStateConflict("trusted_identity_required", str(exc), run) from exc
+    except TrustedIdentityError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
 
     approved_at = _now()
     approval = {

@@ -153,7 +153,14 @@ def create_office_waiver(
     return deepcopy(waiver)
 
 
-def create_current_office_waiver(workspace: Path, body: dict, *, authorizer: dict, now: str) -> tuple[dict, dict]:
+def create_current_office_waiver(
+    workspace: Path,
+    body: dict,
+    *,
+    authorizer: dict,
+    now: str,
+    consume_authorizer_handoff=None,
+) -> tuple[dict, dict]:
     """Resolve the current immutable delivery/acceptance; clients submit only a target ref."""
 
     from .delivery_integrity import sha256_file
@@ -184,12 +191,26 @@ def create_current_office_waiver(workspace: Path, body: dict, *, authorizer: dic
         if not acceptance_path.is_file():
             raise WaiverError("waiver_acceptance_invalid", "current Office acceptance is unavailable")
         acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+        acceptance_sha256 = sha256_file(acceptance_path)
+        handoff_context = {
+            "run_id": run_id,
+            "acceptance_sha256": acceptance_sha256,
+            "delivery_binding_sha256": binding_sha256,
+            "disallowed_principal_id": str((acceptance.get("reviewer") or {}).get("principal_id") or ""),
+        }
+        if consume_authorizer_handoff is None:
+            raise WaiverError("trusted_authorizer_required", "authorizer handoff is required")
+        try:
+            consume_authorizer_handoff(handoff_context)
+        except ValueError as exc:
+            code = "identity_flow_stale" if "identity_flow_stale" in str(exc) else "trusted_authorizer_required"
+            raise WaiverError(code, str(exc)) from exc
         waiver = create_office_waiver(
             workspace,
             binding=binding,
             binding_sha256=binding_sha256,
             acceptance=acceptance,
-            acceptance_sha256=sha256_file(acceptance_path),
+            acceptance_sha256=acceptance_sha256,
             issue_id=str(body.get("target_id") or body.get("issue_id") or ""),
             authorizer=authorizer,
             idempotency_key=str(body.get("idempotency_key") or ""),
