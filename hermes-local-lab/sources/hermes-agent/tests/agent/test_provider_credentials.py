@@ -155,6 +155,18 @@ def test_unmarked_named_credential_does_not_take_over_legacy_config(monkeypatch)
     assert resolve_api_key("alibaba", config_data=_config()) == "legacy-key"
 
 
+def test_default_credential_can_be_configured_only_in_persisted_env(monkeypatch, tmp_path):
+    config = _config()
+    config["provider_credentials"][0]["default"] = True
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=persisted-key\n", encoding="utf-8"
+    )
+
+    assert default_credential_ref("alibaba", config_data=config) == "alibaba-default"
+
+
 def test_explicit_ref_precedes_family_default(monkeypatch):
     config = _config()
     config["provider_credentials"].append(

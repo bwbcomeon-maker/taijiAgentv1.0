@@ -106,6 +106,21 @@ def credential_secret_env(credential_id: object) -> str:
     return f"TAIJI_CREDENTIAL_{normalized.upper().replace('-', '_')}_API_KEY"
 
 
+def _credential_secret_value(secret_env: str) -> str:
+    value = os.getenv(secret_env, "").strip()
+    if value:
+        return value
+    env_path = get_hermes_home() / ".env"
+    if not env_path.exists():
+        return ""
+    try:
+        from dotenv import dotenv_values
+
+        return str(dotenv_values(env_path).get(secret_env) or "").strip()
+    except Exception:
+        return ""
+
+
 def _load_config_data() -> dict[str, Any]:
     configured_path = str(os.getenv("HERMES_CONFIG_PATH") or "").strip()
     config_path = Path(configured_path) if configured_path else get_hermes_home() / "config.yaml"
@@ -182,7 +197,7 @@ def default_credential_ref(
     if len(marked_defaults) > 1:
         raise ValueError("当前 Provider 配置了多个默认凭据，请保留一个。")
     credential_id = marked_defaults[0]
-    if not os.getenv(credential_secret_env(credential_id), "").strip():
+    if not _credential_secret_value(credential_secret_env(credential_id)):
         return ""
     return credential_id
 
@@ -208,7 +223,7 @@ def resolve_api_key(
         secret_env = str(row.get("secret_env") or "").strip()
         if secret_env != credential_secret_env(row.get("id")):
             raise ValueError("所选凭据的 Secret 环境变量配置无效。")
-        value = os.getenv(secret_env, "").strip()
+        value = _credential_secret_value(secret_env)
         if value or explicit_ref:
             return value
     for legacy_env in LEGACY_API_KEY_ENV.get(family, ()):

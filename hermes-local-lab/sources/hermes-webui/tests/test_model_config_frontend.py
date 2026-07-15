@@ -683,7 +683,7 @@ run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{con
 
 def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
     driver = tmp_path / "vision-race-driver.js"
-    driver.write_text(_VISION_RACE_DRIVER, encoding="utf-8")
+    driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _VISION_RACE_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
         capture_output=True,
@@ -697,7 +697,7 @@ def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
 
 def _run_image_gen_race(tmp_path: Path, scenario: str) -> dict:
     driver = tmp_path / "image-gen-race-driver.js"
-    driver.write_text(_IMAGE_GEN_RACE_DRIVER, encoding="utf-8")
+    driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _IMAGE_GEN_RACE_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
         capture_output=True,
@@ -711,7 +711,7 @@ def _run_image_gen_race(tmp_path: Path, scenario: str) -> dict:
 
 def _run_image_config_interactions(tmp_path: Path) -> dict:
     driver = tmp_path / "image-config-interaction-driver.js"
-    driver.write_text(_IMAGE_CONFIG_INTERACTION_DRIVER, encoding="utf-8")
+    driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _IMAGE_CONFIG_INTERACTION_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js")],
         capture_output=True,
@@ -739,7 +739,7 @@ def _run_credential_sessions(tmp_path: Path) -> dict:
 
 def _run_model_config_draft_guard(tmp_path: Path) -> dict:
     driver = tmp_path / "model-config-draft-guard-driver.js"
-    driver.write_text(_MODEL_CONFIG_DRAFT_GUARD_DRIVER, encoding="utf-8")
+    driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _MODEL_CONFIG_DRAFT_GUARD_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js")],
         capture_output=True,
@@ -1545,6 +1545,64 @@ def test_endpoint_field_visibility_is_driven_by_provider_schema():
     assert "endpointNames.has('workspace_id')" in PANELS_JS
     assert "endpointNames.has('region')" in PANELS_JS
     assert "endpointNames.has('base_url')" in PANELS_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_endpoint_schema_renderer_creates_unknown_fields_and_preserves_drafts(tmp_path):
+    driver = tmp_path / "endpoint-schema-driver.js"
+    driver.write_text(
+        r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const re=new RegExp('function\\s+'+name+'\\s*\\(');const start=source.search(re);if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),d=1;i++;while(d&&i<source.length){if(source[i]==='{')d++;else if(source[i]==='}')d--;i++;}return source.slice(start,i);}
+function el(tag,id=''){return {tagName:String(tag).toUpperCase(),id,value:'',type:'',placeholder:'',required:false,hidden:false,disabled:false,dataset:{},children:[],attrs:{},textContent:'',className:'',autocomplete:'',
+ appendChild(c){this.children.push(c);return c;},setAttribute(k,v){this.attrs[k]=v;if(k==='data-endpoint-field')this.dataset.endpointField=v;if(k==='data-endpoint-capability')this.dataset.endpointCapability=v;},removeAttribute(k){delete this.attrs[k];},
+ querySelector(q){if(q==='label')return this.children.find(c=>c.tagName==='LABEL')||null;if(q==='[data-endpoint-help]')return this.children.find(c=>c.dataset.endpointHelp)||null;return null;},
+ querySelectorAll(q){let out=[];for(const c of this.children){if((q==='input,select'||q==='input,select,button')&&['INPUT','SELECT','BUTTON'].includes(c.tagName))out.push(c);if(c.querySelectorAll)out=out.concat(c.querySelectorAll(q));}return out;},
+ set innerHTML(_v){this.children=[];},get options(){return this.children.filter(c=>c.tagName==='OPTION');}};}
+const ids=['visionConfigProvider','visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId','visionConfigBaseUrl','visionConfigEndpointFields','visionConfigEndpointModeRow','visionConfigRegionRow','visionConfigWorkspaceRow','visionConfigBaseUrlRow'];const elements={};
+for(const id of ids)elements[id]=el(id.endsWith('Row')||id.endsWith('Fields')?'div':(id.includes('Mode')||id.includes('Region')?'select':'input'),id);
+for(const pair of [['visionConfigEndpointModeRow','visionConfigEndpointMode'],['visionConfigRegionRow','visionConfigRegion'],['visionConfigWorkspaceRow','visionConfigWorkspaceId'],['visionConfigBaseUrlRow','visionConfigBaseUrl']]){const label=el('label');elements[pair[0]].appendChild(label);elements[pair[0]].appendChild(elements[pair[1]]);}
+elements.visionConfigProvider.value='alibaba';elements.visionConfigEndpointMode.value='public';
+const $=id=>elements[id]||null;const document={createElement:tag=>el(tag),querySelectorAll:q=>{let out=[];for(const e of Object.values(elements)){if(q==='[data-endpoint-field]'&&e.dataset.endpointField)out.push(e);}out=out.concat(elements.visionConfigEndpointFields.querySelectorAll('input,select'));return [...new Set(out)];}};
+let _imageCapabilityProviderDrafts={vision:{},image:{}};const _collectImageGenCredentials=()=>({});const _renderImageCapabilityEndpointPreview=()=>true;const _invalidateVisionTest=()=>{};const _invalidateImageGenTest=()=>{};
+let providerRow={id:'alibaba',endpoint_fields:[
+ {name:'region',label:'部署地域',required:true,placeholder:'choose',options:[{value:'cn-beijing',label:'北京'},{value:'ap-southeast-1',label:'新加坡'}],description:'选择服务地域'},
+ {name:'tenant',label:'租户',required:true,options:['tenant-a','tenant-b'],description:'选择租户'},
+ {name:'route',label:'路由',required:false,placeholder:'blue',type:'text',description:'可选路由'}]};
+let _modelConfigData={vision:{tenant:'tenant-b',route:'green'},vision_providers:[providerRow]};
+const _modelConfigVisionProviderRow=()=>providerRow;const _modelConfigImageProviderRow=()=>null;
+for(const name of ['_endpointFieldInputId','_endpointKnownControl','_applyEndpointFieldMetadata','_renderImageCapabilityEndpointSchema','_collectImageCapabilityEndpointValues','_syncImageCapabilityEndpointFields','_captureImageCapabilityProviderDraft','_restoreImageCapabilityProviderDraft'])eval(extractFunc(name));
+_syncImageCapabilityEndpointFields('vision');
+const box=elements.visionConfigEndpointFields;let tenant=box.children[0].children[1],route=box.children[1].children[1];tenant.value='tenant-a';route.value='blue';_syncImageCapabilityEndpointFields('vision');tenant=box.children[0].children[1];route=box.children[1].children[1];
+_captureImageCapabilityProviderDraft('vision','alibaba');tenant.value='';route.value='';_restoreImageCapabilityProviderDraft('vision','alibaba');
+const values=_collectImageCapabilityEndpointValues('vision');
+const before={count:box.children.length,tenantTag:tenant.tagName,tenantOptions:tenant.options.map(o=>o.value),tenantLabel:box.children[0].children[0].textContent,tenantHelp:box.children[0].children[2].textContent,tenantRequired:tenant.required,routeTag:route.tagName,routePlaceholder:route.placeholder,values,knownLabel:elements.visionConfigRegionRow.children[0].textContent,knownRequired:elements.visionConfigRegion.required};
+providerRow={id:'alibaba',endpoint_fields:[{name:'region',label:'地域',required:false,options:['cn-beijing']}]};_syncImageCapabilityEndpointFields('vision');before.removed=box.children.length;process.stdout.write(JSON.stringify(before));
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data == {
+        "count": 2,
+        "tenantTag": "SELECT",
+        "tenantOptions": ["tenant-a", "tenant-b"],
+        "tenantLabel": "租户",
+        "tenantHelp": "选择租户",
+        "tenantRequired": True,
+        "routeTag": "INPUT",
+        "routePlaceholder": "blue",
+        "values": {"region": "", "tenant": "tenant-a", "route": "blue"},
+        "knownLabel": "部署地域",
+        "knownRequired": True,
+        "removed": 0,
+    }
 
 
 def test_model_config_license_layout_prioritizes_customer_and_compacts_actions():

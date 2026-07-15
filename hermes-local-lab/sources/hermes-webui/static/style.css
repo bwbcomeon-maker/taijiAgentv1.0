@@ -4308,6 +4308,7 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneModels .model-config-field-error{min-height:18px;margin:0;color:#a62f2c;font-size:11px;line-height:1.45;font-weight:800;}
 #settingsPaneModels .model-config-credentials{display:grid;gap:8px;min-width:0;}
 #settingsPaneModels .model-config-credentials[hidden]{display:none!important;}
+#settingsPaneModels .model-config-endpoint-fields{display:grid;gap:8px;min-width:0;}
 #settingsPaneModels .model-config-credential-row{display:grid;gap:6px;min-width:0;border:1px solid rgba(214,230,242,.95);border-radius:12px;background:#fff;padding:9px 10px;}
 #settingsPaneModels .model-config-credential-row .model-config-plain-row{display:flex;min-width:0;}
 #settingsPaneModels .model-config-credential-row .model-config-hint{font-size:10.5px;}

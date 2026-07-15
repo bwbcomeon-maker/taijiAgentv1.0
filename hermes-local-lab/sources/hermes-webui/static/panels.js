@@ -8379,6 +8379,7 @@ function _captureImageCapabilityProviderDraft(capability,providerId){
   const field=$(prefix+suffix);
   if(field) draft[suffix]=String(field.value||'');
  });
+ draft.EndpointFields=_collectImageCapabilityEndpointValues(capability);
  if(capability==='image'){
   draft.Credentials=_collectImageGenCredentials();
   draft.CredentialSecretKeys=[];
@@ -8399,6 +8400,13 @@ function _restoreImageCapabilityProviderDraft(capability,providerId){
   const field=$(prefix+suffix);
   if(field&&Object.prototype.hasOwnProperty.call(draft,suffix)) field.value=draft[suffix];
  });
+ if(draft.EndpointFields){
+  document.querySelectorAll('[data-endpoint-field]').forEach(control=>{
+   if(String(control.dataset.endpointCapability||'')!==capability) return;
+   const name=String(control.dataset.endpointField||'');
+   if(Object.prototype.hasOwnProperty.call(draft.EndpointFields,name)) control.value=draft.EndpointFields[name];
+  });
+ }
  if(capability==='image'&&draft.Credentials){
   document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
    const key=String(input.dataset.imageGenCredential||'').trim();
@@ -8871,6 +8879,117 @@ function _renderImageCapabilityEndpointPreview(capability){
  return !problem;
 }
 
+function _endpointFieldInputId(capability,name){
+ const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
+ return prefix+'Endpoint__'+String(name||'').replace(/[^A-Za-z0-9_-]+/g,'_');
+}
+
+function _endpointKnownControl(capability,name){
+ const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
+ const suffix={endpoint_mode:'EndpointMode',region:'Region',workspace_id:'WorkspaceId',base_url:'BaseUrl'}[name];
+ if(!suffix) return null;
+ return {row:$(prefix+({workspace_id:'WorkspaceRow',base_url:'BaseUrlRow'}[name]||suffix+'Row')),control:$(prefix+suffix)};
+}
+
+function _applyEndpointFieldMetadata(capability,field,row,control){
+ const name=String(field&&field.name||'').trim();
+ if(!name||!control) return;
+ control.dataset.endpointField=name;
+ control.dataset.endpointCapability=capability;
+ control.required=!!field.required;
+ if(Object.prototype.hasOwnProperty.call(field,'placeholder')) control.placeholder=String(field.placeholder||'');
+ if(control.tagName&&String(control.tagName).toLowerCase()==='input') control.type=String(field.type||'text')==='url'?'url':'text';
+ const label=row&&row.querySelector?row.querySelector('label'):null;
+ if(label) label.textContent=String(field.label||name);
+ if(Array.isArray(field.options)&&control.tagName&&String(control.tagName).toLowerCase()==='select'){
+  const selected=String(control.value||'');
+  control.innerHTML='';
+  field.options.forEach(option=>{
+   const item=document.createElement('option');
+   if(option&&typeof option==='object'){
+    item.value=String(option.value||option.id||'');
+    item.textContent=String(option.label||option.value||option.id||'');
+   }else{
+    item.value=String(option||'');item.textContent=String(option||'');
+   }
+   control.appendChild(item);
+  });
+  if(Array.from(control.options||[]).some(option=>option.value===selected)) control.value=selected;
+ }
+ let help=row&&row.querySelector?row.querySelector('[data-endpoint-help]'):null;
+ if(row&&field.description&&!help){
+  help=document.createElement('div');help.className='model-config-hint';help.dataset.endpointHelp='true';row.appendChild(help);
+ }
+ if(help) help.textContent=String(field.description||'');
+}
+
+function _renderImageCapabilityEndpointSchema(capability,providerRow){
+ const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
+ const box=$(prefix+'EndpointFields');
+ const providerId=String(providerRow&&providerRow.id||'');
+ const currentValues=box&&String(box.dataset.endpointProvider||'')===providerId
+  ?_collectImageCapabilityEndpointValues(capability):{};
+ if(box) box.innerHTML='';
+ if(box) box.dataset.endpointProvider=providerId;
+ ['endpoint_mode','region','workspace_id','base_url'].forEach(name=>{
+  const known=_endpointKnownControl(capability,name);
+  if(!known||!known.control) return;
+  known.control.removeAttribute('data-endpoint-field');
+  known.control.removeAttribute('data-endpoint-capability');
+  delete known.control.dataset.endpointField;delete known.control.dataset.endpointCapability;
+  known.control.required=false;
+ });
+ const fields=Array.isArray(providerRow&&providerRow.endpoint_fields)?providerRow.endpoint_fields:[];
+ fields.forEach(field=>{
+  const name=String(field&&field.name||'').trim();
+  if(!name||field.secret===true) return;
+  const known=_endpointKnownControl(capability,name);
+  if(known){_applyEndpointFieldMetadata(capability,field,known.row,known.control);return;}
+  if(!box) return;
+  const row=document.createElement('div');row.className='model-config-field model-config-endpoint-field';
+  const inputId=_endpointFieldInputId(capability,name);
+  const label=document.createElement('label');label.setAttribute('for',inputId);label.textContent=String(field.label||name);
+  const options=Array.isArray(field.options)?field.options:[];
+  const control=document.createElement(options.length?'select':'input');
+  control.id=inputId;control.autocomplete='off';control.required=!!field.required;
+  control.dataset.endpointField=name;control.dataset.endpointCapability=capability;
+  if(!options.length){control.type=String(field.type||'text')==='url'?'url':'text';control.placeholder=String(field.placeholder||'');}
+  options.forEach(option=>{
+   const item=document.createElement('option');
+   if(option&&typeof option==='object'){
+    item.value=String(option.value||option.id||'');item.textContent=String(option.label||option.value||option.id||'');
+   }else{item.value=String(option||'');item.textContent=String(option||'');}
+   control.appendChild(item);
+  });
+  const saved=capability==='vision'
+   ?((_modelConfigData&&_modelConfigData.vision)||{})
+   :(((_modelConfigData&&_modelConfigData.image_gen)||{}).options||{});
+  if(Object.prototype.hasOwnProperty.call(saved,name)) control.value=String(saved[name]||'');
+  const help=document.createElement('div');help.className='model-config-hint';help.id=inputId+'Hint';
+  help.dataset.endpointHelp='true';help.textContent=String(field.description||(field.required?'必填。':'可选。'));
+  const error=document.createElement('p');error.className='model-config-field-error';error.id=inputId+'Error';error.setAttribute('aria-live','polite');
+  control.setAttribute('aria-describedby',help.id+' '+error.id);
+  const invalidate=capability==='vision'?_invalidateVisionTest:_invalidateImageGenTest;
+  control.oninput=invalidate;control.onchange=invalidate;
+  row.appendChild(label);row.appendChild(control);row.appendChild(help);row.appendChild(error);box.appendChild(row);
+ });
+ document.querySelectorAll('[data-endpoint-field]').forEach(control=>{
+  if(String(control.dataset.endpointCapability||'')!==capability) return;
+  const name=String(control.dataset.endpointField||'');
+  if(Object.prototype.hasOwnProperty.call(currentValues,name)) control.value=currentValues[name];
+ });
+}
+
+function _collectImageCapabilityEndpointValues(capability){
+ const values={};
+ document.querySelectorAll('[data-endpoint-field]').forEach(control=>{
+  if(String(control.dataset.endpointCapability||'')!==capability) return;
+  const name=String(control.dataset.endpointField||'').trim();
+  if(name) values[name]=String(control.value||'').trim();
+ });
+ return values;
+}
+
 function _syncImageCapabilityEndpointFields(capability){
  const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
  const provider=String(($(prefix+'Provider')||{}).value||'').trim();
@@ -8879,6 +8998,7 @@ function _syncImageCapabilityEndpointFields(capability){
   ?_modelConfigVisionProviderRow(provider,_modelConfigData)
   :_modelConfigImageProviderRow(provider,_modelConfigData);
  const endpointFields=Array.isArray(providerRow&&providerRow.endpoint_fields)?providerRow.endpoint_fields:[];
+ _renderImageCapabilityEndpointSchema(capability,providerRow);
  const endpointNames=new Set(endpointFields.map(field=>String(field&&field.name||'')).filter(Boolean));
  const modeRow=$(prefix+'EndpointModeRow');
  const regionRow=$(prefix+'RegionRow');
@@ -8921,6 +9041,8 @@ function _setVisionConfigTestBusy(busy){
  const keyRow=$('visionConfigApiKeyRow');
  const pasteBtn=keyRow?keyRow.querySelector('.model-config-paste-btn'):null;
  if(pasteBtn) pasteBtn.disabled=!!busy;
+ const endpoints=$('visionConfigEndpointFields');
+ if(endpoints) endpoints.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
 }
 
 function _restoreVisionTestSnapshot(runGeneration){
@@ -8952,6 +9074,13 @@ function _bindVisionConfigEditInvalidation(){
   control.oninput=handle;
   control.onchange=handle;
  });
+ const endpoints=$('visionConfigEndpointFields');
+ if(endpoints){
+  endpoints.querySelectorAll('input,select').forEach(control=>{
+   control.oninput=_invalidateVisionTest;
+   control.onchange=_invalidateVisionTest;
+  });
+ }
 }
 
 function _imageGenConfigIdentity(data){
@@ -8980,6 +9109,8 @@ function _setImageGenConfigTestBusy(busy){
  if(credentials){
   credentials.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
  }
+ const endpoints=$('imageGenConfigEndpointFields');
+ if(endpoints) endpoints.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
 }
 
 function _restoreImageGenTestSnapshot(runGeneration){
@@ -9014,6 +9145,13 @@ function _bindImageGenConfigEditInvalidation(){
  const credentials=$('imageGenConfigCredentials');
  if(credentials){
   credentials.querySelectorAll('input,select').forEach(control=>{
+   control.oninput=_invalidateImageGenTest;
+   control.onchange=_invalidateImageGenTest;
+  });
+ }
+ const endpoints=$('imageGenConfigEndpointFields');
+ if(endpoints){
+  endpoints.querySelectorAll('input,select').forEach(control=>{
    control.oninput=_invalidateImageGenTest;
    control.onchange=_invalidateImageGenTest;
   });
@@ -10166,6 +10304,9 @@ function _modelConfigDraftIdentity(){
  document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
   values.push(String(input.dataset.imageGenCredential||'')+'='+String(input.value||''));
  });
+ document.querySelectorAll('[data-endpoint-field]').forEach(input=>{
+  values.push(String(input.dataset.endpointCapability||'')+':'+String(input.dataset.endpointField||'')+'='+String(input.value||''));
+ });
  return JSON.stringify(values);
 }
 
@@ -10338,6 +10479,7 @@ async function saveVisionConfig(){
  const endpointMode=(($('visionConfigEndpointMode')||{}).value||'public').trim();
  const region=(($('visionConfigRegion')||{}).value||'cn-beijing').trim();
  const workspaceId=(($('visionConfigWorkspaceId')||{}).value||'').trim();
+ const endpointValues=_collectImageCapabilityEndpointValues('vision');
  _setFieldError('visionConfigEndpointError','',['visionConfigCredential','visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId','visionConfigBaseUrl','visionConfigApiKey','visionConfigModel']);
  if(!_renderImageCapabilityEndpointPreview('vision')) return;
  if(credentialRef&&apiKey){
@@ -10347,6 +10489,7 @@ async function saveVisionConfig(){
  _setVisionConfigTestBusy(true);
  try{
   const payload={provider,model,base_url:baseUrl,endpoint_mode:endpointMode,region,workspace_id:workspaceId};
+  Object.assign(payload,endpointValues);
   if(credentialRef) payload.credential_ref=credentialRef;
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
@@ -10382,6 +10525,8 @@ function _visionConfigHasUnsavedChanges(){
  const region=(($('visionConfigRegion')||{}).value||'cn-beijing').trim();
  const workspaceId=(($('visionConfigWorkspaceId')||{}).value||'').trim();
  const compareBase=provider!=='alibaba'||endpointMode==='custom';
+ const endpointValues=_collectImageCapabilityEndpointValues('vision');
+ const endpointChanged=Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(saved[name]||''));
  return !!apiKey
   || provider!==String(saved.provider||'').trim()
   || model!==String(saved.model||'').trim()
@@ -10389,7 +10534,8 @@ function _visionConfigHasUnsavedChanges(){
   || credentialRef!==String(saved.credential_ref||'').trim()
   || endpointMode!==String(saved.endpoint_mode||'public').trim()
   || region!==String(saved.region||'cn-beijing').trim()
-  || workspaceId!==String(saved.workspace_id||'').trim();
+  || workspaceId!==String(saved.workspace_id||'').trim()
+  || endpointChanged;
 }
 
 async function testVisionConfig(){
@@ -10440,18 +10586,14 @@ async function saveImageGenConfig(){
  const workspaceId=(($('imageGenConfigWorkspaceId')||{}).value||'').trim();
  const baseUrl=(($('imageGenConfigBaseUrl')||{}).value||'').trim();
  const credentials=_collectImageGenCredentials();
+ const endpointValues=_collectImageCapabilityEndpointValues('image');
  _setFieldError('imageGenConfigEndpointError','',['imageGenConfigCredential','imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl','imageGenConfigApiKey','imageGenConfigModel']);
  if(!_renderImageCapabilityEndpointPreview('image')) return;
  if(credentialRef&&apiKey){
   _setFieldError('imageGenConfigEndpointError','已选择平台凭据，请在“平台凭据”中更新 Key。',['imageGenConfigCredential','imageGenConfigApiKey']);
   return;
  }
- if(provider==='dashscope'){
-  credentials.endpoint_mode=endpointMode;
-  credentials.region=region;
-  if(workspaceId) credentials.workspace_id=workspaceId;
-  if(baseUrl) credentials.base_url=baseUrl;
- }
+ Object.assign(credentials,endpointValues);
  _setImageGenConfigTestBusy(true);
  try{
   const payload={provider,model};
@@ -10481,6 +10623,8 @@ async function saveImageGenConfig(){
 function _imageGenConfigHasUnsavedChanges(){
  const saved=(_modelConfigData&&_modelConfigData.image_gen)||{};
  const options=saved.options||{};
+ const endpointValues=_collectImageCapabilityEndpointValues('image');
+ const endpointChanged=Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(options[name]||''));
  return (($('imageGenConfigApiKey')||{}).value||'').trim()!==''
   || (($('imageGenConfigProvider')||{}).value||'').trim()!==String(saved.provider||'').trim()
   || (($('imageGenConfigModel')||{}).value||'').trim()!==String(saved.model||'').trim()
@@ -10488,7 +10632,8 @@ function _imageGenConfigHasUnsavedChanges(){
   || (($('imageGenConfigEndpointMode')||{}).value||'workspace').trim()!==String(options.endpoint_mode||'workspace').trim()
   || (($('imageGenConfigRegion')||{}).value||'cn-beijing').trim()!==String(options.region||'cn-beijing').trim()
   || (($('imageGenConfigWorkspaceId')||{}).value||'').trim()!==String(options.workspace_id||'').trim()
-  || (($('imageGenConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'')!==String(options.base_url||'').trim().replace(/\/$/,'');
+  || (($('imageGenConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'')!==String(options.base_url||'').trim().replace(/\/$/,'')
+  || endpointChanged;
 }
 
 async function testImageGenConfig(){

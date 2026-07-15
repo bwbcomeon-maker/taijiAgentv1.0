@@ -88,6 +88,12 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "description": "用于上传图片、截图和表格截图理解",
         "auth_type": "api_key",
         "transport": "dashscope_openai_compatible",
+        "endpoint_fields": [
+            {"name": "endpoint_mode", "label": "接入方式", "required": True, "secret": False, "options": ["public", "workspace", "custom"], "description": "选择公共端点、业务空间端点或自定义 Base URL。"},
+            {"name": "region", "label": "地域", "required": True, "secret": False, "options": ["cn-beijing", "ap-southeast-1"], "description": "必须与百炼业务空间所在地域一致。"},
+            {"name": "workspace_id", "label": "Workspace ID", "required": False, "secret": False, "placeholder": "例如：llm-demo", "description": "仅业务空间专属端点需要。"},
+            {"name": "base_url", "label": "Base URL", "required": False, "secret": False, "type": "url", "placeholder": "https://api.example.com/v1", "description": "仅自定义接入方式需要。"},
+        ],
         "default_model": "qwen3-vl-plus",
         "models": [
             {"id": "qwen3-vl-plus", "label": "Qwen3 VL Plus"},
@@ -115,6 +121,9 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "default_model": "",
         "models": [],
         "requires_base_url": True,
+        "endpoint_fields": [
+            {"name": "base_url", "label": "Base URL", "required": True, "secret": False, "type": "url", "placeholder": "https://api.example.com/v1", "description": "OpenAI 兼容视图端点。"}
+        ],
     },
 }
 def _validate_provider_credential_secret_env(row: dict[str, Any]) -> str:
@@ -2008,18 +2017,11 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
                     label="API Key",
                 )
             )
-        endpoint_fields: list[dict[str, Any]] = []
-        if pid == "alibaba":
-            endpoint_fields = [
-                credential_field(name="endpoint_mode", env_var="", label="接入方式", required=False, secret=False),
-                credential_field(name="workspace_id", env_var="", label="Workspace ID", required=False, secret=False),
-                credential_field(name="region", env_var="", label="地域", required=False, secret=False),
-                credential_field(name="base_url", env_var="", label="Base URL", required=False, secret=False),
-            ]
-        elif requires_base_url:
-            endpoint_fields = [
-                credential_field(name="base_url", env_var="", label="Base URL", required=True, secret=False)
-            ]
+        endpoint_fields = [
+            dict(field)
+            for field in (meta.get("endpoint_fields") or [])
+            if isinstance(field, dict)
+        ]
         contract = normalized_setup_contract(
             {
                 "auth_type": meta.get("auth_type", "api_key"),
@@ -2189,6 +2191,21 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
         "default_model": named_custom_entry["default_model"],
         "models": [{"id": item} for item in named_custom_entry["models"]],
     }
+    schema_endpoint_fields = [
+        field
+        for field in (meta.get("endpoint_fields") or [])
+        if isinstance(field, dict) and not bool(field.get("secret"))
+    ]
+    endpoint_updates: dict[str, str] = {}
+    for field in schema_endpoint_fields:
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        default_value = {"endpoint_mode": "public", "region": "cn-beijing"}.get(name, "")
+        value = str(body.get(name) or default_value).strip()
+        if bool(field.get("required")) and not value:
+            raise ValueError(f"{name} is required")
+        endpoint_updates[name] = value
     if not model_id:
         model_id = str(meta.get("default_model") or "").strip()
         models = meta.get("models") if isinstance(meta.get("models"), list) else []
@@ -2278,6 +2295,13 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 vision_cfg.pop("endpoint_mode", None)
                 vision_cfg.pop("region", None)
                 vision_cfg.pop("workspace_id", None)
+            for name, value in endpoint_updates.items():
+                if name in {"endpoint_mode", "region", "workspace_id", "base_url"}:
+                    continue
+                if value:
+                    vision_cfg[name] = value
+                else:
+                    vision_cfg.pop(name, None)
             auxiliary["vision"] = vision_cfg
             config_data["auxiliary"] = auxiliary
             try:
@@ -2612,6 +2636,7 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             model_id = str((models[0] or {}).get("id") or "").strip()
 
     credential_fields = selected.get("credential_fields") if isinstance(selected.get("credential_fields"), list) else []
+    endpoint_fields = selected.get("endpoint_fields") if isinstance(selected.get("endpoint_fields"), list) else []
     inline_secret_supplied = bool(api_key is not None and str(api_key).strip())
     for item in credential_fields:
         if not isinstance(item, dict) or not bool(item.get("secret", True)):
@@ -2635,7 +2660,7 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     env_updates: dict[str, str] = {}
     option_updates: dict[str, str] = {}
     legacy_api_key_consumed = False
-    for item in credential_fields:
+    for item in credential_fields + endpoint_fields:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
@@ -2650,6 +2675,11 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             raw_value = api_key
             legacy_api_key_consumed = True
         value = str(raw_value or "").strip()
+        if not value and bool(item.get("required")) and item in endpoint_fields:
+            raise ValueError(f"{name or env_var} is required")
+        if item in endpoint_fields and name and raw_value is not None:
+            option_updates[name] = value
+            continue
         if not value:
             continue
         if secret:
@@ -2699,8 +2729,15 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                     options = image_cfg.get("options")
                     if not isinstance(options, dict):
                         options = {}
-                    options.update(option_updates)
-                    image_cfg["options"] = options
+                    for name, value in option_updates.items():
+                        if value:
+                            options[name] = value
+                        else:
+                            options.pop(name, None)
+                    if options:
+                        image_cfg["options"] = options
+                    else:
+                        image_cfg.pop("options", None)
                 config_data["image_gen"] = image_cfg
                 _save_yaml_config_file(config_path, config_data)
             except Exception:

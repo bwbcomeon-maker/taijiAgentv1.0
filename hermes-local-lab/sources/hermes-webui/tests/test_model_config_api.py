@@ -387,6 +387,44 @@ def test_vision_yaml_failure_restores_previous_legacy_secret(monkeypatch, tmp_pa
     assert os.environ["DASHSCOPE_API_KEY"] == "old-process-secret"
 
 
+def test_vision_schema_endpoint_field_is_saved_from_legacy_payload(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    meta = dict(model_config._VISION_PROVIDER_META["alibaba"])
+    meta["endpoint_fields"] = list(meta.get("endpoint_fields") or []) + [
+        {"name": "tenant", "label": "Tenant", "required": True, "secret": False}
+    ]
+    monkeypatch.setitem(model_config._VISION_PROVIDER_META, "alibaba", meta)
+
+    model_config.set_vision_config(
+        {"provider": "alibaba", "model": "qwen3-vl-plus", "endpoint_mode": "public", "tenant": "tenant-a"}
+    )
+
+    assert _read_config(tmp_path)["auxiliary"]["vision"]["tenant"] == "tenant-a"
+
+
+def test_image_schema_endpoint_fields_are_saved_as_options(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda _provider: [{
+            "id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable",
+            "default_model": "qwen-image-2.0-pro", "models": [{"id": "qwen-image-2.0-pro"}],
+            "credential_fields": [{"name": "api_key", "env_var": "DASHSCOPE_API_KEY", "secret": True}],
+            "endpoint_fields": [
+                {"name": "tenant", "required": True, "secret": False},
+                {"name": "route", "required": False, "secret": False},
+            ],
+        }],
+    )
+
+    model_config.set_image_gen_config(
+        {"provider": "dashscope", "model": "qwen-image-2.0-pro", "api_key": "legacy-key", "credentials": {"tenant": "tenant-a", "route": "blue"}}
+    )
+
+    assert _read_config(tmp_path)["image_gen"]["options"] == {"tenant": "tenant-a", "route": "blue"}
+
+
 def test_lazy_default_binding_rolls_back_when_config_save_fails(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     original = {
