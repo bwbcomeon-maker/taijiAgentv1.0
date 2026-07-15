@@ -230,7 +230,19 @@ def create_current_office_waiver(
         )
         # Complete all business validation and idempotency checks before the
         # recoverable authorization claim is acquired.
-        create_office_waiver(**waiver_kwargs, persist=False)
+        prevalidated = create_office_waiver(**waiver_kwargs, persist=False)
+        existing_ref = next((
+            item for item in run.get("waiver_refs") or []
+            if isinstance(item, dict)
+            and item.get("waiver_id") == prevalidated.get("waiver_id")
+        ), None)
+        if existing_ref == {
+            "waiver_id": prevalidated["waiver_id"],
+            "target_id": prevalidated["issue_id"],
+            "delivery_binding_sha256": prevalidated["delivery_binding_sha256"],
+            "acceptance_sha256": prevalidated["acceptance_sha256"],
+        }:
+            return prevalidated, run
         claim = None
         try:
             if claim_authorizer_handoff is not None:

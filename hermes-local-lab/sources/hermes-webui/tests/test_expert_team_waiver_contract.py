@@ -382,3 +382,51 @@ def test_waiver_handoff_claim_released_on_validation_or_write_failure(tmp_path, 
     with pytest.raises(OSError, match="disk"):
         create_current_office_waiver(tmp_path, body, authorizer=_authorizer(), now="now", **callbacks)
     assert [row[0] for row in calls] == ["claim", "release"]
+
+
+def test_successful_waiver_replay_returns_existing_without_second_handoff_claim(tmp_path):
+    from tests.test_expert_team_terminal_reconciliation import _completion_fixture
+    from api.expert_teams.waivers import WaiverError, create_current_office_waiver
+
+    run, _binding, acceptance = _completion_fixture(tmp_path)
+    acceptance.update({"decision": "passed_with_conditions", "issues": [_acceptance()["issues"][0]]})
+    root = tmp_path / ".taiji/expert-team-deliveries" / run["run_id"] / "delivery/attempt-1"
+    (root / "expert-team-wps-acceptance.json").write_text(json.dumps(acceptance) + "\n")
+    calls = []
+    consumed = {"value": False}
+
+    def claim(context):
+        if consumed["value"]:
+            raise ValueError("authorizer handoff was already used")
+        calls.append(("claim", context))
+        return "claim-success"
+
+    def commit(claim_id):
+        calls.append(("commit", claim_id))
+        consumed["value"] = True
+
+    callbacks = {
+        "claim_authorizer_handoff": claim,
+        "commit_authorizer_handoff": commit,
+        "release_authorizer_handoff": lambda claim_id: calls.append(("release", claim_id)),
+    }
+    body = {
+        "run_id": run["run_id"], "session_id": run["session_id"], "expected_version": run["version"],
+        "idempotency_key": "waiver-response-lost", "target_id": "office-issue-1", "reason": "approved",
+    }
+    first, updated = create_current_office_waiver(
+        tmp_path, body, authorizer=_authorizer(), now="2026-07-15T13:00:00+08:00", **callbacks
+    )
+    replay, replayed_run = create_current_office_waiver(
+        tmp_path, {**body, "expected_version": updated["version"]},
+        authorizer=_authorizer(), now="2026-07-15T13:01:00+08:00", **callbacks
+    )
+    assert replay == first
+    assert replayed_run["version"] == updated["version"]
+    assert [item[0] for item in calls] == ["claim", "commit"]
+    with pytest.raises(WaiverError) as error:
+        create_current_office_waiver(
+            tmp_path, {**body, "expected_version": updated["version"], "reason": "changed"},
+            authorizer=_authorizer(), now="2026-07-15T13:02:00+08:00", **callbacks
+        )
+    assert error.value.code == "waiver_idempotency_conflict"
