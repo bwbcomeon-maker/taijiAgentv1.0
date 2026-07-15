@@ -86,6 +86,24 @@ run(process.argv[3]).then(value=>process.stdout.write(JSON.stringify(value))).ca
 """
 
 
+_CUSTOM_VISION_ACTIVE_ROW_DRIVER = r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const re=new RegExp('function\\s+'+name+'\\s*\\(');const start=source.search(re);
+ let i=source.indexOf('{',start),depth=1;i++;while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}return source.slice(start,i);}
+function el(tag){return {tag,id:'',textContent:'',disabled:false,title:'',attrs:{},children:[],
+ setAttribute(k,v){this.attrs[k]=v;},appendChild(child){this.children.push(child);},set innerHTML(_v){this.children=[];}};}
+const list=el('list');const $=id=>id==='customVisionProviderList'?list:null;
+const document={createElement:tag=>el(tag)};
+const _modelConfigData={vision_providers:[{id:'custom:relay',name:'Relay',custom:true,active:true,
+ transport_label:'OpenAI Chat Completions',available:true}]};
+const deleteCustomVisionProviderConfig=()=>{};const openCustomVisionProviderEditor=()=>{};
+eval(extractFunc('_modelConfigCustomVisionRows'));eval(extractFunc('_renderCustomVisionProviderList'));
+_renderCustomVisionProviderList(_modelConfigData);
+const row=list.children[0],meta=row.children[0].children[1],button=row.children[1].children[1];
+process.stdout.write(JSON.stringify({text:meta.textContent,disabled:button.disabled,describedBy:button.attrs['aria-describedby'],metaId:meta.id}));
+"""
+
+
 _VISION_RACE_DRIVER = r"""
 const fs=require('fs');
 const source=fs.readFileSync(process.argv[2],'utf8');
@@ -852,6 +870,8 @@ def test_named_custom_vision_provider_management_has_visible_accessible_entry():
         "closeCustomVisionProviderEditor",
         "_customVisionProviderReturnFocus",
         "row.active",
+        "正在使用，需先切换后删除",
+        "aria-describedby",
     ):
         assert marker in PANELS_JS
 
@@ -882,6 +902,22 @@ def test_named_custom_vision_provider_interactions(tmp_path, scenario):
         assert payload["second"] is True
         assert payload["hidden"] is True
         assert payload["focused"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_active_custom_vision_row_explains_delete_block_with_aria_relation(tmp_path):
+    driver = tmp_path / "custom-vision-active-row-driver.js"
+    driver.write_text(_CUSTOM_VISION_ACTIVE_ROW_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert "正在使用，需先切换后删除" in payload["text"]
+    assert payload["disabled"] is True
+    assert payload["describedBy"] == payload["metaId"]
 
 
 def test_settings_menu_does_not_add_auth_keys_section():

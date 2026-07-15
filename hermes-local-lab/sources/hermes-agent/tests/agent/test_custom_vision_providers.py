@@ -198,7 +198,9 @@ def test_named_custom_vision_runtime_fails_closed_for_unsafe_dns(tmp_path, monke
 
 
 def test_named_anthropic_vision_refuses_openai_wire_fallback(monkeypatch):
-    raw_client = object()
+    from types import SimpleNamespace
+
+    raw_client = SimpleNamespace()
     monkeypatch.setattr("agent.auxiliary_client.OpenAI", lambda **_kwargs: raw_client)
     monkeypatch.setattr(
         "agent.auxiliary_client._maybe_wrap_anthropic",
@@ -218,3 +220,177 @@ def test_named_anthropic_vision_refuses_openai_wire_fallback(monkeypatch):
 
     assert client is None
     assert model is None
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_named_custom_vision_without_dedicated_key_never_uses_global_fallback(
+    tmp_path, monkeypatch, async_mode
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("OPENAI_API_KEY", "wrong-global-openai-secret")
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "wrong-legacy-vision-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "auxiliary": {"vision": {"provider": "custom:relay"}},
+        "custom_vision_providers": [{
+            "id": "relay",
+            "base_url": "https://relay.example.com/v1",
+            "models": ["relay-vl"],
+            "transport": "openai_chat_completions",
+        }],
+    }), encoding="utf-8")
+    from agent.auxiliary_client import resolve_vision_provider_client
+
+    with pytest.raises(ValueError, match="credential unavailable"):
+        resolve_vision_provider_client(async_mode=async_mode)
+
+    for key in ("OPENAI_API_KEY", "AUXILIARY_VISION_API_KEY"):
+        os.environ.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_strict_async_named_vision_without_key_fails_before_any_global_fallback(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("OPENAI_API_KEY", "wrong-global-openai-secret")
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "wrong-legacy-vision-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "auxiliary": {"vision": {"provider": "custom:relay"}},
+        "custom_vision_providers": [{
+            "id": "relay", "base_url": "https://relay.example.com/v1",
+            "models": ["relay-vl"], "transport": "openai_chat_completions",
+        }],
+    }), encoding="utf-8")
+    from agent.auxiliary_client import async_call_llm
+
+    with pytest.raises(ValueError, match="credential unavailable"):
+        await async_call_llm(
+            task="vision",
+            messages=[{"role": "user", "content": "inspect"}],
+            no_fallback=True,
+        )
+    for key in ("OPENAI_API_KEY", "AUXILIARY_VISION_API_KEY"):
+        os.environ.pop(key, None)
+
+
+@pytest.mark.parametrize(
+    "broken_entry",
+    [
+        None,
+        {"id": "relay", "base_url": "https://relay.example.com/v1", "models": ["relay-vl"], "transport": "native_magic"},
+        {"id": "relay", "base_url": "http://127.0.0.1/v1", "models": ["relay-vl"], "transport": "openai_chat_completions"},
+        {"id": "relay", "base_url": "https://relay.example.com/v1", "models": ["relay-vl"], "transport": "openai_chat_completions", "api_key_env": "OPENAI_API_KEY"},
+    ],
+)
+def test_missing_or_corrupt_named_vision_never_collides_with_legacy_custom(
+    tmp_path, monkeypatch, broken_entry
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("OPENAI_API_KEY", "wrong-global-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    config = {
+        "auxiliary": {"vision": {"provider": "custom:relay"}},
+        "custom_providers": [{
+            "name": "relay",
+            "base_url": "https://legacy.example.com/v1",
+            "api_key": "legacy-same-name-secret",
+        }],
+    }
+    if broken_entry is not None:
+        config["custom_vision_providers"] = [broken_entry]
+    (home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    from agent.auxiliary_client import _resolve_task_provider_model
+
+    with pytest.raises(ValueError, match="named custom vision provider unavailable"):
+        _resolve_task_provider_model("vision")
+    os.environ.pop("OPENAI_API_KEY", None)
+
+
+def test_named_custom_vision_rejects_model_outside_provider_allowlist(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "auxiliary": {"vision": {"provider": "custom:relay", "model": "other-model"}},
+        "custom_vision_providers": [{
+            "id": "relay", "base_url": "https://relay.example.com/v1",
+            "models": ["relay-vl"], "transport": "openai_chat_completions",
+        }],
+    }), encoding="utf-8")
+    from agent.auxiliary_client import _resolve_task_provider_model
+
+    with pytest.raises(ValueError, match="model unavailable"):
+        _resolve_task_provider_model("vision")
+    os.environ.pop("TAIJI_VISION_CUSTOM_RELAY_API_KEY", None)
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_named_openai_vision_clients_disable_redirects_on_real_transport(
+    tmp_path, monkeypatch, async_mode
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "auxiliary": {"vision": {"provider": "custom:relay"}},
+        "custom_vision_providers": [{
+            "id": "relay", "base_url": "https://relay.example.com/v1",
+            "models": ["relay-vl"], "transport": "openai_chat_completions",
+        }],
+    }), encoding="utf-8")
+    from agent.auxiliary_client import resolve_vision_provider_client
+
+    provider, client, _model = resolve_vision_provider_client(async_mode=async_mode)
+    assert provider == "custom:relay"
+    assert client._client.follow_redirects is False
+    if async_mode:
+        import asyncio
+
+        asyncio.run(client.close())
+    else:
+        client.close()
+    os.environ.pop("TAIJI_VISION_CUSTOM_RELAY_API_KEY", None)
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_named_anthropic_vision_clients_disable_redirects_on_real_transport(
+    tmp_path, monkeypatch, async_mode
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "auxiliary": {"vision": {"provider": "custom:relay"}},
+        "custom_vision_providers": [{
+            "id": "relay", "base_url": "https://relay.example.com/anthropic",
+            "models": ["relay-vl"], "transport": "anthropic_messages",
+        }],
+    }), encoding="utf-8")
+    from agent.auxiliary_client import resolve_vision_provider_client
+
+    provider, client, _model = resolve_vision_provider_client(async_mode=async_mode)
+    assert provider == "custom:relay"
+    assert client._real_client._client.follow_redirects is False
+    if async_mode:
+        import asyncio
+
+        asyncio.run(client.close())
+    else:
+        client.close()
+    os.environ.pop("TAIJI_VISION_CUSTOM_RELAY_API_KEY", None)

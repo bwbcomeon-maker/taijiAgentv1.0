@@ -2251,6 +2251,7 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
 def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
     try:
         from agent.custom_vision_providers import (
+            custom_vision_provider_env_var,
             custom_vision_provider_name,
             normalize_custom_vision_provider_id,
         )
@@ -2259,32 +2260,44 @@ def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
     normalized_id = normalize_custom_vision_provider_id(provider_id)
     provider_name = custom_vision_provider_name(normalized_id)
     config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        auxiliary = config_data.get("auxiliary")
-        vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
-        if str((vision_cfg or {}).get("provider") or "").strip().lower() == provider_name:
-            raise ValueError("该外部识图 Provider 正在使用，请先切换识图配置。")
-        entries = config_data.get("custom_vision_providers")
-        if not isinstance(entries, list):
-            entries = []
-        updated = []
-        removed = False
-        for item in entries:
-            if not isinstance(item, dict):
-                continue
+    env_path = _get_hermes_home() / ".env"
+    secret_env = custom_vision_provider_env_var(normalized_id)
+    with credential_transaction():
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
+            auxiliary = config_data.get("auxiliary")
+            vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+            if str((vision_cfg or {}).get("provider") or "").strip().lower() == provider_name:
+                raise ValueError("该外部识图 Provider 正在使用，请先切换识图配置。")
+            entries = config_data.get("custom_vision_providers")
+            if not isinstance(entries, list):
+                entries = []
+            updated = []
+            removed = False
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    item_id = normalize_custom_vision_provider_id(item.get("id"))
+                except ValueError:
+                    continue
+                if item_id == normalized_id:
+                    removed = True
+                else:
+                    updated.append(item)
+            if not removed:
+                raise ValueError("外部识图 Provider 不存在。")
+            env_snapshot = _credential_env_snapshot(env_path, secret_env)
+            env_touched = False
             try:
-                item_id = normalize_custom_vision_provider_id(item.get("id"))
-            except ValueError:
-                continue
-            if item_id == normalized_id:
-                removed = True
-            else:
-                updated.append(item)
-        if not removed:
-            raise ValueError("外部识图 Provider 不存在。")
-        config_data["custom_vision_providers"] = updated
-        _save_yaml_config_file(config_path, config_data)
+                env_touched = True
+                _write_env_file(env_path, {secret_env: None})
+                config_data["custom_vision_providers"] = updated
+                _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_touched:
+                    _restore_credential_env(env_path, secret_env, env_snapshot)
+                raise
     reload_config()
     invalidate_models_cache()
     return get_custom_vision_provider_configs()

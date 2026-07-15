@@ -106,6 +106,10 @@ def normalize_custom_vision_provider_entry(entry: dict[str, Any]) -> dict[str, A
     if not isinstance(entry, dict):
         raise ValueError("外部识图 Provider 配置必须是对象。")
     provider_id = normalize_custom_vision_provider_id(entry.get("id") or entry.get("provider_id"))
+    expected_env = custom_vision_provider_env_var(provider_id)
+    configured_env = str(entry.get("api_key_env") or expected_env).strip()
+    if configured_env != expected_env:
+        raise ValueError("外部识图 Provider 的密钥环境变量配置已损坏。")
     transport = str(entry.get("transport") or "openai_chat_completions").strip().lower()
     if transport not in ALLOWED_CUSTOM_VISION_TRANSPORTS:
         raise ValueError("transport 只能是 openai_chat_completions 或 anthropic_messages。")
@@ -117,7 +121,7 @@ def normalize_custom_vision_provider_entry(entry: dict[str, Any]) -> dict[str, A
         "id": provider_id,
         "name": str(entry.get("name") or provider_id).strip()[:80] or provider_id,
         "base_url": _normalize_base_url(entry.get("base_url")),
-        "api_key_env": custom_vision_provider_env_var(provider_id),
+        "api_key_env": expected_env,
         "models": models,
         "default_model": default_model,
         "transport": transport,

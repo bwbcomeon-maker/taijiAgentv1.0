@@ -1703,8 +1703,69 @@ def test_custom_vision_provider_delete_rejects_active_provider(monkeypatch, tmp_
         encoding="utf-8",
     )
 
+    (tmp_path / ".env").write_text(
+        "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=active-secret\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "active-secret")
     with pytest.raises(ValueError, match="正在使用"):
         model_config.delete_custom_vision_provider_config("router")
+    assert "active-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert os.environ["TAIJI_VISION_CUSTOM_ROUTER_API_KEY"] == "active-secret"
+    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
+
+
+def test_custom_vision_provider_delete_removes_secret_and_recreate_without_key_is_unconfigured(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "custom_vision_providers": [{
+            "id": "router", "base_url": "https://vision.example.com/v1",
+            "models": ["router-vl"], "transport": "openai_chat_completions",
+        }],
+    }), encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=old-secret\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "old-secret")
+
+    model_config.delete_custom_vision_provider_config("router")
+    assert "TAIJI_VISION_CUSTOM_ROUTER_API_KEY" not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "TAIJI_VISION_CUSTOM_ROUTER_API_KEY" not in os.environ
+
+    result = model_config.set_custom_vision_provider_config({
+        "id": "router", "base_url": "https://vision.example.com/v1",
+        "models": ["router-vl"], "transport": "openai_chat_completions",
+    })
+    assert result["provider"]["available"] is False
+    assert result["provider"]["key_status"]["configured"] is False
+
+
+def test_custom_vision_provider_delete_restores_secret_when_yaml_save_fails(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "custom_vision_providers": [{
+            "id": "router", "base_url": "https://vision.example.com/v1",
+            "models": ["router-vl"], "transport": "openai_chat_completions",
+        }],
+    }), encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=old-secret\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "old-secret")
+    monkeypatch.setattr(
+        model_config, "_save_yaml_config_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        model_config.delete_custom_vision_provider_config("router")
+    assert "old-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert os.environ["TAIJI_VISION_CUSTOM_ROUTER_API_KEY"] == "old-secret"
+    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
 
 
 def test_custom_vision_provider_rejects_unknown_transport(monkeypatch, tmp_path):

@@ -9290,12 +9290,15 @@ function _renderCustomVisionProviderList(data){
   const copy=document.createElement('div');copy.className='custom-image-provider-copy';
   const title=document.createElement('strong');title.textContent=(row.name||row.id)+' · '+row.id;
   const meta=document.createElement('span');meta.textContent=(row.transport_label||'兼容协议')+' · '+(row.available?'已配置':'待配置');
+  meta.id='customVisionProviderStatus-'+String(row.id||'').replace(/[^A-Za-z0-9_-]/g,'-');
+  if(row.active) meta.textContent+=' · 正在使用，需先切换后删除';
   copy.appendChild(title);copy.appendChild(meta);
   const actions=document.createElement('div');actions.className='custom-image-provider-actions';
   const edit=document.createElement('button');edit.className='btn-tiny';edit.type='button';edit.textContent='编辑';
   edit.setAttribute('aria-label','编辑 '+(row.name||row.id));edit.onclick=()=>openCustomVisionProviderEditor(row.id);
   const del=document.createElement('button');del.className='btn-tiny';del.type='button';del.textContent='删除';
   del.setAttribute('aria-label','删除 '+(row.name||row.id));del.disabled=!!row.active;
+  if(row.active) del.setAttribute('aria-describedby',meta.id);
   if(row.active) del.title='正在使用，请先切换识图配置';
   del.onclick=()=>deleteCustomVisionProviderConfig(row.id,del);
   actions.appendChild(edit);actions.appendChild(del);item.appendChild(copy);item.appendChild(actions);list.appendChild(item);

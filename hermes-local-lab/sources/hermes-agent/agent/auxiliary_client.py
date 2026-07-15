@@ -1087,6 +1087,13 @@ class AsyncAnthropicAuxiliaryClient:
         # eviction on a poisoned underlying client also drops this entry.
         self._real_client = sync_wrapper._real_client
 
+    async def close(self) -> None:
+        import asyncio
+
+        close_fn = getattr(self._real_client, "close", None)
+        if callable(close_fn):
+            await asyncio.to_thread(close_fn)
+
 
 def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
     """True if the endpoint at ``base_url`` speaks the Anthropic Messages
@@ -3074,6 +3081,13 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
         "api_key": sync_client.api_key,
         "base_url": str(sync_client.base_url),
     }
+    follow_redirects = getattr(sync_client, "_taiji_follow_redirects", None)
+    if follow_redirects is not None:
+        import httpx
+
+        async_kwargs["http_client"] = httpx.AsyncClient(
+            follow_redirects=bool(follow_redirects)
+        )
     sync_base_url = str(sync_client.base_url)
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
         async_kwargs["default_headers"] = build_or_headers()
@@ -3394,6 +3408,8 @@ def resolve_provider_client(
 
                 extra["http_client"] = httpx.Client(follow_redirects=follow_redirects)
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
+            if follow_redirects is not None:
+                client._taiji_follow_redirects = bool(follow_redirects)
             wrapped_client = _maybe_wrap_anthropic(
                 client,
                 final_model,
@@ -4576,27 +4592,33 @@ def _resolve_task_provider_model(
         )
 
         entry = find_custom_vision_provider_entry(selected_provider)
-        if entry is not None:
-            named_base_url = base_url or entry["base_url"]
-            if not is_custom_vision_base_url_safe(named_base_url):
-                raise ValueError("unsafe custom vision endpoint")
-            named_key = (
-                api_key
-                if api_key is not None
-                else os.getenv(entry["api_key_env"], "").strip() or None
-            )
-            named_mode = (
-                "anthropic_messages"
-                if entry["transport"] == "anthropic_messages"
-                else "chat_completions"
-            )
-            return (
-                str(selected_provider).strip().lower(),
-                resolved_model or entry["default_model"],
-                named_base_url,
-                named_key,
-                named_mode,
-            )
+        if entry is None:
+            raise ValueError("named custom vision provider unavailable")
+        named_model = resolved_model or entry["default_model"]
+        if named_model not in entry["models"]:
+            raise ValueError("named custom vision model unavailable")
+        named_base_url = base_url or entry["base_url"]
+        if not is_custom_vision_base_url_safe(named_base_url):
+            raise ValueError("unsafe custom vision endpoint")
+        named_key = (
+            str(api_key).strip()
+            if api_key is not None and str(api_key).strip()
+            else os.getenv(entry["api_key_env"], "").strip()
+        )
+        if not named_key:
+            raise ValueError("named custom vision credential unavailable")
+        named_mode = (
+            "anthropic_messages"
+            if entry["transport"] == "anthropic_messages"
+            else "chat_completions"
+        )
+        return (
+            str(selected_provider).strip().lower(),
+            named_model,
+            named_base_url,
+            named_key,
+            named_mode,
+        )
     if task == "vision" and selected_provider == "alibaba":
         saved_alibaba = cfg_provider == "alibaba"
         alibaba_base_url = (
