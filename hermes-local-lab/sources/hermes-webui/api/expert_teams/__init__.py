@@ -40,6 +40,7 @@ from .runtime import (
     start_expert_team,
     submit_expert_team_stage_input,
     update_expert_team_document_brief,
+    verified_source_context_for_execution,
     confirm_expert_team_document_brief,
 )
 from .view import expert_team_run_view
@@ -87,5 +88,6 @@ __all__ = [
     "start_expert_team",
     "submit_expert_team_stage_input",
     "update_expert_team_document_brief",
+    "verified_source_context_for_execution",
     "confirm_expert_team_document_brief",
 ]

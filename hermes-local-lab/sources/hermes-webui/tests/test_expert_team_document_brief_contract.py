@@ -366,7 +366,7 @@ def test_brief_update_and_confirm_reuse_run_version_and_do_not_auto_start(tmp_pa
     assert confirmed["view"]["brief"]["validation"]["release_candidate"] is True
     assert confirmed["view"]["brief"]["validation"]["enterprise_released"] is False
     snapshot = confirmed["source_context_snapshot_ref"]
-    assert (tmp_path / snapshot["path"]).is_file()
+    assert (tmp_path / snapshot["relative_path"]).is_file()
 
     starting = expert_teams.reserve_expert_team_execution_start(
         tmp_path,

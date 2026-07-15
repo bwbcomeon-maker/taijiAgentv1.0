@@ -1254,7 +1254,7 @@ def _expert_team_execution_prompt(run: dict) -> str:
     raise ValueError(f"Expert team cannot start chat stream: {team_id or 'missing team_id'}")
 
 
-def _expert_team_enterprise_gateway_request(run: dict) -> dict:
+def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
     """Thin route seam; prompt policy and serialization live in expert_teams.prompts."""
     from api.expert_teams.prompts import build_stage_gateway_request
 
@@ -1287,7 +1287,21 @@ def _expert_team_enterprise_gateway_request(run: dict) -> dict:
             },
             "feedback": feedback,
         }
-    return build_stage_gateway_request(run, stage, revision_feedback=revision_context)
+    source_context = None
+    if (str(run.get("team_id") or ""), stage["id"]) in {
+        ("content-creator-team", "materials"),
+        ("deep-research-team", "research"),
+        ("deep-research-team", "evidence"),
+    }:
+        from api import expert_teams
+
+        source_context = expert_teams.verified_source_context_for_execution(workspace, run)
+    return build_stage_gateway_request(
+        run,
+        stage,
+        revision_feedback=revision_context,
+        source_context=source_context,
+    )
 
 
 def _expert_team_execution_display_message(run: dict) -> str:
@@ -2443,7 +2457,7 @@ def _start_expert_team_execution(
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
         enterprise_gateway_request = None
         if expert_teams.classify_contract_version(run) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
-            enterprise_gateway_request = _expert_team_enterprise_gateway_request(run)
+            enterprise_gateway_request = _expert_team_enterprise_gateway_request(workspace, run)
             execution_prompt = ""
         else:
             execution_prompt = _expert_team_execution_prompt(run)
@@ -2622,6 +2636,7 @@ def _start_expert_team_execution(
             "system_template_version": str((enterprise_gateway_request or {}).get("system_template_version") or ""),
             "system_template_sha256": str((enterprise_gateway_request or {}).get("system_template_sha256") or ""),
             "data_envelope_sha256": str((enterprise_gateway_request or {}).get("data_envelope_sha256") or ""),
+            "expert_team_input_refs": copy.deepcopy((enterprise_gateway_request or {}).get("input_refs") or []),
         },
     )
 

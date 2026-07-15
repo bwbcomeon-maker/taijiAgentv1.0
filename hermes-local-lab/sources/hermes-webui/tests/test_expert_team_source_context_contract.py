@@ -78,12 +78,13 @@ def test_source_context_snapshot_is_immutable_and_segment_hashes_recompute(tmp_p
         brief_sha256="b" * 64,
         brief_revision=2,
     )
-    payload = json.loads((tmp_path / ref["path"]).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "source-context-snapshot/v1"
+    payload = json.loads((tmp_path / ref["relative_path"]).read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "expert-source-context/v1"
     assert payload["brief_sha256"] == "b" * 64
-    assert len(payload["segments"]) >= 2
-    for segment in payload["segments"]:
-        assert segment["sha256"] == hashlib.sha256(segment["text"].encode("utf-8")).hexdigest()
+    assert ref["snapshot_id"] == "source-context-0002"
+    assert len(payload["sources"][0]["segments"]) >= 2
+    for segment in payload["sources"][0]["segments"]:
+        assert segment["text_sha256"] == hashlib.sha256(segment["text"].encode("utf-8")).hexdigest()
 
     same = build_source_context_snapshot(
         tmp_path,
@@ -94,3 +95,123 @@ def test_source_context_snapshot_is_immutable_and_segment_hashes_recompute(tmp_p
         brief_revision=2,
     )
     assert same == ref
+
+
+def _confirmed_run(tmp_path):
+    from api.expert_teams.contracts import brief_digest
+    from api.expert_teams.source_context import build_source_context_snapshot
+    from api.expert_teams.source_registry import resolve_source_registry
+
+    source = tmp_path / "material.txt"
+    source.write_text("已完成重点任务 3 项。\n待协调事项 2 项。", encoding="utf-8")
+    refs, registry = resolve_source_registry(
+        tmp_path,
+        "et-verify",
+        [{"source_id": "SRC-001", "kind": "local_file", "label": "月度材料", "locator": "material.txt"}],
+    )
+    brief = {
+        "schema_version": "document-brief/v1",
+        "status": "confirmed",
+        "revision": 1,
+        "confirmed_revision": 1,
+        "confirmed_at": "2026-07-15T10:00:00+08:00",
+        "confirmed_sha256": "",
+        "source_policy": {"source_refs": refs},
+    }
+    brief["confirmed_sha256"] = brief_digest(brief)
+    ref = build_source_context_snapshot(
+        tmp_path,
+        "et-verify",
+        brief,
+        registry,
+        brief_sha256=brief["confirmed_sha256"],
+        brief_revision=1,
+    )
+    return {"run_id": "et-verify", "document_brief": brief, "source_context_snapshot_ref": ref}
+
+
+def test_execution_reverifies_snapshot_brief_and_extractor_identity(tmp_path):
+    from api.expert_teams.source_context import DEFAULT_EXTRACTOR_IDENTITY, verify_source_context_snapshot
+
+    run = _confirmed_run(tmp_path)
+    payload = verify_source_context_snapshot(tmp_path, run, extractor_identity=DEFAULT_EXTRACTOR_IDENTITY)
+    assert payload["sources"][0]["content_text"].startswith("已完成重点任务")
+
+    drifted = {**DEFAULT_EXTRACTOR_IDENTITY, "extractor_version": "2"}
+    with pytest.raises(ValueError, match="new run"):
+        verify_source_context_snapshot(tmp_path, run, extractor_identity=drifted)
+
+    run["document_brief"]["source_policy"]["source_refs"][0]["label"] = "确认后被修改"
+    with pytest.raises(ValueError, match="new run"):
+        verify_source_context_snapshot(tmp_path, run, extractor_identity=DEFAULT_EXTRACTOR_IDENTITY)
+
+
+def test_execution_rejects_missing_modified_or_symlinked_snapshot(tmp_path):
+    from api.expert_teams.source_context import verify_source_context_snapshot
+
+    run = _confirmed_run(tmp_path)
+    target = tmp_path / run["source_context_snapshot_ref"]["relative_path"]
+    target.chmod(0o600)
+    original = target.read_text(encoding="utf-8")
+    target.write_text(original.replace("重点任务", "篡改任务", 1), encoding="utf-8")
+    with pytest.raises(ValueError, match="hash changed"):
+        verify_source_context_snapshot(tmp_path, run)
+
+    target.unlink()
+    with pytest.raises(ValueError, match="missing or unsafe"):
+        verify_source_context_snapshot(tmp_path, run)
+
+    outside = tmp_path / "outside.json"
+    outside.write_text(original, encoding="utf-8")
+    target.symlink_to(outside)
+    with pytest.raises(ValueError, match="missing or unsafe"):
+        verify_source_context_snapshot(tmp_path, run)
+
+
+def test_materials_prompt_consumes_verified_real_segments_and_binds_snapshot(tmp_path):
+    from api.expert_teams.prompts import build_stage_gateway_request
+    from api.expert_teams.source_context import verify_source_context_snapshot
+
+    run = _confirmed_run(tmp_path)
+    run.update(
+        {
+            "team_id": "content-creator-team",
+            "stage_outputs": [
+                {
+                    "task_id": "plan",
+                    "status": "approved",
+                    "artifact": {
+                        "artifact_id": "art-plan",
+                        "sha256": "1" * 64,
+                        "artifact_type": "writing_plan",
+                        "payload": {"goal": "整理材料"},
+                    },
+                }
+            ],
+        }
+    )
+    snapshot = verify_source_context_snapshot(tmp_path, run)
+    request = build_stage_gateway_request(
+        run,
+        {"id": "materials", "executor": "model", "artifact_type": "material_ledger", "depends_on": ["plan"]},
+        source_context=snapshot,
+    )
+    envelope = json.loads(request["messages"][1]["content"])
+    assert envelope["source_context"]["snapshot_id"] == run["source_context_snapshot_ref"]["snapshot_id"]
+    assert envelope["source_context"]["snapshot_sha256"] == run["source_context_snapshot_ref"]["sha256"]
+    assert envelope["source_context"]["sources"][0]["segments"][0]["text"].startswith("已完成重点任务")
+    assert "已完成重点任务" not in request["messages"][0]["content"]
+    assert request["input_refs"][-1] == {
+        "ref_type": "source_context",
+        "snapshot_id": run["source_context_snapshot_ref"]["snapshot_id"],
+        "sha256": run["source_context_snapshot_ref"]["sha256"],
+    }
+
+    snapshot["snapshot_sha256"] = "0" * 64
+    with pytest.raises(ValueError) as error:
+        build_stage_gateway_request(
+            run,
+            {"id": "materials", "executor": "model", "artifact_type": "material_ledger", "depends_on": ["plan"]},
+            source_context=snapshot,
+        )
+    assert error.value.code == "source_context_binding_mismatch"

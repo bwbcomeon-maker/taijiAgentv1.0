@@ -155,19 +155,40 @@ def build_stage_gateway_request(
         source_value = deepcopy(source_context if source_context is not None else run.get("verified_source_context"))
         if source_value is None:
             raise PromptContractError("source_context_required", "当前阶段缺少已验证资料快照")
+        snapshot_ref = run.get("source_context_snapshot_ref")
+        if not isinstance(snapshot_ref, dict) or (
+            source_value.get("snapshot_id") != snapshot_ref.get("snapshot_id")
+            or source_value.get("snapshot_sha256") != snapshot_ref.get("sha256")
+            or source_value.get("brief_sha256") != snapshot_ref.get("brief_sha256")
+        ):
+            raise PromptContractError("source_context_binding_mismatch", "资料快照与当前任务绑定不一致")
 
+    approved_inputs = approved_inputs_for_stage(run, str(declared["id"]))
     envelope = {
         "schema_version": DATA_ENVELOPE_VERSION,
         "document_brief": deepcopy(brief),
-        "approved_input_artifacts": approved_inputs_for_stage(run, str(declared["id"])),
+        "approved_input_artifacts": approved_inputs,
         "source_context": source_value,
         "revision_context": _revision_context(revision_feedback),
     }
     system = _system_message(str(declared["artifact_type"]))
     user = _canonical_json(envelope)
+    input_refs = [
+        {"ref_type": "stage_artifact", "artifact_id": item["artifact_id"], "sha256": item["sha256"]}
+        for item in approved_inputs
+    ]
+    if source_value is not None:
+        input_refs.append(
+            {
+                "ref_type": "source_context",
+                "snapshot_id": source_value["snapshot_id"],
+                "sha256": source_value["snapshot_sha256"],
+            }
+        )
     return {
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "tools_disabled": True,
+        "input_refs": input_refs,
         "system_template_version": SYSTEM_TEMPLATE_VERSION,
         "system_template_sha256": _sha256(system),
         "data_envelope_sha256": _sha256(user),

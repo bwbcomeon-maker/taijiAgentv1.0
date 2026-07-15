@@ -25,7 +25,7 @@ from .contracts import (
     validate_document_brief,
 )
 from .data_egress import load_model_policy_registry
-from .source_context import build_source_context_snapshot
+from .source_context import build_source_context_snapshot, verify_source_context_snapshot
 from .source_registry import SourceRegistryError, resolve_source_registry
 from .documents import (
     FinalDocumentDeliveryError,
@@ -1435,6 +1435,13 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
 def read_expert_team_run(workspace: Path, run_id: str) -> dict:
     run = _refresh_artifact_existence(workspace, read_run(workspace, run_id))
     return _sync_derived(_completion_integrity_for_read(workspace, run))
+
+
+def verified_source_context_for_execution(workspace: Path, run: dict) -> dict:
+    """Re-open and verify the confirmation-time snapshot immediately before dispatch."""
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        raise ContractError("source_context_not_available", "contract_version", "历史任务没有企业资料快照")
+    return verify_source_context_snapshot(workspace, run)
 
 
 def latest_expert_team_run_for_session(workspace: Path, session_id: str) -> dict:
