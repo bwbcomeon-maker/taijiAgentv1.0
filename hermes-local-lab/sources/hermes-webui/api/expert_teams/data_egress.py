@@ -1,0 +1,64 @@
+"""Trusted model-data policy validation for expert-team document briefs."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+
+def _error(field: str, code: str, message: str) -> dict:
+    return {"field": field, "code": code, "message": message}
+
+
+def validate_model_policy_reference(brief: dict, *, model_policy_registry: dict, now: str) -> dict:
+    """Return a safe validation result; never echo provider credentials or endpoints."""
+    handling = brief.get("data_handling") if isinstance(brief.get("data_handling"), dict) else {}
+    control = brief.get("document_control") if isinstance(brief.get("document_control"), dict) else {}
+    policy_id = str(handling.get("model_policy_id") or "").strip()
+    policy = model_policy_registry.get(policy_id) if isinstance(model_policy_registry, dict) else None
+    denied = {
+        "authorized": False,
+        "policy_id": policy_id,
+        "label": "",
+        "field_errors": [_error("data_handling.model_policy_id", "data_egress_not_authorized", "当前文档未配置可用的企业模型数据策略")],
+    }
+    if not policy_id or not isinstance(policy, dict):
+        return denied
+
+    required_lists = (
+        "allowed_classifications",
+        "provider_ids",
+        "deployment_ids",
+        "trust_zones",
+        "retention_modes",
+        "allowed_source_kinds",
+    )
+    if any(not isinstance(policy.get(key), list) or not policy.get(key) for key in required_lists):
+        return denied
+    if not str(policy.get("approval_ref") or "").strip():
+        return denied
+    try:
+        expires_at = datetime.fromisoformat(str(policy.get("expires_at") or ""))
+        checked_at = datetime.fromisoformat(str(now))
+        if expires_at <= checked_at:
+            return denied
+    except (TypeError, ValueError):
+        return denied
+
+    classification = str(control.get("classification") or "").strip()
+    if classification not in policy["allowed_classifications"]:
+        return denied
+    if bool(handling.get("requires_zero_retention")) and "zero_retention" not in policy["retention_modes"]:
+        return denied
+    if policy.get("training_opt_out_required") is not True:
+        return denied
+    if classification in {"restricted", "custom"} and any(
+        "*" in policy[key] for key in ("provider_ids", "deployment_ids", "trust_zones")
+    ):
+        return denied
+
+    return {
+        "authorized": True,
+        "policy_id": policy_id,
+        "label": str(policy.get("label") or policy_id),
+        "field_errors": [],
+    }
