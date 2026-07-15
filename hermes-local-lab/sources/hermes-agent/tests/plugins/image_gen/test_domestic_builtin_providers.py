@@ -21,6 +21,7 @@ def _clear_env(monkeypatch):
         "DASHSCOPE_REGION",
         "DASHSCOPE_ENDPOINT_MODE",
         "DASHSCOPE_BASE_URL",
+        "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY",
         "QIANFAN_API_KEY",
         "GLM_API_KEY",
         "MINIMAX_API_KEY",
@@ -233,6 +234,65 @@ class TestDashScopeQwenImageProvider:
         assert mock_post.call_args.args[0] == (
             "https://llm-demo.cn-beijing.maas.aliyuncs.com/api/v1/services/"
             "aigc/multimodal-generation/generation"
+        )
+
+    def test_quick_credential_public_options_ignore_legacy_endpoint_env(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv(
+            "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY", "quick-secret"
+        )
+        monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
+        monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://legacy.example.com")
+        monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "legacy-workspace")
+        monkeypatch.setenv("DASHSCOPE_REGION", "ap-southeast-1")
+        config = {
+            "provider_credentials": [
+                {
+                    "id": "taiji-alibaba-quick",
+                    "provider_family": "alibaba_dashscope",
+                    "label": "Alibaba quick setup",
+                    "auth_type": "api_key",
+                    "secret_env": (
+                        "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY"
+                    ),
+                }
+            ],
+            "image_gen": {
+                "provider": "dashscope",
+                "credential_ref": "taiji-alibaba-quick",
+                "options": {
+                    "endpoint_mode": "public",
+                    "region": "cn-beijing",
+                },
+            },
+        }
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        payload = {"output": {"image": "https://dashscope/result.png"}}
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.post",
+                return_value=_response(payload),
+            ) as mock_post,
+            patch(
+                "plugins.image_gen.dashscope._save_safe_image_url",
+                return_value=Path("/tmp/result.png"),
+            ),
+        ):
+            result = DashScopeQwenImageProvider().generate("A city skyline")
+
+        assert result["success"] is True
+        assert mock_post.call_args.args[0] == (
+            "https://dashscope.aliyuncs.com/api/v1/services/"
+            "aigc/multimodal-generation/generation"
+        )
+        assert mock_post.call_args.kwargs["headers"]["Authorization"] == (
+            "Bearer quick-secret"
         )
 
     def test_named_credential_config_load_failure_never_uses_legacy_state(
@@ -521,6 +581,104 @@ class TestDashScopeQwenImageProvider:
 
         assert saved == Path("/tmp/safe.png")
         assert mock_get.call_args.kwargs["allow_redirects"] is False
+
+    def test_safe_image_download_redacts_signed_url_on_connection_error(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
+            ],
+        )
+        signed_url = (
+            "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
+            "?Signature=must-not-leak&AccessKeyId=must-not-leak"
+        )
+        from plugins.image_gen.dashscope import _save_safe_image_url
+
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.get",
+                side_effect=requests.ConnectionError(
+                    f"connection failed for {signed_url}"
+                ),
+            ),
+            pytest.raises(ValueError) as exc_info,
+        ):
+            _save_safe_image_url(signed_url)
+
+        assert str(exc_info.value) == "DashScope image download request failed"
+        assert "Signature" not in str(exc_info.value)
+
+    def test_safe_image_download_redacts_signed_url_on_http_error(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
+            ],
+        )
+        signed_url = (
+            "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
+            "?Signature=must-not-leak"
+        )
+        response = _download_response(
+            status=403, headers={"Content-Type": "application/xml"}
+        )
+        response.raise_for_status.side_effect = requests.HTTPError(
+            f"403 Client Error for url: {signed_url}"
+        )
+        from plugins.image_gen.dashscope import _save_safe_image_url
+
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.get", return_value=response
+            ),
+            pytest.raises(ValueError) as exc_info,
+        ):
+            _save_safe_image_url(signed_url)
+
+        assert str(exc_info.value) == "DashScope image download request failed"
+        assert "Signature" not in str(exc_info.value)
+        response.close.assert_called_once()
+
+    def test_safe_image_download_redacts_signed_url_on_stream_error(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
+            ],
+        )
+        signed_url = (
+            "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
+            "?Signature=must-not-leak"
+        )
+        response = _download_response(
+            headers={"Content-Type": "image/png"}, chunks=()
+        )
+        response.iter_content.side_effect = requests.ConnectionError(
+            f"stream failed for {signed_url}"
+        )
+        from plugins.image_gen.dashscope import _save_safe_image_url
+
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.get", return_value=response
+            ),
+            pytest.raises(ValueError) as exc_info,
+        ):
+            _save_safe_image_url(signed_url)
+
+        assert str(exc_info.value) == "DashScope image download request failed"
+        assert "Signature" not in str(exc_info.value)
+        response.close.assert_called_once()
 
     @pytest.mark.parametrize("private_ip", ["127.0.0.1", "10.0.0.8", "192.168.1.9"])
     def test_dashscope_oss_exception_only_allows_proxy_benchmark_range(

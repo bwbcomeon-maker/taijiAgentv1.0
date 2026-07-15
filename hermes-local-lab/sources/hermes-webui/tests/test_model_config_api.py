@@ -23,6 +23,9 @@ from api import model_config
 def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.delenv(
+        "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY", raising=False
+    )
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(model_config, "_get_hermes_home", lambda: tmp_path)
@@ -1602,9 +1605,19 @@ def test_alibaba_single_key_configures_public_vision_and_image_atomically(
         "default": "deepseek-chat",
     }
     assert saved["unrelated"] == {"keep": True}
+    assert saved["provider_credentials"] == [
+        {
+            "id": "taiji-alibaba-quick",
+            "provider_family": "alibaba_dashscope",
+            "label": "阿里百炼快速配置",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY",
+        }
+    ]
     assert saved["auxiliary"]["vision"] == {
         "provider": "alibaba",
         "model": "qwen3-vl-plus",
+        "credential_ref": "taiji-alibaba-quick",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "endpoint_mode": "public",
         "region": "cn-beijing",
@@ -1614,6 +1627,7 @@ def test_alibaba_single_key_configures_public_vision_and_image_atomically(
         "provider": "dashscope",
         "model": "qwen-image-2.0-pro",
         "use_gateway": False,
+        "credential_ref": "taiji-alibaba-quick",
         "options": {
             "temperature": "0.4",
             "endpoint_mode": "public",
@@ -1621,12 +1635,51 @@ def test_alibaba_single_key_configures_public_vision_and_image_atomically(
         },
         "endpoint_field_names": ["endpoint_mode", "region"],
     }
-    assert "DASHSCOPE_API_KEY=single-test-key" in (
+    assert "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY=single-test-key" in (
         tmp_path / ".env"
     ).read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY" not in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
     assert "single-test-key" not in json.dumps(result, ensure_ascii=False)
-    assert result["vision"]["model"] == "qwen3-vl-plus"
-    assert result["image_gen"]["model"] == "qwen-image-2.0-pro"
+    assert result["vision"] == {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "credential_ref": "taiji-alibaba-quick",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+        "key_status": {
+            "configured": True,
+            "source": "env_file",
+            "env_var": "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY",
+        },
+        "verification": {
+            "status": "configured_unverified",
+            "checked_at": "",
+            "error_code": "",
+            "message": "识图配置已保存，但尚未通过真实图片验证。",
+            "diagnostic_id": "",
+        },
+    }
+    assert result["image_gen"] == {
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+        "credential_ref": "taiji-alibaba-quick",
+        "options": {"endpoint_mode": "public", "region": "cn-beijing"},
+        "key_status": {
+            "configured": True,
+            "source": "env_file",
+            "env_var": "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY",
+        },
+        "verification": {
+            "status": "configured_unverified",
+            "checked_at": "",
+            "error_code": "",
+            "message": "生图配置已保存，但尚未通过真实生图验证。",
+            "diagnostic_id": "",
+        },
+    }
     assert vision_invalidations == [True]
     assert image_invalidations == [True]
 
@@ -1645,10 +1698,109 @@ def test_alibaba_single_key_blank_key_preserves_existing_secret(monkeypatch, tmp
         }
     )
 
-    assert "DASHSCOPE_API_KEY=existing-test-key" in (
-        tmp_path / ".env"
-    ).read_text(encoding="utf-8")
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY=existing-test-key" in env_text
+    assert (
+        "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY=existing-test-key"
+        in env_text
+    )
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == (
+        "taiji-alibaba-quick"
+    )
+    assert saved["image_gen"]["credential_ref"] == "taiji-alibaba-quick"
     assert "existing-test-key" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_alibaba_single_key_explicit_ref_beats_another_default_credential(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "alibaba-default",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Other default",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                        "default": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=other-default-key\n",
+        encoding="utf-8",
+    )
+
+    model_config.set_alibaba_image_capabilities(
+        {
+            "api_key": "quick-test-key",
+            "vision_model": "qwen3-vl-plus",
+            "image_model": "qwen-image-2.0-pro",
+        }
+    )
+
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == (
+        "taiji-alibaba-quick"
+    )
+    assert saved["image_gen"]["credential_ref"] == "taiji-alibaba-quick"
+    from agent.provider_credentials import resolve_api_key
+
+    assert resolve_api_key(
+        "alibaba",
+        saved["auxiliary"]["vision"]["credential_ref"],
+        config_data=saved,
+    ) == "quick-test-key"
+    assert resolve_api_key(
+        "dashscope",
+        saved["image_gen"]["credential_ref"],
+        config_data=saved,
+    ) == "quick-test-key"
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        {
+            "id": "taiji-alibaba-quick",
+            "provider_family": "zhipu",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY",
+        },
+        {
+            "id": "taiji-alibaba-quick",
+            "provider_family": "alibaba_dashscope",
+            "auth_type": "api_key",
+            "secret_env": "WRONG_ENV",
+        },
+    ],
+)
+def test_alibaba_single_key_rejects_invalid_reserved_credential_row(
+    monkeypatch, tmp_path, bad_row
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    original = {"provider_credentials": [bad_row]}
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="凭据|Provider|Secret"):
+        model_config.set_alibaba_image_capabilities(
+            {
+                "api_key": "new-test-key",
+                "vision_model": "qwen3-vl-plus",
+                "image_model": "qwen-image-2.0-pro",
+            }
+        )
+
+    assert _read_config(tmp_path) == original
 
 
 @pytest.mark.parametrize(
@@ -1706,6 +1858,34 @@ def test_alibaba_single_key_rolls_back_env_and_config_on_save_failure(
     assert (tmp_path / ".env").read_text(encoding="utf-8").strip() == (
         "DASHSCOPE_API_KEY=old-test-key"
     )
+
+
+def test_alibaba_single_key_reports_refresh_pending_after_committed_save(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("refresh failed")),
+    )
+
+    result = model_config.set_alibaba_image_capabilities(
+        {
+            "api_key": "new-test-key",
+            "vision_model": "qwen3-vl-plus",
+            "image_model": "qwen-image-2.0-pro",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["refresh_pending"] is True
+    assert result["warnings"] == ["runtime_config_refresh_pending"]
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == (
+        "taiji-alibaba-quick"
+    )
+    assert saved["image_gen"]["credential_ref"] == "taiji-alibaba-quick"
 
 
 def test_alibaba_vision_config_rejects_model_outside_server_allowlist(monkeypatch, tmp_path):

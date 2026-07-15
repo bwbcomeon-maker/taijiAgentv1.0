@@ -83,6 +83,17 @@ _VISION_KEY_ENV: dict[str, str] = {
     "zai": "GLM_API_KEY",
     "custom": "AUXILIARY_VISION_API_KEY",
 }
+_ALIBABA_QUICK_CREDENTIAL_ID = "taiji-alibaba-quick"
+_ALIBABA_QUICK_CREDENTIAL_ENV = credential_secret_env(
+    _ALIBABA_QUICK_CREDENTIAL_ID
+)
+_ALIBABA_QUICK_CREDENTIAL_ROW = {
+    "id": _ALIBABA_QUICK_CREDENTIAL_ID,
+    "provider_family": "alibaba_dashscope",
+    "label": "阿里百炼快速配置",
+    "auth_type": "api_key",
+    "secret_env": _ALIBABA_QUICK_CREDENTIAL_ENV,
+}
 _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
     "alibaba": {
         "name": "阿里百炼 Qwen-VL",
@@ -2428,28 +2439,63 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
     if image_model not in image_models:
         raise ValueError(f"unknown Alibaba image model: {image_model}")
 
-    secret_value = str(body.get("api_key") or "").strip()
+    requested_secret = str(body.get("api_key") or "").strip()
     env_path = _get_hermes_home() / ".env"
-    if not secret_value and not _key_status_for_env("DASHSCOPE_API_KEY").get(
-        "configured"
-    ):
-        raise ValueError("api_key is required")
-
     config_path = _get_config_path()
     with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
             original_config = copy.deepcopy(config_data)
-            env_snapshot = (
-                _credential_env_snapshot(env_path, "DASHSCOPE_API_KEY")
-                if secret_value
-                else None
+            previous_index, previous_row = _provider_credential_row(
+                config_data, _ALIBABA_QUICK_CREDENTIAL_ID
+            )
+            if previous_row is not None:
+                if provider_family(previous_row.get("provider_family")) != (
+                    "alibaba_dashscope"
+                ):
+                    raise ValueError(
+                        "快速配置保留凭据属于不同 Provider。"
+                    )
+                if (
+                    str(previous_row.get("auth_type") or "api_key")
+                    .strip()
+                    .lower()
+                    != "api_key"
+                ):
+                    raise ValueError("快速配置保留凭据必须使用 API Key。")
+                _validate_provider_credential_secret_env(previous_row)
+
+            env_values = _load_env_file(env_path)
+            quick_secret = str(
+                env_values.get(_ALIBABA_QUICK_CREDENTIAL_ENV)
+                or os.getenv(_ALIBABA_QUICK_CREDENTIAL_ENV)
+                or ""
+            ).strip()
+            legacy_secret = str(
+                env_values.get("DASHSCOPE_API_KEY")
+                or os.getenv("DASHSCOPE_API_KEY")
+                or ""
+            ).strip()
+            secret_value = requested_secret or quick_secret or legacy_secret
+            if not secret_value:
+                raise ValueError("api_key is required")
+
+            env_snapshot = _credential_env_snapshot(
+                env_path, _ALIBABA_QUICK_CREDENTIAL_ENV
             )
             env_touched = False
             try:
-                if secret_value:
-                    env_touched = True
-                    _write_env_file(env_path, {"DASHSCOPE_API_KEY": secret_value})
+                env_touched = True
+                _write_env_file(
+                    env_path,
+                    {_ALIBABA_QUICK_CREDENTIAL_ENV: secret_value},
+                )
+                _replace_provider_credential_row(
+                    config_data,
+                    _ALIBABA_QUICK_CREDENTIAL_ID,
+                    dict(_ALIBABA_QUICK_CREDENTIAL_ROW),
+                    preferred_index=previous_index,
+                )
 
                 auxiliary = config_data.get("auxiliary")
                 if not isinstance(auxiliary, dict):
@@ -2468,6 +2514,7 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
                     {
                         "provider": "alibaba",
                         "model": vision_model,
+                        "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
                         "base_url": build_vision_base_url(
                             endpoint_mode="public", region="cn-beijing"
                         ),
@@ -2501,6 +2548,7 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
                         "provider": "dashscope",
                         "model": image_model,
                         "use_gateway": False,
+                        "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
                         "options": options,
                         "endpoint_field_names": ["endpoint_mode", "region"],
                     }
@@ -2508,10 +2556,12 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
                 config_data["image_gen"] = image_cfg
                 _save_yaml_config_file(config_path, config_data)
             except Exception:
-                if env_touched and env_snapshot is not None:
+                if env_touched:
                     try:
                         _restore_credential_env(
-                            env_path, "DASHSCOPE_API_KEY", env_snapshot
+                            env_path,
+                            _ALIBABA_QUICK_CREDENTIAL_ENV,
+                            env_snapshot,
                         )
                     except Exception:
                         logger.exception(
@@ -2525,31 +2575,71 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
                     )
                 raise
 
-    reload_config()
-    invalidate_models_cache()
-    _invalidate_vision_verification()
-    _invalidate_image_gen_verification()
-    key_status = _key_status_for_env("DASHSCOPE_API_KEY")
-    return {
+    warnings: list[str] = []
+    post_save_steps = (
+        ("runtime_config_refresh_pending", reload_config),
+        ("model_cache_invalidation_pending", invalidate_models_cache),
+        ("vision_verification_invalidation_pending", _invalidate_vision_verification),
+        (
+            "image_gen_verification_invalidation_pending",
+            _invalidate_image_gen_verification,
+        ),
+    )
+    for warning_code, step in post_save_steps:
+        try:
+            step()
+        except Exception:
+            logger.exception(
+                "Alibaba quick setup post-save step failed: %s", warning_code
+            )
+            warnings.append(warning_code)
+
+    key_status = _key_status_for_env(_ALIBABA_QUICK_CREDENTIAL_ENV)
+    response = {
         "ok": True,
         "vision": {
             "provider": "alibaba",
             "model": vision_model,
+            "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
             "base_url": build_vision_base_url(
                 endpoint_mode="public", region="cn-beijing"
             ),
             "endpoint_mode": "public",
             "region": "cn-beijing",
             "key_status": key_status,
+            "verification": {
+                "status": "configured_unverified",
+                "checked_at": "",
+                "error_code": "",
+                "message": "识图配置已保存，但尚未通过真实图片验证。",
+                "diagnostic_id": "",
+            },
         },
         "image_gen": {
             "provider": "dashscope",
             "model": image_model,
-            "endpoint_mode": "public",
-            "region": "cn-beijing",
+            "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
+            "options": {
+                "endpoint_mode": "public",
+                "region": "cn-beijing",
+            },
             "key_status": key_status,
+            "verification": {
+                "status": "configured_unverified",
+                "checked_at": "",
+                "error_code": "",
+                "message": "生图配置已保存，但尚未通过真实生图验证。",
+                "diagnostic_id": "",
+            },
         },
     }
+    if warnings:
+        response["refresh_pending"] = True
+        response["warnings"] = warnings
+    else:
+        response["refresh_pending"] = False
+        response["warnings"] = []
+    return response
 
 
 def get_custom_vision_provider_configs() -> dict[str, Any]:

@@ -114,12 +114,15 @@ def _save_safe_image_url(
         # rebinding TOCTOU window remains between this check and connect.
         if not _is_safe_dashscope_image_url(current_url):
             raise ValueError("DashScope image URL failed safety validation")
-        response = requests.get(
-            current_url,
-            timeout=DOWNLOAD_TIMEOUT_SECONDS,
-            stream=True,
-            allow_redirects=False,
-        )
+        try:
+            response = requests.get(
+                current_url,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                stream=True,
+                allow_redirects=False,
+            )
+        except requests.RequestException:
+            raise ValueError("DashScope image download request failed") from None
         try:
             if response.status_code in _REDIRECT_STATUSES:
                 if redirect_count >= MAX_IMAGE_REDIRECTS:
@@ -158,6 +161,8 @@ def _save_safe_image_url(
                 prefix=prefix,
                 extension=extension,
             )
+        except requests.RequestException:
+            raise ValueError("DashScope image download request failed") from None
         finally:
             response.close()
     raise ValueError("DashScope image URL exceeded redirect limit")
