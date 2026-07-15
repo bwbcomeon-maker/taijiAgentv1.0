@@ -1330,6 +1330,8 @@ def test_identity_flow_is_discoverable_fail_closed_and_never_persists_credential
     assert 'token:' not in ACTIONS_JS
     assert "body:JSON.stringify({redirect_uri:redirectUri,purpose:'login'})" in ACTIONS_JS
     assert "body:'{}'" in ACTIONS_JS
+    assert "require('electron')" not in ACTIONS_JS
+    assert 'require("electron")' not in ACTIONS_JS
     mutation_body = _function_body(ACTIONS_JS, 'async function submitExpertTeamBrief', 'function expertTeamIdentityCapability')
     assert 'principal' not in mutation_body
     assert 'roles' not in mutation_body
@@ -1355,6 +1357,78 @@ def test_identity_capability_runtime_is_fail_closed_for_provider_login_expiry_an
     assert result['expired']['allowed'] is False
     assert result['wrongRole']['allowed'] is False
     assert result['approved'] == {'allowed': True, 'label': '李工'}
+
+
+def test_identity_runtime_handles_success_cancel_callback_failure_timeout_logout_and_focus_return():
+    result = _run_node(
+        _actions_harness(
+            """
+            context.setTimeout=(fn)=>{fn();return 1;};
+            context.window.location={origin:'http://127.0.0.1:18787'};
+            function button(){return {disabled:false,isConnected:true,textContent:'登录',focusCount:0,setAttribute:()=>{},removeAttribute:()=>{},focus(){this.focusCount+=1;}};}
+            async function loginScenario(kind){
+              const btn=button();let statusCalls=0;
+              context.window.open=()=>({get closed(){return kind==='cancel';}});
+              context.api=async(path)=>{
+                if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize'};
+                if(path.endsWith('/status')){
+                  statusCalls+=1;
+                  if(kind==='callbackFailure')throw new Error('callback failed');
+                  if(kind==='success'&&statusCalls===2)return {enabled:true,authenticated:true,principal:{display_name:'李工',roles:['document-approver']}};
+                  return {enabled:true,authenticated:false};
+                }
+                throw new Error('unexpected '+path);
+              };
+              const ok=await context.window.startExpertTeamIdentityLogin(btn);
+              return {ok,statusCalls,focusCount:btn.focusCount};
+            }
+            (async()=>{
+              const success=await loginScenario('success');
+              const cancel=await loginScenario('cancel');
+              const callbackFailure=await loginScenario('callbackFailure');
+              const timeout=await loginScenario('timeout');
+              const logoutButton=button();const logoutCalls=[];
+              context.api=async(path,opts)=>{logoutCalls.push({path,body:opts.body});return {ok:true};};
+              const logout=await context.window.logoutExpertTeamIdentity(logoutButton);
+              console.log(JSON.stringify({success,cancel,callbackFailure,timeout,logout:{ok:logout,focusCount:logoutButton.focusCount,calls:logoutCalls}}));
+            })();
+            """
+        )
+    )
+    assert result['success'] == {'ok': True, 'statusCalls': 2, 'focusCount': 1}
+    assert result['cancel']['ok'] is False and result['cancel']['focusCount'] == 1
+    assert result['callbackFailure']['ok'] is False and result['callbackFailure']['focusCount'] == 1
+    assert result['timeout']['ok'] is False and result['timeout']['statusCalls'] == 120 and result['timeout']['focusCount'] == 1
+    assert result['logout'] == {
+        'ok': True,
+        'focusCount': 1,
+        'calls': [{'path': '/api/expert-teams/identity/logout', 'body': '{}'}],
+    }
+
+
+def test_dynamic_brief_error_merges_and_clears_aria_describedby_without_losing_help():
+    result = _run_node(
+        _actions_harness(
+            """
+            const attrs={'aria-describedby':'title-help'};
+            const control={focusCount:0,setAttribute:(key,value)=>{attrs[key]=value;},removeAttribute:(key)=>{delete attrs[key];},getAttribute:(key)=>attrs[key]||'',focus(){this.focusCount+=1;}};
+            const error={id:'title-error',textContent:''};
+            const form={querySelector:(selector)=>selector.startsWith('[name=')?control:(selector.startsWith('[data-expert-team-field-error=')?error:null),querySelectorAll:(selector)=>selector==='[data-expert-team-field-error]'?[error]:(selector==='[aria-invalid="true"]'?[control]:[])};
+            const focused=context.window.focusFirstExpertTeamBriefError(form,'exact_title','请填写精确标题');
+            const afterFocus={focused,describedby:attrs['aria-describedby'],invalid:attrs['aria-invalid'],message:error.textContent,focusCount:control.focusCount};
+            context.window.clearExpertTeamBriefErrors(form);
+            console.log(JSON.stringify({afterFocus,afterClear:{describedby:attrs['aria-describedby'],invalid:attrs['aria-invalid']||'',message:error.textContent}}));
+            """
+        )
+    )
+    assert result['afterFocus'] == {
+        'focused': True,
+        'describedby': 'title-help title-error',
+        'invalid': 'true',
+        'message': '请填写精确标题',
+        'focusCount': 1,
+    }
+    assert result['afterClear'] == {'describedby': 'title-help', 'invalid': '', 'message': ''}
 
 
 def test_stage_approval_requires_valid_approver_and_zero_unresolved_warnings():

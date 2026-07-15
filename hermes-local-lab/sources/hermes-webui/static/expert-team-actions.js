@@ -240,10 +240,26 @@
     if(error)error.textContent=String(message||'请检查此字段。');
     if(control){
       if(control.setAttribute)control.setAttribute('aria-invalid','true');
+      const described=String(control.getAttribute&&control.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean);
+      if(error&&error.id&&!described.includes(error.id))described.push(error.id);
+      if(described.length&&control.setAttribute)control.setAttribute('aria-describedby',described.join(' '));
       if(control.focus){try{control.focus({preventScroll:false});}catch(_){control.focus();}}
       return true;
     }
     return false;
+  }
+  function clearExpertTeamBriefErrors(form){
+    if(!form||!form.querySelectorAll)return false;
+    const errors=Array.from(form.querySelectorAll('[data-expert-team-field-error]'));
+    const errorIds=new Set(errors.map(item=>String(item&&item.id||'')).filter(Boolean));
+    errors.forEach(item=>{item.textContent='';});
+    form.querySelectorAll('[aria-invalid="true"]').forEach(control=>{
+      if(control.removeAttribute)control.removeAttribute('aria-invalid');
+      const described=String(control.getAttribute&&control.getAttribute('aria-describedby')||'').split(/\s+/).filter(id=>id&&!errorIds.has(id));
+      if(described.length&&control.setAttribute)control.setAttribute('aria-describedby',described.join(' '));
+      else if(control.removeAttribute)control.removeAttribute('aria-describedby');
+    });
+    return true;
   }
   function expertTeamBriefContract(btn,action){
     const card=activeExpertTeamCard(btn);
@@ -265,6 +281,7 @@
     catch(error){if(typeof showToast==='function')showToast(error.message||String(error));return false;}
     if(mutationInFlight.has(contract.base))return mutationInFlight.get(contract.base);
     const snapshot=captureMutationFormState(btn);
+    clearExpertTeamBriefErrors(contract.form);
     setMutationButtonBusy(btn,true,confirmAfterSave?'正在确认...':'正在保存...');
     const request=(async()=>{
       try{
@@ -322,6 +339,14 @@
     if(returnFocus&&returnFocus.focus){try{returnFocus.focus({preventScroll:true});}catch(_){returnFocus.focus();}}
     return capability;
   }
+  function restoreExpertTeamIdentityFocus(btn){
+    const action=btn&&btn.dataset&&btn.dataset.expertTeamIdentityAction;
+    const panel=(typeof document!=='undefined'&&document.getElementById&&document.getElementById('expertTeamWorkspacePanel'))||null;
+    const selector=action?`[data-expert-team-identity-action="${String(action).replace(/"/g,'\\"')}"]`:'[data-expert-team-identity-action]';
+    const target=panel&&panel.querySelector&&(panel.querySelector(selector)||panel.querySelector('[data-expert-team-identity-action]'))||btn;
+    if(target&&target.focus){try{target.focus({preventScroll:true});}catch(_){target.focus();}return true;}
+    return false;
+  }
   async function refreshExpertTeamIdentityStatus(btn,options){
     options=options||{};
     try{
@@ -343,7 +368,7 @@
       for(let attempt=0;attempt<120;attempt+=1){
         await new Promise(resolve=>setTimeout(resolve,1000));
         const status=await api('/api/expert-teams/identity/status');
-        if(status&&status.authenticated){applyExpertTeamIdentityStatus(status,btn);return true;}
+        if(status&&status.authenticated){applyExpertTeamIdentityStatus(status,null);return true;}
         if(popup.closed){if(typeof showToast==='function')showToast('登录已取消，当前审批仍保持禁用。');return false;}
       }
       if(typeof showToast==='function')showToast('企业身份登录已过期，请重新登录。');
@@ -353,14 +378,16 @@
       return false;
     }finally{
       if(!btn||btn.isConnected!==false)setMutationButtonBusy(btn,false);
+      restoreExpertTeamIdentityFocus(btn);
     }
   }
   async function logoutExpertTeamIdentity(btn){
     try{
       await api('/api/expert-teams/identity/logout',{method:'POST',body:'{}'});
-      applyExpertTeamIdentityStatus({enabled:true,authenticated:false,provider:'oidc_pkce'},btn);
+      applyExpertTeamIdentityStatus({enabled:true,authenticated:false,provider:'oidc_pkce'},null);
       return true;
     }catch(error){if(typeof showToast==='function')showToast('退出企业身份失败：'+(error&&error.message||error));return false;}
+    finally{restoreExpertTeamIdentityFocus(btn);}
   }
   async function refreshExpertTeamRun(btn){
     const card=activeExpertTeamCard(btn);
@@ -534,6 +561,7 @@
     window.submitExpertTeamBrief=submitExpertTeamBrief;
     window.collectExpertTeamBriefPayload=collectExpertTeamBriefPayload;
     window.focusFirstExpertTeamBriefError=focusFirstExpertTeamBriefError;
+    window.clearExpertTeamBriefErrors=clearExpertTeamBriefErrors;
     window.refreshExpertTeamIdentityStatus=refreshExpertTeamIdentityStatus;
     window.startExpertTeamIdentityLogin=startExpertTeamIdentityLogin;
     window.logoutExpertTeamIdentity=logoutExpertTeamIdentity;

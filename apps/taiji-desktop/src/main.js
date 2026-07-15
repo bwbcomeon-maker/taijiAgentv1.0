@@ -6,6 +6,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
+const { createExternalWindowOpenHandler } = require("./external-link-policy");
 
 const APP_NAME = "太极 Agent";
 const DEFAULT_AGENT_PORT = 18642;
@@ -545,6 +546,10 @@ async function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  mainWindow.webContents.setWindowOpenHandler(createExternalWindowOpenHandler(
+    (url) => shell.openExternal(url),
+    (error) => desktopBootLog(`external URL open failed: ${error && error.message ? error.message : String(error)}`)
+  ));
   installDesktopPermissionHandlers(mainWindow);
 
   loadStatus("正在准备太极 Agent", ["初始化桌面窗口", "准备本机运行环境"]);

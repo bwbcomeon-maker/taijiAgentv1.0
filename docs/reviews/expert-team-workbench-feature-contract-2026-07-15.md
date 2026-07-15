@@ -8,7 +8,7 @@
 |---|---:|---:|---:|---:|---:|---:|---:|---|---|
 | Brief 持久摘要 | 是 | 是 | 是 | 部分 | 是 | 是 | 未验证 | 通过 | 始终展示原始诉求摘要、精确标题、文种、revision 与规格详情入口；legacy 不补造 Brief。 |
 | 原始诉求完整查看 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | `original_request` 使用明确 `label`；当前为只读详情。 |
-| Brief 编辑与确认 | 是 | 是 | 是 | 是 | 是 | label、错误关联、首错聚焦 | 未验证 | 通过 | 原始诉求与补充背景分栏；保存、确认和开始生成相互独立。 |
+| Brief 编辑与确认 | 是 | 是 | 是 | 是 | 是 | label、稳定错误 id、动态 `aria-describedby`、首错聚焦 | 未验证 | 通过 | 原始诉求与补充背景分栏；清错只移除错误关联并保留 help；保存、确认和开始生成相互独立。 |
 | Brief revision conflict | 是 | 是 | 是 | 是 | 是 | 草稿保留、首错可聚焦 | 未验证 | 通过 | 409 应用权威 run，明确提示核对后重试，不自动启动。 |
 | 需求确认 0/N | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | intake 阶段固定 0/N，首模型阶段开始后才进入 1/N。 |
 | 三道完成门 | 是 | 是 | 是 | 是 | 是 | 状态不只靠颜色 | 未验证 | 通过 | content/document/office 只接受稳定状态；document 不以 DOCX 文件存在或旧 `delivery_gate=passed` 推导通过。 |
@@ -20,7 +20,7 @@
 | 历史任务诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“历史任务，未按企业合同验证”，三门 invalidated。 |
 | 未放行文种诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“AI 草稿能力”，不承诺企业交付。 |
 | 收起态状态胶囊 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | 展开按钮具有 accessible name、`aria-expanded` 与 `aria-controls`；点击展开/切换时使用实际工作台返回状态同步 ARIA。 |
-| 企业审批身份 | start/status/logout | 是 | 是 | 是 | provider/取消/过期/缺 role 均禁用 | 可见文字入口、焦点恢复 | 未验证 | 通过 | UI mutation 不提交 token/principal/role，不把 credential 写入 localStorage。 |
+| 企业审批身份 | start/status/logout | 是 | 是 | 是 | provider/取消/过期/缺 role 均禁用 | 可见文字入口、成功/取消/失败/超时焦点恢复 | Node 运行时契约通过；真实 Electron 未验证 | 通过 | http(s) PKCE URL 由 Electron 主进程转交系统浏览器，窗口请求一律 deny；renderer 不依赖 Node。UI mutation 不提交 token/principal/role，不把 credential 写入 localStorage。 |
 | 阶段批准门禁 | 是 | 是 | 是 | fail-closed | 无合法 approver 或有 unresolved warning 时禁用并解释 | 禁用原因可读 | 未验证 | 通过 | pre-Office warning 不提供“申请授权”。 |
 | 聊天区无可操作确认卡 | 是 | 是 | 是 | 不适用 | 不适用 | 是 | 未验证 | 通过 | 生命周期提示只引导右侧工作台；完成成果入口继续保留。 |
 | 真实 Brief 编辑与阶段复核 | 是 | 是 | 是 | 是 | 是 | 人工语义检查完成 | 未验证 | 未验证 | 代码与自动化契约已覆盖；真实 Electron 留待 Task 7。 |
@@ -35,6 +35,7 @@
 - 真实浏览器测试：未验证。原因：计划将真实 Electron/浏览器验收集中在 Task 7；本轮不启动 rollout。
 - 截图与视觉回归：未验证。Task 3 已改布局/样式，真实视觉验收按计划留待 Task 7。
 - 自动化可访问性：未验证。未发现本轮计划要求可直接复用的 axe 检查命令，且未新增依赖。
+- Electron 外链安全契约：Node 单测已覆盖 http/https allowlist、非 http(s) 拒绝、`shell.openExternal` 转发和 `setWindowOpenHandler` 接线；真实系统浏览器回返仍留 Task 7。
 - 长时间工作体验与响应式布局：未验证。本轮不改变布局，待 Task 3 与 Task 7 在真实视口审查。
 
 ## 当前问题分级

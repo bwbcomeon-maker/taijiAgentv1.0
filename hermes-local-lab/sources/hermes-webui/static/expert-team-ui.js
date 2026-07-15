@@ -207,9 +207,9 @@
     const principal=identity.principal&&typeof identity.principal==='object'?identity.principal:{};
     const label=approval.reason||'正在核验企业审批身份。';
     if(identity.authenticated){
-      return `<div class="expert-team-identity-status" role="status"><span>${safeEsc(label)}</span><button type="button" onclick="logoutExpertTeamIdentity(this);event.stopPropagation()">退出企业身份</button></div>`;
+      return `<div class="expert-team-identity-status" role="status"><span>${safeEsc(label)}</span><button type="button" data-expert-team-identity-action="logout" onclick="logoutExpertTeamIdentity(this);event.stopPropagation()">退出企业身份</button></div>`;
     }
-    return `<div class="expert-team-identity-status" role="status"><span>${safeEsc(label)}</span><button type="button" onclick="startExpertTeamIdentityLogin(this);event.stopPropagation()">使用企业审批身份登录</button><button type="button" onclick="refreshExpertTeamIdentityStatus(this);event.stopPropagation()">检查登录状态</button></div>`;
+    return `<div class="expert-team-identity-status" role="status"><span>${safeEsc(label)}</span><button type="button" data-expert-team-identity-action="login" onclick="startExpertTeamIdentityLogin(this);event.stopPropagation()">使用企业审批身份登录</button><button type="button" data-expert-team-identity-action="status" onclick="refreshExpertTeamIdentityStatus(this);event.stopPropagation()">检查登录状态</button></div>`;
   }
   function renderCompletionGates(card){
     const presentation=card&&card.presentation||{};
