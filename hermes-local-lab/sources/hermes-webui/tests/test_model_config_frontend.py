@@ -895,6 +895,17 @@ def test_named_custom_vision_provider_management_has_visible_accessible_entry():
         assert marker in PANELS_JS
 
 
+def test_custom_vision_provider_focus_falls_back_inside_visible_providers_pane():
+    assert 'id="btnAddCustomVisionProvider"' in INDEX_HTML
+    close_body = PANELS_JS.split("async function closeCustomVisionProviderEditor", 1)[1].split(
+        "function _renderCustomVisionProviderList", 1
+    )[0]
+    assert "target.closest('#settingsPaneProviders')" in close_body
+    assert "$('btnAddCustomVisionProvider')" in close_body
+    assert "'[aria-controls=\"customVisionProviderPanel\"]'" in close_body
+    assert "control.setAttribute('aria-expanded','false')" in close_body
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 @pytest.mark.parametrize("scenario", ["save", "active-delete", "dirty-close", "switch-cancel", "switch-confirm", "switch-busy"])
 def test_named_custom_vision_provider_interactions(tmp_path, scenario):
@@ -982,12 +993,7 @@ def test_providers_panel_contains_image_generation_provider_management_surface()
         "外部模型服务",
         "添加图片生成提供商",
         "通义万相",
-        "豆包 Seedream",
-        "百度千帆",
-        "腾讯混元",
-        "智谱 GLM-Image",
-        "讯飞 HiDream",
-        "自定义 HTTP",
+        "OpenAI Images 兼容端点",
     ):
         assert marker in INDEX_HTML
     for marker in (
@@ -999,6 +1005,89 @@ def test_providers_panel_contains_image_generation_provider_management_surface()
         assert marker in PANELS_JS
     assert ".provider-image-services" in STYLE_CSS
     assert ".provider-template-grid" in STYLE_CSS
+
+
+def test_providers_panel_does_not_offer_unsupported_image_protocol_templates():
+    providers_start = INDEX_HTML.index('id="settingsPaneProviders"')
+    providers_end = INDEX_HTML.index('id="settingsPanePlugins"', providers_start)
+    providers_html = INDEX_HTML[providers_start:providers_end]
+    for unsupported in (
+        "豆包 Seedream",
+        "百度千帆",
+        "腾讯混元",
+        "讯飞 HiDream",
+        "可灵",
+        "自定义 HTTP",
+    ):
+        assert unsupported not in providers_html
+    assert "通义万相请在模型配置页使用原生阿里百炼入口" in providers_html
+
+
+def test_provider_status_refresh_is_not_mislabeled_as_verification():
+    providers_start = INDEX_HTML.index('id="settingsPaneProviders"')
+    providers_end = INDEX_HTML.index('id="settingsPanePlugins"', providers_start)
+    providers_html = INDEX_HTML[providers_start:providers_end]
+    assert "批量验证" not in providers_html
+    render_body = PANELS_JS.split("function _renderProviderImageGenSettings", 1)[1].split(
+        "async function _selectImageProviderFromProviders", 1
+    )[0]
+    assert "refresh.textContent='刷新状态'" in render_body
+    assert "refresh.textContent='验证'" not in render_body
+
+
+def test_custom_image_provider_editor_has_safe_complete_interactions():
+    for marker in (
+        'id="customImageProviderPanel"',
+        'aria-labelledby="customImageProviderPanelTitle"',
+        'id="customImageProviderError" aria-live="assertive"',
+        'id="btnCancelCustomImageProvider"',
+        'aria-describedby="customImageProviderError"',
+        'id="btnAddCustomImageProvider" type="button" aria-expanded="false" aria-controls="customImageProviderPanel"',
+        'id="btnManageCustomImageProviders" type="button" aria-expanded="false" aria-controls="customImageProviderPanel"',
+        'id="btnAddProviderImageService"',
+    ):
+        assert marker in INDEX_HTML
+    for marker in (
+        "closeCustomImageProviderEditor",
+        "_customImageProviderDraftIdentity",
+        "放弃外部图片模型草稿？",
+        "该 Provider 正在使用，请先切换图片生成配置。",
+        "save.setAttribute('aria-busy'",
+        "target.closest('#settingsPaneProviders')",
+        "$('btnAddProviderImageService')",
+    ):
+        assert marker in PANELS_JS
+    for field_id in (
+        "customImageProviderLandscapeSize",
+        "customImageProviderSquareSize",
+        "customImageProviderPortraitSize",
+        "customImageProviderResponseFormat",
+        "customImageProviderTimeout",
+    ):
+        assert f'id="{field_id}"' in INDEX_HTML
+        field_markup = INDEX_HTML.split(f'id="{field_id}"', 1)[1].split('>', 1)[0]
+        assert 'aria-describedby="customImageProviderError"' in field_markup
+
+
+def test_dynamic_image_credential_fields_expose_help_and_error_semantics():
+    body = PANELS_JS.split("function _renderImageGenCredentialFields", 1)[1].split(
+        "function _collectImageGenCredentials", 1
+    )[0]
+    for marker in (
+        "hint.id=",
+        "input.setAttribute('aria-describedby'",
+        "input.setAttribute('aria-invalid'",
+    ):
+        assert marker in body
+
+
+def test_platform_credential_editor_expansion_tracks_only_its_trigger():
+    body = PANELS_JS.split("function openPlatformCredentialEditor", 1)[1].split(
+        "function closePlatformCredentialEditor", 1
+    )[0]
+    assert "document.querySelectorAll('[data-credential-update]')" in body
+    assert "control.setAttribute('aria-expanded','false')" in body
+    assert "if(add) add.setAttribute('aria-expanded',row?'false':'true')" in body
 
 
 def test_model_config_has_clear_image_capability_cards():

@@ -2368,7 +2368,10 @@ def test_custom_image_provider_appears_in_image_gen_config(monkeypatch, tmp_path
     assert result["image_gen"]["provider"] == "custom:router"
     assert row["name"] == "Router Images"
     assert row["active"] is True
-    assert row["available"] is True
+    assert row["available"] is False
+    assert row["can_attempt"] is True
+    assert row["reason_code"] == "configured_unverified"
+    assert row["status_message"] == "已配置，尚未验证。"
     assert row["oauth_managed"] is False
     assert row["custom"] is True
     assert row["key_status"]["configured"] is True
@@ -2412,7 +2415,10 @@ def test_custom_image_provider_reads_key_status_from_env_file(monkeypatch, tmp_p
     result = model_config.get_custom_image_provider_configs()
     row = result["providers"][0]
 
-    assert row["available"] is True
+    assert row["available"] is False
+    assert row["configured"] is True
+    assert row["verification_status"] == "configured_unverified"
+    assert row["status_message"] == "已配置，尚未验证。"
     assert row["key_status"]["configured"] is True
     assert row["key_status"]["source"] == "env_file"
     assert "secret-from-file" not in json.dumps(result, ensure_ascii=False)

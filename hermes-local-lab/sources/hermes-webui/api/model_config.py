@@ -972,6 +972,13 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
             available = False
             reason_code = ""
             status_message = ""
+        if is_custom:
+            # The generic readiness check only proves that local fields exist.
+            # Keep public status unverified until the dedicated generation probe succeeds.
+            available = False
+            if can_attempt:
+                reason_code = "configured_unverified"
+                status_message = "已配置，尚未验证。"
         rows.append(
             {
                 "id": public_pid,
@@ -2567,7 +2574,24 @@ def get_custom_image_provider_configs() -> dict[str, Any]:
     for row in rows:
         key_status = _key_status_for_env((row.get("key_status") or {}).get("env_var"))
         row["key_status"] = key_status
-        row["available"] = bool(key_status.get("configured") and row.get("base_url_configured") and row.get("default_model"))
+        configured = bool(
+            key_status.get("configured")
+            and row.get("base_url_configured")
+            and row.get("default_model")
+        )
+        row["configured"] = configured
+        row["available"] = False
+        row["verification_status"] = (
+            "configured_unverified" if configured else "not_configured"
+        )
+        row["reason_code"] = (
+            "configured_unverified" if configured else "authorization_required"
+        )
+        row["status_message"] = (
+            "已配置，尚未验证。"
+            if configured
+            else "外部图片模型密钥未配置。"
+        )
     return {"ok": True, "providers": rows}
 
 

@@ -154,7 +154,10 @@ def custom_image_provider_public_row(entry: dict[str, Any], *, active_provider: 
         "name": normalized["name"],
         "description": "OpenAI Images 兼容外部图片模型",
         "badge": "外部",
-        "available": bool(configured and normalized["base_url"] and normalized["default_model"]),
+        # Field completeness is not proof that the remote endpoint works.
+        "available": False,
+        "configured": bool(configured and normalized["base_url"] and normalized["default_model"]),
+        "verification_status": "configured_unverified" if configured else "not_configured",
         "active": provider_name == str(active_provider or "").strip(),
         "requires_env": [normalized["api_key_env"]],
         "key_status": {
@@ -162,8 +165,8 @@ def custom_image_provider_public_row(entry: dict[str, Any], *, active_provider: 
             "source": "env_var" if configured else "none",
             "env_var": normalized["api_key_env"],
         },
-        "reason_code": "ready" if configured else "authorization_required",
-        "status_message": "外部图片模型已就绪。" if configured else "外部图片模型密钥未配置。",
+        "reason_code": "configured_unverified" if configured else "authorization_required",
+        "status_message": "已配置，尚未验证。" if configured else "外部图片模型密钥未配置。",
         "models": [{"id": model, "label": model} for model in normalized["models"]],
         "default_model": normalized["default_model"],
         "oauth_managed": False,

@@ -1683,8 +1683,8 @@
                       <span>只有需要接入更多生图服务、维护外部端点或查看国产模板时才打开。</span>
                     </div>
                     <div class="model-config-actions">
-                      <button class="btn-tiny" id="btnAddCustomImageProvider" type="button" onclick="openCustomImageProviderEditor()">添加外部图片模型</button>
-                      <button class="btn-tiny" id="btnManageCustomImageProviders" type="button" onclick="openImageProvidersPanel()">管理外部模型</button>
+                      <button class="btn-tiny" id="btnAddCustomImageProvider" type="button" aria-expanded="false" aria-controls="customImageProviderPanel" onclick="openCustomImageProviderEditor()">添加外部图片模型</button>
+                      <button class="btn-tiny" id="btnManageCustomImageProviders" type="button" aria-expanded="false" aria-controls="customImageProviderPanel" onclick="openImageProvidersPanel()">管理外部模型</button>
                       <button class="btn-tiny" id="btnGoImageProviders" type="button" onclick="openImageProvidersPanel()">去提供商配置</button>
                     </div>
                     <div class="model-config-template-row" aria-label="国产图片模型模板">
@@ -1735,8 +1735,8 @@
 	                <span><b>本机状态</b><em>本机密钥区</em></span>
 	                <span><b>外部模型密钥</b><em id="providerImageGenOverview">正在读取</em></span>
 	                <div class="provider-overview-actions">
-	                  <button class="sm-btn" type="button" onclick="openCustomImageProviderEditor()">新增提供商</button>
-	                  <button class="btn-tiny" type="button" onclick="refreshProviderImageGenStatus()">批量验证</button>
+	                  <button class="sm-btn" id="btnAddProviderImageService" type="button" aria-expanded="false" aria-controls="customImageProviderPanel" onclick="openCustomImageProviderEditor()">新增提供商</button>
+	                  <button class="btn-tiny" type="button" onclick="refreshProviderImageGenStatus()">刷新状态</button>
 	                </div>
 	              </section>
 	              <section class="provider-management-card">
@@ -1759,7 +1759,7 @@
 	                    <strong>外部识图 Provider</strong>
 	                    <span>仅接入已明确兼容 OpenAI Chat Completions 或 Anthropic Messages 的视觉端点。</span>
 	                  </div>
-	                  <button class="btn-tiny" type="button" onclick="openCustomVisionProviderEditor()">添加识图 Provider</button>
+	                  <button class="btn-tiny" id="btnAddCustomVisionProvider" type="button" aria-expanded="false" aria-controls="customVisionProviderPanel" onclick="openCustomVisionProviderEditor()">添加识图 Provider</button>
 	                </div>
 	                <div class="custom-image-provider-list" id="customVisionProviderList" aria-live="polite"></div>
 	              </section>
@@ -1808,7 +1808,7 @@
 	                <div class="model-config-actions">
 	                  <button class="sm-btn" id="btnSaveCustomVisionProvider" type="button" onclick="saveCustomVisionProviderConfig()">保存识图 Provider</button>
 	                  <button class="btn-tiny" id="btnCancelCustomVisionProvider" type="button" onclick="closeCustomVisionProviderEditor()">取消</button>
-	                  <button class="btn-tiny" type="button" onclick="openCustomVisionProviderEditor()">新建</button>
+	                  <button class="btn-tiny" type="button" aria-expanded="true" aria-controls="customVisionProviderPanel" onclick="openCustomVisionProviderEditor()">新建</button>
 	                </div>
 	              </section>
 	              <section class="provider-image-services">
@@ -1827,25 +1827,18 @@
 	                <div class="provider-management-head">
 	                  <div>
 	                    <strong>添加图片生成提供商</strong>
-	                    <span>优先选择国产模型模板；高级 HTTP 配置仅用于私有网关。</span>
+	                    <span>通义万相请在模型配置页使用原生阿里百炼入口；外部端点必须明确兼容 OpenAI Images。</span>
 	                  </div>
 	                </div>
 	                <div class="provider-template-grid" id="providerImageGenTemplates">
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('dashscope')"><strong>通义万相</strong><span>DashScope</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('seedream')"><strong>豆包 Seedream</strong><span>火山方舟</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('qianfan')"><strong>百度千帆</strong><span>千帆大模型</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('hunyuan')"><strong>腾讯混元</strong><span>签名鉴权</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('glm-image')"><strong>智谱 GLM-Image</strong><span>OpenAI-like</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('minimax')"><strong>MiniMax</strong><span>API 接入</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('hidream')"><strong>讯飞 HiDream</strong><span>星火大模型</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('kling')"><strong>可灵</strong><span>可灵大模型</span></button>
-	                  <button type="button" onclick="_openCustomImageProviderTemplate('http')"><strong>自定义 HTTP</strong><span>高级配置</span></button>
+	                  <button type="button" onclick="_selectImageProviderFromProviders('dashscope','qwen-image-2.0-pro')"><strong>通义万相</strong><span>阿里百炼原生</span></button>
+	                  <button type="button" onclick="_openCustomImageProviderTemplate('openai-images')"><strong>OpenAI Images 兼容端点</strong><span>外部兼容协议</span></button>
 	                </div>
 	              </section>
-	              <section class="model-config-collapsible custom-image-provider-panel" id="customImageProviderPanel" hidden>
+	              <section class="model-config-collapsible custom-image-provider-panel" id="customImageProviderPanel" hidden aria-labelledby="customImageProviderPanelTitle">
 	                <div class="provider-management-head">
 	                  <div>
-	                    <strong>外部图片模型配置</strong>
+	                    <strong id="customImageProviderPanelTitle">外部图片模型配置</strong>
 	                    <span>密钥只保存到本机，不回显到页面或日志。</span>
 	                  </div>
 	                </div>
@@ -1854,42 +1847,42 @@
 	                  <input id="customImageProviderId" type="hidden" autocomplete="off">
 	                  <div>
 	                    <label for="customImageProviderName">名称</label>
-	                    <input id="customImageProviderName" placeholder="例如：公司图片网关" autocomplete="off">
+	                    <input id="customImageProviderName" placeholder="例如：公司图片网关" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderBaseUrl">Base URL</label>
-	                    <input id="customImageProviderBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+	                    <input id="customImageProviderBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div class="span-2">
 	                    <label for="customImageProviderModels">模型 ID</label>
-	                    <input id="customImageProviderModels" placeholder="多个模型用逗号分隔，首个作为默认模型" autocomplete="off">
+	                    <input id="customImageProviderModels" placeholder="多个模型用逗号分隔，首个作为默认模型" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderDefaultModel">默认模型</label>
-	                    <input id="customImageProviderDefaultModel" placeholder="留空使用首个模型" autocomplete="off">
+	                    <input id="customImageProviderDefaultModel" placeholder="留空使用首个模型" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderApiKey">API 密钥</label>
 	                    <div class="model-config-secret-row">
-	                      <input id="customImageProviderApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+	                      <input id="customImageProviderApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true" aria-describedby="customImageProviderError">
 	                      <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('customImageProviderApiKey')">粘贴</button>
 	                    </div>
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderLandscapeSize">横图尺寸</label>
-	                    <input id="customImageProviderLandscapeSize" placeholder="1536x1024" autocomplete="off">
+	                    <input id="customImageProviderLandscapeSize" placeholder="1536x1024" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderSquareSize">方图尺寸</label>
-	                    <input id="customImageProviderSquareSize" placeholder="1024x1024" autocomplete="off">
+	                    <input id="customImageProviderSquareSize" placeholder="1024x1024" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderPortraitSize">竖图尺寸</label>
-	                    <input id="customImageProviderPortraitSize" placeholder="1024x1536" autocomplete="off">
+	                    <input id="customImageProviderPortraitSize" placeholder="1024x1536" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderResponseFormat">响应格式</label>
-	                    <select id="customImageProviderResponseFormat">
+	                    <select id="customImageProviderResponseFormat" aria-describedby="customImageProviderError">
 	                      <option value="auto">自动</option>
 	                      <option value="b64_json">b64_json</option>
 	                      <option value="url">url</option>
@@ -1897,12 +1890,14 @@
 	                  </div>
 	                  <div>
 	                    <label for="customImageProviderTimeout">超时秒数</label>
-	                    <input id="customImageProviderTimeout" type="number" min="10" max="600" step="1" placeholder="180" autocomplete="off">
+	                    <input id="customImageProviderTimeout" type="number" min="10" max="600" step="1" placeholder="180" autocomplete="off" aria-describedby="customImageProviderError">
 	                  </div>
 	                </div>
-	                <p class="model-config-muted">第一阶段按 OpenAI Images 兼容接口调用；通义万相、豆包、文心、混元等非兼容协议由后续 provider adapter 承载。</p>
+	                <p class="model-config-muted">仅支持明确兼容 OpenAI Images 的 HTTPS 端点；专用签名或私有协议不能在此直接使用。</p>
+	                <p class="model-config-field-error" id="customImageProviderError" aria-live="assertive"></p>
 	                <div class="model-config-actions">
-	                  <button class="sm-btn" id="btnSaveCustomImageProvider" type="button" onclick="saveCustomImageProviderConfig()">保存外部图片模型</button>
+	                  <button class="sm-btn" id="btnSaveCustomImageProvider" type="button" aria-busy="false" onclick="saveCustomImageProviderConfig()">保存外部图片模型</button>
+	                  <button class="btn-tiny" id="btnCancelCustomImageProvider" type="button" onclick="closeCustomImageProviderEditor()">取消</button>
 	                  <button class="btn-tiny" type="button" onclick="openCustomImageProviderEditor()">新建</button>
 	                </div>
 	              </section>

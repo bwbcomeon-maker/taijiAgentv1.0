@@ -7364,15 +7364,7 @@ async function _loadPluginPage(path, label) {
 const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
 
 const _DOMESTIC_IMAGE_PROVIDER_TEMPLATES=[
- {id:'dashscope',name:'通义万相',protocol:'DashScope',baseUrl:'https://dashscope.aliyuncs.com/compatible-mode/v1',models:'wan2.6-t2i, qwen-image, z-image-turbo',defaultModel:'wan2.6-t2i'},
- {id:'seedream',name:'豆包 Seedream',protocol:'火山方舟',baseUrl:'https://ark.cn-beijing.volces.com/api/v3',models:'doubao-seedream-4-0, doubao-seedream-5-0',defaultModel:'doubao-seedream-5-0'},
- {id:'qianfan',name:'百度千帆',protocol:'千帆大模型',baseUrl:'https://qianfan.baidubce.com/v2',models:'ernie-image, qwen-image',defaultModel:'ernie-image'},
- {id:'hunyuan',name:'腾讯混元',protocol:'签名鉴权',baseUrl:'https://hunyuan.tencentcloudapi.com',models:'hunyuan-image, hunyuan-image-3',defaultModel:'hunyuan-image'},
- {id:'glm-image',name:'智谱 GLM-Image',protocol:'OpenAI-like',baseUrl:'https://open.bigmodel.cn/api/paas/v4',models:'cogview-4, glm-image',defaultModel:'cogview-4'},
- {id:'minimax',name:'MiniMax',protocol:'API 接入',baseUrl:'https://api.minimax.chat/v1',models:'image-01',defaultModel:'image-01'},
- {id:'hidream',name:'讯飞 HiDream',protocol:'星火大模型',baseUrl:'https://spark-api.xf-yun.com/v1',models:'hidream, image-generation',defaultModel:'hidream'},
- {id:'kling',name:'可灵',protocol:'开放平台',baseUrl:'https://api.klingai.com/v1',models:'kling-image',defaultModel:'kling-image'},
- {id:'http',name:'自定义 HTTP',protocol:'高级配置',baseUrl:'https://api.example.com/v1',models:'custom-image-model',defaultModel:'custom-image-model'},
+ {id:'openai-images',name:'OpenAI Images 兼容端点',protocol:'OpenAI Images',baseUrl:'https://api.example.com/v1',models:'image-model',defaultModel:'image-model'},
 ];
 
 function openImageProvidersPanel(){
@@ -8206,6 +8198,8 @@ let _modelConfigLoadGeneration=0;
 let _customVisionProviderBusy=false;
 let _customVisionProviderGeneration=0;
 let _customVisionProviderReturnFocus=null;
+let _customImageProviderBusy=false;
+let _customImageProviderReturnFocus=null;
 const _imageCapabilityProviderDrafts={vision:{},image:{}};
 let _modelConfigAuxProviders=[];
 let _modelConfigAuxOriginalConfig=null;
@@ -8333,6 +8327,7 @@ function _renderImageGenCredentialFields(provider){
   input.dataset.envVar=String(field.env_var||'');
   input.dataset.secret=secret?'1':'0';
   input.disabled=authReadOnly;
+  input.setAttribute('aria-invalid','false');
   if(secret) input.dataset.secretField='true';
   const status=(provider.credential_status&&Array.isArray(provider.credential_status.fields))
    ? provider.credential_status.fields.find(item=>String(item.name||item.env_var||'')===name||String(item.env_var||'')===String(field.env_var||''))
@@ -8351,6 +8346,8 @@ function _renderImageGenCredentialFields(provider){
   }
   const hint=document.createElement('div');
   hint.className='model-config-hint';
+  hint.id=inputId+'Hint';
+  input.setAttribute('aria-describedby',hint.id+' imageGenConfigEndpointError');
   hint.textContent=authReadOnly?String(provider.auth_message||'当前认证方式暂不支持在此编辑。')
    :(configured?'已配置，留空不会覆盖。':(field.required===false?'可选，留空使用默认值。':'未配置，保存后生效。'));
   row.appendChild(label);
@@ -8661,7 +8658,12 @@ function openPlatformCredentialEditor(credentialId,returnCapability,returnFocus)
  _setFieldError('platformCredentialListStatus','',[]);
  toggleModelConfigSection('platformCredentialEditor',true);
  const add=$('btnAddPlatformCredential');
- if(add) add.setAttribute('aria-expanded','true');
+ if(add) add.setAttribute('aria-expanded',row?'false':'true');
+ if(document.querySelectorAll){
+  document.querySelectorAll('[data-credential-update]').forEach(control=>{
+   control.setAttribute('aria-expanded','false');
+  });
+ }
  if(row&&document.querySelector){
   const update=document.querySelector('[data-credential-update="'+String(row.id||'')+'"]');
   if(update) update.setAttribute('aria-expanded','true');
@@ -9444,8 +9446,9 @@ async function openCustomVisionProviderEditor(providerId){
   Object.keys(values).forEach(id=>{const el=$(id);if(el) el.value=values[id];});
  }
  toggleModelConfigSection('customVisionProviderPanel',true);
- const manage=$('btnManageCustomVisionProviders');
- if(manage) manage.setAttribute('aria-expanded','true');
+ if(document.querySelectorAll) document.querySelectorAll('[aria-controls="customVisionProviderPanel"]').forEach(control=>{
+  control.setAttribute('aria-expanded','true');
+ });
  if(panel) panel.dataset.originalDraft=_customVisionProviderDraftIdentity();
  const focus=$('customVisionProviderName')||$('customVisionProviderBaseUrl');
  if(focus) setTimeout(()=>focus.focus(),0);
@@ -9464,9 +9467,14 @@ async function closeCustomVisionProviderEditor(force){
  _resetCustomVisionProviderForm();
  toggleModelConfigSection('customVisionProviderPanel',false);
  const manage=$('btnManageCustomVisionProviders');
- if(manage) manage.setAttribute('aria-expanded','false');
- const target=_customVisionProviderReturnFocus&&_customVisionProviderReturnFocus.isConnected!==false
+ if(document.querySelectorAll) document.querySelectorAll('[aria-controls="customVisionProviderPanel"]').forEach(control=>{
+  control.setAttribute('aria-expanded','false');
+ });
+ let target=_customVisionProviderReturnFocus&&_customVisionProviderReturnFocus.isConnected!==false
   ?_customVisionProviderReturnFocus:manage;
+ if(_settingsSection==='providers'&&target&&target.closest&&!target.closest('#settingsPaneProviders')){
+  target=$('btnAddCustomVisionProvider')||manage;
+ }
  if(target&&!target.hidden&&!target.disabled) target.focus();
  _customVisionProviderReturnFocus=null;
  return true;
@@ -9584,17 +9592,56 @@ function _resetCustomImageProviderForm(){
  });
  const fmt=$('customImageProviderResponseFormat');
  if(fmt) fmt.value='auto';
+ _setFieldError('customImageProviderError','',['customImageProviderName','customImageProviderBaseUrl',
+  'customImageProviderModels','customImageProviderDefaultModel','customImageProviderApiKey']);
 }
 
-function openCustomImageProviderEditor(providerId,templateId){
+function _customImageProviderDraftIdentity(){
+ const payload=_customImageProviderPayload();
+ delete payload.api_key;
+ return JSON.stringify(payload);
+}
+
+function _setCustomImageProviderExpanded(expanded){
+ document.querySelectorAll('[aria-controls="customImageProviderPanel"]').forEach(control=>{
+  control.setAttribute('aria-expanded',expanded?'true':'false');
+ });
+}
+
+function _setCustomImageProviderBusy(busy){
+ _customImageProviderBusy=!!busy;
+ const panel=$('customImageProviderPanel');
+ if(panel) panel.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
+ const save=$('btnSaveCustomImageProvider');
+ if(save) save.setAttribute('aria-busy',busy?'true':'false');
+}
+
+async function openCustomImageProviderEditor(providerId,templateId){
+ if(_customImageProviderBusy) return false;
  if(_settingsSection!=='providers') switchSettingsSection('providers');
-	 const rows=_modelConfigCustomImageRows(_modelConfigData);
-	 const normalized=String(providerId||'').replace(/^custom:/,'').trim();
-	 const row=normalized?rows.find(item=>String(item.id||'')===normalized):null;
+ const rows=_modelConfigCustomImageRows(_modelConfigData);
+ const normalized=String(providerId||'').replace(/^custom:/,'').trim();
+ const row=normalized?rows.find(item=>String(item.id||'')===normalized):null;
  const template=!row&&templateId?_DOMESTIC_IMAGE_PROVIDER_TEMPLATES.find(item=>item.id===templateId):null;
-	 toggleModelConfigSection('customImageProviderPanel',true);
-	 _resetCustomImageProviderForm();
-	 if(row){
+ const panel=$('customImageProviderPanel');
+ const currentId=(($('customImageProviderId')||{}).value||'').trim();
+ const apiKey=(($('customImageProviderApiKey')||{}).value||'').trim();
+ const hasOpenDraft=!!(panel&&!panel.hidden&&Object.prototype.hasOwnProperty.call(panel.dataset,'originalDraft'));
+ const dirty=hasOpenDraft&&(apiKey||String(panel.dataset.originalDraft||'')!==_customImageProviderDraftIdentity());
+ if(hasOpenDraft&&currentId===normalized&&!templateId){
+  const currentFocus=$('customImageProviderName')||$('customImageProviderBaseUrl');
+  if(currentFocus) currentFocus.focus();
+  return true;
+ }
+ if(dirty){
+  const discard=await showConfirmDialog({title:'放弃外部图片模型草稿？',message:'切换后，未保存的端点、模型和密钥输入将丢失。',confirmLabel:'放弃并切换',danger:true,focusCancel:true});
+  if(!discard) return false;
+ }
+ _customImageProviderReturnFocus=document.activeElement;
+ toggleModelConfigSection('customImageProviderPanel',true);
+ _setCustomImageProviderExpanded(true);
+ _resetCustomImageProviderForm();
+ if(row){
   const sizeMap=row.size_map||{};
   const models=Array.isArray(row.models)?row.models:[];
   const values={
@@ -9614,7 +9661,7 @@ function openCustomImageProviderEditor(providerId,templateId){
   });
 	  const fmt=$('customImageProviderResponseFormat');
 	  if(fmt) fmt.value=row.response_format||'auto';
-	 }else if(template){
+ }else if(template){
 	  const values={
 	   customImageProviderName:template.name||'',
 	   customImageProviderBaseUrl:template.baseUrl||'',
@@ -9625,9 +9672,34 @@ function openCustomImageProviderEditor(providerId,templateId){
 	   const el=$(id);
 	   if(el) el.value=values[id];
 	  });
-	 }
-	 const focus=$('customImageProviderName')||$('customImageProviderBaseUrl');
-	 if(focus) setTimeout(()=>focus.focus(),0);
+ }
+ if(panel) panel.dataset.originalDraft=_customImageProviderDraftIdentity();
+ const focus=$('customImageProviderName')||$('customImageProviderBaseUrl');
+ if(focus) setTimeout(()=>focus.focus(),0);
+ return true;
+}
+
+async function closeCustomImageProviderEditor(force){
+ if(_customImageProviderBusy) return false;
+ const panel=$('customImageProviderPanel');
+ const apiKey=(($('customImageProviderApiKey')||{}).value||'').trim();
+ const dirty=panel&&(apiKey||String(panel.dataset.originalDraft||'')!==_customImageProviderDraftIdentity());
+ if(dirty&&!force){
+  const discard=await showConfirmDialog({title:'放弃外部图片模型草稿？',message:'未保存的端点、模型和密钥输入将丢失。',confirmLabel:'放弃',danger:true,focusCancel:true});
+  if(!discard) return false;
+ }
+ _resetCustomImageProviderForm();
+ if(panel) delete panel.dataset.originalDraft;
+ toggleModelConfigSection('customImageProviderPanel',false);
+ _setCustomImageProviderExpanded(false);
+ let target=_customImageProviderReturnFocus&&_customImageProviderReturnFocus.isConnected!==false
+  ?_customImageProviderReturnFocus:$('btnAddProviderImageService');
+ if(_settingsSection==='providers'&&target&&target.closest&&!target.closest('#settingsPaneProviders')){
+  target=$('btnAddProviderImageService');
+ }
+ if(target&&!target.hidden&&!target.disabled) target.focus();
+ _customImageProviderReturnFocus=null;
+ return true;
 }
 
 function _renderCustomImageProviderList(data){
@@ -9651,7 +9723,7 @@ function _renderCustomImageProviderList(data){
   title.textContent=_customImageProviderLabel(row);
   const meta=document.createElement('span');
   const model=row.default_model||((row.models||[])[0])||'未配置模型';
-  const status=row.available?'可用':'待配置';
+  const status=row.available?'已验证':(row.configured||row.key_status&&row.key_status.configured?'已配置，尚未验证':'待配置');
   meta.textContent=model+' · '+status;
   copy.appendChild(title);
   copy.appendChild(meta);
@@ -9661,12 +9733,16 @@ function _renderCustomImageProviderList(data){
   edit.className='btn-tiny';
   edit.type='button';
   edit.textContent='编辑';
+  edit.setAttribute('aria-label','编辑 '+_customImageProviderLabel(row));
   edit.onclick=()=>openCustomImageProviderEditor(row.id);
   const del=document.createElement('button');
   del.className='btn-tiny';
   del.type='button';
   del.textContent='删除';
-  del.onclick=()=>deleteCustomImageProviderConfig(row.id);
+  del.setAttribute('aria-label','删除 '+_customImageProviderLabel(row));
+  del.disabled=!!row.active;
+  if(row.active) del.title='正在使用，请先切换图片生成配置';
+  del.onclick=()=>deleteCustomImageProviderConfig(row.id,del);
   actions.appendChild(edit);
   actions.appendChild(del);
   item.appendChild(copy);
@@ -9767,7 +9843,8 @@ function _renderProviderImageGenSettings(data){
   const refresh=document.createElement('button');
   refresh.className='btn-tiny';
   refresh.type='button';
-  refresh.textContent='验证';
+  refresh.textContent='刷新状态';
+  refresh.setAttribute('aria-label','刷新 '+name+' 状态');
   refresh.onclick=()=>refreshProviderImageGenStatus();
   actions.appendChild(refresh);
   if(row&&row.custom){
@@ -9848,33 +9925,51 @@ function _customImageProviderPayload(){
 async function saveCustomImageProviderConfig(){
  const btn=$('btnSaveCustomImageProvider');
  const payload=_customImageProviderPayload();
- if(btn) btn.disabled=true;
+ _setFieldError('customImageProviderError','',['customImageProviderName','customImageProviderBaseUrl',
+  'customImageProviderModels','customImageProviderDefaultModel','customImageProviderApiKey']);
+ if(!payload.name||!payload.base_url||!payload.models.length){
+  _setFieldError('customImageProviderError','请完整填写名称、HTTPS Base URL 和模型 ID。',
+   ['customImageProviderName','customImageProviderBaseUrl','customImageProviderModels']);
+  return;
+ }
+ _setCustomImageProviderBusy(true);
  try{
-	  await api('/api/image-gen/custom-providers',{method:'POST',body:JSON.stringify(payload)});
-	  const key=$('customImageProviderApiKey');
-	  if(key) key.value='';
-	  await loadModelConfigPanel(true);
-	  if(_settingsSection==='providers') _renderProviderImageGenSettings(_modelConfigData);
-	  if(typeof showToast==='function') showToast('外部图片模型已保存');
-	 }catch(e){
-  if(typeof showToast==='function') showToast('保存外部图片模型失败：'+(e.message||e),5000,'error');
+  await api('/api/image-gen/custom-providers',{method:'POST',body:JSON.stringify(payload)});
+  const key=$('customImageProviderApiKey');
+  if(key) key.value='';
+  await loadModelConfigPanel(true);
+  if(_settingsSection==='providers') _renderProviderImageGenSettings(_modelConfigData);
+  _setCustomImageProviderBusy(false);
+  await closeCustomImageProviderEditor(true);
+  if(typeof showToast==='function') showToast('外部图片模型已保存，请在模型配置页执行真实生图测试');
+ }catch(e){
+  _setFieldError('customImageProviderError','保存失败：'+(e.message||e),['customImageProviderBaseUrl','customImageProviderApiKey']);
+  if(typeof showToast==='function') showToast('保存外部图片模型失败',5000,'error');
  }finally{
-  if(btn) btn.disabled=false;
+  _setCustomImageProviderBusy(false);
  }
 }
 
-async function deleteCustomImageProviderConfig(providerId){
+async function deleteCustomImageProviderConfig(providerId,trigger){
  const normalized=String(providerId||'').replace(/^custom:/,'').trim();
  if(!normalized) return;
+ const row=_modelConfigCustomImageRows(_modelConfigData).find(item=>String(item.id||'').replace(/^custom:/,'')===normalized);
+ if(row&&row.active){
+  _setFieldError('customImageProviderError','该 Provider 正在使用，请先切换图片生成配置。',[]);
+  return;
+ }
  const ok=await showConfirmDialog({title:'删除外部图片模型？',message:'删除后需要重新添加才能再次选择。',confirmLabel:'删除',danger:true,focusCancel:true});
- if(!ok) return;
-	 try{
-	  await api('/api/image-gen/custom-providers/'+encodeURIComponent(normalized),{method:'DELETE'});
-	  await loadModelConfigPanel(true);
-	  if(_settingsSection==='providers') _renderProviderImageGenSettings(_modelConfigData);
-	  if(typeof showToast==='function') showToast('外部图片模型已删除');
-	 }catch(e){
-  if(typeof showToast==='function') showToast('删除外部图片模型失败：'+(e.message||e),5000,'error');
+ if(!ok){if(trigger) trigger.focus();return;}
+ try{
+  await api('/api/image-gen/custom-providers/'+encodeURIComponent(normalized),{method:'DELETE'});
+  await loadModelConfigPanel(true);
+  if(_settingsSection==='providers') _renderProviderImageGenSettings(_modelConfigData);
+  if(typeof showToast==='function') showToast('外部图片模型已删除');
+ }catch(e){
+  _setFieldError('customImageProviderError','删除失败：'+(e.message||e),[]);
+  if(typeof showToast==='function') showToast('删除外部图片模型失败',5000,'error');
+ }finally{
+  if(trigger&&trigger.isConnected!==false) trigger.focus();
  }
 }
 
@@ -10628,6 +10723,9 @@ async function saveImageGenConfig(){
  const baseUrl=(($('imageGenConfigBaseUrl')||{}).value||'').trim();
  const credentials=_collectImageGenCredentials();
  const endpointValues=_collectImageCapabilityEndpointValues('image');
+ if(document.querySelectorAll) document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
+  input.setAttribute('aria-invalid','false');
+ });
  _setFieldError('imageGenConfigEndpointError','',['imageGenConfigCredential','imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl','imageGenConfigApiKey','imageGenConfigModel']);
  if(!_renderImageCapabilityEndpointPreview('image')) return;
  if(credentialRef&&apiKey){
@@ -10654,6 +10752,9 @@ async function saveImageGenConfig(){
   _closeModelConfigEditor('imageGenConfigEdit','btnEditImageGenConfig');
   if(typeof showToast==='function') showToast('图片生成配置已保存');
  }catch(e){
+  if(document.querySelectorAll) document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
+   input.setAttribute('aria-invalid','true');
+  });
   _setFieldError('imageGenConfigEndpointError','生图配置保存失败：'+(e.message||e),['imageGenConfigCredential','imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl','imageGenConfigModel']);
   if(typeof showToast==='function') showToast('保存图片生成配置失败：'+(e.message||e),5000,'error');
  }finally{
