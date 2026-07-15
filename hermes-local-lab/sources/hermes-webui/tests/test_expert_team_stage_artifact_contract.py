@@ -380,3 +380,35 @@ def test_delivery_manifest_rejects_unknown_fields_and_path_escape():
         parsed = parse_stage_response(_raw("delivery_manifest", bad), artifact_type="delivery_manifest", requires_document=False)
         with pytest.raises(StageArtifactError):
             build_stage_artifact(parsed, stage_id="delivery", stage_attempt=1, brief=_brief(), input_refs=[], now="2026-07-15T10:00:00+08:00")
+
+
+def test_catalog_declares_executor_artifact_dependencies_and_hidden_research_delivery():
+    from api import expert_teams
+
+    catalog = {team["id"]: team for team in expert_teams.expert_team_catalog()["teams"]}
+    content = {stage["id"]: stage for stage in catalog["content-creator-team"]["tasks"]}
+    research = {stage["id"]: stage for stage in catalog["deep-research-team"]["tasks"]}
+
+    assert content["plan"] == {**content["plan"], "executor": "model", "artifact_type": "writing_plan", "depends_on": []}
+    assert content["materials"]["depends_on"] == ["plan"]
+    assert content["draft"]["depends_on"] == ["plan", "materials"]
+    assert content["polish"]["depends_on"] == ["materials", "draft"]
+    assert content["delivery"]["executor"] == "system"
+    assert content["delivery"]["artifact_type"] == "delivery_manifest"
+    assert content["delivery"]["depends_on"] == ["polish"]
+
+    assert research["direction"]["artifact_type"] == "research_charter"
+    assert research["evidence"]["artifact_type"] == "evidence_matrix"
+    assert research["review"]["artifact_type"] == "reviewed_research_document"
+    assert len(research) == 6
+    hidden = catalog["deep-research-team"]["post_approval_system_steps"]
+    assert hidden == [
+        {
+            "id": "delivery",
+            "executor": "system",
+            "artifact_type": "delivery_manifest",
+            "depends_on": ["review"],
+            "trigger": "canonical_approved",
+            "visible_progress": False,
+        }
+    ]
