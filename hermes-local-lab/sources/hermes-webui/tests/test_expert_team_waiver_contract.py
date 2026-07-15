@@ -315,3 +315,70 @@ def test_waiver_mutation_consumes_exact_handoff_binding_and_rejects_drift(tmp_pa
             consume_authorizer_handoff=lambda _context: (_ for _ in ()).throw(ValueError("identity_flow_stale")),
         )
     assert error.value.code == "identity_flow_stale"
+
+
+def test_waiver_idempotency_key_is_unique_and_fingerprint_stable(tmp_path):
+    from api.expert_teams.waivers import WaiverError, create_office_waiver
+
+    binding = _binding()
+    acceptance = _acceptance()
+    common = dict(
+        workspace=tmp_path, binding=binding, binding_sha256="a" * 64,
+        acceptance=acceptance, acceptance_sha256="b" * 64,
+        issue_id="office-issue-1", authorizer=_authorizer(), idempotency_key="same-key",
+    )
+    first = create_office_waiver(**common, reason="approved reason", now="2026-07-15T10:00:00+08:00")
+    replay = create_office_waiver(**common, reason="approved reason", now="2026-07-15T10:01:00+08:00")
+    assert replay == first
+    with pytest.raises(WaiverError) as error:
+        create_office_waiver(**common, reason="changed reason", now="2026-07-15T10:02:00+08:00")
+    assert error.value.code == "waiver_idempotency_conflict"
+    with pytest.raises(WaiverError) as error:
+        create_office_waiver(
+            **{**common, "authorizer": _authorizer("authorizer-2")},
+            reason="approved reason", now="2026-07-15T10:03:00+08:00",
+        )
+    assert error.value.code == "waiver_idempotency_conflict"
+    second_target = json.loads(json.dumps(acceptance))
+    second_target["issues"].append({**second_target["issues"][0], "issue_id": "office-issue-2"})
+    with pytest.raises(WaiverError) as error:
+        create_office_waiver(
+            **{**common, "acceptance": second_target, "issue_id": "office-issue-2"},
+            reason="approved reason", now="2026-07-15T10:04:00+08:00",
+        )
+    assert error.value.code == "waiver_idempotency_conflict"
+    ledger = json.loads((
+        tmp_path / ".taiji/expert-team-deliveries" / binding["run_id"]
+        / "delivery/attempt-2/expert-team-waiver-ledger.json"
+    ).read_text())
+    assert len(ledger["waivers"]) == 1
+
+
+def test_waiver_handoff_claim_released_on_validation_or_write_failure(tmp_path, monkeypatch):
+    from tests.test_expert_team_terminal_reconciliation import _completion_fixture
+    from api.expert_teams import waivers
+    from api.expert_teams.waivers import WaiverError, create_current_office_waiver
+
+    run, _binding, acceptance = _completion_fixture(tmp_path)
+    acceptance.update({"decision": "passed_with_conditions", "issues": [_acceptance()["issues"][0]]})
+    root = tmp_path / ".taiji/expert-team-deliveries" / run["run_id"] / "delivery/attempt-1"
+    (root / "expert-team-wps-acceptance.json").write_text(json.dumps(acceptance) + "\n")
+    calls = []
+    callbacks = {
+        "claim_authorizer_handoff": lambda context: calls.append(("claim", context)) or "claim-1",
+        "commit_authorizer_handoff": lambda claim: calls.append(("commit", claim)),
+        "release_authorizer_handoff": lambda claim: calls.append(("release", claim)),
+    }
+    body = {
+        "run_id": run["run_id"], "session_id": run["session_id"], "expected_version": run["version"],
+        "idempotency_key": "waiver-claim", "target_id": "missing", "reason": "reason",
+    }
+    with pytest.raises(WaiverError, match="不存在"):
+        create_current_office_waiver(tmp_path, body, authorizer=_authorizer(), now="now", **callbacks)
+    assert calls == []
+
+    body["target_id"] = "office-issue-1"
+    monkeypatch.setattr(waivers, "_write_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError, match="disk"):
+        create_current_office_waiver(tmp_path, body, authorizer=_authorizer(), now="now", **callbacks)
+    assert [row[0] for row in calls] == ["claim", "release"]

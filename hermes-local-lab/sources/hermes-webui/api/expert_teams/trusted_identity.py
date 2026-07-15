@@ -113,6 +113,7 @@ class TrustedIdentityResolver:
         self._flows: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
         self._authorizer_handoffs: dict[str, dict] = {}
+        self._authorizer_handoff_claims: dict[str, dict] = {}
         self._consumed_authorizer_handoffs: set[str] = set()
         self._lock = threading.RLock()
         if self._config.get("enabled"):
@@ -327,21 +328,51 @@ class TrustedIdentityResolver:
         with self._lock:
             self._sessions.pop(str(session_id or ""), None)
             self._authorizer_handoffs.pop(str(session_id or ""), None)
+            self._authorizer_handoff_claims.pop(str(session_id or ""), None)
 
-    def consume_authorizer_handoff(self, session_id: str, *, current_context: dict) -> dict:
+    def claim_authorizer_handoff(self, session_id: str, *, current_context: dict) -> str:
         key = str(session_id or "")
         context = deepcopy(current_context) if isinstance(current_context, dict) else {}
         with self._lock:
             if key in self._consumed_authorizer_handoffs:
                 raise ValueError("authorizer handoff was already used")
+            handoff = self._authorizer_handoffs.get(key)
+            if not isinstance(handoff, dict):
+                raise ValueError("authorizer handoff is missing or was already used")
+            if handoff.get("context_sha256") != _digest(_canonical(context)) or handoff.get("context") != context:
+                raise ValueError("identity_flow_stale")
+            existing = self._authorizer_handoff_claims.get(key)
+            if isinstance(existing, dict):
+                if existing.get("context") != context:
+                    raise ValueError("identity_flow_stale")
+                return str(existing["claim_id"])
+            claim_id = "handoff-claim-" + secrets.token_urlsafe(16)
+            self._authorizer_handoff_claims[key] = {"claim_id": claim_id, "context": context}
+            return claim_id
+
+    def commit_authorizer_handoff(self, session_id: str, claim_id: str) -> dict:
+        key = str(session_id or "")
+        with self._lock:
+            claim = self._authorizer_handoff_claims.get(key)
+            if not isinstance(claim, dict) or claim.get("claim_id") != str(claim_id or ""):
+                raise ValueError("authorizer handoff claim is missing")
             handoff = self._authorizer_handoffs.pop(key, None)
             if not isinstance(handoff, dict):
                 raise ValueError("authorizer handoff is missing or was already used")
+            self._authorizer_handoff_claims.pop(key, None)
             self._consumed_authorizer_handoffs.add(key)
-        if handoff.get("context_sha256") != _digest(_canonical(context)) or handoff.get("context") != context:
-            self.logout(key)
-            raise ValueError("identity_flow_stale")
-        return deepcopy(handoff)
+            return deepcopy(handoff)
+
+    def release_authorizer_handoff(self, session_id: str, claim_id: str) -> None:
+        key = str(session_id or "")
+        with self._lock:
+            claim = self._authorizer_handoff_claims.get(key)
+            if isinstance(claim, dict) and claim.get("claim_id") == str(claim_id or ""):
+                self._authorizer_handoff_claims.pop(key, None)
+
+    def consume_authorizer_handoff(self, session_id: str, *, current_context: dict) -> dict:
+        claim_id = self.claim_authorizer_handoff(session_id, current_context=current_context)
+        return self.commit_authorizer_handoff(session_id, claim_id)
 
     def install_test_principal(self, principal: dict) -> str:
         if self._production:
@@ -364,6 +395,9 @@ class TrustedIdentityResolver:
         }
         self._authorizer_handoffs = {
             key: value for key, value in self._authorizer_handoffs.items() if key in self._sessions
+        }
+        self._authorizer_handoff_claims = {
+            key: value for key, value in self._authorizer_handoff_claims.items() if key in self._authorizer_handoffs
         }
 
 

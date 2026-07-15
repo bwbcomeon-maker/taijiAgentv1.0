@@ -4,6 +4,7 @@ import io
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -153,6 +154,80 @@ def test_execution_truth_start_or_retry_recovers_partial_completion(tmp_path, fa
     assert recovered["workflow_state"] == "completed"
     assert recovered["completion_integrity"]["status"] == "passed"
     assert recovered.get("execution_status") != "error"
+
+
+def test_committed_completion_get_is_pure_read(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.office_review import reconcile_enterprise_completion
+    from api.expert_teams.storage import run_path
+
+    run, binding, _acceptance = _completion_fixture(tmp_path)
+    completed = reconcile_enterprise_completion(
+        tmp_path, run=run, binding=binding,
+        binding_sha256=run["current_delivery_manifest_ref"]["delivery_binding_sha256"],
+        now="2026-07-15T10:20:00+08:00",
+    )
+    path = run_path(tmp_path, run["run_id"])
+    before = (path.read_bytes(), path.stat().st_mtime_ns, completed["version"])
+    first = expert_teams.read_expert_team_run(tmp_path, run["run_id"])
+    second = expert_teams.read_expert_team_run(tmp_path, run["run_id"])
+    after = (path.read_bytes(), path.stat().st_mtime_ns, second["version"])
+    assert first["version"] == completed["version"]
+    assert after == before
+
+
+def test_get_reconciliation_and_revision_never_silently_lose_successful_revision(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import office_review
+    from api.expert_teams.office_review import create_current_office_revision_request
+    from api.expert_teams.storage import read_run, write_run
+
+    run, _binding, acceptance = _completion_fixture(tmp_path)
+    acceptance.update({"decision": "failed", "issues": [{
+        "issue_id": "office-issue-1", "severity": "blocking", "category": "duplicate_figure",
+        "description": "duplicate", "expected_fix": "remove duplicate",
+    }]})
+    root = tmp_path / ".taiji/expert-team-deliveries" / run["run_id"] / "delivery/attempt-1"
+    (root / "expert-team-wps-acceptance.json").write_text(json.dumps(acceptance) + "\n")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def stale_reconcile(_workspace, *, run, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        stale = dict(run)
+        stale["workflow_state"] = "completed"
+        stale["version"] = int(run["version"]) + 1
+        return write_run(tmp_path, stale)
+
+    monkeypatch.setattr(office_review, "reconcile_enterprise_completion", stale_reconcile)
+    reader = threading.Thread(target=expert_teams.read_expert_team_run, args=(tmp_path, run["run_id"]))
+    reader.start()
+    assert entered.wait(5)
+    outcome = {}
+    def revise():
+        try:
+            _request, outcome["run"] = create_current_office_revision_request(
+                tmp_path, {
+                    "run_id": run["run_id"], "session_id": run["session_id"],
+                    "expected_version": run["version"], "idempotency_key": "revision-race",
+                    "issue_ids": ["office-issue-1"],
+                }, now="2026-07-15T12:40:00+08:00",
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    writer = threading.Thread(target=revise)
+    writer.start()
+    time.sleep(0.05)
+    release.set()
+    reader.join(5)
+    writer.join(5)
+    stored = read_run(tmp_path, run["run_id"])
+    if "run" in outcome:
+        assert stored["workflow_state"] == "delivery_validation_required"
+    else:
+        assert "version conflict" in str(outcome["error"])
 
 
 class _Handler:

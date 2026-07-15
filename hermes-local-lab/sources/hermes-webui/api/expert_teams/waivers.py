@@ -54,6 +54,7 @@ def create_office_waiver(
     idempotency_key: str,
     now: str,
     reason: str = "",
+    persist: bool = True,
 ) -> dict:
     if binding.get("schema_version") != "expert-delivery-binding/v2":
         raise WaiverError("waiver_binding_invalid", "仅企业交付绑定支持条件豁免")
@@ -95,9 +96,15 @@ def create_office_waiver(
         "target_id": str(issue_id),
         "target_sha256": str(acceptance_sha256),
         "authorizer_subject": str(authorizer.get("subject") or ""),
+        "authorizer_auth_method": str(authorizer.get("auth_method") or ""),
+        "authorizer_identity_snapshot_sha256": str(authorizer.get("identity_snapshot_sha256") or ""),
         "idempotency_key": str(idempotency_key),
         "reason": str(reason or "").strip(),
     }
+    idempotency_key_sha256 = hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
+    request_fingerprint_sha256 = _digest({
+        key: value for key, value in identity.items() if key != "idempotency_key"
+    })
     waiver = {
         "schema_version": "expert-waiver/v1",
         "waiver_id": "waiver-" + _digest(identity)[:20],
@@ -121,7 +128,8 @@ def create_office_waiver(
         },
         "authorized_at": str(now),
         "reason": str(reason or "").strip(),
-        "idempotency_key_sha256": hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest(),
+        "idempotency_key_sha256": idempotency_key_sha256,
+        "request_fingerprint_sha256": request_fingerprint_sha256,
     }
     root = canonical_attempt_root(
         workspace,
@@ -139,14 +147,19 @@ def create_office_waiver(
             "office_acceptance_sha256": str(acceptance_sha256),
             "waivers": [],
         }
-    existing = next(
-        (item for item in ledger.get("waivers") or [] if item.get("waiver_id") == waiver["waiver_id"]),
-        None,
-    )
+    idempotency_matches = [
+        item for item in ledger.get("waivers") or []
+        if item.get("idempotency_key_sha256") == idempotency_key_sha256
+    ]
+    if len(idempotency_matches) > 1:
+        raise WaiverError("waiver_idempotency_conflict", "豁免幂等键存在多个历史记录")
+    existing = idempotency_matches[0] if idempotency_matches else None
     if existing is not None:
-        if existing != waiver:
+        if existing.get("request_fingerprint_sha256") != request_fingerprint_sha256:
             raise WaiverError("waiver_idempotency_conflict", "豁免幂等身份发生冲突")
         return deepcopy(existing)
+    if not persist:
+        return deepcopy(waiver)
     ledger["waivers"] = [*ledger.get("waivers", []), waiver]
     ledger["ledger_sha256"] = _digest({key: value for key, value in ledger.items() if key != "ledger_sha256"})
     _write_json(ledger_path, ledger)
@@ -160,6 +173,9 @@ def create_current_office_waiver(
     authorizer: dict,
     now: str,
     consume_authorizer_handoff=None,
+    claim_authorizer_handoff=None,
+    commit_authorizer_handoff=None,
+    release_authorizer_handoff=None,
 ) -> tuple[dict, dict]:
     """Resolve the current immutable delivery/acceptance; clients submit only a target ref."""
 
@@ -198,15 +214,10 @@ def create_current_office_waiver(
             "delivery_binding_sha256": binding_sha256,
             "disallowed_principal_id": str((acceptance.get("reviewer") or {}).get("principal_id") or ""),
         }
-        if consume_authorizer_handoff is None:
+        if claim_authorizer_handoff is None and consume_authorizer_handoff is None:
             raise WaiverError("trusted_authorizer_required", "authorizer handoff is required")
-        try:
-            consume_authorizer_handoff(handoff_context)
-        except ValueError as exc:
-            code = "identity_flow_stale" if "identity_flow_stale" in str(exc) else "trusted_authorizer_required"
-            raise WaiverError(code, str(exc)) from exc
-        waiver = create_office_waiver(
-            workspace,
+        waiver_kwargs = dict(
+            workspace=workspace,
             binding=binding,
             binding_sha256=binding_sha256,
             acceptance=acceptance,
@@ -217,15 +228,38 @@ def create_current_office_waiver(
             reason=str(body.get("reason") or ""),
             now=now,
         )
-        rows = [deepcopy(item) for item in run.get("waiver_refs") or [] if isinstance(item, dict)]
-        if not any(item.get("waiver_id") == waiver["waiver_id"] for item in rows):
-            rows.append({
-                "waiver_id": waiver["waiver_id"],
-                "target_id": waiver["issue_id"],
-                "delivery_binding_sha256": waiver["delivery_binding_sha256"],
-                "acceptance_sha256": waiver["acceptance_sha256"],
-            })
-            run["waiver_refs"] = rows
-            run["version"] = int(run.get("version") or 0) + 1
-            run = write_run(workspace, run)
-        return waiver, run
+        # Complete all business validation and idempotency checks before the
+        # recoverable authorization claim is acquired.
+        create_office_waiver(**waiver_kwargs, persist=False)
+        claim = None
+        try:
+            if claim_authorizer_handoff is not None:
+                claim = claim_authorizer_handoff(handoff_context)
+            else:
+                claim = handoff_context
+            waiver = create_office_waiver(**waiver_kwargs)
+            rows = [deepcopy(item) for item in run.get("waiver_refs") or [] if isinstance(item, dict)]
+            if not any(item.get("waiver_id") == waiver["waiver_id"] for item in rows):
+                rows.append({
+                    "waiver_id": waiver["waiver_id"],
+                    "target_id": waiver["issue_id"],
+                    "delivery_binding_sha256": waiver["delivery_binding_sha256"],
+                    "acceptance_sha256": waiver["acceptance_sha256"],
+                })
+                run["waiver_refs"] = rows
+                run["version"] = int(run.get("version") or 0) + 1
+                run = write_run(workspace, run)
+            if commit_authorizer_handoff is not None:
+                commit_authorizer_handoff(claim)
+            elif consume_authorizer_handoff is not None:
+                consume_authorizer_handoff(handoff_context)
+            return waiver, run
+        except ValueError as exc:
+            if release_authorizer_handoff is not None and claim is not None:
+                release_authorizer_handoff(claim)
+            code = "identity_flow_stale" if "identity_flow_stale" in str(exc) else "trusted_authorizer_required"
+            raise WaiverError(code, str(exc)) from exc
+        except Exception:
+            if release_authorizer_handoff is not None and claim is not None:
+                release_authorizer_handoff(claim)
+            raise

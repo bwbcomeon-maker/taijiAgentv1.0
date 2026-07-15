@@ -18689,20 +18689,26 @@ def _handle_expert_team_waiver_create(handler, body):
             "waiver-authorizer",
             int(time.time()),
         )
+        identity_resolver = get_trusted_identity_resolver()
         waiver, run = create_current_office_waiver(
             workspace,
             body,
             authorizer=principal,
             now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-            consume_authorizer_handoff=lambda context: get_trusted_identity_resolver().consume_authorizer_handoff(
-                identity_session_id, current_context=context
-            ),
+            claim_authorizer_handoff=lambda context: identity_resolver.claim_authorizer_handoff(
+                identity_session_id, current_context=context),
+            commit_authorizer_handoff=lambda claim_id: identity_resolver.commit_authorizer_handoff(
+                identity_session_id, claim_id),
+            release_authorizer_handoff=lambda claim_id: identity_resolver.release_authorizer_handoff(
+                identity_session_id, claim_id),
         )
         return j(handler, {"ok": True, "waiver": waiver, "run": run}, status=201)
     except TrustedIdentityError as exc:
         return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
     except WaiverError as exc:
-        status = 409 if exc.code in {"version_conflict", "waiver_binding_changed"} else 400
+        status = 409 if exc.code in {
+            "version_conflict", "waiver_binding_changed", "waiver_idempotency_conflict"
+        } else 400
         return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return bad(handler, _sanitize_error(exc), 400)

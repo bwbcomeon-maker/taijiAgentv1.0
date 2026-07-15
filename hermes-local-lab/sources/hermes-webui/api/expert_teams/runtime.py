@@ -781,6 +781,14 @@ def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
             reconcile_enterprise_completion,
         )
 
+        # Hash-closed committed runs are a pure read: do not rewrite the run,
+        # transaction, or proof on every GET.
+        if str(run.get("workflow_state") or "") == "completed":
+            status = enterprise_completion_status(workspace, run)
+            if status.get("status") == "passed":
+                run["completion_integrity"] = status
+                return run
+
         ref = run["current_delivery_manifest_ref"]
         binding_path = Path(workspace).expanduser().resolve() / str(ref.get("delivery_binding_path") or "")
         attempt_root = canonical_attempt_root(
@@ -796,18 +804,32 @@ def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
             attempt_root / COMPLETION_TRANSACTION_NAME,
         )
         if binding_path.is_file() and any(path.is_file() for path in completion_evidence):
-            try:
-                binding = read_binding_manifest(binding_path)
-                run = reconcile_enterprise_completion(
-                    workspace,
-                    run=run,
-                    binding=binding,
-                    binding_sha256=sha256_file(binding_path),
-                    now=_now(),
+            # Recovery is a mutation. Serialize it with revisions and re-read
+            # after taking the lock so a stale GET can never overwrite them.
+            with _run_mutation_lock(workspace, str(run.get("run_id") or "")):
+                current = read_run(workspace, str(run.get("run_id") or ""))
+                current_status = enterprise_completion_status(workspace, current)
+                if current_status.get("status") == "passed":
+                    current["completion_integrity"] = current_status
+                    return current
+                current_ref = current.get("current_delivery_manifest_ref")
+                if not isinstance(current_ref, dict):
+                    return current
+                current_binding_path = Path(workspace).expanduser().resolve() / str(
+                    current_ref.get("delivery_binding_path") or ""
                 )
-            except (DeliveryIntegrityError, OSError, TypeError, ValueError):
-                run["completion_integrity"] = enterprise_completion_status(workspace, run)
-            return run
+                try:
+                    binding = read_binding_manifest(current_binding_path)
+                    current = reconcile_enterprise_completion(
+                        workspace,
+                        run=current,
+                        binding=binding,
+                        binding_sha256=sha256_file(current_binding_path),
+                        now=_now(),
+                    )
+                except (DeliveryIntegrityError, OSError, TypeError, ValueError):
+                    current["completion_integrity"] = enterprise_completion_status(workspace, current)
+                return current
         if str(run.get("workflow_state") or "") == "completed":
             run["completion_integrity"] = enterprise_completion_status(workspace, run)
             return run

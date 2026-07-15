@@ -251,7 +251,10 @@ def test_authorizer_handoff_requires_provider_switch_and_distinct_principal():
     assert completed["binding_context"] == context
     resolved = resolver.resolve(completed["session_id"], required_role="waiver-authorizer")
     assert resolved["subject"] == "authorizer-2"
-    resolver.consume_authorizer_handoff(completed["session_id"], current_context=context)
+    first_claim = resolver.claim_authorizer_handoff(completed["session_id"], current_context=context)
+    resolver.release_authorizer_handoff(completed["session_id"], first_claim)
+    retry_claim = resolver.claim_authorizer_handoff(completed["session_id"], current_context=context)
+    resolver.commit_authorizer_handoff(completed["session_id"], retry_claim)
     with pytest.raises(ValueError, match="used"):
         resolver.consume_authorizer_handoff(completed["session_id"], current_context=context)
 
