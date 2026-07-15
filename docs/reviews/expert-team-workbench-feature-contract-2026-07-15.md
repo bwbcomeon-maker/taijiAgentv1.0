@@ -20,7 +20,7 @@
 | 历史任务诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“历史任务，未按企业合同验证”，三门 invalidated。 |
 | 未放行文种诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“AI 草稿能力”，不承诺企业交付。 |
 | 收起态状态胶囊 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | 展开按钮具有 accessible name、`aria-expanded` 与 `aria-controls`；点击展开/切换时使用实际工作台返回状态同步 ARIA。 |
-| 企业审批身份 | start/status/logout | 是 | 是 | 是 | provider/取消/过期/缺 role 均禁用 | 可见文字入口、成功/取消/失败/超时焦点恢复 | Node 运行时契约通过；真实 Electron 未验证 | 通过 | http(s) PKCE URL 由 Electron 主进程转交系统浏览器，窗口请求一律 deny；renderer 不依赖 Node。UI mutation 不提交 token/principal/role，不把 credential 写入 localStorage。 |
+| 企业审批身份 | start/status/logout | 是 | 是 | 是 | provider/显式取消/callback 失败/超时/缺 role 均禁用 | 可见取消入口、成功/取消/失败/超时焦点恢复 | Node 运行时契约通过；真实 Electron 未验证 | 通过 | http(s) PKCE URL 由 Electron 主进程转交系统浏览器，窗口请求一律 deny；renderer 即使收到 `window.open=null` 仍轮询权威 status，不依赖 popup handle/`closed` 或 Node。UI mutation 不提交 token/principal/role，不把 credential 写入 localStorage。 |
 | 阶段批准门禁 | 是 | 是 | 是 | fail-closed | 无合法 approver 或有 unresolved warning 时禁用并解释 | 禁用原因可读 | 未验证 | 通过 | pre-Office warning 不提供“申请授权”。 |
 | 聊天区无可操作确认卡 | 是 | 是 | 是 | 不适用 | 不适用 | 是 | 未验证 | 通过 | 生命周期提示只引导右侧工作台；完成成果入口继续保留。 |
 | 真实 Brief 编辑与阶段复核 | 是 | 是 | 是 | 是 | 是 | 人工语义检查完成 | 未验证 | 未验证 | 代码与自动化契约已覆盖；真实 Electron 留待 Task 7。 |

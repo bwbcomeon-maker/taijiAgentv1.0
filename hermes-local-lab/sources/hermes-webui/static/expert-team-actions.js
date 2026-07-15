@@ -11,6 +11,7 @@
   const mutationInFlight=new Map();
   const mutationIdempotencyKeys=new Map();
   let mutationNonce=0;
+  let activeIdentityLoginAttempt=null;
   function activeExpertTeamCard(btn){
     const root=btn&&btn.closest&&btn.closest('[data-expert-team-run-id]');
     const active=(typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||{};
@@ -347,6 +348,18 @@
     if(target&&target.focus){try{target.focus({preventScroll:true});}catch(_){target.focus();}return true;}
     return false;
   }
+  function setExpertTeamIdentityLoginPending(pending){
+    const panel=(typeof document!=='undefined'&&document.getElementById&&document.getElementById('expertTeamWorkspacePanel'))||null;
+    const cancel=panel&&panel.querySelector&&panel.querySelector('[data-expert-team-identity-action="cancel"]');
+    if(cancel){cancel.hidden=!pending;cancel.disabled=!pending;}
+    return !!pending;
+  }
+  function cancelExpertTeamIdentityLogin(){
+    if(!activeIdentityLoginAttempt)return false;
+    activeIdentityLoginAttempt.cancelled=true;
+    if(typeof showToast==='function')showToast('企业身份登录已取消，审批仍保持禁用。');
+    return true;
+  }
   async function refreshExpertTeamIdentityStatus(btn,options){
     options=options||{};
     try{
@@ -358,18 +371,22 @@
     }
   }
   async function startExpertTeamIdentityLogin(btn){
+    if(activeIdentityLoginAttempt)activeIdentityLoginAttempt.cancelled=true;
+    const loginAttempt={cancelled:false};
+    activeIdentityLoginAttempt=loginAttempt;
+    setExpertTeamIdentityLoginPending(true);
     setMutationButtonBusy(btn,true,'正在打开登录...');
-    let popup=null;
     try{
       const redirectUri=(window.location&&window.location.origin?window.location.origin:'')+'/api/expert-teams/identity/callback';
       const flow=await api('/api/expert-teams/identity/start',{method:'POST',body:JSON.stringify({redirect_uri:redirectUri,purpose:'login'})});
-      popup=window.open(String(flow&&flow.authorization_url||''),'_blank','noopener,noreferrer');
-      if(!popup){if(typeof showToast==='function')showToast('登录窗口未打开，请允许弹出窗口后重试。');return false;}
+      window.open(String(flow&&flow.authorization_url||''),'_blank','noopener,noreferrer');
+      if(typeof showToast==='function')showToast('已请求在系统浏览器中登录，完成后此处会自动更新。');
       for(let attempt=0;attempt<120;attempt+=1){
+        if(loginAttempt.cancelled)return false;
         await new Promise(resolve=>setTimeout(resolve,1000));
         const status=await api('/api/expert-teams/identity/status');
+        if(loginAttempt.cancelled||status&&['cancelled','failed'].includes(String(status.identity_flow_status||status.login_state||'')))return false;
         if(status&&status.authenticated){applyExpertTeamIdentityStatus(status,null);return true;}
-        if(popup.closed){if(typeof showToast==='function')showToast('登录已取消，当前审批仍保持禁用。');return false;}
       }
       if(typeof showToast==='function')showToast('企业身份登录已过期，请重新登录。');
       return false;
@@ -377,6 +394,8 @@
       if(typeof showToast==='function')showToast('企业身份登录失败：'+(error&&error.message||error));
       return false;
     }finally{
+      if(activeIdentityLoginAttempt===loginAttempt)activeIdentityLoginAttempt=null;
+      setExpertTeamIdentityLoginPending(false);
       if(!btn||btn.isConnected!==false)setMutationButtonBusy(btn,false);
       restoreExpertTeamIdentityFocus(btn);
     }
@@ -564,6 +583,7 @@
     window.clearExpertTeamBriefErrors=clearExpertTeamBriefErrors;
     window.refreshExpertTeamIdentityStatus=refreshExpertTeamIdentityStatus;
     window.startExpertTeamIdentityLogin=startExpertTeamIdentityLogin;
+    window.cancelExpertTeamIdentityLogin=cancelExpertTeamIdentityLogin;
     window.logoutExpertTeamIdentity=logoutExpertTeamIdentity;
     window.expertTeamIdentityCapability=expertTeamIdentityCapability;
     window.openExpertTeamFileArtifact=openExpertTeamFileArtifact;

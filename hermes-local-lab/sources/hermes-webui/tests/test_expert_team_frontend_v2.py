@@ -1368,11 +1368,12 @@ def test_identity_runtime_handles_success_cancel_callback_failure_timeout_logout
             function button(){return {disabled:false,isConnected:true,textContent:'登录',focusCount:0,setAttribute:()=>{},removeAttribute:()=>{},focus(){this.focusCount+=1;}};}
             async function loginScenario(kind){
               const btn=button();let statusCalls=0;
-              context.window.open=()=>({get closed(){return kind==='cancel';}});
+              context.window.open=()=>null;
               context.api=async(path)=>{
                 if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize'};
                 if(path.endsWith('/status')){
                   statusCalls+=1;
+                  if(kind==='cancel'&&statusCalls===1)context.window.cancelExpertTeamIdentityLogin(btn);
                   if(kind==='callbackFailure')throw new Error('callback failed');
                   if(kind==='success'&&statusCalls===2)return {enabled:true,authenticated:true,principal:{display_name:'李工',roles:['document-approver']}};
                   return {enabled:true,authenticated:false};
@@ -1404,6 +1405,19 @@ def test_identity_runtime_handles_success_cancel_callback_failure_timeout_logout
         'focusCount': 1,
         'calls': [{'path': '/api/expert-teams/identity/logout', 'body': '{}'}],
     }
+
+
+def test_identity_external_browser_launch_never_depends_on_popup_handle_or_closed_state():
+    start = _function_body(
+        ACTIONS_JS,
+        'async function startExpertTeamIdentityLogin',
+        'async function logoutExpertTeamIdentity',
+    )
+    assert 'window.open' in start
+    assert 'if(!popup)' not in start
+    assert 'popup.closed' not in start
+    assert 'cancelExpertTeamIdentityLogin' in ACTIONS_JS
+    assert 'data-expert-team-identity-action="cancel"' in EXPERT_UI_JS
 
 
 def test_dynamic_brief_error_merges_and_clears_aria_describedby_without_losing_help():
