@@ -3121,6 +3121,7 @@ def resolve_provider_client(
     api_mode: str = None,
     main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False,
+    follow_redirects: Optional[bool] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Central router: given a provider name and optional model, return a
     configured client with the correct auth, base URL, and API format.
@@ -3629,8 +3630,28 @@ def resolve_provider_client(
                     headers.update(_ph_main.default_headers)
             except Exception:
                 pass
-        client = OpenAI(api_key=api_key, base_url=base_url,
-                        **({"default_headers": headers} if headers else {}))
+        client_kwargs = {"default_headers": headers} if headers else {}
+        if follow_redirects is not None:
+            import httpx
+
+            if async_mode:
+                from openai import AsyncOpenAI
+
+                async_http_client = httpx.AsyncClient(
+                    follow_redirects=follow_redirects
+                )
+                client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    http_client=async_http_client,
+                    **client_kwargs,
+                )
+                logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
+                return client, final_model
+            client_kwargs["http_client"] = httpx.Client(
+                follow_redirects=follow_redirects
+            )
+        client = OpenAI(api_key=api_key, base_url=base_url, **client_kwargs)
 
         # Copilot GPT-5+ models (except gpt-5-mini) require the Responses
         # API — they are not accessible via /chat/completions.  Wrap the
@@ -3923,6 +3944,22 @@ def resolve_vision_provider_client(
         provider_for_base_override = (
             requested if requested and requested not in {"", "auto"} else "custom"
         )
+        vision_cfg = _get_auxiliary_task_config("vision")
+        configured_base_url = str(vision_cfg.get("base_url") or "").strip().rstrip("/")
+        custom_alibaba_endpoint = bool(
+            provider_for_base_override == "alibaba"
+            and (
+                str(vision_cfg.get("endpoint_mode") or "").strip().lower()
+                == "custom"
+                or (
+                    base_url
+                    and base_url.rstrip("/") != configured_base_url
+                )
+            )
+        )
+        redirect_kwargs = (
+            {"follow_redirects": False} if custom_alibaba_endpoint else {}
+        )
         client, final_model = resolve_provider_client(
             provider_for_base_override,
             model=resolved_model,
@@ -3930,6 +3967,7 @@ def resolve_vision_provider_client(
             explicit_base_url=resolved_base_url,
             explicit_api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            **redirect_kwargs,
         )
         if client is None:
             return provider_for_base_override, None, None

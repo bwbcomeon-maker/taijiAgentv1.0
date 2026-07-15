@@ -2860,6 +2860,182 @@ async def test_alibaba_custom_vision_endpoint_fails_closed_before_router(
     router.assert_not_called()
 
 
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_alibaba_custom_vision_client_disables_redirects_without_affecting_identity(
+    monkeypatch, async_mode
+):
+    base_url = "https://vision.example.com/compatible-mode/v1"
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "endpoint_mode": "custom",
+            "base_url": base_url,
+        }
+        if task == "vision"
+        else {},
+    )
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_api_key",
+        lambda provider, credential_ref: "named-runtime-secret",
+    )
+    transport = MagicMock(name="no_redirect_transport")
+    if async_mode:
+        transport_factory = MagicMock(return_value=transport)
+        monkeypatch.setattr("httpx.AsyncClient", transport_factory)
+        sdk_factory = MagicMock(
+            return_value=SimpleNamespace(
+                api_key="named-runtime-secret", base_url=base_url
+            )
+        )
+        monkeypatch.setattr("openai.AsyncOpenAI", sdk_factory)
+        sync_sdk_factory = MagicMock(
+            side_effect=AssertionError("sync SDK client must not be allocated")
+        )
+        monkeypatch.setattr("agent.auxiliary_client.OpenAI", sync_sdk_factory)
+    else:
+        transport_factory = MagicMock(return_value=transport)
+        monkeypatch.setattr("httpx.Client", transport_factory)
+        sdk_factory = MagicMock(
+            return_value=SimpleNamespace(
+                api_key="named-runtime-secret", base_url=base_url
+            )
+        )
+        monkeypatch.setattr("agent.auxiliary_client.OpenAI", sdk_factory)
+
+    provider, client, model = resolve_vision_provider_client(async_mode=async_mode)
+
+    assert (provider, model) == ("alibaba", "qwen3-vl-plus")
+    assert client is sdk_factory.return_value
+    transport_factory.assert_called_once_with(follow_redirects=False)
+    sdk_factory.assert_called_once_with(
+        api_key="named-runtime-secret",
+        base_url=base_url,
+        http_client=transport,
+    )
+
+
+@pytest.mark.asyncio
+async def test_strict_alibaba_custom_vision_probe_uses_no_redirect_async_transport(
+    monkeypatch,
+):
+    base_url = "https://vision.example.com/compatible-mode/v1"
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "endpoint_mode": "custom",
+            "base_url": base_url,
+        }
+        if task == "vision"
+        else {},
+    )
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_api_key",
+        lambda provider, credential_ref: "named-runtime-secret",
+    )
+    transport = MagicMock(name="no_redirect_async_transport")
+    transport_factory = MagicMock(return_value=transport)
+    monkeypatch.setattr("httpx.AsyncClient", transport_factory)
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="vision-ok"))]
+    )
+    fake_client = SimpleNamespace(
+        api_key="named-runtime-secret",
+        base_url=base_url,
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(return_value=response))
+        ),
+    )
+    sdk_factory = MagicMock(return_value=fake_client)
+    monkeypatch.setattr("openai.AsyncOpenAI", sdk_factory)
+    monkeypatch.setattr(
+        "agent.auxiliary_client.OpenAI",
+        MagicMock(side_effect=AssertionError("sync SDK client must not be allocated")),
+    )
+    resolution = {}
+
+    result = await async_call_llm(
+        task="vision",
+        provider="alibaba",
+        model="qwen3-vl-plus",
+        messages=[{"role": "user", "content": "inspect"}],
+        no_fallback=True,
+        resolution_out=resolution,
+    )
+
+    assert result is response
+    assert resolution == {"provider": "alibaba", "model": "qwen3-vl-plus"}
+    transport_factory.assert_called_once_with(follow_redirects=False)
+    sdk_factory.assert_called_once_with(
+        api_key="named-runtime-secret",
+        base_url=base_url,
+        http_client=transport,
+    )
+
+
+@pytest.mark.parametrize(
+    ("endpoint_mode", "base_url"),
+    [
+        ("public", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        (
+            "workspace",
+            "https://workspace-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        ),
+    ],
+)
+def test_alibaba_managed_vision_endpoints_keep_standard_transport(
+    monkeypatch, endpoint_mode, base_url
+):
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "endpoint_mode": endpoint_mode,
+            "base_url": base_url,
+        }
+        if task == "vision"
+        else {},
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_api_key",
+        lambda provider, credential_ref: "named-runtime-secret",
+    )
+    fake_client = MagicMock(name="managed_alibaba_client")
+    router = MagicMock(return_value=(fake_client, "qwen3-vl-plus"))
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", router)
+
+    assert resolve_vision_provider_client() == (
+        "alibaba",
+        fake_client,
+        "qwen3-vl-plus",
+    )
+    router.assert_called_once_with(
+        "alibaba",
+        model="qwen3-vl-plus",
+        async_mode=False,
+        explicit_base_url=base_url,
+        explicit_api_key="named-runtime-secret",
+        api_mode=None,
+    )
+
+
 class TestCodexAuxiliaryAdapterTimeout:
     def test_forwards_timeout_to_responses_create(self):
         message_item = SimpleNamespace(
