@@ -1621,6 +1621,106 @@ def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypat
     os.environ.pop("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", None)
 
 
+def test_custom_vision_provider_config_writes_isolated_secret_and_redacts(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.delenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", raising=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+
+    result = model_config.set_custom_vision_provider_config({
+        "id": "router",
+        "name": "Router Vision",
+        "base_url": "https://vision.example.com/v1",
+        "models": ["router-vl"],
+        "default_model": "router-vl",
+        "transport": "openai_chat_completions",
+        "api_key": "vision-secret-must-not-leak",
+    })
+
+    cfg = _read_config(tmp_path)
+    assert cfg["custom_vision_providers"] == [{
+        "id": "router",
+        "name": "Router Vision",
+        "base_url": "https://vision.example.com/v1",
+        "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+        "models": ["router-vl"],
+        "default_model": "router-vl",
+        "transport": "openai_chat_completions",
+    }]
+    assert "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=vision-secret-must-not-leak" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    public = json.dumps(result, ensure_ascii=False)
+    assert "vision-secret-must-not-leak" not in public
+    assert result["provider"]["id"] == "custom:router"
+    assert result["provider"]["transport"] == "openai_chat_completions"
+    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
+
+
+def test_custom_vision_provider_delete_rejects_active_provider(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({
+            "auxiliary": {"vision": {"provider": "custom:router", "model": "router-vl"}},
+            "custom_vision_providers": [{
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-vl"],
+                "default_model": "router-vl",
+                "transport": "openai_chat_completions",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="正在使用"):
+        model_config.delete_custom_vision_provider_config("router")
+
+
+def test_custom_vision_provider_rejects_unknown_transport(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+
+    with pytest.raises(ValueError, match="transport"):
+        model_config.set_custom_vision_provider_config({
+            "id": "router",
+            "base_url": "https://vision.example.com/v1",
+            "models": ["router-vl"],
+            "transport": "vendor_native_magic",
+            "api_key": "secret",
+        })
+
+
+def test_named_custom_vision_provider_appears_in_vision_config(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "router-secret")
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({
+            "auxiliary": {"vision": {"provider": "custom:router", "model": "router-vl"}},
+            "custom_vision_providers": [{
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-vl"],
+                "default_model": "router-vl",
+                "transport": "openai_chat_completions",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_vision_config()
+    row = next(item for item in result["providers"] if item["id"] == "custom:router")
+    assert row["active"] is True
+    assert row["available"] is True
+    assert row["transport"] == "openai_chat_completions"
+    assert result["vision"]["key_status"]["env_var"] == "TAIJI_VISION_CUSTOM_ROUTER_API_KEY"
+    assert "router-secret" not in json.dumps(result, ensure_ascii=False)
+    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
+
+
 def test_custom_image_provider_appears_in_image_gen_config(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "router-sensitive-value")

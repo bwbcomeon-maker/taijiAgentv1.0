@@ -9611,6 +9611,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_vision_config())
 
+    if parsed.path == "/api/vision/custom-providers":
+        from api.model_config import get_custom_vision_provider_configs
+
+        return j(handler, get_custom_vision_provider_configs())
+
     if parsed.path == "/api/image-gen/custom-providers":
         from api.model_config import get_custom_image_provider_configs
 
@@ -11289,6 +11294,16 @@ def handle_post(handler, parsed) -> bool:
         from api.model_config import test_vision_config
 
         return j(handler, test_vision_config())
+
+    if parsed.path == "/api/vision/custom-providers":
+        from api.model_config import set_custom_vision_provider_config
+
+        try:
+            return j(handler, set_custom_vision_provider_config(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=500)
 
     if parsed.path == "/api/image-gen/test":
         from api.model_config import test_image_gen_config
@@ -13377,6 +13392,16 @@ def handle_delete(handler, parsed) -> bool:
         name = parsed.path[len("/api/image-gen/custom-providers/"):]
         try:
             return j(handler, delete_custom_image_provider_config(name))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=500)
+    if parsed.path.startswith("/api/vision/custom-providers/"):
+        from api.model_config import delete_custom_vision_provider_config
+
+        name = parsed.path[len("/api/vision/custom-providers/"):]
+        try:
+            return j(handler, delete_custom_vision_provider_config(name))
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:

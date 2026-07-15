@@ -647,6 +647,7 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    follow_redirects: Optional[bool] = None,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -699,6 +700,10 @@ def build_anthropic_client(
     kwargs = {
         "timeout": Timeout(timeout=float(_read_timeout), connect=10.0),
     }
+    if follow_redirects is not None:
+        import httpx
+
+        kwargs["http_client"] = httpx.Client(follow_redirects=follow_redirects)
     if normalized_base_url:
         # Azure Anthropic endpoints require an ``api-version`` query parameter.
         # Pass it via default_query so the SDK appends it to every request URL

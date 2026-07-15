@@ -1001,6 +1001,18 @@ def _vision_key_status(
     vision_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     provider = str(provider_id or "").strip().lower()
+    if provider.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            entry = find_custom_vision_provider_entry(
+                provider,
+                _load_yaml_config_file(_get_config_path()),
+            )
+        except ImportError:
+            entry = None
+        if entry is not None:
+            return _key_status_for_env(entry["api_key_env"])
     credential_ref = str((vision_cfg or {}).get("credential_ref") or "").strip()
     if credential_ref:
         try:
@@ -1120,6 +1132,17 @@ def _vision_secret_digest(provider: str, credential_ref: str = "") -> str:
                     env_var = expected
         except ValueError:
             pass
+    elif str(provider or "").startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            entry = find_custom_vision_provider_entry(
+                provider,
+                _load_yaml_config_file(_get_config_path()),
+            )
+        except ImportError:
+            entry = None
+        env_var = str((entry or {}).get("api_key_env") or "")
     else:
         env_var = _VISION_KEY_ENV.get(provider) or _PROVIDER_ENV_VAR.get(provider) or ""
     if not env_var:
@@ -1136,6 +1159,17 @@ def _vision_config_fingerprint(
     profile: str,
 ) -> str:
     provider = str(vision_cfg.get("provider") or "").strip().lower()
+    custom_entry: dict[str, Any] = {}
+    if provider.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            custom_entry = find_custom_vision_provider_entry(
+                provider,
+                _load_yaml_config_file(_get_config_path()),
+            ) or {}
+        except ImportError:
+            pass
     material = {
         "profile": profile,
         "provider": provider,
@@ -1151,6 +1185,8 @@ def _vision_config_fingerprint(
             provider,
             str(vision_cfg.get("credential_ref") or "").strip(),
         ),
+        "custom_base_url": str(custom_entry.get("base_url") or "").rstrip("/"),
+        "custom_transport": str(custom_entry.get("transport") or ""),
     }
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1165,6 +1201,20 @@ def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
     if not isinstance(vision_cfg, dict):
         vision_cfg = {}
     provider = str(vision_cfg.get("provider") or "").strip().lower()
+    if provider.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            entry = find_custom_vision_provider_entry(provider, config_data) or {}
+        except ImportError:
+            entry = {}
+        vision_cfg = dict(vision_cfg)
+        vision_cfg["base_url"] = str(entry.get("base_url") or "")
+        vision_cfg["api_mode"] = (
+            "anthropic_messages"
+            if entry.get("transport") == "anthropic_messages"
+            else "chat_completions"
+        )
     key_status = _vision_key_status(provider, vision_cfg)
     return _VisionConfigSnapshot(
         profile=profile,
@@ -1189,6 +1239,14 @@ def _vision_is_configured(vision_cfg: dict[str, Any], key_status: dict[str, Any]
     provider = str(vision_cfg.get("provider") or "").strip().lower()
     model = str(vision_cfg.get("model") or "").strip()
     meta = _VISION_PROVIDER_META.get(provider) or {}
+    if provider.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            entry = find_custom_vision_provider_entry(provider)
+        except ImportError:
+            entry = None
+        return bool(entry and model in entry["models"] and key_status.get("configured"))
     base_url = str(vision_cfg.get("base_url") or "").strip()
     return bool(
         provider
@@ -1872,7 +1930,26 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
                 "default_model": str(meta.get("default_model") or ""),
             }
         )
-    if active and active not in _VISION_PROVIDER_META and active != "auto":
+    try:
+        from agent.custom_vision_providers import (
+            custom_vision_provider_public_row,
+            load_custom_vision_provider_entries,
+        )
+
+        custom_rows = [
+            custom_vision_provider_public_row(entry, active_provider=active)
+            for entry in load_custom_vision_provider_entries(
+                _load_yaml_config_file(_get_config_path())
+            )
+        ]
+    except ImportError:
+        custom_rows = []
+    for row in custom_rows:
+        row["key_status"] = _key_status_for_env(row["key_status"]["env_var"])
+        row["available"] = bool(row["key_status"].get("configured"))
+        rows.append(row)
+    custom_ids = {str(row.get("id") or "") for row in custom_rows}
+    if active and active not in _VISION_PROVIDER_META and active not in custom_ids and active != "auto":
         key_status = _vision_key_status(active, vision_cfg)
         rows.append(
             {
@@ -1903,6 +1980,19 @@ def get_vision_config() -> dict[str, Any]:
     model = str(vision_cfg.get("model") or "").strip()
     base_url = str(vision_cfg.get("base_url") or "").strip()
     api_mode = str(vision_cfg.get("api_mode") or "").strip()
+    if provider.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            entry = find_custom_vision_provider_entry(provider, config_data) or {}
+        except ImportError:
+            entry = {}
+        base_url = str(entry.get("base_url") or "")
+        api_mode = (
+            "anthropic_messages"
+            if entry.get("transport") == "anthropic_messages"
+            else ("chat_completions" if entry else "")
+        )
     key_status = _vision_key_status(provider, vision_cfg)
     return {
         "ok": True,
@@ -1936,7 +2026,15 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     credential_ref = str(body.get("credential_ref") or "").strip()
     if not provider_id:
         raise ValueError("provider is required")
-    if provider_id not in _VISION_PROVIDER_META:
+    named_custom_entry: dict[str, Any] | None = None
+    if provider_id.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            named_custom_entry = find_custom_vision_provider_entry(provider_id)
+        except ImportError:
+            named_custom_entry = None
+    if provider_id not in _VISION_PROVIDER_META and named_custom_entry is None:
         raise ValueError(f"unknown vision provider: {provider_id}")
     if (
         provider_id == "alibaba"
@@ -1946,7 +2044,10 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("credential_ref and api_key cannot be used together")
 
-    meta = _VISION_PROVIDER_META[provider_id]
+    meta = _VISION_PROVIDER_META.get(provider_id) or {
+        "default_model": named_custom_entry["default_model"],
+        "models": [{"id": item} for item in named_custom_entry["models"]],
+    }
     if not model_id:
         model_id = str(meta.get("default_model") or "").strip()
         models = meta.get("models") if isinstance(meta.get("models"), list) else []
@@ -1973,6 +2074,11 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
         )
         if credential_ref:
             credential_ref = normalize_credential_id(credential_ref)
+    elif named_custom_entry is not None:
+        if api_key is not None and str(api_key).strip():
+            raise ValueError("命名式外部识图密钥请在 Provider 管理中更新。")
+        if model_id not in named_custom_entry["models"]:
+            raise ValueError(f"unknown custom vision model: {model_id}")
     if bool(meta.get("requires_base_url")) and not base_url:
         raise ValueError("base_url is required for custom vision provider")
 
@@ -2037,6 +2143,132 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     invalidate_models_cache()
     _invalidate_vision_verification()
     return get_vision_config()
+
+
+def get_custom_vision_provider_configs() -> dict[str, Any]:
+    config_data = _load_yaml_config_file(_get_config_path())
+    auxiliary = config_data.get("auxiliary")
+    vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+    active_provider = str((vision_cfg or {}).get("provider") or "").strip().lower()
+    try:
+        from agent.custom_vision_providers import (
+            custom_vision_provider_public_row,
+            load_custom_vision_provider_entries,
+        )
+    except ImportError:
+        return {"ok": True, "providers": []}
+    rows = [
+        custom_vision_provider_public_row(entry, active_provider=active_provider)
+        for entry in load_custom_vision_provider_entries(config_data)
+    ]
+    for row in rows:
+        row["key_status"] = _key_status_for_env(row["key_status"]["env_var"])
+        row["available"] = bool(row["key_status"].get("configured"))
+    return {"ok": True, "providers": rows}
+
+
+def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from agent.custom_vision_providers import (
+            custom_vision_provider_public_row,
+            is_custom_vision_base_url_safe,
+            normalize_custom_vision_provider_entry,
+            normalize_custom_vision_provider_id,
+        )
+    except ImportError as exc:
+        raise RuntimeError("custom vision provider support is unavailable") from exc
+
+    requested_id = normalize_custom_vision_provider_id(body.get("id") or body.get("provider_id"))
+    api_key = body.get("api_key")
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        existing_entries = config_data.get("custom_vision_providers")
+        if not isinstance(existing_entries, list):
+            existing_entries = []
+        existing = next(
+            (
+                item for item in existing_entries
+                if isinstance(item, dict)
+                and normalize_custom_vision_provider_id(item.get("id")) == requested_id
+            ),
+            {},
+        )
+        merged = dict(existing)
+        merged.update({key: value for key, value in body.items() if key != "api_key"})
+        merged["id"] = requested_id
+        normalized = normalize_custom_vision_provider_entry(merged)
+        if not is_custom_vision_base_url_safe(normalized["base_url"]):
+            raise ValueError("外部识图 Base URL 无法通过公网安全校验。")
+        if api_key is not None and str(api_key).strip():
+            _write_env_file(
+                _get_hermes_home() / ".env",
+                {normalized["api_key_env"]: str(api_key).strip()},
+            )
+        updated = []
+        for item in existing_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = normalize_custom_vision_provider_id(item.get("id"))
+            except ValueError:
+                continue
+            if item_id != requested_id:
+                updated.append(item)
+        updated.append(normalized)
+        config_data["custom_vision_providers"] = updated
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    invalidate_models_cache()
+    _invalidate_vision_verification()
+    row = custom_vision_provider_public_row(normalized)
+    return {
+        "ok": True,
+        "provider": row,
+        "providers": get_custom_vision_provider_configs()["providers"],
+    }
+
+
+def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
+    try:
+        from agent.custom_vision_providers import (
+            custom_vision_provider_name,
+            normalize_custom_vision_provider_id,
+        )
+    except ImportError as exc:
+        raise RuntimeError("custom vision provider support is unavailable") from exc
+    normalized_id = normalize_custom_vision_provider_id(provider_id)
+    provider_name = custom_vision_provider_name(normalized_id)
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        auxiliary = config_data.get("auxiliary")
+        vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+        if str((vision_cfg or {}).get("provider") or "").strip().lower() == provider_name:
+            raise ValueError("该外部识图 Provider 正在使用，请先切换识图配置。")
+        entries = config_data.get("custom_vision_providers")
+        if not isinstance(entries, list):
+            entries = []
+        updated = []
+        removed = False
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = normalize_custom_vision_provider_id(item.get("id"))
+            except ValueError:
+                continue
+            if item_id == normalized_id:
+                removed = True
+            else:
+                updated.append(item)
+        if not removed:
+            raise ValueError("外部识图 Provider 不存在。")
+        config_data["custom_vision_providers"] = updated
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    invalidate_models_cache()
+    return get_custom_vision_provider_configs()
 
 
 def get_custom_image_provider_configs() -> dict[str, Any]:

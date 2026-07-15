@@ -1122,6 +1122,7 @@ def _maybe_wrap_anthropic(
     api_key: str,
     base_url: str,
     api_mode: Optional[str] = None,
+    follow_redirects: Optional[bool] = None,
 ) -> Any:
     """Rewrap a plain OpenAI client in ``AnthropicAuxiliaryClient`` when
     the endpoint actually speaks Anthropic Messages.
@@ -1180,7 +1181,11 @@ def _maybe_wrap_anthropic(
         return client_obj
 
     try:
-        real_client = build_anthropic_client(api_key, base_url)
+        real_client = build_anthropic_client(
+            api_key,
+            base_url,
+            follow_redirects=follow_redirects,
+        )
     except Exception as exc:
         logger.warning(
             "Failed to build Anthropic client for %s (%s) — falling back to "
@@ -3384,8 +3389,19 @@ def resolve_provider_client(
                         extra["default_headers"] = dict(_ph_custom.default_headers)
                 except Exception:
                     pass
+            if follow_redirects is not None:
+                import httpx
+
+                extra["http_client"] = httpx.Client(follow_redirects=follow_redirects)
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
-            client = _wrap_if_needed(client, final_model, custom_base, custom_key)
+            client = _maybe_wrap_anthropic(
+                client,
+                final_model,
+                custom_key,
+                custom_base,
+                api_mode,
+                follow_redirects=follow_redirects,
+            )
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
         # Try custom first, then API-key providers (Codex excluded here:
@@ -3856,6 +3872,15 @@ def _main_model_supports_vision(provider: str, model: Optional[str]) -> bool:
 
 
 def _normalize_vision_provider(provider: Optional[str]) -> str:
+    raw = str(provider or "").strip().lower()
+    if raw.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import find_custom_vision_provider_entry
+
+            if find_custom_vision_provider_entry(raw):
+                return raw
+        except ImportError:
+            pass
     return _normalize_aux_provider(provider)
 
 
@@ -3957,11 +3982,15 @@ def resolve_vision_provider_client(
                 )
             )
         )
+        named_custom_vision = provider_for_base_override.startswith("custom:")
+        route_provider = "custom" if named_custom_vision else provider_for_base_override
         redirect_kwargs = (
-            {"follow_redirects": False} if custom_alibaba_endpoint else {}
+            {"follow_redirects": False}
+            if custom_alibaba_endpoint or named_custom_vision
+            else {}
         )
         client, final_model = resolve_provider_client(
-            provider_for_base_override,
+            route_provider,
             model=resolved_model,
             async_mode=async_mode,
             explicit_base_url=resolved_base_url,
@@ -4529,6 +4558,34 @@ def _resolve_task_provider_model(
         cfg_provider, cfg_base_url = _expand_direct_api_alias(cfg_provider, cfg_base_url)
 
     selected_provider = provider or cfg_provider
+    if task == "vision" and str(selected_provider or "").strip().lower().startswith("custom:"):
+        from agent.custom_vision_providers import (
+            find_custom_vision_provider_entry,
+            is_custom_vision_base_url_safe,
+        )
+
+        entry = find_custom_vision_provider_entry(selected_provider)
+        if entry is not None:
+            named_base_url = base_url or entry["base_url"]
+            if not is_custom_vision_base_url_safe(named_base_url):
+                raise ValueError("unsafe custom vision endpoint")
+            named_key = (
+                api_key
+                if api_key is not None
+                else os.getenv(entry["api_key_env"], "").strip() or None
+            )
+            named_mode = (
+                "anthropic_messages"
+                if entry["transport"] == "anthropic_messages"
+                else "chat_completions"
+            )
+            return (
+                str(selected_provider).strip().lower(),
+                resolved_model or entry["default_model"],
+                named_base_url,
+                named_key,
+                named_mode,
+            )
     if task == "vision" and selected_provider == "alibaba":
         saved_alibaba = cfg_provider == "alibaba"
         alibaba_base_url = (
