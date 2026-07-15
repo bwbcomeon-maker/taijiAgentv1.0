@@ -24,9 +24,11 @@ from typing import Any
 
 from agent.provider_credentials import (
     credential_secret_env,
+    load_credential,
     normalize_credential_id,
     provider_family,
 )
+from agent.alibaba_endpoints import build_vision_base_url
 
 from api.config import (
     _cfg_lock,
@@ -923,8 +925,26 @@ def get_image_gen_config() -> dict[str, Any]:
     }
 
 
-def _vision_key_status(provider_id: str) -> dict[str, Any]:
+def _vision_key_status(
+    provider_id: str,
+    vision_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     provider = str(provider_id or "").strip().lower()
+    credential_ref = str((vision_cfg or {}).get("credential_ref") or "").strip()
+    if credential_ref:
+        try:
+            row = load_credential(
+                credential_ref,
+                config_data=_load_yaml_config_file(_get_config_path()),
+            )
+            if provider_family(row.get("provider_family")) != provider_family(provider):
+                return {"configured": False, "source": "none", "env_var": ""}
+            secret_env = credential_secret_env(row.get("id"))
+            if str(row.get("secret_env") or "").strip() != secret_env:
+                return {"configured": False, "source": "none", "env_var": ""}
+            return _key_status_for_env(secret_env)
+        except ValueError:
+            return {"configured": False, "source": "none", "env_var": ""}
     env_var = _VISION_KEY_ENV.get(provider)
     if env_var:
         return _key_status_for_env(env_var)
@@ -943,6 +963,10 @@ class _VisionConfigSnapshot:
     model: str
     base_url: str
     api_mode: str
+    credential_ref: str
+    endpoint_mode: str
+    region: str
+    workspace_id: str
     configured: bool
     fingerprint: str
 
@@ -1011,8 +1035,22 @@ def _read_vision_verification_state(profile: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _vision_secret_digest(provider: str) -> str:
-    env_var = _VISION_KEY_ENV.get(provider) or _PROVIDER_ENV_VAR.get(provider) or ""
+def _vision_secret_digest(provider: str, credential_ref: str = "") -> str:
+    env_var = ""
+    if credential_ref:
+        try:
+            row = load_credential(
+                credential_ref,
+                config_data=_load_yaml_config_file(_get_config_path()),
+            )
+            if provider_family(row.get("provider_family")) == provider_family(provider):
+                expected = credential_secret_env(row.get("id"))
+                if str(row.get("secret_env") or "").strip() == expected:
+                    env_var = expected
+        except ValueError:
+            pass
+    else:
+        env_var = _VISION_KEY_ENV.get(provider) or _PROVIDER_ENV_VAR.get(provider) or ""
     if not env_var:
         return ""
     env_values = _load_env_file(_get_hermes_home() / ".env")
@@ -1033,8 +1071,15 @@ def _vision_config_fingerprint(
         "model": str(vision_cfg.get("model") or "").strip(),
         "base_url": str(vision_cfg.get("base_url") or "").strip().rstrip("/"),
         "api_mode": str(vision_cfg.get("api_mode") or "").strip(),
+        "credential_ref": str(vision_cfg.get("credential_ref") or "").strip(),
+        "endpoint_mode": str(vision_cfg.get("endpoint_mode") or "").strip(),
+        "region": str(vision_cfg.get("region") or "").strip(),
+        "workspace_id": str(vision_cfg.get("workspace_id") or "").strip(),
         "key_configured": bool(key_status.get("configured")),
-        "key_digest": _vision_secret_digest(provider),
+        "key_digest": _vision_secret_digest(
+            provider,
+            str(vision_cfg.get("credential_ref") or "").strip(),
+        ),
     }
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1049,13 +1094,17 @@ def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
     if not isinstance(vision_cfg, dict):
         vision_cfg = {}
     provider = str(vision_cfg.get("provider") or "").strip().lower()
-    key_status = _vision_key_status(provider)
+    key_status = _vision_key_status(provider, vision_cfg)
     return _VisionConfigSnapshot(
         profile=profile,
         provider=provider,
         model=str(vision_cfg.get("model") or "").strip(),
         base_url=str(vision_cfg.get("base_url") or "").strip().rstrip("/"),
         api_mode=str(vision_cfg.get("api_mode") or "").strip(),
+        credential_ref=str(vision_cfg.get("credential_ref") or "").strip(),
+        endpoint_mode=str(vision_cfg.get("endpoint_mode") or "").strip(),
+        region=str(vision_cfg.get("region") or "").strip(),
+        workspace_id=str(vision_cfg.get("workspace_id") or "").strip(),
         configured=_vision_is_configured(vision_cfg, key_status),
         fingerprint=_vision_config_fingerprint(
             vision_cfg,
@@ -1251,7 +1300,7 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
     rows: list[dict[str, Any]] = []
     active = str(active_provider or "").strip().lower()
     for pid, meta in _VISION_PROVIDER_META.items():
-        key_status = _vision_key_status(pid)
+        key_status = _vision_key_status(pid, vision_cfg if pid == active else None)
         requires_base_url = bool(meta.get("requires_base_url"))
         active_base_url = str((vision_cfg or {}).get("base_url") or "").strip() if pid == active else ""
         rows.append(
@@ -1269,7 +1318,7 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
             }
         )
     if active and active not in _VISION_PROVIDER_META and active != "auto":
-        key_status = _vision_key_status(active)
+        key_status = _vision_key_status(active, vision_cfg)
         rows.append(
             {
                 "id": active,
@@ -1299,7 +1348,7 @@ def get_vision_config() -> dict[str, Any]:
     model = str(vision_cfg.get("model") or "").strip()
     base_url = str(vision_cfg.get("base_url") or "").strip()
     api_mode = str(vision_cfg.get("api_mode") or "").strip()
-    key_status = _vision_key_status(provider)
+    key_status = _vision_key_status(provider, vision_cfg)
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -1309,6 +1358,10 @@ def get_vision_config() -> dict[str, Any]:
             "model": model,
             "base_url": base_url,
             "api_mode": api_mode,
+            "credential_ref": str(vision_cfg.get("credential_ref") or "").strip(),
+            "endpoint_mode": str(vision_cfg.get("endpoint_mode") or "").strip(),
+            "region": str(vision_cfg.get("region") or "").strip(),
+            "workspace_id": str(vision_cfg.get("workspace_id") or "").strip(),
             "key_status": key_status,
             "verification": _public_vision_verification(
                 vision_cfg,
@@ -1325,6 +1378,7 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     model_id = str(body.get("model") or "").strip()
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = body.get("api_key")
+    credential_ref = str(body.get("credential_ref") or "").strip()
     if not provider_id:
         raise ValueError("provider is required")
     if provider_id not in _VISION_PROVIDER_META:
@@ -1338,6 +1392,31 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             model_id = str((models[0] or {}).get("id") or "").strip()
     if not model_id:
         raise ValueError("model is required")
+    if provider_id == "alibaba":
+        allowed_models = {
+            str(row.get("id") or "").strip()
+            for row in meta.get("models", [])
+            if isinstance(row, dict)
+        }
+        if model_id not in allowed_models:
+            raise ValueError(f"unknown Alibaba vision model: {model_id}")
+        endpoint_mode = str(body.get("endpoint_mode") or "public").strip().lower()
+        region = str(body.get("region") or "cn-beijing").strip().lower()
+        workspace_id = str(body.get("workspace_id") or "").strip().lower()
+        base_url = build_vision_base_url(
+            endpoint_mode=endpoint_mode,
+            region=region,
+            workspace_prefix=workspace_id,
+            custom_url=base_url,
+        )
+        if credential_ref:
+            credential_ref = normalize_credential_id(credential_ref)
+            row = load_credential(
+                credential_ref,
+                config_data=_load_yaml_config_file(_get_config_path()),
+            )
+            if provider_family(row.get("provider_family")) != provider_family(provider_id):
+                raise ValueError("所选凭据不属于当前 Provider。")
     if bool(meta.get("requires_base_url")) and not base_url:
         raise ValueError("base_url is required for custom vision provider")
 
@@ -1358,7 +1437,15 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             vision_cfg = {}
         vision_cfg["provider"] = provider_id
         vision_cfg["model"] = model_id
-        if provider_id == "custom":
+        if provider_id == "alibaba":
+            vision_cfg["credential_ref"] = credential_ref
+            vision_cfg["endpoint_mode"] = endpoint_mode
+            vision_cfg["region"] = region
+            vision_cfg["workspace_id"] = workspace_id
+            vision_cfg["base_url"] = base_url
+            vision_cfg.pop("api_key", None)
+            vision_cfg.pop("api_mode", None)
+        elif provider_id == "custom":
             vision_cfg["base_url"] = base_url
             has_custom_key = (
                 (api_key is not None and str(api_key).strip())
@@ -1372,6 +1459,11 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             vision_cfg.pop("base_url", None)
             vision_cfg.pop("api_key", None)
             vision_cfg.pop("api_mode", None)
+        if provider_id != "alibaba":
+            vision_cfg.pop("credential_ref", None)
+            vision_cfg.pop("endpoint_mode", None)
+            vision_cfg.pop("region", None)
+            vision_cfg.pop("workspace_id", None)
         auxiliary["vision"] = vision_cfg
         config_data["auxiliary"] = auxiliary
         _save_yaml_config_file(config_path, config_data)

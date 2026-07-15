@@ -100,6 +100,7 @@ class _OpenAIProxy:
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
+from agent.provider_credentials import resolve_api_key
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
@@ -4453,6 +4454,7 @@ def _resolve_task_provider_model(
     cfg_base_url = None
     cfg_api_key = None
     cfg_api_mode = None
+    cfg_credential_ref = None
 
     if task:
         task_config = _get_auxiliary_task_config(task)
@@ -4461,6 +4463,7 @@ def _resolve_task_provider_model(
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
+        cfg_credential_ref = str(task_config.get("credential_ref", "")).strip() or None
 
     resolved_model = model or cfg_model
     resolved_api_mode = cfg_api_mode
@@ -4491,6 +4494,9 @@ def _resolve_task_provider_model(
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
+        if cfg_provider == "alibaba" and cfg_base_url:
+            cfg_api_key = resolve_api_key("alibaba", cfg_credential_ref or "") or None
+            return cfg_provider, resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
         if cfg_base_url and cfg_api_key:
             # Both base_url and api_key explicitly set → custom endpoint.
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode

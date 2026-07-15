@@ -609,6 +609,79 @@ def test_vision_config_writes_auxiliary_vision_and_key_without_echo(monkeypatch,
     os.environ.pop("DASHSCOPE_API_KEY", None)
 
 
+def test_alibaba_vision_config_persists_named_credential_and_beijing_endpoint(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "label": "阿里默认凭据",
+            "api_key": "named-alibaba-secret",
+        }
+    )
+
+    result = model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+        }
+    )
+
+    saved = _read_config(tmp_path)["auxiliary"]["vision"]
+    assert saved == {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "credential_ref": "alibaba-default",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+        "workspace_id": "",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    }
+    assert result["vision"]["credential_ref"] == "alibaba-default"
+    assert result["vision"]["endpoint_mode"] == "public"
+    assert result["vision"]["region"] == "cn-beijing"
+    assert result["vision"]["workspace_id"] == ""
+    assert result["vision"]["base_url"] == saved["base_url"]
+    assert "named-alibaba-secret" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_alibaba_vision_config_requires_explicit_international_region(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+
+    model_config.set_vision_config(
+        {"provider": "alibaba", "model": "qwen3-vl-plus"}
+    )
+    assert (
+        _read_config(tmp_path)["auxiliary"]["vision"]["base_url"]
+        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "endpoint_mode": "public",
+            "region": "ap-southeast-1",
+        }
+    )
+    assert (
+        _read_config(tmp_path)["auxiliary"]["vision"]["base_url"]
+        == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    )
+
+
+def test_alibaba_vision_config_rejects_model_outside_server_allowlist(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="unknown Alibaba vision model"):
+        model_config.set_vision_config(
+            {"provider": "alibaba", "model": "unlisted-qwen-vl"}
+        )
+
+
 def test_model_config_includes_image_understanding_config(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     (tmp_path / "config.yaml").write_text(
@@ -781,6 +854,51 @@ def test_vision_verification_fingerprint_invalidates_when_key_changes(monkeypatc
     assert model_config.test_vision_config()["status"] == "verified"
 
     (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=rotated-test-key\n", encoding="utf-8")
+
+    assert model_config.get_vision_config()["vision"]["verification"]["status"] == "configured_unverified"
+
+
+def test_vision_verification_fingerprint_invalidates_when_named_key_rotates(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "label": "阿里默认凭据",
+            "api_key": "named-key-before",
+        }
+    )
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+        }
+    )
+
+    async def succeed(**_kwargs):
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", succeed)
+    assert model_config.test_vision_config()["status"] == "verified"
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=named-key-before",
+            "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=named-key-after",
+        ),
+        encoding="utf-8",
+    )
 
     assert model_config.get_vision_config()["vision"]["verification"]["status"] == "configured_unverified"
 

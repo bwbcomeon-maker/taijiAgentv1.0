@@ -28,6 +28,7 @@ from agent.auxiliary_client import (
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
+    _resolve_task_provider_model,
 )
 
 
@@ -2580,6 +2581,124 @@ class TestVisionAutoSkipsKimiCoding:
             "kimi-coding",
             "kimi-coding-cn",
         })
+
+
+def test_alibaba_vision_runtime_resolves_named_secret_and_saved_beijing_endpoint(monkeypatch):
+    task_config = {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "credential_ref": "alibaba-default",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+        "workspace_id": "",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    }
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: task_config if task == "vision" else {},
+    )
+    resolve_key = MagicMock(return_value="named-runtime-secret")
+    monkeypatch.setattr("agent.auxiliary_client.resolve_api_key", resolve_key)
+
+    resolved = _resolve_task_provider_model("vision")
+
+    assert resolved == (
+        "alibaba",
+        "qwen3-vl-plus",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "named-runtime-secret",
+        None,
+    )
+    resolve_key.assert_called_once_with("alibaba", "alibaba-default")
+
+
+def test_alibaba_vision_runtime_passes_named_secret_and_endpoint_to_existing_router(monkeypatch):
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        if task == "vision"
+        else {},
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_api_key",
+        lambda provider, credential_ref: "named-runtime-secret",
+    )
+    client = MagicMock(name="alibaba_openai_client")
+    router = MagicMock(return_value=(client, "qwen3-vl-plus"))
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", router)
+
+    provider, resolved_client, model = resolve_vision_provider_client()
+
+    assert (provider, resolved_client, model) == (
+        "alibaba",
+        client,
+        "qwen3-vl-plus",
+    )
+    router.assert_called_once_with(
+        "alibaba",
+        model="qwen3-vl-plus",
+        async_mode=False,
+        explicit_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        explicit_api_key="named-runtime-secret",
+        api_mode=None,
+    )
+
+
+def test_alibaba_vision_runtime_keeps_legacy_env_fallback(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-runtime-secret")
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        if task == "vision"
+        else {},
+    )
+    assert _resolve_task_provider_model("vision") == (
+        "alibaba",
+        "qwen3-vl-plus",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "legacy-runtime-secret",
+        None,
+    )
+
+
+def test_explicit_vision_override_does_not_resolve_saved_alibaba_credential(monkeypatch):
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "deleted-credential",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        if task == "vision"
+        else {},
+    )
+    resolver = MagicMock(side_effect=ValueError("saved credential is unavailable"))
+    monkeypatch.setattr("agent.auxiliary_client.resolve_api_key", resolver)
+
+    assert _resolve_task_provider_model(
+        "vision",
+        provider="custom",
+        model="explicit-model",
+        base_url="https://vision.example.com/v1",
+        api_key="explicit-secret",
+    ) == (
+        "custom",
+        "explicit-model",
+        "https://vision.example.com/v1",
+        "explicit-secret",
+        None,
+    )
+    resolver.assert_not_called()
 
 
 class TestCodexAuxiliaryAdapterTimeout:
