@@ -831,3 +831,177 @@ def test_compact_desktop_expert_workspace_reserves_chat_context_and_scrolls_insi
     assert "grid-template-columns:minmax(0,1fr) clamp(380px,36%,500px)!important;" in wide
     assert "grid-row:1 / span 2!important;" in wide
     assert "overflow:hidden auto!important;" in wide
+
+
+def _enterprise_brief(*, status="draft"):
+    return {
+        "schema_version": "document-brief/v1",
+        "revision": 3,
+        "status": status,
+        "team_id": "content-creator-team",
+        "task_mode": "create",
+        "original_request": "请根据已提供材料形成迎峰度夏保供电月度汇报。",
+        "document_type": "work_report",
+        "intake_example_id": "work_report",
+        "exact_title": "迎峰度夏保供电重点工作月度汇报",
+        "purpose": "提交经营班子审议",
+        "audience": "公司经营班子",
+        "usage_scenario": "月度经营分析会",
+        "source_policy": {"source_refs": []},
+        "data_handling": {},
+        "document_control": {"render_template_id": "enterprise-work-report"},
+        "content_constraints": {},
+        "details": {},
+        "approval": {},
+        "additional_context": "只使用已批准资料。",
+        "confirmed_revision": 3 if status == "confirmed" else None,
+        "confirmed_at": "2026-07-15T10:00:00+08:00" if status == "confirmed" else None,
+        "confirmed_sha256": "b" * 64 if status == "confirmed" else None,
+    }
+
+
+def test_enterprise_view_exposes_persistent_brief_progress_capability_and_honest_legacy_copy():
+    from api.expert_teams.view import expert_team_run_view
+
+    enterprise = expert_team_run_view(
+        {
+            "run_id": "run-enterprise",
+            "contract_version": "expert-team-contract/v1",
+            "team_id": "content-creator-team",
+            "workflow_state": "collecting_required",
+            "document_brief": _enterprise_brief(),
+            "tasks": [{"id": "draft"}, {"id": "review"}],
+        }
+    )
+    assert enterprise["brief"]["original_request"] == "请根据已提供材料形成迎峰度夏保供电月度汇报。"
+    assert enterprise["brief"]["original_request_summary"]
+    assert enterprise["brief"]["exact_title"] == "迎峰度夏保供电重点工作月度汇报"
+    assert enterprise["brief"]["document_type_label"] == "工作汇报"
+    assert enterprise["brief"]["revision"] == 3
+    assert enterprise["brief"]["view_action"]["label"] == "查看/编辑文档规格"
+    assert enterprise["presentation"]["progress_text"] == "0/2"
+    assert enterprise["capability"]["label"] == "企业合同试点"
+
+    confirmed_not_started = expert_team_run_view(
+        {
+            "run_id": "run-confirmed",
+            "contract_version": "expert-team-contract/v1",
+            "team_id": "content-creator-team",
+            "workflow_state": "ready_to_generate",
+            "document_brief": _enterprise_brief(status="confirmed"),
+            "tasks": [{"id": "draft"}, {"id": "review"}],
+        }
+    )
+    assert confirmed_not_started["presentation"]["progress_text"] == "0/2"
+
+    legacy = expert_team_run_view({"run_id": "run-legacy", "workflow_state": "completed"})
+    assert legacy["capability"]["label"] == "历史任务，未按企业合同验证"
+    assert "brief" not in legacy
+    assert legacy["completion_gates"]["content"]["status"] != "passed"
+
+
+def test_completion_gates_fail_closed_and_do_not_treat_a_document_file_as_document_passed():
+    from api.expert_teams.view import expert_team_run_view
+
+    view = expert_team_run_view(
+        {
+            "run_id": "run-gates",
+            "contract_version": "expert-team-contract/v1",
+            "team_id": "content-creator-team",
+            "workflow_state": "delivery_validation_required",
+            "document_brief": _enterprise_brief(status="confirmed"),
+            "canonical_document_ref": {
+                "artifact_id": "artifact-1",
+                "sha256": "a" * 64,
+                "brief_revision": 3,
+                "brief_sha256": "b" * 64,
+            },
+            "approved_stage_artifact_refs": {"review": {"artifact_id": "artifact-1", "sha256": "a" * 64}},
+            "artifacts": [{"kind": "final_document", "status": "ready", "path": "delivery/document.docx"}],
+            "enterprise_quality_gates": {
+                "brief": "passed",
+                "semantic": "passed",
+                "evidence": "passed",
+                "asset": "passed",
+                "render": "failed",
+                "office": "pending",
+                "delivery": "pending",
+            },
+        }
+    )
+    assert view["completion_gates"]["content"]["status"] == "passed"
+    assert view["completion_gates"]["document"]["status"] == "failed"
+    assert view["completion_gates"]["office"]["status"] == "pending"
+    assert all(gate["next_action"] for gate in view["completion_gates"].values())
+    assert view["artifact_validation"]["status"] == "unavailable"
+    assert view["delivery_status"] != "passed"
+    assert view["next_action"]["type"] == "repair_document"
+
+
+def test_presenter_is_a_pure_state_mapper_for_brief_review_delivery_and_capability_states():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');
+            const vm=require('vm');
+            const context={window:{},console};
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const present=context.window.buildExpertTeamPresentation;
+            function model(state,extra={}){
+              return present({workflow_state:state,view:{
+                presentation:{state,title:'内部标题',progress_text:'0/2'},
+                brief:{status:'draft',revision:2,original_request:'原始诉求',original_request_summary:'原始诉求',exact_title:'精确标题',document_type:'work_report',document_type_label:'工作汇报'},
+                completion_gates:{content:{status:'pending'},document:{status:'pending'},office:{status:'pending'}},
+                delivery_status:'pending',next_action:{type:'confirm_brief',label:'确认文档规格'},
+                capability:{kind:'enterprise_pilot',label:'企业合同试点'},
+                ...extra,
+              }});
+            }
+            const scenarios={
+              draft:model('collecting_required'),
+              confirmed:model('ready_to_generate',{brief:{status:'confirmed'},next_action:{type:'start_generation',label:'开始生成'}}),
+              generating:model('generating',{next_action:{type:'wait',label:'正在生成'}}),
+              review:model('awaiting_review',{next_action:{type:'review_stage',label:'复核阶段成果'}}),
+              invalid:model('generated_invalid',{next_action:{type:'regenerate',label:'查看问题并重新生成'}}),
+              documentPending:model('delivery_validation_required',{completion_gates:{content:{status:'passed'},document:{status:'running'},office:{status:'pending'}},next_action:{type:'wait_document',label:'正在生成文档'}}),
+              officeFailed:model('awaiting_review',{completion_gates:{content:{status:'passed'},document:{status:'passed'},office:{status:'failed'}},delivery_status:'office_failed',next_action:{type:'repair_office',label:'处理 Office 验收问题'}}),
+              delivered:model('completed',{completion_gates:{content:{status:'passed'},document:{status:'passed'},office:{status:'passed'}},delivery_status:'passed',next_action:{type:'view_result',label:'查看完整成果'}}),
+            };
+            console.log(JSON.stringify(scenarios));
+            """
+        )
+    )
+    assert result["draft"]["brief"]["originalRequestLabel"] == "原始诉求"
+    assert result["draft"]["nextAction"]["label"] == "确认文档规格"
+    assert result["confirmed"]["nextAction"]["label"] == "开始生成"
+    assert result["generating"]["statusLabel"] == "AI 阶段协作正在生成"
+    assert result["review"]["statusLabel"] == "阶段成果待复核"
+    assert result["invalid"]["statusLabel"] == "草稿未通过校验"
+    assert result["documentPending"]["gateSummary"] == "内容已确认，正在生成文档"
+    assert result["officeFailed"]["gateSummary"] == "Office 验收不通过，待修改"
+    assert result["delivered"]["gateSummary"] == "交付已通过"
+    assert result["delivered"]["capabilityLabel"] == "企业合同试点"
+
+
+def test_workspace_keeps_brief_visible_and_collapsed_capsule_keyboard_discoverable():
+    for token in (
+        "expert-team-brief-card",
+        "原始诉求",
+        "精确标题",
+        "文种",
+        "Brief revision",
+        "查看/编辑文档规格",
+        'aria-expanded="false"',
+        'aria-controls="expert-team-workspace-expanded"',
+        'id="expert-team-workspace-expanded"',
+    ):
+        assert token in EXPERT_UI_JS
+
+
+def test_chat_surface_has_no_confirmation_controls_and_keeps_terminal_result_entry():
+    lifecycle = _function_body(UI_JS, "function _expertTeamLifecycleCardHtml", "function renderExpertTeamLifecycleNotice")
+    assert "data-expert-team-action" not in lifecycle
+    assert "answerExpertTeamQuestion" not in lifecycle
+    assert "右侧专家团工作台" in lifecycle
+    assert "查看完整成果" in UI_JS

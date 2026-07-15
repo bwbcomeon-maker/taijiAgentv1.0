@@ -98,6 +98,43 @@
     const pct=total?Math.max(0,Math.min(100,Math.round(current*100/total))):0;
     return {total,done,current,currentIndex:progressCurrentIndex,isIntake,text,pct,stages};
   }
+  function renderBriefCard(card){
+    const presentation=card&&card.presentation||{};
+    const brief=card&&card.brief||presentation.brief;
+    const capability=card&&card.capability||{};
+    if(!brief){
+      return `<section class="expert-team-brief-card is-legacy" aria-label="文档规格状态"><strong>${safeEsc(capability.label||presentation.capabilityLabel||'历史任务，未按企业合同验证')}</strong><p>该任务未按企业文档规格合同创建，不补造 Brief 或企业验收结论。</p></section>`;
+    }
+    const runId=String(card&&card.runId||'expert-team').replace(/[^a-zA-Z0-9_-]/g,'-');
+    const originalId=`expert-team-brief-original-request-${runId}`;
+    const actionLabel=brief.viewAction&&brief.viewAction.label||'查看/编辑文档规格';
+    return `<section class="expert-team-brief-card" aria-label="文档规格摘要">
+      <div class="expert-team-panel-section-title"><span>文档规格</span><small>${safeEsc(capability.label||presentation.capabilityLabel||'AI 草稿能力')}</small></div>
+      <strong>${safeEsc(brief.exactTitle||'待补充精确标题')}</strong>
+      <dl>
+        <div><dt>原始诉求</dt><dd>${safeEsc(brief.originalRequestSummary||'未提供')}</dd></div>
+        <div><dt>精确标题</dt><dd>${safeEsc(brief.exactTitle||'待补充')}</dd></div>
+        <div><dt>文种</dt><dd>${safeEsc(brief.documentTypeLabel||'待选择')}</dd></div>
+        <div><dt>Brief revision</dt><dd>${safeEsc(brief.revision||0)}</dd></div>
+      </dl>
+      <details class="expert-team-brief-details">
+        <summary>${safeEsc(actionLabel)}</summary>
+        <label for="${safeEsc(originalId)}">原始诉求</label>
+        <textarea id="${safeEsc(originalId)}" name="original_request" rows="4" readonly>${safeEsc(brief.originalRequest||'')}</textarea>
+      </details>
+    </section>`;
+  }
+  function renderCompletionGates(card){
+    const presentation=card&&card.presentation||{};
+    const gates=card&&card.completionGates||presentation.completionGates||{};
+    const labels={content:'内容确认',document:'DOCX 生成',office:'Office 验收'};
+    return `<section class="expert-team-completion-gates" aria-label="企业交付三道门">
+      ${['content','document','office'].map(name=>{
+        const gate=gates[name]||{};
+        return `<span class="expert-team-completion-gate is-${safeEsc(gate.status||'pending')}"><b>${safeEsc(labels[name])}</b><small>${safeEsc(gate.label||'待完成')}</small></span>`;
+      }).join('')}
+    </section>`;
+  }
   function renderStageInput(card,pendingInput){
     pendingInput=pendingInput||{};
     if(!(pendingInput.question||pendingInput.description))return '';
@@ -189,6 +226,8 @@
     const runId=card&&card.runId||card&&card.sessionId||'';
     const isReadOnly=!!(card&&card.readOnly);
     const statusTone=presentationTone(presentation.state);
+    const briefCardHtml=renderBriefCard(card);
+    const completionGatesHtml=renderCompletionGates(card);
     const currentStageId=String(currentStage.id||currentStage.task_id||'');
     const currentWorkerId=String(currentWorker.id||currentWorker.member_id||currentStage.worker_id||'');
     const currentWorkerName=String(currentWorker.name||currentStage.worker_name||'');
@@ -325,7 +364,7 @@
         <strong>${safeEsc(progress.text)}</strong>
         <small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small>
         <span class="expert-team-capsule-state ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span>
-        <button type="button" class="expert-team-capsule-action" onclick="showExpertTeamWorkspacePanel(this);event.stopPropagation()" aria-label="展开专家团工作台">处理</button>
+        <button type="button" class="expert-team-capsule-action" onclick="showExpertTeamWorkspacePanel(this);event.stopPropagation()" aria-label="展开专家团工作台" aria-expanded="false" aria-controls="expert-team-workspace-expanded">处理</button>
       </div>
       <div class="expert-team-panel-head">
         <div class="expert-team-panel-topbar">
@@ -340,12 +379,14 @@
           </button>
         </div>
         <div class="expert-team-panel-overview">
-          <span class="expert-team-panel-copy" role="status" aria-live="polite"><span class="expert-team-panel-status ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span><span class="expert-team-panel-summary">${safeEsc(presentation.detail||'')}</span></span>
+          <span class="expert-team-panel-copy" role="status" aria-live="polite"><span class="expert-team-panel-status ${safeEsc(statusTone)}">${safeEsc(presentation.statusLabel||presentation.title||'专家团状态')}</span><span class="expert-team-panel-summary">${safeEsc(presentation.gateSummary||presentation.detail||'')}</span></span>
           <span class="expert-team-panel-progress-summary"><b>${safeEsc(progress.text)}</b><i><em style="width:${progress.pct}%"></em></i><small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small></span>
         </div>
       </div>
-      <div class="expert-team-panel-expanded-body">
+      <div id="expert-team-workspace-expanded" class="expert-team-panel-expanded-body">
         ${recoverableDraftHintHtml}
+        ${completionGatesHtml}
+        ${briefCardHtml}
         <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
         <nav class="expert-team-panel-tabs" role="tablist" aria-label="专家团工作台视图" onkeydown="handleExpertTeamWorkspaceTabKeydown(event)">
           <button id="expert-team-tab-todo" type="button" role="tab" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" aria-controls="expert-team-tabpanel-todo" tabindex="0" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>

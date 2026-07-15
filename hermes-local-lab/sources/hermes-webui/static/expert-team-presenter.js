@@ -4,9 +4,70 @@
   function normalizeAction(action){
     if(!action||typeof action!=='object')return null;
     return {
-      id:str(action.id),
+      id:str(action.id||action.type),
       label:str(action.label),
       kind:str(action.kind,'primary')
+    };
+  }
+  const STATE_LABELS={
+    collecting_required:'待确认文档规格',
+    collecting_optional:'待补全文档规格',
+    ready_to_generate:'文档规格已确认，待开始生成',
+    starting:'正在启动 AI 阶段协作',
+    start_failed:'启动失败',
+    generation_failed:'生成失败',
+    result_unverified:'结果待核验',
+    legacy_result_unverified:'历史结果未绑定',
+    generating:'AI 阶段协作正在生成',
+    revising:'AI 阶段协作正在修改',
+    cancelling:'正在停止生成',
+    awaiting_stage_input:'当前阶段需要确认',
+    generated_invalid:'草稿未通过校验',
+    awaiting_review:'阶段成果待复核',
+    delivery_validation_required:'内容已确认，正在生成文档',
+    completion_reconciling:'正在恢复交付完成状态',
+    completed_invalid:'交付状态异常',
+    completed:'专家团阶段已完成',
+    failed:'生成失败',
+    cancelled:'已取消'
+  };
+  function normalizedGate(gate){
+    gate=gate&&typeof gate==='object'?gate:{};
+    return {
+      status:str(gate.status,'pending'),
+      label:str(gate.label),
+      reasonCode:str(gate.reason_code||gate.reasonCode),
+      blockingIssueCount:Number(gate.blocking_issue_count||gate.blockingIssueCount||0)
+    };
+  }
+  function normalizedGates(value){
+    value=value&&typeof value==='object'?value:{};
+    return {content:normalizedGate(value.content),document:normalizedGate(value.document),office:normalizedGate(value.office)};
+  }
+  function gateSummary(gates,deliveryStatus,state){
+    if(deliveryStatus==='passed'&&gates.content.status==='passed'&&gates.document.status==='passed'&&gates.office.status==='passed')return '交付已通过';
+    if(gates.office.status==='failed')return 'Office 验收不通过，待修改';
+    if(gates.document.status==='passed'&&gates.office.status!=='passed')return 'DOCX 自动检查通过，待 Office 验收';
+    if(gates.content.status==='passed'&&gates.document.status==='failed')return '内容已确认，DOCX 自动检查未通过';
+    if(gates.content.status==='passed'&&gates.document.status!=='passed')return '内容已确认，正在生成文档';
+    if(state==='generating'||state==='revising'||state==='starting')return '正在生成/待复核内容';
+    return '内容待确认';
+  }
+  function normalizedBrief(brief){
+    if(!brief||typeof brief!=='object')return null;
+    return {
+      status:str(brief.status,'draft'),
+      revision:Number(brief.revision||0),
+      originalRequest:str(brief.original_request),
+      originalRequestSummary:str(brief.original_request_summary||brief.original_request),
+      originalRequestLabel:'原始诉求',
+      exactTitle:str(brief.exact_title),
+      documentType:str(brief.document_type),
+      documentTypeLabel:str(brief.document_type_label||brief.document_type),
+      editable:brief.editable===true,
+      editPolicy:str(brief.edit_policy),
+      validation:brief.validation||{},
+      viewAction:normalizeAction(brief.view_action)||{id:str((brief.view_action||{}).type),label:str((brief.view_action||{}).label),kind:'ghost'}
     };
   }
   function taskStatusText(task){
@@ -28,16 +89,33 @@
     const presentation=view.presentation||{};
     const business=view.business_context||{};
     const primary_action=presentation.primary_action||presentation.primaryAction||null;
+    const state=str(presentation.state,run.workflow_state||'collecting_required');
+    const gates=normalizedGates(view.completion_gates);
+    const deliveryStatus=str(view.delivery_status,'pending');
+    const nextAction=normalizeAction(view.next_action)||(
+      view.next_action&&typeof view.next_action==='object'
+        ? {id:str(view.next_action.type),label:str(view.next_action.label),kind:'primary'}
+        : null
+    );
+    const capability=view.capability&&typeof view.capability==='object'?view.capability:{};
     return {
-      state:str(presentation.state,run.workflow_state||'collecting_required'),
+      state,
       title:str(presentation.title,'专家团状态'),
+      statusLabel:STATE_LABELS[state]||str(presentation.title,'专家团状态'),
       visibleTitle:str(presentation.visible_title||business.visible_title||run.title,'专家团任务'),
       detail:str(presentation.detail),
       primaryAction:normalizeAction(primary_action),
       secondaryActions:arr(presentation.secondary_actions||presentation.secondaryActions).map(normalizeAction).filter(Boolean),
       result:presentation.result||((view.stage_review||{}).output)||{},
       summary:str(presentation.summary),
-      progressText:str(presentation.progress_text)
+      progressText:str(presentation.progress_text),
+      brief:normalizedBrief(view.brief),
+      completionGates:gates,
+      deliveryStatus,
+      nextAction,
+      gateSummary:gateSummary(gates,deliveryStatus,state),
+      capabilityKind:str(capability.kind,'legacy'),
+      capabilityLabel:str(capability.label,'历史任务，未按企业合同验证')
     };
   }
   function buildExpertTeamWorkspace(run){
@@ -129,6 +207,11 @@
       phase:str(phaseProgress.current||run.phase,'需求确认'),
       progress:{done:Number(phaseProgress.done||0),total:Number(phaseProgress.total||tasks.length||0)},
       presentation,
+      brief:presentation.brief,
+      completionGates:presentation.completionGates,
+      deliveryStatus:presentation.deliveryStatus,
+      nextAction:presentation.nextAction,
+      capability:{kind:presentation.capabilityKind,label:presentation.capabilityLabel},
       workspace,
       workflow:{stages:tasks,currentStage,progress:phaseProgress},
       pendingInput,

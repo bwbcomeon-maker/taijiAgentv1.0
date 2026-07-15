@@ -32,6 +32,12 @@ STATE_LABELS = {
     "completed_invalid": "已完成交付异常",
 }
 
+DOCUMENT_TYPE_LABELS = {
+    "work_report": "工作汇报",
+    "research_report": "研究报告",
+}
+_GATE_STATUSES = {"pending", "running", "failed", "invalidated", "passed"}
+
 
 def _effective_state(run: dict) -> str:
     state = str(run.get("workflow_state") or "collecting_required")
@@ -274,7 +280,13 @@ def _progress(run: dict) -> dict:
     done = sum(1 for task in tasks if str(task.get("status") or "") == "done")
     current = str(run.get("phase") or "")
     state = str(run.get("workflow_state") or "")
-    is_intake = state in {"collecting_required", "collecting_optional"}
+    is_intake = state in {
+        "collecting_required",
+        "collecting_optional",
+        "ready_to_generate",
+        "starting",
+        "start_failed",
+    }
     current_index = int(run.get("current_stage_index") or 0)
     if is_intake:
         done = 0
@@ -415,6 +427,171 @@ def _timeline_events(run: dict) -> list[dict]:
     return rows
 
 
+def _normalized_gate_status(value, default: str = "pending") -> str:
+    status = str(value or "").strip().lower()
+    if status == "passed_with_conditions":
+        return "pending"
+    if status in {"blocked", "error", "passed_with_warnings", "regeneration_required"}:
+        return "failed"
+    return status if status in _GATE_STATUSES else default
+
+
+def _gate_issue_count(run: dict, names: set[str]) -> int:
+    issues = run.get("enterprise_quality_issues") if isinstance(run.get("enterprise_quality_issues"), list) else []
+    return sum(
+        1
+        for issue in issues
+        if isinstance(issue, dict)
+        and str(issue.get("gate") or issue.get("domain") or "") in names
+        and str(issue.get("disposition") or "unresolved") != "resolved"
+    )
+
+
+def _canonical_content_passed(run: dict) -> bool:
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    ref = run.get("canonical_document_ref") if isinstance(run.get("canonical_document_ref"), dict) else {}
+    if (
+        brief.get("status") != "confirmed"
+        or not str(ref.get("artifact_id") or "")
+        or not str(ref.get("sha256") or "")
+        or int(ref.get("brief_revision") or 0) != int(brief.get("confirmed_revision") or 0)
+        or str(ref.get("brief_sha256") or "") != str(brief.get("confirmed_sha256") or "")
+    ):
+        return False
+    approvals = run.get("approved_stage_artifact_refs") if isinstance(run.get("approved_stage_artifact_refs"), dict) else {}
+    expected = {"artifact_id": ref["artifact_id"], "sha256": ref["sha256"]}
+    return any(value == expected for value in approvals.values())
+
+
+def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
+    if not enterprise:
+        gates = {
+            name: {
+                "status": "invalidated",
+                "label": label,
+                "reason_code": "legacy_contract_unverified",
+                "blocking_issue_count": 0,
+                "next_action": {"type": "view_result", "label": "查看历史成果"},
+            }
+            for name, label in (
+                ("content", "历史内容未按企业合同验证"),
+                ("document", "历史文档未按企业合同验证"),
+                ("office", "历史任务无企业 Office 验收"),
+            )
+        }
+        return gates, "legacy_unverified", {"type": "view_result", "label": "查看历史成果"}
+
+    quality = run.get("enterprise_quality_gates") if isinstance(run.get("enterprise_quality_gates"), dict) else {}
+    integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
+    delivery_gate = run.get("delivery_gate") if isinstance(run.get("delivery_gate"), dict) else {}
+    content_status = "passed" if _canonical_content_passed(run) else (
+        "failed" if run.get("canonical_document_ref") else "pending"
+    )
+
+    upstream = [_normalized_gate_status(quality.get(name)) for name in ("brief", "semantic", "evidence", "asset", "render")]
+    binding = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+    binding_closed = bool(str(binding.get("delivery_binding_sha256") or ""))
+    legacy_delivery_status = str(delivery_gate.get("status") or "")
+    if any(status in {"failed", "invalidated"} for status in upstream):
+        document_status = "failed"
+    elif any(status == "running" for status in upstream):
+        document_status = "running"
+    elif all(status == "passed" for status in upstream) and binding_closed:
+        document_status = "passed"
+    elif legacy_delivery_status in {"office_acceptance_required", "passed"} and binding_closed:
+        document_status = "passed"
+    else:
+        document_status = "pending"
+
+    quality_office = _normalized_gate_status(quality.get("office"))
+    if str(integrity.get("status") or "") == "passed":
+        office_status = "passed"
+    elif quality_office in {"failed", "invalidated"} or str(run.get("office_acceptance_status") or "") == "failed":
+        office_status = "failed"
+    elif str(run.get("office_acceptance_status") or "") == "running":
+        office_status = "running"
+    else:
+        office_status = "pending"
+
+    gates = {
+        "content": {
+            "status": content_status,
+            "label": "内容已确认" if content_status == "passed" else "内容待确认",
+            "reason_code": None if content_status == "passed" else "canonical_content_required",
+            "blocking_issue_count": _gate_issue_count(run, {"brief", "semantic", "evidence", "content"}),
+            "next_action": {
+                "type": "view_content" if content_status == "passed" else "review_content",
+                "label": "查看已确认内容" if content_status == "passed" else "复核内容",
+            },
+        },
+        "document": {
+            "status": document_status,
+            "label": "DOCX 自动检查通过" if document_status == "passed" else (
+                "DOCX 自动检查未通过" if document_status == "failed" else "DOCX 自动检查待完成"
+            ),
+            "reason_code": None if document_status == "passed" else (
+                "document_quality_failed" if document_status == "failed" else "document_quality_required"
+            ),
+            "blocking_issue_count": _gate_issue_count(run, {"asset", "render", "document"}),
+            "next_action": {
+                "type": "open_document" if document_status == "passed" else (
+                    "repair_document" if document_status == "failed" else "wait_document"
+                ),
+                "label": "打开 DOCX" if document_status == "passed" else (
+                    "处理 DOCX 自动检查问题" if document_status == "failed" else "等待生成文档"
+                ),
+            },
+        },
+        "office": {
+            "status": office_status,
+            "label": "Office 验收通过" if office_status == "passed" else (
+                "Office 验收不通过" if office_status == "failed" else "待 Office 验收"
+            ),
+            "reason_code": None if office_status == "passed" else (
+                "office_review_failed" if office_status == "failed" else "office_review_required"
+            ),
+            "blocking_issue_count": _gate_issue_count(run, {"office"}),
+            "next_action": {
+                "type": "view_office_acceptance" if office_status == "passed" else (
+                    "repair_office" if office_status == "failed" else "open_office_review"
+                ),
+                "label": "查看 Office 验收" if office_status == "passed" else (
+                    "处理 Office 验收问题" if office_status == "failed" else "开始 Office 验收"
+                ),
+            },
+        },
+    }
+    all_passed = all(gate["status"] == "passed" for gate in gates.values())
+    committed = (
+        all_passed
+        and str(run.get("workflow_state") or "") == "completed"
+        and bool(run.get("completion_transaction_ref"))
+        and str(integrity.get("status") or "") == "passed"
+    )
+    if committed:
+        return gates, "passed", {"type": "view_result", "label": "查看完整成果"}
+    if run.get("completion_transaction_ref") and str(integrity.get("status") or "") != "passed":
+        return gates, "finalizing", {"type": "reconcile_completion", "label": "恢复交付完成状态"}
+    if content_status != "passed":
+        return gates, "content_required", {"type": "review_content", "label": "复核内容"}
+    if document_status == "failed":
+        return gates, "document_failed", {"type": "repair_document", "label": "处理 DOCX 自动检查问题"}
+    if document_status != "passed":
+        return gates, "document_pending", {"type": "wait_document", "label": "等待生成文档"}
+    if office_status == "failed":
+        return gates, "office_failed", {"type": "repair_office", "label": "处理 Office 验收问题"}
+    return gates, "office_review_required", {"type": "open_office_review", "label": "开始 Office 验收"}
+
+
+def _capability_model(run: dict, contract_version: str) -> dict:
+    if contract_version != EXPERT_TEAM_CONTRACT_V1:
+        return {"kind": "legacy", "label": "历史任务，未按企业合同验证"}
+    document_type = str((run.get("document_brief") or {}).get("document_type") or run.get("document_type") or "")
+    if document_type in DOCUMENT_TYPE_LABELS:
+        return {"kind": "enterprise_pilot", "label": "企业合同试点"}
+    return {"kind": "ai_draft", "label": "AI 草稿能力"}
+
+
 def expert_team_run_view(run: dict) -> dict:
     contract_version = classify_contract_version(run)
     business_context = business_context_for_run(run)
@@ -449,6 +626,8 @@ def expert_team_run_view(run: dict) -> dict:
         pending_input = _pending_input(run)
     if state != "awaiting_stage_input":
         pending_input = _pending_input(run)
+    enterprise = contract_version == EXPERT_TEAM_CONTRACT_V1
+    completion_gates, delivery_status, next_action = _completion_model(run, enterprise=enterprise)
     result = {
         "business_context": business_context,
         "presentation": presentation,
@@ -473,9 +652,17 @@ def expert_team_run_view(run: dict) -> dict:
             "can_approve_stage": state == "awaiting_review",
             "can_request_revision": state == "awaiting_review",
         },
+        "completion_gates": completion_gates,
+        "delivery_status": delivery_status,
+        "next_action": next_action,
+        "capability": _capability_model(run, contract_version),
+        "artifact_validation": {"status": "unavailable", "blocking_count": 0},
     }
-    if contract_version == EXPERT_TEAM_CONTRACT_V1:
+    if enterprise:
         brief = brief_summary(run.get("document_brief") or {})
+        original_request = str(brief.get("original_request") or "")
+        brief["original_request_summary"] = content_summary(original_request)
+        brief["document_type_label"] = DOCUMENT_TYPE_LABELS.get(str(brief.get("document_type") or ""), "未放行文种")
         brief["editable"] = not bool(run.get("stage_outputs"))
         brief["edit_policy"] = "editable" if brief["editable"] else "new_run_required"
         brief["validation"] = deepcopy(
@@ -484,9 +671,18 @@ def expert_team_run_view(run: dict) -> dict:
             else {"valid_for_confirmation": False, "field_errors": []}
         )
         brief["gate"] = "confirmed" if brief.get("status") == "confirmed" else "needs_confirmation"
+        brief["view_action"] = {
+            "type": "edit_brief" if brief["editable"] else "view_brief",
+            "label": "查看/编辑文档规格" if brief["editable"] else "查看文档规格",
+        }
         result["contract_version"] = contract_version
         result["brief"] = brief
         enterprise_result = _enterprise_stage_result(run)
+        result["artifact_validation"] = deepcopy(
+            enterprise_result.get("validation")
+            if isinstance(enterprise_result.get("validation"), dict)
+            else {"status": "unavailable", "blocking_count": 0}
+        )
         result["stage_result"] = enterprise_result
         result["presentation"]["result"] = enterprise_result
         result["presentation"]["summary"] = str(enterprise_result.get("summary") or "")
