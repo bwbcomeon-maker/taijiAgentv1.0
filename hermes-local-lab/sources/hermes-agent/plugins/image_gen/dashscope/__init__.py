@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from agent.alibaba_endpoints import (
+    DEFAULT_REGION,
+    PUBLIC_ROOTS,
+    build_image_generation_url,
+)
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, ImageGenProvider, error_response
 from plugins.image_gen.domestic_common import (
     SIZE_MAP_STAR,
@@ -22,7 +27,6 @@ from plugins.image_gen.domestic_common import (
 )
 
 DEFAULT_MODEL = "qwen-image-2.0-pro"
-DEFAULT_REGION = "cn-beijing"
 TIMEOUT_SECONDS = 180
 
 
@@ -55,7 +59,13 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         return "通义 Qwen-Image"
 
     def is_available(self) -> bool:
-        return bool(env_value("DASHSCOPE_API_KEY") and _option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID"))
+        if not env_value("DASHSCOPE_API_KEY"):
+            return False
+        try:
+            self._endpoint()
+        except ValueError:
+            return False
+        return True
 
     def list_models(self) -> List[Dict[str, Any]]:
         return [
@@ -86,16 +96,26 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             "domestic": True,
             "integration_status": "stable",
             "call_mode": "sync",
-            "supported_regions": ["cn-beijing", "cn-shanghai"],
+            "supported_regions": list(PUBLIC_ROOTS),
             "env_vars": [{"key": "DASHSCOPE_API_KEY", "prompt": "DashScope API Key"}],
             "credential_fields": [
                 credential_field(name="api_key", env_var="DASHSCOPE_API_KEY", label="API Key"),
                 credential_field(
+                    name="endpoint_mode",
+                    env_var="DASHSCOPE_ENDPOINT_MODE",
+                    label="Endpoint Mode",
+                    required=False,
+                    secret=False,
+                    placeholder="workspace",
+                )
+                | {"options": ["workspace", "custom"]},
+                credential_field(
                     name="workspace_id",
                     env_var="DASHSCOPE_WORKSPACE_ID",
                     label="Workspace ID",
+                    required=False,
                     secret=False,
-                    placeholder="ws-xxxxxxxx",
+                    placeholder="llm-demo",
                 ),
                 credential_field(
                     name="region",
@@ -104,6 +124,15 @@ class DashScopeQwenImageProvider(ImageGenProvider):
                     required=False,
                     secret=False,
                     placeholder=DEFAULT_REGION,
+                )
+                | {"options": list(PUBLIC_ROOTS)},
+                credential_field(
+                    name="base_url",
+                    env_var="DASHSCOPE_BASE_URL",
+                    label="Custom Base URL",
+                    required=False,
+                    secret=False,
+                    placeholder="https://gateway.example.com",
                 ),
             ],
         }
@@ -111,12 +140,19 @@ class DashScopeQwenImageProvider(ImageGenProvider):
     def _model(self, requested: Any = "") -> str:
         model = str(requested or "").strip()
         ids = {item["id"] for item in self.list_models()}
-        return model if model in ids else DEFAULT_MODEL
+        if not model:
+            return DEFAULT_MODEL
+        if model not in ids:
+            raise ValueError(f"Unsupported DashScope image model: {model}")
+        return model
 
     def _endpoint(self) -> str:
-        workspace = _option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID")
-        region = _option_value("region", "DASHSCOPE_REGION") or DEFAULT_REGION
-        return f"https://{workspace}.{region}.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        return build_image_generation_url(
+            endpoint_mode=_option_value("endpoint_mode", "DASHSCOPE_ENDPOINT_MODE") or "workspace",
+            workspace_prefix=_option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID"),
+            region=_option_value("region", "DASHSCOPE_REGION") or DEFAULT_REGION,
+            custom_url=_option_value("base_url", "DASHSCOPE_BASE_URL"),
+        )
 
     def generate(
         self,
@@ -132,8 +168,11 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         missing = []
         if not env_value("DASHSCOPE_API_KEY"):
             missing.append("DASHSCOPE_API_KEY")
-        if not _option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID"):
+        endpoint_mode = _option_value("endpoint_mode", "DASHSCOPE_ENDPOINT_MODE") or "workspace"
+        if endpoint_mode == "workspace" and not _option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID"):
             missing.append("DASHSCOPE_WORKSPACE_ID")
+        if endpoint_mode == "custom" and not _option_value("base_url", "DASHSCOPE_BASE_URL"):
+            missing.append("DASHSCOPE_BASE_URL")
         if missing:
             return auth_error(missing=missing, provider=self.name, model=model, prompt=prompt, aspect_ratio=aspect)
 
