@@ -2670,6 +2670,52 @@ def test_alibaba_vision_runtime_keeps_legacy_env_fallback(monkeypatch):
     )
 
 
+def test_legacy_alibaba_vision_config_gets_beijing_endpoint_and_legacy_key(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-runtime-secret")
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        if task == "vision"
+        else {},
+    )
+
+    assert _resolve_task_provider_model("vision") == (
+        "alibaba",
+        "qwen3-vl-plus",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "legacy-runtime-secret",
+        None,
+    )
+
+
+def test_explicit_api_key_overrides_saved_alibaba_named_credential(monkeypatch):
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        if task == "vision"
+        else {},
+    )
+    resolver = MagicMock(return_value="named-runtime-secret")
+    monkeypatch.setattr("agent.auxiliary_client.resolve_api_key", resolver)
+
+    assert _resolve_task_provider_model("vision", api_key="explicit-secret") == (
+        "alibaba",
+        "qwen3-vl-plus",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "explicit-secret",
+        None,
+    )
+    resolver.assert_not_called()
+
+
 def test_explicit_vision_override_does_not_resolve_saved_alibaba_credential(monkeypatch):
     monkeypatch.setattr(
         "agent.auxiliary_client._get_auxiliary_task_config",

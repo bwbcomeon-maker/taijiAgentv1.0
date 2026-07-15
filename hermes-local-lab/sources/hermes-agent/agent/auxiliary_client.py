@@ -99,6 +99,7 @@ class _OpenAIProxy:
 
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
+from agent.alibaba_endpoints import build_vision_base_url
 from agent.credential_pool import load_pool
 from agent.provider_credentials import resolve_api_key
 from hermes_cli.config import get_hermes_home
@@ -4494,9 +4495,20 @@ def _resolve_task_provider_model(
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
-        if cfg_provider == "alibaba" and cfg_base_url:
-            cfg_api_key = resolve_api_key("alibaba", cfg_credential_ref or "") or None
-            return cfg_provider, resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
+        if cfg_provider == "alibaba":
+            alibaba_base_url = cfg_base_url or build_vision_base_url()
+            alibaba_api_key = (
+                api_key
+                if api_key is not None
+                else resolve_api_key("alibaba", cfg_credential_ref or "") or None
+            )
+            return (
+                cfg_provider,
+                resolved_model,
+                alibaba_base_url,
+                alibaba_api_key,
+                resolved_api_mode,
+            )
         if cfg_base_url and cfg_api_key:
             # Both base_url and api_key explicitly set → custom endpoint.
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
