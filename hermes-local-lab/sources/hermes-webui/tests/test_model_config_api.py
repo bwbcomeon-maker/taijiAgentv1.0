@@ -546,6 +546,238 @@ def test_image_gen_config_writes_multi_field_domestic_credentials_without_echo(
         os.environ.pop(key, None)
 
 
+def _dashscope_image_provider_row():
+    return {
+        "id": "dashscope",
+        "name": "通义 Qwen-Image",
+        "models": [{"id": "qwen-image-2.0-pro", "label": "Qwen Image 2 Pro"}],
+        "default_model": "qwen-image-2.0-pro",
+        "key_status": {"configured": False, "env_var": "DASHSCOPE_API_KEY"},
+        "credential_fields": [
+            {
+                "name": "api_key",
+                "env_var": "DASHSCOPE_API_KEY",
+                "label": "API Key",
+                "required": True,
+                "secret": True,
+            },
+            {
+                "name": "workspace_id",
+                "env_var": "DASHSCOPE_WORKSPACE_ID",
+                "label": "Workspace ID",
+                "required": True,
+                "secret": False,
+            },
+        ],
+        "domestic": True,
+        "integration_status": "stable",
+    }
+
+
+def test_dashscope_image_can_share_named_credential_with_vision(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [_dashscope_image_provider_row()],
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=legacy-must-stay\n", encoding="utf-8"
+    )
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "label": "阿里默认凭据",
+            "api_key": "shared-named-secret",
+        }
+    )
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+        }
+    )
+
+    model_config.set_image_gen_config(
+        {
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "credential_ref": "alibaba-default",
+            "credentials": {"workspace_id": "llm-demo"},
+        }
+    )
+
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == "alibaba-default"
+    assert saved["image_gen"]["credential_ref"] == "alibaba-default"
+    assert saved["image_gen"]["options"]["workspace_id"] == "llm-demo"
+    assert "api_key" not in saved["image_gen"]
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY=legacy-must-stay" in env_text
+    assert "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=shared-named-secret" in env_text
+
+
+def test_dashscope_independent_credential_rotation_does_not_change_shared_or_legacy_key(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [_dashscope_image_provider_row()],
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=legacy-must-stay\n", encoding="utf-8"
+    )
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "api_key": "shared-secret",
+        }
+    )
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-image",
+            "provider": "dashscope",
+            "api_key": "image-secret-before",
+        }
+    )
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+        }
+    )
+    model_config.set_image_gen_config(
+        {
+            "provider": "dashscope",
+            "credential_ref": "alibaba-image",
+            "credentials": {"workspace_id": "llm-demo"},
+        }
+    )
+
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-image",
+            "provider": "dashscope",
+            "api_key": "image-secret-after",
+        }
+    )
+
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == "alibaba-default"
+    assert saved["image_gen"]["credential_ref"] == "alibaba-image"
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY=legacy-must-stay" in env_text
+    assert "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=shared-secret" in env_text
+    assert "TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY=image-secret-after" in env_text
+    assert "image-secret-before" not in env_text
+
+
+def test_dashscope_image_rejects_named_ref_with_inline_api_key(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [_dashscope_image_provider_row()],
+    )
+    model_config.upsert_provider_credential(
+        {"id": "alibaba-default", "provider": "alibaba", "api_key": "named-secret"}
+    )
+
+    with pytest.raises(ValueError, match="credential_ref.*api_key"):
+        model_config.set_image_gen_config(
+            {
+                "provider": "dashscope",
+                "credential_ref": "alibaba-default",
+                "api_key": "must-not-write",
+            }
+        )
+
+    assert "must-not-write" not in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_concurrent_image_binding_and_credential_delete_cannot_leave_dangling_ref(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda active: [_dashscope_image_provider_row()],
+    )
+    model_config.upsert_provider_credential(
+        {"id": "alibaba-image", "provider": "dashscope", "api_key": "named-secret"}
+    )
+    validated = threading.Event()
+    continue_binding = threading.Event()
+    original_load_credential = model_config.load_credential
+
+    def pause_after_validation(*args, **kwargs):
+        row = original_load_credential(*args, **kwargs)
+        validated.set()
+        assert continue_binding.wait(timeout=2)
+        return row
+
+    monkeypatch.setattr(model_config, "load_credential", pause_after_validation)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        bind_future = pool.submit(
+            model_config.set_image_gen_config,
+            {"provider": "dashscope", "credential_ref": "alibaba-image"},
+        )
+        assert validated.wait(timeout=2)
+        delete_future = pool.submit(
+            model_config.delete_provider_credential, "alibaba-image"
+        )
+        time.sleep(0.1)
+        continue_binding.set()
+        bind_future.result(timeout=2)
+        with pytest.raises(ValueError, match="正在使用"):
+            delete_future.result(timeout=2)
+
+    saved = _read_config(tmp_path)
+    assert saved["image_gen"]["credential_ref"] == "alibaba-image"
+    assert saved["provider_credentials"][0]["id"] == "alibaba-image"
+
+
+def test_shared_credential_rotation_invalidates_every_referencing_capability(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {"id": "alibaba-default", "provider": "alibaba", "api_key": "before"}
+    )
+    saved = _read_config(tmp_path)
+    saved["auxiliary"] = {"vision": {"credential_ref": "alibaba-default"}}
+    saved["image_gen"] = {"credential_ref": "alibaba-default"}
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(saved), encoding="utf-8"
+    )
+    invalidated = []
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda: invalidated.append("vision"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda: invalidated.append("image_gen"),
+        raising=False,
+    )
+
+    model_config.upsert_provider_credential(
+        {"id": "alibaba-default", "provider": "dashscope", "api_key": "after"}
+    )
+
+    assert invalidated == ["vision", "image_gen"]
+
+
 def test_image_gen_config_writes_doubao_ark_key_without_echo(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
@@ -1448,6 +1680,44 @@ def test_image_gen_config_payload_hides_raw_config_path(monkeypatch, tmp_path):
     assert result["config"]["exists"] is True
 
 
+def test_image_gen_config_returns_named_ref_and_safe_endpoint_options(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                    "credential_ref": "alibaba-default",
+                    "options": {
+                        "endpoint_mode": "workspace",
+                        "workspace_id": "llm-demo",
+                        "region": "cn-beijing",
+                        "api_key": "must-never-be-public",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda active: [])
+    monkeypatch.setattr(
+        model_config,
+        "get_custom_image_provider_configs",
+        lambda: {"providers": []},
+    )
+
+    result = model_config.get_image_gen_config()
+
+    assert result["image_gen"]["credential_ref"] == "alibaba-default"
+    assert result["image_gen"]["options"] == {
+        "endpoint_mode": "workspace",
+        "workspace_id": "llm-demo",
+        "region": "cn-beijing",
+    }
+    assert "must-never-be-public" not in json.dumps(result)
+
+
 def test_image_gen_config_rejects_taiji_public_provider_from_domestic_policy(monkeypatch, tmp_path):
     real_get_image_gen_config = model_config.get_image_gen_config
     _use_home(monkeypatch, tmp_path)
@@ -1642,6 +1912,82 @@ def test_image_gen_provider_rows_expose_credential_status(monkeypatch, tmp_path)
     assert row["domestic"] is True
     assert row["integration_status"] == "stable"
     os.environ.pop("DASHSCOPE_REGION", None)
+
+
+def test_active_dashscope_provider_row_uses_named_credential_status(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "api_key": "named-secret",
+        }
+    )
+    saved = _read_config(tmp_path)
+    saved["image_gen"] = {
+        "provider": "dashscope",
+        "credential_ref": "alibaba-default",
+        "options": {"workspace_id": "llm-demo"},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(saved), encoding="utf-8")
+
+    class _Provider:
+        name = "dashscope"
+        display_name = "通义 Qwen-Image"
+
+        def get_setup_schema(self):
+            return {
+                "name": self.display_name,
+                "env_vars": [{"key": "DASHSCOPE_API_KEY"}],
+                "credential_fields": [
+                    {
+                        "name": "api_key",
+                        "env_var": "DASHSCOPE_API_KEY",
+                        "label": "API Key",
+                        "required": True,
+                        "secret": True,
+                    },
+                    {
+                        "name": "workspace_id",
+                        "env_var": "DASHSCOPE_WORKSPACE_ID",
+                        "label": "Workspace ID",
+                        "required": True,
+                        "secret": False,
+                    },
+                ],
+                "domestic": True,
+                "integration_status": "stable",
+            }
+
+        def list_models(self):
+            return [{"id": "qwen-image-2.0-pro", "display": "Qwen Image 2 Pro"}]
+
+        def default_model(self):
+            return "qwen-image-2.0-pro"
+
+        def is_available(self):
+            return True
+
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr("agent.image_gen_registry.list_providers", lambda: [_Provider()])
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness", lambda: {}
+    )
+
+    row = next(
+        item
+        for item in model_config._image_gen_provider_rows("dashscope")
+        if item["id"] == "dashscope"
+    )
+
+    assert row["credential_status"]["configured"] is True
+    assert row["credential_status"]["missing"] == []
+    assert row["key_status"] == {
+        "configured": True,
+        "source": "provider_credential",
+        "env_var": "",
+    }
 
 
 def test_openai_codex_image_provider_reflects_real_readiness(monkeypatch, tmp_path):

@@ -311,6 +311,12 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
             credential = next(
                 row for row in public_config["credentials"] if row["id"] == credential_id
             )
+            if secret_value:
+                used_by = credential.get("used_by") or []
+                if "auxiliary.vision" in used_by:
+                    _invalidate_vision_verification()
+                if "image_gen" in used_by:
+                    _invalidate_image_gen_verification()
             return {"ok": True, "credential": credential}
         except Exception:
             if metadata_touched:
@@ -636,6 +642,7 @@ def _image_gen_credential_status(
     fields: list[dict[str, Any]],
     *,
     active_options: dict[str, Any] | None = None,
+    secret_status_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     statuses: list[dict[str, Any]] = []
     missing: list[str] = []
@@ -646,6 +653,8 @@ def _image_gen_credential_status(
         required = bool(field.get("required", True))
         secret = bool(field.get("secret", True))
         status = _key_status_for_env(env_var) if env_var else {"configured": False, "source": "none", "env_var": ""}
+        if secret and secret_status_override is not None:
+            status = secret_status_override
         if not secret and name and str(options.get(name) or "").strip():
             status = {"configured": True, "source": "config_yaml", "env_var": env_var}
         configured = bool(status.get("configured"))
@@ -686,6 +695,35 @@ def _image_gen_primary_key_status(
         if env_var:
             return _key_status_for_env(env_var)
     return {"configured": bool(credential_status.get("configured")), "source": "none", "env_var": ""}
+
+
+def _image_gen_named_key_status(
+    provider_id: str,
+    *,
+    active: bool,
+) -> dict[str, Any] | None:
+    if not active:
+        return None
+    config_data = _load_yaml_config_file(_get_config_path())
+    image_cfg = config_data.get("image_gen")
+    if not isinstance(image_cfg, dict):
+        return None
+    credential_ref = str(image_cfg.get("credential_ref") or "").strip()
+    if not credential_ref:
+        return None
+    try:
+        row = load_credential(credential_ref, config_data=config_data)
+        if provider_family(row.get("provider_family")) != provider_family(provider_id):
+            return {"configured": False, "source": "none", "env_var": ""}
+        secret_env = _validate_provider_credential_secret_env(row)
+        configured = bool(_key_status_for_env(secret_env).get("configured"))
+    except ValueError:
+        configured = False
+    return {
+        "configured": configured,
+        "source": "provider_credential" if configured else "none",
+        "env_var": "",
+    }
 
 
 def _image_gen_policy_allowed(pid: str, schema: dict[str, Any], *, is_custom: bool) -> tuple[bool, bool, str]:
@@ -802,11 +840,15 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
             env_var=env_var,
             env_vars=env_vars,
         )
+        named_key_status = _image_gen_named_key_status(pid, active=active)
         credential_status = _image_gen_credential_status(
             credential_fields,
             active_options=active_options if active else {},
+            secret_status_override=named_key_status,
         )
-        key_status = _image_gen_primary_key_status(credential_fields, credential_status)
+        key_status = named_key_status or _image_gen_primary_key_status(
+            credential_fields, credential_status
+        )
         if is_custom and key_status.get("configured") and default_model:
             available = True
         display_name = str(schema.get("name") or getattr(provider, "display_name", "") or pid)
@@ -909,6 +951,14 @@ def get_image_gen_config() -> dict[str, Any]:
         image_cfg = {}
     active_provider = str(image_cfg.get("provider") or "").strip()
     active_model = str(image_cfg.get("model") or "").strip()
+    active_options = image_cfg.get("options")
+    if not isinstance(active_options, dict):
+        active_options = {}
+    public_options = {
+        key: str(active_options.get(key) or "").strip()
+        for key in ("endpoint_mode", "workspace_id", "region", "base_url")
+        if str(active_options.get(key) or "").strip()
+    }
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -917,6 +967,8 @@ def get_image_gen_config() -> dict[str, Any]:
             "provider": _public_image_gen_provider_id(active_provider),
             "model": active_model,
             "use_gateway": bool(image_cfg.get("use_gateway")),
+            "credential_ref": str(image_cfg.get("credential_ref") or "").strip(),
+            "options": public_options,
         },
         "providers": _image_gen_provider_rows(active_provider),
         "custom_image_providers": get_custom_image_provider_configs().get("providers", []),
@@ -1168,6 +1220,10 @@ def _invalidate_vision_verification() -> None:
         except OSError:
             _atomic_write_json(path, {})
 
+
+def _invalidate_image_gen_verification() -> None:
+    """Extension hook for Task 5's persisted image-generation verification."""
+    pass
 
 def _vision_test_response(
     *,
@@ -1608,11 +1664,14 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     provider_id = _internal_image_gen_provider_id(requested_provider_id)
     model_id = str(body.get("model") or "").strip()
     api_key = body.get("api_key")
+    credential_ref = str(body.get("credential_ref") or "").strip()
     credentials = body.get("credentials")
     if not isinstance(credentials, dict):
         credentials = {}
     if not requested_provider_id:
         raise ValueError("provider is required")
+    if credential_ref and provider_id != "dashscope":
+        raise ValueError("credential_ref is only supported for DashScope image generation")
 
     rows = _image_gen_provider_rows(provider_id)
     selected = next((row for row in rows if row.get("id") == requested_provider_id), None)
@@ -1637,6 +1696,21 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             model_id = str((models[0] or {}).get("id") or "").strip()
 
     credential_fields = selected.get("credential_fields") if isinstance(selected.get("credential_fields"), list) else []
+    inline_secret_supplied = bool(api_key is not None and str(api_key).strip())
+    for item in credential_fields:
+        if not isinstance(item, dict) or not bool(item.get("secret", True)):
+            continue
+        name = str(item.get("name") or "").strip()
+        env_var = str(item.get("env_var") or "").strip()
+        raw_value = credentials.get(name) if name and name in credentials else None
+        if raw_value is None and env_var and env_var in credentials:
+            raw_value = credentials.get(env_var)
+        if raw_value is not None and str(raw_value).strip():
+            inline_secret_supplied = True
+    if credential_ref and inline_secret_supplied:
+        raise ValueError("credential_ref and api_key cannot be used together")
+    if credential_ref:
+        credential_ref = normalize_credential_id(credential_ref)
     env_updates: dict[str, str] = {}
     option_updates: dict[str, str] = {}
     legacy_api_key_consumed = False
@@ -1670,27 +1744,36 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{provider_id} does not accept an API key from WebUI")
         env_updates[env_var] = str(api_key).strip()
 
-    if env_updates:
-        _write_env_file(_get_hermes_home() / ".env", env_updates)
-
     config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        image_cfg = config_data.get("image_gen")
-        if not isinstance(image_cfg, dict):
-            image_cfg = {}
-        image_cfg["provider"] = provider_id
-        if model_id:
-            image_cfg["model"] = model_id
-        image_cfg["use_gateway"] = False
-        if option_updates:
-            options = image_cfg.get("options")
-            if not isinstance(options, dict):
-                options = {}
-            options.update(option_updates)
-            image_cfg["options"] = options
-        config_data["image_gen"] = image_cfg
-        _save_yaml_config_file(config_path, config_data)
+    with credential_transaction():
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
+            if credential_ref:
+                row = load_credential(credential_ref, config_data=config_data)
+                if provider_family(row.get("provider_family")) != provider_family(provider_id):
+                    raise ValueError("所选凭据不属于当前 Provider。")
+            if env_updates:
+                _write_env_file(_get_hermes_home() / ".env", env_updates)
+            image_cfg = config_data.get("image_gen")
+            if not isinstance(image_cfg, dict):
+                image_cfg = {}
+            image_cfg["provider"] = provider_id
+            if model_id:
+                image_cfg["model"] = model_id
+            image_cfg["use_gateway"] = False
+            if provider_id == "dashscope":
+                image_cfg["credential_ref"] = credential_ref
+            else:
+                image_cfg.pop("credential_ref", None)
+            image_cfg.pop("api_key", None)
+            if option_updates:
+                options = image_cfg.get("options")
+                if not isinstance(options, dict):
+                    options = {}
+                options.update(option_updates)
+                image_cfg["options"] = options
+            config_data["image_gen"] = image_cfg
+            _save_yaml_config_file(config_path, config_data)
     reload_config()
     invalidate_models_cache()
     return get_image_gen_config()

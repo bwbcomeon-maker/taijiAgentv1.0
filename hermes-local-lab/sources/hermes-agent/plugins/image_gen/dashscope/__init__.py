@@ -19,6 +19,7 @@ from agent.image_gen_provider import (
     error_response,
     save_b64_image,
 )
+from agent.provider_credentials import resolve_api_key
 from plugins.image_gen.domestic_common import (
     SIZE_MAP_STAR,
     auth_error,
@@ -112,16 +113,41 @@ def _save_safe_image_url(
     raise ValueError("DashScope image URL exceeded redirect limit")
 
 
-def _load_options() -> dict[str, Any]:
+def _load_config_data() -> dict[str, Any]:
     try:
         from hermes_cli.config import load_config
 
         cfg = load_config()
-        image_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
-        options = image_cfg.get("options") if isinstance(image_cfg, dict) else None
-        return options if isinstance(options, dict) else {}
+        return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
+
+
+def _load_image_config(config_data: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = config_data if isinstance(config_data, dict) else _load_config_data()
+    image_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
+    return image_cfg if isinstance(image_cfg, dict) else {}
+
+
+def _load_options() -> dict[str, Any]:
+    options = _load_image_config().get("options")
+    return options if isinstance(options, dict) else {}
+
+
+def _resolve_api_key() -> str:
+    config_data = _load_config_data()
+    image_cfg = _load_image_config(config_data)
+    credential_ref = ""
+    if str(image_cfg.get("provider") or "").strip().lower() == "dashscope":
+        credential_ref = str(image_cfg.get("credential_ref") or "").strip()
+    try:
+        return resolve_api_key(
+            "dashscope",
+            credential_ref,
+            config_data=config_data,
+        )
+    except ValueError:
+        return ""
 
 
 def _option_value(name: str, env_var: str) -> str:
@@ -141,7 +167,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         return "通义 Qwen-Image"
 
     def is_available(self) -> bool:
-        if not env_value("DASHSCOPE_API_KEY"):
+        if not _resolve_api_key():
             return False
         try:
             endpoint = self._endpoint()
@@ -262,7 +288,8 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         if prompt_error:
             return prompt_error
         missing = []
-        if not env_value("DASHSCOPE_API_KEY"):
+        api_key = _resolve_api_key()
+        if not api_key:
             missing.append("DASHSCOPE_API_KEY")
         endpoint_mode = _option_value("endpoint_mode", "DASHSCOPE_ENDPOINT_MODE") or "workspace"
         if endpoint_mode == "workspace" and not _option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID"):
@@ -272,7 +299,6 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         if missing:
             return auth_error(missing=missing, provider=self.name, model=model, prompt=prompt, aspect_ratio=aspect)
 
-        api_key = env_value("DASHSCOPE_API_KEY")
         try:
             endpoint = self._endpoint()
         except ValueError:
