@@ -31,6 +31,13 @@ from agent.provider_credentials import (
     provider_family,
 )
 from agent.alibaba_endpoints import build_vision_base_url
+from agent.image_gen_verification import (
+    active_custom_provider_identity,
+    image_gen_fingerprint as shared_image_gen_fingerprint,
+    image_gen_secret_env,
+    verification_state_path,
+    verification_status_from_state,
+)
 
 from api.config import (
     _cfg_lock,
@@ -1399,8 +1406,7 @@ def _image_gen_verification_state_root() -> Path:
 
 def _image_gen_verification_state_path(profile: str | None = None) -> Path:
     profile_name = str(profile or _active_profile_name() or "default")
-    profile_id = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:24]
-    return _image_gen_verification_state_root() / f"{profile_id}.json"
+    return verification_state_path(_image_gen_verification_state_root(), profile_name)
 
 
 def _image_gen_profile_lock(profile: str) -> threading.Lock:
@@ -1431,70 +1437,16 @@ def _read_image_gen_verification_state(profile: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _image_gen_secret_digest(
+def _image_gen_secret_value(
     provider: str,
     credential_ref: str,
     config_data: dict[str, Any],
 ) -> str:
-    env_var = ""
-    if credential_ref:
-        try:
-            row = load_credential(credential_ref, config_data=config_data)
-            if provider_family(row.get("provider_family")) == provider_family(provider):
-                env_var = _validate_provider_credential_secret_env(row)
-        except ValueError:
-            pass
-    elif provider.startswith("custom:"):
-        identity = _active_custom_image_provider_identity(provider, config_data)
-        env_var = str(identity.get("api_key_env") or "")
-    else:
-        env_var = _IMAGE_GEN_KEY_ENV.get(provider) or ""
+    env_var = image_gen_secret_env(provider, credential_ref, config_data)
     if not env_var:
         return ""
     env_values = _load_env_file(_get_hermes_home() / ".env")
-    secret = str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else ""
-
-
-def _active_custom_image_provider_identity(
-    provider: str,
-    config_data: dict[str, Any],
-) -> dict[str, Any]:
-    if not provider.startswith("custom:"):
-        return {}
-    requested_id = provider.split(":", 1)[1]
-    entries = config_data.get("custom_image_providers")
-    if not isinstance(entries, list):
-        return {}
-    try:
-        from agent.custom_image_providers import (
-            normalize_custom_image_provider_entry,
-            normalize_custom_image_provider_id,
-        )
-    except Exception:
-        return {}
-    for raw_entry in entries:
-        if not isinstance(raw_entry, dict):
-            continue
-        try:
-            if normalize_custom_image_provider_id(raw_entry.get("id")) != requested_id:
-                continue
-            normalized = normalize_custom_image_provider_entry(raw_entry)
-        except ValueError:
-            continue
-        return {
-            "id": normalized["id"],
-            "name": normalized["name"],
-            "base_url": normalized["base_url"],
-            "api_key_env": normalized["api_key_env"],
-            "models": list(normalized["models"]),
-            "default_model": normalized["default_model"],
-            "size_map": dict(normalized["size_map"]),
-            "response_format": normalized["response_format"],
-            "timeout_seconds": normalized["timeout_seconds"],
-            "transport": str(raw_entry.get("transport") or "openai_images").strip(),
-        }
-    return {}
+    return str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
 
 
 def _image_gen_config_fingerprint(
@@ -1504,26 +1456,14 @@ def _image_gen_config_fingerprint(
     config_data: dict[str, Any] | None = None,
 ) -> str:
     data = config_data or _load_yaml_config_file(_get_config_path())
-    options = image_cfg.get("options")
-    if not isinstance(options, dict):
-        options = {}
     provider = str(image_cfg.get("provider") or "").strip().lower()
     credential_ref = str(image_cfg.get("credential_ref") or "").strip()
-    material = {
-        "profile": profile,
-        "provider": provider,
-        "model": str(image_cfg.get("model") or "").strip(),
-        "credential_ref": credential_ref,
-        "endpoint_mode": str(options.get("endpoint_mode") or "").strip(),
-        "region": str(options.get("region") or "").strip(),
-        "workspace_id": str(options.get("workspace_id") or "").strip(),
-        "base_url": str(options.get("base_url") or "").strip().rstrip("/"),
-        "custom_provider": _active_custom_image_provider_identity(provider, data),
-        "key_digest": _image_gen_secret_digest(provider, credential_ref, data),
-    }
-    return hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return shared_image_gen_fingerprint(
+        image_cfg,
+        profile=profile,
+        config_data=data,
+        secret_value=_image_gen_secret_value(provider, credential_ref, data),
+    )
 
 
 def _capture_image_gen_config_snapshot() -> _ImageGenConfigSnapshot:
@@ -1537,26 +1477,42 @@ def _capture_image_gen_config_snapshot() -> _ImageGenConfigSnapshot:
     options = image_cfg.get("options")
     if not isinstance(options, dict):
         options = {}
-    available = False
-    if provider and model:
-        try:
-            _ensure_image_gen_plugins_registered()
-            from agent.image_gen_registry import get_provider
-
-            selected = get_provider(provider)
-            available = bool(selected and selected.is_available())
-        except Exception:
-            available = False
+    credential_ref = str(image_cfg.get("credential_ref") or "").strip()
+    secret_value = _image_gen_secret_value(provider, credential_ref, config_data)
+    credential_required = provider in _IMAGE_GEN_KEY_ENV or provider.startswith("custom:")
+    custom_complete = bool(
+        not provider.startswith("custom:")
+        or active_custom_provider_identity(provider, config_data)
+    )
+    endpoint_mode = str(options.get("endpoint_mode") or "").strip()
+    endpoint_complete = bool(
+        endpoint_mode not in {"workspace", "custom"}
+        or (
+            endpoint_mode == "workspace"
+            and str(options.get("workspace_id") or "").strip()
+        )
+        or (
+            endpoint_mode == "custom"
+            and str(options.get("base_url") or "").strip()
+        )
+    )
+    configured = bool(
+        provider
+        and model
+        and custom_complete
+        and endpoint_complete
+        and (not credential_required or secret_value)
+    )
     return _ImageGenConfigSnapshot(
         profile=profile,
         provider=provider,
         model=model,
-        credential_ref=str(image_cfg.get("credential_ref") or "").strip(),
-        endpoint_mode=str(options.get("endpoint_mode") or "").strip(),
+        credential_ref=credential_ref,
+        endpoint_mode=endpoint_mode,
         region=str(options.get("region") or "").strip(),
         workspace_id=str(options.get("workspace_id") or "").strip(),
         base_url=str(options.get("base_url") or "").strip().rstrip("/"),
-        configured=bool(provider and model and available),
+        configured=configured,
         fingerprint=_image_gen_config_fingerprint(
             image_cfg,
             profile=profile,
@@ -1581,13 +1537,12 @@ def _public_image_gen_verification(
         }
     state = _read_image_gen_verification_state(profile)
     fingerprint = _image_gen_config_fingerprint(image_cfg, profile=profile)
-    if state.get("fingerprint") == fingerprint and state.get("status") in {
-        "verifying",
-        "verified",
-        "failed",
-    }:
+    persisted_status = verification_status_from_state(
+        state, expected_fingerprint=fingerprint
+    )
+    if persisted_status in {"verifying", "verified", "failed"}:
         return {
-            "status": str(state.get("status")),
+            "status": persisted_status,
             "checked_at": str(state.get("checked_at") or ""),
             "error_code": str(state.get("error_code") or ""),
             "message": str(state.get("message") or ""),
@@ -1629,6 +1584,7 @@ def _image_gen_test_response(
 @dataclass(frozen=True)
 class _ImageCacheSnapshot:
     root: Path
+    lexical_root: Path
     paths: frozenset[Path]
     inodes: frozenset[tuple[int, int]]
 
@@ -1649,7 +1605,10 @@ class _ProbeCleanupCandidate:
 
 
 def _snapshot_image_cache() -> _ImageCacheSnapshot:
-    root = (_get_hermes_home() / "cache" / "images").resolve()
+    lexical_root = Path(
+        os.path.abspath(_get_hermes_home() / "cache" / "images")
+    )
+    root = lexical_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     paths: set[Path] = set()
     inodes: set[tuple[int, int]] = set()
@@ -1664,6 +1623,7 @@ def _snapshot_image_cache() -> _ImageCacheSnapshot:
             inodes.add((info.st_dev, info.st_ino))
     return _ImageCacheSnapshot(
         root=root,
+        lexical_root=lexical_root,
         paths=frozenset(paths),
         inodes=frozenset(inodes),
     )
@@ -1679,11 +1639,15 @@ def _probe_cleanup_candidate(
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         return None
-    lexical = Path(os.path.abspath(candidate))
+    requested = Path(os.path.abspath(candidate))
     try:
-        relative = lexical.relative_to(before.root)
+        relative = requested.relative_to(before.lexical_root)
     except ValueError:
-        return None
+        try:
+            relative = requested.relative_to(before.root)
+        except ValueError:
+            return None
+    lexical = before.root / relative
     if lexical in before.paths:
         return None
     current = before.root
@@ -1808,19 +1772,23 @@ def test_image_gen_config() -> dict[str, Any]:
         from agent.image_gen_registry import get_provider
 
         selected = get_provider(snapshot.provider)
-        if selected is None:
-            raise RuntimeError("provider not registered")
-        result = selected.generate(
-            prompt=_IMAGE_GEN_PROBE_PROMPT,
-            aspect_ratio="square",
-            num_images=1,
-            model=snapshot.model,
-        )
+        can_attempt = bool(selected and selected.is_available())
+        if not can_attempt:
+            error_code = "image_gen_provider_unavailable"
+            message = "生图配置已保存，但当前 Provider 或凭据暂不可用。"
+            result = None
+        else:
+            result = selected.generate(
+                prompt=_IMAGE_GEN_PROBE_PROMPT,
+                aspect_ratio="square",
+                num_images=1,
+                model=snapshot.model,
+            )
         if isinstance(result, dict):
             cleanup_candidate = _probe_cleanup_candidate(result.get("image"), cache_before)
             generated_image = _owned_probe_image(cleanup_candidate, cache_before)
             identity_ok = bool(
-                result.get("success")
+                result.get("success") is True
                 and result.get("provider") == snapshot.provider
                 and result.get("model") == snapshot.model
             )
@@ -1837,7 +1805,7 @@ def test_image_gen_config() -> dict[str, Any]:
     finally:
         if cleanup_candidate is not None:
             removed = _remove_probe_cleanup_candidate(cleanup_candidate)
-            if generated_image is not None and not removed:
+            if not removed:
                 logger.warning("Failed to remove image generation probe output (%s)", diagnostic_id)
                 ok = False
                 error_code = "image_gen_cleanup_failed"

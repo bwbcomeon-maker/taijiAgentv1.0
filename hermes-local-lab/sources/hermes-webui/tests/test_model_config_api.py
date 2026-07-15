@@ -2185,6 +2185,53 @@ def test_image_gen_test_rejects_unconfigured_without_calling_provider(monkeypatc
     }
 
 
+def test_image_gen_saved_config_is_not_unconfigured_when_provider_cannot_attempt(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json")
+    _write_saved_image_gen_config(tmp_path)
+    provider = _ProbeImageProvider({})
+    provider.is_available = lambda: False
+    _install_probe_provider(monkeypatch, provider)
+
+    public = model_config.get_image_gen_config()["image_gen"]["verification"]
+    tested = model_config.test_image_gen_config()
+
+    assert public["status"] == "configured_unverified"
+    assert tested["status"] == "failed"
+    assert tested["error_code"] == "image_gen_provider_unavailable"
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize("success_value", ["false", 1, {}, None])
+def test_image_gen_probe_requires_literal_true_success(
+    monkeypatch, tmp_path, success_value
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json")
+    _write_saved_image_gen_config(tmp_path)
+    generated = tmp_path / "cache" / "images" / "malformed.png"
+
+    def result_payload():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nmalformed")
+        return {
+            "success": success_value,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result_payload))
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "image_gen_probe_failed"
+    assert not generated.exists()
+
+
 def test_image_gen_probe_verifies_identity_magic_and_removes_probe_file(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     state_path = tmp_path / "image-gen-verification.json"
@@ -2606,6 +2653,30 @@ def test_image_probe_rejects_new_hardlink_to_preexisting_cache_file(monkeypatch,
     assert not hardlink.exists()
 
 
+def test_unsafe_probe_entry_cleanup_failure_is_reported(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json")
+    _write_saved_image_gen_config(tmp_path)
+    cache = tmp_path / "cache" / "images"
+    cache.mkdir(parents=True)
+    target = tmp_path / "target.png"
+    target.write_bytes(b"target")
+    link = cache / "provider-result.png"
+
+    def result_payload():
+        link.symlink_to(target)
+        return {"success": True, "image": str(link), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result_payload))
+    monkeypatch.setattr(model_config, "_remove_probe_cleanup_candidate", lambda *_: False)
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "image_gen_cleanup_failed"
+    assert target.read_bytes() == b"target"
+
+
 def test_image_probe_snapshot_failure_is_safe_persisted_and_retryable(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     state_path = tmp_path / "state.json"
@@ -2664,3 +2735,22 @@ def test_probe_cleanup_candidate_identity_change_does_not_delete_replacement(
 
     assert removed is False
     assert result_path.read_bytes() == b"replacement"
+
+
+def test_probe_cache_accepts_runtime_home_parent_symlink(monkeypatch, tmp_path):
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    alias_home = tmp_path / "alias-home"
+    alias_home.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: alias_home)
+    before = model_config._snapshot_image_cache()
+    result_path = alias_home / "cache" / "images" / "provider-result.png"
+    result_path.write_bytes(b"\x89PNG\r\n\x1a\nowned")
+
+    candidate = model_config._probe_cleanup_candidate(result_path, before)
+    owned = model_config._owned_probe_image(candidate, before)
+
+    assert candidate is not None
+    assert owned is not None
+    assert model_config._remove_probe_cleanup_candidate(candidate) is True
+    assert not result_path.exists()

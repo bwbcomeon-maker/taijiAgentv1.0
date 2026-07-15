@@ -786,6 +786,17 @@ def _load_image_gen_config() -> Dict[str, Any]:
         return {}
 
 
+def _load_image_gen_full_config() -> Dict[str, Any]:
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception as exc:
+        logger.debug("Could not load full image_gen config: %s", exc)
+        return {}
+
+
 def _iter_image_generation_providers():
     """Return registered image generation providers, best-effort."""
     try:
@@ -816,27 +827,31 @@ def _image_gen_public_message(reason_code: str) -> str:
 
 
 def _read_image_gen_verification_status(image_cfg: Dict[str, Any]) -> str:
-    """Read the active profile's probe state; fail closed outside WebUI."""
+    """Read probe state through the Agent-owned cross-runtime contract."""
     try:
-        from api.model_config import (
-            _active_profile_name,
-            _image_gen_config_fingerprint,
-            _image_gen_verification_state_path,
+        from agent.image_gen_verification import (
+            active_profile_name,
+            image_gen_secret_env,
+            read_image_gen_verification_status,
         )
+        from hermes_cli.config import load_env
 
-        profile = _active_profile_name()
-        state = json.loads(
-            _image_gen_verification_state_path(profile).read_text(encoding="utf-8")
+        config_data = _load_image_gen_full_config()
+        provider = str(image_cfg.get("provider") or "").strip().lower()
+        credential_ref = str(image_cfg.get("credential_ref") or "").strip()
+        env_var = image_gen_secret_env(provider, credential_ref, config_data)
+        env_values = load_env()
+        secret = str(
+            (env_values.get(env_var) if isinstance(env_values, dict) and env_var else "")
+            or (os.getenv(env_var) if env_var else "")
+            or ""
+        ).strip()
+        return read_image_gen_verification_status(
+            image_cfg,
+            profile=active_profile_name(),
+            config_data=config_data,
+            secret_value=secret,
         )
-        if not isinstance(state, dict):
-            return "configured_unverified"
-        expected = _image_gen_config_fingerprint(image_cfg, profile=profile)
-        if str(state.get("fingerprint") or "") != expected:
-            return "configured_unverified"
-        status = str(state.get("status") or "")
-        return status if status in {
-            "configured_unverified", "verifying", "verified", "failed"
-        } else "configured_unverified"
     except Exception:
         return "configured_unverified"
 

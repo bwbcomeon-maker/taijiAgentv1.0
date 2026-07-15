@@ -11278,7 +11278,15 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/image-gen/test":
         from api.model_config import test_image_gen_config
 
-        return j(handler, test_image_gen_config())
+        try:
+            return j(handler, test_image_gen_config())
+        except Exception:
+            logger.exception("Image generation verification route failed")
+            return bad(
+                handler,
+                "生图验证暂时无法执行，请稍后重试。",
+                status=500,
+            )
 
     if parsed.path == "/api/image-gen/custom-providers":
         from api.model_config import set_custom_image_provider_config
