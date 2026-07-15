@@ -397,44 +397,98 @@ function element(id,value=''){
   focus(){this.focused=true;}};
 }
 const ids=['alibabaQuickApiKey','alibabaQuickVisionModel','alibabaQuickImageModel','btnSaveVerifyAlibaba',
- 'alibabaQuickConfigStatus','alibabaQuickConfigSummary','alibabaQuickVisionStatus','alibabaQuickImageStatus'];
+ 'alibabaQuickConfigStatus','alibabaQuickConfigSummary','alibabaQuickVisionStatus','alibabaQuickImageStatus',
+ 'visionConfigProvider','visionConfigModel','visionConfigCredential','visionConfigEndpointMode','visionConfigRegion',
+ 'visionConfigWorkspaceId','visionConfigBaseUrl','imageGenConfigProvider','imageGenConfigModel','imageGenConfigCredential',
+ 'imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl'];
 const elements={};for(const id of ids) elements[id]=element(id);
 const $=id=>elements[id]||null;
-const document={createElement:tag=>element(tag)};
+const document={createElement:tag=>element(tag),querySelectorAll:selector=>selector==='[data-secret-field="true"]'?[elements.alibabaQuickApiKey]:[]};
 const showToast=()=>{};
 let _visionTestGeneration=0,_imageGenTestGeneration=0,_visionVerificationSnapshot=null,_imageGenVerificationSnapshot=null;
+let _alibabaQuickOperationGeneration=0,_alibabaQuickOperation=null;
+const _imageCapabilityProviderDrafts={vision:{alibaba:{WorkspaceId:'stale-vision'}},image:{dashscope:{WorkspaceId:'stale-image'}}};
 let _modelConfigData={
- vision:{provider:'alibaba',model:'qwen3-vl-plus',verification:{status:'configured_unverified'}},
- image_gen:{provider:'dashscope',model:'qwen-image-2.0-pro',verification:{status:'configured_unverified'}},
- vision_providers:[{id:'alibaba',models:[{id:'qwen3-vl-plus',label:'Qwen3 VL Plus'},{id:'qwen-vl-max'}]}],
- image_gen_providers:[{id:'dashscope',models:['qwen-image-2.0-pro','wanx-v1']}]
+ profile:'default',
+ vision:{provider:'alibaba',model:'qwen3-vl-plus',credential_ref:'old-vision',endpoint_mode:'workspace',
+  region:'ap-southeast-1',workspace_id:'old-workspace',base_url:'https://old.example/v1',verification:{status:'configured_unverified'}},
+ image_gen:{provider:'dashscope',model:'qwen-image-2.0-pro',credential_ref:'old-image',
+  options:{endpoint_mode:'workspace',region:'ap-southeast-1',workspace_id:'old-workspace',base_url:'https://old.example'},
+  verification:{status:'configured_unverified'}},
+ vision_providers:[{id:'alibaba',models:[{id:'qwen3-vl-plus',label:'Qwen3 VL Plus'},{id:'qwen3-vl-flash'}]}],
+ image_gen_providers:[{id:'dashscope',models:['qwen-image-2.0-pro','qwen-image']}]
 };
 const calls=[];
 const scenario=process.argv[3];
+let resolveVision;
+const pendingVision=new Promise(resolve=>{resolveVision=resolve;});
 const api=async(url,options)=>{
  const payload=options&&options.body?JSON.parse(options.body):null;
  calls.push({url,payload});
  if(url==='/api/image-capabilities/alibaba'){
   if(scenario==='save-failure') throw new Error('save rejected secret-value');
-  return {vision:{provider:'alibaba',model:payload.vision_model,verification:{status:'configured_unverified'}},
-   image_gen:{provider:'dashscope',model:payload.image_model,verification:{status:'configured_unverified'}},
+  return {vision:{provider:'alibaba',model:payload.vision_model,credential_ref:'taiji-alibaba-quick',
+    base_url:'https://dashscope.aliyuncs.com/compatible-mode/v1',endpoint_mode:'public',region:'cn-beijing',
+    key_status:{configured:true},verification:{status:'configured_unverified',provider:'alibaba',model:payload.vision_model}},
+   image_gen:{provider:'dashscope',model:payload.image_model,credential_ref:'taiji-alibaba-quick',
+    options:{endpoint_mode:'public',region:'cn-beijing'},key_status:{configured:true},
+    verification:{status:'configured_unverified',provider:'dashscope',model:payload.image_model}},
    vision_providers:_modelConfigData.vision_providers,image_gen_providers:_modelConfigData.image_gen_providers};
  }
- if(url==='/api/vision/test') return {ok:true,status:'verified',message:'vision ok'};
+ if(url==='/api/vision/test'){
+  if(scenario==='advanced-change'||scenario==='late-invalidated') return pendingVision;
+  if(scenario==='wrong-identity') return {ok:true,status:'verified',provider:'other',model:'wrong-vl',message:'wrong target'};
+  if(scenario==='superseded') return {ok:false,status:'configured_unverified',provider:'alibaba',model:elements.alibabaQuickVisionModel.value,error_code:'vision_probe_superseded',message:'superseded'};
+  return {ok:true,status:'verified',provider:'alibaba',model:elements.alibabaQuickVisionModel.value,message:'vision ok'};
+ }
  if(url==='/api/image-gen/test'){
-  if(scenario==='partial') return {ok:false,status:'failed',message:'image failed'};
-  return {ok:true,status:'verified',message:'image ok'};
+  if(scenario==='partial'||scenario==='model-change-partial') return {ok:false,status:'failed',provider:'dashscope',model:elements.alibabaQuickImageModel.value,message:'image failed'};
+  return {ok:true,status:'verified',provider:'dashscope',model:elements.alibabaQuickImageModel.value,message:'image ok'};
  }
  throw new Error('unexpected '+url);
 };
 const _renderVisionConfigSummary=()=>{};
 const _renderImageGenConfigSummary=()=>{};
+const _modelConfigMainHasUnsavedChanges=()=>false;
+const _visionConfigHasUnsavedChanges=()=>false;
+const _imageGenConfigHasUnsavedChanges=()=>false;
+const _imageGenCredentialDraftHasValues=()=>false;
+const _platformCredentialEditorHasUnsavedChanges=()=>false;
+const _modelConfigAnySecretDraft=()=>String(elements.alibabaQuickApiKey.value||'').trim()!=='';
+const _discardImageCapabilityProviderDrafts=()=>{
+ for(const capability of ['vision','image']) for(const key of Object.keys(_imageCapabilityProviderDrafts[capability])) delete _imageCapabilityProviderDrafts[capability][key];
+};
+const _renderModelConfigPanel=data=>{
+ _modelConfigData=data;
+ const vision=data.vision||{},image=data.image_gen||{},options=image.options||{};
+ elements.visionConfigProvider.value=vision.provider||'';elements.visionConfigModel.value=vision.model||'';
+ elements.visionConfigCredential.value=vision.credential_ref||'';elements.visionConfigEndpointMode.value=vision.endpoint_mode||'public';
+ elements.visionConfigRegion.value=vision.region||'cn-beijing';elements.visionConfigWorkspaceId.value=vision.workspace_id||'';
+ elements.visionConfigBaseUrl.value=vision.endpoint_mode==='custom'?(vision.base_url||''):'';
+ elements.imageGenConfigProvider.value=image.provider||'';elements.imageGenConfigModel.value=image.model||'';
+ elements.imageGenConfigCredential.value=image.credential_ref||'';elements.imageGenConfigEndpointMode.value=options.endpoint_mode||'workspace';
+ elements.imageGenConfigRegion.value=options.region||'cn-beijing';elements.imageGenConfigWorkspaceId.value=options.workspace_id||'';
+ elements.imageGenConfigBaseUrl.value=options.endpoint_mode==='custom'?(options.base_url||''):'';
+ _syncAlibabaQuickConfig(data);
+};
 for(const name of ['_alibabaQuickModels','_populateAlibabaQuickSelect','_safeAlibabaQuickMessage',
- '_setAlibabaQuickStatus','_setAlibabaQuickBusy','_onAlibabaQuickModelChange','_syncAlibabaQuickConfig','_mergeAlibabaQuickConfigResponse',
- '_testAlibabaQuickCapability','saveAndVerifyAlibabaImageCapabilities']) eval(extractFunc(name));
+ '_setAlibabaQuickStatus','_setAlibabaQuickBusy','_alibabaQuickConfigIdentity','_alibabaQuickOperationIsCurrent',
+ '_invalidateAlibabaQuickOperation','_onAlibabaQuickModelChange','_syncAlibabaQuickConfig','_mergeAlibabaQuickConfigResponse',
+ '_testAlibabaQuickCapability','saveAndVerifyAlibabaImageCapabilities','_modelConfigHasUnsavedChanges']) eval(extractFunc(name));
 
 async function run(){
+ if(scenario==='persisted-failure'){
+  _modelConfigData.vision.verification={status:'failed',provider:'alibaba',model:'qwen3-vl-plus',message:'bad key sk-test-persist-secret'};
+  _modelConfigData.image_gen.verification={status:'verified',provider:'dashscope',model:'qwen-image-2.0-pro',message:'image ok'};
+  _syncAlibabaQuickConfig(_modelConfigData);
+  return {calls,summary:elements.alibabaQuickConfigSummary.textContent,visionStatus:elements.alibabaQuickVisionStatus.textContent,
+   imageStatus:elements.alibabaQuickImageStatus.textContent,state:elements.alibabaQuickConfigStatus.dataset.state};
+ }
  _syncAlibabaQuickConfig(_modelConfigData);
+ if(scenario==='model-change-partial'){
+  elements.alibabaQuickVisionModel.value='qwen3-vl-flash';elements.alibabaQuickVisionModel.onchange();
+  elements.alibabaQuickImageModel.value='qwen-image';elements.alibabaQuickImageModel.onchange();
+ }
  elements.alibabaQuickApiKey.value='secret-value';
  const initial={vision:elements.alibabaQuickVisionModel.value,image:elements.alibabaQuickImageModel.value,
   visionOptions:elements.alibabaQuickVisionModel.options.map(option=>option.value),
@@ -442,11 +496,26 @@ async function run(){
  const pending=saveAndVerifyAlibabaImageCapabilities();
  const during={disabled:elements.btnSaveVerifyAlibaba.disabled,busy:elements.btnSaveVerifyAlibaba.attrs['aria-busy'],
   keyDisabled:elements.alibabaQuickApiKey.disabled};
+ if(scenario==='advanced-change'||scenario==='late-invalidated'){
+  for(let i=0;i<8&&!calls.some(call=>call.url==='/api/vision/test');i++) await Promise.resolve();
+  if(scenario==='advanced-change') _modelConfigData.vision.model='advanced-vl';
+  else _invalidateAlibabaQuickOperation('识图配置在验证期间已更改，本次结果已忽略，请重新验证。');
+  resolveVision({ok:true,status:'verified',provider:'alibaba',model:elements.alibabaQuickVisionModel.value,message:'late vision ok'});
+ }
  await pending;
  return {initial,during,calls,secret:elements.alibabaQuickApiKey.value,
   summary:elements.alibabaQuickConfigSummary.textContent,visionStatus:elements.alibabaQuickVisionStatus.textContent,
   imageStatus:elements.alibabaQuickImageStatus.textContent,state:elements.alibabaQuickConfigStatus.dataset.state,
-  disabled:elements.btnSaveVerifyAlibaba.disabled,busy:elements.btnSaveVerifyAlibaba.attrs['aria-busy']};
+  disabled:elements.btnSaveVerifyAlibaba.disabled,busy:elements.btnSaveVerifyAlibaba.attrs['aria-busy'],
+  savedValues:{vision:elements.alibabaQuickVisionModel.dataset.savedValue,image:elements.alibabaQuickImageModel.dataset.savedValue},
+  dirty:_modelConfigHasUnsavedChanges(),memory:{vision:_modelConfigData.vision,image:_modelConfigData.image_gen},
+  advanced:{visionProvider:elements.visionConfigProvider.value,visionModel:elements.visionConfigModel.value,
+   visionCredential:elements.visionConfigCredential.value,visionMode:elements.visionConfigEndpointMode.value,
+   visionRegion:elements.visionConfigRegion.value,visionWorkspace:elements.visionConfigWorkspaceId.value,
+   visionBaseUrl:elements.visionConfigBaseUrl.value,imageProvider:elements.imageGenConfigProvider.value,
+   imageModel:elements.imageGenConfigModel.value,imageCredential:elements.imageGenConfigCredential.value,
+   imageMode:elements.imageGenConfigEndpointMode.value,imageRegion:elements.imageGenConfigRegion.value,
+   imageWorkspace:elements.imageGenConfigWorkspaceId.value,imageBaseUrl:elements.imageGenConfigBaseUrl.value}};
 }
 run().then(value=>process.stdout.write(JSON.stringify(value))).catch(err=>{console.error(err);process.exit(1);});
 """
@@ -759,7 +828,12 @@ run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{con
 
 def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
     driver = tmp_path / "vision-race-driver.js"
-    driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _VISION_RACE_DRIVER, encoding="utf-8")
+    driver.write_text(
+        "const _collectImageCapabilityEndpointValues=()=>({});\n"
+        "const _invalidateAlibabaQuickOperation=()=>false;\n"
+        + _VISION_RACE_DRIVER,
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
         capture_output=True,
@@ -773,7 +847,12 @@ def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
 
 def _run_image_gen_race(tmp_path: Path, scenario: str) -> dict:
     driver = tmp_path / "image-gen-race-driver.js"
-    driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _IMAGE_GEN_RACE_DRIVER, encoding="utf-8")
+    driver.write_text(
+        "const _collectImageCapabilityEndpointValues=()=>({});\n"
+        "const _invalidateAlibabaQuickOperation=()=>false;\n"
+        + _IMAGE_GEN_RACE_DRIVER,
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
         capture_output=True,
@@ -1237,8 +1316,8 @@ def test_alibaba_quick_config_uses_api_models_and_verifies_both_capabilities(tmp
     assert result["initial"] == {
         "vision": "qwen3-vl-plus",
         "image": "qwen-image-2.0-pro",
-        "visionOptions": ["qwen3-vl-plus", "qwen-vl-max"],
-        "imageOptions": ["qwen-image-2.0-pro", "wanx-v1"],
+        "visionOptions": ["qwen3-vl-plus", "qwen3-vl-flash"],
+        "imageOptions": ["qwen-image-2.0-pro", "qwen-image"],
     }
     assert result["calls"] == [
         {
@@ -1260,6 +1339,44 @@ def test_alibaba_quick_config_uses_api_models_and_verifies_both_capabilities(tmp
     assert result["state"] == "ok"
     assert result["disabled"] is False
     assert result["busy"] == "false"
+    assert result["dirty"] is False
+    assert result["memory"]["vision"] == {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "credential_ref": "taiji-alibaba-quick",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+        "key_status": {"configured": True},
+        "verification": {
+            "ok": True,
+            "status": "verified",
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "message": "vision ok",
+        },
+    }
+    assert result["memory"]["image"]["options"] == {
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+    }
+    assert "workspace_id" not in result["memory"]["image"]
+    assert result["advanced"] == {
+        "visionProvider": "alibaba",
+        "visionModel": "qwen3-vl-plus",
+        "visionCredential": "taiji-alibaba-quick",
+        "visionMode": "public",
+        "visionRegion": "cn-beijing",
+        "visionWorkspace": "",
+        "visionBaseUrl": "",
+        "imageProvider": "dashscope",
+        "imageModel": "qwen-image-2.0-pro",
+        "imageCredential": "taiji-alibaba-quick",
+        "imageMode": "public",
+        "imageRegion": "cn-beijing",
+        "imageWorkspace": "",
+        "imageBaseUrl": "",
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required")
@@ -1285,6 +1402,55 @@ def test_alibaba_quick_config_sanitizes_failure_and_always_clears_key(tmp_path):
     assert "secret-value" not in result["summary"]
     assert result["summary"].startswith("保存失败：")
     assert result["state"] == "danger"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_alibaba_quick_config_marks_changed_models_saved_even_when_probe_partially_fails(tmp_path):
+    result = _run_alibaba_quick_config(tmp_path, "model-change-partial")
+    assert result["summary"] == "配置已保存，但部分能力验证失败，请按下方提示重试。"
+    assert result["savedValues"] == {
+        "vision": "qwen3-vl-flash",
+        "image": "qwen-image",
+    }
+    assert result["dirty"] is False
+    assert result["memory"]["vision"]["model"] == "qwen3-vl-flash"
+    assert result["memory"]["image"]["model"] == "qwen-image"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+@pytest.mark.parametrize("scenario", ["advanced-change", "late-invalidated"])
+def test_alibaba_quick_config_ignores_late_probe_after_configuration_changes(tmp_path, scenario):
+    result = _run_alibaba_quick_config(tmp_path, scenario)
+    assert [call["url"] for call in result["calls"]] == [
+        "/api/image-capabilities/alibaba",
+        "/api/vision/test",
+    ]
+    assert result["summary"] == "识图配置在验证期间已更改，本次结果已忽略，请重新验证。"
+    assert result["summary"] != "识图和生图均已验证"
+    assert result["state"] == "warn"
+    assert result["disabled"] is False
+    assert result["busy"] == "false"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+@pytest.mark.parametrize("scenario", ["wrong-identity", "superseded"])
+def test_alibaba_quick_config_never_accepts_wrong_or_superseded_probe_identity(tmp_path, scenario):
+    result = _run_alibaba_quick_config(tmp_path, scenario)
+    assert result["summary"] == "配置已保存，但部分能力验证失败，请按下方提示重试。"
+    assert result["summary"] != "识图和生图均已验证"
+    assert result["visionStatus"] != "识图：已验证"
+    assert result["state"] == "warn"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_alibaba_quick_config_restores_safe_persistent_failed_status(tmp_path):
+    result = _run_alibaba_quick_config(tmp_path, "persisted-failure")
+    assert result["calls"] == []
+    assert result["summary"] == "上次验证未全部通过，请查看下方状态后重试。"
+    assert result["visionStatus"] == "识图：bad key [API Key]"
+    assert "sk-test-persist-secret" not in result["visionStatus"]
+    assert result["imageStatus"] == "生图：已验证"
+    assert result["state"] == "warn"
 
 
 def test_image_capability_has_visible_safe_platform_credential_surface():
