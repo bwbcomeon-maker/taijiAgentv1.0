@@ -322,6 +322,7 @@ def test_explicit_invalid_contract_version_fails_closed_without_creating_run(tmp
 def test_brief_update_and_confirm_reuse_run_version_and_do_not_auto_start(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
+    from api.expert_teams.contracts import ContractError
 
     source = tmp_path / "monthly.txt"
     source.write_text("已完成3项重点任务，待协调2项。", encoding="utf-8")
@@ -362,8 +363,29 @@ def test_brief_update_and_confirm_reuse_run_version_and_do_not_auto_start(tmp_pa
     assert confirmed["workflow_state"] == "ready_to_generate"
     assert confirmed["view"]["phase_progress"]["done"] == 0
     assert not confirmed.get("execution_start_id")
+    assert confirmed["view"]["brief"]["validation"]["release_candidate"] is True
+    assert confirmed["view"]["brief"]["validation"]["enterprise_released"] is False
     snapshot = confirmed["source_context_snapshot_ref"]
     assert (tmp_path / snapshot["path"]).is_file()
+
+    starting = expert_teams.reserve_expert_team_execution_start(
+        tmp_path,
+        confirmed["run_id"],
+        expected_version=confirmed["version"],
+    )
+    with pytest.raises(ContractError) as frozen:
+        expert_teams.update_expert_team_document_brief(
+            tmp_path,
+            {
+                "session_id": starting["session_id"],
+                "run_id": starting["run_id"],
+                "expected_version": starting["version"],
+                "expected_brief_revision": 2,
+                "idempotency_key": "brief-update-after-start",
+                "patch": {"exact_title": "不允许覆盖的标题"},
+            },
+        )
+    assert frozen.value.code == "brief_frozen_new_run_required"
 
 
 def test_brief_mutation_rejects_stale_revision_and_draft_resume(tmp_path):
