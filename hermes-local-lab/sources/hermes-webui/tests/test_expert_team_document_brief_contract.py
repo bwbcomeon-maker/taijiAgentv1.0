@@ -8,6 +8,11 @@ CONTRACT_VERSION = "expert-team-contract/v1"
 CANARY = "CANARY-NEGATION-7f9c 不要写成公众号文章"
 
 
+@pytest.fixture(autouse=True)
+def _enable_contract_pilot_for_contract_tests(monkeypatch):
+    monkeypatch.setenv("TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT", "pilot")
+
+
 def _payload(**overrides):
     payload = {
         "contract_version": CONTRACT_VERSION,

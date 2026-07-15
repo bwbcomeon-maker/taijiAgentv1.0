@@ -9,6 +9,11 @@ from urllib.parse import urlparse
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _enable_contract_pilot_for_contract_tests(monkeypatch):
+    monkeypatch.setenv("TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT", "pilot")
+
+
 class _Handler:
     def __init__(self, payload: dict):
         raw = json.dumps(payload).encode("utf-8")
@@ -211,8 +216,9 @@ def test_contract_answer_route_never_auto_starts_before_brief_confirmation(monke
         {
             "session_id": "sid-contract-answer",
             "team_id": "content-creator-team",
-            "contract_version": "expert-team-contract/v1",
-            "document_type": "work_report",
+                "contract_version": "expert-team-contract/v1",
+                "intake_example_id": "work_report",
+                "document_type": "work_report",
             "prompt": "起草工作汇报，不要写成公众号文章",
             "document_brief_seed": {"document_control": {"render_template_id": "enterprise-work-report"}},
         },

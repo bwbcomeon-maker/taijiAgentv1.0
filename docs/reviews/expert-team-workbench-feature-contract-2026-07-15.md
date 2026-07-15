@@ -1,6 +1,6 @@
 # 专家团工作台功能契约（2026-07-15）
 
-范围：`专家团工作台 UX、状态保护与企业放行门禁实施计划` Tasks 1–5。本文审计稳定 view/presenter、Plan A 工作台、Brief 编辑确认、轮询草稿保护和 Office 二级验收；不提前宣称 Tasks 6–7 已完成。
+范围：`专家团工作台 UX、状态保护与企业放行门禁实施计划` Tasks 1–6。本文审计稳定 view/presenter、Plan A 工作台、Brief 编辑确认、轮询草稿保护、Office 二级验收和默认关闭的 contract-v1 rollout gate；不提前宣称 Task 7 已完成。
 
 ## 功能契约
 
@@ -27,6 +27,9 @@
 | Office 操作路径 | 是 | 是 | 是 | fail-closed | 待验收/提交中/身份失败/过期恢复 | dialog、fieldset/legend、focus trap、dirty Escape 保护、焦点归还、aria-live | 真实 Electron 通过 | 通过 | 摘要只显示版本、短 hash、状态、问题数和验收人；condition 才显示授权，blocking/unknown fail-closed。 |
 | Office condition 授权 | 独立 waiver API | 是 | 是 | 原 reviewer/过期/取消保留理由 | 提交中禁用 | 草稿焦点保留 | 真实 Electron 通过 | 通过 | 只发 target/reason/version/idempotency，不发 identity/role/reviewer。 |
 | Office 结构化返修 | `office-revisions/create` | 是 | 是 | 无 issue 禁提交 | loading/disabled/防重复 | 影响确认可取消 | 真实 Electron 通过 | 通过 | 只发 issue_ids/version/idempotency，不发 feedback/expected_fix/target_stage_id。 |
+| Rollout 配置与状态 | env > config 顶层 > off | catalog/status | 是 | 非精确值 fail-closed + warning | off/pilot | 不适用 | off/pilot Electron 通过 | 通过 | 只接受精确 `off`/`pilot`；默认与持久配置均未启用 pilot。 |
+| 新 v1 创建门禁 | runtime 写前强制 | 两条黄金入口 | 成功进入 Brief 0/N | off、错配组合、未知版本均返回稳定错误 | off 不发送 v1 | 黄金入口可 Tab/Enter | off/pilot Electron 通过 | 通过 | pilot 仅工作汇报与专题研究的精确 team/document/intake 组合；API 无法绕过。 |
+| Pilot 回退与在途任务 | create 与 read/mutation 分离 | 原任务工作台 | 既有状态继续显示 | 回退 off 只禁止新建 | 已有 v1 不锁死 | 沿用原工作台键盘路径 | Python 契约通过 | 通过 | 未对 read/resume/review/complete 增加 rollout 拦截。 |
 
 ## Tasks 1–3 QA 摘要
 
@@ -61,4 +64,4 @@
 - 已改用生产实际的 `completion_integrity.transaction_state`，不再依赖 transaction ref 中不存在的虚构 status。
 - 已让内容门状态、阻断计数和 reason code 从同一组 unresolved blocking issues 派生。
 
-结论：Tasks 1–2 的稳定状态模型与最小可见入口通过自动化契约；完整前端工作仍为“未完成”，不得据此开启企业 contract-v1 rollout。
+结论：Tasks 1–6 的自动化契约和 Task 6 的 off/pilot Electron gate 已通过；默认仍为 off。Task 7 的真实模型、真实企业身份与目标 WPS 验收尚未完成，不得据此把试点改为正式能力或在持久配置中启用 pilot。

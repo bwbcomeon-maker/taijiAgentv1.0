@@ -47,6 +47,7 @@ from .runtime import (
     confirm_expert_team_document_brief,
 )
 from .view import expert_team_run_view
+from .rollout import resolve_contract_rollout
 
 __all__ = [
     "_business_context_for_view",
@@ -62,6 +63,7 @@ __all__ = [
     "complete_expert_team_orphan_cleanup",
     "expert_team_catalog",
     "expert_team_run_view",
+    "resolve_contract_rollout",
     "fail_expert_team_execution",
     "fail_expert_team_cancellation",
     "fail_expert_team_execution_protocol",

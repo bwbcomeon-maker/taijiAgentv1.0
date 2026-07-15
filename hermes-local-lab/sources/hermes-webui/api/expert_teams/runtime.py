@@ -15,6 +15,7 @@ from functools import wraps
 from pathlib import Path
 
 from .catalog import CONTENT_CREATOR_TEAM_ID, get_template
+from .rollout import enforce_new_contract_rollout
 from .contracts import (
     EXPERT_TEAM_CONTRACT_V1,
     ContractError,
@@ -1509,6 +1510,12 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
 
 def start_expert_team(workspace: Path, body: dict) -> dict:
     contract_version = classify_contract_version(body)
+    if contract_version == EXPERT_TEAM_CONTRACT_V1:
+        enforce_new_contract_rollout(
+            team_id=str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID),
+            document_type=str(body.get("document_type") or ""),
+            intake_example_id=str(body.get("intake_example_id") or body.get("template_id") or ""),
+        )
     template = get_template(str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID))
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
         prompt = str(body.get("prompt") or "")

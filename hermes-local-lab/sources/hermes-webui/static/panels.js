@@ -3709,12 +3709,8 @@ async function loadWriteflow(force) {
     const expertCatalog = await api('/api/expert-teams/catalog');
     const rollout = expertCatalog && expertCatalog.contract_rollout;
     _writeflowContractRollout = rollout && typeof rollout === 'object'
-      ? {
-          mode:String(rollout.mode||'off'),
-          contract_version:String(rollout.contract_version||'expert-team-contract/v1'),
-          document_types:Array.isArray(rollout.document_types)?rollout.document_types.map(String):[],
-        }
-      : {mode:'off',contract_version:'expert-team-contract/v1',document_types:[]};
+      ? {...rollout}
+      : {mode:'off',effective_mode:'off',effective_source:'default',contract_version:'expert-team-contract/v1',allowed_combinations:[],document_types:[],warnings:[]};
     WRITEFLOW_TEAMS = [];
     _writeflowApplyServerTeams(expertCatalog && expertCatalog.teams);
     _writeflowData = {
@@ -3793,9 +3789,8 @@ function openWriteflowTeamModal(teamId) {
   const examples = team.examples.map((example, idx) => {
     const prompt = String(example.prompt || '').replace(/\s+/g, ' ').trim();
     const summary = prompt.split(/[。；;.!?？]/).find(Boolean) || prompt;
-    const pilotEligible = _writeflowContractRollout.mode === 'pilot'
-      && _writeflowContractRollout.document_types.includes(String(example.document_type||''));
-    const capabilityLabel = pilotEligible ? '企业合同试点' : '草稿能力';
+    const capability = example.capability && typeof example.capability === 'object' ? example.capability : {};
+    const capabilityLabel = String(capability.label || 'AI 草稿能力');
     return `
     <button type="button" class="writeflow-example ${idx === 0 ? 'selected' : ''}" data-template-id="${esc(example.id)}" data-example-prompt="${esc(example.prompt)}" aria-label="选择${esc(example.label)}模板">
       <span class="writeflow-example-label">${esc(example.label)} · ${capabilityLabel}</span>
@@ -3877,13 +3872,11 @@ function _writeflowExpertTeamStartPayload(team,example,base){
     template_id:example.id,
     example_prompt:example.prompt||'',
   };
-  const contractRollout=_writeflowContractRollout||{mode:'off',document_types:[]};
-  const allowedTypes=Array.isArray(contractRollout.document_types)?contractRollout.document_types:[];
-  const pilotEligible=contractRollout.mode==='pilot'
-    && allowedTypes.includes(String(example.document_type||''))
-    && ['work_report','research_report'].includes(String(example.document_type||''));
+  const capability=example.capability&&typeof example.capability==='object'?example.capability:{};
+  const pilotEligible=capability.kind==='enterprise_contract_pilot'
+    && capability.contract_version==='expert-team-contract/v1';
   if(pilotEligible){
-    payload.contract_version=String(contractRollout.contract_version||'expert-team-contract/v1');
+    payload.contract_version=capability.contract_version;
     payload.intake_example_id=String(example.intake_example_id||example.id||'');
     payload.document_type=String(example.document_type||'');
     payload.document_brief_seed={

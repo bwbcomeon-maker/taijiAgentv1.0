@@ -6,6 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _enable_contract_pilot_for_contract_tests(monkeypatch):
+    monkeypatch.setenv("TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT", "pilot")
+
+
 META_START = "<<<TAIJI_META_V1>>>"
 META_END = "<<<TAIJI_META_END>>>"
 DOC_START = "<<<TAIJI_DOCUMENT_V1>>>"

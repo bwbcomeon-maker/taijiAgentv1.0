@@ -23,20 +23,22 @@ def test_expert_team_pilot_payload_is_explicit_and_fails_closed_when_rollout_is_
     )
     for token in (
         "contract_version",
-        "expert-team-contract/v1",
         "intake_example_id",
         "document_type",
         "document_brief_seed",
-        "contractRollout.mode==='pilot'",
+        "example.capability",
+        "enterprise_contract_pilot",
     ):
         assert token in body
+    assert "_writeflowContractRollout" not in body
+    assert "['work_report','research_report']" not in body
     assert "delete payload.template_id" in body
     assert "template_id:example.id" in body
 
 
 def test_expert_team_modal_labels_draft_capability_and_has_a_visible_prompt_label():
-    assert "企业合同试点" in PANELS_JS
-    assert "草稿能力" in PANELS_JS
+    assert "example.capability" in PANELS_JS
+    assert "AI 草稿能力" in PANELS_JS
     assert '<label for="writeflowTeamPrompt"' in PANELS_JS
     assert 'id="writeflowTeamPrompt"' in PANELS_JS
 
@@ -57,15 +59,15 @@ def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
     result = _run_node(
         textwrap.dedent(
             f"""
-            let _writeflowContractRollout={{mode:'off',contract_version:'expert-team-contract/v1',document_types:[]}};
             {helper}
             const team={{id:'content-creator-team'}};
             const example={{
               id:'work_report',intake_example_id:'work_report',document_type:'work_report',task_mode:'create',
               prompt:'起草工作汇报',document_brief_seed:{{document_control:{{render_template_id:'enterprise-work-report'}}}},
+              capability:{{kind:'draft',label:'AI 草稿能力',contract_version:''}},
             }};
             const off=_writeflowExpertTeamStartPayload(team,example,{{prompt:'起草工作汇报'}});
-            _writeflowContractRollout={{mode:'pilot',contract_version:'expert-team-contract/v1',document_types:['work_report']}};
+            example.capability={{kind:'enterprise_contract_pilot',label:'企业合同试点',contract_version:'expert-team-contract/v1'}};
             const pilot=_writeflowExpertTeamStartPayload(team,example,{{prompt:'起草工作汇报'}});
             console.log(JSON.stringify({{off,pilot}}));
             """
@@ -78,6 +80,26 @@ def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
     assert result["pilot"]["intake_example_id"] == "work_report"
     assert result["pilot"]["document_type"] == "work_report"
     assert result["pilot"]["document_brief_seed"]["task_mode"] == "create"
+
+
+def test_electron_smoke_covers_off_and_pilot_catalog_keyboard_and_brief_gate():
+    smoke = (REPO_ROOT / "tests" / "expert_team_electron_artifact_smoke.js").read_text(encoding="utf-8")
+    for token in (
+        "verifyRolloutGate",
+        "/api/expert-teams/rollout/status",
+        "effective_mode",
+        "effective_source",
+        "enterprise_contract_pilot",
+        "AI 草稿能力",
+        "企业合同试点",
+        "document_brief",
+        "progress_text",
+        "0/",
+        "page.keyboard.press(\"Enter\")",
+        "expert-team-rollout-gate.png",
+        "expert-team-rollout-gate.json",
+    ):
+        assert token in smoke
 
 
 def _run_node(source: str) -> dict:

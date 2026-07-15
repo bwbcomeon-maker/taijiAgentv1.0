@@ -10616,6 +10616,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, expert_teams.expert_team_catalog())
 
+    if parsed.path == "/api/expert-teams/rollout/status":
+        from api import expert_teams
+
+        return j(handler, {"ok": True, "contract_rollout": expert_teams.resolve_contract_rollout()})
+
     if parsed.path == "/api/expert-teams/run":
         from api import expert_teams
 

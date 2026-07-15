@@ -375,6 +375,106 @@ async function activeWorkbenchTab(page) {
   });
 }
 
+async function verifyRolloutGate(page) {
+  const requested = process.env.TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT;
+  const expectedMode = requested === "pilot" ? "pilot" : "off";
+  const expectedSource = Object.prototype.hasOwnProperty.call(process.env, "TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT")
+    ? "environment"
+    : "default";
+  const status = await page.evaluate(async () => {
+    const response = await fetch("/api/expert-teams/rollout/status", { credentials: "include" });
+    if (!response.ok) throw new Error(`rollout status failed ${response.status}: ${await response.text()}`);
+    return response.json();
+  });
+  const rollout = status.contract_rollout || {};
+  assertState(
+    rollout.effective_mode === expectedMode && rollout.effective_source === expectedSource,
+    "Rollout status does not match the isolated process configuration",
+    { expectedMode, expectedSource, rollout }
+  );
+
+  const inspectEntry = async (teamId, exampleId) => {
+    await page.evaluate(async (id) => {
+      if (typeof switchPanel === "function") await switchPanel("writeflow");
+      await loadWriteflow(true);
+      openWriteflowTeamModal(id);
+    }, teamId);
+    const selector = `#writeflowTeamModal [data-template-id="${exampleId}"]`;
+    await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    await page.focus(selector);
+    await page.keyboard.press("Enter");
+    return page.evaluate(({ teamId, exampleId }) => {
+      const team = _writeflowTeamById(teamId);
+      const example = (team.examples || []).find((item) => item.id === exampleId);
+      const selected = document.querySelector(`#writeflowTeamModal [data-template-id="${exampleId}"]`);
+      return {
+        text: selected?.textContent.replace(/\s+/g, " ").trim() || "",
+        selected: Boolean(selected?.classList.contains("selected")),
+        focused: document.activeElement === selected,
+        capability: example?.capability || {},
+        payload: _writeflowExpertTeamStartPayload(team, example, { prompt: example.prompt || "测试诉求" }),
+      };
+    }, { teamId, exampleId });
+  };
+  const startFromEntry = (teamId, exampleId) => page.evaluate(async ({ teamId, exampleId }) => {
+    const team = _writeflowTeamById(teamId);
+    const example = (team.examples || []).find((item) => item.id === exampleId);
+    const payload = _writeflowExpertTeamStartPayload(team, example, {
+      session_id: S.session.session_id,
+      prompt: example.prompt || "测试诉求",
+    });
+    const response = await fetch("/api/expert-teams/start", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    return { ok: response.ok, status: response.status, payload, result };
+  }, { teamId, exampleId });
+
+  const workEntry = await inspectEntry("content-creator-team", "work_report");
+  assertState(workEntry.selected && workEntry.focused, "Work-report rollout entry is not keyboard discoverable", workEntry);
+  await page.screenshot({ path: path.join(outDir, "expert-team-rollout-gate.png"), fullPage: false });
+  const starts = [];
+  starts.push(await startFromEntry("content-creator-team", "work_report"));
+  if (expectedMode === "off") {
+    assertState(
+      workEntry.text.includes("AI 草稿能力") && !workEntry.text.includes("企业合同试点") &&
+        !Object.prototype.hasOwnProperty.call(workEntry.payload, "contract_version") && starts[0].ok &&
+        !Object.prototype.hasOwnProperty.call(starts[0].result.run || {}, "contract_version") &&
+        !Object.prototype.hasOwnProperty.call(starts[0].result.run || {}, "document_brief"),
+      "Off mode exposed or created an enterprise contract run",
+      { workEntry, start: starts[0] }
+    );
+  } else {
+    const researchEntry = await inspectEntry("deep-research-team", "research_report");
+    assertState(researchEntry.selected && researchEntry.focused, "Research-report rollout entry is not keyboard discoverable", researchEntry);
+    starts.push(await startFromEntry("deep-research-team", "research_report"));
+    for (const [entry, start] of [[workEntry, starts[0]], [researchEntry, starts[1]]]) {
+      const run = start.result.run || {};
+      const progressText = String(run.view?.presentation?.progress_text || run.view?.phase_progress?.text || "");
+      assertState(
+        entry.text.includes("企业合同试点") && entry.capability.kind === "enterprise_contract_pilot" &&
+          start.ok && start.payload.contract_version === "expert-team-contract/v1" &&
+          run.contract_version === "expert-team-contract/v1" && run.document_brief?.status === "draft" &&
+          (progressText.startsWith("0/") || Number(run.view?.phase_progress?.done || -1) === 0),
+        "Pilot entry did not create a contract-v1 Brief at 0/N",
+        { entry, start, progress_text: progressText }
+      );
+    }
+  }
+  fs.writeFileSync(
+    path.join(outDir, "expert-team-rollout-gate.json"),
+    JSON.stringify({ expected_mode: expectedMode, effective_mode: rollout.effective_mode, effective_source: rollout.effective_source, starts }, null, 2)
+  );
+  await page.evaluate(async () => {
+    closeWriteflowTeamModal();
+    if (typeof switchPanel === "function") await switchPanel("chat");
+  });
+  return { rollout, starts };
+}
+
 async function main() {
   assertState(fs.existsSync(electronBin), `Electron binary not found: ${electronBin}`);
   fs.mkdirSync(outDir, { recursive: true });
@@ -418,6 +518,8 @@ async function main() {
     await page.evaluate(({ fixtureSource }) => {
       window.__expertTeamRunFixture = eval(`(${fixtureSource})`);
     }, { fixtureSource: runFixture.toString() });
+
+    await verifyRolloutGate(page);
 
     await page.evaluate(async () => {
       const ok = await sendExpertTeamAction({
@@ -1058,6 +1160,7 @@ async function main() {
         path.join(outDir, "expert-team-polling-office-review-id-recovery.png"),
         path.join(outDir, "expert-team-polling-409-preserved.png"),
         path.join(outDir, "expert-team-office-review-drawer.png"),
+        path.join(outDir, "expert-team-rollout-gate.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
         path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),

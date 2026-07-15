@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-
 CONTENT_CREATOR_TEAM_ID = "content-creator-team"
 DEEP_RESEARCH_TEAM_ID = "deep-research-team"
 PUBLIC_EXPERT_TEAM_IDS = (CONTENT_CREATOR_TEAM_ID, DEEP_RESEARCH_TEAM_ID)
@@ -242,11 +241,29 @@ def get_template(team_id: str | None) -> dict:
 
 
 def expert_team_catalog() -> dict:
+    from .rollout import resolve_contract_rollout
+
+    rollout = resolve_contract_rollout()
+    allowed = {
+        (item["team_id"], item["document_type"], item["intake_example_id"]): item
+        for item in rollout["allowed_combinations"]
+    }
+    teams = [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS]
+    for team in teams:
+        for example in team.get("examples") or []:
+            capability = allowed.get(
+                (
+                    str(team.get("id") or ""),
+                    str(example.get("document_type") or ""),
+                    str(example.get("intake_example_id") or ""),
+                )
+            )
+            example["capability"] = {
+                "kind": capability["capability"] if capability else "draft",
+                "label": capability["label"] if capability else "AI 草稿能力",
+                "contract_version": rollout["contract_version"] if capability else "",
+            }
     return {
-        "teams": [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS],
-        "contract_rollout": {
-            "mode": "off",
-            "contract_version": "expert-team-contract/v1",
-            "document_types": [],
-        },
+        "teams": teams,
+        "contract_rollout": rollout,
     }

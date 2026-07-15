@@ -11,6 +11,11 @@ from api.expert_teams.materials import validate_stage_output
 from api.expert_teams.rich_draft import build_rich_draft_package
 
 
+@pytest.fixture(autouse=True)
+def _enable_contract_pilot_for_contract_tests(monkeypatch):
+    monkeypatch.setenv("TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT", "pilot")
+
+
 def _control(run, key: str, **extra) -> dict:
     return {
         "run_id": run["run_id"],
