@@ -14,6 +14,65 @@ PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def test_expert_team_pilot_payload_is_explicit_and_fails_closed_when_rollout_is_off():
+    assert "function _writeflowExpertTeamStartPayload" in PANELS_JS
+    body = _function_body(
+        PANELS_JS,
+        "function _writeflowExpertTeamStartPayload",
+        "async function summonWriteflowTeam",
+    )
+    for token in (
+        "contract_version",
+        "expert-team-contract/v1",
+        "intake_example_id",
+        "document_type",
+        "document_brief_seed",
+        "contractRollout.mode==='pilot'",
+    ):
+        assert token in body
+    assert "delete payload.template_id" in body
+    assert "template_id:example.id" in body
+
+
+def test_expert_team_modal_labels_draft_capability_and_has_a_visible_prompt_label():
+    assert "企业合同试点" in PANELS_JS
+    assert "草稿能力" in PANELS_JS
+    assert '<label for="writeflowTeamPrompt"' in PANELS_JS
+    assert 'id="writeflowTeamPrompt"' in PANELS_JS
+
+
+def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
+    helper = _function_body(
+        PANELS_JS,
+        "function _writeflowExpertTeamStartPayload",
+        "async function summonWriteflowTeam",
+    )
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            let _writeflowContractRollout={{mode:'off',contract_version:'expert-team-contract/v1',document_types:[]}};
+            {helper}
+            const team={{id:'content-creator-team'}};
+            const example={{
+              id:'work_report',intake_example_id:'work_report',document_type:'work_report',task_mode:'create',
+              prompt:'起草工作汇报',document_brief_seed:{{document_control:{{render_template_id:'enterprise-work-report'}}}},
+            }};
+            const off=_writeflowExpertTeamStartPayload(team,example,{{prompt:'起草工作汇报'}});
+            _writeflowContractRollout={{mode:'pilot',contract_version:'expert-team-contract/v1',document_types:['work_report']}};
+            const pilot=_writeflowExpertTeamStartPayload(team,example,{{prompt:'起草工作汇报'}});
+            console.log(JSON.stringify({{off,pilot}}));
+            """
+        )
+    )
+    assert result["off"]["template_id"] == "work_report"
+    assert "contract_version" not in result["off"]
+    assert "template_id" not in result["pilot"]
+    assert result["pilot"]["contract_version"] == "expert-team-contract/v1"
+    assert result["pilot"]["intake_example_id"] == "work_report"
+    assert result["pilot"]["document_type"] == "work_report"
+    assert result["pilot"]["document_brief_seed"]["task_mode"] == "create"
+
+
 def _run_node(source: str) -> dict:
     completed = subprocess.run(
         ["node", "-e", source],

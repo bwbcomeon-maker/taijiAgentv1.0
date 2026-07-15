@@ -232,4 +232,11 @@ def get_template(team_id: str | None) -> dict:
 
 
 def expert_team_catalog() -> dict:
-    return {"teams": [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS]}
+    return {
+        "teams": [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS],
+        "contract_rollout": {
+            "mode": "off",
+            "contract_version": "expert-team-contract/v1",
+            "document_types": [],
+        },
+    }

@@ -3543,6 +3543,7 @@ let _writeflowSelectedTeamId = 'content-creator-team';
 let _writeflowModalTeamId = '';
 let _writeflowSelectedTemplateId = '';
 let _writeflowSelectedRunId = '';
+let _writeflowContractRollout = {mode:'off',contract_version:'expert-team-contract/v1',document_types:[]};
 const WRITEFLOW_PHASES = ['确定方向', '生成初稿', '打磨发布'];
 const WRITEFLOW_ARTIFACT_LABELS = {
   '01_theme': '选题确认',
@@ -3706,6 +3707,14 @@ async function loadWriteflow(force) {
   if (statusEl) statusEl.textContent = '正在加载专家团...';
   try {
     const expertCatalog = await api('/api/expert-teams/catalog');
+    const rollout = expertCatalog && expertCatalog.contract_rollout;
+    _writeflowContractRollout = rollout && typeof rollout === 'object'
+      ? {
+          mode:String(rollout.mode||'off'),
+          contract_version:String(rollout.contract_version||'expert-team-contract/v1'),
+          document_types:Array.isArray(rollout.document_types)?rollout.document_types.map(String):[],
+        }
+      : {mode:'off',contract_version:'expert-team-contract/v1',document_types:[]};
     WRITEFLOW_TEAMS = [];
     _writeflowApplyServerTeams(expertCatalog && expertCatalog.teams);
     _writeflowData = {
@@ -3784,9 +3793,12 @@ function openWriteflowTeamModal(teamId) {
   const examples = team.examples.map((example, idx) => {
     const prompt = String(example.prompt || '').replace(/\s+/g, ' ').trim();
     const summary = prompt.split(/[。；;.!?？]/).find(Boolean) || prompt;
+    const pilotEligible = _writeflowContractRollout.mode === 'pilot'
+      && _writeflowContractRollout.document_types.includes(String(example.document_type||''));
+    const capabilityLabel = pilotEligible ? '企业合同试点' : '草稿能力';
     return `
     <button type="button" class="writeflow-example ${idx === 0 ? 'selected' : ''}" data-template-id="${esc(example.id)}" data-example-prompt="${esc(example.prompt)}" aria-label="选择${esc(example.label)}模板">
-      <span class="writeflow-example-label">${esc(example.label)}</span>
+      <span class="writeflow-example-label">${esc(example.label)} · ${capabilityLabel}</span>
       <strong class="writeflow-example-summary">${esc(summary)}</strong>
       <em class="writeflow-example-prompt-preview">${esc(prompt)}</em>
     </button>`;
@@ -3823,7 +3835,7 @@ function openWriteflowTeamModal(teamId) {
             <div class="writeflow-examples writeflow-modal-template-list">${examples}</div>
           </div>
           <div class="writeflow-modal-section writeflow-modal-prompt-card">
-            <h4>本次需求</h4>
+            <label for="writeflowTeamPrompt" class="writeflow-modal-prompt-label">本次需求</label>
             <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清材料类型、主题、对象、素材、语气和边界；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
             <p class="writeflow-modal-note">召唤后会新建一个聊天任务，运行状态、阶段确认和产物入口会显示在对话框上方。</p>
           </div>
@@ -3858,6 +3870,31 @@ function closeWriteflowTeamModal() {
   if (modal) modal.hidden = true;
 }
 
+function _writeflowExpertTeamStartPayload(team,example,base){
+  const payload={
+    ...(base||{}),
+    team_id:team.id,
+    template_id:example.id,
+    example_prompt:example.prompt||'',
+  };
+  const contractRollout=_writeflowContractRollout||{mode:'off',document_types:[]};
+  const allowedTypes=Array.isArray(contractRollout.document_types)?contractRollout.document_types:[];
+  const pilotEligible=contractRollout.mode==='pilot'
+    && allowedTypes.includes(String(example.document_type||''))
+    && ['work_report','research_report'].includes(String(example.document_type||''));
+  if(pilotEligible){
+    payload.contract_version=String(contractRollout.contract_version||'expert-team-contract/v1');
+    payload.intake_example_id=String(example.intake_example_id||example.id||'');
+    payload.document_type=String(example.document_type||'');
+    payload.document_brief_seed={
+      ...(example.document_brief_seed||{}),
+      task_mode:String(example.task_mode||'create'),
+    };
+    delete payload.template_id;
+  }
+  return payload;
+}
+
 async function summonWriteflowTeam() {
   const team = _writeflowTeamById(_writeflowModalTeamId || _writeflowSelectedTeamId);
   const modalPrompt = (($('writeflowTeamPrompt') || {}).value || '').trim();
@@ -3881,17 +3918,15 @@ async function summonWriteflowTeam() {
     }
     return;
   }
-  const started=await window.sendExpertTeamAction({
+  const example=team.examples.find(item=>item.id===_writeflowSelectedTemplateId)||team.examples[0]||{};
+  const started=await window.sendExpertTeamAction(_writeflowExpertTeamStartPayload(team,example,{
     action: team.defaultAction || 'start',
     project,
     mode: (($('writeflowMode') || {}).value || '').trim() || team.defaultMode || '',
     prompt,
-    team_id: team.id,
-    template_id: _writeflowSelectedTemplateId,
-    example_prompt: team.examples.find(example => example.id === _writeflowSelectedTemplateId)?.prompt || '',
     new_session: true,
     summon_only: false,
-  });
+  }));
   if(started)closeWriteflowTeamModal();
 }
 
