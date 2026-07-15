@@ -45,10 +45,75 @@ import logging
 import os
 import threading
 import time
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
+
+
+_transient_named_vision_clients: ContextVar[Optional[list[Any]]] = ContextVar(
+    "transient_named_vision_clients", default=None
+)
+
+
+def _register_transient_named_vision_client(client: Any) -> None:
+    clients = _transient_named_vision_clients.get()
+    if clients is not None and client is not None and all(item is not client for item in clients):
+        clients.append(client)
+
+
+def _close_transient_named_vision_client(client: Any) -> None:
+    close_fn = getattr(client, "close", None)
+    if callable(close_fn):
+        close_fn()
+
+
+async def _aclose_transient_named_vision_client(client: Any) -> None:
+    import inspect
+
+    close_fn = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if callable(close_fn):
+        result = close_fn()
+        if inspect.isawaitable(result):
+            await result
+
+
+def _owns_transient_named_vision_clients(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        clients: list[Any] = []
+        token = _transient_named_vision_clients.set(clients)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            for client in reversed(clients):
+                try:
+                    _close_transient_named_vision_client(client)
+                except Exception:
+                    logger.debug("Failed to close transient named vision client", exc_info=True)
+            _transient_named_vision_clients.reset(token)
+
+    return wrapper
+
+
+def _owns_async_transient_named_vision_clients(fn):
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        clients: list[Any] = []
+        token = _transient_named_vision_clients.set(clients)
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            for client in reversed(clients):
+                try:
+                    await _aclose_transient_named_vision_client(client)
+                except Exception:
+                    logger.debug("Failed to close async transient named vision client", exc_info=True)
+            _transient_named_vision_clients.reset(token)
+
+    return wrapper
 
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # openai SDK pulls a large type tree (~240 ms cold, including responses/*,
@@ -3380,6 +3445,10 @@ def resolve_provider_client(
                 model or (main_runtime.get("model") if main_runtime else None) or "gpt-4o-mini",
                 provider,
             )
+            wants_anthropic = (
+                api_mode == "anthropic_messages"
+                or (not api_mode and _endpoint_speaks_anthropic_messages(custom_base))
+            )
             extra = {}
             _clean_base, _dq = _extract_url_query_params(custom_base)
             if _dq:
@@ -3406,7 +3475,17 @@ def resolve_provider_client(
             if follow_redirects is not None:
                 import httpx
 
-                extra["http_client"] = httpx.Client(follow_redirects=follow_redirects)
+                extra["http_client"] = (
+                    httpx.AsyncClient(follow_redirects=follow_redirects)
+                    if async_mode and not wants_anthropic
+                    else httpx.Client(follow_redirects=follow_redirects)
+                )
+            if async_mode and not wants_anthropic:
+                from openai import AsyncOpenAI
+
+                return AsyncOpenAI(
+                    api_key=custom_key, base_url=_clean_base, **extra
+                ), final_model
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
             if follow_redirects is not None:
                 client._taiji_follow_redirects = bool(follow_redirects)
@@ -3423,11 +3502,18 @@ def resolve_provider_client(
                 and follow_redirects is False
                 and wrapped_client is client
             ):
+                close_fn = getattr(client, "close", None)
+                if callable(close_fn):
+                    close_fn()
                 logger.warning(
                     "Strict custom vision endpoint requires Anthropic Messages "
                     "support; refusing OpenAI-wire fallback"
                 )
                 return None, None
+            if wrapped_client is not client:
+                close_fn = getattr(client, "close", None)
+                if callable(close_fn):
+                    close_fn()
             client = wrapped_client
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
@@ -4027,6 +4113,8 @@ def resolve_vision_provider_client(
         )
         if client is None:
             return provider_for_base_override, None, None
+        if named_custom_vision:
+            _register_transient_named_vision_client(client)
         return provider_for_base_override, client, final_model
 
     if requested == "auto":
@@ -4936,6 +5024,7 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
     return response
 
 
+@_owns_transient_named_vision_clients
 def call_llm(
     task: str = None,
     *,
@@ -5414,6 +5503,7 @@ def extract_content_or_reasoning(response) -> str:
     return ""
 
 
+@_owns_async_transient_named_vision_clients
 async def async_call_llm(
     task: str = None,
     *,

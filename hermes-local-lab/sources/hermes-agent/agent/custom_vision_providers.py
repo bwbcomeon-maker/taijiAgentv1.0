@@ -45,6 +45,12 @@ def custom_vision_provider_env_var(provider_id: Any) -> str:
 def _normalize_base_url(value: Any) -> str:
     url = str(value or "").strip().rstrip("/")
     parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("外部识图 Base URL 的端口必须在 1 到 65535 之间。") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("外部识图 Base URL 的端口必须在 1 到 65535 之间。")
     if (
         parsed.scheme != "https"
         or not parsed.hostname

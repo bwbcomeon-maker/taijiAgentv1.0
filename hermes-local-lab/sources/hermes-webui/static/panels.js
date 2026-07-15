@@ -9226,14 +9226,32 @@ function _setCustomVisionProviderBusy(busy){
  if(save) save.setAttribute('aria-busy',busy?'true':'false');
 }
 
-function openCustomVisionProviderEditor(providerId){
+async function openCustomVisionProviderEditor(providerId){
  if(_customVisionProviderBusy){
   _setFieldError('customVisionProviderError','识图 Provider 请求正在处理，请稍候。',[]);
   return false;
  }
+ const normalized=String(providerId||'').replace(/^custom:/,'').trim();
+ const panel=$('customVisionProviderPanel');
+ const currentId=(($('customVisionProviderId')||{}).value||'').trim();
+ const apiKey=(($('customVisionProviderApiKey')||{}).value||'').trim();
+ const hasOpenDraft=!!(panel&&!panel.hidden&&Object.prototype.hasOwnProperty.call(panel.dataset,'originalDraft'));
+ const dirty=hasOpenDraft&&(apiKey||String(panel.dataset.originalDraft||'')!==_customVisionProviderDraftIdentity());
+ if(hasOpenDraft&&currentId===normalized){
+  const currentFocus=$('customVisionProviderName')||$('customVisionProviderBaseUrl');
+  if(currentFocus) currentFocus.focus();
+  return true;
+ }
+ if(currentId!==normalized&&dirty){
+  const discard=await showConfirmDialog({title:'放弃外部识图草稿？',message:'切换后，未保存的端点、模型和密钥输入将丢失。',confirmLabel:'放弃并切换',danger:true,focusCancel:true});
+  if(!discard) return false;
+  if(_customVisionProviderBusy){
+   _setFieldError('customVisionProviderError','识图 Provider 请求正在处理，请稍候。',[]);
+   return false;
+  }
+ }
  if(_settingsSection!=='providers') switchSettingsSection('providers');
  _customVisionProviderReturnFocus=document.activeElement;
- const normalized=String(providerId||'').replace(/^custom:/,'').trim();
  const row=_modelConfigCustomVisionRows(_modelConfigData).find(item=>String(item.id||'').replace(/^custom:/,'')===normalized)||null;
  _resetCustomVisionProviderForm();
  if(row){
@@ -9246,7 +9264,6 @@ function openCustomVisionProviderEditor(providerId){
  toggleModelConfigSection('customVisionProviderPanel',true);
  const manage=$('btnManageCustomVisionProviders');
  if(manage) manage.setAttribute('aria-expanded','true');
- const panel=$('customVisionProviderPanel');
  if(panel) panel.dataset.originalDraft=_customVisionProviderDraftIdentity();
  const focus=$('customVisionProviderName')||$('customVisionProviderBaseUrl');
  if(focus) setTimeout(()=>focus.focus(),0);

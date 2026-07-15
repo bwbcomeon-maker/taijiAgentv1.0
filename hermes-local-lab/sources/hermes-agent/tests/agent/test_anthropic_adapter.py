@@ -113,6 +113,22 @@ class TestBuildAnthropicClient:
                 "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
             }
 
+    def test_constructor_failure_closes_owned_redirect_transport(self):
+        with (
+            patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk,
+            patch("httpx.Client") as http_client_cls,
+        ):
+            mock_sdk.Anthropic.side_effect = RuntimeError("constructor failed")
+
+            with pytest.raises(RuntimeError, match="constructor failed"):
+                build_anthropic_client(
+                    "sk-ant-api03-x",
+                    base_url="https://custom.api.com/anthropic",
+                    follow_redirects=False,
+                )
+
+            http_client_cls.return_value.close.assert_called_once_with()
+
     def test_azure_anthropic_endpoint_keeps_context_1m_beta(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
             build_anthropic_client(

@@ -57,7 +57,9 @@ const api=async(url,options)=>{apiCalls.push({url,options});return {providers:[{
 let _customVisionProviderBusy=false;
 let _customVisionProviderGeneration=0;
 let _customVisionProviderReturnFocus=null;
-let _modelConfigData={vision:{provider:'alibaba',model:'qwen3-vl-plus'},vision_providers:[{id:'alibaba'}]};
+let _modelConfigData={vision:{provider:'alibaba',model:'qwen3-vl-plus'},vision_providers:[{id:'alibaba'},
+ {id:'custom:relay',name:'Relay Vision',custom:true,base_url:'https://relay.example.com/v1',models:[{id:'relay-vl'}],default_model:'relay-vl',transport:'openai_chat_completions'},
+ {id:'custom:other',name:'Other Vision',custom:true,base_url:'https://other.example.com/v1',models:[{id:'other-vl'}],default_model:'other-vl',transport:'openai_chat_completions'}]};
 for(const name of ['_modelConfigCustomVisionRows','_customVisionProviderDraftId','_resetCustomVisionProviderForm',
  '_customVisionProviderPayload','_customVisionProviderDraftIdentity','_setCustomVisionProviderBusy',
  'openCustomVisionProviderEditor','closeCustomVisionProviderEditor','saveCustomVisionProviderConfig',
@@ -74,7 +76,20 @@ async function run(scenario){
   await deleteCustomVisionProviderConfig('custom:relay',document.activeElement);
   return {apiCalls,error:elements.customVisionProviderError.textContent};
  }
- openCustomVisionProviderEditor();
+ if(scenario==='switch-cancel'||scenario==='switch-confirm'||scenario==='switch-busy'){
+  await openCustomVisionProviderEditor('relay');
+  elements.customVisionProviderName.value='Changed draft';
+  elements.customVisionProviderApiKey.value='draft-secret';
+  document.activeElement=elements.customVisionProviderApiKey;
+  if(scenario==='switch-busy') _customVisionProviderBusy=true;
+  confirmResult=scenario==='switch-confirm';
+  const switched=await openCustomVisionProviderEditor('other');
+  return {switched,id:elements.customVisionProviderId.value,name:elements.customVisionProviderName.value,
+   baseUrl:elements.customVisionProviderBaseUrl.value,models:elements.customVisionProviderModels.value,
+   secret:elements.customVisionProviderApiKey.value,activeId:document.activeElement.id,
+   error:elements.customVisionProviderError.textContent};
+ }
+ await openCustomVisionProviderEditor();
  elements.customVisionProviderName.value='Changed draft';
  confirmResult=false;
  const first=await closeCustomVisionProviderEditor();
@@ -877,7 +892,7 @@ def test_named_custom_vision_provider_management_has_visible_accessible_entry():
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-@pytest.mark.parametrize("scenario", ["save", "active-delete", "dirty-close"])
+@pytest.mark.parametrize("scenario", ["save", "active-delete", "dirty-close", "switch-cancel", "switch-confirm", "switch-busy"])
 def test_named_custom_vision_provider_interactions(tmp_path, scenario):
     driver = tmp_path / "custom-vision-provider-driver.js"
     driver.write_text(_CUSTOM_VISION_PROVIDER_DRIVER, encoding="utf-8")
@@ -897,6 +912,28 @@ def test_named_custom_vision_provider_interactions(tmp_path, scenario):
     elif scenario == "active-delete":
         assert payload["apiCalls"] == []
         assert "正在使用" in payload["error"]
+    elif scenario == "switch-cancel":
+        assert payload == {
+            "switched": False,
+            "id": "relay",
+            "name": "Changed draft",
+            "baseUrl": "https://relay.example.com/v1",
+            "models": "relay-vl",
+            "secret": "draft-secret",
+            "activeId": "customVisionProviderApiKey",
+            "error": "",
+        }
+    elif scenario == "switch-confirm":
+        assert payload["switched"] is True
+        assert payload["id"] == "other"
+        assert payload["name"] == "Other Vision"
+        assert payload["secret"] == ""
+    elif scenario == "switch-busy":
+        assert payload["switched"] is False
+        assert payload["id"] == "relay"
+        assert payload["name"] == "Changed draft"
+        assert payload["secret"] == "draft-secret"
+        assert "正在处理" in payload["error"]
     else:
         assert payload["first"] is False
         assert payload["second"] is True

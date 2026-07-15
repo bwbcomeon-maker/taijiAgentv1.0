@@ -1,6 +1,7 @@
 """Named custom vision provider configuration and routing tests."""
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -61,6 +62,31 @@ def test_named_custom_vision_provider_rejects_structurally_unsafe_base_url(base_
             "models": ["vision-model"],
             "transport": "openai_chat_completions",
         })
+
+
+@pytest.mark.parametrize("port", ["0", "99999"])
+def test_named_custom_vision_provider_rejects_invalid_explicit_port(port):
+    from agent.custom_vision_providers import normalize_custom_vision_provider_entry
+
+    with pytest.raises(ValueError, match="端口"):
+        normalize_custom_vision_provider_entry({
+            "id": "port-check",
+            "base_url": f"https://vision.example.com:{port}/v1",
+            "models": ["vision-model"],
+        })
+
+
+@pytest.mark.parametrize("port", ["443", "8443"])
+def test_named_custom_vision_provider_accepts_valid_explicit_port(port):
+    from agent.custom_vision_providers import normalize_custom_vision_provider_entry
+
+    entry = normalize_custom_vision_provider_entry({
+        "id": "port-check",
+        "base_url": f"https://vision.example.com:{port}/v1",
+        "models": ["vision-model"],
+    })
+
+    assert entry["base_url"] == f"https://vision.example.com:{port}/v1"
 
 
 def test_named_custom_vision_runtime_resolves_each_provider_secret(tmp_path, monkeypatch):
@@ -394,3 +420,230 @@ def test_named_anthropic_vision_clients_disable_redirects_on_real_transport(
     else:
         client.close()
     os.environ.pop("TAIJI_VISION_CUSTOM_RELAY_API_KEY", None)
+
+
+def _write_named_vision_config(home, transport):
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "auxiliary": {"vision": {"provider": "custom:relay"}},
+        "custom_vision_providers": [{
+            "id": "relay",
+            "base_url": "https://relay.example.com/anthropic" if transport == "anthropic_messages" else "https://relay.example.com/v1",
+            "models": ["relay-vl"],
+            "transport": transport,
+        }],
+    }), encoding="utf-8")
+
+
+class _SyncLifecycleClient:
+    def __init__(self, error=None):
+        self.error = error
+        self.close_count = 0
+        self.base_url = "https://relay.example.com/v1"
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    def create(self, **_kwargs):
+        if self.error:
+            raise self.error
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+
+    def close(self):
+        self.close_count += 1
+
+
+class _AsyncLifecycleClient(_SyncLifecycleClient):
+    async def create(self, **_kwargs):
+        if self.error:
+            raise self.error
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+
+    async def close(self):
+        self.close_count += 1
+
+
+@pytest.mark.parametrize("transport", ["openai_chat_completions", "anthropic_messages"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_call_llm_closes_transient_named_vision_client(
+    tmp_path, monkeypatch, transport, fails
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    _write_named_vision_config(home, transport)
+    client = _SyncLifecycleClient(RuntimeError("call failed") if fails else None)
+
+    def fake_resolve(_provider, model=None, **_kwargs):
+        return client, model
+
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", fake_resolve)
+    from agent.auxiliary_client import call_llm
+
+    if fails:
+        with pytest.raises(RuntimeError, match="call failed"):
+            call_llm(task="vision", messages=[{"role": "user", "content": "inspect"}])
+    else:
+        response = call_llm(task="vision", messages=[{"role": "user", "content": "inspect"}])
+        assert response.choices[0].message.content == "ok"
+    assert client.close_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["openai_chat_completions", "anthropic_messages"])
+@pytest.mark.parametrize("fails", [False, True])
+async def test_async_call_llm_closes_transient_named_vision_client(
+    tmp_path, monkeypatch, transport, fails
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    _write_named_vision_config(home, transport)
+    client = _AsyncLifecycleClient(RuntimeError("call failed") if fails else None)
+
+    def fake_resolve(_provider, model=None, **_kwargs):
+        return client, model
+
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", fake_resolve)
+    from agent.auxiliary_client import async_call_llm
+
+    if fails:
+        with pytest.raises(RuntimeError, match="call failed"):
+            await async_call_llm(
+                task="vision", messages=[{"role": "user", "content": "inspect"}], no_fallback=True
+            )
+    else:
+        response = await async_call_llm(
+            task="vision", messages=[{"role": "user", "content": "inspect"}], no_fallback=True
+        )
+        assert response.choices[0].message.content == "ok"
+    assert client.close_count == 1
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_strict_anthropic_build_failure_closes_prebuilt_client(monkeypatch, async_mode):
+    raw_client = _SyncLifecycleClient()
+    monkeypatch.setattr("agent.auxiliary_client.OpenAI", lambda **_kwargs: raw_client)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._maybe_wrap_anthropic",
+        lambda client, *_args, **_kwargs: client,
+    )
+    from agent.auxiliary_client import resolve_provider_client
+
+    client, model = resolve_provider_client(
+        "custom",
+        "relay-vl",
+        async_mode=async_mode,
+        explicit_base_url="https://relay.example.com/anthropic",
+        explicit_api_key="relay-secret",
+        api_mode="anthropic_messages",
+        follow_redirects=False,
+        is_vision=True,
+    )
+
+    assert client is None
+    assert model is None
+    assert raw_client.close_count == 1
+
+
+def test_call_llm_strict_anthropic_build_failure_closes_prebuilt_client(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    _write_named_vision_config(home, "anthropic_messages")
+    raw_client = _SyncLifecycleClient()
+    monkeypatch.setattr("agent.auxiliary_client.OpenAI", lambda **_kwargs: raw_client)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._maybe_wrap_anthropic",
+        lambda client, *_args, **_kwargs: client,
+    )
+    from agent.auxiliary_client import call_llm
+
+    with pytest.raises(RuntimeError, match="No LLM provider"):
+        call_llm(task="vision", messages=[{"role": "user", "content": "inspect"}])
+
+    assert raw_client.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_call_llm_strict_anthropic_build_failure_closes_prebuilt_client(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("TAIJI_VISION_CUSTOM_RELAY_API_KEY", "relay-secret")
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    _write_named_vision_config(home, "anthropic_messages")
+    raw_client = _SyncLifecycleClient()
+    monkeypatch.setattr("agent.auxiliary_client.OpenAI", lambda **_kwargs: raw_client)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._maybe_wrap_anthropic",
+        lambda client, *_args, **_kwargs: client,
+    )
+    from agent.auxiliary_client import async_call_llm
+
+    with pytest.raises(RuntimeError, match="No LLM provider"):
+        await async_call_llm(
+            task="vision",
+            messages=[{"role": "user", "content": "inspect"}],
+            no_fallback=True,
+        )
+
+    assert raw_client.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_openai_custom_vision_build_does_not_create_sync_client(monkeypatch):
+    import openai
+
+    async_client = _AsyncLifecycleClient()
+    monkeypatch.setattr(
+        "agent.auxiliary_client.OpenAI",
+        lambda **_kwargs: pytest.fail("sync OpenAI client must not be built for async custom vision"),
+    )
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **_kwargs: async_client)
+    from agent.auxiliary_client import resolve_provider_client
+
+    client, model = resolve_provider_client(
+        "custom",
+        "relay-vl",
+        async_mode=True,
+        explicit_base_url="https://relay.example.com/v1",
+        explicit_api_key="relay-secret",
+        api_mode="chat_completions",
+        follow_redirects=False,
+        is_vision=True,
+    )
+
+    assert client is async_client
+    assert model == "relay-vl"
+
+
+def test_call_llm_does_not_close_shared_cached_client(monkeypatch):
+    client = _SyncLifecycleClient()
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda *_args, **_kwargs: ("shared", "shared-model", None, None, None),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_cached_client",
+        lambda *_args, **_kwargs: (client, "shared-model"),
+    )
+    from agent.auxiliary_client import call_llm
+
+    response = call_llm(
+        task="compression", messages=[{"role": "user", "content": "compress"}]
+    )
+
+    assert response.choices[0].message.content == "ok"
+    assert client.close_count == 0

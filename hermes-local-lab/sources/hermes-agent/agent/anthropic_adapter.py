@@ -700,10 +700,12 @@ def build_anthropic_client(
     kwargs = {
         "timeout": Timeout(timeout=float(_read_timeout), connect=10.0),
     }
+    owned_http_client = None
     if follow_redirects is not None:
         import httpx
 
-        kwargs["http_client"] = httpx.Client(follow_redirects=follow_redirects)
+        owned_http_client = httpx.Client(follow_redirects=follow_redirects)
+        kwargs["http_client"] = owned_http_client
     if normalized_base_url:
         # Azure Anthropic endpoints require an ``api-version`` query parameter.
         # Pass it via default_query so the SDK appends it to every request URL
@@ -763,7 +765,12 @@ def build_anthropic_client(
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
-    return _anthropic_sdk.Anthropic(**kwargs)
+    try:
+        return _anthropic_sdk.Anthropic(**kwargs)
+    except Exception:
+        if owned_http_client is not None:
+            owned_http_client.close()
+        raise
 
 
 def build_anthropic_bedrock_client(region: str):
