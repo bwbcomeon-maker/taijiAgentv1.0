@@ -11703,6 +11703,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .expert-team-office-issue.is-condition{border-color:color-mix(in srgb,var(--warning) 52%,var(--border))}
 .expert-team-office-issue.is-invalid{border-color:var(--error);background:color-mix(in srgb,var(--error) 7%,transparent)}
 .expert-team-office-impact,.expert-team-office-identity{padding:10px 12px;border-radius:10px;background:var(--hover-bg);color:var(--muted)}
+.expert-team-office-evidence{display:grid;gap:10px;padding:14px;border:1px solid var(--border);border-radius:12px}
+.expert-team-office-evidence h3{margin:0}.expert-team-office-evidence label{display:grid;gap:7px}
+.expert-team-office-evidence input[type="file"]{min-height:44px;padding:8px;border:1px dashed var(--border);border-radius:10px;background:var(--bg)}
+.expert-team-office-evidence p{margin:0;color:var(--muted)}.expert-team-office-evidence ul{display:grid;gap:6px;margin:0;padding-left:20px}
 .expert-team-office-drawer-actions{justify-content:flex-end;border-top:1px solid var(--border);border-bottom:0}
 .expert-team-office-live{min-height:22px;padding:0 20px 10px;color:var(--muted)}
 .expert-team-office-drawer :focus-visible{outline:2px solid var(--accent);outline-offset:3px}

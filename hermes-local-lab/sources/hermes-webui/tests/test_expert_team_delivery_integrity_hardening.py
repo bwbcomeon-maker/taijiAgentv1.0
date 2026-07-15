@@ -438,8 +438,42 @@ def test_real_first_pending_office_lifecycle_begin_get_safe_submit_and_replay(mo
     )
     assert begin_status == 200, begun
     screenshot = Path(__file__).resolve().parents[1] / "docs" / "images" / "update-banner-whats-new-after.png"
-    evidence = tmp_path / begun["evidence_dir"] / "first-page.png"
-    evidence.write_bytes(screenshot.read_bytes())
+    registry_key = docx_engine_v2._office_review_token_key(tmp_path, reviewed)
+    with docx_engine_v2._ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
+        docx_engine_v2._ACTIVE_OFFICE_REVIEW_TOKENS[registry_key]["expires_at_ns"] = 0
+    expired_upload, expired_upload_status = docx_engine_v2.upload_structured_office_evidence(
+        {"session_id": reviewed["session_id"], "run_id": reviewed["run_id"], "expected_version": str(reviewed["version"])},
+        {"file_0": ("first-page.png", screenshot.read_bytes())}, tmp_path, trusted_principal=principal,
+    )
+    assert expired_upload_status == 409 and expired_upload["code"] == "rebegin_required"
+    begun, begin_status = docx_engine_v2.begin_office_review(
+        {"session_id": reviewed["session_id"], "delivery_dir": str(delivery_dir)}, tmp_path,
+        trusted_principal=principal, open_document=lambda _path: None,
+    )
+    assert begin_status == 200, begun
+    for bad_files, bad_principal, expected_status in (
+        ({"file_0": ("../escape.png", screenshot.read_bytes())}, principal, 400),
+        ({"file_0": ("renamed.png", b"MZ" + b"x" * 64)}, principal, 400),
+        ({"file_0": ("first-page.png", screenshot.read_bytes())}, {**principal, "subject": "other-reviewer"}, 403),
+    ):
+        rejected, rejected_status = docx_engine_v2.upload_structured_office_evidence(
+            {"session_id": reviewed["session_id"], "run_id": reviewed["run_id"], "expected_version": str(reviewed["version"])},
+            bad_files, tmp_path, trusted_principal=bad_principal,
+        )
+        assert rejected_status == expected_status and rejected["ok"] is False
+    uploaded, upload_status = docx_engine_v2.upload_structured_office_evidence(
+        {
+            "session_id": reviewed["session_id"], "run_id": reviewed["run_id"],
+            "expected_version": str(reviewed["version"]),
+        },
+        {"file_0": ("first-page.png", screenshot.read_bytes())},
+        tmp_path,
+        trusted_principal=principal,
+    )
+    assert upload_status == 200 and uploaded["ok"] is True
+    assert uploaded["count"] == 1 and uploaded["files"][0]["name"].endswith(".png")
+    assert len(uploaded["files"][0]["sha256_short"]) == 12
+    assert "path" not in json.dumps(uploaded) and "token" not in json.dumps(uploaded)
     ready = expert_teams.read_expert_team_run(tmp_path, reviewed["run_id"])
     assert ready["view"]["office_review"]["review_session_status"] == "ready"
     payload = {
@@ -448,10 +482,25 @@ def test_real_first_pending_office_lifecycle_begin_get_safe_submit_and_replay(mo
         "issues": [], "note": "已在 WPS 打开正式文档并逐页检查目录、表格和整体版式。",
         "idempotency_key": "first-pending-safe-submit-1",
     }
+    from api.expert_teams import office_review
+    real_consume = office_review.consume_review_token
+    consume_attempts = 0
+    def fail_first_consume(path, state):
+        nonlocal consume_attempts
+        consume_attempts += 1
+        if consume_attempts == 1:
+            raise OSError("fault after acceptance prepared")
+        return real_consume(path, state)
+    monkeypatch.setattr(office_review, "consume_review_token", fail_first_consume)
+    failed, failed_status = docx_engine_v2.record_wps_visual_acceptance(payload, tmp_path, trusted_principal=principal)
+    assert failed_status == 400 and failed["ok"] is False
+    assert docx_engine_v2.active_office_review_session_status(tmp_path, reviewed) == "ready"
     accepted, accepted_status = docx_engine_v2.record_wps_visual_acceptance(payload, tmp_path, trusted_principal=principal)
     replayed, replay_status = docx_engine_v2.record_wps_visual_acceptance(payload, tmp_path, trusted_principal=principal)
     assert accepted_status == replay_status == 200 and accepted["ok"] is replayed["ok"] is True
-    assert replayed["idempotent_replay"] is True
+    assert accepted["idempotent_replay"] is replayed["idempotent_replay"] is True
+    assert consume_attempts == 2
+    assert docx_engine_v2.active_office_review_session_status(tmp_path, reviewed) == "begin_required"
     final = expert_teams.read_expert_team_run(tmp_path, reviewed["run_id"])
     assert final["view"]["office_review"]["decision"] == "passed"
 

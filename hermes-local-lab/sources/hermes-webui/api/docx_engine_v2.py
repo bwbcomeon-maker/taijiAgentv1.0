@@ -86,6 +86,102 @@ def active_office_review_session_status(workspace: Path, run: dict) -> str:
         return "ready" if key in _ACTIVE_OFFICE_REVIEW_TOKENS else "begin_required"
 
 
+def upload_structured_office_evidence(payload: dict, files: dict, workspace: Path, *, trusted_principal: dict | None = None) -> tuple[dict[str, Any], int]:
+    """Store evidence in the active server-owned Office review directory."""
+    import hashlib
+    from api.expert_teams.delivery_integrity import canonical_delivery_dir, delivery_identity_from_directory, office_binding_identity, validated_binding_for_identity
+    from api.expert_teams.office_review import load_review_token
+    from api.expert_teams.storage import read_run
+
+    root = Path(workspace).expanduser().resolve()
+    unexpected = sorted(set(payload) - {"session_id", "run_id", "expected_version"})
+    if unexpected:
+        return _error_payload("office_evidence_request_invalid", f"unsupported fields: {', '.join(unexpected)}"), 400
+    principal = trusted_principal if isinstance(trusted_principal, dict) else {}
+    if "document-reviewer" not in (principal.get("roles") or []) or not str(principal.get("subject") or ""):
+        return _error_payload("trusted_reviewer_required", "trusted document reviewer is required"), 403
+    try:
+        session_id = _first_text(payload, "session_id")
+        run = read_run(root, _first_text(payload, "run_id"))
+        if str(run.get("session_id") or "") != session_id:
+            raise ValueError("Office evidence run identity mismatch")
+        if int(payload.get("expected_version") or -1) != int(run.get("version") or 0):
+            raise ValueError("Office evidence version conflict")
+        attempt = _current_office_delivery_attempt(run)
+        if attempt < 1:
+            raise ValueError("Office evidence has no current delivery")
+        registry_key = _office_review_token_key(root, run)
+        with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
+            _prune_active_office_review_tokens_locked(time.time_ns())
+            token = str((_ACTIVE_OFFICE_REVIEW_TOKENS.get(registry_key) or {}).get("token") or "")
+        if not token:
+            return _error_payload("rebegin_required", "active Office review session is missing or expired"), 409
+        delivery_dir = canonical_delivery_dir(root, str(run.get("run_id") or ""), "delivery", attempt)
+        identity = delivery_identity_from_directory(root, delivery_dir)
+        if identity is None:
+            raise ValueError("Office evidence delivery identity is invalid")
+        office_binding = office_binding_identity(root, identity, validated_binding_for_identity(root, identity))
+        try:
+            token_state, _token_path = load_review_token(root, token, binding=office_binding)
+        except Exception as exc:
+            if "expired" in str(exc).lower() or "already used" in str(exc).lower():
+                _forget_active_office_review_token(registry_key)
+                return _error_payload("rebegin_required", "active Office review session is missing or expired"), 409
+            raise
+        reviewer = token_state.get("reviewer_identity") if isinstance(token_state.get("reviewer_identity"), dict) else {}
+        if str(reviewer.get("subject") or "") != str(principal.get("subject") or ""):
+            return _error_payload("trusted_reviewer_mismatch", "active Office reviewer does not match authenticated principal"), 403
+        rows = list(files.values()) if isinstance(files, dict) else []
+        if not rows or len(rows) > 5:
+            raise ValueError("Office evidence requires 1 to 5 files per upload")
+        evidence_dir = root / str(token_state.get("evidence_dir") or "")
+        expected_dir = root / ".taiji" / "wps-evidence" / str(token_state.get("token_hash") or "")
+        if evidence_dir.resolve() != expected_dir.resolve() or not evidence_dir.is_dir() or evidence_dir.is_symlink():
+            raise ValueError("Office evidence directory is invalid")
+        existing = [item for item in evidence_dir.iterdir() if item.is_file() and not item.name.startswith(".upload-")]
+        if len(existing) + len(rows) > 10:
+            raise ValueError("Office evidence file count exceeds 10")
+        prepared = []
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".pdf"}
+        executable_suffixes = {".exe", ".dll", ".com", ".bat", ".cmd", ".sh", ".app", ".js", ".jar", ".msi"}
+        for row in rows:
+            if not isinstance(row, tuple) or len(row) != 2:
+                raise ValueError("Office evidence multipart file is invalid")
+            original, content = str(row[0] or ""), row[1]
+            if not isinstance(content, bytes) or not content:
+                raise ValueError("Office evidence file is empty")
+            if "\x00" in original or "/" in original or "\\" in original or Path(original).name != original:
+                raise ValueError("Office evidence filename is unsafe")
+            suffix = Path(original).suffix.lower()
+            if suffix in executable_suffixes or suffix not in allowed_suffixes:
+                raise ValueError("Office evidence file type is not allowed")
+            if len(content) > 8 * 1024 * 1024:
+                raise ValueError("Office evidence file exceeds 8 MB")
+            if content.startswith((b"MZ", b"\x7fELF", b"#!")):
+                raise ValueError("Office evidence executable content is not allowed")
+            valid_magic = (suffix == ".png" and content.startswith(b"\x89PNG\r\n\x1a\n")) or (suffix in {".jpg", ".jpeg"} and content.startswith(b"\xff\xd8\xff")) or (suffix == ".pdf" and content.startswith(b"%PDF-"))
+            if not valid_magic:
+                raise ValueError("Office evidence content does not match its file type")
+            prepared.append((f"office-{uuid.uuid4().hex[:12]}{suffix}", content, hashlib.sha256(content).hexdigest()))
+        if sum(item.stat().st_size for item in existing) + sum(len(item[1]) for item in prepared) > 20 * 1024 * 1024:
+            raise ValueError("Office evidence total size exceeds 20 MB")
+        written = []
+        for safe_name, content, digest in prepared:
+            target = evidence_dir / safe_name
+            temporary = evidence_dir / f".upload-{uuid.uuid4().hex}.tmp"
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(content); handle.flush(); os.fsync(handle.fileno())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            written.append({"name": safe_name, "sha256_short": digest[:12], "size_bytes": len(content)})
+        return {"ok": True, "count": len(existing) + len(written), "uploaded_count": len(written), "files": written}, 200
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        conflict = "version conflict" in str(exc).lower()
+        return _error_payload("office_evidence_version_conflict" if conflict else "office_evidence_invalid", str(exc)), 409 if conflict else 400
+
+
 def _expand_structured_office_submission(
     payload: dict,
     workspace: Path,
@@ -168,8 +264,16 @@ def _structured_office_request_fingerprint(payload: dict) -> str:
 
 
 def _structured_office_acceptance_replay(payload: dict, workspace: Path) -> tuple[dict[str, Any], int] | None:
-    from api.expert_teams.delivery_integrity import canonical_attempt_root
-    from api.expert_teams.office_review import OFFICE_ACCEPTANCE_NAME
+    from datetime import datetime, timezone
+    from api.expert_teams.delivery_integrity import canonical_attempt_root, read_binding_manifest, sha256_file
+    from api.expert_teams.office_review import (
+        OFFICE_ACCEPTANCE_NAME,
+        _token_state_path,
+        consume_review_token,
+        enterprise_completion_status,
+        prepare_consumed_review_state,
+        reconcile_enterprise_completion,
+    )
     from api.expert_teams.storage import read_run
     key = _first_text(payload, "idempotency_key")
     if not re.fullmatch(r"[A-Za-z0-9:._-]{8,240}", key):
@@ -185,6 +289,37 @@ def _structured_office_acceptance_replay(payload: dict, workspace: Path) -> tupl
         return _error_payload("office_acceptance_idempotency_conflict", "Office acceptance already exists for another request"), 409
     if str(request.get("fingerprint") or "") != _structured_office_request_fingerprint(payload):
         return _error_payload("office_acceptance_idempotency_conflict", "Office acceptance idempotency key was reused with different input"), 409
+    try:
+        token_hash = str((acceptance.get("token_provenance") or {}).get("token_hash") or "")
+        if token_hash:
+            token_path = _token_state_path(workspace, token_hash)
+            if not token_path.is_file():
+                raise ValueError("prepared Office acceptance token state is missing")
+            token_state = json.loads(token_path.read_text(encoding="utf-8"))
+            if token_state.get("state") != "consumed":
+                consumed = prepare_consumed_review_state(
+                    token_state,
+                    acceptance_manifest_path=str(path.relative_to(Path(workspace).resolve())),
+                    acceptance_manifest_sha256=sha256_file(path),
+                    canonical_evidence=acceptance.get("evidence") if isinstance(acceptance.get("evidence"), list) else [],
+                )
+                consume_review_token(token_path, consumed)
+            _forget_active_office_review_token(_office_review_token_key(workspace, run))
+            if str(acceptance.get("decision") or "") in {"passed", "passed_with_conditions"}:
+                status = enterprise_completion_status(workspace, run)
+                if status.get("status") != "passed":
+                    ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+                    binding_path = Path(workspace).resolve() / str(ref.get("delivery_binding_path") or "")
+                    binding = read_binding_manifest(binding_path)
+                    run = reconcile_enterprise_completion(
+                        workspace,
+                        run=run,
+                        binding=binding,
+                        binding_sha256=sha256_file(binding_path),
+                        now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                    )
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        return _error_payload("office_acceptance_reconcile_failed", str(exc)), 500
     return {
         "ok": True, "office_status": str(acceptance.get("decision") or ""), "acceptance": acceptance,
         "acceptance_manifest_path": str(path.relative_to(Path(workspace).resolve())),

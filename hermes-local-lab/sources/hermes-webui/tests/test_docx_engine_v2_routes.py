@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from io import BytesIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,7 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/docx-engine-v2/drafts/package" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual/begin" in routes_py
+    assert "/api/docx-engine-v2/quality/wps-visual/evidence" in routes_py
     assert "/api/expert-teams/waivers/create" in routes_py
     assert "/api/expert-teams/office-revisions/create" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
@@ -111,6 +113,37 @@ def test_begin_office_review_route_uses_shared_trusted_oidc_identity(monkeypatch
 
     assert result["status"] == 200
     assert captured["principal"] == principal
+
+
+def test_office_evidence_multipart_route_passes_only_server_resolved_identity(monkeypatch, tmp_path):
+    from api import routes
+    from api import upload
+
+    monkeypatch.setattr(routes, "get_session_for_file_ops", lambda _sid: SimpleNamespace(workspace=str(tmp_path)))
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: {"status": status, "payload": payload})
+    fields = {"session_id": "sid-1", "run_id": "run-1", "expected_version": "7"}
+    files = {"file_0": ("page.png", b"\x89PNG\r\n\x1a\nbody")}
+    monkeypatch.setattr(upload, "parse_multipart", lambda *_args: (fields, files))
+    principal = {"subject": "reviewer-1", "roles": ["document-reviewer"]}
+    monkeypatch.setattr("api.expert_teams.trusted_identity.resolve_trusted_principal", lambda *_args: principal)
+    captured = {}
+    monkeypatch.setattr(
+        routes.docx_engine_v2,
+        "upload_structured_office_evidence",
+        lambda payload, uploaded, workspace, *, trusted_principal: (
+            captured.update(payload=payload, files=uploaded, workspace=workspace, principal=trusted_principal)
+            or ({"ok": True, "count": 1, "files": [{"name": "office-safe.png", "sha256_short": "123456789abc"}]}, 200)
+        ),
+    )
+    handler = SimpleNamespace(
+        headers={"Content-Type": "multipart/form-data; boundary=test", "Content-Length": "1", "Cookie": "taiji_expert_identity=identity-1"},
+        rfile=BytesIO(b"x"),
+    )
+
+    result = routes._handle_docx_engine_v2_office_evidence_upload(handler)
+
+    assert result["status"] == 200 and captured["payload"] == fields and captured["files"] == files
+    assert captured["principal"] == principal and captured["workspace"] == tmp_path
 
 
 def test_legacy_figure_adjustment_routes_do_not_keep_skill_script_runner():

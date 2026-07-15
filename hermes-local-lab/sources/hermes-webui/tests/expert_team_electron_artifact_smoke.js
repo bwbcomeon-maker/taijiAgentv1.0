@@ -278,6 +278,9 @@ async function submitOfficeAcceptanceScenario(page, { decision, issues, doubleCl
   });
   await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='result']");
   await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+  const evidenceBefore = await page.evaluate(() => window.__officeEvidenceCalls.length);
+  await page.setInputFiles("body > [data-expert-team-office-drawer] [data-office-evidence-input]", path.join(repoRoot, "hermes-local-lab", "sources", "hermes-webui", "docs", "images", "update-banner-whats-new-after.png"));
+  await page.waitForFunction((count) => window.__officeEvidenceCalls.length === count + 1, evidenceBefore, { timeout: 5000 });
   await page.locator("body > [data-expert-team-office-drawer] [data-office-checklist]").evaluateAll((items) => items.forEach((item) => { item.checked = true; item.dispatchEvent(new Event("change", { bubbles: true })); }));
   await page.check(`body > [data-expert-team-office-drawer] input[name="office-decision"][value="${decision}"]`);
   await page.fill("body > [data-expert-team-office-drawer] [data-office-note]", "已用 WPS 打开正式文档并逐页检查目录、表格和整体版式。");
@@ -445,6 +448,7 @@ async function main() {
       window.__officeAcceptanceCalls = [];
       window.__officeAcceptanceResults = [];
       window.__officeBeginCalls = [];
+      window.__officeEvidenceCalls = [];
       window.__officeWindowOpenOriginal = window.open;
       window.open = () => null;
       api = async (url, options) => {
@@ -486,6 +490,15 @@ async function main() {
             throw error;
           }
           return result;
+        }
+        if (String(url) === "/api/docx-engine-v2/quality/wps-visual/evidence") {
+          const form = options?.body;
+          window.__officeEvidenceCalls.push({
+            session_id: String(form?.get("session_id") || ""), run_id: String(form?.get("run_id") || ""),
+            expected_version: String(form?.get("expected_version") || ""), file_name: String(form?.get("file_0")?.name || ""),
+            has_token: Boolean(form?.get("review_token")), has_path: Boolean(form?.get("delivery_dir") || form?.get("document_path")),
+          });
+          return { ok: true, count: 1, uploaded_count: 1, files: [{ name: "office-safe.png", sha256_short: "123456789abc", size_bytes: 1234 }] };
         }
         if (String(url) === "/api/docx-engine-v2/quality/wps-visual/begin") {
           window.__officeBeginCalls.push(JSON.parse(options?.body || "{}"));
@@ -863,8 +876,8 @@ async function main() {
     assertState(await page.isDisabled("body > [data-expert-team-office-drawer] [data-office-submit]"), "First pending Office view enabled submit before begin");
     await page.click("body > [data-expert-team-office-drawer] [data-office-begin]");
     await page.waitForFunction(() => window.__officeBeginCalls.length === 1, { timeout: 5000 });
-    const firstBegin = await page.evaluate(() => ({ payload: window.__officeBeginCalls[0], submitDisabled: document.querySelector("body > [data-expert-team-office-drawer] [data-office-submit]")?.disabled }));
-    assertState(firstBegin.payload.run_id === "electron-office-first-pending" && firstBegin.payload.expected_version > 0 && !firstBegin.payload.delivery_dir && !firstBegin.payload.review_token && firstBegin.submitDisabled === false, "First pending Office begin leaked paths/token or did not unlock submit", firstBegin);
+    const firstBegin = await page.evaluate(() => ({ payload: window.__officeBeginCalls[0], submitDisabled: document.querySelector("body > [data-expert-team-office-drawer] [data-office-submit]")?.disabled, uploadDisabled: document.querySelector("body > [data-expert-team-office-drawer] [data-office-evidence-input]")?.disabled }));
+    assertState(firstBegin.payload.run_id === "electron-office-first-pending" && firstBegin.payload.expected_version > 0 && !firstBegin.payload.delivery_dir && !firstBegin.payload.review_token && firstBegin.submitDisabled === true && firstBegin.uploadDisabled === false, "First pending Office begin leaked paths/token or enabled submit before evidence", firstBegin);
     await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
     const passedSubmission = await submitOfficeAcceptanceScenario(page, { decision: "passed", issues: [], doubleClick: true });
     const conditionIssue = { issue_id: "condition-1", severity: "condition", target_domain: "office_issue", category: "visual_alignment", description: "第三页表格对齐略有差异", expected_fix: "授权保留或返修" };
@@ -902,6 +915,9 @@ async function main() {
     });
     assertState(officeSummary.text.includes("正式版本 4") && officeSummary.text.includes("abcdef012345") && !officeSummary.leaksFullHash, "Office summary did not progressively disclose technical identity", officeSummary);
     await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    const driftEvidenceBefore = await page.evaluate(() => window.__officeEvidenceCalls.length);
+    await page.setInputFiles("body > [data-expert-team-office-drawer] [data-office-evidence-input]", path.join(repoRoot, "hermes-local-lab", "sources", "hermes-webui", "docs", "images", "update-banner-whats-new-after.png"));
+    await page.waitForFunction((count) => window.__officeEvidenceCalls.length === count + 1, driftEvidenceBefore, { timeout: 5000 });
     const officeDrawer = await page.evaluate(() => {
       const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
       return {
@@ -978,6 +994,9 @@ async function main() {
     assertState(closeAbort.after === closeAbort.before, "Closing the Office drawer allowed a stale authorizer handoff to create a waiver", closeAbort);
 
     await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    const staleSubmitEvidenceBefore = await page.evaluate(() => window.__officeEvidenceCalls.length);
+    await page.setInputFiles("body > [data-expert-team-office-drawer] [data-office-evidence-input]", path.join(repoRoot, "hermes-local-lab", "sources", "hermes-webui", "docs", "images", "update-banner-whats-new-after.png"));
+    await page.waitForFunction((count) => window.__officeEvidenceCalls.length === count + 1, staleSubmitEvidenceBefore, { timeout: 5000 });
     await page.locator("body > [data-expert-team-office-drawer] [data-office-checklist]").evaluateAll((items) => items.forEach((item) => { item.checked = true; item.dispatchEvent(new Event("change", { bubbles: true })); }));
     await page.check('body > [data-expert-team-office-drawer] input[name="office-decision"][value="passed_with_conditions"]');
     await page.fill("body > [data-expert-team-office-drawer] [data-office-note]", "已用 WPS 打开正式文档并逐页检查目录、表格和整体版式，草稿需保留。");

@@ -90,6 +90,7 @@
     Object.keys(root.dataset||{}).forEach(key=>{drawer.dataset[key]=root.dataset[key];});
     drawer._expertTeamOfficeAuthoritativeIdentity=officeAuthoritativeIdentity((typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||activeExpertTeamCard(btn));
     document.body.appendChild(drawer);drawer.hidden=false;
+    drawer.dataset.officeEvidenceCount='0';
     const main=document.getElementById('mainChat');if(main)main.inert=true;
     drawer._expertTeamOfficeBaseline=officeDrawerDraftState(drawer);
     const first=drawer.querySelector('button,input:not([disabled])');if(first&&first.focus)first.focus();
@@ -102,6 +103,8 @@
       checklist:Array.from(drawer.querySelectorAll('[data-office-checklist]')).map(item=>[String(item.dataset.officeChecklist||''),!!item.checked]),
       revisions:Array.from(drawer.querySelectorAll('[data-office-revision-issue]')).filter(item=>item.checked).map(item=>String(item.dataset.officeRevisionIssue||'')),
       reasons:Array.from(drawer.querySelectorAll('[data-office-waiver-reason]')).map(item=>[String(item.dataset.officeWaiverReason||''),String(item.value||'')]),
+      evidenceSelected:Array.from(drawer.querySelector('[data-office-evidence-input]')?.files||[]).map(item=>String(item.name||'')),
+      evidenceUploaded:Number(drawer.dataset.officeEvidenceCount||0),
       note:String(drawer.querySelector('[data-office-note]')?.value||'')
     });
   }
@@ -136,15 +139,37 @@
     if(!drawer||btn.disabled)return false;btn.disabled=true;btn.setAttribute('aria-busy','true');
     try{
       const result=await api('/api/docx-engine-v2/quality/wps-visual/begin',{method:'POST',body:JSON.stringify({session_id:card.sourceSessionId,run_id:card.runId,expected_version:Number(card.version||0)})});
-      drawer.dataset.officeReviewSessionStatus='ready';const submit=drawer.querySelector('[data-office-submit]');if(submit){submit.disabled=false;submit.removeAttribute('aria-disabled');}
+      drawer.dataset.officeReviewSessionStatus='ready';const input=drawer.querySelector('[data-office-evidence-input]');if(input)input.disabled=false;
       if(live)live.textContent=`已开始 ${String(result&&result.reviewer||'当前验收人')} 的可信复核，请上传本次证据并完成检查。`;
       btn.hidden=true;return true;
     }catch(error){if(live)live.textContent='可信复核启动失败：'+(error&&error.message||error)+'；当前草稿已保留。';return false;}
     finally{btn.disabled=false;btn.removeAttribute('aria-busy');}
   }
+  async function uploadExpertTeamOfficeEvidence(input){
+    const drawer=officeDrawer(input);const card=activeExpertTeamCard(input);const status=drawer&&drawer.querySelector('[data-office-evidence-status]');
+    const selected=Array.from(input&&input.files||[]);if(!drawer||input.disabled)return false;
+    if(drawer.dataset.officeReviewSessionStatus!=='ready'){if(status)status.textContent='请先开始可信复核。';return false;}
+    if(!selected.length){if(status)status.textContent='请选择至少 1 份证据。';return false;}
+    input.disabled=true;if(status)status.textContent='正在安全上传 Office 复核证据…';
+    const form=new FormData();form.append('session_id',String(card.sourceSessionId||''));form.append('run_id',String(card.runId||''));form.append('expected_version',String(card.version||0));
+    selected.forEach((file,index)=>form.append(`file_${index}`,file,file.name));
+    try{
+      const result=await api('/api/docx-engine-v2/quality/wps-visual/evidence',{method:'POST',body:form});
+      drawer.dataset.officeEvidenceCount=String(Number(result&&result.count||0));
+      const list=drawer.querySelector('[data-office-evidence-list]');if(list){(result&&result.files||[]).forEach(file=>{const item=document.createElement('li');item.textContent=`${String(file.name||'证据')} · ${String(file.sha256_short||'')}`;list.appendChild(item);});}
+      if(status)status.textContent=`已安全上传 ${Number(result&&result.uploaded_count||selected.length)} 份证据。`;
+      const submit=drawer.querySelector('[data-office-submit]');if(submit&&Number(drawer.dataset.officeEvidenceCount||0)>0){submit.disabled=false;submit.removeAttribute('aria-disabled');}
+      input.value='';drawer._expertTeamOfficeBaseline=officeDrawerDraftState(drawer);return true;
+    }catch(error){
+      const code=String(error&&error.payload&&(error.payload.code||error.payload.error_code)||'');if(status)status.textContent=code==='rebegin_required'?'复核会话已过期，请重新打开 DOCX。':'证据上传失败：'+(error&&error.message||error);
+      if(code==='rebegin_required'){drawer.dataset.officeReviewSessionStatus='begin_required';const submit=drawer.querySelector('[data-office-submit]');if(submit){submit.disabled=true;submit.setAttribute('aria-disabled','true');}}
+      return false;
+    }finally{if(drawer.dataset.officeReviewSessionStatus==='ready')input.disabled=false;}
+  }
   async function submitExpertTeamOfficeAcceptance(btn){
     const drawer=officeDrawer(btn);let card=activeExpertTeamCard(btn);const live=drawer&&drawer.querySelector('[data-office-live]');
     if(!drawer||btn.disabled)return false;
+    const officeEvidenceCount=Number(drawer.dataset.officeEvidenceCount||0);if(officeEvidenceCount<1){if(live)live.textContent='请先成功上传至少 1 份本次复核证据。';return false;}
     const authoritative=(typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||{};
     if(String(authoritative.runId||'')===String(card.runId||'')){
       if(officeAuthoritativeIdentity(authoritative)!==String(drawer._expertTeamOfficeAuthoritativeIdentity||'')){
@@ -858,6 +883,7 @@
     window.closeExpertTeamOfficeDrawer=closeExpertTeamOfficeDrawer;
     window.handleExpertTeamOfficeDrawerKeydown=handleExpertTeamOfficeDrawerKeydown;
     window.beginExpertTeamOfficeReview=beginExpertTeamOfficeReview;
+    window.uploadExpertTeamOfficeEvidence=uploadExpertTeamOfficeEvidence;
     window.submitExpertTeamOfficeAcceptance=submitExpertTeamOfficeAcceptance;
     window.submitExpertTeamOfficeRevision=submitExpertTeamOfficeRevision;
     window.startExpertTeamOfficeAuthorizerHandoff=startExpertTeamOfficeAuthorizerHandoff;

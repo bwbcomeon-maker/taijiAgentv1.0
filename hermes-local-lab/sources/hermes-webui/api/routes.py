@@ -11041,6 +11041,8 @@ def handle_post(handler, parsed) -> bool:
         return handle_upload_extract(handler)
     if parsed.path == "/api/workspace/upload":
         return handle_workspace_upload(handler)
+    if parsed.path == "/api/docx-engine-v2/quality/wps-visual/evidence":
+        return _handle_docx_engine_v2_office_evidence_upload(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
@@ -18663,6 +18665,34 @@ def _handle_docx_engine_v2_wps_visual_acceptance(handler, body):
         return bad(handler, _sanitize_error(e))
     except subprocess.TimeoutExpired as e:
         return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_docx_engine_v2_office_evidence_upload(handler):
+    from api.expert_teams.trusted_identity import TrustedIdentityError, resolve_trusted_principal
+    from api.upload import parse_multipart
+
+    try:
+        content_type = str(handler.headers.get("Content-Type", ""))
+        content_length = handler.headers.get("Content-Length", "0")
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        _session, workspace = _docx_engine_v2_session_and_workspace(fields)
+        principal = resolve_trusted_principal(
+            {"identity_session_id": _expert_identity_session(handler)},
+            "document-reviewer",
+            int(time.time()),
+        )
+        payload, status = docx_engine_v2.upload_structured_office_evidence(
+            fields,
+            files,
+            workspace,
+            trusted_principal=principal,
+        )
+        return j(handler, payload, status=status)
+    except TrustedIdentityError as exc:
+        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as exc:
+        status = 413 if "too large" in str(exc).lower() else 400
+        return j(handler, {"ok": False, "code": "office_evidence_invalid", "error": _sanitize_error(exc)}, status=status)
 
 
 def _handle_docx_engine_v2_begin_office_review(handler, body):

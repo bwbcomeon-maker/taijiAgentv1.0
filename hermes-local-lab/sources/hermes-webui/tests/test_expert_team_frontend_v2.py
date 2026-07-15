@@ -1973,6 +1973,29 @@ def test_office_pending_begin_abort_and_poll_drift_are_fail_closed():
     assert 'AbortController' in handoff and 'officeAuthorizerAttempt' in handoff and 'signal.aborted' in handoff
     close = _function_body(ACTIONS_JS, 'function closeExpertTeamOfficeDrawer', 'function handleExpertTeamOfficeDrawerKeydown')
     assert 'abortExpertTeamOfficeAuthorizerHandoff' in close
+
+
+def test_office_evidence_upload_is_discoverable_safe_and_required_before_submit():
+    ui = EXPERT_UI_JS
+    actions = ACTIONS_JS
+    for marker in ('data-office-evidence-input', 'data-office-evidence-status', 'data-office-evidence-list'):
+        assert marker in ui
+    assert 'type="file"' in ui and 'Office 复核证据' in ui
+    upload = _function_body(
+        actions,
+        'async function uploadExpertTeamOfficeEvidence',
+        'async function submitExpertTeamOfficeAcceptance',
+    )
+    assert "api('/api/docx-engine-v2/quality/wps-visual/evidence'" in upload
+    assert 'FormData' in upload
+    for safe_field in ('session_id', 'run_id', 'expected_version'):
+        assert safe_field in upload
+    for forbidden in ('review_token', 'delivery_dir', 'document_path', 'reviewer'):
+        assert forbidden not in upload
+    submit = _function_body(actions, 'async function submitExpertTeamOfficeAcceptance', 'async function submitExpertTeamOfficeRevision')
+    assert 'officeEvidenceCount' in submit
+    dirty = _function_body(actions, 'function officeDrawerDraftState', 'function closeExpertTeamOfficeDrawer')
+    assert 'data-office-evidence-input' in dirty
     submit = _function_body(ACTIONS_JS, 'async function submitExpertTeamOfficeAcceptance', 'async function submitExpertTeamOfficeRevision')
     assert 'officeAuthoritativeIdentity' in submit and '当前草稿已保留' in submit
 

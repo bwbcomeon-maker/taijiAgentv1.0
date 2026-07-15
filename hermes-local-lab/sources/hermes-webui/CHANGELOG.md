@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Added a server-owned multipart evidence upload for structured Office review, requiring fresh evidence before acceptance while keeping tokens, paths, and reviewer identity off the client; prepared acceptances now reconcile token consumption and completion idempotently after partial failure.
 - Hardened the enterprise Office review lifecycle with an expiring bounded review-session registry, safe first-review begin flow, idempotent acceptance and revision mutations, authoritative delivery-manifest validation, cancellable authorizer handoff, and stale-poll submission guards.
 - Fixed the structured Office drawer's primary submission so it validates all three decisions, posts only safe fields to the existing WPS visual endpoint, prevents duplicate clicks, and preserves dirty drafts on token expiry.
 - Persisted image-analysis errors now rebuild their in-memory recovery action after a session reload, so "Retry image analysis" and "Open image configuration" remain visible without storing attachment paths in browser storage.
