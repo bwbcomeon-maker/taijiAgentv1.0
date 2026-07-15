@@ -246,6 +246,50 @@ def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):
     assert merged["webui"]["feature_visibility"]["composer"]["model"] is False
 
 
+def test_packaged_config_declares_empty_provider_credentials_without_secrets():
+    packaged = yaml.safe_load(PACKAGED_CONFIG_PATH.read_text(encoding="utf-8"))
+
+    assert packaged["provider_credentials"] == []
+    serialized = PACKAGED_CONFIG_PATH.read_text(encoding="utf-8").lower()
+    assert "api_key:" not in serialized
+    assert "secret_env:" not in serialized
+
+
+def test_sync_packaged_config_only_adds_missing_provider_credentials(tmp_path):
+    template = tmp_path / "template.yaml"
+    target = tmp_path / "config.yaml"
+    template.write_text("provider_credentials: []\n", encoding="utf-8")
+    target.write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "keep",
+                        "provider_family": "alibaba_dashscope",
+                        "secret_env": "TAIJI_CREDENTIAL_KEEP_API_KEY",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+        check=True,
+    )
+
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["provider_credentials"][0]["id"] == "keep"
+
+    missing = tmp_path / "missing.yaml"
+    missing.write_text("model:\n  provider: deepseek\n", encoding="utf-8")
+    subprocess.run(
+        [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(missing)],
+        check=True,
+    )
+    assert yaml.safe_load(missing.read_text(encoding="utf-8"))["provider_credentials"] == []
+
+
 def test_sync_packaged_config_copies_template_for_missing_target(tmp_path):
     template = PACKAGED_CONFIG_PATH
     target = tmp_path / "fresh" / "config.yaml"

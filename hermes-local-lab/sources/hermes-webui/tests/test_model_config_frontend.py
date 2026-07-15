@@ -1525,10 +1525,26 @@ def test_image_generation_key_row_uses_dynamic_credentials_and_policy_explanatio
     assert 'id="imageGenProviderScopeHint"' in INDEX_HTML
     assert 'id="visionProviderScopeHint"' in INDEX_HTML
     assert "provider&&provider.oauth_managed" in PANELS_JS
-    assert "imageGenConfigApiKey.disabled=oauth||blocked" in PANELS_JS
+    assert "imageGenConfigApiKey.disabled=oauth||blocked||authReadOnly" in PANELS_JS
     assert "此服务由太极授权托管，无需填写 API 密钥。" in PANELS_JS
-    assert "keyRow.hidden=named||fields.length>0" in PANELS_JS
     assert "当前配置不符合国产策略，请切换到上方中国可用 Provider。" in PANELS_JS
+
+
+def test_auth_schema_keeps_non_editable_auth_explanation_visible():
+    assert "provider&&provider.auth_type" in PANELS_JS
+    assert "provider&&provider.auth_message" in PANELS_JS
+    assert "authReadOnly" in PANELS_JS
+    assert "keyRow.hidden=named||fields.length>0" not in PANELS_JS
+    assert "OAuth" in PANELS_JS
+    assert "无需填写" in PANELS_JS
+
+
+def test_endpoint_field_visibility_is_driven_by_provider_schema():
+    assert "providerRow&&providerRow.endpoint_fields" in PANELS_JS
+    assert "endpointNames.has('endpoint_mode')" in PANELS_JS
+    assert "endpointNames.has('workspace_id')" in PANELS_JS
+    assert "endpointNames.has('region')" in PANELS_JS
+    assert "endpointNames.has('base_url')" in PANELS_JS
 
 
 def test_model_config_license_layout_prioritizes_customer_and_compacts_actions():

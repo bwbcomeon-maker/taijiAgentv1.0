@@ -15,6 +15,7 @@ from agent.image_gen_provider import (
     save_url_image,
     success_response,
 )
+from agent.provider_credentials import auth_schema
 
 SIZE_MAP_X = {
     "landscape": "1536x1024",
@@ -49,6 +50,41 @@ def credential_field(
         "required": required,
         "secret": secret,
         "placeholder": placeholder,
+    }
+
+
+def normalized_setup_contract(
+    schema: dict[str, Any] | None,
+    *,
+    provider_family: str,
+    capabilities: Iterable[str],
+    auth_type: str = "api_key",
+    transport: str,
+    models: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """Return the common public provider contract used by settings UI."""
+    source = schema if isinstance(schema, dict) else {}
+    auth = auth_schema(source.get("auth_type") or auth_type)
+    raw_fields = source.get("credential_fields")
+    fields = [dict(field) for field in raw_fields if isinstance(field, dict)] if isinstance(raw_fields, list) else []
+    if not fields:
+        fields = [dict(field) for field in auth["credential_fields"]]
+    credentials = [
+        field
+        for field in fields
+        if bool(field.get("credential")) or bool(field.get("secret", True))
+    ]
+    endpoints = [field for field in fields if field not in credentials]
+    return {
+        "provider_family": str(provider_family or "").strip(),
+        "capabilities": [str(item) for item in capabilities if str(item).strip()],
+        "auth_type": auth["auth_type"],
+        "transport": str(source.get("transport") or transport or "").strip(),
+        "credential_fields": credentials,
+        "endpoint_fields": endpoints,
+        "models": [dict(item) for item in models if isinstance(item, dict)],
+        "auth_editable": bool(source.get("auth_implemented", auth["editable"])),
+        "auth_message": str(source.get("auth_message") or auth["message"]),
     }
 
 

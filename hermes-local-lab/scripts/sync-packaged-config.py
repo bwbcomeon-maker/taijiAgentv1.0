@@ -78,6 +78,10 @@ def sync_packaged_config(template_path: Path, target_path: Path) -> bool:
     target_config = _load_yaml(target_path)
     changed = False
 
+    if "provider_credentials" in template_config and "provider_credentials" not in target_config:
+        target_config["provider_credentials"] = list(template_config.get("provider_credentials") or [])
+        changed = True
+
     template_webui = _dict(template_config.get("webui"))
     template_visibility = _dict(template_webui.get("feature_visibility"))
     if template_visibility:

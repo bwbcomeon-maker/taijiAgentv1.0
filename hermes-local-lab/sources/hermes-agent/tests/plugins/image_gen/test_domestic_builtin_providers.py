@@ -77,6 +77,24 @@ class TestDashScopeQwenImageProvider:
         assert fields["endpoint_mode"]["placeholder"] == "workspace"
         assert fields["workspace_id"]["placeholder"] == "llm-demo"
 
+
+    def test_normalized_schema_keeps_non_secret_access_key_id_in_credentials(self):
+        from plugins.image_gen.domestic_common import normalized_setup_contract
+
+        contract = normalized_setup_contract(
+            {"auth_type": "access_key_secret"},
+            provider_family="example",
+            capabilities=("image_generation",),
+            transport="vendor_signed_request",
+        )
+
+        assert [field["name"] for field in contract["credential_fields"]] == [
+            "access_key_id",
+            "access_key_secret",
+        ]
+        assert contract["endpoint_fields"] == []
+        assert contract["auth_editable"] is False
+
     def test_missing_credentials_return_auth_required(self):
         from plugins.image_gen.dashscope import DashScopeQwenImageProvider
 

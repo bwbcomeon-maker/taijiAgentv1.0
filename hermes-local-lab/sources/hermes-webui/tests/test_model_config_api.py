@@ -115,6 +115,7 @@ def test_provider_credentials_report_vision_and_image_gen_usage(monkeypatch, tmp
                         "label": "Alibaba default",
                         "auth_type": "api_key",
                         "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                        "default": True,
                     }
                 ],
                 "auxiliary": {"vision": {"credential_ref": "alibaba-default"}},
@@ -179,6 +180,174 @@ def test_model_config_includes_only_safe_provider_credential_fields(monkeypatch,
     dumped = json.dumps(result, ensure_ascii=False)
     assert secret not in dumped
     assert "secret_env" not in dumped
+
+
+def test_image_and_vision_provider_rows_expose_normalized_auth_transport_contract(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "image_gen:\n  provider: dashscope\n", encoding="utf-8"
+    )
+
+    result = model_config.get_model_config()
+
+    rows = list(result["vision_providers"]) + list(result["image_gen_providers"])
+    assert rows
+    required = {
+        "provider_family",
+        "capabilities",
+        "auth_type",
+        "transport",
+        "credential_fields",
+        "endpoint_fields",
+        "models",
+        "auth_editable",
+        "auth_message",
+    }
+    for row in rows:
+        assert required <= set(row), row.get("id")
+        assert row["auth_type"] in {
+            "api_key",
+            "bearer_token",
+            "access_key_secret",
+            "service_account",
+            "oauth",
+            "no_auth",
+        }
+    alibaba = next(row for row in result["vision_providers"] if row["id"] == "alibaba")
+    dashscope = next(
+        row for row in model_config._image_gen_provider_rows("dashscope")
+        if row["id"] == "dashscope"
+    )
+    assert alibaba["transport"] == "dashscope_openai_compatible"
+    assert alibaba["capabilities"] == ["vision"]
+    assert dashscope["transport"] == "dashscope_native_image_generation"
+    assert dashscope["capabilities"] == ["image_generation"]
+    assert [field["name"] for field in dashscope["endpoint_fields"]] == [
+        "endpoint_mode",
+        "workspace_id",
+        "region",
+        "base_url",
+    ]
+
+
+def test_get_model_config_does_not_lazy_write_provider_ref(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    original = {
+        "provider_credentials": [
+            {
+                "id": "alibaba-default",
+                "provider_family": "alibaba_dashscope",
+                "label": "Alibaba",
+                "auth_type": "api_key",
+                "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+            }
+        ],
+        "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(original), encoding="utf-8")
+
+    model_config.get_model_config()
+
+    assert _read_config(tmp_path) == original
+
+
+def test_first_vision_save_lazily_binds_family_default_and_is_idempotent(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "alibaba-default",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Alibaba",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                        "default": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    body = {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+    }
+
+    model_config.set_vision_config(body)
+    first = _read_config(tmp_path)
+    model_config.set_vision_config(body)
+
+    assert first["auxiliary"]["vision"]["credential_ref"] == "alibaba-default"
+    assert _read_config(tmp_path) == first
+
+
+def test_vision_save_without_explicit_default_keeps_legacy_fallback(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "image-only",
+                        "provider_family": "alibaba_dashscope",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_IMAGE_ONLY_API_KEY",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+        }
+    )
+
+    assert _read_config(tmp_path)["auxiliary"]["vision"]["credential_ref"] == ""
+
+
+def test_lazy_default_binding_rolls_back_when_config_save_fails(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    original = {
+        "provider_credentials": [
+            {
+                "id": "alibaba-default",
+                "provider_family": "alibaba_dashscope",
+                "auth_type": "api_key",
+                "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                "default": True,
+            }
+        ]
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(original), encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_save_yaml_config_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        model_config.set_vision_config(
+            {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "endpoint_mode": "public",
+                "region": "cn-beijing",
+            }
+        )
+
+    assert _read_config(tmp_path) == original
 
 
 def test_provider_credential_routes_map_validation_errors_to_400(monkeypatch):
@@ -2273,6 +2442,8 @@ def test_image_gen_provider_rows_expose_credential_status(monkeypatch, tmp_path)
 
     assert [field["env_var"] for field in row["credential_fields"]] == [
         "DASHSCOPE_API_KEY",
+    ]
+    assert [field["env_var"] for field in row["endpoint_fields"]] == [
         "DASHSCOPE_WORKSPACE_ID",
         "DASHSCOPE_REGION",
     ]

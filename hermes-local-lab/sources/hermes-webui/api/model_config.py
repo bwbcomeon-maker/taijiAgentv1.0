@@ -26,10 +26,12 @@ from typing import Any
 from agent.provider_credentials import (
     credential_transaction,
     credential_secret_env,
+    default_credential_ref,
     load_credential,
     normalize_credential_id,
     provider_family,
 )
+from plugins.image_gen.domestic_common import credential_field, normalized_setup_contract
 from agent.alibaba_endpoints import build_vision_base_url
 from agent.image_gen_verification import (
     active_custom_provider_identity,
@@ -84,6 +86,8 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
     "alibaba": {
         "name": "阿里百炼 Qwen-VL",
         "description": "用于上传图片、截图和表格截图理解",
+        "auth_type": "api_key",
+        "transport": "dashscope_openai_compatible",
         "default_model": "qwen3-vl-plus",
         "models": [
             {"id": "qwen3-vl-plus", "label": "Qwen3 VL Plus"},
@@ -94,6 +98,8 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
     "zai": {
         "name": "智谱 GLM-V",
         "description": "用于图片理解和视觉问答",
+        "auth_type": "api_key",
+        "transport": "zhipu_openai_compatible",
         "default_model": "glm-5v-turbo",
         "models": [
             {"id": "glm-5v-turbo", "label": "GLM-5V Turbo"},
@@ -104,6 +110,8 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
     "custom": {
         "name": "自定义国产兼容端点",
         "description": "适合私有化或 OpenAI 兼容视觉接口",
+        "auth_type": "api_key",
+        "transport": "openai_chat_completions",
         "default_model": "",
         "models": [],
         "requires_base_url": True,
@@ -754,6 +762,12 @@ def _blocked_image_gen_row(
     status_message: str = "当前配置不符合国产策略，请切换到中国可用的稳定生图 Provider。",
 ) -> dict[str, Any]:
     public = public_id or _public_image_gen_provider_id(provider_id)
+    contract = normalized_setup_contract(
+        {"auth_type": "oauth" if provider_id == "openai-codex" else "api_key"},
+        provider_family=provider_family(public),
+        capabilities=("image_generation",),
+        transport="policy_blocked",
+    )
     return {
         "id": public,
         "name": _BLOCKED_IMAGE_GEN_PROVIDER_LABELS.get(public, _BLOCKED_IMAGE_GEN_PROVIDER_LABELS.get(provider_id, public)),
@@ -775,6 +789,7 @@ def _blocked_image_gen_row(
         "domestic": False,
         "integration_status": "blocked",
         "policy_blocked": True,
+        **contract,
     }
 
 
@@ -846,14 +861,42 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 rows.append(blocked)
             continue
 
-        credential_fields = _image_gen_credential_fields(
+        raw_credential_fields = _image_gen_credential_fields(
             schema=schema,
             env_var=env_var,
             env_vars=env_vars,
         )
+        transport = {
+            "dashscope": "dashscope_native_image_generation",
+            "doubao": "volcengine_ark_images",
+            "qianfan": "qianfan_images",
+            "zhipu-image": "zhipu_images",
+            "minimax-image": "minimax_images",
+        }.get(pid, "openai_images" if is_custom else f"{pid}_images")
+        contract = normalized_setup_contract(
+            schema | {"credential_fields": raw_credential_fields},
+            provider_family=provider_family(pid),
+            capabilities=("image_generation",),
+            auth_type="api_key",
+            transport=transport,
+            models=[
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "label": str(
+                        item.get("display")
+                        or item.get("label")
+                        or item.get("id")
+                        or ""
+                    ).strip(),
+                }
+                for item in models
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ],
+        )
+        credential_fields = contract["credential_fields"]
         named_key_status = _image_gen_named_key_status(pid, active=active)
         credential_status = _image_gen_credential_status(
-            credential_fields,
+            raw_credential_fields,
             active_options=active_options if active else {},
             secret_status_override=named_key_status,
         )
@@ -903,6 +946,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 "domestic": domestic,
                 "integration_status": integration_status,
                 "policy_blocked": False,
+                **contract,
             }
         )
 
@@ -915,7 +959,22 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 rows.append(_blocked_image_gen_row(provider_id=pid, active=True))
             continue
         fallback = _IMAGE_GEN_FALLBACK_META.get(pid, {})
-        credential_fields = _image_gen_credential_fields(schema={}, env_var=env_var, env_vars=[env_var])
+        raw_credential_fields = _image_gen_credential_fields(schema={}, env_var=env_var, env_vars=[env_var])
+        contract = normalized_setup_contract(
+            {"credential_fields": raw_credential_fields},
+            provider_family=provider_family(pid),
+            capabilities=("image_generation",),
+            auth_type="api_key",
+            transport={
+                "dashscope": "dashscope_native_image_generation",
+                "doubao": "volcengine_ark_images",
+                "qianfan": "qianfan_images",
+                "zhipu-image": "zhipu_images",
+                "minimax-image": "minimax_images",
+            }.get(pid, f"{pid}_images"),
+            models=fallback.get("models") or [],
+        )
+        credential_fields = contract["credential_fields"]
         credential_status = _image_gen_credential_status(
             credential_fields,
             active_options=active_options if active else {},
@@ -942,6 +1001,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 "domestic": True,
                 "integration_status": "stable",
                 "policy_blocked": False,
+                **contract,
             }
         )
     if "openai-codex" not in seen:
@@ -1916,6 +1976,39 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
         key_status = _vision_key_status(pid, vision_cfg if pid == active else None)
         requires_base_url = bool(meta.get("requires_base_url"))
         active_base_url = str((vision_cfg or {}).get("base_url") or "").strip() if pid == active else ""
+        fields = []
+        env_var = _VISION_KEY_ENV.get(pid, "")
+        if env_var:
+            fields.append(
+                credential_field(
+                    name="api_key",
+                    env_var=env_var,
+                    label="API Key",
+                )
+            )
+        endpoint_fields: list[dict[str, Any]] = []
+        if pid == "alibaba":
+            endpoint_fields = [
+                credential_field(name="endpoint_mode", env_var="", label="接入方式", required=False, secret=False),
+                credential_field(name="workspace_id", env_var="", label="Workspace ID", required=False, secret=False),
+                credential_field(name="region", env_var="", label="地域", required=False, secret=False),
+                credential_field(name="base_url", env_var="", label="Base URL", required=False, secret=False),
+            ]
+        elif requires_base_url:
+            endpoint_fields = [
+                credential_field(name="base_url", env_var="", label="Base URL", required=True, secret=False)
+            ]
+        contract = normalized_setup_contract(
+            {
+                "auth_type": meta.get("auth_type", "api_key"),
+                "transport": meta.get("transport", ""),
+                "credential_fields": fields + endpoint_fields,
+            },
+            provider_family=provider_family(pid),
+            capabilities=("vision",),
+            transport=str(meta.get("transport") or ""),
+            models=meta.get("models") or [],
+        )
         rows.append(
             {
                 "id": pid,
@@ -1928,6 +2021,7 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
                 "requires_base_url": requires_base_url,
                 "models": list(meta.get("models") or []),
                 "default_model": str(meta.get("default_model") or ""),
+                **contract,
             }
         )
     try:
@@ -1947,10 +2041,34 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
     for row in custom_rows:
         row["key_status"] = _key_status_for_env(row["key_status"]["env_var"])
         row["available"] = bool(row["key_status"].get("configured"))
+        custom_contract = normalized_setup_contract(
+            {
+                "auth_type": "api_key",
+                "transport": row.get("transport") or "openai_chat_completions",
+                "credential_fields": [
+                    credential_field(
+                        name="api_key",
+                        env_var=str(row["key_status"].get("env_var") or ""),
+                        label="API Key",
+                    )
+                ],
+            },
+            provider_family=str(row.get("id") or ""),
+            capabilities=("vision",),
+            transport=str(row.get("transport") or "openai_chat_completions"),
+            models=row.get("models") or [],
+        )
+        row.update(custom_contract)
         rows.append(row)
     custom_ids = {str(row.get("id") or "") for row in custom_rows}
     if active and active not in _VISION_PROVIDER_META and active not in custom_ids and active != "auto":
         key_status = _vision_key_status(active, vision_cfg)
+        legacy_contract = normalized_setup_contract(
+            {"credential_fields": []},
+            provider_family=provider_family(active),
+            capabilities=("vision",),
+            transport="legacy_vision",
+        )
         rows.append(
             {
                 "id": active,
@@ -1963,6 +2081,7 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
                 "requires_base_url": False,
                 "models": [],
                 "default_model": "",
+                **legacy_contract,
             }
         )
     return rows
@@ -2072,6 +2191,11 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             workspace_prefix=workspace_id,
             custom_url=base_url,
         )
+        if not credential_ref:
+            credential_ref = default_credential_ref(
+                provider_id,
+                config_data=_load_yaml_config_file(_get_config_path()),
+            )
         if credential_ref:
             credential_ref = normalize_credential_id(credential_ref)
     elif named_custom_entry is not None:
@@ -2436,6 +2560,11 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
         credentials = {}
     if not requested_provider_id:
         raise ValueError("provider is required")
+    if provider_id == "dashscope" and not credential_ref:
+        credential_ref = default_credential_ref(
+            provider_id,
+            config_data=_load_yaml_config_file(_get_config_path()),
+        )
     if credential_ref and provider_id != "dashscope":
         raise ValueError("credential_ref is only supported for DashScope image generation")
 

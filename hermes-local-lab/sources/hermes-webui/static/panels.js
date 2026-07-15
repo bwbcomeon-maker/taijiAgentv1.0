@@ -8306,6 +8306,7 @@ function _renderImageGenCredentialFields(provider){
  if(!box) return;
  box.innerHTML='';
  const allFields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
+ const authReadOnly=!!(provider&&provider.auth_editable===false);
  const fields=String(provider&&provider.id||'')==='dashscope'?[]:allFields;
  if(!fields.length){
   box.hidden=true;
@@ -8331,6 +8332,7 @@ function _renderImageGenCredentialFields(provider){
   input.dataset.imageGenCredential=name;
   input.dataset.envVar=String(field.env_var||'');
   input.dataset.secret=secret?'1':'0';
+  input.disabled=authReadOnly;
   if(secret) input.dataset.secretField='true';
   const status=(provider.credential_status&&Array.isArray(provider.credential_status.fields))
    ? provider.credential_status.fields.find(item=>String(item.name||item.env_var||'')===name||String(item.env_var||'')===String(field.env_var||''))
@@ -8349,7 +8351,8 @@ function _renderImageGenCredentialFields(provider){
   }
   const hint=document.createElement('div');
   hint.className='model-config-hint';
-  hint.textContent=configured?'已配置，留空不会覆盖。':(field.required===false?'可选，留空使用默认值。':'未配置，保存后生效。');
+  hint.textContent=authReadOnly?String(provider.auth_message||'当前认证方式暂不支持在此编辑。')
+   :(configured?'已配置，留空不会覆盖。':(field.required===false?'可选，留空使用默认值。':'未配置，保存后生效。'));
   row.appendChild(label);
   row.appendChild(wrap);
   row.appendChild(hint);
@@ -8872,16 +8875,21 @@ function _syncImageCapabilityEndpointFields(capability){
  const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
  const provider=String(($(prefix+'Provider')||{}).value||'').trim();
  const endpointMode=String(($(prefix+'EndpointMode')||{}).value||'').trim();
- const alibaba=capability==='vision'?provider==='alibaba':provider==='dashscope';
+ const providerRow=capability==='vision'
+  ?_modelConfigVisionProviderRow(provider,_modelConfigData)
+  :_modelConfigImageProviderRow(provider,_modelConfigData);
+ const endpointFields=Array.isArray(providerRow&&providerRow.endpoint_fields)?providerRow.endpoint_fields:[];
+ const endpointNames=new Set(endpointFields.map(field=>String(field&&field.name||'')).filter(Boolean));
  const modeRow=$(prefix+'EndpointModeRow');
  const regionRow=$(prefix+'RegionRow');
  const workspaceRow=$(prefix+'WorkspaceRow');
  const baseRow=$(prefix+'BaseUrlRow');
  const namedCustomVision=capability==='vision'&&provider.startsWith('custom:');
- if(modeRow) modeRow.hidden=!alibaba;
- if(regionRow) regionRow.hidden=!alibaba||endpointMode==='custom';
- if(workspaceRow) workspaceRow.hidden=!alibaba||endpointMode!=='workspace';
- if(baseRow) baseRow.hidden=namedCustomVision||(alibaba?endpointMode!=='custom':capability!=='vision');
+ if(modeRow) modeRow.hidden=!endpointNames.has('endpoint_mode');
+ if(regionRow) regionRow.hidden=!endpointNames.has('region')||endpointMode==='custom';
+ if(workspaceRow) workspaceRow.hidden=!endpointNames.has('workspace_id')||endpointMode!=='workspace';
+ if(baseRow) baseRow.hidden=namedCustomVision||!endpointNames.has('base_url')
+  ||(endpointNames.has('endpoint_mode')&&endpointMode!=='custom');
  _renderImageCapabilityEndpointPreview(capability);
 }
 
@@ -9725,6 +9733,7 @@ function _syncVisionConfigControls(){
  const providerSel=$('visionConfigProvider');
  const keyRow=$('visionConfigApiKeyRow');
  const hint=$('visionConfigKeyHint');
+ const keyInput=$('visionConfigApiKey');
  if(!providerSel||!_modelConfigData) return;
  const providerId=providerSel.value||'';
  const providers=Array.isArray(_modelConfigData.vision_providers)?_modelConfigData.vision_providers:[];
@@ -9734,10 +9743,20 @@ function _syncVisionConfigControls(){
  const envVar=provider&&provider.key_status&&provider.key_status.env_var;
  const named=_providerSupportsNamedCredential('vision',providerId);
  const namedCustom=providerId.startsWith('custom:');
+ const authType=String(provider&&provider.auth_type||'api_key');
+ const authReadOnly=!!(provider&&provider.auth_editable===false);
+ const pasteBtn=keyRow?keyRow.querySelector('.model-config-paste-btn'):null;
  if(named) _renderCapabilityCredentialOptions('vision',providerId,((_modelConfigData.vision||{}).credential_ref||''));
- if(keyRow) keyRow.hidden=named||namedCustom||!envVar;
+ if(keyRow) keyRow.hidden=!authReadOnly&&(named||namedCustom||!envVar);
+ if(keyInput){
+  keyInput.disabled=authReadOnly;
+  if(authReadOnly) keyInput.placeholder=String(provider&&provider.auth_message||'当前认证方式无需或不支持在此编辑。');
+ }
+ if(pasteBtn) pasteBtn.disabled=authReadOnly;
  if(hint){
-  if(named){
+  if(authReadOnly){
+   hint.textContent=String(provider&&provider.auth_message||(authType==='oauth'?'此 Provider 使用 OAuth 授权，请完成授权后刷新状态。':'此 Provider 无需填写凭据。'));
+  }else if(named){
    hint.textContent='阿里百炼密钥请在上方“平台凭据”中管理。';
   }else if(namedCustom){
    hint.textContent='该命名式 Provider 使用独立本机密钥；请在“管理外部识图”中更新。';
@@ -9769,18 +9788,22 @@ function _syncImageGenConfigControls(){
  const blocked=!!(provider&&provider.policy_blocked);
  const fields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
  const oauth=!!(provider&&provider.oauth_managed);
+ const authType=String(provider&&provider.auth_type||'api_key');
+ const authReadOnly=!!(provider&&provider.auth_editable===false);
  const named=_providerSupportsNamedCredential('image',providerId);
  if(named) _renderCapabilityCredentialOptions('image',providerId,((_modelConfigData.image_gen||{}).credential_ref||''));
- if(keyRow) keyRow.hidden=named||fields.length>0;
+ if(keyRow) keyRow.hidden=!authReadOnly&&(named||fields.length>0);
  if(imageGenConfigApiKey){
-  imageGenConfigApiKey.disabled=oauth||blocked;
-  imageGenConfigApiKey.placeholder=blocked?'当前配置已被国产策略阻止':(oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥');
+  imageGenConfigApiKey.disabled=oauth||blocked||authReadOnly;
+  imageGenConfigApiKey.placeholder=blocked?'当前配置已被国产策略阻止':(authReadOnly?String(provider&&provider.auth_message||'当前认证方式无需或不支持在此编辑。'):(oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥'));
  }
- if(pasteBtn) pasteBtn.disabled=oauth||blocked;
+ if(pasteBtn) pasteBtn.disabled=oauth||blocked||authReadOnly;
  if(saveBtn) saveBtn.disabled=blocked;
  if(hint){
   if(blocked){
    hint.textContent='当前配置不符合国产策略，请切换到上方中国可用 Provider。';
+  }else if(authReadOnly){
+   hint.textContent=String(provider&&provider.auth_message||(authType==='oauth'?'此 Provider 使用 OAuth 授权，请完成授权后刷新状态。':'此 Provider 无需填写凭据。'));
   }else if(provider&&provider.credential_status&&Array.isArray(provider.credential_status.missing)&&provider.credential_status.missing.length){
    hint.textContent='缺少：'+provider.credential_status.missing.join('、')+'。密钥写入本机凭据区，Workspace/Region 等非密钥参数写入当前配置档。';
   }else if(oauth){

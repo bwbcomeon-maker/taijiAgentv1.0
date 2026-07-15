@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from agent.provider_credentials import (
+    AUTH_TYPES,
+    auth_schema,
     credential_secret_env,
+    default_credential_ref,
     find_credential,
     load_credential,
     normalize_credential_id,
@@ -99,3 +103,87 @@ def test_credential_helpers_normalize_aliases_and_find_rows(tmp_path, monkeypatc
 def test_invalid_credential_id_is_rejected():
     with pytest.raises(ValueError):
         normalize_credential_id("../../secret")
+
+
+@pytest.mark.parametrize(
+    ("auth_type", "field_names", "editable"),
+    [
+        ("api_key", ["api_key"], True),
+        ("bearer_token", ["bearer_token"], False),
+        ("access_key_secret", ["access_key_id", "access_key_secret"], False),
+        ("service_account", ["service_account_json"], False),
+        ("oauth", [], False),
+        ("no_auth", [], False),
+    ],
+)
+def test_auth_schema_expresses_supported_shapes_without_claiming_adapter_support(
+    auth_type, field_names, editable
+):
+    schema = auth_schema(auth_type)
+
+    assert set(AUTH_TYPES) == {
+        "api_key",
+        "bearer_token",
+        "access_key_secret",
+        "service_account",
+        "oauth",
+        "no_auth",
+    }
+    assert schema["auth_type"] == auth_type
+    assert [field["name"] for field in schema["credential_fields"]] == field_names
+    assert schema["editable"] is editable
+    assert isinstance(schema["message"], str) and schema["message"]
+
+
+def test_named_default_credential_precedes_legacy_env_without_mutating_config(monkeypatch):
+    config = _config()
+    config["provider_credentials"][0]["default"] = True
+    before = yaml.safe_dump(config, sort_keys=False)
+    monkeypatch.setenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", "named-default")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-key")
+
+    assert default_credential_ref("alibaba", config_data=config) == "alibaba-default"
+    assert resolve_api_key("alibaba", config_data=config) == "named-default"
+    assert yaml.safe_dump(config, sort_keys=False) == before
+
+
+def test_unmarked_named_credential_does_not_take_over_legacy_config(monkeypatch):
+    monkeypatch.setenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", "named-key")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-key")
+
+    assert default_credential_ref("alibaba", config_data=_config()) == ""
+    assert resolve_api_key("alibaba", config_data=_config()) == "legacy-key"
+
+
+def test_explicit_ref_precedes_family_default(monkeypatch):
+    config = _config()
+    config["provider_credentials"].append(
+        {
+            "id": "alibaba-image",
+            "provider_family": "alibaba_dashscope",
+            "label": "Image",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY",
+        }
+    )
+    monkeypatch.setenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", "default-key")
+    monkeypatch.setenv("TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY", "image-key")
+
+    assert resolve_api_key("alibaba", "alibaba-image", config_data=config) == "image-key"
+
+
+def test_multiple_explicit_family_defaults_fail_closed():
+    config = _config()
+    config["provider_credentials"][0]["default"] = True
+    config["provider_credentials"].append(
+        {
+            "id": "alibaba-other",
+            "provider_family": "alibaba_dashscope",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_ALIBABA_OTHER_API_KEY",
+            "default": True,
+        }
+    )
+
+    with pytest.raises(ValueError, match="默认凭据"):
+        default_credential_ref("alibaba", config_data=config)
