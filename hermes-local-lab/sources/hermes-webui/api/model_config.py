@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.provider_credentials import (
+    credential_transaction,
     credential_secret_env,
     load_credential,
     normalize_credential_id,
@@ -100,9 +101,6 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "requires_base_url": True,
     },
 }
-_PROVIDER_CREDENTIAL_LOCK = threading.RLock()
-
-
 def _validate_provider_credential_secret_env(row: dict[str, Any]) -> str:
     expected = credential_secret_env(row.get("id"))
     actual = str(row.get("secret_env") or "").strip()
@@ -240,7 +238,7 @@ def _public_provider_credential(
 
 
 def get_provider_credentials_config() -> dict[str, Any]:
-    with _PROVIDER_CREDENTIAL_LOCK:
+    with credential_transaction():
         config_data = _load_yaml_config_file(_get_config_path())
         rows = config_data.get("provider_credentials")
         credentials: list[dict[str, Any]] = []
@@ -282,7 +280,7 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
     }
     config_path = _get_config_path()
     env_path = _get_hermes_home() / ".env"
-    with _PROVIDER_CREDENTIAL_LOCK:
+    with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
         previous_index, previous_row = _provider_credential_row(config_data, credential_id)
@@ -337,7 +335,7 @@ def delete_provider_credential(credential_id: str) -> dict[str, Any]:
     normalized = normalize_credential_id(credential_id)
     config_path = _get_config_path()
     env_path = _get_hermes_home() / ".env"
-    with _PROVIDER_CREDENTIAL_LOCK:
+    with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
         used_by = _provider_credential_used_by(config_data, normalized)
@@ -1383,6 +1381,13 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("provider is required")
     if provider_id not in _VISION_PROVIDER_META:
         raise ValueError(f"unknown vision provider: {provider_id}")
+    if (
+        provider_id == "alibaba"
+        and credential_ref
+        and api_key is not None
+        and str(api_key).strip()
+    ):
+        raise ValueError("credential_ref and api_key cannot be used together")
 
     meta = _VISION_PROVIDER_META[provider_id]
     if not model_id:
@@ -1411,62 +1416,66 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
         )
         if credential_ref:
             credential_ref = normalize_credential_id(credential_ref)
-            row = load_credential(
-                credential_ref,
-                config_data=_load_yaml_config_file(_get_config_path()),
-            )
-            if provider_family(row.get("provider_family")) != provider_family(provider_id):
-                raise ValueError("所选凭据不属于当前 Provider。")
     if bool(meta.get("requires_base_url")) and not base_url:
         raise ValueError("base_url is required for custom vision provider")
 
-    env_var = _VISION_KEY_ENV.get(provider_id)
-    if api_key is not None and str(api_key).strip():
-        if not env_var:
-            raise ValueError(f"{provider_id} does not accept an API key from WebUI")
-        _write_env_file(_get_hermes_home() / ".env", {env_var: str(api_key).strip()})
-
     config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        auxiliary = config_data.get("auxiliary")
-        if not isinstance(auxiliary, dict):
-            auxiliary = {}
-        vision_cfg = auxiliary.get("vision")
-        if not isinstance(vision_cfg, dict):
-            vision_cfg = {}
-        vision_cfg["provider"] = provider_id
-        vision_cfg["model"] = model_id
-        if provider_id == "alibaba":
-            vision_cfg["credential_ref"] = credential_ref
-            vision_cfg["endpoint_mode"] = endpoint_mode
-            vision_cfg["region"] = region
-            vision_cfg["workspace_id"] = workspace_id
-            vision_cfg["base_url"] = base_url
-            vision_cfg.pop("api_key", None)
-            vision_cfg.pop("api_mode", None)
-        elif provider_id == "custom":
-            vision_cfg["base_url"] = base_url
-            has_custom_key = (
-                (api_key is not None and str(api_key).strip())
-                or _key_status_for_env("AUXILIARY_VISION_API_KEY").get("configured")
+    with credential_transaction():
+        if credential_ref:
+            row = load_credential(
+                credential_ref,
+                config_data=_load_yaml_config_file(config_path),
             )
-            if has_custom_key:
-                vision_cfg["api_key"] = "${AUXILIARY_VISION_API_KEY}"
-            else:
+            if provider_family(row.get("provider_family")) != provider_family(provider_id):
+                raise ValueError("所选凭据不属于当前 Provider。")
+        env_var = _VISION_KEY_ENV.get(provider_id)
+        if api_key is not None and str(api_key).strip():
+            if not env_var:
+                raise ValueError(f"{provider_id} does not accept an API key from WebUI")
+            _write_env_file(
+                _get_hermes_home() / ".env", {env_var: str(api_key).strip()}
+            )
+
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
+            auxiliary = config_data.get("auxiliary")
+            if not isinstance(auxiliary, dict):
+                auxiliary = {}
+            vision_cfg = auxiliary.get("vision")
+            if not isinstance(vision_cfg, dict):
+                vision_cfg = {}
+            vision_cfg["provider"] = provider_id
+            vision_cfg["model"] = model_id
+            if provider_id == "alibaba":
+                vision_cfg["credential_ref"] = credential_ref
+                vision_cfg["endpoint_mode"] = endpoint_mode
+                vision_cfg["region"] = region
+                vision_cfg["workspace_id"] = workspace_id
+                vision_cfg["base_url"] = base_url
                 vision_cfg.pop("api_key", None)
-        else:
-            vision_cfg.pop("base_url", None)
-            vision_cfg.pop("api_key", None)
-            vision_cfg.pop("api_mode", None)
-        if provider_id != "alibaba":
-            vision_cfg.pop("credential_ref", None)
-            vision_cfg.pop("endpoint_mode", None)
-            vision_cfg.pop("region", None)
-            vision_cfg.pop("workspace_id", None)
-        auxiliary["vision"] = vision_cfg
-        config_data["auxiliary"] = auxiliary
-        _save_yaml_config_file(config_path, config_data)
+                vision_cfg.pop("api_mode", None)
+            elif provider_id == "custom":
+                vision_cfg["base_url"] = base_url
+                has_custom_key = (
+                    (api_key is not None and str(api_key).strip())
+                    or _key_status_for_env("AUXILIARY_VISION_API_KEY").get("configured")
+                )
+                if has_custom_key:
+                    vision_cfg["api_key"] = "${AUXILIARY_VISION_API_KEY}"
+                else:
+                    vision_cfg.pop("api_key", None)
+            else:
+                vision_cfg.pop("base_url", None)
+                vision_cfg.pop("api_key", None)
+                vision_cfg.pop("api_mode", None)
+            if provider_id != "alibaba":
+                vision_cfg.pop("credential_ref", None)
+                vision_cfg.pop("endpoint_mode", None)
+                vision_cfg.pop("region", None)
+                vision_cfg.pop("workspace_id", None)
+            auxiliary["vision"] = vision_cfg
+            config_data["auxiliary"] = auxiliary
+            _save_yaml_config_file(config_path, config_data)
     reload_config()
     invalidate_models_cache()
     _invalidate_vision_verification()

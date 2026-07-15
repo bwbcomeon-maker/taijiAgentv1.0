@@ -2747,6 +2747,119 @@ def test_explicit_vision_override_does_not_resolve_saved_alibaba_credential(monk
     resolver.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strict_identity", [False, True])
+async def test_alibaba_vision_call_chain_keeps_saved_transport_and_provider_identity(
+    monkeypatch, strict_identity
+):
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        if task == "vision"
+        else {},
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_api_key",
+        lambda provider, credential_ref: "named-runtime-secret",
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="vision-ok"))]
+    )
+    fake_client = SimpleNamespace(
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(return_value=response))
+        ),
+    )
+    routed = []
+
+    def route(provider, **kwargs):
+        routed.append((provider, kwargs))
+        return fake_client, kwargs.get("model")
+
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", route)
+    resolution = {}
+    explicit = (
+        {"provider": "alibaba", "model": "qwen3-vl-plus", "no_fallback": True}
+        if strict_identity
+        else {}
+    )
+
+    result = await async_call_llm(
+        task="vision",
+        messages=[{"role": "user", "content": "inspect"}],
+        resolution_out=resolution,
+        **explicit,
+    )
+
+    assert result is response
+    assert resolution == {"provider": "alibaba", "model": "qwen3-vl-plus"}
+    assert routed == [
+        (
+            "alibaba",
+            {
+                "model": "qwen3-vl-plus",
+                "async_mode": True,
+                "explicit_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "explicit_api_key": "named-runtime-secret",
+                "api_mode": None,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "dns_failure"),
+    [
+        ("https://127.0.0.1/compatible-mode/v1", False),
+        ("https://unresolvable.example/compatible-mode/v1", True),
+    ],
+)
+async def test_alibaba_custom_vision_endpoint_fails_closed_before_router(
+    monkeypatch, base_url, dns_failure
+):
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+            "endpoint_mode": "custom",
+            "base_url": base_url,
+        }
+        if task == "vision"
+        else {},
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_api_key",
+        lambda provider, credential_ref: "named-runtime-secret",
+    )
+    if dns_failure:
+        monkeypatch.setattr(
+            "socket.getaddrinfo", MagicMock(side_effect=OSError("dns failed"))
+        )
+    router = MagicMock(side_effect=AssertionError("network router must not run"))
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", router)
+
+    with pytest.raises(ValueError, match="unsafe Alibaba vision endpoint"):
+        await async_call_llm(
+            task="vision",
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            messages=[{"role": "user", "content": "inspect"}],
+            no_fallback=True,
+        )
+    router.assert_not_called()
+
+
 class TestCodexAuxiliaryAdapterTimeout:
     def test_forwards_timeout_to_responses_create(self):
         message_item = SimpleNamespace(

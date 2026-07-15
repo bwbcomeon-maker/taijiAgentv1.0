@@ -8,6 +8,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -682,6 +684,80 @@ def test_alibaba_vision_config_rejects_model_outside_server_allowlist(monkeypatc
         )
 
 
+def test_alibaba_vision_rejects_credential_ref_with_inline_api_key(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "label": "阿里默认凭据",
+            "api_key": "named-secret",
+        }
+    )
+
+    with pytest.raises(ValueError, match="credential_ref.*api_key"):
+        model_config.set_vision_config(
+            {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "credential_ref": "alibaba-default",
+                "api_key": "must-not-write",
+            }
+        )
+
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY" not in env_text
+    assert "must-not-write" not in env_text
+
+
+def test_concurrent_vision_binding_and_credential_delete_cannot_leave_dangling_ref(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "label": "阿里默认凭据",
+            "api_key": "named-secret",
+        }
+    )
+    validated = threading.Event()
+    continue_binding = threading.Event()
+    original_load_credential = model_config.load_credential
+
+    def pause_after_validation(*args, **kwargs):
+        row = original_load_credential(*args, **kwargs)
+        validated.set()
+        assert continue_binding.wait(timeout=2)
+        return row
+
+    monkeypatch.setattr(model_config, "load_credential", pause_after_validation)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        bind_future = pool.submit(
+            model_config.set_vision_config,
+            {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "credential_ref": "alibaba-default",
+            },
+        )
+        assert validated.wait(timeout=2)
+        delete_future = pool.submit(
+            model_config.delete_provider_credential, "alibaba-default"
+        )
+        time.sleep(0.1)
+        continue_binding.set()
+        bind_future.result(timeout=2)
+        with pytest.raises(ValueError, match="正在使用"):
+            delete_future.result(timeout=2)
+
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == "alibaba-default"
+    assert saved["provider_credentials"][0]["id"] == "alibaba-default"
+
+
 def test_model_config_includes_image_understanding_config(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     (tmp_path / "config.yaml").write_text(
@@ -805,6 +881,70 @@ def test_vision_test_persists_verified_result_without_model_text_or_secret(monke
         assert forbidden not in public_dump
         assert forbidden not in persisted_dump
     assert model_config.get_vision_config()["vision"]["verification"]["status"] == "verified"
+
+
+def test_vision_probe_full_chain_uses_named_key_and_keeps_alibaba_identity(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(
+        model_config, "_vision_verification_state_path", lambda *_: state_path
+    )
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default",
+            "provider": "alibaba",
+            "label": "阿里默认凭据",
+            "api_key": "named-probe-secret",
+        }
+    )
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "credential_ref": "alibaba-default",
+        }
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="TAIJI-VISION-CHECK-7319")
+            )
+        ]
+    )
+    fake_client = SimpleNamespace(
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(return_value=response))
+        ),
+    )
+    routed = []
+
+    def route(provider, model=None, async_mode=False, **kwargs):
+        routed.append((provider, model, async_mode, kwargs))
+        return fake_client, model
+
+    import agent.auxiliary_client as auxiliary_client
+
+    monkeypatch.setattr(auxiliary_client, "resolve_provider_client", route)
+
+    result = model_config.test_vision_config()
+
+    assert result["status"] == "verified"
+    assert result["provider"] == "alibaba"
+    assert routed == [
+        (
+            "alibaba",
+            "qwen3-vl-plus",
+            True,
+            {
+                "explicit_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "explicit_api_key": "named-probe-secret",
+                "api_mode": None,
+            },
+        )
+    ]
 
 
 def test_vision_test_failure_returns_only_safe_fields(monkeypatch, tmp_path):

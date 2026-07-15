@@ -4456,6 +4456,7 @@ def _resolve_task_provider_model(
     cfg_api_key = None
     cfg_api_mode = None
     cfg_credential_ref = None
+    cfg_endpoint_mode = None
 
     if task:
         task_config = _get_auxiliary_task_config(task)
@@ -4465,6 +4466,7 @@ def _resolve_task_provider_model(
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
         cfg_credential_ref = str(task_config.get("credential_ref", "")).strip() or None
+        cfg_endpoint_mode = str(task_config.get("endpoint_mode", "")).strip().lower() or None
 
     resolved_model = model or cfg_model
     resolved_api_mode = cfg_api_mode
@@ -4488,6 +4490,42 @@ def _resolve_task_provider_model(
     if cfg_provider:
         cfg_provider, cfg_base_url = _expand_direct_api_alias(cfg_provider, cfg_base_url)
 
+    selected_provider = provider or cfg_provider
+    if task == "vision" and selected_provider == "alibaba":
+        saved_alibaba = cfg_provider == "alibaba"
+        alibaba_base_url = (
+            base_url
+            or (cfg_base_url if saved_alibaba else None)
+            or build_vision_base_url()
+        )
+        custom_endpoint = bool(
+            (saved_alibaba and cfg_endpoint_mode == "custom")
+            or (
+                base_url
+                and (not saved_alibaba or base_url.rstrip("/") != (cfg_base_url or "").rstrip("/"))
+            )
+        )
+        if custom_endpoint:
+            from tools.url_safety import is_safe_url
+
+            if not is_safe_url(alibaba_base_url):
+                raise ValueError("unsafe Alibaba vision endpoint")
+        alibaba_api_key = (
+            api_key
+            if api_key is not None
+            else resolve_api_key(
+                "alibaba", cfg_credential_ref if saved_alibaba else ""
+            )
+            or None
+        )
+        return (
+            "alibaba",
+            resolved_model,
+            alibaba_base_url,
+            alibaba_api_key,
+            resolved_api_mode,
+        )
+
     if base_url:
         return "custom", resolved_model, base_url, api_key, resolved_api_mode
     if provider:
@@ -4495,20 +4533,6 @@ def _resolve_task_provider_model(
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
-        if cfg_provider == "alibaba":
-            alibaba_base_url = cfg_base_url or build_vision_base_url()
-            alibaba_api_key = (
-                api_key
-                if api_key is not None
-                else resolve_api_key("alibaba", cfg_credential_ref or "") or None
-            )
-            return (
-                cfg_provider,
-                resolved_model,
-                alibaba_base_url,
-                alibaba_api_key,
-                resolved_api_mode,
-            )
         if cfg_base_url and cfg_api_key:
             # Both base_url and api_key explicitly set → custom endpoint.
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode

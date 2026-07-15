@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,14 @@ LEGACY_API_KEY_ENV = {
     "alibaba_dashscope": ("DASHSCOPE_API_KEY",),
     "zhipu": ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
 }
+_CREDENTIAL_TRANSACTION_LOCK = threading.RLock()
+
+
+@contextmanager
+def credential_transaction():
+    """Serialize credential metadata checks with reference mutations."""
+    with _CREDENTIAL_TRANSACTION_LOCK:
+        yield
 
 
 def normalize_credential_id(credential_id: object) -> str:
