@@ -44,6 +44,18 @@ def test_missing_credential_ref_falls_back_to_legacy_provider_env(monkeypatch):
     assert resolve_api_key("zhipu-image", config_data={}) == "legacy-zai"
 
 
+def test_zhipu_legacy_env_precedence(monkeypatch):
+    monkeypatch.setenv("GLM_API_KEY", "glm-primary")
+    monkeypatch.setenv("ZAI_API_KEY", "zai-compatible")
+    monkeypatch.setenv("Z_AI_API_KEY", "z-ai-compatible")
+
+    assert resolve_api_key("zai", config_data={}) == "glm-primary"
+    monkeypatch.delenv("GLM_API_KEY")
+    assert resolve_api_key("zai", config_data={}) == "zai-compatible"
+    monkeypatch.delenv("ZAI_API_KEY")
+    assert resolve_api_key("zai", config_data={}) == "z-ai-compatible"
+
+
 def test_provider_family_mismatch_is_rejected(monkeypatch):
     monkeypatch.setenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", "named-key")
 
@@ -54,6 +66,15 @@ def test_provider_family_mismatch_is_rejected(monkeypatch):
 def test_unknown_credential_ref_fails_safely():
     with pytest.raises(ValueError, match="不存在"):
         resolve_api_key("alibaba", "missing", config_data=_config())
+
+
+def test_tampered_secret_env_is_rejected_without_reading_unrelated_env(monkeypatch):
+    config = _config()
+    config["provider_credentials"][0]["secret_env"] = "UNRELATED_API_KEY"
+    monkeypatch.setenv("UNRELATED_API_KEY", "must-not-be-read")
+
+    with pytest.raises(ValueError, match="Secret 环境变量"):
+        resolve_api_key("alibaba", "alibaba-default", config_data=config)
 
 
 def test_credential_helpers_normalize_aliases_and_find_rows(tmp_path, monkeypatch):

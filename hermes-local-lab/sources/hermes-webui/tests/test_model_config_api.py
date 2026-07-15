@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -156,6 +158,202 @@ def test_unknown_provider_credential_delete_fails_safely(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="不存在"):
         model_config.delete_provider_credential("missing")
+
+
+@pytest.mark.parametrize("replacement_key", [None, "zhipu-secret"])
+def test_existing_credential_id_cannot_change_provider_family(
+    monkeypatch, tmp_path, replacement_key
+):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {"id": "shared", "provider": "alibaba", "label": "Alibaba", "api_key": "alibaba-secret"}
+    )
+    body = {"id": "shared", "provider": "zhipu", "label": "Zhipu"}
+    if replacement_key is not None:
+        body["api_key"] = replacement_key
+
+    with pytest.raises(ValueError, match="Provider"):
+        model_config.upsert_provider_credential(body)
+
+    assert _read_config(tmp_path)["provider_credentials"] == [
+        {
+            "id": "shared",
+            "provider_family": "alibaba_dashscope",
+            "label": "Alibaba",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_SHARED_API_KEY",
+        }
+    ]
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "TAIJI_CREDENTIAL_SHARED_API_KEY=alibaba-secret" in env_text
+    assert "zhipu-secret" not in env_text
+
+
+def test_blank_credential_label_falls_back_to_id(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+
+    result = model_config.upsert_provider_credential(
+        {"id": "shared", "provider": "alibaba", "label": "   ", "api_key": "secret"}
+    )
+
+    assert result["credential"]["label"] == "shared"
+    assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "shared"
+
+
+def test_delete_rejects_tampered_secret_env_without_touching_unrelated_env(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "shared",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Shared",
+                        "auth_type": "api_key",
+                        "secret_env": "UNRELATED_API_KEY",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("UNRELATED_API_KEY=keep-me\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Secret 环境变量"):
+        model_config.delete_provider_credential("shared")
+
+    assert _read_config(tmp_path)["provider_credentials"][0]["id"] == "shared"
+    assert "UNRELATED_API_KEY=keep-me" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_concurrent_cross_family_upserts_cannot_mismatch_metadata_and_secret(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    barrier = threading.Barrier(2)
+
+    def save(provider, label, secret):
+        barrier.wait(timeout=5)
+        try:
+            model_config.upsert_provider_credential(
+                {"id": "shared", "provider": provider, "label": label, "api_key": secret}
+            )
+            return "saved"
+        except ValueError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda args: save(*args),
+                [("alibaba", "Alibaba", "alibaba-secret"), ("zhipu", "Zhipu", "zhipu-secret")],
+            )
+        )
+
+    assert sorted(results) == ["rejected", "saved"]
+    row = _read_config(tmp_path)["provider_credentials"][0]
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    if row["provider_family"] == "alibaba_dashscope":
+        assert row["label"] == "Alibaba"
+        assert "TAIJI_CREDENTIAL_SHARED_API_KEY=alibaba-secret" in env_text
+        assert "zhipu-secret" not in env_text
+    else:
+        assert row["provider_family"] == "zhipu"
+        assert row["label"] == "Zhipu"
+        assert "TAIJI_CREDENTIAL_SHARED_API_KEY=zhipu-secret" in env_text
+        assert "alibaba-secret" not in env_text
+
+
+def test_interleaved_upsert_delete_leaves_complete_or_absent_credential(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {"id": "shared", "provider": "alibaba", "api_key": "initial-secret"}
+    )
+    secret_written = threading.Event()
+    original_write = model_config._write_env_file
+
+    def delayed_write(env_path, updates):
+        result = original_write(env_path, updates)
+        if updates == {"TAIJI_CREDENTIAL_SHARED_API_KEY": "updated-secret"}:
+            secret_written.set()
+            time.sleep(0.1)
+        return result
+
+    monkeypatch.setattr(model_config, "_write_env_file", delayed_write)
+
+    def upsert():
+        model_config.upsert_provider_credential(
+            {"id": "shared", "provider": "alibaba", "api_key": "updated-secret"}
+        )
+
+    def delete():
+        assert secret_written.wait(timeout=5)
+        model_config.delete_provider_credential("shared")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda fn: fn(), [upsert, delete]))
+
+    rows = _read_config(tmp_path).get("provider_credentials", [])
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8") if (tmp_path / ".env").exists() else ""
+    if rows:
+        assert rows[0]["secret_env"] == "TAIJI_CREDENTIAL_SHARED_API_KEY"
+        assert "TAIJI_CREDENTIAL_SHARED_API_KEY=updated-secret" in env_text
+    else:
+        assert "TAIJI_CREDENTIAL_SHARED_API_KEY" not in env_text
+
+
+def test_upsert_restores_previous_secret_when_yaml_save_fails(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {"id": "shared", "provider": "alibaba", "label": "Before", "api_key": "before-secret"}
+    )
+    original_save = model_config._save_yaml_config_file
+    failed = False
+
+    def fail_after_save(*args, **kwargs):
+        nonlocal failed
+        result = original_save(*args, **kwargs)
+        if not failed:
+            failed = True
+            raise OSError("simulated yaml failure")
+        return result
+
+    monkeypatch.setattr(model_config, "_save_yaml_config_file", fail_after_save)
+    with pytest.raises(OSError, match="simulated"):
+        model_config.upsert_provider_credential(
+            {"id": "shared", "provider": "alibaba", "label": "After", "api_key": "after-secret"}
+        )
+    monkeypatch.setattr(model_config, "_save_yaml_config_file", original_save)
+
+    assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "Before"
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "TAIJI_CREDENTIAL_SHARED_API_KEY=before-secret" in env_text
+    assert "after-secret" not in env_text
+
+
+def test_delete_restores_metadata_when_secret_delete_fails(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {"id": "shared", "provider": "alibaba", "label": "Shared", "api_key": "shared-secret"}
+    )
+    original_write = model_config._write_env_file
+    failed = False
+
+    def fail_after_delete(env_path, updates):
+        nonlocal failed
+        result = original_write(env_path, updates)
+        if not failed and updates == {"TAIJI_CREDENTIAL_SHARED_API_KEY": None}:
+            failed = True
+            raise OSError("simulated env failure")
+        return result
+
+    monkeypatch.setattr(model_config, "_write_env_file", fail_after_delete)
+    with pytest.raises(OSError, match="simulated"):
+        model_config.delete_provider_credential("shared")
+
+    assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "Shared"
+    assert "TAIJI_CREDENTIAL_SHARED_API_KEY=shared-secret" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
 
 
 def test_legacy_dashscope_api_key_payload_remains_compatible(monkeypatch, tmp_path):

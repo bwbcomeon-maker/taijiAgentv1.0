@@ -22,8 +22,8 @@ PROVIDER_FAMILY_ALIASES = {
 }
 
 LEGACY_API_KEY_ENV = {
-    "alibaba_dashscope": "DASHSCOPE_API_KEY",
-    "zhipu": "ZAI_API_KEY",
+    "alibaba_dashscope": ("DASHSCOPE_API_KEY",),
+    "zhipu": ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
 }
 
 
@@ -105,13 +105,16 @@ def resolve_api_key(
     family = provider_family(provider)
     ref = str(credential_ref or "").strip()
     if not ref:
-        legacy_env = LEGACY_API_KEY_ENV.get(family, "")
-        return os.getenv(legacy_env, "").strip() if legacy_env else ""
+        for legacy_env in LEGACY_API_KEY_ENV.get(family, ()):
+            value = os.getenv(legacy_env, "").strip()
+            if value:
+                return value
+        return ""
 
     row = load_credential(ref, config_data=config_data)
     if provider_family(row.get("provider_family")) != family:
         raise ValueError("所选凭据不属于当前 Provider。")
     secret_env = str(row.get("secret_env") or "").strip()
-    if not secret_env:
-        raise ValueError("所选凭据缺少 Secret 环境变量配置。")
+    if secret_env != credential_secret_env(row.get("id")):
+        raise ValueError("所选凭据的 Secret 环境变量配置无效。")
     return os.getenv(secret_env, "").strip()

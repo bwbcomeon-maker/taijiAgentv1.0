@@ -98,6 +98,106 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "requires_base_url": True,
     },
 }
+_PROVIDER_CREDENTIAL_LOCK = threading.RLock()
+
+
+def _validate_provider_credential_secret_env(row: dict[str, Any]) -> str:
+    expected = credential_secret_env(row.get("id"))
+    actual = str(row.get("secret_env") or "").strip()
+    if actual != expected:
+        raise ValueError("凭据的 Secret 环境变量配置无效。")
+    return actual
+
+
+def _provider_credential_row(
+    config_data: dict[str, Any], credential_id: str
+) -> tuple[int, dict[str, Any] | None]:
+    rows = config_data.get("provider_credentials")
+    if not isinstance(rows, list):
+        return -1, None
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        try:
+            row_id = normalize_credential_id(row.get("id"))
+        except ValueError:
+            continue
+        if row_id == credential_id:
+            return index, row
+    return -1, None
+
+
+def _replace_provider_credential_row(
+    config_data: dict[str, Any],
+    credential_id: str,
+    replacement: dict[str, Any] | None,
+    *,
+    preferred_index: int = -1,
+) -> None:
+    existing = config_data.get("provider_credentials")
+    rows = list(existing) if isinstance(existing, list) else []
+    updated: list[Any] = []
+    found_index = -1
+    for row in rows:
+        if not isinstance(row, dict):
+            updated.append(row)
+            continue
+        try:
+            row_id = normalize_credential_id(row.get("id"))
+        except ValueError:
+            updated.append(row)
+            continue
+        if row_id == credential_id:
+            if found_index < 0:
+                found_index = len(updated)
+            continue
+        updated.append(row)
+    if replacement is not None:
+        insert_at = found_index if found_index >= 0 else preferred_index
+        if insert_at < 0 or insert_at > len(updated):
+            insert_at = len(updated)
+        updated.insert(insert_at, replacement)
+    config_data["provider_credentials"] = updated
+
+
+def _credential_env_snapshot(env_path: Path, secret_env: str) -> tuple[bool, str, bool, str]:
+    file_values = _load_env_file(env_path)
+    return (
+        secret_env in file_values,
+        str(file_values.get(secret_env) or ""),
+        secret_env in os.environ,
+        str(os.environ.get(secret_env) or ""),
+    )
+
+
+def _restore_credential_env(
+    env_path: Path,
+    secret_env: str,
+    snapshot: tuple[bool, str, bool, str],
+) -> None:
+    file_present, file_value, process_present, process_value = snapshot
+    _write_env_file(env_path, {secret_env: file_value if file_present else None})
+    if process_present:
+        os.environ[secret_env] = process_value
+    else:
+        os.environ.pop(secret_env, None)
+
+
+def _restore_provider_credential_metadata(
+    config_path: Path,
+    credential_id: str,
+    previous_row: dict[str, Any] | None,
+    previous_index: int,
+) -> None:
+    with _cfg_lock:
+        current = _load_yaml_config_file(config_path)
+        _replace_provider_credential_row(
+            current,
+            credential_id,
+            previous_row,
+            preferred_index=previous_index,
+        )
+        _save_yaml_config_file(config_path, current)
 
 
 def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str) -> list[str]:
@@ -125,11 +225,12 @@ def _public_provider_credential(
 ) -> dict[str, Any]:
     credential_id = normalize_credential_id(row.get("id"))
     family = provider_family(row.get("provider_family"))
-    secret_env = str(row.get("secret_env") or "").strip()
+    secret_env = _validate_provider_credential_secret_env(row)
+    label = str(row.get("label") or "").strip() or credential_id
     return {
         "id": credential_id,
         "provider_family": family,
-        "label": str(row.get("label") or credential_id).strip(),
+        "label": label,
         "auth_type": str(row.get("auth_type") or "api_key").strip(),
         "configured": bool(secret_env and _key_status_for_env(secret_env).get("configured")),
         "used_by": _provider_credential_used_by(config_data, credential_id),
@@ -137,22 +238,23 @@ def _public_provider_credential(
 
 
 def get_provider_credentials_config() -> dict[str, Any]:
-    config_data = _load_yaml_config_file(_get_config_path())
-    rows = config_data.get("provider_credentials")
-    credentials: list[dict[str, Any]] = []
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                credentials.append(_public_provider_credential(row, config_data=config_data))
-            except ValueError:
-                continue
-    return {
-        "ok": True,
-        "profile": _active_profile_name(),
-        "credentials": credentials,
-    }
+    with _PROVIDER_CREDENTIAL_LOCK:
+        config_data = _load_yaml_config_file(_get_config_path())
+        rows = config_data.get("provider_credentials")
+        credentials: list[dict[str, Any]] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    credentials.append(_public_provider_credential(row, config_data=config_data))
+                except ValueError:
+                    continue
+        return {
+            "ok": True,
+            "profile": _active_profile_name(),
+            "credentials": credentials,
+        }
 
 
 def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
@@ -163,15 +265,12 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
     auth_type = str(body.get("auth_type") or "api_key").strip().lower()
     if auth_type != "api_key":
         raise ValueError("only api_key credentials are supported")
-    label = str(body.get("label") or credential_id).strip()
+    label = str(body.get("label") or "").strip() or credential_id
     secret_env = credential_secret_env(credential_id)
     secret = body.get("api_key")
     if secret is None:
         secret = body.get("secret")
     secret_value = str(secret or "").strip()
-    if secret_value:
-        _write_env_file(_get_hermes_home() / ".env", {secret_env: secret_value})
-
     stored = {
         "id": credential_id,
         "provider_family": family,
@@ -180,69 +279,102 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
         "secret_env": secret_env,
     }
     config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        existing = config_data.get("provider_credentials")
-        rows = existing if isinstance(existing, list) else []
-        updated: list[dict[str, Any]] = []
-        replaced = False
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                row_id = normalize_credential_id(row.get("id"))
-            except ValueError:
-                updated.append(row)
-                continue
-            if row_id == credential_id:
-                updated.append(stored)
-                replaced = True
-            else:
-                updated.append(row)
-        if not replaced:
-            updated.append(stored)
-        config_data["provider_credentials"] = updated
-        _save_yaml_config_file(config_path, config_data)
-    reload_config()
-    public_config = get_provider_credentials_config()
-    credential = next(row for row in public_config["credentials"] if row["id"] == credential_id)
-    return {"ok": True, "credential": credential}
+    env_path = _get_hermes_home() / ".env"
+    with _PROVIDER_CREDENTIAL_LOCK:
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
+        previous_index, previous_row = _provider_credential_row(config_data, credential_id)
+        if previous_row is not None:
+            _validate_provider_credential_secret_env(previous_row)
+            previous_family = provider_family(previous_row.get("provider_family"))
+            if previous_family != family:
+                raise ValueError("已有凭据 ID 属于不同 Provider，请使用新的凭据 ID。")
+        env_snapshot = _credential_env_snapshot(env_path, secret_env)
+        env_touched = False
+        metadata_touched = False
+        try:
+            if secret_value:
+                env_touched = True
+                _write_env_file(env_path, {secret_env: secret_value})
+            with _cfg_lock:
+                latest = _load_yaml_config_file(config_path)
+                _replace_provider_credential_row(
+                    latest,
+                    credential_id,
+                    stored,
+                    preferred_index=previous_index,
+                )
+                metadata_touched = True
+                _save_yaml_config_file(config_path, latest)
+            reload_config()
+            public_config = get_provider_credentials_config()
+            credential = next(
+                row for row in public_config["credentials"] if row["id"] == credential_id
+            )
+            return {"ok": True, "credential": credential}
+        except Exception:
+            if metadata_touched:
+                try:
+                    _restore_provider_credential_metadata(
+                        config_path,
+                        credential_id,
+                        previous_row,
+                        previous_index,
+                    )
+                except Exception:
+                    logger.exception("Failed to restore provider credential metadata")
+            if env_touched:
+                try:
+                    _restore_credential_env(env_path, secret_env, env_snapshot)
+                except Exception:
+                    logger.exception("Failed to restore provider credential secret")
+            raise
 
 
 def delete_provider_credential(credential_id: str) -> dict[str, Any]:
     normalized = normalize_credential_id(credential_id)
     config_path = _get_config_path()
-    secret_env = ""
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+    env_path = _get_hermes_home() / ".env"
+    with _PROVIDER_CREDENTIAL_LOCK:
+        with _cfg_lock:
+            config_data = _load_yaml_config_file(config_path)
         used_by = _provider_credential_used_by(config_data, normalized)
         if used_by:
             raise ValueError("凭据正在使用，不能删除。")
-        existing = config_data.get("provider_credentials")
-        rows = existing if isinstance(existing, list) else []
-        updated: list[dict[str, Any]] = []
-        found = False
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                row_id = normalize_credential_id(row.get("id"))
-            except ValueError:
-                updated.append(row)
-                continue
-            if row_id == normalized:
-                found = True
-                secret_env = str(row.get("secret_env") or "").strip()
-                continue
-            updated.append(row)
-        if not found:
+        previous_index, previous_row = _provider_credential_row(config_data, normalized)
+        if previous_row is None:
             raise ValueError("凭据不存在。")
-        config_data["provider_credentials"] = updated
-        _save_yaml_config_file(config_path, config_data)
-    if secret_env:
-        _write_env_file(_get_hermes_home() / ".env", {secret_env: None})
-    reload_config()
-    return get_provider_credentials_config()
+        secret_env = _validate_provider_credential_secret_env(previous_row)
+        env_snapshot = _credential_env_snapshot(env_path, secret_env)
+        metadata_touched = False
+        env_touched = False
+        try:
+            with _cfg_lock:
+                latest = _load_yaml_config_file(config_path)
+                _replace_provider_credential_row(latest, normalized, None)
+                metadata_touched = True
+                _save_yaml_config_file(config_path, latest)
+            env_touched = True
+            _write_env_file(env_path, {secret_env: None})
+            reload_config()
+            return get_provider_credentials_config()
+        except Exception:
+            if metadata_touched:
+                try:
+                    _restore_provider_credential_metadata(
+                        config_path,
+                        normalized,
+                        previous_row,
+                        previous_index,
+                    )
+                except Exception:
+                    logger.exception("Failed to restore deleted provider credential metadata")
+            if env_touched:
+                try:
+                    _restore_credential_env(env_path, secret_env, env_snapshot)
+                except Exception:
+                    logger.exception("Failed to restore deleted provider credential secret")
+            raise
 _VISION_PROBE_MARKER = "TAIJI-VISION-CHECK-7319"
 _VISION_PROBE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAkAAAAA0CAAAAABH3dgUAAABPElEQVR42u3aYRKCIBAGUO9/6TpAyO4COYrv+1cpwvKasc3jIzKRQwkEIAFIABKARAASgAQgAUgEIAFIHgLoaKT1Web41jnR8T+Ta4xXmWf1+Oi60Vxb1101/8p8zsaPan/2Xm+vAAIIIIAAAmgHQNkCVhaUnei/51E5PwKVXU9v/NFxsrUbGXekvgABBBBAAAEE0F6AMht+NaCVeFbVFyCAAAIIIIB2BxQ1DGcA9Rpf5QUVGmWZDc40JHsbX2noReNkx19Vn1TzESCAAAIIIIA2BzT6+sqb6FXrmL3OHW6is38Az64TIIAAAggggABaDygq3tsAzXz5AAIIIIAAAgigdYAyD4dXGl+VhVYbdG96qH6kKZidC0AAAQQQQADtDEgk/SNHCQQgAUgAEoBEABKABCABSAQgAUjumy803ZPAu+g+xgAAAABJRU5ErkJggg=="
