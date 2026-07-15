@@ -10,12 +10,14 @@
 | 原始诉求完整查看 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | `original_request` 使用明确 `label`；当前为只读详情。 |
 | Brief 编辑与确认 | API 已存在 | 否 | 否 | 未验证 | 未验证 | 未验证 | 未验证 | 失败 | P1；属于计划 Task 3，本轮不得提前接 mutation 或伪装为已可编辑。 |
 | 需求确认 0/N | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | intake 阶段固定 0/N，首模型阶段开始后才进入 1/N。 |
-| 三道完成门 | 是 | 是 | 是 | 是 | 是 | 状态不只靠颜色 | 未验证 | 通过 | content/document/office 只接受稳定状态；document 不以 DOCX 文件存在推导通过。 |
-| 七类质量状态到三门派生 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | brief/semantic/evidence/asset/render/office/delivery 缺失时不猜 passed。 |
+| 三道完成门 | 是 | 是 | 是 | 是 | 是 | 状态不只靠颜色 | 未验证 | 通过 | content/document/office 只接受稳定状态；document 不以 DOCX 文件存在或旧 `delivery_gate=passed` 推导通过。 |
+| 七类质量状态到三门派生 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | brief/semantic/evidence/asset/render 任一缺失、pending、failed 均阻止 document passed；Office failed 不被完整性摘要覆盖。 |
+| 完成事务绑定 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | 只有 committed transaction 且 delivery attempt 与当前 binding 一致时，Office/企业交付才可 passed。 |
+| Brief 启动后冻结 | 是 | 是 | 是 | 是 | 是 | 是 | 未验证 | 通过 | starting、generating、当前或历史首阶段 reservation 均返回 `editable=false/new_run_required`。 |
 | 唯一下一步 | 是 | 是 | 是 | 是 | 是 | 可见文字按钮/状态 | 未验证 | 通过 | view 输出单一 `next_action`；presenter 纯映射。 |
 | 历史任务诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“历史任务，未按企业合同验证”，三门 invalidated。 |
 | 未放行文种诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“AI 草稿能力”，不承诺企业交付。 |
-| 收起态状态胶囊 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | 展开按钮具有 accessible name、`aria-expanded` 与 `aria-controls`。 |
+| 收起态状态胶囊 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | 展开按钮具有 accessible name、`aria-expanded` 与 `aria-controls`；点击展开/切换时使用实际工作台返回状态同步 ARIA。 |
 | 聊天区无可操作确认卡 | 是 | 是 | 是 | 不适用 | 不适用 | 是 | 未验证 | 通过 | 生命周期提示只引导右侧工作台；完成成果入口继续保留。 |
 | 真实 Brief 编辑、阶段复核与 Office 操作路径 | API 部分存在 | 未验证 | 未验证 | 未验证 | 未验证 | 未验证 | 未验证 | 未验证 | 分别由计划 Tasks 3、5 实现和验证。 |
 
@@ -37,5 +39,13 @@
 | P1 | 后端已有 Brief 编辑/确认能力，但 Tasks 1–2 尚未提供可完成编辑/确认的 UI mutation 路径 | 明确留给 Task 3；本轮详情区保持只读，不伪装提交成功。 |
 | P1 | Office 验收 API 尚未在本轮工作台提供完整可访问入口 | 明确留给 Task 5。 |
 | P2 | 未进行真实浏览器、截图、响应式和长时间使用验证 | Task 7 统一执行。 |
+
+## 规格审查补修
+
+- 已修复旧 delivery gate 绕过七类上游质量状态的问题。
+- 已修复 `completion_integrity=passed` 覆盖明确 Office failed 的问题。
+- 已修复未 committed 或 delivery attempt 漂移的事务错误显示企业完成的问题。
+- 已修复启动/生成/reservation 已发生但 `stage_outputs=[]` 时 Brief 仍可编辑的问题。
+- 已补充胶囊 `aria-expanded` 与展开/切换结果同步，真实浏览器焦点与持久化恢复仍待 Task 7 验证。
 
 结论：Tasks 1–2 的稳定状态模型与最小可见入口通过自动化契约；完整前端工作仍为“未完成”，不得据此开启企业 contract-v1 rollout。

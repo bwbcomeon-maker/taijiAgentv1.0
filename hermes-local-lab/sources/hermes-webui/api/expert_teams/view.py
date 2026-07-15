@@ -483,7 +483,6 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
 
     quality = run.get("enterprise_quality_gates") if isinstance(run.get("enterprise_quality_gates"), dict) else {}
     integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
-    delivery_gate = run.get("delivery_gate") if isinstance(run.get("delivery_gate"), dict) else {}
     content_status = "passed" if _canonical_content_passed(run) else (
         "failed" if run.get("canonical_document_ref") else "pending"
     )
@@ -491,23 +490,35 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
     upstream = [_normalized_gate_status(quality.get(name)) for name in ("brief", "semantic", "evidence", "asset", "render")]
     binding = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
     binding_closed = bool(str(binding.get("delivery_binding_sha256") or ""))
-    legacy_delivery_status = str(delivery_gate.get("status") or "")
     if any(status in {"failed", "invalidated"} for status in upstream):
         document_status = "failed"
     elif any(status == "running" for status in upstream):
         document_status = "running"
     elif all(status == "passed" for status in upstream) and binding_closed:
         document_status = "passed"
-    elif legacy_delivery_status in {"office_acceptance_required", "passed"} and binding_closed:
-        document_status = "passed"
     else:
         document_status = "pending"
 
     quality_office = _normalized_gate_status(quality.get("office"))
-    if str(integrity.get("status") or "") == "passed":
-        office_status = "passed"
-    elif quality_office in {"failed", "invalidated"} or str(run.get("office_acceptance_status") or "") == "failed":
+    transaction = run.get("completion_transaction_ref") if isinstance(run.get("completion_transaction_ref"), dict) else {}
+    binding_attempt = int(binding.get("delivery_attempt") or 0)
+    transaction_attempt = int(transaction.get("delivery_attempt") or 0)
+    transaction_committed = (
+        bool(str(transaction.get("transaction_id") or ""))
+        and str(transaction.get("status") or "") == "committed"
+        and binding_attempt > 0
+        and transaction_attempt == binding_attempt
+    )
+    if quality_office in {"failed", "invalidated"} or str(run.get("office_acceptance_status") or "") == "failed":
         office_status = "failed"
+    elif transaction and binding_attempt > 0 and transaction_attempt != binding_attempt:
+        office_status = "invalidated"
+    elif (
+        quality_office == "passed"
+        and transaction_committed
+        and str(integrity.get("status") or "") == "passed"
+    ):
+        office_status = "passed"
     elif str(run.get("office_acceptance_status") or "") == "running":
         office_status = "running"
     else:
@@ -548,7 +559,9 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
                 "Office 验收不通过" if office_status == "failed" else "待 Office 验收"
             ),
             "reason_code": None if office_status == "passed" else (
-                "office_review_failed" if office_status == "failed" else "office_review_required"
+                "office_review_failed" if office_status == "failed" else (
+                    "completion_transaction_mismatch" if office_status == "invalidated" else "office_review_required"
+                )
             ),
             "blocking_issue_count": _gate_issue_count(run, {"office"}),
             "next_action": {
@@ -565,12 +578,12 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
     committed = (
         all_passed
         and str(run.get("workflow_state") or "") == "completed"
-        and bool(run.get("completion_transaction_ref"))
+        and transaction_committed
         and str(integrity.get("status") or "") == "passed"
     )
     if committed:
         return gates, "passed", {"type": "view_result", "label": "查看完整成果"}
-    if run.get("completion_transaction_ref") and str(integrity.get("status") or "") != "passed":
+    if transaction and not transaction_committed:
         return gates, "finalizing", {"type": "reconcile_completion", "label": "恢复交付完成状态"}
     if content_status != "passed":
         return gates, "content_required", {"type": "review_content", "label": "复核内容"}
@@ -581,6 +594,17 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
     if office_status == "failed":
         return gates, "office_failed", {"type": "repair_office", "label": "处理 Office 验收问题"}
     return gates, "office_review_required", {"type": "open_office_review", "label": "开始 Office 验收"}
+
+
+def _brief_is_editable(run: dict) -> bool:
+    state = str(run.get("workflow_state") or "collecting_required")
+    if state not in {"collecting_required", "collecting_optional", "ready_to_generate"}:
+        return False
+    if run.get("stage_outputs"):
+        return False
+    if isinstance(run.get("current_stage_attempt_reservation"), dict):
+        return False
+    return not any(isinstance(item, dict) for item in run.get("stage_attempt_reservations") or [])
 
 
 def _capability_model(run: dict, contract_version: str) -> dict:
@@ -663,7 +687,7 @@ def expert_team_run_view(run: dict) -> dict:
         original_request = str(brief.get("original_request") or "")
         brief["original_request_summary"] = content_summary(original_request)
         brief["document_type_label"] = DOCUMENT_TYPE_LABELS.get(str(brief.get("document_type") or ""), "未放行文种")
-        brief["editable"] = not bool(run.get("stage_outputs"))
+        brief["editable"] = _brief_is_editable(run)
         brief["edit_policy"] = "editable" if brief["editable"] else "new_run_required"
         brief["validation"] = deepcopy(
             run.get("brief_validation")

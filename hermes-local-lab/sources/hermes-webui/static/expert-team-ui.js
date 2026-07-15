@@ -6,6 +6,24 @@
     const kind=action.kind?` data-expert-team-action-kind="${safeEsc(action.kind)}"`:'';
     return `<button type="button" class="${cls}" data-expert-team-action="${safeEsc(action.id)}"${kind} onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()" aria-label="${safeEsc(action.label||'操作')}">${safeEsc(action.label||'操作')}</button>`;
   }
+  function setExpertTeamCapsuleExpanded(trigger,expanded){
+    const root=trigger&&trigger.closest?trigger.closest('.expert-team-panel-inner'):null;
+    const capsule=root&&root.querySelector?root.querySelector('.expert-team-capsule-action'):null;
+    if(capsule)capsule.setAttribute('aria-expanded',expanded?'true':'false');
+    return !!expanded;
+  }
+  function showExpertTeamWorkspaceFromCapsule(trigger){
+    const expanded=typeof showExpertTeamWorkspacePanel==='function'
+      ? !!showExpertTeamWorkspacePanel(trigger)
+      : true;
+    return setExpertTeamCapsuleExpanded(trigger,expanded);
+  }
+  function toggleExpertTeamWorkspaceFromControl(trigger){
+    const expanded=typeof toggleExpertTeamWorkspacePanel==='function'
+      ? !!toggleExpertTeamWorkspacePanel(trigger)
+      : false;
+    return setExpertTeamCapsuleExpanded(trigger,expanded);
+  }
   function presentationTone(state){
     if(state==='generating'||state==='ready_to_generate'||state==='starting'||state==='revising'||state==='cancelling')return 'running';
     if(state==='awaiting_stage_input'||state==='collecting_required'||state==='collecting_optional'||state==='awaiting_review')return 'waiting';
@@ -364,7 +382,7 @@
         <strong>${safeEsc(progress.text)}</strong>
         <small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small>
         <span class="expert-team-capsule-state ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span>
-        <button type="button" class="expert-team-capsule-action" onclick="showExpertTeamWorkspacePanel(this);event.stopPropagation()" aria-label="展开专家团工作台" aria-expanded="false" aria-controls="expert-team-workspace-expanded">处理</button>
+        <button type="button" class="expert-team-capsule-action" onclick="showExpertTeamWorkspaceFromCapsule(this);event.stopPropagation()" aria-label="展开专家团工作台" aria-expanded="false" aria-controls="expert-team-workspace-expanded">处理</button>
       </div>
       <div class="expert-team-panel-head">
         <div class="expert-team-panel-topbar">
@@ -373,7 +391,7 @@
             <strong class="expert-team-panel-title">${safeEsc(card&&card.team&&card.team.title||'专家团')}</strong>
             <span class="expert-team-panel-summary">${safeEsc(presentation.visibleTitle||'专家团任务')}</span>
           </span>
-          <button type="button" class="expert-team-panel-hide expert-team-panel-collapse-toggle" onclick="toggleExpertTeamWorkspacePanel(this);event.stopPropagation()" aria-label="展开或合上专家团工作台">
+          <button type="button" class="expert-team-panel-hide expert-team-panel-collapse-toggle" onclick="toggleExpertTeamWorkspaceFromControl(this);event.stopPropagation()" aria-label="展开或合上专家团工作台">
             <span class="expert-team-panel-collapse-icon is-collapse">合上</span>
             <span class="expert-team-panel-collapse-icon is-expand">展开</span>
           </button>
@@ -400,6 +418,9 @@
     </div>`;
   }
   if(typeof window!=='undefined'){
+    window.setExpertTeamCapsuleExpanded=setExpertTeamCapsuleExpanded;
+    window.showExpertTeamWorkspaceFromCapsule=showExpertTeamWorkspaceFromCapsule;
+    window.toggleExpertTeamWorkspaceFromControl=toggleExpertTeamWorkspaceFromControl;
     window.expertTeamDockSummaryFromPresentation=expertTeamDockSummaryFromPresentation;
     window.renderExpertTeamWorkspaceFromPresentation=renderExpertTeamWorkspaceFromPresentation;
     window.openExpertTeamWpsAcceptance=openExpertTeamWpsAcceptance;

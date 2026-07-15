@@ -1005,3 +1005,115 @@ def test_chat_surface_has_no_confirmation_controls_and_keeps_terminal_result_ent
     assert "answerExpertTeamQuestion" not in lifecycle
     assert "右侧专家团工作台" in lifecycle
     assert "查看完整成果" in UI_JS
+
+
+def _enterprise_delivery_run():
+    return {
+        "run_id": "run-delivery",
+        "contract_version": "expert-team-contract/v1",
+        "team_id": "content-creator-team",
+        "workflow_state": "completed",
+        "document_brief": _enterprise_brief(status="confirmed"),
+        "canonical_document_ref": {
+            "artifact_id": "artifact-1",
+            "sha256": "a" * 64,
+            "brief_revision": 3,
+            "brief_sha256": "b" * 64,
+        },
+        "approved_stage_artifact_refs": {"review": {"artifact_id": "artifact-1", "sha256": "a" * 64}},
+        "current_delivery_manifest_ref": {"delivery_binding_sha256": "c" * 64, "delivery_attempt": 2},
+        "enterprise_quality_gates": {
+            "brief": "passed",
+            "semantic": "passed",
+            "evidence": "passed",
+            "asset": "passed",
+            "render": "passed",
+            "office": "passed",
+            "delivery": "passed",
+        },
+        "completion_integrity": {"status": "passed"},
+        "completion_transaction_ref": {"transaction_id": "tx-1", "status": "committed", "delivery_attempt": 2},
+    }
+
+
+def test_document_gate_never_uses_legacy_delivery_pass_to_override_incomplete_upstream_gates():
+    from api.expert_teams.view import expert_team_run_view
+
+    for status in (None, "pending", "failed"):
+        run = _enterprise_delivery_run()
+        run["delivery_gate"] = {"status": "passed"}
+        if status is None:
+            run["enterprise_quality_gates"].pop("semantic")
+        else:
+            run["enterprise_quality_gates"]["semantic"] = status
+        view = expert_team_run_view(run)
+        assert view["completion_gates"]["document"]["status"] != "passed", status
+        assert view["delivery_status"] != "passed", status
+
+
+def test_failed_office_quality_gate_cannot_be_overridden_by_completion_integrity():
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _enterprise_delivery_run()
+    run["enterprise_quality_gates"]["office"] = "failed"
+    view = expert_team_run_view(run)
+    assert view["completion_gates"]["office"]["status"] == "failed"
+    assert view["delivery_status"] != "passed"
+
+
+def test_completion_requires_committed_transaction_bound_to_current_delivery_attempt():
+    from api.expert_teams.view import expert_team_run_view
+
+    cases = (
+        {"transaction_id": "tx-prepared", "status": "prepared", "delivery_attempt": 2},
+        {"transaction_id": "tx-stale", "status": "committed", "delivery_attempt": 1},
+    )
+    for transaction_ref in cases:
+        run = _enterprise_delivery_run()
+        run["completion_transaction_ref"] = transaction_ref
+        view = expert_team_run_view(run)
+        assert view["completion_gates"]["office"]["status"] != "passed", transaction_ref
+        assert view["delivery_status"] != "passed", transaction_ref
+
+
+def test_brief_freezes_as_soon_as_execution_or_first_stage_reservation_starts():
+    from api.expert_teams.view import expert_team_run_view
+
+    cases = (
+        {"workflow_state": "starting"},
+        {"workflow_state": "generating"},
+        {
+            "workflow_state": "ready_to_generate",
+            "current_stage_attempt_reservation": {
+                "reservation_id": "stage-attempt-1",
+                "stage_id": "draft",
+                "stage_attempt": 1,
+                "executor": "model",
+                "status": "reserved",
+            },
+        },
+    )
+    for extra in cases:
+        run = {
+            "run_id": "run-freeze",
+            "contract_version": "expert-team-contract/v1",
+            "team_id": "content-creator-team",
+            "document_brief": _enterprise_brief(status="confirmed"),
+            "stage_outputs": [],
+            **extra,
+        }
+        brief = expert_team_run_view(run)["brief"]
+        assert brief["editable"] is False, extra
+        assert brief["edit_policy"] == "new_run_required", extra
+
+
+def test_capsule_aria_expanded_is_updated_by_the_same_workspace_toggle_result():
+    for token in (
+        "function setExpertTeamCapsuleExpanded",
+        "function showExpertTeamWorkspaceFromCapsule",
+        "function toggleExpertTeamWorkspaceFromControl",
+        "setExpertTeamCapsuleExpanded(trigger,expanded)",
+        "showExpertTeamWorkspaceFromCapsule(this)",
+        "toggleExpertTeamWorkspaceFromControl(this)",
+    ):
+        assert token in EXPERT_UI_JS
