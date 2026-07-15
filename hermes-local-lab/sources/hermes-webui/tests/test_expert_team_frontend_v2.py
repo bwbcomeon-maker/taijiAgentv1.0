@@ -1031,8 +1031,12 @@ def _enterprise_delivery_run():
             "office": "passed",
             "delivery": "passed",
         },
-        "completion_integrity": {"status": "passed"},
-        "completion_transaction_ref": {"transaction_id": "tx-1", "status": "committed", "delivery_attempt": 2},
+        "completion_integrity": {
+            "status": "passed",
+            "transaction_state": "committed",
+            "summary_closed": True,
+        },
+        "completion_transaction_ref": {"transaction_id": "tx-1", "delivery_attempt": 2},
     }
 
 
@@ -1064,16 +1068,46 @@ def test_failed_office_quality_gate_cannot_be_overridden_by_completion_integrity
 def test_completion_requires_committed_transaction_bound_to_current_delivery_attempt():
     from api.expert_teams.view import expert_team_run_view
 
-    cases = (
-        {"transaction_id": "tx-prepared", "status": "prepared", "delivery_attempt": 2},
-        {"transaction_id": "tx-stale", "status": "committed", "delivery_attempt": 1},
-    )
-    for transaction_ref in cases:
-        run = _enterprise_delivery_run()
-        run["completion_transaction_ref"] = transaction_ref
-        view = expert_team_run_view(run)
-        assert view["completion_gates"]["office"]["status"] != "passed", transaction_ref
-        assert view["delivery_status"] != "passed", transaction_ref
+    committed = expert_team_run_view(_enterprise_delivery_run())
+    assert committed["completion_gates"]["office"]["status"] == "passed"
+    assert committed["delivery_status"] == "passed"
+
+    prepared_run = _enterprise_delivery_run()
+    prepared_run["completion_integrity"] = {
+        "status": "reconciling",
+        "transaction_state": "prepared",
+        "summary_closed": False,
+    }
+    prepared = expert_team_run_view(prepared_run)
+    assert prepared["completion_gates"]["office"]["status"] != "passed"
+    assert prepared["delivery_status"] == "finalizing"
+
+    stale_run = _enterprise_delivery_run()
+    stale_run["completion_transaction_ref"] = {"transaction_id": "tx-stale", "delivery_attempt": 1}
+    stale = expert_team_run_view(stale_run)
+    assert stale["completion_gates"]["office"]["status"] != "passed"
+    assert stale["delivery_status"] != "passed"
+
+
+def test_unresolved_upstream_blocking_issues_keep_content_status_and_count_consistent():
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _enterprise_delivery_run()
+    run["enterprise_quality_issues"] = [
+        {
+            "issue_id": "semantic:unsupported-claim",
+            "gate": "semantic",
+            "severity": "blocking",
+            "completion_blocking": True,
+            "disposition": "unresolved",
+        }
+    ]
+    view = expert_team_run_view(run)
+    content = view["completion_gates"]["content"]
+    assert content["blocking_issue_count"] == 1
+    assert content["status"] == "failed"
+    assert content["reason_code"] == "content_blocking_issues"
+    assert view["delivery_status"] != "passed"
 
 
 def test_brief_freezes_as_soon_as_execution_or_first_stage_reservation_starts():

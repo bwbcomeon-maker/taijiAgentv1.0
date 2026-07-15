@@ -12,7 +12,8 @@
 | 需求确认 0/N | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | intake 阶段固定 0/N，首模型阶段开始后才进入 1/N。 |
 | 三道完成门 | 是 | 是 | 是 | 是 | 是 | 状态不只靠颜色 | 未验证 | 通过 | content/document/office 只接受稳定状态；document 不以 DOCX 文件存在或旧 `delivery_gate=passed` 推导通过。 |
 | 七类质量状态到三门派生 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | brief/semantic/evidence/asset/render 任一缺失、pending、failed 均阻止 document passed；Office failed 不被完整性摘要覆盖。 |
-| 完成事务绑定 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | 只有 committed transaction 且 delivery attempt 与当前 binding 一致时，Office/企业交付才可 passed。 |
+| 完成事务绑定 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | 以 `completion_integrity.transaction_state/summary_closed` 为权威；只有 committed 且 transaction ref 的 delivery attempt 与当前 binding 一致时，Office/企业交付才可 passed。 |
+| 内容阻断问题一致性 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | brief/semantic/evidence/content 任一 unresolved completion-blocking issue 非零时，content gate 同步 failed 并返回一致 count/reason。 |
 | Brief 启动后冻结 | 是 | 是 | 是 | 是 | 是 | 是 | 未验证 | 通过 | starting、generating、当前或历史首阶段 reservation 均返回 `editable=false/new_run_required`。 |
 | 唯一下一步 | 是 | 是 | 是 | 是 | 是 | 可见文字按钮/状态 | 未验证 | 通过 | view 输出单一 `next_action`；presenter 纯映射。 |
 | 历史任务诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“历史任务，未按企业合同验证”，三门 invalidated。 |
@@ -47,5 +48,7 @@
 - 已修复未 committed 或 delivery attempt 漂移的事务错误显示企业完成的问题。
 - 已修复启动/生成/reservation 已发生但 `stage_outputs=[]` 时 Brief 仍可编辑的问题。
 - 已补充胶囊 `aria-expanded` 与展开/切换结果同步，真实浏览器焦点与持久化恢复仍待 Task 7 验证。
+- 已改用生产实际的 `completion_integrity.transaction_state`，不再依赖 transaction ref 中不存在的虚构 status。
+- 已让内容门状态、阻断计数和 reason code 从同一组 unresolved blocking issues 派生。
 
 结论：Tasks 1–2 的稳定状态模型与最小可见入口通过自动化契约；完整前端工作仍为“未完成”，不得据此开启企业 contract-v1 rollout。

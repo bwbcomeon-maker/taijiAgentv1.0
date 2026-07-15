@@ -444,6 +444,10 @@ def _gate_issue_count(run: dict, names: set[str]) -> int:
         if isinstance(issue, dict)
         and str(issue.get("gate") or issue.get("domain") or "") in names
         and str(issue.get("disposition") or "unresolved") != "resolved"
+        and (
+            issue.get("completion_blocking") is True
+            or str(issue.get("severity") or "") in {"blocking", "error", "warning"}
+        )
     )
 
 
@@ -483,9 +487,13 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
 
     quality = run.get("enterprise_quality_gates") if isinstance(run.get("enterprise_quality_gates"), dict) else {}
     integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
-    content_status = "passed" if _canonical_content_passed(run) else (
-        "failed" if run.get("canonical_document_ref") else "pending"
-    )
+    content_blocking_count = _gate_issue_count(run, {"brief", "semantic", "evidence", "content"})
+    if content_blocking_count:
+        content_status = "failed"
+    elif _canonical_content_passed(run):
+        content_status = "passed"
+    else:
+        content_status = "failed" if run.get("canonical_document_ref") else "pending"
 
     upstream = [_normalized_gate_status(quality.get(name)) for name in ("brief", "semantic", "evidence", "asset", "render")]
     binding = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
@@ -505,7 +513,8 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
     transaction_attempt = int(transaction.get("delivery_attempt") or 0)
     transaction_committed = (
         bool(str(transaction.get("transaction_id") or ""))
-        and str(transaction.get("status") or "") == "committed"
+        and str(integrity.get("transaction_state") or "") == "committed"
+        and integrity.get("summary_closed") is True
         and binding_attempt > 0
         and transaction_attempt == binding_attempt
     )
@@ -528,8 +537,10 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
         "content": {
             "status": content_status,
             "label": "内容已确认" if content_status == "passed" else "内容待确认",
-            "reason_code": None if content_status == "passed" else "canonical_content_required",
-            "blocking_issue_count": _gate_issue_count(run, {"brief", "semantic", "evidence", "content"}),
+            "reason_code": None if content_status == "passed" else (
+                "content_blocking_issues" if content_blocking_count else "canonical_content_required"
+            ),
+            "blocking_issue_count": content_blocking_count,
             "next_action": {
                 "type": "view_content" if content_status == "passed" else "review_content",
                 "label": "查看已确认内容" if content_status == "passed" else "复核内容",
