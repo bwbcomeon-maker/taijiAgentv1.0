@@ -23,6 +23,7 @@ def test_docx_engine_v2_routes_are_registered_in_router():
     assert "/api/docx-engine-v2/drafts/package" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual" in routes_py
     assert "/api/docx-engine-v2/quality/wps-visual/begin" in routes_py
+    assert "/api/expert-teams/waivers/create" in routes_py
     assert "/api/docx-engine-v2/assets/rerender" in routes_py
     assert "/api/docx-engine-v2/assets/replace" in routes_py
     assert "/api/file/open" in routes_py
@@ -74,7 +75,7 @@ def test_python_and_node_use_same_canonical_json_digest():
     )
 
 
-def test_begin_office_review_route_uses_server_trusted_profile_identity(monkeypatch, tmp_path):
+def test_begin_office_review_route_uses_shared_trusted_oidc_identity(monkeypatch, tmp_path):
     from api import routes
 
     monkeypatch.setattr(
@@ -87,23 +88,28 @@ def test_begin_office_review_route_uses_server_trusted_profile_identity(monkeypa
     monkeypatch.setattr(
         routes.docx_engine_v2,
         "begin_office_review",
-        lambda body, workspace, *, trusted_reviewer: (
-            captured.update(body=dict(body), workspace=workspace, reviewer=trusted_reviewer)
+        lambda body, workspace, *, trusted_principal: (
+            captured.update(body=dict(body), workspace=workspace, principal=trusted_principal)
             or ({"ok": True}, 200)
         ),
     )
+    principal = {
+        "subject": "reviewer-1", "display_name": "复核人甲", "roles": ["document-reviewer"],
+        "auth_method": "oidc_pkce", "identity_snapshot_sha256": "a" * 64, "expires_at": 9999999999,
+    }
     monkeypatch.setattr(
-        "api.expert_teams.office_review.getpass.getuser",
-        lambda: "localuser",
+        "api.expert_teams.trusted_identity.resolve_trusted_principal",
+        lambda context, role, now: principal,
     )
+    handler = SimpleNamespace(headers={"Cookie": "taiji_expert_identity=trusted-session"})
 
     result = routes._handle_docx_engine_v2_begin_office_review(
-        object(),
+        handler,
         {"session_id": "sid-1", "delivery_dir": ".taiji/expert-team-deliveries/x"},
     )
 
     assert result["status"] == 200
-    assert captured["reviewer"] == "localuser@finance"
+    assert captured["principal"] == principal
 
 
 def test_legacy_figure_adjustment_routes_do_not_keep_skill_script_runner():

@@ -351,6 +351,36 @@ def validated_binding_for_identity(workspace: Path, identity: dict) -> dict:
     return expected
 
 
+def office_binding_identity(workspace: Path, identity: dict, binding: dict) -> dict:
+    """Normalize legacy/v2 bindings for Office tokens without weakening v2 mirrors."""
+
+    root = Path(workspace).expanduser().resolve()
+    if classify_delivery_binding(binding) != "enterprise_pre_office":
+        return dict(binding)
+    attempt_root = canonical_attempt_root(
+        root,
+        str(identity.get("run_id") or ""),
+        str(identity.get("stage_id") or ""),
+        int(identity.get("attempt") or 0),
+    )
+    binding_path = attempt_root / BINDING_MANIFEST_NAME
+    if not binding_path.is_file():
+        raise DeliveryIntegrityError("enterprise delivery binding manifest is missing")
+    return {
+        "schema_version": "expert-office-binding/v1",
+        "run_id": str(binding.get("run_id") or ""),
+        "session_id": str(binding.get("session_id") or ""),
+        "stage_id": str(binding.get("stage_id") or ""),
+        "attempt": int(binding.get("delivery_attempt") or 0),
+        "document_sha256": str((binding.get("document") or {}).get("sha256") or ""),
+        "delivery_binding_sha256": sha256_file(binding_path),
+        "brief": dict(binding.get("brief") or {}),
+        "canonical_artifact": dict(binding.get("canonical_artifact") or {}),
+        "template": dict(binding.get("template") or {}),
+        "renderer": dict(binding.get("renderer") or {}),
+    }
+
+
 def wps_acceptance_manifest_path(workspace: Path, run_id: str, stage_id: str, attempt: int) -> Path:
     return canonical_attempt_root(workspace, run_id, stage_id, attempt) / WPS_ACCEPTANCE_MANIFEST_NAME
 

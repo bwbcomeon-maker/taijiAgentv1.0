@@ -12,6 +12,105 @@ from urllib.parse import urlparse
 import pytest
 
 
+def _completion_fixture(workspace: Path) -> tuple[dict, dict, dict]:
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+    from api.expert_teams.storage import write_run
+
+    run = {
+        "schema_version": 2,
+        "contract_version": "expert-team-contract/v1",
+        "run_id": "run-completion-reconcile",
+        "session_id": "sid-completion-reconcile",
+        "version": 42,
+        "workflow_state": "awaiting_review",
+        "current_delivery_manifest_ref": {"delivery_attempt": 1},
+    }
+    binding = {
+        "schema_version": "expert-delivery-binding/v2",
+        "run_id": run["run_id"],
+        "session_id": run["session_id"],
+        "stage_id": "delivery",
+        "delivery_attempt": 1,
+        "document_revision": 1,
+        "brief": {"revision": 1, "sha256": "b" * 64},
+        "canonical_artifact": {"artifact_id": "polish:1", "sha256": "c" * 64},
+        "document": {"sha256": "d" * 64},
+        "template": {"id": "enterprise-work-report", "version": "1", "package_sha256": "e" * 64},
+        "renderer": {"name": "docx-engine-v2", "version": "1", "build_sha256": "f" * 64, "profile_id": "enterprise-default", "profile_sha256": "1" * 64},
+    }
+    acceptance = {
+        "schema_version": "office-acceptance/v2",
+        "delivery_binding_sha256": "",
+        "document_id": "document-1",
+        "document_revision": 1,
+        "canonical_sha256": "c" * 64,
+        "document_sha256": "d" * 64,
+        "template": binding["template"],
+        "review_id": "review-1",
+        "decision": "passed",
+        "validity": "active",
+        "checklist": {"document_opened": "passed"},
+        "issues": [],
+        "evidence": [{"path": "evidence/page-1.png", "sha256": "2" * 64, "size_bytes": 1, "media_type": "image/png"}],
+        "token_provenance": {"token_hash": "3" * 64, "opened_at": "2026-07-15T10:00:00+08:00", "delivery_binding_sha256": ""},
+        "reviewer": {"principal_id": "reviewer-1", "role": "document-reviewer", "auth_source": "oidc_pkce", "identity_snapshot_sha256": "4" * 64},
+        "reviewed_at": "2026-07-15T10:10:00+08:00",
+    }
+    root = canonical_attempt_root(workspace, run["run_id"], "delivery", 1)
+    root.mkdir(parents=True, exist_ok=True)
+    binding_path = root / "expert-team-delivery.json"
+    binding_path.write_text(json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8")
+    binding_sha256 = __import__("hashlib").sha256(binding_path.read_bytes()).hexdigest()
+    acceptance["delivery_binding_sha256"] = binding_sha256
+    acceptance["token_provenance"]["delivery_binding_sha256"] = binding_sha256
+    run["current_delivery_manifest_ref"].update({
+        "delivery_binding_path": binding_path.relative_to(workspace).as_posix(),
+        "delivery_binding_sha256": binding_sha256,
+    })
+    (root / "expert-team-wps-acceptance.json").write_text(json.dumps(acceptance, sort_keys=True) + "\n", encoding="utf-8")
+    write_run(workspace, run)
+    return run, binding, acceptance
+
+
+@pytest.mark.parametrize(
+    "fault_after",
+    ["acceptance", "waiver_ledger", "token_consumed", "proof", "run_completed"],
+)
+def test_enterprise_completion_reconciles_every_prepared_crash_window(tmp_path, fault_after):
+    from api.expert_teams.office_review import (
+        CompletionCrashInjected,
+        enterprise_completion_status,
+        reconcile_enterprise_completion,
+    )
+    from api.expert_teams.storage import read_run
+
+    run, binding, _acceptance = _completion_fixture(tmp_path)
+    with pytest.raises(CompletionCrashInjected, match=fault_after):
+        reconcile_enterprise_completion(
+            tmp_path,
+            run=run,
+            binding=binding,
+            binding_sha256=run["current_delivery_manifest_ref"]["delivery_binding_sha256"],
+            now="2026-07-15T10:20:00+08:00",
+            fault_after=fault_after,
+        )
+    intermediate = read_run(tmp_path, run["run_id"])
+    assert enterprise_completion_status(tmp_path, intermediate)["status"] != "passed"
+
+    completed = reconcile_enterprise_completion(
+        tmp_path,
+        run=intermediate,
+        binding=binding,
+        binding_sha256=run["current_delivery_manifest_ref"]["delivery_binding_sha256"],
+        now="2026-07-15T10:20:00+08:00",
+    )
+    status = enterprise_completion_status(tmp_path, completed)
+    assert completed["workflow_state"] == "completed"
+    assert status["status"] == "passed"
+    assert status["transaction_state"] == "committed"
+    assert status["summary_closed"] is True
+
+
 class _Handler:
     def __init__(self, payload: dict):
         raw = json.dumps(payload).encode("utf-8")

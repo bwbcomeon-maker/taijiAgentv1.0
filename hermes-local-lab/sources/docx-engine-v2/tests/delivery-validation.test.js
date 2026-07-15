@@ -730,6 +730,37 @@ test('validate-delivery CLI exits nonzero when WPS visual acceptance is not veri
   assert.ok(payload.failures.some((failure) => /WPS\/Word visual inspection.*not.*verified/i.test(failure)));
 });
 
+test('validate-delivery CLI external-office mode leaves Office pending without rewriting automatic report', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  attachReplayReport(deliveryDir);
+  const qualityPath = path.join(deliveryDir, 'quality-report.json');
+  const before = fs.readFileSync(qualityPath);
+
+  const result = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir', deliveryDir,
+    '--office-mode', 'external-office',
+    '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const payload = parseStdoutJson(result);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.officeStatus, 'pending');
+  assert.equal(payload.qualityReport.automaticQuality.assetStatus, 'passed');
+  assert.equal(payload.qualityReport.automaticQuality.renderStatus, 'passed');
+  assert.deepEqual(fs.readFileSync(qualityPath), before);
+
+  const forbidden = spawnSync(process.execPath, [
+    VALIDATE_DELIVERY,
+    '--delivery-dir', deliveryDir,
+    '--office-mode', 'external-office',
+    '--write-report', '--json',
+  ], { cwd: ENGINE_ROOT, encoding: 'utf8' });
+  assert.equal(forbidden.status, 3);
+  assert.match(parseStdoutJson(forbidden).message, /external-office.*write-report/i);
+});
+
 test('validate-delivery CLI exits nonzero when the final package is missing replay-report.json', async (t) => {
   const { deliveryDir } = await makeDeliveryPackage(t);
 

@@ -32,6 +32,17 @@ IDENTITY_COOKIE_NAME = "taiji_expert_identity"
 _GLOBAL_LOCK = threading.Lock()
 _GLOBAL_RESOLVER: "TrustedIdentityResolver | None" = None
 _GLOBAL_CONFIG_SHA256 = ""
+_ROLE_ERROR_CODES = {
+    "document-approver": "trusted_approver_required",
+    "document-reviewer": "trusted_reviewer_required",
+    "waiver-authorizer": "trusted_authorizer_required",
+}
+
+
+class TrustedIdentityError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 def _canonical(value: object) -> bytes:
@@ -126,7 +137,13 @@ class TrustedIdentityResolver:
         if not self._config.get("enabled"):
             raise ValueError("trusted identity is disabled")
 
-    def start_login(self, redirect_uri: str) -> dict:
+    def start_login(
+        self,
+        redirect_uri: str,
+        *,
+        purpose: str = "login",
+        binding_context: dict | None = None,
+    ) -> dict:
         self._require_enabled()
         redirect_uri = str(redirect_uri or "").strip()
         if redirect_uri not in self._config["redirect_uris"]:
@@ -136,6 +153,16 @@ class TrustedIdentityResolver:
         nonce = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
         challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+        purpose = str(purpose or "login")
+        context = deepcopy(binding_context) if isinstance(binding_context, dict) else {}
+        if purpose == "authorizer_handoff":
+            required = {"run_id", "acceptance_sha256", "delivery_binding_sha256", "disallowed_principal_id"}
+            if set(context) != required or any(not str(context.get(key) or "").strip() for key in required):
+                raise ValueError("authorizer handoff binding context is incomplete")
+            if self._config.get("authorizer_handoff_mode") != "select_account":
+                raise ValueError("authorizer handoff provider cannot switch accounts")
+        elif purpose != "login" or context:
+            raise ValueError("trusted identity login purpose is invalid")
         with self._lock:
             self._prune(now)
             self._flows[state] = {
@@ -143,6 +170,8 @@ class TrustedIdentityResolver:
                 "code_verifier": verifier,
                 "redirect_uri": redirect_uri,
                 "expires_at": now + int(self._config.get("flow_ttl_seconds") or 300),
+                "purpose": purpose,
+                "binding_context": context,
             }
         params = {
             "response_type": "code",
@@ -154,6 +183,8 @@ class TrustedIdentityResolver:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
+        if purpose == "authorizer_handoff":
+            params["prompt"] = "select_account"
         return {
             "authorization_url": f"{self._config['authorization_endpoint']}?{urlencode(params)}",
             "state": state,
@@ -181,10 +212,22 @@ class TrustedIdentityResolver:
         if not token:
             raise ValueError("OIDC token response has no ID token")
         principal = self._verify_id_token(token, expected_nonce=flow["nonce"], now=now)
+        if flow.get("purpose") == "authorizer_handoff":
+            context = flow.get("binding_context") if isinstance(flow.get("binding_context"), dict) else {}
+            if "waiver-authorizer" not in principal.get("roles", []):
+                raise ValueError("trusted authorizer role is required")
+            if principal.get("subject") == context.get("disallowed_principal_id"):
+                raise ValueError("authorizer must be distinct from reviewer")
         session_id = secrets.token_urlsafe(32)
         with self._lock:
             self._sessions[session_id] = deepcopy(principal)
-        return {"session_id": session_id, "redirect_uri": flow["redirect_uri"], "principal": deepcopy(principal)}
+        result = {"session_id": session_id, "redirect_uri": flow["redirect_uri"], "principal": deepcopy(principal)}
+        if flow.get("purpose") == "authorizer_handoff":
+            result.update({
+                "purpose": "authorizer_handoff",
+                "binding_context": deepcopy(flow.get("binding_context") or {}),
+            })
+        return result
 
     def _verify_id_token(self, token: str, *, expected_nonce: str, now: float) -> dict:
         try:
@@ -268,6 +311,7 @@ class TrustedIdentityResolver:
             "enabled": True,
             "authenticated": isinstance(principal, dict),
             "provider": "oidc_pkce",
+            "authorizer_handoff_ready": self._config.get("authorizer_handoff_mode") == "select_account",
             "principal": principal if isinstance(principal, dict) else None,
         }
 
@@ -325,3 +369,32 @@ def identity_session_from_cookie_header(cookie_header: str) -> str:
         if separator and name == IDENTITY_COOKIE_NAME:
             return value.strip()
     return ""
+
+
+def resolve_trusted_principal(request_context: dict, required_role: str, now: int | float) -> dict:
+    """Resolve every enterprise human action through one fail-closed identity boundary."""
+
+    context = deepcopy(request_context) if isinstance(request_context, dict) else {}
+    forbidden = {
+        "principal", "role", "roles", "headers", "authorization", "bearer_token",
+        "reviewer", "authorizer", "approver",
+    }
+    if set(context) & forbidden:
+        raise TrustedIdentityError("client_identity_forbidden", "客户端不得提交或覆盖可信身份")
+    role = str(required_role or "").strip()
+    if role not in _ROLE_ERROR_CODES:
+        raise TrustedIdentityError("trusted_role_not_released", "请求的可信身份角色尚未开放")
+    resolver = get_trusted_identity_resolver()
+    status = resolver.status(None)
+    if status.get("enabled") is not True:
+        raise TrustedIdentityError("trusted_identity_provider_required", "企业可信身份提供方尚未配置")
+    session_id = str(context.get("identity_session_id") or "").strip()
+    if not session_id:
+        raise TrustedIdentityError(_ROLE_ERROR_CODES[role], "缺少可信身份会话")
+    try:
+        principal = resolver.resolve(session_id, required_role=role)
+    except ValueError as exc:
+        raise TrustedIdentityError(_ROLE_ERROR_CODES[role], str(exc)) from exc
+    if int(principal.get("expires_at") or 0) <= int(now):
+        raise TrustedIdentityError(_ROLE_ERROR_CODES[role], "可信身份已过期")
+    return deepcopy(principal)

@@ -16,21 +16,29 @@ main();
 function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
+    if (args.officeMode === 'external-office' && args.writeReport) {
+      throw new Error('external-office mode forbids --write-report because the bound automatic report is read-only.');
+    }
     const qualityReport = validateDeliveryPackage({
       deliveryDir: args.deliveryDir,
       requireReplayReport: true,
       enforceStoredQualityReport: !args.writeReport,
-      requireWpsVisualAcceptance: true,
+      requireWpsVisualAcceptance: args.officeMode !== 'external-office',
     });
     const qualityReportPath = path.join(args.deliveryDir, 'quality-report.json');
     if (args.writeReport) {
       writeJson(qualityReportPath, qualityReport);
       refreshDeliveryPackageFileHashes({ deliveryDir: args.deliveryDir, roles: ['qualityReport'] });
     }
+    const automatedOk = (qualityReport.checks || []).every(
+      (check) => check.id === 'wps_visual' || check.status === 'passed'
+    );
+    const ok = args.officeMode === 'external-office' ? automatedOk : qualityReport.status !== 'failed';
     const payload = {
-      ok: qualityReport.status !== 'failed',
-      code: qualityReport.status === 'failed' ? 'delivery_validation_failed' : undefined,
+      ok,
+      code: ok ? undefined : 'delivery_validation_failed',
       deliveryDir: args.deliveryDir,
+      officeStatus: args.officeMode === 'external-office' ? 'pending' : undefined,
       qualityReportPath: args.writeReport ? qualityReportPath : undefined,
       qualityReport,
       failures: qualityReport.failures,
@@ -58,6 +66,7 @@ function parseArgs(argv) {
     deliveryDir: '',
     json: false,
     writeReport: false,
+    officeMode: 'legacy-embedded',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -77,6 +86,11 @@ function parseArgs(argv) {
     }
     if (arg === '--delivery-dir') {
       parsed.deliveryDir = path.resolve(next);
+    } else if (arg === '--office-mode') {
+      if (!['legacy-embedded', 'external-office'].includes(next)) {
+        throw new Error(`Invalid office mode: ${next}`);
+      }
+      parsed.officeMode = next;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }

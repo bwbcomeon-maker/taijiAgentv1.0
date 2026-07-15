@@ -34,6 +34,7 @@ from .documents import (
     is_final_delivery_stage,
 )
 from .delivery_integrity import (
+    BINDING_MANIFEST_NAME,
     BINDING_SCHEMA_VERSION,
     DeliveryIntegrityError,
     binding_manifest_path,
@@ -770,6 +771,40 @@ def _refresh_artifact_existence(workspace: Path, run: dict) -> dict:
 
 
 def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
+    if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
+        run.get("current_delivery_manifest_ref"), dict
+    ):
+        from .office_review import (
+            COMPLETION_TRANSACTION_NAME,
+            enterprise_completion_status,
+            reconcile_enterprise_completion,
+        )
+
+        ref = run["current_delivery_manifest_ref"]
+        binding_path = Path(workspace).expanduser().resolve() / str(ref.get("delivery_binding_path") or "")
+        attempt_root = canonical_attempt_root(
+            workspace,
+            str(run.get("run_id") or ""),
+            "delivery",
+            int(ref.get("delivery_attempt") or 0),
+        )
+        transaction_path = attempt_root / COMPLETION_TRANSACTION_NAME
+        if binding_path.is_file() and transaction_path.is_file():
+            try:
+                binding = read_binding_manifest(binding_path)
+                run = reconcile_enterprise_completion(
+                    workspace,
+                    run=run,
+                    binding=binding,
+                    binding_sha256=sha256_file(binding_path),
+                    now=_now(),
+                )
+            except (DeliveryIntegrityError, OSError, TypeError, ValueError):
+                run["completion_integrity"] = enterprise_completion_status(workspace, run)
+            return run
+        if str(run.get("workflow_state") or "") == "completed":
+            run["completion_integrity"] = enterprise_completion_status(workspace, run)
+            return run
     if str(run.get("workflow_state") or "") != "completed":
         return run
     checked_at = _now()
@@ -3320,6 +3355,34 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
         raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
     if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0) != 0:
         raise ExpertTeamStateConflict("stage_artifact_blocked", "stage artifact has unresolved issues", run)
+    if artifact.get("artifact_type") == "delivery_manifest":
+        from .office_review import reconcile_enterprise_completion
+
+        ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+        binding_path = Path(workspace).expanduser().resolve() / str(ref.get("delivery_binding_path") or "")
+        expected_root = canonical_attempt_root(
+            workspace,
+            str(run.get("run_id") or ""),
+            stage_id,
+            int(ref.get("delivery_attempt") or 0),
+        )
+        if binding_path.resolve() != (expected_root / BINDING_MANIFEST_NAME).resolve() or not binding_path.is_file():
+            raise ExpertTeamStateConflict("delivery_binding_changed", "current delivery binding is unavailable", run)
+        binding_sha256 = sha256_file(binding_path)
+        if binding_sha256 != str(ref.get("delivery_binding_sha256") or ""):
+            raise ExpertTeamStateConflict("delivery_binding_changed", "current delivery binding digest changed", run)
+        try:
+            binding = read_binding_manifest(binding_path)
+            _record_action(run, body, "approve_stage")
+            return reconcile_enterprise_completion(
+                workspace,
+                run=run,
+                binding=binding,
+                binding_sha256=binding_sha256,
+                now=_now(),
+            )
+        except (DeliveryIntegrityError, OSError, TypeError, ValueError) as exc:
+            raise ExpertTeamStateConflict("office_acceptance_required", str(exc), run) from exc
     identity_session_id = str(body.get("trusted_identity_session_id") or "").strip()
     try:
         principal = get_trusted_identity_resolver().resolve(

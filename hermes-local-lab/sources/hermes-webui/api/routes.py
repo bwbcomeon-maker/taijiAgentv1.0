@@ -12016,9 +12016,40 @@ def handle_post(handler, parsed) -> bool:
         from api.expert_teams.trusted_identity import get_trusted_identity_resolver
 
         try:
+            purpose = str(body.get("purpose") or "login")
+            binding_context = None
+            if purpose == "authorizer_handoff":
+                from api import expert_teams
+                from api.expert_teams.delivery_integrity import canonical_attempt_root, sha256_file
+                from api.expert_teams.office_review import OFFICE_ACCEPTANCE_NAME
+
+                forbidden = {"disallowed_principal_id", "acceptance_sha256", "delivery_binding_sha256", "required_role"}
+                if forbidden & set(body):
+                    return bad(handler, "authorizer handoff identity constraints are server-derived", 400)
+                session_id = str(body.get("session_id") or "").strip()
+                workspace = _expert_team_workspace(session_id or None)
+                run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+                if str(run.get("session_id") or "") != session_id:
+                    return bad(handler, "expert team run does not belong to this session", 404)
+                ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+                binding_path = Path(workspace) / str(ref.get("delivery_binding_path") or "")
+                acceptance_path = canonical_attempt_root(
+                    workspace, str(run.get("run_id") or ""), "delivery", int(ref.get("delivery_attempt") or 0)
+                ) / OFFICE_ACCEPTANCE_NAME
+                acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+                binding_context = {
+                    "run_id": str(run.get("run_id") or ""),
+                    "acceptance_sha256": sha256_file(acceptance_path),
+                    "delivery_binding_sha256": sha256_file(binding_path),
+                    "disallowed_principal_id": str((acceptance.get("reviewer") or {}).get("principal_id") or ""),
+                }
             return j(
                 handler,
-                get_trusted_identity_resolver().start_login(str(body.get("redirect_uri") or "")),
+                get_trusted_identity_resolver().start_login(
+                    str(body.get("redirect_uri") or ""),
+                    purpose=purpose,
+                    binding_context=binding_context,
+                ),
             )
         except Exception as exc:
             return bad(handler, f"Failed to start trusted identity login: {_sanitize_error(exc)}", 400)
@@ -12549,6 +12580,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Plugin command not found", 404)
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
+
+    if parsed.path == "/api/expert-teams/waivers/create":
+        return _handle_expert_team_waiver_create(handler, body)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
@@ -18611,21 +18645,56 @@ def _handle_docx_engine_v2_wps_visual_acceptance(handler, body):
 
 
 def _handle_docx_engine_v2_begin_office_review(handler, body):
-    from api.expert_teams.office_review import trusted_local_reviewer
+    from api.expert_teams.trusted_identity import TrustedIdentityError, resolve_trusted_principal
 
     try:
-        session, workspace = _docx_engine_v2_session_and_workspace(body)
-        reviewer = trusted_local_reviewer(str(getattr(session, "profile", "") or ""))
+        _session, workspace = _docx_engine_v2_session_and_workspace(body)
+        principal = resolve_trusted_principal(
+            {"identity_session_id": _expert_identity_session(handler)},
+            "document-reviewer",
+            int(time.time()),
+        )
         payload, status = docx_engine_v2.begin_office_review(
             body,
             workspace,
-            trusted_reviewer=reviewer,
+            trusted_principal=principal,
         )
         return j(handler, payload, status=status)
+    except TrustedIdentityError as e:
+        return j(handler, {"ok": False, "code": e.code, "error": str(e)}, status=403)
     except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
     except subprocess.TimeoutExpired as e:
         return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_expert_team_waiver_create(handler, body):
+    from datetime import datetime, timezone
+    from api.expert_teams.trusted_identity import TrustedIdentityError, resolve_trusted_principal
+    from api.expert_teams.waivers import WaiverError, create_current_office_waiver
+
+    try:
+        session_id = str(body.get("session_id") or "").strip()
+        workspace = _expert_team_workspace(session_id or None)
+        principal = resolve_trusted_principal(
+            {"identity_session_id": _expert_identity_session(handler)},
+            "waiver-authorizer",
+            int(time.time()),
+        )
+        waiver, run = create_current_office_waiver(
+            workspace,
+            body,
+            authorizer=principal,
+            now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        )
+        return j(handler, {"ok": True, "waiver": waiver, "run": run}, status=201)
+    except TrustedIdentityError as exc:
+        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
+    except WaiverError as exc:
+        status = 409 if exc.code in {"version_conflict", "waiver_binding_changed"} else 400
+        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return bad(handler, _sanitize_error(exc), 400)
 
 
 def _handle_docx_engine_v2_rerender_asset(handler, body):

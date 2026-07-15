@@ -26,6 +26,7 @@ STATE_LABELS = {
     "delivery_validation_required": "正文已确认，等待文档交付",
     "revising": "正在按修改意见调整",
     "completed": "专家团任务已完成",
+    "completion_reconciling": "正在恢复交付完成状态",
     "failed": "生成失败",
     "cancelled": "已取消",
     "completed_invalid": "已完成交付异常",
@@ -40,6 +41,8 @@ def _effective_state(run: dict) -> str:
     ):
         return "legacy_result_unverified"
     integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
+    if state == "completed" and run.get("completion_transaction_ref") and str(integrity.get("status") or "") != "passed":
+        return "completion_reconciling"
     if state == "completed" and str(integrity.get("status") or "") in {"drifted", "unverified"}:
         return "completed_invalid"
     return state
@@ -61,6 +64,7 @@ def _primary_action(state: str) -> dict | None:
         "awaiting_review": {"id": "review_stage", "label": "去复核", "kind": "primary"},
         "revising": {"id": "cancel", "label": "停止生成", "kind": "danger"},
         "completed": {"id": "view_result", "label": "查看成果", "kind": "primary"},
+        "completion_reconciling": {"id": "refresh", "label": "恢复完成状态", "kind": "primary"},
         "completed_invalid": {"id": "view_result", "label": "查看异常交付", "kind": "primary"},
     }.get(state)
 
@@ -225,6 +229,8 @@ def _presentation(run: dict, business_context: dict) -> dict:
         detail = "正文语义已由受信人员确认，正在等待系统生成并校验唯一 DOCX 交付物。"
     elif state == "completed":
         detail = "所有阶段已完成，结果已写入当前对话。"
+    elif state == "completion_reconciling":
+        detail = "Office 验收证据正在对账恢复，摘要闭合前不会显示企业完成。"
     elif state == "completed_invalid":
         integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
         detail = str(integrity.get("message") or "已完成交付文件缺失或摘要已变化，请勿继续按已验收结果使用。")

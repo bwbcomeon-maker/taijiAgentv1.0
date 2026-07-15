@@ -168,3 +168,84 @@ def test_disabled_and_production_test_principal_injection_are_rejected():
         disabled.start_login("https://taiji.example/callback")
     with pytest.raises(RuntimeError, match="production"):
         disabled.install_test_principal({"subject": "fake", "roles": ["document-approver"]})
+
+
+def test_shared_trusted_principal_entrypoint_is_role_exact_and_rejects_client_identity(monkeypatch):
+    from api.expert_teams import trusted_identity
+    from api.expert_teams.trusted_identity import TrustedIdentityError, TrustedIdentityResolver
+
+    resolver = TrustedIdentityResolver({"enabled": False}, production=False)
+    resolver._config = {"enabled": True}
+    session_id = resolver.install_test_principal(
+        {
+            "subject": "reviewer-1",
+            "display_name": "复核人甲",
+            "roles": ["document-reviewer"],
+            "expires_at": int(time.time()) + 3600,
+            "auth_method": "oidc_pkce",
+        }
+    )
+    monkeypatch.setattr(trusted_identity, "get_trusted_identity_resolver", lambda: resolver)
+
+    principal = trusted_identity.resolve_trusted_principal(
+        {"identity_session_id": session_id}, "document-reviewer", int(time.time())
+    )
+    assert principal["subject"] == "reviewer-1"
+    with pytest.raises(TrustedIdentityError) as missing_role:
+        trusted_identity.resolve_trusted_principal(
+            {"identity_session_id": session_id}, "waiver-authorizer", int(time.time())
+        )
+    assert missing_role.value.code == "trusted_authorizer_required"
+
+    with pytest.raises(TrustedIdentityError) as forged:
+        trusted_identity.resolve_trusted_principal(
+            {"identity_session_id": session_id, "principal": {"subject": "fake"}},
+            "document-reviewer",
+            int(time.time()),
+        )
+    assert forged.value.code == "client_identity_forbidden"
+
+    disabled = TrustedIdentityResolver({"enabled": False}, production=True)
+    monkeypatch.setattr(trusted_identity, "get_trusted_identity_resolver", lambda: disabled)
+    with pytest.raises(TrustedIdentityError) as unavailable:
+        trusted_identity.resolve_trusted_principal({}, "document-reviewer", int(time.time()))
+    assert unavailable.value.code == "trusted_identity_provider_required"
+
+
+def test_authorizer_handoff_requires_provider_switch_and_distinct_principal():
+    now = [time.time()]
+    private, jwk = _key_material()
+    holder = {"private": private, "jwk": jwk, "token": ""}
+    resolver = _resolver(now, holder, config=_config(authorizer_handoff_mode="select_account"))
+    redirect_uri = _config()["redirect_uris"][0]
+    context = {
+        "run_id": "run-1",
+        "acceptance_sha256": "a" * 64,
+        "delivery_binding_sha256": "b" * 64,
+        "disallowed_principal_id": "reviewer-1",
+    }
+    started = resolver.start_login(
+        redirect_uri,
+        purpose="authorizer_handoff",
+        binding_context=context,
+    )
+    query = parse_qs(urlparse(started["authorization_url"]).query)
+    assert query["prompt"] == ["select_account"]
+    claims = {
+        "iss": _config()["issuer"], "aud": _config()["audience"], "sub": "reviewer-1",
+        "iat": int(now[0]), "exp": int(now[0] + 600), "nonce": started["nonce"],
+        "jti": "same-reviewer", "roles": ["waiver-authorizer"],
+    }
+    holder["token"] = jwt.encode(claims, private, algorithm="RS256", headers={"kid": jwk["kid"]})
+    with pytest.raises(ValueError, match="distinct"):
+        resolver.complete_login(state=started["state"], code="authorization-code")
+    with pytest.raises(ValueError, match="state"):
+        resolver.complete_login(state=started["state"], code="authorization-code")
+
+    started = resolver.start_login(redirect_uri, purpose="authorizer_handoff", binding_context=context)
+    claims.update({"sub": "authorizer-2", "nonce": started["nonce"], "jti": "new-authorizer"})
+    holder["token"] = jwt.encode(claims, private, algorithm="RS256", headers={"kid": jwk["kid"]})
+    completed = resolver.complete_login(state=started["state"], code="authorization-code")
+    assert completed["principal"]["subject"] == "authorizer-2"
+    assert completed["purpose"] == "authorizer_handoff"
+    assert completed["binding_context"] == context

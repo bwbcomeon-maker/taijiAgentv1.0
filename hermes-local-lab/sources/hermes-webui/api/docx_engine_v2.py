@@ -278,6 +278,7 @@ def validate_delivery(
         args.append("--write-report")
     try:
         from api.expert_teams.delivery_integrity import (
+            classify_delivery_binding,
             delivery_attempt_lock,
             delivery_identity_from_directory,
             path_targets_expert_delivery_tree,
@@ -295,6 +296,12 @@ def validate_delivery(
                 identity["attempt"],
             ):
                 binding = validated_binding_for_identity(workspace, identity)
+                if classify_delivery_binding(binding) == "enterprise_pre_office":
+                    if _first_bool(payload, "write_report", "writeReport"):
+                        raise _ExpertDeliveryImmutable(
+                            "enterprise automatic quality report is immutable after delivery binding"
+                        )
+                    args.extend(["--office-mode", "external-office"])
                 if _first_bool(payload, "write_report", "writeReport"):
                     _validate_expert_wps_run_binding(
                         workspace,
@@ -342,7 +349,8 @@ def begin_office_review(
     payload: dict,
     workspace: Path,
     *,
-    trusted_reviewer: str,
+    trusted_reviewer: str = "",
+    trusted_principal: dict | None = None,
     open_document=None,
 ) -> tuple[dict[str, Any], int]:
     from api.expert_teams.delivery_integrity import (
@@ -350,6 +358,7 @@ def begin_office_review(
         delivery_attempt_lock,
         delivery_identity_from_directory,
         validated_binding_for_identity,
+        office_binding_identity,
         workspace_relative_path,
     )
     from api.expert_teams.office_review import issue_review_token, open_document_with_os
@@ -380,12 +389,14 @@ def begin_office_review(
                 supplied_session_id=_first_text(payload, "session_id", "sessionId"),
             )
             document = delivery_dir / "document.docx"
+            office_binding = office_binding_identity(root, identity, binding)
             token, state, _state_path = issue_review_token(
                 root,
-                binding=binding,
+                binding=office_binding,
                 document_path=document,
                 reviewer=trusted_reviewer,
                 open_document=open_document or open_document_with_os,
+                trusted_principal=trusted_principal,
             )
     except _ExpertDeliveryImmutable as exc:
         return _error_payload("expert_delivery_immutable", str(exc)), 409
@@ -393,6 +404,7 @@ def begin_office_review(
         return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
     return {
         "ok": True,
+        "office_status": "pending",
         "review_token": token,
         "reviewer": state["reviewer"],
         "opened_at": state["opened_at"],
@@ -417,7 +429,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
         if not delivery_dir.is_dir():
             return _error_payload("validation_failed", f"delivery_dir must be a directory: {delivery_dir}"), 400
         status = _first_text(payload, "status") or "passed"
-        if status not in {"passed", "passed_with_warnings", "failed"}:
+        if status not in {"passed", "passed_with_warnings", "passed_with_conditions", "failed"}:
             return _error_payload("validation_failed", f"Invalid WPS visual status: {status}"), 400
         raw_visual_checks = payload.get("visual_checks", payload.get("visualChecks", []))
         visual_checks = [
@@ -492,6 +504,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
         delivery_attempt_lock,
         delivery_identity_from_directory,
         path_targets_expert_delivery_tree,
+        office_binding_identity,
         validated_binding_for_identity,
         workspace_relative_path,
         sha256_file,
@@ -529,6 +542,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
 
         try:
             binding = validated_binding_for_identity(workspace, expert_identity)
+            office_binding = office_binding_identity(workspace, expert_identity, binding)
             _validate_expert_wps_run_binding(
                 workspace,
                 binding=binding,
@@ -547,7 +561,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
             token_state, token_state_path = load_review_token(
                 workspace,
                 _first_text(payload, "review_token", "reviewToken"),
-                binding=binding,
+                binding=office_binding,
             )
         except OfficeReviewTokenUsed as exc:
             return _error_payload("office_review_token_used", str(exc)), 409
@@ -565,6 +579,55 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
         evidence_error = _expert_wps_evidence_error(evidence_files)
         if evidence_error:
             return _error_payload("wps_visual_evidence_invalid", evidence_error), 400
+        if office_binding.get("schema_version") == "expert-office-binding/v1":
+            from datetime import datetime, timezone
+            from api.expert_teams.office_review import build_office_acceptance, write_office_acceptance
+
+            if status == "passed_with_warnings":
+                return _error_payload("office_acceptance_status_invalid", "enterprise Office uses passed_with_conditions"), 400
+            canonical_evidence = []
+            evidence_dir = expert_identity["delivery_dir"] / "evidence" / "wps-visual"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            for index, source in enumerate(evidence_files, 1):
+                suffix = source.suffix.lower() if source.suffix else ".bin"
+                target = evidence_dir / f"office-{index}{suffix}"
+                if target.resolve() != source.resolve():
+                    shutil.copyfile(source, target)
+                canonical_evidence.append({
+                    "path": target.relative_to(expert_identity["delivery_dir"]).as_posix(),
+                    "sha256": sha256_file(target),
+                    "sizeBytes": target.stat().st_size,
+                    "mediaType": _visual_evidence_media_type(target),
+                })
+            checklist = {item: "passed" for item in visual_checks}
+            try:
+                acceptance = build_office_acceptance(
+                    binding=office_binding,
+                    token_state=token_state,
+                    status=status,
+                    checklist=checklist,
+                    issues=payload.get("issues") if isinstance(payload.get("issues"), list) else [],
+                    evidence=canonical_evidence,
+                    note=note,
+                    now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                )
+                manifest_path, _manifest = write_office_acceptance(workspace, office_binding, acceptance)
+                consumed_state = prepare_consumed_review_state(
+                    token_state,
+                    acceptance_manifest_path=workspace_relative_path(workspace, manifest_path),
+                    acceptance_manifest_sha256=sha256_file(manifest_path),
+                    canonical_evidence=canonical_evidence,
+                )
+                consume_review_token(token_state_path, consumed_state)
+            except (DeliveryIntegrityError, OSError, ValueError) as exc:
+                return _error_payload("office_acceptance_invalid", str(exc)), 400
+            return {
+                "ok": True,
+                "office_status": acceptance["decision"],
+                "acceptance": acceptance,
+                "acceptance_manifest_path": workspace_relative_path(workspace, manifest_path),
+                "reviewer": str(token_state.get("reviewer") or ""),
+            }, 200
         reviewer_index = args.index("--reviewer") + 1
         args[reviewer_index] = reviewer
 
@@ -588,7 +651,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
                 raise DeliveryIntegrityError("WPS acceptance record is missing from quality-report.json")
             if str(wps_check.get("reviewedBy") or "").strip() != reviewer:
                 raise DeliveryIntegrityError("WPS acceptance reviewer does not match the trusted local identity")
-            if str(wps_check.get("documentSha256") or "") != binding["document_sha256"]:
+            if str(wps_check.get("documentSha256") or "") != office_binding["document_sha256"]:
                 raise DeliveryIntegrityError("WPS acceptance is bound to a different document digest")
             canonical_evidence = validate_canonical_wps_evidence(
                 workspace,
@@ -602,7 +665,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
             wps_check["visualEvidence"] = canonical_evidence
             manifest_path, _manifest = write_wps_acceptance_manifest(
                 workspace,
-                binding=binding,
+                binding=office_binding,
                 reviewer=reviewer,
                 note=note,
                 visual_checks=[
@@ -624,7 +687,7 @@ def record_wps_visual_acceptance(payload: dict, workspace: Path) -> tuple[dict[s
                 acceptance_manifest_sha256=sha256_file(manifest_path),
                 canonical_evidence=canonical_evidence,
             )
-            write_office_review_proof(workspace, binding, consumed_state)
+            write_office_review_proof(workspace, office_binding, consumed_state)
             consume_review_token(token_state_path, consumed_state)
         except (DeliveryIntegrityError, OSError, ValueError) as exc:
             return _error_payload("expert_delivery_binding_invalid", str(exc)), 400
@@ -694,6 +757,13 @@ def _expert_wps_evidence_error(evidence_files: list[Path]) -> str:
         except OSError as exc:
             return f"cannot inspect WPS evidence {evidence}: {exc}"
     return ""
+
+
+def _visual_evidence_media_type(path: Path) -> str:
+    suffix = Path(path).suffix.lower()
+    return {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".pdf": "application/pdf"}.get(
+        suffix, "application/octet-stream"
+    )
 
 
 def _jpeg_dimensions(path: Path) -> tuple[int, int] | None:
