@@ -1354,7 +1354,11 @@ def test_alibaba_quick_config_is_primary_and_advanced_fields_are_progressively_d
     assert '<select id="alibabaQuickVisionModel"' in quick_html
     assert '<select id="alibabaQuickImageModel"' in quick_html
     assert ".model-config-alibaba-quick" in STYLE_CSS
-    assert "@media(max-width:760px)" in STYLE_CSS
+    assert "@container model-config (max-width:600px)" in STYLE_CSS
+    assert (
+        "#settingsPaneModels .model-config-alibaba-quick-grid,\n"
+        " #settingsPaneModels .model-config-alibaba-quick-status{grid-template-columns:1fr;}"
+    ) in STYLE_CSS
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required")

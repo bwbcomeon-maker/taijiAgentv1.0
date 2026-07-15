@@ -4380,7 +4380,7 @@ main.main > #mainPlugin{display:none;}
  #settingsPaneModels .model-config-license-toolbar{justify-content:flex-start;}
  #settingsPaneModels .model-config-license-online-note{justify-content:flex-start;text-align:left;}
 }
-@media(max-width:760px){
+@container model-config (max-width:600px){
  #settingsPaneModels .model-config-alibaba-quick-grid,
  #settingsPaneModels .model-config-alibaba-quick-status{grid-template-columns:1fr;}
  #settingsPaneModels .model-config-alibaba-quick-head{display:grid;grid-template-columns:1fr;}
