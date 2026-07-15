@@ -258,7 +258,12 @@ class DashScopeQwenImageProvider(ImageGenProvider):
                     secret=False,
                     placeholder="workspace",
                 )
-                | {"options": ["workspace", "custom"]},
+                | {
+                    "options": [
+                        {"value": "workspace", "label": "业务空间专属端点"},
+                        {"value": "custom", "label": "自定义 Base URL"},
+                    ]
+                },
                 credential_field(
                     name="workspace_id",
                     env_var="DASHSCOPE_WORKSPACE_ID",
@@ -275,7 +280,12 @@ class DashScopeQwenImageProvider(ImageGenProvider):
                     secret=False,
                     placeholder=DEFAULT_REGION,
                 )
-                | {"options": list(PUBLIC_ROOTS)},
+                | {
+                    "options": [
+                        {"value": "cn-beijing", "label": "华北 2（北京）"},
+                        {"value": "ap-southeast-1", "label": "新加坡"},
+                    ]
+                },
                 credential_field(
                     name="base_url",
                     env_var="DASHSCOPE_BASE_URL",

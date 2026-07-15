@@ -400,6 +400,45 @@ def test_vision_schema_endpoint_field_is_saved_from_legacy_payload(monkeypatch, 
     )
 
     assert _read_config(tmp_path)["auxiliary"]["vision"]["tenant"] == "tenant-a"
+    result = model_config.get_vision_config()
+    assert result["vision"]["endpoint_values"]["tenant"] == "tenant-a"
+
+
+def test_vision_endpoint_values_never_echo_secret_schema_fields(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    meta = dict(model_config._VISION_PROVIDER_META["alibaba"])
+    meta["endpoint_fields"] = list(meta.get("endpoint_fields") or []) + [
+        {"name": "unsafe_token", "label": "Unsafe", "secret": True}
+    ]
+    monkeypatch.setitem(model_config._VISION_PROVIDER_META, "alibaba", meta)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus", "unsafe_token": "must-not-echo"}}}),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_vision_config()
+
+    assert "unsafe_token" not in result["vision"]["endpoint_values"]
+    assert "must-not-echo" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_alibaba_endpoint_options_have_localized_labels(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text("image_gen:\n  provider: dashscope\n", encoding="utf-8")
+
+    result = model_config.get_model_config()
+    vision = next(row for row in result["vision_providers"] if row["id"] == "alibaba")
+    image = next(row for row in model_config._image_gen_provider_rows("dashscope") if row["id"] == "dashscope")
+
+    vision_fields = {field["name"]: field for field in vision["endpoint_fields"]}
+    image_fields = {field["name"]: field for field in image["endpoint_fields"]}
+    assert vision_fields["endpoint_mode"]["options"] == [
+        {"value": "public", "label": "公共端点"},
+        {"value": "workspace", "label": "业务空间专属端点"},
+        {"value": "custom", "label": "自定义 Base URL"},
+    ]
+    assert vision_fields["region"]["options"][0] == {"value": "cn-beijing", "label": "华北 2（北京）"}
+    assert image_fields["region"]["options"][1] == {"value": "ap-southeast-1", "label": "新加坡"}
 
 
 def test_image_schema_endpoint_fields_are_saved_as_options(monkeypatch, tmp_path):

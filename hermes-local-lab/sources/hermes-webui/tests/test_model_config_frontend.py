@@ -1569,14 +1569,14 @@ let providerRow={id:'alibaba',endpoint_fields:[
  {name:'region',label:'部署地域',required:true,placeholder:'choose',options:[{value:'cn-beijing',label:'北京'},{value:'ap-southeast-1',label:'新加坡'}],description:'选择服务地域'},
  {name:'tenant',label:'租户',required:true,options:['tenant-a','tenant-b'],description:'选择租户'},
  {name:'route',label:'路由',required:false,placeholder:'blue',type:'text',description:'可选路由'}]};
-let _modelConfigData={vision:{tenant:'tenant-b',route:'green'},vision_providers:[providerRow]};
+let _modelConfigData={vision:{endpoint_values:{region:'cn-beijing',tenant:'tenant-b',route:'green'}},vision_providers:[providerRow]};
 const _modelConfigVisionProviderRow=()=>providerRow;const _modelConfigImageProviderRow=()=>null;
-for(const name of ['_endpointFieldInputId','_endpointKnownControl','_applyEndpointFieldMetadata','_renderImageCapabilityEndpointSchema','_collectImageCapabilityEndpointValues','_syncImageCapabilityEndpointFields','_captureImageCapabilityProviderDraft','_restoreImageCapabilityProviderDraft'])eval(extractFunc(name));
+for(const name of ['_endpointFieldInputId','_endpointKnownControl','_applyEndpointFieldMetadata','_imageCapabilityEndpointSavedValues','_imageCapabilityEndpointValuesChanged','_renderImageCapabilityEndpointSchema','_collectImageCapabilityEndpointValues','_syncImageCapabilityEndpointFields','_captureImageCapabilityProviderDraft','_restoreImageCapabilityProviderDraft'])eval(extractFunc(name));
 _syncImageCapabilityEndpointFields('vision');
-const box=elements.visionConfigEndpointFields;let tenant=box.children[0].children[1],route=box.children[1].children[1];tenant.value='tenant-a';route.value='blue';_syncImageCapabilityEndpointFields('vision');tenant=box.children[0].children[1];route=box.children[1].children[1];
+const initialDirty=_imageCapabilityEndpointValuesChanged('vision');const box=elements.visionConfigEndpointFields;let tenant=box.children[0].children[1],route=box.children[1].children[1];tenant.value='tenant-a';route.value='blue';_syncImageCapabilityEndpointFields('vision');tenant=box.children[0].children[1];route=box.children[1].children[1];
 _captureImageCapabilityProviderDraft('vision','alibaba');tenant.value='';route.value='';_restoreImageCapabilityProviderDraft('vision','alibaba');
 const values=_collectImageCapabilityEndpointValues('vision');
-const before={count:box.children.length,tenantTag:tenant.tagName,tenantOptions:tenant.options.map(o=>o.value),tenantLabel:box.children[0].children[0].textContent,tenantHelp:box.children[0].children[2].textContent,tenantRequired:tenant.required,routeTag:route.tagName,routePlaceholder:route.placeholder,values,knownLabel:elements.visionConfigRegionRow.children[0].textContent,knownRequired:elements.visionConfigRegion.required};
+const before={initialDirty,count:box.children.length,tenantTag:tenant.tagName,tenantOptions:tenant.options.map(o=>o.value),tenantLabel:box.children[0].children[0].textContent,tenantHelp:box.children[0].children[2].textContent,tenantRequired:tenant.required,routeTag:route.tagName,routePlaceholder:route.placeholder,values,knownLabel:elements.visionConfigRegionRow.children[0].textContent,knownRequired:elements.visionConfigRegion.required,knownValues:elements.visionConfigRegion.options.map(o=>o.value),knownTexts:elements.visionConfigRegion.options.map(o=>o.textContent)};
 providerRow={id:'alibaba',endpoint_fields:[{name:'region',label:'地域',required:false,options:['cn-beijing']}]};_syncImageCapabilityEndpointFields('vision');before.removed=box.children.length;process.stdout.write(JSON.stringify(before));
 """,
         encoding="utf-8",
@@ -1590,6 +1590,7 @@ providerRow={id:'alibaba',endpoint_fields:[{name:'region',label:'地域',require
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data == {
+        "initialDirty": False,
         "count": 2,
         "tenantTag": "SELECT",
         "tenantOptions": ["tenant-a", "tenant-b"],
@@ -1598,9 +1599,11 @@ providerRow={id:'alibaba',endpoint_fields:[{name:'region',label:'地域',require
         "tenantRequired": True,
         "routeTag": "INPUT",
         "routePlaceholder": "blue",
-        "values": {"region": "", "tenant": "tenant-a", "route": "blue"},
+        "values": {"region": "cn-beijing", "tenant": "tenant-a", "route": "blue"},
         "knownLabel": "部署地域",
         "knownRequired": True,
+        "knownValues": ["cn-beijing", "ap-southeast-1"],
+        "knownTexts": ["北京", "新加坡"],
         "removed": 0,
     }
 

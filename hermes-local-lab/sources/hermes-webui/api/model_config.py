@@ -89,8 +89,29 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "auth_type": "api_key",
         "transport": "dashscope_openai_compatible",
         "endpoint_fields": [
-            {"name": "endpoint_mode", "label": "接入方式", "required": True, "secret": False, "options": ["public", "workspace", "custom"], "description": "选择公共端点、业务空间端点或自定义 Base URL。"},
-            {"name": "region", "label": "地域", "required": True, "secret": False, "options": ["cn-beijing", "ap-southeast-1"], "description": "必须与百炼业务空间所在地域一致。"},
+            {
+                "name": "endpoint_mode",
+                "label": "接入方式",
+                "required": True,
+                "secret": False,
+                "options": [
+                    {"value": "public", "label": "公共端点"},
+                    {"value": "workspace", "label": "业务空间专属端点"},
+                    {"value": "custom", "label": "自定义 Base URL"},
+                ],
+                "description": "选择公共端点、业务空间端点或自定义 Base URL。",
+            },
+            {
+                "name": "region",
+                "label": "地域",
+                "required": True,
+                "secret": False,
+                "options": [
+                    {"value": "cn-beijing", "label": "华北 2（北京）"},
+                    {"value": "ap-southeast-1", "label": "新加坡"},
+                ],
+                "description": "必须与百炼业务空间所在地域一致。",
+            },
             {"name": "workspace_id", "label": "Workspace ID", "required": False, "secret": False, "placeholder": "例如：llm-demo", "description": "仅业务空间专属端点需要。"},
             {"name": "base_url", "label": "Base URL", "required": False, "secret": False, "type": "url", "placeholder": "https://api.example.com/v1", "description": "仅自定义接入方式需要。"},
         ],
@@ -644,7 +665,8 @@ def _image_gen_credential_fields(
             field_name = str(item.get("name") or field_env.lower() or "").strip()
             if not field_name and not field_env:
                 continue
-            fields.append(
+            normalized = dict(item)
+            normalized.update(
                 {
                     "name": field_name or field_env,
                     "env_var": field_env,
@@ -654,6 +676,7 @@ def _image_gen_credential_fields(
                     "placeholder": str(item.get("placeholder") or ""),
                 }
             )
+            fields.append(normalized)
     if fields:
         return fields
     keys = env_vars or ([env_var] if env_var else [])
@@ -2137,6 +2160,14 @@ def get_vision_config() -> dict[str, Any]:
             else ("chat_completions" if entry else "")
         )
     key_status = _vision_key_status(provider, vision_cfg)
+    meta = _VISION_PROVIDER_META.get(provider) or {}
+    endpoint_values: dict[str, str] = {}
+    for field in meta.get("endpoint_fields") or []:
+        if not isinstance(field, dict) or bool(field.get("secret")):
+            continue
+        name = str(field.get("name") or "").strip()
+        if name and name in vision_cfg:
+            endpoint_values[name] = str(vision_cfg.get(name) or "").strip()
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -2150,6 +2181,7 @@ def get_vision_config() -> dict[str, Any]:
             "endpoint_mode": str(vision_cfg.get("endpoint_mode") or "").strip(),
             "region": str(vision_cfg.get("region") or "").strip(),
             "workspace_id": str(vision_cfg.get("workspace_id") or "").strip(),
+            "endpoint_values": endpoint_values,
             "key_status": key_status,
             "verification": _public_vision_verification(
                 vision_cfg,

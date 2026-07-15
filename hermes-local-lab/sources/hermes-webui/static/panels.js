@@ -8923,6 +8923,21 @@ function _applyEndpointFieldMetadata(capability,field,row,control){
  if(help) help.textContent=String(field.description||'');
 }
 
+function _imageCapabilityEndpointSavedValues(capability){
+ if(capability==='vision'){
+  const vision=(_modelConfigData&&_modelConfigData.vision)||{};
+  return vision.endpoint_values&&typeof vision.endpoint_values==='object'
+   ?vision.endpoint_values:vision;
+ }
+ return (((_modelConfigData&&_modelConfigData.image_gen)||{}).options||{});
+}
+
+function _imageCapabilityEndpointValuesChanged(capability){
+ const saved=_imageCapabilityEndpointSavedValues(capability);
+ const current=_collectImageCapabilityEndpointValues(capability);
+ return Object.keys(current).some(name=>String(current[name]||'')!==String(saved[name]||''));
+}
+
 function _renderImageCapabilityEndpointSchema(capability,providerRow){
  const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
  const box=$(prefix+'EndpointFields');
@@ -8940,6 +8955,7 @@ function _renderImageCapabilityEndpointSchema(capability,providerRow){
   known.control.required=false;
  });
  const fields=Array.isArray(providerRow&&providerRow.endpoint_fields)?providerRow.endpoint_fields:[];
+ const savedValues=_imageCapabilityEndpointSavedValues(capability);
  fields.forEach(field=>{
   const name=String(field&&field.name||'').trim();
   if(!name||field.secret===true) return;
@@ -8961,10 +8977,6 @@ function _renderImageCapabilityEndpointSchema(capability,providerRow){
    }else{item.value=String(option||'');item.textContent=String(option||'');}
    control.appendChild(item);
   });
-  const saved=capability==='vision'
-   ?((_modelConfigData&&_modelConfigData.vision)||{})
-   :(((_modelConfigData&&_modelConfigData.image_gen)||{}).options||{});
-  if(Object.prototype.hasOwnProperty.call(saved,name)) control.value=String(saved[name]||'');
   const help=document.createElement('div');help.className='model-config-hint';help.id=inputId+'Hint';
   help.dataset.endpointHelp='true';help.textContent=String(field.description||(field.required?'必填。':'可选。'));
   const error=document.createElement('p');error.className='model-config-field-error';error.id=inputId+'Error';error.setAttribute('aria-live','polite');
@@ -8977,6 +8989,7 @@ function _renderImageCapabilityEndpointSchema(capability,providerRow){
   if(String(control.dataset.endpointCapability||'')!==capability) return;
   const name=String(control.dataset.endpointField||'');
   if(Object.prototype.hasOwnProperty.call(currentValues,name)) control.value=currentValues[name];
+  else if(Object.prototype.hasOwnProperty.call(savedValues,name)) control.value=String(savedValues[name]||'');
  });
 }
 
@@ -10525,8 +10538,11 @@ function _visionConfigHasUnsavedChanges(){
  const region=(($('visionConfigRegion')||{}).value||'cn-beijing').trim();
  const workspaceId=(($('visionConfigWorkspaceId')||{}).value||'').trim();
  const compareBase=provider!=='alibaba'||endpointMode==='custom';
+ const endpointSaved=saved.endpoint_values&&typeof saved.endpoint_values==='object'?saved.endpoint_values:saved;
  const endpointValues=_collectImageCapabilityEndpointValues('vision');
- const endpointChanged=Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(saved[name]||''));
+ const endpointChanged=typeof _imageCapabilityEndpointValuesChanged==='function'
+  ?_imageCapabilityEndpointValuesChanged('vision')
+  :Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(endpointSaved[name]||''));
  return !!apiKey
   || provider!==String(saved.provider||'').trim()
   || model!==String(saved.model||'').trim()
@@ -10624,7 +10640,9 @@ function _imageGenConfigHasUnsavedChanges(){
  const saved=(_modelConfigData&&_modelConfigData.image_gen)||{};
  const options=saved.options||{};
  const endpointValues=_collectImageCapabilityEndpointValues('image');
- const endpointChanged=Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(options[name]||''));
+ const endpointChanged=typeof _imageCapabilityEndpointValuesChanged==='function'
+  ?_imageCapabilityEndpointValuesChanged('image')
+  :Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(options[name]||''));
  return (($('imageGenConfigApiKey')||{}).value||'').trim()!==''
   || (($('imageGenConfigProvider')||{}).value||'').trim()!==String(saved.provider||'').trim()
   || (($('imageGenConfigModel')||{}).value||'').trim()!==String(saved.model||'').trim()
