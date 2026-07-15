@@ -61,8 +61,8 @@ def custom_image_provider_env_var(provider_id: Any) -> str:
 def _normalize_base_url(value: Any) -> str:
     url = str(value or "").strip().rstrip("/")
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("外部图片模型 Base URL 必须以 http:// 或 https:// 开头。")
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("外部图片模型 Base URL 必须使用 HTTPS。")
     return url
 
 

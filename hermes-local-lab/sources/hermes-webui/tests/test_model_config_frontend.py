@@ -1055,6 +1055,7 @@ def test_custom_image_provider_editor_has_safe_complete_interactions():
         "save.setAttribute('aria-busy'",
         "target.closest('#settingsPaneProviders')",
         "$('btnAddProviderImageService')",
+        "必须使用 HTTPS",
     ):
         assert marker in PANELS_JS
     for field_id in (

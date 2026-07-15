@@ -9928,8 +9928,13 @@ async function saveCustomImageProviderConfig(){
  _setFieldError('customImageProviderError','',['customImageProviderName','customImageProviderBaseUrl',
   'customImageProviderModels','customImageProviderDefaultModel','customImageProviderApiKey']);
  if(!payload.name||!payload.base_url||!payload.models.length){
-  _setFieldError('customImageProviderError','请完整填写名称、HTTPS Base URL 和模型 ID。',
+ _setFieldError('customImageProviderError','请完整填写名称、HTTPS Base URL 和模型 ID。',
    ['customImageProviderName','customImageProviderBaseUrl','customImageProviderModels']);
+  return;
+ }
+ if(!/^https:\/\/[^/]+/i.test(payload.base_url)){
+  _setFieldError('customImageProviderError','外部图片模型 Base URL 必须使用 HTTPS。',
+   ['customImageProviderBaseUrl']);
   return;
  }
  _setCustomImageProviderBusy(true);

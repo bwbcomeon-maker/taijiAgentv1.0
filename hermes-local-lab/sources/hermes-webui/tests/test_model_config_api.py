@@ -2107,6 +2107,26 @@ def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypat
     os.environ.pop("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", None)
 
 
+def test_custom_image_provider_rejects_insecure_http_without_persisting(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        model_config.set_custom_image_provider_config(
+            {
+                "id": "router",
+                "name": "Router Images",
+                "base_url": "http://images.example.com/v1",
+                "models": ["gpt-image-custom"],
+                "api_key": "must-not-be-written",
+            }
+        )
+
+    env_path = tmp_path / ".env"
+    assert not env_path.exists() or "must-not-be-written" not in env_path.read_text(encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    assert not config_path.exists() or _read_config(tmp_path).get("custom_image_providers") in (None, [])
+
+
 def test_custom_vision_provider_config_writes_isolated_secret_and_redacts(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.delenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", raising=False)

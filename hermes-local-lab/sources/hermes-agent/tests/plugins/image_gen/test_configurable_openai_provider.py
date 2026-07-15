@@ -65,6 +65,15 @@ def test_configurable_provider_requires_key_and_base_url(monkeypatch):
     assert provider.is_available() is True
 
 
+def test_configurable_provider_rejects_insecure_http_base_url():
+    from agent.custom_image_providers import normalize_custom_image_provider_entry
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        normalize_custom_image_provider_entry(
+            _entry(base_url="http://images.example.com/v1")
+        )
+
+
 def test_configurable_provider_posts_to_openai_compatible_endpoint(monkeypatch, tmp_path):
     from agent import custom_image_providers
     from agent.custom_image_providers import ConfigurableOpenAIImageProvider
