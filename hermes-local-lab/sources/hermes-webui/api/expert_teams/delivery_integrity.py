@@ -38,6 +38,14 @@ class DeliveryIntegrityError(ValueError):
     """A final delivery does not match its canonical expert-team identity."""
 
 
+def classify_delivery_binding(binding: dict) -> str:
+    """Classify evidence without granting enterprise trust to legacy sidecars."""
+
+    if isinstance(binding, dict) and binding.get("schema_version") == "expert-delivery-binding/v2":
+        return "enterprise_pre_office"
+    return "legacy_unverified"
+
+
 def safe_stage_id(value: str) -> str:
     stage_id = str(value or "").strip()
     if not stage_id or not _STAGE_ID_PATTERN.fullmatch(stage_id):
@@ -284,15 +292,42 @@ def validated_binding_for_identity(workspace: Path, identity: dict) -> dict:
     attempt = int(identity.get("attempt") or 0)
     attempt_root = canonical_attempt_root(root, run_id, stage_id, attempt)
     delivery_dir = attempt_root / "delivery"
-    source_path = attempt_root / "final.md"
     document_path = delivery_dir / "document.docx"
     manifest_path = attempt_root / BINDING_MANIFEST_NAME
-    for path in (attempt_root, delivery_dir, source_path, document_path, manifest_path):
+    for path in (attempt_root, delivery_dir, document_path, manifest_path):
         if path_contains_symlink(root, path):
             raise DeliveryIntegrityError(f"expert-team delivery binding contains a symlink: {path}")
-    if not source_path.is_file() or not document_path.is_file() or not manifest_path.is_file():
+    if not document_path.is_file() or not manifest_path.is_file():
         raise DeliveryIntegrityError("expert-team delivery binding inputs are missing")
     manifest = read_binding_manifest(manifest_path)
+    if classify_delivery_binding(manifest) == "enterprise_pre_office":
+        if (
+            manifest.get("run_id") != run_id
+            or manifest.get("stage_id") != stage_id
+            or int(manifest.get("delivery_attempt") or 0) != attempt
+            or not str(manifest.get("session_id") or "").strip()
+        ):
+            raise DeliveryIntegrityError("enterprise delivery binding identity is stale")
+        references = (
+            ("canonical_markdown", "canonical/document.md"),
+            ("asset_manifest", "assets/asset-manifest.json"),
+            ("semantic_gates", "reviews/semantic-gates.json"),
+            ("document", "delivery/document.docx"),
+            ("automatic_quality_report", "delivery/quality-report.json"),
+        )
+        for field, expected_relative in references:
+            reference = manifest.get(field)
+            if not isinstance(reference, dict) or reference.get("path") != expected_relative:
+                raise DeliveryIntegrityError(f"enterprise delivery binding {field} path is stale")
+            target = attempt_root / expected_relative
+            if path_contains_symlink(root, target) or not target.is_file():
+                raise DeliveryIntegrityError(f"enterprise delivery binding {field} input is missing")
+            if reference.get("sha256") != sha256_file(target):
+                raise DeliveryIntegrityError(f"enterprise delivery binding {field} hash is stale")
+        return manifest
+    source_path = attempt_root / "final.md"
+    if path_contains_symlink(root, source_path) or not source_path.is_file():
+        raise DeliveryIntegrityError("expert-team delivery binding inputs are missing")
     expected = {
         "schema_version": BINDING_SCHEMA_VERSION,
         "run_id": run_id,
@@ -505,7 +540,10 @@ def delivery_digest_set(
     root = Path(workspace).expanduser().resolve()
     attempt_root = canonical_attempt_root(root, run_id, stage_id, attempt)
     delivery_dir = attempt_root / "delivery"
-    source_path = attempt_root / "final.md"
+    manifest_path = attempt_root / BINDING_MANIFEST_NAME
+    binding = read_binding_manifest(manifest_path) if manifest_path.is_file() else {}
+    enterprise = classify_delivery_binding(binding) == "enterprise_pre_office"
+    source_path = attempt_root / ("canonical/document.md" if enterprise else "final.md")
     if not source_path.is_file() or not delivery_dir.is_dir():
         raise DeliveryIntegrityError("expert-team delivery snapshot inputs are missing")
     candidates = [source_path]
@@ -529,6 +567,12 @@ def delivery_digest_set(
             child = current / name
             if child.is_symlink() or not child.is_file():
                 raise DeliveryIntegrityError(f"expert-team delivery snapshot contains a non-regular file: {child}")
+            candidates.append(child)
+    if enterprise:
+        for relative in ("brief.json", "canonical/artifact.json", "assets/asset-manifest.json", "reviews/semantic-gates.json"):
+            child = attempt_root / relative
+            if path_contains_symlink(root, child) or not child.is_file():
+                raise DeliveryIntegrityError(f"enterprise delivery snapshot is missing {relative}")
             candidates.append(child)
     files = {
         path.relative_to(attempt_root).as_posix(): sha256_file(path)
@@ -573,7 +617,7 @@ def delivery_digest_set(
         "session_id": str(session_id or "").strip(),
         "stage_id": safe_stage_id(stage_id),
         "attempt": int(attempt),
-        "source_sha256": files["final.md"],
+        "source_sha256": files["canonical/document.md" if enterprise else "final.md"],
         "document_sha256": files[document_key],
         "files": files,
         "workspace_roots": sorted(set(extra_root_names)),

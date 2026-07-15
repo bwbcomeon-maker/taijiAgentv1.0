@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -1570,6 +1571,135 @@ def _reserve_stage_attempt_in_run(
     next_run["stage_attempt_reservations"] = reservations
     next_run["current_stage_attempt_reservation"] = deepcopy(reservation)
     return next_run, reservation, True
+
+
+def _reserve_document_revision_and_delivery_attempt_in_run(
+    run: dict,
+    *,
+    canonical_ref: dict,
+    render_input_fingerprint: str,
+    idempotency_key: str,
+) -> tuple[dict, dict, bool]:
+    """Allocate document revision and delivery attempt as independent monotonic identities."""
+
+    artifact_id = str((canonical_ref or {}).get("artifact_id") or "").strip()
+    artifact_sha256 = str((canonical_ref or {}).get("sha256") or "").strip()
+    fingerprint = str(render_input_fingerprint or "").strip()
+    lineage_key = str(idempotency_key or "").strip()
+    if not artifact_id or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
+        raise ValueError("canonical_ref must contain an artifact id and sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or not lineage_key:
+        raise ValueError("render fingerprint and idempotency key are required")
+    binding_sha256 = hashlib.sha256(
+        json.dumps(
+            {"canonical_ref": canonical_ref, "render_input_fingerprint": fingerprint},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    reservations = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    for item in reservations:
+        if item.get("idempotency_key") != lineage_key:
+            continue
+        if item.get("input_binding_sha256") != binding_sha256:
+            raise ExpertTeamStateConflict(
+                "delivery_attempt_idempotency_conflict",
+                "delivery idempotency key was reused with different render inputs",
+                run,
+            )
+        return run, deepcopy(item), False
+    active = next(
+        (
+            item
+            for item in reversed(reservations)
+            if item.get("status") in {"reserved", "rendering"}
+        ),
+        None,
+    )
+    if active is not None:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_in_progress",
+            "another delivery attempt is already authoritative",
+            run,
+        )
+    current_ref = run.get("current_document_revision_ref")
+    same_canonical = (
+        isinstance(current_ref, dict)
+        and current_ref.get("artifact_id") == artifact_id
+        and current_ref.get("sha256") == artifact_sha256
+    )
+    document_revision_counter = int(run.get("document_revision_counter") or 0)
+    if same_canonical:
+        document_revision = int(current_ref.get("document_revision") or document_revision_counter)
+    else:
+        document_revision_counter += 1
+        document_revision = document_revision_counter
+    delivery_attempt = int(run.get("delivery_attempt_counter") or 0) + 1
+    reservation = {
+        "reservation_id": "delivery-attempt-" + uuid.uuid4().hex[:16],
+        "canonical_ref": {"artifact_id": artifact_id, "sha256": artifact_sha256},
+        "document_revision": document_revision,
+        "delivery_attempt": delivery_attempt,
+        "render_input_fingerprint": fingerprint,
+        "input_binding_sha256": binding_sha256,
+        "idempotency_key": lineage_key,
+        "status": "reserved",
+        "created_at": _now(),
+    }
+    next_run = deepcopy(run)
+    next_run["document_revision_counter"] = document_revision_counter
+    next_run["delivery_attempt_counter"] = delivery_attempt
+    next_run["delivery_attempt_reservations"] = reservations + [deepcopy(reservation)]
+    next_run["current_delivery_attempt_reservation"] = deepcopy(reservation)
+    next_run["current_document_revision_ref"] = {
+        "artifact_id": artifact_id,
+        "sha256": artifact_sha256,
+        "document_revision": document_revision,
+    }
+    return next_run, reservation, True
+
+
+def reserve_document_revision_and_delivery_attempt(
+    workspace: Path,
+    run_id: str,
+    *,
+    canonical_ref: dict,
+    render_input_fingerprint: str,
+    idempotency_key: str,
+) -> tuple[dict, dict, bool]:
+    """Persist canonical document/delivery allocation under the authoritative run lock."""
+
+    with _run_mutation_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        _require_mutable_v2(run)
+        if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+            raise ExpertTeamStateConflict(
+                "delivery_attempt_not_available",
+                "legacy runs do not use canonical delivery reservations",
+                run,
+            )
+        if canonical_ref != run.get("canonical_document_ref"):
+            raise ExpertTeamStateConflict(
+                "canonical_document_ref_changed",
+                "canonical document reference is no longer authoritative",
+                run,
+            )
+        next_run, reservation, created = _reserve_document_revision_and_delivery_attempt_in_run(
+            run,
+            canonical_ref=canonical_ref,
+            render_input_fingerprint=render_input_fingerprint,
+            idempotency_key=idempotency_key,
+        )
+        if not created:
+            return _sync_derived(run), reservation, False
+        next_run["version"] = int(run.get("version") or 0) + 1
+        next_run["updated_at"] = _now()
+        return write_run(workspace, _sync_derived(next_run)), reservation, True
 
 
 def reserve_stage_attempt(
