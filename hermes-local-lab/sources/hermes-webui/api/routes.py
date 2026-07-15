@@ -1254,6 +1254,42 @@ def _expert_team_execution_prompt(run: dict) -> str:
     raise ValueError(f"Expert team cannot start chat stream: {team_id or 'missing team_id'}")
 
 
+def _expert_team_enterprise_gateway_request(run: dict) -> dict:
+    """Thin route seam; prompt policy and serialization live in expert_teams.prompts."""
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    task = _expert_team_current_task(run)
+    stage = {
+        "id": str(task.get("id") or task.get("task_id") or ""),
+        "executor": task.get("executor"),
+        "artifact_type": task.get("artifact_type"),
+        "depends_on": copy.deepcopy(task.get("depends_on") or []),
+    }
+    feedback = _expert_team_revision_feedback(run)
+    revision_context = None
+    if feedback:
+        previous = next(
+            (
+                item.get("artifact")
+                for item in reversed(run.get("stage_outputs") or [])
+                if isinstance(item, dict)
+                and str(item.get("task_id") or "") == stage["id"]
+                and isinstance(item.get("artifact"), dict)
+            ),
+            None,
+        )
+        if not isinstance(previous, dict):
+            raise ValueError("enterprise stage revision requires an immutable previous artifact reference")
+        revision_context = {
+            "previous_artifact_ref": {
+                "artifact_id": str(previous.get("artifact_id") or ""),
+                "sha256": str(previous.get("sha256") or ""),
+            },
+            "feedback": feedback,
+        }
+    return build_stage_gateway_request(run, stage, revision_feedback=revision_context)
+
+
 def _expert_team_execution_display_message(run: dict) -> str:
     title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
     task = _expert_team_current_task(run)
@@ -2405,7 +2441,12 @@ def _start_expert_team_execution(
         )
         display_msg = _expert_team_execution_display_message(run)
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
-        execution_prompt = _expert_team_execution_prompt(run)
+        enterprise_gateway_request = None
+        if expert_teams.classify_contract_version(run) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
+            enterprise_gateway_request = _expert_team_enterprise_gateway_request(run)
+            execution_prompt = ""
+        else:
+            execution_prompt = _expert_team_execution_prompt(run)
     except Exception as exc:
         error = str(exc) or "当前运行时启动参数无效，请检查配置后重试。"
         return {
@@ -2559,6 +2600,60 @@ def _start_expert_team_execution(
                 "run": failed_run,
             }, 503
 
+    current_stage = _expert_team_current_task(reserved_run)
+    start_request = StartRunRequest(
+        session_id=sid,
+        message=execution_prompt,
+        messages=copy.deepcopy((enterprise_gateway_request or {}).get("messages") or []),
+        tools_disabled=bool((enterprise_gateway_request or {}).get("tools_disabled")),
+        idempotency_key=reservation_id,
+        attachments=[],
+        workspace=str(workspace),
+        profile=getattr(session, "profile", None),
+        provider=model_provider,
+        model=model,
+        source="expert-team",
+        metadata={
+            "route": "expert-team",
+            "expert_team_run_id": str(run.get("run_id") or ""),
+            "expert_team_stage_id": str(current_stage.get("task_id") or current_stage.get("id") or ""),
+            "expert_team_version": int(run.get("version") or 0),
+            "execution_start_id": reservation_id,
+            "system_template_version": str((enterprise_gateway_request or {}).get("system_template_version") or ""),
+            "system_template_sha256": str((enterprise_gateway_request or {}).get("system_template_sha256") or ""),
+            "data_envelope_sha256": str((enterprise_gateway_request or {}).get("data_envelope_sha256") or ""),
+        },
+    )
+
+    if enterprise_gateway_request is not None:
+        try:
+            from api.expert_teams.data_egress import load_model_policy_registry
+            from api.expert_teams.prompts import authorize_stage_model_call
+
+            provider_context = adapter.resolve_provider_context(start_request)
+            authorization = authorize_stage_model_call(
+                reserved_run,
+                {
+                    "id": str(current_stage.get("id") or current_stage.get("task_id") or ""),
+                    "executor": current_stage.get("executor"),
+                    "artifact_type": current_stage.get("artifact_type"),
+                    "depends_on": copy.deepcopy(current_stage.get("depends_on") or []),
+                },
+                provider_context=provider_context,
+                policy_registry=load_model_policy_registry(),
+                now=datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+            start_request.metadata["provider_authorization"] = authorization
+        except Exception as exc:
+            error = str(exc) or "当前模型数据外发未获授权，未启动专家团。"
+            failed_run = _fail_reserved_start(error)
+            return {
+                "ok": False,
+                "code": "data_egress_not_authorized",
+                "error": error,
+                "run": failed_run,
+            }, 503
+
     try:
         reserved_run = expert_teams.mark_expert_team_execution_start_dispatching(
             workspace,
@@ -2574,26 +2669,7 @@ def _start_expert_team_execution(
         }, 409
 
     try:
-        result = adapter.start_run(
-            StartRunRequest(
-                session_id=sid,
-                message=execution_prompt,
-                idempotency_key=reservation_id,
-                attachments=[],
-                workspace=str(workspace),
-                profile=getattr(session, "profile", None),
-                provider=model_provider,
-                model=model,
-                source="expert-team",
-                metadata={
-                    "route": "expert-team",
-                    "expert_team_run_id": str(run.get("run_id") or ""),
-                    "expert_team_stage_id": str((run.get("current_stage") or {}).get("task_id") or ""),
-                    "expert_team_version": int(run.get("version") or 0),
-                    "execution_start_id": reservation_id,
-                },
-            )
-        )
+        result = adapter.start_run(start_request)
         response = _chat_start_response_from_run_start(result)
     except Exception as exc:
         cleanup = _cancel_expert_team_runtime_start(adapter, result, exc)

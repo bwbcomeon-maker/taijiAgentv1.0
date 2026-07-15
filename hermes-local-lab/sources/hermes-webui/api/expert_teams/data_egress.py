@@ -75,3 +75,73 @@ def validate_model_policy_reference(brief: dict, *, model_policy_registry: dict,
         "label": str(policy.get("label") or policy_id),
         "field_errors": [],
     }
+
+
+def authorize_actual_provider(
+    brief: dict,
+    *,
+    provider_context: dict,
+    model_policy_registry: dict,
+    now: str,
+) -> dict:
+    """Authorize the provider/deployment selected by the gateway, not the UI hint.
+
+    The returned value is deliberately audit-safe: endpoints, credentials and
+    arbitrary provider metadata are never copied into it.
+    """
+    reference = validate_model_policy_reference(
+        brief,
+        model_policy_registry=model_policy_registry,
+        now=now,
+    )
+    if not reference.get("authorized"):
+        return reference
+
+    handling = brief.get("data_handling") if isinstance(brief.get("data_handling"), dict) else {}
+    source_policy = brief.get("source_policy") if isinstance(brief.get("source_policy"), dict) else {}
+    policy_id = str(handling.get("model_policy_id") or "").strip()
+    policy = model_policy_registry[policy_id]
+    provider_id = str(provider_context.get("provider_id") or "").strip()
+    deployment_id = str(provider_context.get("deployment_id") or "").strip()
+    trust_zone = str(provider_context.get("trust_zone") or "").strip()
+    retention_mode = str(provider_context.get("retention_mode") or "").strip()
+    source_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in source_policy.get("source_refs") or []
+        if isinstance(item, dict) and str(item.get("kind") or "").strip()
+    }
+
+    checks = (
+        provider_id in policy["provider_ids"],
+        deployment_id in policy["deployment_ids"],
+        trust_zone in policy["trust_zones"],
+        retention_mode in policy["retention_modes"],
+        provider_context.get("training_opt_out") is True,
+        provider_context.get("preserves_message_roles") is True,
+        provider_context.get("supports_tools_disabled") is True,
+        source_kinds.issubset(set(policy["allowed_source_kinds"])),
+    )
+    if not all(checks):
+        return {
+            "authorized": False,
+            "policy_id": policy_id,
+            "label": str(policy.get("label") or policy_id),
+            "field_errors": [
+                _error(
+                    "data_handling.model_policy_id",
+                    "data_egress_not_authorized",
+                    "当前网关实际使用的模型部署不满足文档数据策略",
+                )
+            ],
+        }
+
+    return {
+        "authorized": True,
+        "policy_id": policy_id,
+        "provider_id": provider_id,
+        "deployment_id": deployment_id,
+        "trust_zone": trust_zone,
+        "retention_mode": retention_mode,
+        "preserves_message_roles": True,
+        "tools_disabled": True,
+    }

@@ -31,6 +31,8 @@ _VALID_RUNTIME_ADAPTER_MODES = {
 class StartRunRequest:
     session_id: str
     message: str
+    messages: list[dict[str, str]] = field(default_factory=list)
+    tools_disabled: bool = False
     idempotency_key: str | None = None
     attachments: list[dict[str, Any]] = field(default_factory=list)
     workspace: str | None = None
@@ -95,6 +97,7 @@ class ControlResult:
 
 
 class RuntimeAdapter(Protocol):
+    def resolve_provider_context(self, request: StartRunRequest) -> dict[str, Any]: ...
     def start_run(self, request: StartRunRequest) -> RunStartResult: ...
     def find_run_by_idempotency_key(self, key: str, *, session_id: str) -> RunStatus: ...
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream: ...
@@ -209,6 +212,15 @@ class RunnerRuntimeAdapter:
 
     def __init__(self, *, client: Any):
         self._client = client
+
+    def resolve_provider_context(self, request: StartRunRequest) -> dict[str, Any]:
+        resolve = getattr(self._client, "resolve_provider_context", None)
+        if resolve is None:
+            raise NotImplementedError("Runner backend cannot preflight its actual provider capabilities")
+        payload = resolve(request)
+        if not isinstance(payload, dict):
+            raise ValueError("Runner provider preflight returned an invalid capability payload")
+        return dict(payload)
 
     def start_run(self, request: StartRunRequest) -> RunStartResult:
         start_run = getattr(self._client, "start_run", None)
@@ -371,7 +383,14 @@ class LegacyJournalRuntimeAdapter:
         self._live_stream_lookup = live_stream_lookup or (lambda _run_id: False)
         self._session_dir = Path(session_dir) if session_dir is not None else None
 
+    def resolve_provider_context(self, request: StartRunRequest) -> dict[str, Any]:
+        raise NotImplementedError(
+            "Legacy runtime cannot preserve role-separated enterprise prompts or preflight provider fallback"
+        )
+
     def start_run(self, request: StartRunRequest) -> RunStartResult:
+        if request.messages:
+            raise NotImplementedError("Legacy runtime cannot flatten role-separated enterprise prompts")
         if self._start_run_delegate is None:
             raise NotImplementedError("LegacyJournalRuntimeAdapter.start_run requires a legacy delegate")
         payload = dict(self._start_run_delegate(request) or {})
