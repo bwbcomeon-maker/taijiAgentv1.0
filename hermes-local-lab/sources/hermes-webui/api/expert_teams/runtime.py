@@ -16,9 +16,17 @@ from pathlib import Path
 from .catalog import CONTENT_CREATOR_TEAM_ID, get_template
 from .contracts import (
     EXPERT_TEAM_CONTRACT_V1,
+    ContractError,
+    brief_digest,
     build_document_brief,
     classify_contract_version,
+    confirm_document_brief,
+    patch_document_brief,
+    validate_document_brief,
 )
+from .data_egress import load_model_policy_registry
+from .source_context import build_source_context_snapshot
+from .source_registry import SourceRegistryError, resolve_source_registry
 from .documents import (
     FinalDocumentDeliveryError,
     build_final_document_delivery,
@@ -1114,6 +1122,7 @@ def _prepare_mutation(
     action: str,
     *,
     skip_idempotency_result: bool = False,
+    require_stage: bool = True,
 ) -> tuple[dict, dict | None]:
     run = read_run(workspace, str(body.get("run_id") or ""))
     _require_mutable_v2(run)
@@ -1127,7 +1136,10 @@ def _prepare_mutation(
             run,
         )
 
-    for field in ("expected_version", "stage_id", "idempotency_key"):
+    required_fields = ["expected_version", "idempotency_key"]
+    if require_stage:
+        required_fields.append("stage_id")
+    for field in required_fields:
         if body.get(field) is None or (isinstance(body.get(field), str) and not str(body.get(field)).strip()):
             raise ValueError(f"{field} is required for expert team v2 mutations")
 
@@ -1141,7 +1153,7 @@ def _prepare_mutation(
     if duplicate is not None:
         return run, duplicate
 
-    authoritative_stage = _authoritative_stage_for_mutation(run)
+    authoritative_stage = _authoritative_stage_for_mutation(run) if require_stage else {}
 
     if body.get("expected_version") is not None:
         try:
@@ -1155,7 +1167,7 @@ def _prepare_mutation(
                 run,
             )
 
-    if requested_stage_id:
+    if require_stage and requested_stage_id:
         current_stage_id = str(authoritative_stage.get("task_id") or authoritative_stage.get("id") or "")
         if requested_stage_id != current_stage_id:
             raise ExpertTeamStateConflict(
@@ -1497,7 +1509,97 @@ def answer_expert_team(workspace: Path, body: dict) -> dict:
     answers = body.get("answers") if isinstance(body.get("answers"), dict) else {}
     run = _apply_answers(run, answers, bool(body.get("skip_optional")))
     _record_action(run, body, "answer")
-    return _transition(workspace, run, _intake_state(run), "questions_answered")
+    next_state = (
+        "collecting_required"
+        if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1
+        else _intake_state(run)
+    )
+    return _transition(workspace, run, next_state, "questions_answered")
+
+
+@_serialized_body_mutation
+def update_expert_team_document_brief(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(workspace, body, "brief_update", require_stage=False)
+    if duplicate is not None:
+        return duplicate
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        raise ContractError("brief_not_available", "contract_version", "历史任务不支持企业文档规格编辑")
+    if body.get("expected_brief_revision") is None:
+        raise ValueError("expected_brief_revision is required for document brief mutations")
+    stage_started = bool(run.get("stage_outputs") or run.get("execution_start_id")) or str(
+        run.get("workflow_state") or ""
+    ) in {"starting", "generating", "revising", "awaiting_review", "awaiting_stage_input", "completed"}
+    updated = patch_document_brief(
+        run.get("document_brief") or {},
+        body.get("patch"),
+        expected_revision=body.get("expected_brief_revision"),
+        stage_started=stage_started,
+    )
+    _record_action(run, body, "brief_update")
+    return _transition(
+        workspace,
+        run,
+        "collecting_required",
+        "brief_updated",
+        {"document_brief": updated, "brief_validation": {"valid_for_confirmation": False, "field_errors": []}},
+    )
+
+
+@_serialized_body_mutation
+def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(workspace, body, "brief_confirm", require_stage=False)
+    if duplicate is not None:
+        return duplicate
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        raise ContractError("brief_not_available", "contract_version", "历史任务不支持企业文档规格确认")
+    brief = deepcopy(run.get("document_brief") or {})
+    expected_revision = body.get("expected_brief_revision")
+    if expected_revision is None:
+        raise ValueError("expected_brief_revision is required for document brief mutations")
+    if int(expected_revision) != int(brief.get("revision") or 0):
+        raise ContractError("brief_revision_conflict", "expected_brief_revision", "规格已被更新，请刷新后重试")
+    try:
+        resolved_refs, source_registry = resolve_source_registry(
+            workspace,
+            str(run.get("run_id") or ""),
+            list((brief.get("source_policy") or {}).get("source_refs") or []),
+        )
+    except SourceRegistryError as exc:
+        raise ContractError(exc.code, f"source_policy.source_refs.{exc.source_id}", str(exc)) from exc
+    brief["source_policy"]["source_refs"] = resolved_refs
+    checked_at = _now()
+    validation = validate_document_brief(
+        brief,
+        runtime_capabilities={"approved_public_search": False},
+        source_registry=source_registry,
+        model_policy_registry=load_model_policy_registry(),
+        now=checked_at,
+    )
+    if not validation["valid_for_confirmation"]:
+        first = validation["field_errors"][0]
+        raise ContractError(first["code"], first["field"], first["message"])
+    confirmed = confirm_document_brief(brief, now=checked_at)
+    snapshot_ref = build_source_context_snapshot(
+        workspace,
+        str(run.get("run_id") or ""),
+        confirmed,
+        source_registry,
+        brief_sha256=brief_digest(confirmed),
+        brief_revision=int(confirmed.get("confirmed_revision") or 0),
+    )
+    _record_action(run, body, "brief_confirm")
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "brief_confirmed",
+        {
+            "document_brief": confirmed,
+            "brief_validation": validation,
+            "source_registry": source_registry,
+            "source_context_snapshot_ref": snapshot_ref,
+        },
+    )
 
 
 @_serialized_body_mutation
@@ -2784,6 +2886,10 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     run, duplicate = _prepare_mutation(workspace, body, "resume")
     if duplicate is not None:
         return duplicate
+    if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and str(
+        (run.get("document_brief") or {}).get("status") or ""
+    ) != "confirmed":
+        raise ExpertTeamStateConflict("brief_not_confirmed", "document brief must be confirmed before generation", run)
     state = str(run.get("workflow_state") or "")
     if state in TERMINAL_STATES:
         raise ExpertTeamStateConflict("terminal_state", "terminal expert team runs cannot resume", run)

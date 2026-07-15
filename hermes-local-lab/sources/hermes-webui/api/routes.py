@@ -11781,6 +11781,8 @@ def handle_post(handler, parsed) -> bool:
                     "session_messages": session_messages,
                 },
             )
+        except expert_teams.ContractError as exc:
+            return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except Exception as exc:
             return bad(handler, f"Failed to start expert team: {_sanitize_error(exc)}", 400)
 
@@ -11790,11 +11792,16 @@ def handle_post(handler, parsed) -> bool:
         try:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
-            run, reservation_created = expert_teams.answer_and_reserve_expert_team_execution_start(
-                workspace,
-                body,
-                runtime_adapter=_expert_team_planned_runtime_adapter_name(),
-            )
+            existing = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if expert_teams.classify_contract_version(existing) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
+                run = expert_teams.answer_expert_team(workspace, body)
+                reservation_created = False
+            else:
+                run, reservation_created = expert_teams.answer_and_reserve_expert_team_execution_start(
+                    workspace,
+                    body,
+                    runtime_adapter=_expert_team_planned_runtime_adapter_name(),
+                )
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
             if reservation_created and str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS:
                 stream_payload, status = _start_expert_team_execution(
@@ -11811,8 +11818,42 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
+        except expert_teams.ContractError as exc:
+            return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except Exception as exc:
             return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
+
+    if parsed.path in {"/api/expert-teams/brief/update", "/api/expert-teams/brief/confirm"}:
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            operation = (
+                expert_teams.update_expert_team_document_brief
+                if parsed.path.endswith("/update")
+                else expert_teams.confirm_expert_team_document_brief
+            )
+            run = operation(workspace, body)
+            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except expert_teams.ContractError as exc:
+            status = 409 if exc.code in {"brief_revision_conflict", "brief_frozen_new_run_required"} else 400
+            payload = {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}
+            if status == 409:
+                try:
+                    authoritative = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+                    payload["run"] = authoritative
+                    payload["brief_revision"] = int((authoritative.get("document_brief") or {}).get("revision") or 0)
+                    payload["version"] = int(authoritative.get("version") or 0)
+                except Exception:
+                    pass
+            return j(handler, payload, status=status)
+        except Exception as exc:
+            return bad(handler, f"Failed to update document brief: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/expert-teams/stage/approve":
         from api import expert_teams

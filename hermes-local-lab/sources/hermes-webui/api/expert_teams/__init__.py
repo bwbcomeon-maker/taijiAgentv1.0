@@ -1,6 +1,7 @@
 """Expert team facade for the rebuilt runtime."""
 
 from .catalog import expert_team_catalog
+from .contracts import ContractError, EXPERT_TEAM_CONTRACT_V1, classify_contract_version
 from .runtime import (
     _business_context_for_view,
     ExpertTeamStateConflict,
@@ -38,12 +39,17 @@ from .runtime import (
     restore_expert_team_after_cancel_completion,
     start_expert_team,
     submit_expert_team_stage_input,
+    update_expert_team_document_brief,
+    confirm_expert_team_document_brief,
 )
 from .view import expert_team_run_view
 
 __all__ = [
     "_business_context_for_view",
     "ExpertTeamStateConflict",
+    "ContractError",
+    "EXPERT_TEAM_CONTRACT_V1",
+    "classify_contract_version",
     "answer_and_reserve_expert_team_execution_start",
     "answer_expert_team",
     "approve_expert_team_stage",
@@ -80,4 +86,6 @@ __all__ = [
     "restore_expert_team_after_cancel_completion",
     "start_expert_team",
     "submit_expert_team_stage_input",
+    "update_expert_team_document_brief",
+    "confirm_expert_team_document_brief",
 ]

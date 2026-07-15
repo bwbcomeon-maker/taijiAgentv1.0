@@ -5,6 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 
 
+def load_model_policy_registry() -> dict:
+    """Load the server-owned policy registry from the active config.yaml."""
+    try:
+        from api.config import _get_config_path, _load_yaml_config_file
+
+        path = _get_config_path()
+        config = _load_yaml_config_file(path) if path.exists() else {}
+    except Exception:
+        return {}
+    registry = config.get("expert_team_model_data_policies") if isinstance(config, dict) else {}
+    return registry if isinstance(registry, dict) else {}
+
+
 def _error(field: str, code: str, message: str) -> dict:
     return {"field": field, "code": code, "message": message}
 

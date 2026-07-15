@@ -203,6 +203,58 @@ def test_answer_route_starts_first_stage_in_the_same_request(monkeypatch, tmp_pa
     assert payload["run"]["execution_stream_id"] == "stream-first"
 
 
+def test_contract_answer_route_never_auto_starts_before_brief_confirmation(monkeypatch, tmp_path):
+    from api import expert_teams, routes
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "session_id": "sid-contract-answer",
+            "team_id": "content-creator-team",
+            "contract_version": "expert-team-contract/v1",
+            "document_type": "work_report",
+            "prompt": "起草工作汇报，不要写成公众号文章",
+            "document_brief_seed": {"document_control": {"render_template_id": "enterprise-work-report"}},
+        },
+    )
+    session = SimpleNamespace(session_id=run["session_id"], model="test-model", model_provider=None, messages=[])
+    _configure_route(monkeypatch, routes, tmp_path, session)
+    calls = []
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", lambda *args, **kwargs: calls.append(kwargs))
+    answers = {str(item["id"]): "已确认" for item in run["questions"]}
+
+    handler = _post(
+        routes,
+        "/api/expert-teams/answer",
+        _control(run, "contract-answer", answers=answers, skip_optional=True),
+    )
+
+    assert handler.status == 200
+    assert calls == []
+    assert handler.json_body()["run"]["workflow_state"] == "collecting_required"
+    assert handler.json_body()["run"]["view"]["brief"]["gate"] == "needs_confirmation"
+
+
+def test_start_route_returns_stable_contract_error_code(monkeypatch, tmp_path):
+    from api import routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
+    handler = _post(
+        routes,
+        "/api/expert-teams/start",
+        {
+            "session_id": "sid-invalid-contract",
+            "team_id": "content-creator-team",
+            "contract_version": "expert-team-contract/v9",
+            "document_type": "work_report",
+            "prompt": "起草工作汇报",
+        },
+    )
+    assert handler.status == 400
+    assert handler.json_body()["code"] == "unsupported_contract_version"
+
+
 def test_approve_route_starts_next_stage_in_the_same_request(monkeypatch, tmp_path):
     from api import expert_teams, routes
 

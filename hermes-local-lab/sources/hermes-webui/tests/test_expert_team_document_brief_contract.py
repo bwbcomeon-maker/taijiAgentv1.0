@@ -317,3 +317,76 @@ def test_explicit_invalid_contract_version_fails_closed_without_creating_run(tmp
 
     assert error.value.code == "unsupported_contract_version"
     assert list(tmp_path.rglob("et-*.json")) == []
+
+
+def test_brief_update_and_confirm_reuse_run_version_and_do_not_auto_start(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    source = tmp_path / "monthly.txt"
+    source.write_text("已完成3项重点任务，待协调2项。", encoding="utf-8")
+    payload = _payload()
+    payload["document_brief_seed"]["source_policy"]["source_refs"][0].update(
+        {"kind": "local_file", "locator": "monthly.txt"}
+    )
+    _, _, policies = _registries()
+    monkeypatch.setattr(runtime, "load_model_policy_registry", lambda: policies)
+    run = expert_teams.start_expert_team(tmp_path, {"session_id": "brief-mutation", **payload})
+
+    updated = expert_teams.update_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "expected_version": run["version"],
+            "expected_brief_revision": 1,
+            "idempotency_key": "brief-update-1",
+            "patch": {"exact_title": "更新后的精确标题"},
+        },
+    )
+    assert updated["version"] == run["version"] + 1
+    assert updated["document_brief"]["revision"] == 2
+
+    request = {
+        "session_id": updated["session_id"],
+        "run_id": updated["run_id"],
+        "expected_version": updated["version"],
+        "expected_brief_revision": 2,
+        "idempotency_key": "brief-confirm-1",
+    }
+    confirmed = expert_teams.confirm_expert_team_document_brief(tmp_path, request)
+    replay = expert_teams.confirm_expert_team_document_brief(tmp_path, request)
+
+    assert confirmed == replay
+    assert confirmed["document_brief"]["status"] == "confirmed"
+    assert confirmed["workflow_state"] == "ready_to_generate"
+    assert confirmed["view"]["phase_progress"]["done"] == 0
+    assert not confirmed.get("execution_start_id")
+    snapshot = confirmed["source_context_snapshot_ref"]
+    assert (tmp_path / snapshot["path"]).is_file()
+
+
+def test_brief_mutation_rejects_stale_revision_and_draft_resume(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.contracts import ContractError
+
+    run = expert_teams.start_expert_team(tmp_path, {"session_id": "brief-conflict", **_payload()})
+    base = {
+        "session_id": run["session_id"],
+        "run_id": run["run_id"],
+        "expected_version": run["version"],
+        "idempotency_key": "brief-conflict-1",
+    }
+    with pytest.raises(ContractError) as stale:
+        expert_teams.update_expert_team_document_brief(
+            tmp_path,
+            {**base, "expected_brief_revision": 99, "patch": {"exact_title": "x"}},
+        )
+    assert stale.value.code == "brief_revision_conflict"
+
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as blocked:
+        expert_teams.resume_expert_team(
+            tmp_path,
+            {**base, "stage_id": run["current_stage"]["task_id"], "idempotency_key": "draft-resume"},
+        )
+    assert blocked.value.code == "brief_not_confirmed"

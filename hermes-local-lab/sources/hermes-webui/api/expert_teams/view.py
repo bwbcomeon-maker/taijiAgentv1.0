@@ -438,7 +438,12 @@ def expert_team_run_view(run: dict) -> dict:
         brief = brief_summary(run.get("document_brief") or {})
         brief["editable"] = not bool(run.get("stage_outputs"))
         brief["edit_policy"] = "editable" if brief["editable"] else "new_run_required"
-        brief["validation"] = {"valid_for_confirmation": False, "field_errors": []}
+        brief["validation"] = deepcopy(
+            run.get("brief_validation")
+            if isinstance(run.get("brief_validation"), dict)
+            else {"valid_for_confirmation": False, "field_errors": []}
+        )
+        brief["gate"] = "confirmed" if brief.get("status") == "confirmed" else "needs_confirmation"
         result["contract_version"] = contract_version
         result["brief"] = brief
     return result
