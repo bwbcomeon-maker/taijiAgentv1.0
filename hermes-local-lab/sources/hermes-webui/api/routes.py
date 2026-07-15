@@ -2434,7 +2434,7 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
             reserved_run,
             descriptor,
             reservation,
-            registry=get_system_stage_registry(),
+            registry=get_system_stage_registry(workspace),
         )
         completed = expert_teams.complete_system_stage_attempt(
             workspace,

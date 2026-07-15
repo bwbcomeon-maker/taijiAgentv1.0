@@ -337,23 +337,33 @@ def build_render_input_binding(
         if not Path(path).is_file():
             raise FinalDocumentDeliveryError(f"{label} is missing")
     payload = {
-        "schema_version": "render-input-binding/v1",
+        "schemaVersion": "render-input-binding/v1",
         "brief": {
             "revision": int(brief.get("confirmed_revision") or 0),
             "sha256": str(brief.get("confirmed_sha256") or ""),
         },
-        "canonical_artifact": {
-            "artifact_id": str(artifact.get("artifact_id") or ""),
+        "canonicalArtifact": {
+            "artifactId": str(artifact.get("artifact_id") or ""),
             "sha256": str(artifact.get("sha256") or ""),
         },
-        "canonical_markdown_sha256": sha256_file(Path(canonical_document_path)),
-        "asset_manifest_sha256": sha256_file(Path(asset_manifest_path)),
-        "semantic_gates_sha256": sha256_file(Path(semantic_gates_path)),
-        "template": template_identity,
-        "renderer": renderer_identity,
+        "canonicalMarkdownSha256": sha256_file(Path(canonical_document_path)),
+        "assetManifestSha256": sha256_file(Path(asset_manifest_path)),
+        "semanticGatesSha256": sha256_file(Path(semantic_gates_path)),
+        "template": {
+            "id": template_identity["id"],
+            "version": template_identity["version"],
+            "packageSha256": template_identity["package_sha256"],
+        },
+        "rendererIdentity": {
+            "name": renderer_identity["name"],
+            "version": renderer_identity["version"],
+            "buildSha256": renderer_identity["build_sha256"],
+            "profileId": renderer_identity["profile_id"],
+            "profileSha256": renderer_identity["profile_sha256"],
+        },
     }
     for field in ("sha256",):
-        if not _HEX64.fullmatch(payload["brief"][field]) or not _HEX64.fullmatch(payload["canonical_artifact"][field]):
+        if not _HEX64.fullmatch(payload["brief"][field]) or not _HEX64.fullmatch(payload["canonicalArtifact"][field]):
             raise FinalDocumentDeliveryError("render input upstream binding is invalid")
     payload["render_input_fingerprint"] = _sha256_payload(payload)
     return payload
@@ -430,12 +440,25 @@ def build_delivery_binding_v2(
         "document_revision": int(document_revision),
         "render_input_fingerprint": render_input_fingerprint,
         "brief": render_input["brief"],
-        "canonical_artifact": render_input["canonical_artifact"],
-        "canonical_markdown": {"path": "canonical/document.md", "sha256": render_input["canonical_markdown_sha256"]},
-        "asset_manifest": {"path": "assets/asset-manifest.json", "sha256": render_input["asset_manifest_sha256"]},
-        "semantic_gates": {"path": "reviews/semantic-gates.json", "sha256": render_input["semantic_gates_sha256"]},
-        "template": render_input["template"],
-        "renderer": render_input["renderer"],
+        "canonical_artifact": {
+            "artifact_id": render_input["canonicalArtifact"]["artifactId"],
+            "sha256": render_input["canonicalArtifact"]["sha256"],
+        },
+        "canonical_markdown": {"path": "canonical/document.md", "sha256": render_input["canonicalMarkdownSha256"]},
+        "asset_manifest": {"path": "assets/asset-manifest.json", "sha256": render_input["assetManifestSha256"]},
+        "semantic_gates": {"path": "reviews/semantic-gates.json", "sha256": render_input["semanticGatesSha256"]},
+        "template": {
+            "id": render_input["template"]["id"],
+            "version": render_input["template"]["version"],
+            "package_sha256": render_input["template"]["packageSha256"],
+        },
+        "renderer": {
+            "name": render_input["rendererIdentity"]["name"],
+            "version": render_input["rendererIdentity"]["version"],
+            "build_sha256": render_input["rendererIdentity"]["buildSha256"],
+            "profile_id": render_input["rendererIdentity"]["profileId"],
+            "profile_sha256": render_input["rendererIdentity"]["profileSha256"],
+        },
         "document": {"path": "delivery/document.docx", "sha256": sha256_file(expected_document)},
         "automatic_quality_report": {"path": "delivery/quality-report.json", "sha256": sha256_file(expected_quality)},
         "layered_quality_report": {
@@ -445,6 +468,80 @@ def build_delivery_binding_v2(
     }
     _immutable_json(root / "expert-team-delivery.json", binding, label="delivery binding")
     return binding
+
+
+def build_delivery_manifest_from_binding(binding: dict, quality_report: dict) -> dict:
+    """Project the public system-stage manifest from hash-bound delivery facts only."""
+
+    if not isinstance(binding, dict) or binding.get("schema_version") != "expert-delivery-binding/v2":
+        raise ValueError("delivery binding is invalid")
+    if not isinstance(quality_report, dict):
+        raise ValueError("quality report is invalid")
+    binding_path = str(binding.get("_binding_path") or "").strip()
+    binding_sha256 = str(binding.get("_binding_sha256") or "").strip()
+    quality_sha256 = str(binding.get("_quality_report_sha256") or "").strip()
+    attempt = int(binding.get("delivery_attempt") or 0)
+    expected_path = (
+        f".taiji/expert-team-deliveries/{binding.get('run_id')}/{binding.get('stage_id')}"
+        f"/attempt-{attempt}/expert-team-delivery.json"
+    )
+    if binding_path != expected_path or not _HEX64.fullmatch(binding_sha256):
+        raise ValueError("delivery binding path or hash is invalid")
+    expected_quality = binding.get("automatic_quality_report")
+    if (
+        not isinstance(expected_quality, dict)
+        or expected_quality.get("path") != "delivery/quality-report.json"
+        or quality_sha256 != expected_quality.get("sha256")
+    ):
+        raise ValueError("quality report hash does not match delivery binding")
+    if not _HEX64.fullmatch(str(binding.get("render_input_fingerprint") or "")):
+        raise ValueError("render input fingerprint is invalid")
+    if attempt <= 0 or int(binding.get("document_revision") or 0) <= 0:
+        raise ValueError("delivery attempt or document revision is invalid")
+
+    checks = [
+        item for item in quality_report.get("checks") or []
+        if isinstance(item, dict) and item.get("id") != "wps_visual"
+    ]
+    counts = {
+        "passed_count": sum(item.get("status") == "passed" for item in checks),
+        "failed_count": sum(item.get("status") == "failed" for item in checks),
+        "warning_count": sum(item.get("status") in {"passed_with_warnings", "not_verified"} for item in checks),
+    }
+    automatic = quality_report.get("automaticQuality")
+    if not isinstance(automatic, dict):
+        raise ValueError("automatic quality layers are missing")
+    blocking_count = sum(
+        bool(item.get("completionBlocking"))
+        for item in automatic.get("issues") or []
+        if isinstance(item, dict)
+    )
+    counts["blocking_count"] = blocking_count
+    counts["status"] = (
+        "passed"
+        if automatic.get("assetStatus") == "passed"
+        and automatic.get("renderStatus") == "passed"
+        and counts["failed_count"] == 0
+        and counts["warning_count"] == 0
+        and blocking_count == 0
+        else "failed"
+    )
+    return {
+        "schema_version": "delivery-manifest/v1",
+        "delivery_binding_path": binding_path,
+        "delivery_binding_sha256": binding_sha256,
+        "render_input_fingerprint": binding["render_input_fingerprint"],
+        "delivery_attempt": attempt,
+        "document_revision": int(binding["document_revision"]),
+        "automatic_check_summary": {
+            "status": counts["status"],
+            "passed_count": counts["passed_count"],
+            "failed_count": counts["failed_count"],
+            "warning_count": counts["warning_count"],
+            "blocking_count": counts["blocking_count"],
+        },
+        "office_review_required": True,
+    }
 
 
 def is_final_delivery_stage(run: dict, stage_id: str) -> bool:

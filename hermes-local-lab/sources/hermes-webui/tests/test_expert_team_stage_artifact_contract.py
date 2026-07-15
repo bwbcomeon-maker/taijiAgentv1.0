@@ -45,6 +45,16 @@ def _brief():
         "confirmed_sha256": "b" * 64,
         "exact_title": "迎峰度夏保供电重点工作月度汇报",
         "document_type": "work_report",
+        "document_control": {
+            "render_template_id": "enterprise-work-report",
+            "client": "国家电网有限公司",
+            "issuer": "办公室",
+            "compiler": "信息化工作组",
+            "version_label": "V1.0",
+            "classification": "internal",
+            "classification_label": "内部资料",
+            "document_date": "2026-07-15",
+        },
         "content_constraints": {
             "required_sections": ["工作开展情况", "存在问题", "下一步工安排"],
             "must_include": [],
@@ -774,12 +784,12 @@ def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_d
     }
 
 
-def test_system_delivery_dispatch_never_uses_gateway_and_fails_closed_without_adapter(monkeypatch, tmp_path):
+def test_system_delivery_dispatch_never_uses_gateway_and_production_adapter_is_canonical(monkeypatch, tmp_path):
     from api import expert_teams
     from api import routes
     from api.expert_teams import trusted_identity
     from api.expert_teams.stage_artifacts import build_stage_artifact, parse_stage_response
-    from api.expert_teams.system_stages import SystemStageError, SystemStageRegistry, dispatch_system_stage
+    from api.expert_teams.system_stages import SystemStageError, SystemStageRegistry, dispatch_system_stage, get_system_stage_registry
 
     # Reuse the semantic-review path to create a real canonical pointer and pending descriptor.
     run = _contract_run_ready_for_attempt(tmp_path, stage_index=3)
@@ -823,56 +833,55 @@ def test_system_delivery_dispatch_never_uses_gateway_and_fails_closed_without_ad
         "_resolve_compatible_session_model_state",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Gateway/model resolution must stay at zero")),
     )
-    unavailable_payload, unavailable_status = routes._start_expert_team_execution(tmp_path, approved, {})
-    assert unavailable_status == 503
-    assert unavailable_payload["code"] == "delivery_contract_unavailable"
-    reserved_run = unavailable_payload["run"]
+    delivered_payload, delivered_status = routes._start_expert_team_execution(tmp_path, approved, {})
+    assert delivered_status == 200, delivered_payload
+    assert delivered_payload["ok"] is True
+    reserved_run = delivered_payload["run"]
     descriptor = reserved_run["pending_system_stage"]
     system_reservation = reserved_run["current_stage_attempt_reservation"]
     with pytest.raises(SystemStageError) as unavailable:
         dispatch_system_stage(reserved_run, descriptor, system_reservation, registry=SystemStageRegistry())
     assert unavailable.value.code == "delivery_contract_unavailable"
-
-    manifest_payload = {
-        "schema_version": "delivery-manifest/v1",
-        "delivery_binding_path": "attempt-1/expert-team-delivery.json",
-        "delivery_binding_sha256": "d" * 64,
-        "render_input_fingerprint": "e" * 64,
-        "delivery_attempt": 1,
-        "document_revision": 1,
-        "automatic_check_summary": {"status": "passed", "passed_count": 5, "failed_count": 0, "warning_count": 0, "blocking_count": 0},
-        "office_review_required": True,
-    }
-    parsed = parse_stage_response(_raw("delivery_manifest", manifest_payload), artifact_type="delivery_manifest", requires_document=False)
-    artifact = build_stage_artifact(
-        parsed, stage_id="delivery", stage_attempt=system_reservation["stage_attempt"],
-        brief=reserved_run["document_brief"], input_refs=system_reservation["input_refs"], now="2026-07-15T10:00:00+08:00",
-    )
-    calls = []
-    result = dispatch_system_stage(
+    manifest = reserved_run["stage_artifacts"][-1]
+    assert manifest["artifact_type"] == "delivery_manifest"
+    assert manifest["payload"]["automatic_check_summary"]["status"] == "passed"
+    assert reserved_run["current_delivery_manifest_ref"]["sha256"] == manifest["sha256"]
+    assert reserved_run["current_delivery_attempt_reservation"]["status"] == "generated_valid"
+    assert reserved_run["workflow_state"] == "awaiting_review"
+    replay = dispatch_system_stage(
         reserved_run,
         descriptor,
         system_reservation,
-        registry=SystemStageRegistry({"delivery": lambda request: calls.append(request) or {"artifact": artifact}}),
+        registry=get_system_stage_registry(tmp_path),
     )
-    assert len(calls) == 1
-    assert set(calls[0]) == {
-        "schema_version", "session_id", "run_id", "stage_id", "stage_attempt", "descriptor",
-        "brief_ref", "canonical_document_ref", "approved_input_refs",
-    }
-    assert "stage_outputs" not in json.dumps(calls[0], ensure_ascii=False)
-    completed = expert_teams.complete_system_stage_attempt(
-        tmp_path, approved["run_id"], reservation_id=system_reservation["reservation_id"], artifact=result["artifact"]
-    )
-    assert completed["current_stage_artifact_ref"]["artifact_id"] == "delivery:1"
-    assert completed["workflow_state"] == "awaiting_review"
+    assert replay["artifact"] == manifest
+    assert reserved_run["delivery_attempt_counter"] == 1
+    binding_path = tmp_path / manifest["payload"]["delivery_binding_path"]
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    for field in (
+        "canonical_markdown", "asset_manifest", "semantic_gates", "document",
+        "automatic_quality_report", "layered_quality_report",
+    ):
+        target = binding_path.parent / binding[field]["path"]
+        original = target.read_bytes()
+        target.write_bytes(original + b"tamper")
+        with pytest.raises(SystemStageError) as changed:
+            dispatch_system_stage(
+                reserved_run,
+                descriptor,
+                system_reservation,
+                registry=get_system_stage_registry(tmp_path),
+            )
+        assert changed.value.code == "delivery_binding_changed"
+        target.write_bytes(original)
 
 
 def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_changing_six_step_progress(tmp_path):
     from api import expert_teams
     from api.expert_teams.catalog import get_template
     from api.expert_teams.storage import read_run, write_run
-    from api.expert_teams.system_stages import SystemStageError, SystemStageRegistry, dispatch_system_stage
+    from api.expert_teams.stage_artifacts import artifact_digest
+    from api.expert_teams.system_stages import get_system_stage_registry, dispatch_system_stage
 
     run = expert_teams.start_expert_team(
         tmp_path,
@@ -890,16 +899,58 @@ def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_cha
     )
     stored = read_run(tmp_path, run["run_id"])
     brief = _research_brief()
+    brief["document_control"] = {
+        "render_template_id": "enterprise-research-report",
+        "client": "国家电网有限公司",
+        "issuer": "研究中心",
+        "compiler": "信息化研究组",
+        "version_label": "V1.0",
+        "classification": "internal",
+        "classification_label": "内部资料",
+        "document_date": "2026-07-15",
+    }
+    artifact = {
+        "schema_version": "expert-stage-artifact/v1",
+        "artifact_id": "review:1",
+        "artifact_type": "reviewed_research_document",
+        "stage_id": "review",
+        "stage_attempt": 1,
+        "brief_revision": brief["confirmed_revision"],
+        "brief_sha256": brief["confirmed_sha256"],
+        "input_refs": [],
+        "summary": "研究报告已复核",
+        "payload": {
+            "title": brief["exact_title"],
+            "section_map": [{"section_id": "SEC-1", "heading": "研究结论"}],
+            "claim_usage": [],
+            "review_report": {
+                "schema_version": "research-review-report/v1",
+                "checks": {key: "passed" for key in (
+                    "brief_alignment", "citation_completeness", "unsupported_claims",
+                    "unresolved_contradictions", "as_of_date_compliance", "document_purity", "confidentiality",
+                )},
+                "issues": [], "unsupported_claim_ids": [], "unresolved_contradiction_ids": [],
+                "change_summary": ["通过"], "unresolved_issue_ids": [],
+            },
+            "open_issues": [],
+        },
+        "deliverable_markdown": f"# {brief['exact_title']}\n\n## 研究结论\n\n本报告形成受控研究结论。",
+        "blocking_issues": [],
+        "created_at": "2026-07-15T10:00:00+08:00",
+        "validation_status": "valid",
+    }
+    artifact["sha256"] = artifact_digest(artifact)
     stored.update(
         {
             "workflow_state": "delivery_validation_required",
             "document_brief": brief,
             "current_stage_index": 6,
             "pending_system_stage": get_template("deep-research-team")["post_approval_system_steps"][0],
-            "approved_stage_artifact_refs": {"review": {"artifact_id": "review:1", "sha256": "a" * 64}},
+            "stage_artifacts": [artifact],
+            "approved_stage_artifact_refs": {"review": {"artifact_id": "review:1", "sha256": artifact["sha256"]}},
             "canonical_document_ref": {
                 "artifact_id": "review:1",
-                "sha256": "a" * 64,
+                "sha256": artifact["sha256"],
                 "brief_revision": brief["confirmed_revision"],
                 "brief_sha256": brief["confirmed_sha256"],
             },
@@ -913,6 +964,16 @@ def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_cha
     assert len(reserved_run["tasks"]) == 6
     assert descriptor["visible_progress"] is False
     assert reservation["stage_attempt"] == 1
-    with pytest.raises(SystemStageError) as unavailable:
-        dispatch_system_stage(reserved_run, descriptor, reservation, registry=SystemStageRegistry())
-    assert unavailable.value.code == "delivery_contract_unavailable"
+    result = dispatch_system_stage(
+        reserved_run, descriptor, reservation, registry=get_system_stage_registry(tmp_path)
+    )
+    completed = expert_teams.complete_system_stage_attempt(
+        tmp_path,
+        stored["run_id"],
+        reservation_id=reservation["reservation_id"],
+        artifact=result["artifact"],
+    )
+    assert len(completed["tasks"]) == 6
+    assert completed["view"]["workflow"]["progress"]["done"] == 6
+    assert completed["view"]["workflow"]["progress"]["total"] == 6
+    assert completed["stage_artifacts"][-1]["artifact_type"] == "delivery_manifest"

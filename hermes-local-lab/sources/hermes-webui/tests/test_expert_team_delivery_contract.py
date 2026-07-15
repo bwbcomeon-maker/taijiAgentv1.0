@@ -73,6 +73,71 @@ MEETING_MINUTES_MARKDOWN = """# 供电服务质效提升专题会议纪要
 """
 
 
+def test_delivery_manifest_is_a_deterministic_projection_of_bound_reports():
+    from api.expert_teams.documents import build_delivery_manifest_from_binding
+
+    binding = {
+        "schema_version": "expert-delivery-binding/v2",
+        "session_id": "sid-enterprise",
+        "run_id": "run-enterprise",
+        "stage_id": "delivery",
+        "stage_attempt": 4,
+        "delivery_attempt": 2,
+        "document_revision": 1,
+        "render_input_fingerprint": "f" * 64,
+        "brief": {"revision": 3, "sha256": "b" * 64},
+        "canonical_artifact": {"artifact_id": "polish:1", "sha256": "c" * 64},
+        "canonical_markdown": {"path": "canonical/document.md", "sha256": "d" * 64},
+        "asset_manifest": {"path": "assets/asset-manifest.json", "sha256": "e" * 64},
+        "semantic_gates": {"path": "reviews/semantic-gates.json", "sha256": "1" * 64},
+        "template": {"id": "enterprise-work-report", "version": "1.0.0", "package_sha256": "2" * 64},
+        "renderer": {
+            "name": "docx-engine-v2", "version": "0.1.0", "build_sha256": "3" * 64,
+            "profile_id": "enterprise-default", "profile_sha256": "4" * 64,
+        },
+        "document": {"path": "delivery/document.docx", "sha256": "5" * 64},
+        "automatic_quality_report": {"path": "delivery/quality-report.json", "sha256": "6" * 64},
+        "layered_quality_report": {"path": "reviews/enterprise-quality-report.json", "sha256": "7" * 64},
+        "_binding_path": ".taiji/expert-team-deliveries/run-enterprise/delivery/attempt-2/expert-team-delivery.json",
+        "_binding_sha256": "8" * 64,
+        "_quality_report_sha256": "6" * 64,
+    }
+    quality = {
+        "schemaVersion": "docx-engine-v2/validation-report",
+        "status": "passed_with_warnings",
+        "checks": [
+            {"id": "schema", "status": "passed"},
+            {"id": "asset_semantics", "status": "passed"},
+            {"id": "wps_visual", "status": "not_verified"},
+        ],
+        "automaticQuality": {
+            "schemaVersion": "docx-engine-v2/automatic-quality-v1",
+            "assetStatus": "passed", "renderStatus": "passed", "issues": [],
+        },
+    }
+
+    first = build_delivery_manifest_from_binding(binding, quality)
+    second = build_delivery_manifest_from_binding(binding, quality)
+
+    assert first == second
+    assert first == {
+        "schema_version": "delivery-manifest/v1",
+        "delivery_binding_path": binding["_binding_path"],
+        "delivery_binding_sha256": "8" * 64,
+        "render_input_fingerprint": "f" * 64,
+        "delivery_attempt": 2,
+        "document_revision": 1,
+        "automatic_check_summary": {
+            "status": "passed", "passed_count": 2, "failed_count": 0,
+            "warning_count": 0, "blocking_count": 0,
+        },
+        "office_review_required": True,
+    }
+
+    with pytest.raises(ValueError, match="quality report hash"):
+        build_delivery_manifest_from_binding({**binding, "_quality_report_sha256": "9" * 64}, quality)
+
+
 def _ready_at_stage(expert_teams, tmp_path: Path, *, team_id: str, stage_index: int, session_id: str):
     from api.expert_teams.storage import write_run
 

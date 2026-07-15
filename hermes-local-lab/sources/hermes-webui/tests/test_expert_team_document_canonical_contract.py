@@ -289,6 +289,10 @@ def test_delivery_allocator_is_idempotent_but_never_resurrects_superseded_attemp
 
     assert [first["delivery_attempt"], second["delivery_attempt"], third["delivery_attempt"]] == [1, 2, 3]
     assert [first["document_revision"], second["document_revision"], third["document_revision"]] == [1, 2, 3]
+    assert [item["status"] for item in run["delivery_attempt_reservations"]] == [
+        "superseded", "superseded", "reserved"
+    ]
+    assert run["current_delivery_manifest_ref"] is None
 
 
 def test_prepare_delivery_inputs_uses_only_canonical_artifact_not_raw_output(tmp_path):

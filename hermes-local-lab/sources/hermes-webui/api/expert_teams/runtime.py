@@ -1565,6 +1565,10 @@ def _reserve_stage_attempt_in_run(
         "status": "reserved",
         "created_at": _now(),
     }
+    for item in reservations:
+        if item.get("stage_id") == stage_id and item.get("status") != "superseded":
+            item["status"] = "superseded"
+            item["superseded_at"] = _now()
     reservations.append(reservation)
     next_run = deepcopy(run)
     next_run["stage_attempt_counters"] = counters
@@ -1654,8 +1658,15 @@ def _reserve_document_revision_and_delivery_attempt_in_run(
     next_run = deepcopy(run)
     next_run["document_revision_counter"] = document_revision_counter
     next_run["delivery_attempt_counter"] = delivery_attempt
+    for item in reservations:
+        if item.get("status") != "superseded":
+            item["status"] = "superseded"
+            item["superseded_at"] = _now()
     next_run["delivery_attempt_reservations"] = reservations + [deepcopy(reservation)]
     next_run["current_delivery_attempt_reservation"] = deepcopy(reservation)
+    next_run["current_delivery_manifest_ref"] = None
+    next_run.pop("delivery_gate", None)
+    next_run.pop("completion_integrity", None)
     next_run["current_document_revision_ref"] = {
         "artifact_id": artifact_id,
         "sha256": artifact_sha256,
@@ -1846,6 +1857,35 @@ def complete_system_stage_attempt(
             "sha256": artifact["sha256"],
             "stage_attempt": artifact["stage_attempt"],
         }
+        if artifact.get("artifact_type") == "delivery_manifest":
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            delivery_attempt = int(payload.get("delivery_attempt") or 0)
+            delivery_reservations = [
+                deepcopy(item)
+                for item in run.get("delivery_attempt_reservations") or []
+                if isinstance(item, dict)
+            ]
+            matched = None
+            for index, item in enumerate(delivery_reservations):
+                if (
+                    int(item.get("delivery_attempt") or 0) == delivery_attempt
+                    and item.get("render_input_fingerprint") == payload.get("render_input_fingerprint")
+                ):
+                    matched = {**item, "status": "generated_valid", "updated_at": _now()}
+                    delivery_reservations[index] = deepcopy(matched)
+                    break
+            if matched is None:
+                raise ExpertTeamStateConflict("delivery_attempt_identity_mismatch", "delivery reservation is missing", run)
+            run["delivery_attempt_reservations"] = delivery_reservations
+            run["current_delivery_attempt_reservation"] = deepcopy(matched)
+            run["current_delivery_manifest_ref"] = {
+                "artifact_id": artifact["artifact_id"],
+                "sha256": artifact["sha256"],
+                "stage_attempt": artifact["stage_attempt"],
+                "delivery_attempt": delivery_attempt,
+                "delivery_binding_path": payload.get("delivery_binding_path"),
+                "delivery_binding_sha256": payload.get("delivery_binding_sha256"),
+            }
         run["pending_system_stage_result"] = "generated_valid"
         return _transition(
             workspace,
