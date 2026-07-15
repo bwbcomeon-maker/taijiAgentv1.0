@@ -1640,6 +1640,14 @@ class _OwnedProbeImage:
     inode: int
 
 
+@dataclass(frozen=True)
+class _ProbeCleanupCandidate:
+    path: Path
+    device: int
+    inode: int
+    file_type: int
+
+
 def _snapshot_image_cache() -> _ImageCacheSnapshot:
     root = (_get_hermes_home() / "cache" / "images").resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -1661,10 +1669,10 @@ def _snapshot_image_cache() -> _ImageCacheSnapshot:
     )
 
 
-def _owned_probe_image(
+def _probe_cleanup_candidate(
     raw_path: Any,
     before: _ImageCacheSnapshot,
-) -> _OwnedProbeImage | None:
+) -> _ProbeCleanupCandidate | None:
     value = str(raw_path or "").strip()
     if not value:
         return None
@@ -1676,21 +1684,43 @@ def _owned_probe_image(
         relative = lexical.relative_to(before.root)
     except ValueError:
         return None
+    if lexical in before.paths:
+        return None
     current = before.root
     try:
-        for part in relative.parts:
+        for part in relative.parts[:-1]:
             current = current / part
             info = current.lstat()
-            if stat.S_ISLNK(info.st_mode):
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 return None
         info = lexical.lstat()
-        resolved = lexical.resolve(strict=True)
+    except OSError:
+        return None
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+        return None
+    return _ProbeCleanupCandidate(
+        path=lexical,
+        device=info.st_dev,
+        inode=info.st_ino,
+        file_type=stat.S_IFMT(info.st_mode),
+    )
+
+
+def _owned_probe_image(
+    candidate: _ProbeCleanupCandidate | None,
+    before: _ImageCacheSnapshot,
+) -> _OwnedProbeImage | None:
+    if candidate is None or candidate.file_type != stat.S_IFREG:
+        return None
+    try:
+        info = candidate.path.lstat()
+        resolved = candidate.path.resolve(strict=True)
         resolved.relative_to(before.root)
     except (OSError, RuntimeError, ValueError):
         return None
     identity = (info.st_dev, info.st_ino)
     if (
-        lexical in before.paths
+        identity != (candidate.device, candidate.inode)
         or identity in before.inodes
         or not stat.S_ISREG(info.st_mode)
         or info.st_nlink != 1
@@ -1727,17 +1757,15 @@ def _has_safe_image_header(image: _OwnedProbeImage) -> bool:
     )
 
 
-def _remove_owned_probe_image(image: _OwnedProbeImage) -> bool:
+def _remove_probe_cleanup_candidate(candidate: _ProbeCleanupCandidate) -> bool:
     try:
-        info = image.path.lstat()
+        info = candidate.path.lstat()
         if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or (info.st_dev, info.st_ino) != (image.device, image.inode)
+            (info.st_dev, info.st_ino) != (candidate.device, candidate.inode)
+            or stat.S_IFMT(info.st_mode) != candidate.file_type
         ):
             return False
-        image.path.unlink()
+        candidate.path.unlink()
         return True
     except OSError:
         return False
@@ -1774,8 +1802,9 @@ def test_image_gen_config() -> dict[str, Any]:
     error_code = "image_gen_probe_failed"
     message = "生图验证失败，请检查网络、凭据、模型和账号状态后重试。"
     generated_image: _OwnedProbeImage | None = None
-    cache_before = _snapshot_image_cache()
+    cleanup_candidate: _ProbeCleanupCandidate | None = None
     try:
+        cache_before = _snapshot_image_cache()
         from agent.image_gen_registry import get_provider
 
         selected = get_provider(snapshot.provider)
@@ -1788,7 +1817,8 @@ def test_image_gen_config() -> dict[str, Any]:
             model=snapshot.model,
         )
         if isinstance(result, dict):
-            generated_image = _owned_probe_image(result.get("image"), cache_before)
+            cleanup_candidate = _probe_cleanup_candidate(result.get("image"), cache_before)
+            generated_image = _owned_probe_image(cleanup_candidate, cache_before)
             identity_ok = bool(
                 result.get("success")
                 and result.get("provider") == snapshot.provider
@@ -1805,8 +1835,9 @@ def test_image_gen_config() -> dict[str, Any]:
     except Exception:
         logger.warning("Image generation configuration probe failed (%s)", diagnostic_id)
     finally:
-        if generated_image is not None:
-            if not _remove_owned_probe_image(generated_image):
+        if cleanup_candidate is not None:
+            removed = _remove_probe_cleanup_candidate(cleanup_candidate)
+            if generated_image is not None and not removed:
                 logger.warning("Failed to remove image generation probe output (%s)", diagnostic_id)
                 ok = False
                 error_code = "image_gen_cleanup_failed"

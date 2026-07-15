@@ -2577,7 +2577,8 @@ def test_image_probe_rejects_new_symlink_without_deleting_link_or_target(
 
     assert result["status"] == "failed"
     assert result["error_code"] == "image_gen_invalid_file"
-    assert link.is_symlink()
+    assert not link.exists()
+    assert not link.is_symlink()
     assert target.read_bytes().endswith(b"target")
 
 
@@ -2602,4 +2603,64 @@ def test_image_probe_rejects_new_hardlink_to_preexisting_cache_file(monkeypatch,
     assert result["status"] == "failed"
     assert result["error_code"] == "image_gen_invalid_file"
     assert target.read_bytes().endswith(b"target")
-    assert hardlink.exists()
+    assert not hardlink.exists()
+
+
+def test_image_probe_snapshot_failure_is_safe_persisted_and_retryable(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path)
+    _write_saved_image_gen_config(tmp_path)
+    generated = tmp_path / "cache" / "images" / "retry.png"
+
+    def result_payload():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nretry")
+        return {"success": True, "image": str(generated), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    provider = _ProbeImageProvider(result_payload)
+    _install_probe_provider(monkeypatch, provider)
+    real_snapshot = model_config._snapshot_image_cache
+    monkeypatch.setattr(
+        model_config,
+        "_snapshot_image_cache",
+        lambda: (_ for _ in ()).throw(
+            PermissionError("secret-path /private/cache image-test-only-key")
+        ),
+    )
+
+    failed = model_config.test_image_gen_config()
+
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "image_gen_probe_failed"
+    combined = json.dumps(failed, ensure_ascii=False) + state_path.read_text(encoding="utf-8")
+    for forbidden in ("secret-path", "/private/cache", "image-test-only-key"):
+        assert forbidden not in combined
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "failed"
+    assert provider.calls == []
+
+    monkeypatch.setattr(model_config, "_snapshot_image_cache", real_snapshot)
+    retried = model_config.test_image_gen_config()
+
+    assert retried["status"] == "verified"
+    assert not generated.exists()
+
+
+def test_probe_cleanup_candidate_identity_change_does_not_delete_replacement(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    cache = tmp_path / "cache" / "images"
+    cache.mkdir(parents=True)
+    before = model_config._snapshot_image_cache()
+    result_path = cache / "provider-result.png"
+    result_path.write_bytes(b"\x89PNG\r\n\x1a\noriginal")
+    candidate = model_config._probe_cleanup_candidate(result_path, before)
+    assert candidate is not None
+    result_path.unlink()
+    result_path.write_bytes(b"replacement")
+
+    removed = model_config._remove_probe_cleanup_candidate(candidate)
+
+    assert removed is False
+    assert result_path.read_bytes() == b"replacement"
