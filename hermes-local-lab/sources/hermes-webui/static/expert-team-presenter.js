@@ -76,6 +76,23 @@
       viewAction:normalizeAction(brief.view_action)||{id:str((brief.view_action||{}).type),label:str((brief.view_action||{}).label),kind:'ghost'}
     };
   }
+  function normalizedOfficeReview(value){
+    if(!value||typeof value!=='object')return null;
+    const issues=arr(value.issues).map(item=>({
+      issueId:str(item&&item.issue_id||item&&item.issueId),severity:str(item&&item.severity),
+      targetDomain:str(item&&item.target_domain||item&&item.targetDomain),category:str(item&&item.category),
+      sectionId:str(item&&item.section_id),blockId:str(item&&item.block_id),logicalAssetId:str(item&&item.logical_asset_id),
+      page:Number(item&&item.page||0),description:str(item&&item.description),expectedFix:str(item&&item.expected_fix||item&&item.expectedFix)
+    }));
+    return {
+      reviewId:str(value.review_id||value.reviewId),documentRevision:Number(value.document_revision||value.documentRevision||1),
+      documentSha256:str(value.document_sha256||value.documentSha256),canonicalSha256:str(value.canonical_sha256||value.canonicalSha256),
+      status:str(value.status,'pending'),decision:str(value.decision,'pending'),validity:str(value.validity,'active'),
+      checklist:value.checklist&&typeof value.checklist==='object'?value.checklist:{},issues,
+      issueCount:Number(value.issue_count==null?issues.length:value.issue_count),reviewerLabel:str(value.reviewer_label||value.reviewerLabel),
+      waivedIssueIds:arr(value.waived_issue_ids||value.waivedIssueIds).map(String)
+    };
+  }
   function taskStatusText(task){
     const explicit=str(task&&task.status_label);
     if(explicit)return explicit;
@@ -154,7 +171,7 @@
     const stageReview=view.stage_review||{};
     const stageReviewOutput=stageReview.output||{};
     const stageAttemptReservation=run.current_stage_attempt_reservation||{};
-    const officeReview=view.office_review||view.office_acceptance||run.office_review_ref||{};
+    const officeReview=view.office_review||view.office_acceptance||run.office_review_view||run.office_review_ref||{};
     const brief=view.brief||run.document_brief||{};
     const schemaVersion=Number(run.schema_version||0);
     const teamTitle=str(teamView.title||run.team_title,'专家团');
@@ -228,6 +245,7 @@
       brief:presentation.brief,
       completionGates:presentation.completionGates,
       deliveryStatus:presentation.deliveryStatus,
+      officeReview:normalizedOfficeReview(officeReview),
       nextAction:presentation.nextAction,
       capability:{kind:presentation.capabilityKind,label:presentation.capabilityLabel},
       artifactValidation:view.artifact_validation||{},

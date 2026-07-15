@@ -1030,3 +1030,19 @@ def test_expert_team_final_review_node_harness_renders_one_discoverable_office_a
         "hasDelivery": True,
         "readOnlyHasForm": False,
     }
+
+
+def test_structured_office_drawer_has_progressive_disclosure_and_responsive_single_scroll_surface():
+    ui = (REPO_ROOT / "static" / "expert-team-ui.js").read_text(encoding="utf-8")
+    actions = (REPO_ROOT / "static" / "expert-team-actions.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    for token in (
+        "expert-team-office-summary", "expert-team-office-drawer", "expert-team-office-scroll",
+        'role="dialog"', 'aria-modal="true"', "data-office-live", "data-office-checklist",
+    ):
+        assert token in ui
+    for token in ("officeDrawerIsDirty", "handleExpertTeamOfficeDrawerKeydown", "officeRevisionMutationPayload"):
+        assert token in actions
+    for selector in (".expert-team-office-summary", ".expert-team-office-drawer", ".expert-team-office-scroll"):
+        assert selector in css
+    assert "@media (max-width: 720px)" in css

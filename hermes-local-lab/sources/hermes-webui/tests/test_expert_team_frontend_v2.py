@@ -1845,3 +1845,97 @@ def test_chat_keeps_conclusion_and_full_result_but_never_embeds_brief_or_review_
     assert 'approve_stage' not in lifecycle
     assert '查看完整成果' in UI_JS
     assert '下一步' in UI_JS
+
+
+def test_structured_office_summary_and_drawer_fail_closed_for_identity_and_issue_policy():
+    source = textwrap.dedent(
+        """
+        const fs=require('fs');const vm=require('vm');
+        const context={window:{},console};vm.createContext(context);
+        vm.runInContext(fs.readFileSync('static/expert-team-ui.js','utf8'),context);
+        const office={
+          reviewId:'office-9',documentRevision:4,documentSha256:'abcdef0123456789'.repeat(4),
+          status:'pending',decision:'pending',issueCount:3,reviewerLabel:'王审核',
+          reviewToken:'SECRET-TOKEN',documentPath:'/secret/full/path/document.docx',
+          identity:{enabled:true,authenticated:true,authorizerHandoffReady:true,principal:{displayName:'王审核',roles:['document-reviewer']}},
+          checklist:Object.fromEntries([
+            'document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct',
+            'figures_unique_and_readable','tables_readable','headers_footers_pagination',
+            'no_placeholders_or_workflow_text','citations_readable'
+          ].map(key=>[key,'not_checked'])),
+          issues:[
+            {issueId:'condition-1',severity:'condition',targetDomain:'office_issue',category:'visual_alignment',description:'可接受偏差',expectedFix:'授权或返修'},
+            {issueId:'blocking-1',severity:'blocking',targetDomain:'office_issue',category:'placeholder',description:'阻断问题',expectedFix:'必须修复'},
+            {issueId:'unknown-1',severity:'Warning',targetDomain:'office_issue',category:'mystery',description:'未知问题',expectedFix:'拒绝'}
+          ]
+        };
+        const summary=context.window.renderExpertTeamOfficeSummary(office);
+        const drawer=context.window.renderExpertTeamOfficeDrawer(office);
+        console.log(JSON.stringify({
+          summary,drawer,
+          summaryLeaks:summary.includes('SECRET-TOKEN')||summary.includes('/secret/full/path')||summary.includes(office.documentSha256),
+          checklistCount:(drawer.match(/data-office-checklist=/g)||[]).length,
+          waiverCondition:drawer.includes('data-office-waiver-issue="condition-1"'),
+          waiverBlocking:drawer.includes('data-office-waiver-issue="blocking-1"'),
+          waiverUnknown:drawer.includes('data-office-waiver-issue="unknown-1"')
+        }));
+        """
+    )
+    result = _run_node(source)
+    assert result["summaryLeaks"] is False
+    assert "abcdef012345" in result["summary"]
+    assert "正式版本 4" in result["summary"]
+    assert result["checklistCount"] == 9
+    assert 'role="dialog"' in result["drawer"] and 'aria-modal="true"' in result["drawer"]
+    assert "<fieldset" in result["drawer"] and "<legend" in result["drawer"]
+    assert 'aria-live="polite"' in result["drawer"]
+    assert result["waiverCondition"] is True
+    assert result["waiverBlocking"] is False
+    assert result["waiverUnknown"] is False
+    assert "需使用企业验收身份登录" not in result["drawer"]
+
+
+def test_office_mutations_send_only_server_derived_refs_and_validate_decision_fail_closed():
+    source = textwrap.dedent(
+        """
+        const fs=require('fs');const vm=require('vm');
+        const context={window:{},console,crypto:{randomUUID:()=> 'uuid-1'}};vm.createContext(context);
+        vm.runInContext(fs.readFileSync('static/expert-team-actions.js','utf8'),context);
+        const card={sourceSessionId:'sid-1',runId:'run-1',version:7,draftIdentity:{officeReviewId:'review-1'}};
+        const waiver=context.window.officeWaiverMutationPayload(card,'condition-1','已经业务授权');
+        const revision=context.window.officeRevisionMutationPayload(card,['condition-1','blocking-1']);
+        const base={
+          identity:{enabled:true,authenticated:true,principal:{roles:['document-reviewer']}},
+          checklist:Object.fromEntries(['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','headers_footers_pagination','no_placeholders_or_workflow_text'].map(key=>[key,'passed']))
+        };
+        console.log(JSON.stringify({waiver,revision,
+          passedIssue:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed',issues:[{issueId:'c',severity:'condition',targetDomain:'office_issue'}]}),
+          conditionsBlocking:context.window.validateExpertTeamOfficeSubmission({...base,decision:'passed_with_conditions',issues:[{issueId:'b',severity:'blocking',targetDomain:'office_issue'}]}),
+          wrongRole:context.window.validateExpertTeamOfficeSubmission({...base,identity:{enabled:true,authenticated:true,principal:{roles:['waiver-authorizer']}},decision:'passed',issues:[]})
+        }));
+        """
+    )
+    result = _run_node(source)
+    assert set(result["waiver"]) == {"session_id", "run_id", "expected_version", "target_id", "reason", "idempotency_key"}
+    assert set(result["revision"]) == {"session_id", "run_id", "expected_version", "office_review_id", "issue_ids", "idempotency_key"}
+    serialized = json.dumps(result, ensure_ascii=False)
+    for forbidden in ("principal", "reviewer", "role", "target_stage_id", "feedback", "message", "expected_fix"):
+        assert forbidden not in json.dumps({"waiver": result["waiver"], "revision": result["revision"]})
+    assert result["passedIssue"]["code"] == "office_passed_requires_zero_issues"
+    assert result["conditionsBlocking"]["code"] == "office_blocking_issue_requires_revision"
+    assert result["wrongRole"]["code"] == "trusted_reviewer_required"
+
+
+def test_presenter_maps_safe_office_review_view_into_workspace_card():
+    source = textwrap.dedent(
+        """
+        const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+        vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+        const card=context.window.buildExpertTeamCardFromRun({run_id:'run-1',session_id:'sid-1',schema_version:2,version:4,workflow_state:'awaiting_review',view:{presentation:{state:'awaiting_review'},office_review:{review_id:'office-1',document_sha256:'f'.repeat(64),issue_count:1,issues:[]}}});
+        console.log(JSON.stringify(card.officeReview));
+        """
+    )
+    result = _run_node(source)
+    assert result["reviewId"] == "office-1"
+    assert result["documentSha256"] == "f" * 64
+    assert result["issueCount"] == 1

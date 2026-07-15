@@ -5,6 +5,7 @@
 
 ### Added
 
+- Added a structured expert-team Office review drawer with a compact non-secret delivery summary, nine-item checklist, condition-only authorizer handoff, issue-scoped waivers, and server-derived revision requests.
 - Added a real image-understanding verification flow in Settings: configured credentials now remain "configured, unverified" until a fixed safe image probe succeeds against the exact selected Provider and model. Verification evidence is isolated per profile, invalidated by model/key/config changes, and never stores model output, raw errors, paths, or credentials.
 - Added dedicated image-analysis recovery cards with visible "Retry image analysis" and "Open image configuration" actions. Retries reuse the already uploaded image descriptors in memory without re-uploading files or persisting local paths in browser storage.
 - Added the `taiji-light-glass` WebUI skin with light glass enterprise tokens, centralized brand metadata in `static/brand.js`, and service-worker coverage for the new brand entrypoint.

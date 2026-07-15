@@ -181,6 +181,46 @@ def build_office_acceptance(
     }
 
 
+def office_acceptance_view(acceptance: dict, *, waiver_refs: list[dict] | None = None) -> dict:
+    """Project an acceptance into the non-secret, policy-preserving UI contract."""
+    if not isinstance(acceptance, dict) or acceptance.get("schema_version") != "office-acceptance/v2":
+        raise DeliveryIntegrityError("Office acceptance v2 is required")
+    issues = []
+    for item in acceptance.get("issues") or []:
+        if not isinstance(item, dict):
+            continue
+        issues.append({
+            "issue_id": str(item.get("issue_id") or ""),
+            "severity": str(item.get("severity") or ""),
+            "target_domain": str(item.get("target_domain") or "office_issue"),
+            "category": str(item.get("category") or ""),
+            **{key: item[key] for key in ("section_id", "block_id", "logical_asset_id", "page") if item.get(key) not in (None, "")},
+            "description": str(item.get("description") or ""),
+            "expected_fix": str(item.get("expected_fix") or ""),
+        })
+    reviewer = acceptance.get("reviewer") if isinstance(acceptance.get("reviewer"), dict) else {}
+    waived = sorted({
+        str(item.get("target_id") or "")
+        for item in waiver_refs or []
+        if isinstance(item, dict) and str(item.get("target_id") or "")
+    })
+    return {
+        "schema_version": "office-review-view/v1",
+        "review_id": str(acceptance.get("review_id") or ""),
+        "document_revision": int(acceptance.get("document_revision") or 1),
+        "document_sha256": str(acceptance.get("document_sha256") or ""),
+        "canonical_sha256": str(acceptance.get("canonical_sha256") or ""),
+        "status": str(acceptance.get("decision") or "pending"),
+        "decision": str(acceptance.get("decision") or "pending"),
+        "validity": str(acceptance.get("validity") or "active"),
+        "checklist": deepcopy(acceptance.get("checklist") or {}),
+        "issues": issues,
+        "issue_count": len(issues),
+        "reviewer_label": str(reviewer.get("display_name") or reviewer.get("principal_id") or ""),
+        "waived_issue_ids": waived,
+    }
+
+
 def write_office_acceptance(workspace: Path, binding: dict, acceptance: dict) -> tuple[Path, dict]:
     path = canonical_attempt_root(
         workspace,

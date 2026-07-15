@@ -690,6 +690,7 @@ def expert_team_run_view(run: dict) -> dict:
         "completion_gates": completion_gates,
         "delivery_status": delivery_status,
         "next_action": next_action,
+        "office_review": deepcopy(run.get("office_review_view")) if isinstance(run.get("office_review_view"), dict) else None,
         "capability": _capability_model(run, contract_version),
         "artifact_validation": {"status": "unavailable", "blocking_count": 0},
     }

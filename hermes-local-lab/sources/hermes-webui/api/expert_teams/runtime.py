@@ -771,7 +771,29 @@ def _refresh_artifact_existence(workspace: Path, run: dict) -> dict:
     return run
 
 
+def _attach_office_review_view(workspace: Path, run: dict) -> dict:
+    ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+    attempt = int(ref.get("delivery_attempt") or 0)
+    if not attempt:
+        return run
+    from .office_review import OFFICE_ACCEPTANCE_NAME, office_acceptance_view
+
+    path = canonical_attempt_root(workspace, str(run.get("run_id") or ""), "delivery", attempt) / OFFICE_ACCEPTANCE_NAME
+    if not path.is_file():
+        return run
+    try:
+        acceptance = json.loads(path.read_text(encoding="utf-8"))
+        run["office_review_view"] = office_acceptance_view(
+            acceptance,
+            waiver_refs=run.get("waiver_refs") if isinstance(run.get("waiver_refs"), list) else [],
+        )
+    except (DeliveryIntegrityError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        run.pop("office_review_view", None)
+    return run
+
+
 def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
+    run = _attach_office_review_view(workspace, run)
     if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
         run.get("current_delivery_manifest_ref"), dict
     ):

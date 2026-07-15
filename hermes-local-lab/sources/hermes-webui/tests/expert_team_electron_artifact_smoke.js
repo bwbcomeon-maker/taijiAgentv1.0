@@ -221,7 +221,7 @@ function runFixture(sessionId, state, overrides = {}) {
       actionable: state === "awaiting_review",
       output: { ...output, attempt: Number(overrides.artifactAttempt || overrides.stageAttempt || 1) },
     },
-    office_review: { review_id: String(overrides.officeReviewId || "office-review-1") },
+    office_review: overrides.officeReviewUi || { review_id: String(overrides.officeReviewId || "office-review-1") },
     actions: { can_submit_stage_input: state === "awaiting_stage_input", can_approve_stage: state === "awaiting_review", can_request_revision: state === "awaiting_review", can_cancel: state === "generating", can_retry: state === "generated_invalid" },
     timeline_events: [],
   };
@@ -395,6 +395,12 @@ async function main() {
       window.__expertTeamRejectRevision409 = false;
       window.__expertTeamRevision409Count = 0;
       window.__expertTeamRevision409Run = null;
+      window.__officeIdentityStatusQueue = [];
+      window.__officeHandoffCalls = [];
+      window.__officeWaiverCalls = [];
+      window.__officeRevisionCalls = [];
+      window.__officeWindowOpenOriginal = window.open;
+      window.open = () => null;
       api = async (url, options) => {
         if (String(url).startsWith("/api/expert-teams/run?") && window.__expertTeamRunFixtureCurrent) {
           window.__expertTeamPollRequestCount += 1;
@@ -409,6 +415,21 @@ async function main() {
           error.status = 409;
           error.payload = { run: window.__expertTeamRevision409Run };
           throw error;
+        }
+        if (String(url) === "/api/expert-teams/identity/start" && JSON.parse(options?.body || "{}").purpose === "authorizer_handoff") {
+          window.__officeHandoffCalls.push(JSON.parse(options.body));
+          return { authorization_url: "https://identity.invalid/select-account" };
+        }
+        if (String(url) === "/api/expert-teams/identity/status" && window.__officeIdentityStatusQueue.length) {
+          return window.__officeIdentityStatusQueue.shift();
+        }
+        if (String(url) === "/api/expert-teams/waivers/create") {
+          window.__officeWaiverCalls.push(JSON.parse(options?.body || "{}"));
+          return { ok: true };
+        }
+        if (String(url) === "/api/expert-teams/office-revisions/create") {
+          window.__officeRevisionCalls.push(JSON.parse(options?.body || "{}"));
+          return { ok: true };
         }
         return originalApi(url, options);
       };
@@ -764,6 +785,84 @@ async function main() {
     await page.evaluate(() => document.querySelector("[data-expert-team-recoverable-draft]")?.scrollIntoView({ block: "center" }));
     await page.screenshot({ path: path.join(outDir, "expert-team-polling-409-preserved.png"), fullPage: false });
 
+    const officeChecklist = Object.fromEntries([
+      "document_opened", "title_and_cover_match", "genre_and_structure_match", "content_order_correct",
+      "figures_unique_and_readable", "tables_readable", "headers_footers_pagination",
+      "no_placeholders_or_workflow_text", "citations_readable",
+    ].map((key) => [key, "not_checked"]));
+    await page.evaluate(() => {
+      window._expertTeamIdentityStatus = { enabled: true, authenticated: true, authorizerHandoffReady: true, principal: { display_name: "王审核", roles: ["document-reviewer"] } };
+    });
+    await renderRun(page, "awaiting_review", {
+      run_id: "electron-office-review-run",
+      officeReviewId: "office-review-ui-1",
+      officeReviewUi: {
+        review_id: "office-review-ui-1", document_revision: 4, document_sha256: "abcdef0123456789".repeat(4),
+        status: "pending", decision: "pending", validity: "active", checklist: officeChecklist, reviewer_label: "王审核",
+        issues: [
+          { issue_id: "condition-1", severity: "condition", target_domain: "office_issue", category: "visual_alignment", description: "第三页表格对齐略有差异", expected_fix: "授权保留或返修" },
+          { issue_id: "blocking-1", severity: "blocking", target_domain: "office_issue", category: "placeholder_content", description: "正文存在占位语", expected_fix: "删除后重新验收" },
+        ],
+      },
+    });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='result']");
+    const officeSummary = await page.evaluate(() => {
+      const summary = document.querySelector("#expertTeamWorkspacePanel .expert-team-office-summary");
+      return { text: summary?.textContent.replace(/\s+/g, " ").trim() || "", leaksFullHash: summary?.textContent.includes("abcdef0123456789".repeat(4)) || false };
+    });
+    assertState(officeSummary.text.includes("正式版本 4") && officeSummary.text.includes("abcdef012345") && !officeSummary.leaksFullHash, "Office summary did not progressively disclose technical identity", officeSummary);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    const officeDrawer = await page.evaluate(() => {
+      const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+      return {
+        visible: Boolean(drawer && !drawer.hidden), focusedInside: Boolean(document.activeElement?.closest("[data-expert-team-office-drawer]")),
+        checklist: drawer?.querySelectorAll("[data-office-checklist]").length || 0,
+        waiverButtons: drawer?.querySelectorAll("[data-office-waiver-issue]").length || 0,
+        blockingWaiver: Boolean(drawer?.querySelector('[data-office-waiver-issue="blocking-1"]')),
+        oneScroll: drawer?.querySelectorAll(".expert-team-office-scroll").length || 0,
+      };
+    });
+    assertState(officeDrawer.visible && officeDrawer.focusedInside && officeDrawer.checklist === 9 && officeDrawer.waiverButtons === 1 && !officeDrawer.blockingWaiver && officeDrawer.oneScroll === 1, "Structured Office drawer failed policy or accessibility gate", officeDrawer);
+    await page.fill('body > [data-expert-team-office-drawer] [data-office-waiver-reason="condition-1"]', "经业务负责人确认，该对齐差异不影响使用。");
+    await page.evaluate(() => { window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: false, identity_flow_status: "authorizer_same_as_reviewer" }]; });
+    await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
+    await page.waitForFunction(() => document.querySelector("[data-office-live]")?.textContent.includes("仍是原验收人"), { timeout: 5000 });
+    const sameReviewer = await page.evaluate(() => ({
+      handoffs: window.__officeHandoffCalls.length, waivers: window.__officeWaiverCalls.length,
+      reason: document.querySelector('[data-office-waiver-reason="condition-1"]')?.value || "",
+      focused: document.activeElement?.matches('[data-office-waiver-reason="condition-1"]') || false,
+    }));
+    assertState(sameReviewer.handoffs === 1 && sameReviewer.waivers === 0 && sameReviewer.reason.includes("不影响使用") && sameReviewer.focused, "Same-reviewer SSO did not fail closed while preserving draft focus", sameReviewer);
+    await page.evaluate(() => { window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: true, principal: { display_name: "李授权", roles: ["waiver-authorizer"] } }]; });
+    await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
+    await page.waitForFunction(() => window.__officeWaiverCalls.length === 1, { timeout: 5000 });
+    const authorized = await page.evaluate(() => ({ handoffs: window.__officeHandoffCalls.length, waiver: window.__officeWaiverCalls[0] }));
+    assertState(authorized.handoffs === 2 && authorized.waiver.target_id === "condition-1" && authorized.waiver.reason.includes("不影响使用") && authorized.waiver.expected_version > 0 && authorized.waiver.idempotency_key && !authorized.waiver.principal && !authorized.waiver.role && !authorized.waiver.reviewer, "Authorizer handoff emitted an unsafe waiver payload", authorized);
+    await page.evaluate(() => { window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: false, identity_flow_status: "expired" }]; });
+    await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
+    await page.waitForFunction(() => document.querySelector("[data-office-live]")?.textContent.includes("已过期"), { timeout: 5000 });
+    const expiredHandoff = await page.evaluate(() => ({ waivers: window.__officeWaiverCalls.length, reason: document.querySelector('[data-office-waiver-reason="condition-1"]')?.value || "", live: document.querySelector("[data-office-live]")?.textContent || "" }));
+    assertState(expiredHandoff.waivers === 1 && expiredHandoff.reason.includes("不影响使用") && expiredHandoff.live.includes("重试"), "Expired handoff did not preserve the recoverable draft", expiredHandoff);
+    await page.check('body > [data-expert-team-office-drawer] [data-office-revision-issue="blocking-1"]');
+    await page.evaluate(() => { window.__officeConfirmOriginal = window.confirm; window.confirm = () => true; });
+    await page.click('body > [data-expert-team-office-drawer] .expert-team-office-drawer-actions .expert-team-secondary-action');
+    await page.waitForFunction(() => window.__officeRevisionCalls.length === 1, { timeout: 5000 });
+    const revisionMutation = await page.evaluate(() => window.__officeRevisionCalls[0]);
+    assertState(Array.isArray(revisionMutation.issue_ids) && revisionMutation.issue_ids.length === 1 && revisionMutation.issue_ids[0] === "blocking-1" && revisionMutation.expected_version > 0 && revisionMutation.idempotency_key && !revisionMutation.feedback && !revisionMutation.message && !revisionMutation.expected_fix && !revisionMutation.target_stage_id, "Office revision emitted free text or a client-derived target", revisionMutation);
+    await page.check("body > [data-expert-team-office-drawer] [data-office-checklist='document_opened']");
+    await page.evaluate(() => { window.confirm = () => false; });
+    await page.keyboard.press("Escape");
+    assertState(await page.isVisible("body > [data-expert-team-office-drawer]"), "Dirty Office drawer closed without confirmation");
+    await page.evaluate(() => { window.confirm = () => true; });
+    await page.keyboard.press("Escape");
+    const officeClosed = await page.evaluate(() => ({ hidden: document.querySelector("#expertTeamWorkspacePanel [data-expert-team-office-drawer]")?.hidden, focusReturned: document.activeElement?.hasAttribute("data-expert-team-office-open") || false, inert: document.getElementById("mainChat")?.inert || false }));
+    assertState(officeClosed.hidden && officeClosed.focusReturned && !officeClosed.inert, "Office drawer did not close and restore focus safely", officeClosed);
+    await page.evaluate(() => { window.confirm = window.__officeConfirmOriginal; delete window.__officeConfirmOriginal; });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    await page.screenshot({ path: path.join(outDir, "expert-team-office-review-drawer.png"), fullPage: false });
+    await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='task']");
+
     await page.click("#expertTeamWorkspacePanel .expert-team-result-card [data-expert-team-action='view_result']");
     await page.waitForSelector("#expertTeamResultViewer:not([hidden])", { timeout: 10000 });
     const viewer = await page.evaluate(() => ({
@@ -803,6 +902,7 @@ async function main() {
         path.join(outDir, "expert-team-polling-review-id-recovery.png"),
         path.join(outDir, "expert-team-polling-office-review-id-recovery.png"),
         path.join(outDir, "expert-team-polling-409-preserved.png"),
+        path.join(outDir, "expert-team-office-review-drawer.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
         path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),

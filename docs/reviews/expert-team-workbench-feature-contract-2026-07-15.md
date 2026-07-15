@@ -1,6 +1,6 @@
 # 专家团工作台功能契约（2026-07-15）
 
-范围：`专家团工作台 UX、状态保护与企业放行门禁实施计划` Tasks 1–3。本文审计稳定 view/presenter、Plan A 工作台、Brief 编辑确认和可信审批身份入口；不提前宣称 Tasks 4–7 已完成。
+范围：`专家团工作台 UX、状态保护与企业放行门禁实施计划` Tasks 1–5。本文审计稳定 view/presenter、Plan A 工作台、Brief 编辑确认、轮询草稿保护和 Office 二级验收；不提前宣称 Tasks 6–7 已完成。
 
 ## 功能契约
 
@@ -24,7 +24,9 @@
 | 阶段批准门禁 | 是 | 是 | 是 | fail-closed | 无合法 approver 或有 unresolved warning 时禁用并解释 | 禁用原因可读 | 未验证 | 通过 | pre-Office warning 不提供“申请授权”。 |
 | 聊天区无可操作确认卡 | 是 | 是 | 是 | 不适用 | 不适用 | 是 | 未验证 | 通过 | 生命周期提示只引导右侧工作台；完成成果入口继续保留。 |
 | 真实 Brief 编辑与阶段复核 | 是 | 是 | 是 | 是 | 是 | 人工语义检查完成 | 未验证 | 未验证 | 代码与自动化契约已覆盖；真实 Electron 留待 Task 7。 |
-| Office 操作路径 | API 部分存在 | 未验证 | 未验证 | 未验证 | 未验证 | 未验证 | 未验证 | 未验证 | 由计划 Task 5 实现和验证。 |
+| Office 操作路径 | 是 | 是 | 是 | fail-closed | 待验收/提交中/身份失败/过期恢复 | dialog、fieldset/legend、focus trap、dirty Escape 保护、焦点归还、aria-live | 真实 Electron 通过 | 通过 | 摘要只显示版本、短 hash、状态、问题数和验收人；condition 才显示授权，blocking/unknown fail-closed。 |
+| Office condition 授权 | 独立 waiver API | 是 | 是 | 原 reviewer/过期/取消保留理由 | 提交中禁用 | 草稿焦点保留 | 真实 Electron 通过 | 通过 | 只发 target/reason/version/idempotency，不发 identity/role/reviewer。 |
+| Office 结构化返修 | `office-revisions/create` | 是 | 是 | 无 issue 禁提交 | loading/disabled/防重复 | 影响确认可取消 | 真实 Electron 通过 | 通过 | 只发 issue_ids/version/idempotency，不发 feedback/expected_fix/target_stage_id。 |
 
 ## Tasks 1–3 QA 摘要
 
@@ -42,8 +44,8 @@
 
 | 严重程度 | 问题 | 当前处理 |
 |---|---|---|
-| P1 | Office 验收 API 尚未在本轮工作台提供完整可访问入口 | 明确留给 Task 5。 |
-| P2 | 未进行真实浏览器、截图、响应式和长时间使用验证 | Task 7 统一执行；本轮只能标记代码层人工语义检查。 |
+| P2 | 项目未配置 axe/Lighthouse 自动可访问性检查 | Electron 键盘/焦点语义已验证；自动 a11y 仍为未验证。 |
+| P3 | 抽屉关闭按钮仍为原生控件外观 | 不阻断主路径，后续统一视觉细节。 |
 
 ## 规格审查补修
 

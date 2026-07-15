@@ -223,6 +223,67 @@
       }).join('')}
     </section>`;
   }
+  const OFFICE_CHECKLIST_LABELS={
+    document_opened:'已打开绑定 DOCX',title_and_cover_match:'标题与封面一致',
+    genre_and_structure_match:'文种与结构匹配',content_order_correct:'正文顺序正确',
+    figures_unique_and_readable:'图形唯一且可读',tables_readable:'表格可读',
+    headers_footers_pagination:'页眉页脚和页码正确',no_placeholders_or_workflow_text:'无占位符或工作流话术',
+    citations_readable:'引用可读'
+  };
+  const OFFICE_CONDITION_CATEGORIES=new Set(['visual_alignment','minor_typography','pagination_preference']);
+  function officeIssueUiPolicy(issue){
+    issue=issue&&typeof issue==='object'?issue:{};
+    const severity=String(issue.severity||'');
+    const domain=String(issue.targetDomain||issue.target_domain||'');
+    const category=String(issue.category||'');
+    const released=severity==='condition'&&domain==='office_issue'&&OFFICE_CONDITION_CATEGORIES.has(category);
+    return {released,severity:severity==='blocking'?'blocking':(released?'condition':'invalid')};
+  }
+  function officeStatusLabel(office){
+    if(String(office&&office.validity||'')==='invalidated')return '验收已失效';
+    return {passed:'已通过',passed_with_conditions:'有条件通过',failed:'不通过',pending:'待验收'}[String(office&&office.decision||office&&office.status||'pending')]||'待验收';
+  }
+  function renderExpertTeamOfficeSummary(office){
+    office=office&&typeof office==='object'?office:{};
+    const digest=String(office.documentSha256||office.document_sha256||'');
+    const reviewer=String(office.reviewerLabel||office.reviewer_label||'')||'尚未提交';
+    const issueCount=Number(office.issueCount==null?(office.issues||[]).length:office.issueCount||0);
+    return `<section class="expert-team-office-summary" aria-label="Office 验收摘要">
+      <div class="expert-team-panel-section-title"><span>Office 验收</span><small>${safeEsc(officeStatusLabel(office))}</small></div>
+      <strong>正式版本 ${safeEsc(office.documentRevision||office.document_revision||1)}</strong>
+      <dl><div><dt>文档指纹</dt><dd>${safeEsc(digest?digest.slice(0,12):'待生成')}</dd></div><div><dt>问题</dt><dd>${safeEsc(issueCount)} 项</dd></div><div><dt>验收人</dt><dd>${safeEsc(reviewer)}</dd></div></dl>
+      <button type="button" class="expert-team-panel-action expert-team-primary-action" data-expert-team-office-open onclick="openExpertTeamOfficeDrawer(this);event.stopPropagation()">${office.decision&&office.decision!=='pending'?'继续验收':'开始 Office 验收'}</button>
+      <details><summary>验收详情</summary><p>完整指纹、证据路径和一次性 token 仅在服务端安全验证，此处不展示敏感值。</p></details>
+    </section>`;
+  }
+  function renderExpertTeamOfficeDrawer(office){
+    office=office&&typeof office==='object'?office:{};
+    const identity=office.identity&&typeof office.identity==='object'?office.identity:{};
+    const principal=identity.principal&&typeof identity.principal==='object'?identity.principal:{};
+    const roles=Array.isArray(principal.roles)?principal.roles:[];
+    const reviewerReady=identity.enabled!==false&&identity.authenticated===true&&roles.includes('document-reviewer');
+    const checklist=office.checklist&&typeof office.checklist==='object'?office.checklist:{};
+    const issues=Array.isArray(office.issues)?office.issues:[];
+    const issueHtml=issues.length?issues.map(issue=>{
+      const policy=officeIssueUiPolicy(issue);
+      const issueId=String(issue.issueId||issue.issue_id||'');
+      const severity=policy.severity==='blocking'?'阻断问题':(policy.severity==='condition'?'可接受条件':'策略未识别');
+      const actions=policy.released&&identity.authorizerHandoffReady
+        ? `<label><span>授权理由</span><textarea rows="2" data-office-waiver-reason="${safeEsc(issueId)}" placeholder="说明为何可接受该条件"></textarea></label><button type="button" data-office-waiver-issue="${safeEsc(issueId)}" onclick="startExpertTeamOfficeAuthorizerHandoff(this);event.stopPropagation()">交由授权人处理</button>`:'';
+      return `<fieldset class="expert-team-office-issue is-${safeEsc(policy.severity)}"><legend>${safeEsc(severity)}</legend><strong>${safeEsc(issue.description||'待处理问题')}</strong><p>${safeEsc(issue.expectedFix||issue.expected_fix||'按结构化问题返修')}</p><label><input type="checkbox" data-office-revision-issue="${safeEsc(issueId)}"> 退回修改</label>${actions}</fieldset>`;
+    }).join(''):'<p class="expert-team-office-empty">暂无结构化 Office 问题。</p>';
+    const identityMessage=reviewerReady?`当前验收身份：${safeEsc(principal.displayName||principal.display_name||'已认证用户')}`:'需使用企业验收身份登录';
+    return `<aside class="expert-team-office-drawer" role="dialog" aria-modal="true" aria-labelledby="expert-team-office-title" data-expert-team-office-drawer hidden onkeydown="handleExpertTeamOfficeDrawerKeydown(event)">
+      <div class="expert-team-office-drawer-head"><span><small>Office 二级验收</small><strong id="expert-team-office-title">检查正式 DOCX</strong></span><button type="button" data-office-close aria-label="关闭 Office 验收" onclick="closeExpertTeamOfficeDrawer(this);event.stopPropagation()">关闭</button></div>
+      <div class="expert-team-office-scroll"><p class="expert-team-office-identity" role="status">${identityMessage}</p>
+      <fieldset><legend>1. 选择验收结论</legend><label><input type="radio" name="office-decision" value="passed"> 通过</label><label><input type="radio" name="office-decision" value="passed_with_conditions"> 有条件通过</label><label><input type="radio" name="office-decision" value="failed"> 不通过</label></fieldset>
+      <fieldset><legend>2. 完成 9 项检查</legend>${Object.entries(OFFICE_CHECKLIST_LABELS).map(([key,label])=>`<label><input type="checkbox" data-office-checklist="${safeEsc(key)}" ${checklist[key]==='passed'?'checked':''}> ${safeEsc(label)}</label>`).join('')}</fieldset>
+      <section aria-label="结构化问题"><h3>3. 结构化问题</h3>${issueHtml}</section>
+      <div class="expert-team-office-impact" role="status">退回修改只发送已选 issue ID；影响范围和返修阶段由服务端派生。</div></div>
+      <div class="expert-team-office-drawer-actions"><button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="submitExpertTeamOfficeRevision(this);event.stopPropagation()">退回专家团修改</button><button type="button" class="expert-team-panel-action expert-team-primary-action" data-office-submit ${reviewerReady?'':'disabled aria-disabled="true"'}>提交验收</button></div>
+      <p class="expert-team-office-live" aria-live="polite" data-office-live></p>
+    </aside>`;
+  }
   function renderStageInput(card,pendingInput){
     pendingInput=pendingInput||{};
     if(!(pendingInput.question||pendingInput.description))return '';
@@ -353,14 +414,15 @@
     const finalDocument=artifacts.find(item=>item&&String(item.kind||'')==='final_document'&&item.exists!==false&&String(item.path||''));
     const deliveryPackage=artifacts.find(item=>item&&String(item.kind||'')==='delivery_package'&&item.exists!==false&&String(item.path||''));
     const qualityReportArtifact=artifacts.find(item=>item&&String(item.kind||'')==='quality_report');
-    const officeAcceptanceHtml=!isReadOnly&&finalDocument&&deliveryPackage&&typeof renderDocxWpsVisualAcceptanceForm==='function'
-      ? renderDocxWpsVisualAcceptanceForm({
-          expertTeam:true,
-          documentPath:String(finalDocument.path||''),
-          deliveryDir:String(deliveryPackage.path||''),
-          qualityStatus:String(qualityReportArtifact&&qualityReportArtifact.status||'待验收'),
-        })
-      : '';
+    const officeModel=card&&card.officeReview&&typeof card.officeReview==='object'
+      ? {...card.officeReview,identity:card.identityStatus||(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{}}
+      : null;
+    const officeDrawerHtml=!isReadOnly&&officeModel?renderExpertTeamOfficeDrawer(officeModel):'';
+    const officeAcceptanceHtml=!isReadOnly&&officeModel
+      ? renderExpertTeamOfficeSummary(officeModel)
+      : (!isReadOnly&&finalDocument&&deliveryPackage&&typeof renderDocxWpsVisualAcceptanceForm==='function'
+        ? renderDocxWpsVisualAcceptanceForm({expertTeam:true,documentPath:String(finalDocument.path||''),deliveryDir:String(deliveryPackage.path||''),qualityStatus:String(qualityReportArtifact&&qualityReportArtifact.status||'待验收')})
+        : '');
     const officeReviewAction=officeAcceptanceHtml
       ? '<button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="openExpertTeamWpsAcceptance(this);event.stopPropagation()" aria-label="打开 Office 验收表单">Office 验收</button>'
       : '';
@@ -490,6 +552,7 @@
         ${tabPanel('result',resultPanelHtml,false)}
         ${tabPanel('process',collaborationPanelHtml,false)}
       </div>
+      ${officeDrawerHtml}
     </div>`;
   }
   if(typeof window!=='undefined'){
@@ -499,5 +562,8 @@
     window.expertTeamDockSummaryFromPresentation=expertTeamDockSummaryFromPresentation;
     window.renderExpertTeamWorkspaceFromPresentation=renderExpertTeamWorkspaceFromPresentation;
     window.openExpertTeamWpsAcceptance=openExpertTeamWpsAcceptance;
+    window.officeIssueUiPolicy=officeIssueUiPolicy;
+    window.renderExpertTeamOfficeSummary=renderExpertTeamOfficeSummary;
+    window.renderExpertTeamOfficeDrawer=renderExpertTeamOfficeDrawer;
   }
 })();

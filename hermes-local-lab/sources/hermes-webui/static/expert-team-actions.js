@@ -12,6 +12,35 @@
   const mutationIdempotencyKeys=new Map();
   let mutationNonce=0;
   let activeIdentityLoginAttempt=null;
+  let officeDrawerReturnFocus=null;
+  const OFFICE_REQUIRED_CHECKS=['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','headers_footers_pagination','no_placeholders_or_workflow_text'];
+  function officeMutationKey(card,kind){
+    const uuid=(typeof crypto!=='undefined'&&crypto&&typeof crypto.randomUUID==='function')?crypto.randomUUID():`${Date.now().toString(36)}-${(++mutationNonce).toString(36)}`;
+    return `expert-team:${card.runId}:${card.version}:office:${kind}:${uuid}`;
+  }
+  function officeWaiverMutationPayload(card,targetId,reason){
+    return {session_id:String(card.sourceSessionId||''),run_id:String(card.runId||''),expected_version:Number(card.version||0),target_id:String(targetId||''),reason:String(reason||'').trim(),idempotency_key:officeMutationKey(card,'waiver')};
+  }
+  function officeRevisionMutationPayload(card,issueIds){
+    return {session_id:String(card.sourceSessionId||''),run_id:String(card.runId||''),expected_version:Number(card.version||0),office_review_id:String(card.draftIdentity&&card.draftIdentity.officeReviewId||card.officeReview&&card.officeReview.reviewId||''),issue_ids:Array.from(new Set((Array.isArray(issueIds)?issueIds:[]).map(String).filter(Boolean))),idempotency_key:officeMutationKey(card,'revision')};
+  }
+  function validateExpertTeamOfficeSubmission(office){
+    office=office&&typeof office==='object'?office:{};
+    const identity=office.identity&&typeof office.identity==='object'?office.identity:{};
+    const roles=Array.isArray(identity.principal&&identity.principal.roles)?identity.principal.roles:[];
+    if(identity.enabled===false||identity.authenticated!==true||!roles.includes('document-reviewer'))return {ok:false,code:'trusted_reviewer_required',message:'需使用企业验收身份登录'};
+    const decision=String(office.decision||'pending');
+    if(!['passed','passed_with_conditions','failed'].includes(decision))return {ok:false,code:'office_decision_required',message:'请选择验收结论'};
+    const checklist=office.checklist&&typeof office.checklist==='object'?office.checklist:{};
+    if(OFFICE_REQUIRED_CHECKS.some(key=>checklist[key]!=='passed'))return {ok:false,code:'office_required_checklist_incomplete',message:'必选检查项全部通过后才能提交'};
+    const issues=Array.isArray(office.issues)?office.issues:[];
+    const invalid=issues.some(issue=>!issue||!['blocking','condition'].includes(String(issue.severity||''))||String(issue.targetDomain||issue.target_domain||'')!=='office_issue');
+    if(invalid)return {ok:false,code:'office_issue_policy_invalid',message:'存在未识别的问题策略，请刷新后返修'};
+    if(decision==='passed'&&issues.length)return {ok:false,code:'office_passed_requires_zero_issues',message:'通过要求零未处置问题'};
+    if(decision==='passed_with_conditions'&&(!issues.length||issues.some(issue=>issue.severity!=='condition')))return {ok:false,code:'office_blocking_issue_requires_revision',message:'阻断问题不可豁免，必须返修'};
+    if(decision==='failed'&&!issues.length)return {ok:false,code:'office_failed_requires_issues',message:'不通过必须关联结构化问题'};
+    return {ok:true,code:'ok',message:'可提交'};
+  }
   function activeExpertTeamCard(btn){
     const root=btn&&btn.closest&&btn.closest('[data-expert-team-run-id]');
     const active=(typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||{};
@@ -27,6 +56,83 @@
       stageReviewId:root.dataset.expertTeamReviewId||active.stageReviewId||'',
       readOnly:root.dataset.expertTeamReadOnly==='true'||active.readOnly===true,
     };
+  }
+  function officeDrawer(btn){return btn&&btn.closest?btn.closest('[data-expert-team-office-drawer]'):null;}
+  function openExpertTeamOfficeDrawer(btn){
+    const root=btn&&btn.closest?btn.closest('.expert-team-panel-inner'):null;
+    const drawer=root&&root.querySelector?root.querySelector('[data-expert-team-office-drawer]'):null;
+    if(!drawer)return false;
+    officeDrawerReturnFocus=btn;
+    drawer._expertTeamOfficeRoot=root;
+    drawer._expertTeamOfficePlaceholder=document.createComment('expert-team-office-drawer');
+    drawer.parentNode.insertBefore(drawer._expertTeamOfficePlaceholder,drawer);
+    Object.keys(root.dataset||{}).forEach(key=>{drawer.dataset[key]=root.dataset[key];});
+    document.body.appendChild(drawer);drawer.hidden=false;
+    const main=document.getElementById('mainChat');if(main)main.inert=true;
+    const first=drawer.querySelector('button,input:not([disabled])');if(first&&first.focus)first.focus();
+    return true;
+  }
+  function officeDrawerIsDirty(drawer){return !!(drawer&&drawer.querySelector&&drawer.querySelector('input:checked'));}
+  function closeExpertTeamOfficeDrawer(btn,force){
+    const drawer=officeDrawer(btn);if(!drawer)return false;
+    if(!force&&officeDrawerIsDirty(drawer)&&typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('验收草稿尚未提交，确定关闭吗？'))return false;
+    drawer.hidden=true;const main=document.getElementById('mainChat');if(main)main.inert=false;
+    const placeholder=drawer._expertTeamOfficePlaceholder;
+    if(placeholder&&placeholder.parentNode)placeholder.parentNode.replaceChild(drawer,placeholder);else if(drawer.parentNode)drawer.parentNode.removeChild(drawer);
+    drawer._expertTeamOfficePlaceholder=null;drawer._expertTeamOfficeRoot=null;
+    const returnTarget=officeDrawerReturnFocus&&officeDrawerReturnFocus.isConnected
+      ? officeDrawerReturnFocus
+      : (document.querySelector('#expertTeamWorkspacePanel [data-expert-team-office-open]')||null);
+    if(returnTarget&&returnTarget.focus)returnTarget.focus();officeDrawerReturnFocus=null;return true;
+  }
+  function handleExpertTeamOfficeDrawerKeydown(event){
+    const drawer=event&&event.target&&event.target.closest?event.target.closest('[data-expert-team-office-drawer]'):null;if(!drawer)return false;
+    if(event.key==='Escape'){event.preventDefault();return closeExpertTeamOfficeDrawer(drawer.querySelector('[data-office-close]'));}
+    if(event.key!=='Tab')return false;
+    const items=Array.from(drawer.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')).filter(item=>!item.hidden);
+    if(!items.length)return false;const first=items[0],last=items[items.length-1];
+    if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}return true;
+  }
+  async function submitExpertTeamOfficeRevision(btn){
+    const drawer=officeDrawer(btn);const card=activeExpertTeamCard(btn);
+    const ids=Array.from(drawer&&drawer.querySelectorAll('[data-office-revision-issue]:checked')||[]).map(item=>item.dataset.officeRevisionIssue).filter(Boolean);
+    if(!ids.length){if(typeof showToast==='function')showToast('请先选择要退回修改的问题。');return false;}
+    if(typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('退回后，影响范围和目标阶段将由服务端根据问题类型派生。确定继续吗？'))return false;
+    if(btn.disabled)return false;btn.disabled=true;btn.setAttribute('aria-busy','true');
+    try{const result=await api('/api/expert-teams/office-revisions/create',{method:'POST',body:JSON.stringify(officeRevisionMutationPayload(card,ids))});if(result&&result.run)applyExpertTeamActionResponse(result);if(typeof showToast==='function')showToast('已按结构化问题退回修改。');return true;}
+    catch(error){if(typeof showToast==='function')showToast('退回修改失败：'+(error&&error.message||error));return false;}
+    finally{btn.disabled=false;btn.removeAttribute('aria-busy');}
+  }
+  async function startExpertTeamOfficeAuthorizerHandoff(btn){
+    const card=activeExpertTeamCard(btn);const drawer=officeDrawer(btn);const live=drawer&&drawer.querySelector('[data-office-live]');
+    const issueId=String(btn&&btn.dataset&&btn.dataset.officeWaiverIssue||'');
+    const reasonField=drawer&&drawer.querySelector(`[data-office-waiver-reason="${issueId.replace(/"/g,'\\"')}"]`);
+    const reason=String(reasonField&&reasonField.value||'').trim();
+    if(!reason){if(live)live.textContent='请先填写授权理由。';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
+    if(btn.disabled)return false;btn.disabled=true;
+    try{
+      const started=await api('/api/expert-teams/identity/start',{method:'POST',body:JSON.stringify({purpose:'authorizer_handoff',session_id:card.sourceSessionId,run_id:card.runId,redirect_uri:`${location.origin}/api/expert-teams/identity/callback`})});
+      if(live)live.textContent='请在系统浏览器中切换为授权人账号，完成后返回此处。';
+      if(typeof window!=='undefined'&&typeof window.open==='function')window.open(started.authorization_url,'_blank','noopener,noreferrer');
+      for(let attempt=0;attempt<120;attempt+=1){
+        await expertTeamIdentityDelay(1000);
+        const status=await api('/api/expert-teams/identity/status');
+        const flow=String(status&&status.identity_flow_status||status&&status.login_state||'');
+        if(flow==='authorizer_same_as_reviewer'){if(live)live.textContent='仍是原验收人，请换账号重试';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
+        if(['cancelled','expired','stale','failed'].includes(flow)){if(live)live.textContent=flow==='expired'?'授权登录已过期，请重试；问题草稿已保留。':'授权交接未完成，可重试或退回修改。';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
+        const roles=Array.isArray(status&&status.principal&&status.principal.roles)?status.principal.roles:[];
+        if(status&&status.authenticated&&roles.includes('waiver-authorizer')){
+          const result=await api('/api/expert-teams/waivers/create',{method:'POST',body:JSON.stringify(officeWaiverMutationPayload(card,issueId,reason))});
+          if(result&&result.run)applyExpertTeamActionResponse(result);
+          if(live)live.textContent='该 Office 条件已由授权人完成逐项授权。';
+          return true;
+        }
+      }
+      if(live)live.textContent='授权登录已过期，请重试；问题草稿已保留。';
+      return false;
+    }
+    catch(error){const code=String(error&&error.payload&&error.payload.code||'');if(live)live.textContent=code==='authorizer_same_as_reviewer'?'仍是原验收人，请换账号重试':'授权人交接失败，可重试或退回修改。';return false;}
+    finally{btn.disabled=false;}
   }
   function mutationIdempotencyKey(base,card,action){
     if(action==='retry_cancel'&&card.cancelRequestId)return String(card.cancelRequestId);
@@ -650,6 +756,14 @@
       return applyExpertTeamWorkspaceTab(root,tab);
     };
     window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab;
+    window.officeWaiverMutationPayload=officeWaiverMutationPayload;
+    window.officeRevisionMutationPayload=officeRevisionMutationPayload;
+    window.validateExpertTeamOfficeSubmission=validateExpertTeamOfficeSubmission;
+    window.openExpertTeamOfficeDrawer=openExpertTeamOfficeDrawer;
+    window.closeExpertTeamOfficeDrawer=closeExpertTeamOfficeDrawer;
+    window.handleExpertTeamOfficeDrawerKeydown=handleExpertTeamOfficeDrawerKeydown;
+    window.submitExpertTeamOfficeRevision=submitExpertTeamOfficeRevision;
+    window.startExpertTeamOfficeAuthorizerHandoff=startExpertTeamOfficeAuthorizerHandoff;
     window.normalizeExpertTeamWorkspaceTab=normalizeExpertTeamWorkspaceTab;
     window.selectExpertTeamStageInputChoice=function(btn){
       const root=btn&&btn.closest&&btn.closest('.expert-team-stage-input-card');

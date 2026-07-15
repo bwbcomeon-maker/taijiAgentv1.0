@@ -174,6 +174,56 @@ def test_office_acceptance_requires_exact_checklist_identity_and_issue_severity(
     assert conditioned["issues"] == [allowed_condition]
 
 
+def test_office_acceptance_view_exposes_safe_structured_ui_contract_only():
+    from api.expert_teams.office_review import office_acceptance_view
+
+    acceptance = _acceptance()
+    acceptance.update({
+        "document_revision": 4,
+        "document_sha256": "f" * 64,
+        "canonical_sha256": "e" * 64,
+        "checklist": {key: "not_checked" for key in (
+            "document_opened", "title_and_cover_match", "genre_and_structure_match",
+            "content_order_correct", "figures_unique_and_readable", "tables_readable",
+            "headers_footers_pagination", "no_placeholders_or_workflow_text", "citations_readable",
+        )},
+        "token_provenance": {"token_hash": "secret-token-hash", "opened_at": "now"},
+        "evidence": [{"path": "/secret/evidence.png", "sha256": "1" * 64}],
+        "reviewer": {"principal_id": "reviewer-1", "role": "document-reviewer", "auth_source": "oidc_pkce"},
+    })
+    view = office_acceptance_view(acceptance, waiver_refs=[])
+    assert view["review_id"] == "review-1"
+    assert view["document_sha256"] == "f" * 64
+    assert view["issue_count"] == 1
+    assert view["reviewer_label"] == "reviewer-1"
+    assert view["waived_issue_ids"] == []
+    serialized = json.dumps(view, ensure_ascii=False)
+    for secret in ("secret-token-hash", "/secret/evidence.png", "token_provenance", "evidence"):
+        assert secret not in serialized
+
+
+def test_runtime_attaches_current_office_view_without_secret_evidence(tmp_path):
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+    from api.expert_teams.runtime import _attach_office_review_view
+
+    root = canonical_attempt_root(tmp_path, "run-1", "delivery", 2)
+    root.mkdir(parents=True)
+    acceptance = _acceptance()
+    acceptance.update({
+        "document_revision": 2, "document_sha256": "f" * 64, "canonical_sha256": "e" * 64,
+        "checklist": {}, "evidence": [{"path": "/secret/page.png", "sha256": "1" * 64}],
+        "token_provenance": {"token_hash": "secret"},
+    })
+    (root / "expert-team-wps-acceptance.json").write_text(json.dumps(acceptance), encoding="utf-8")
+    run = {
+        "run_id": "run-1", "waiver_refs": [],
+        "current_delivery_manifest_ref": {"delivery_attempt": 2},
+    }
+    projected = _attach_office_review_view(tmp_path, run)
+    assert projected["office_review_view"]["review_id"] == "review-1"
+    assert "/secret/page.png" not in json.dumps(projected)
+
+
 def test_office_policy_requires_complete_versioned_checklist_and_derives_severity():
     from api.expert_teams.office_review import OFFICE_POLICY_V1, build_office_acceptance
 
