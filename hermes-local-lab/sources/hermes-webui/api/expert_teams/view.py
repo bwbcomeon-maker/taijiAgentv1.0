@@ -695,9 +695,21 @@ def expert_team_run_view(run: dict) -> dict:
     }
     if enterprise:
         brief = brief_summary(run.get("document_brief") or {})
+        full_brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
         original_request = str(brief.get("original_request") or "")
         brief["original_request_summary"] = content_summary(original_request)
         brief["document_type_label"] = DOCUMENT_TYPE_LABELS.get(str(brief.get("document_type") or ""), "未放行文种")
+        for field in ("purpose", "audience", "usage_scenario", "additional_context"):
+            brief[field] = str(full_brief.get(field) or "")
+        brief["document_control"] = deepcopy(
+            full_brief.get("document_control") if isinstance(full_brief.get("document_control"), dict) else {}
+        )
+        source_policy = full_brief.get("source_policy") if isinstance(full_brief.get("source_policy"), dict) else {}
+        brief["source_policy_summary"] = {
+            "mode": str(source_policy.get("mode") or ""),
+            "citation_style": str(source_policy.get("citation_style") or ""),
+            "source_count": len(source_policy.get("source_refs") or []),
+        }
         brief["editable"] = _brief_is_editable(run)
         brief["edit_policy"] = "editable" if brief["editable"] else "new_run_required"
         brief["validation"] = deepcopy(

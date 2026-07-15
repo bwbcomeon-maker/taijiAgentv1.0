@@ -4,7 +4,9 @@
     if(!action||!action.id)return '';
     const cls=extraClass||'expert-team-action-button';
     const kind=action.kind?` data-expert-team-action-kind="${safeEsc(action.kind)}"`:'';
-    return `<button type="button" class="${cls}" data-expert-team-action="${safeEsc(action.id)}"${kind} onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()" aria-label="${safeEsc(action.label||'操作')}">${safeEsc(action.label||'操作')}</button>`;
+    const disabled=action.disabled?' disabled aria-disabled="true"':'';
+    const reason=action.disabledReason?` title="${safeEsc(action.disabledReason)}"`:'';
+    return `<button type="button" class="${cls}" data-expert-team-action="${safeEsc(action.id)}"${kind}${disabled}${reason} onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()" aria-label="${safeEsc(action.label||'操作')}">${safeEsc(action.label||'操作')}</button>`;
   }
   function setExpertTeamCapsuleExpanded(trigger,expanded){
     const root=trigger&&trigger.closest?trigger.closest('.expert-team-panel-inner'):null;
@@ -126,6 +128,48 @@
     const runId=String(card&&card.runId||'expert-team').replace(/[^a-zA-Z0-9_-]/g,'-');
     const originalId=`expert-team-brief-original-request-${runId}`;
     const actionLabel=brief.viewAction&&brief.viewAction.label||'查看/编辑文档规格';
+    const validation=brief.validation&&typeof brief.validation==='object'?brief.validation:{};
+    const errors=Array.isArray(validation.field_errors)?validation.field_errors:[];
+    const errorFor=(name)=>errors.find(item=>String(item&&item.field||'')===name)||null;
+    const field=(name,label,value,options)=>{
+      options=options||{};
+      const id=`expert-team-brief-${name.replace(/[^a-zA-Z0-9_-]/g,'-')}-${runId}`;
+      const helpId=`${id}-help`;
+      const error=errorFor(name);
+      const errorId=`${id}-error`;
+      const described=[options.help?helpId:'',error?errorId:''].filter(Boolean).join(' ');
+      const common=`id="${safeEsc(id)}" name="${safeEsc(name)}"${described?` aria-describedby="${safeEsc(described)}"`:''}${error?' aria-invalid="true"':''}`;
+      const control=options.rows
+        ? `<textarea ${common} rows="${safeEsc(options.rows)}">${safeEsc(value||'')}</textarea>`
+        : `<input ${common} type="text" value="${safeEsc(value||'')}">`;
+      return `<label class="expert-team-brief-field"><span>${safeEsc(label)}</span>${control}${options.help?`<small id="${safeEsc(helpId)}">${safeEsc(options.help)}</small>`:''}<small id="${safeEsc(errorId)}" data-expert-team-field-error="${safeEsc(name)}" role="alert">${safeEsc(error&&error.message||'')}</small></label>`;
+    };
+    const control=brief.documentControl||{};
+    const editor=brief.editable
+      ? `<form class="expert-team-brief-editor" data-expert-team-brief-editor data-expert-team-brief-revision="${safeEsc(brief.revision||0)}" data-expert-team-document-control="${safeEsc(JSON.stringify(control))}" onsubmit="return false">
+          <fieldset><legend>文档目标</legend>
+            ${field('original_request','原始诉求',brief.originalRequest,{rows:4,help:'这是创建任务时的原始要求，可在首阶段启动前修正。'})}
+            ${field('exact_title','精确标题',brief.exactTitle)}
+            <div class="expert-team-brief-field"><span>文种</span><strong>${safeEsc(brief.documentTypeLabel||'待选择')}</strong><small>文种决定企业模板和必填字段；如需更换文种，请新建任务。</small></div>
+            ${field('purpose','用途',brief.purpose)}
+          </fieldset>
+          <fieldset><legend>使用与资料边界</legend>
+            ${field('audience','读者',brief.audience)}
+            ${field('usage_scenario','使用场景',brief.usageScenario)}
+            ${field('additional_context','补充背景',brief.additionalContext,{rows:4,help:'补充可核对的背景和资料使用边界，不会覆盖原始诉求。'})}
+            <p class="expert-team-brief-boundary">已绑定资料：${safeEsc(brief.sourcePolicySummary&&brief.sourcePolicySummary.source_count||0)} 项；资料策略由企业配置管理。</p>
+          </fieldset>
+          <fieldset><legend>交付控制</legend>
+            ${field('document_control.classification','密级',control.classification)}
+            ${field('document_control.document_version','文档版本',control.document_version||control.version)}
+            <label class="expert-team-brief-field"><span>模板</span><input name="document_control.render_template_id" type="text" value="${safeEsc(control.render_template_id||'')}" readonly><small>模板由所选文种确定。</small></label>
+          </fieldset>
+          <div class="expert-team-brief-actions">
+            <button type="button" class="expert-team-panel-action expert-team-secondary-action" onclick="submitExpertTeamBrief(this,false);event.stopPropagation()">保存规格</button>
+            <button type="button" class="expert-team-panel-action expert-team-primary-action" onclick="submitExpertTeamBrief(this,true);event.stopPropagation()">确认文档规格</button>
+          </div>
+        </form>`
+      : `<div class="expert-team-brief-frozen" role="status"><strong>首阶段已经启动，整份文档规格已冻结</strong><p>当前任务不会覆盖已生成阶段；如需修改，请基于当前规格创建新任务。</p><button type="button" class="expert-team-panel-action expert-team-secondary-action" data-expert-team-action="relaunch" onclick="handleExpertTeamPresentationAction(this);event.stopPropagation()">基于当前规格创建新任务</button></div>`;
     return `<section class="expert-team-brief-card" aria-label="文档规格摘要">
       <div class="expert-team-panel-section-title"><span>文档规格</span><small>${safeEsc(capability.label||presentation.capabilityLabel||'AI 草稿能力')}</small></div>
       <strong>${safeEsc(brief.exactTitle||'待补充精确标题')}</strong>
@@ -138,9 +182,34 @@
       <details class="expert-team-brief-details">
         <summary>${safeEsc(actionLabel)}</summary>
         <label for="${safeEsc(originalId)}">原始诉求</label>
-        <textarea id="${safeEsc(originalId)}" name="original_request" rows="4" readonly>${safeEsc(brief.originalRequest||'')}</textarea>
+        <p id="${safeEsc(originalId)}">${safeEsc(brief.originalRequest||'')}</p>
+        ${editor}
       </details>
     </section>`;
+  }
+
+  function expertTeamApprovalState(card){
+    const identity=card&&card.identityStatus||(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{};
+    const principal=identity.principal&&typeof identity.principal==='object'?identity.principal:{};
+    const roles=Array.isArray(principal.roles)?principal.roles:[];
+    const validation=card&&card.artifactValidation||{};
+    const warningCount=Number(validation.unresolved_warning_count||validation.blocking_count||0);
+    if(identity.enabled===false)return {allowed:false,reason:'未配置企业身份提供方，无法批准阶段成果。',action:'login'};
+    if(identity.expired)return {allowed:false,reason:'企业身份已过期，请重新登录。',action:'login'};
+    if(!identity.authenticated)return {allowed:false,reason:'需使用企业审批身份登录后才能确认。',action:'login'};
+    if(!roles.includes('document-approver'))return {allowed:false,reason:'当前身份缺少文档审批权限。',action:'login'};
+    if(warningCount>0)return {allowed:false,reason:`仍有 ${warningCount} 个阻断问题或警告，修复后才能确认。`,action:'repair'};
+    return {allowed:true,reason:`当前审批身份：${String(principal.display_name||'已认证用户')}`,action:'logout'};
+  }
+
+  function renderExpertTeamIdentityStatus(card,approval){
+    const identity=card&&card.identityStatus||(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{};
+    const principal=identity.principal&&typeof identity.principal==='object'?identity.principal:{};
+    const label=approval.reason||'正在核验企业审批身份。';
+    if(identity.authenticated){
+      return `<div class="expert-team-identity-status" role="status"><span>${safeEsc(label)}</span><button type="button" onclick="logoutExpertTeamIdentity(this);event.stopPropagation()">退出企业身份</button></div>`;
+    }
+    return `<div class="expert-team-identity-status" role="status"><span>${safeEsc(label)}</span><button type="button" onclick="startExpertTeamIdentityLogin(this);event.stopPropagation()">使用企业审批身份登录</button><button type="button" onclick="refreshExpertTeamIdentityStatus(this);event.stopPropagation()">检查登录状态</button></div>`;
   }
   function renderCompletionGates(card){
     const presentation=card&&card.presentation||{};
@@ -246,6 +315,8 @@
     const statusTone=presentationTone(presentation.state);
     const briefCardHtml=renderBriefCard(card);
     const completionGatesHtml=renderCompletionGates(card);
+    const approvalState=expertTeamApprovalState(card);
+    const identityStatusHtml=renderExpertTeamIdentityStatus(card,approvalState);
     const currentStageId=String(currentStage.id||currentStage.task_id||'');
     const currentWorkerId=String(currentWorker.id||currentWorker.member_id||currentStage.worker_id||'');
     const currentWorkerName=String(currentWorker.name||currentStage.worker_name||'');
@@ -295,7 +366,7 @@
     const stageSummary=stageResult&&stageResult.summary?stageResult.summary:(result&&result.summary||'当前阶段产物生成后会在这里沉淀。');
     const reviewActions={
       view:secondaryActions.find(action=>action&&action.id==='view_result')||{id:'view_result',label:'查看成果',kind:'ghost'},
-      approve:secondaryActions.find(action=>action&&action.id==='approve_stage')||{id:'approve_stage',label:'无修改，进入下一阶段',kind:'primary'},
+      approve:{...(secondaryActions.find(action=>action&&action.id==='approve_stage')||{id:'approve_stage',label:'无修改，进入下一阶段',kind:'primary'}),disabled:!approvalState.allowed,disabledReason:approvalState.reason},
       revise:secondaryActions.find(action=>action&&action.id==='revise_stage')||{id:'revise_stage',label:'需要修改',kind:'ghost'}
     };
     const reviewItems=Array.isArray(card&&card.reviewItems)?card.reviewItems:[];
@@ -308,6 +379,7 @@
           <p class="expert-team-panel-detail">${safeEsc(stageSummary||'阶段结果已生成，请查看后确认是否进入下一阶段。')}</p>
           ${resultHtml}
           ${reviewItemHtml}
+          ${identityStatusHtml}
           ${isReadOnly?'<p class="expert-team-panel-detail">历史任务仅支持查看，请新建专家团任务后继续。</p>':`<div class="expert-team-stage-actions">
             ${actionButton(reviewActions.view,'expert-team-panel-action expert-team-secondary-action expert-team-stage-locate')}
             ${officeReviewAction}
@@ -382,14 +454,15 @@
         <strong>${safeEsc(progress.text)}</strong>
         <small>${safeEsc(currentStage.phase||card&&card.phase||'需求确认')}</small>
         <span class="expert-team-capsule-state ${safeEsc(statusTone)}">${safeEsc(presentation.title||'专家团状态')}</span>
+        <span class="expert-team-capsule-todo-count">${safeEsc(['awaiting_review','awaiting_stage_input','collecting_required','collecting_optional','ready_to_generate'].includes(String(presentation.state||''))?'1 个待办':'0 个待办')}</span>
         <button type="button" class="expert-team-capsule-action" onclick="showExpertTeamWorkspaceFromCapsule(this);event.stopPropagation()" aria-label="展开专家团工作台" aria-expanded="false" aria-controls="expert-team-workspace-expanded">处理</button>
       </div>
       <div class="expert-team-panel-head">
         <div class="expert-team-panel-topbar">
           <span class="expert-team-panel-copy">
             <small class="expert-team-panel-eyebrow">专家团工作台</small>
-            <strong class="expert-team-panel-title">${safeEsc(card&&card.team&&card.team.title||'专家团')}</strong>
-            <span class="expert-team-panel-summary">${safeEsc(presentation.visibleTitle||'专家团任务')}</span>
+            <strong class="expert-team-panel-title">${safeEsc(card&&card.brief&&card.brief.exactTitle||presentation.visibleTitle||'专家团任务')}</strong>
+            <span class="expert-team-panel-summary">${safeEsc(card&&card.brief?`${card.brief.documentTypeLabel||'待选择文种'} · Brief revision ${card.brief.revision||0}`:(card&&card.team&&card.team.title||'专家团'))}</span>
           </span>
           <button type="button" class="expert-team-panel-hide expert-team-panel-collapse-toggle" onclick="toggleExpertTeamWorkspaceFromControl(this);event.stopPropagation()" aria-label="展开或合上专家团工作台">
             <span class="expert-team-panel-collapse-icon is-collapse">合上</span>
@@ -407,13 +480,13 @@
         ${briefCardHtml}
         <div class="expert-team-confirmation-wizard" data-expert-team-workspace-mode="confirm" data-confirmation-title="需求确认 1/" data-ready-label="确认并下一题" data-draft-label="保存草稿" data-defer-label="稍后处理">${questionPopoverHtml}</div>
         <nav class="expert-team-panel-tabs" role="tablist" aria-label="专家团工作台视图" onkeydown="handleExpertTeamWorkspaceTabKeydown(event)">
-          <button id="expert-team-tab-todo" type="button" role="tab" class="is-active" data-expert-team-workspace-tab="todo" aria-selected="true" aria-controls="expert-team-tabpanel-todo" tabindex="0" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>待办</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>
-          <button id="expert-team-tab-collaboration" type="button" role="tab" data-expert-team-workspace-tab="collaboration" aria-selected="false" aria-controls="expert-team-tabpanel-collaboration" tabindex="-1" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>协作</span><small>${safeEsc(members.length?`${progress.text} · ${members.length} 人`:progress.text)}</small></button>
+          <button id="expert-team-tab-task" type="button" role="tab" class="is-active" data-expert-team-workspace-tab="task" aria-selected="true" aria-controls="expert-team-tabpanel-task" tabindex="0" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>任务</span><small>${safeEsc(tabStatusText(presentation.state))}</small></button>
           <button id="expert-team-tab-result" type="button" role="tab" data-expert-team-workspace-tab="result" aria-selected="false" aria-controls="expert-team-tabpanel-result" tabindex="-1" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>成果</span><small>${safeEsc(readyArtifactCount?`${readyArtifactCount} 个可打开`:(presentation.state==='completed'?'可查看':'沉淀中'))}</small></button>
+          <button id="expert-team-tab-process" type="button" role="tab" data-expert-team-workspace-tab="process" aria-selected="false" aria-controls="expert-team-tabpanel-process" tabindex="-1" onclick="switchExpertTeamWorkspaceTab(this);event.stopPropagation()"><span>过程</span><small>${safeEsc(members.length?`${progress.text} · ${members.length} 人`:progress.text)}</small></button>
         </nav>
-        ${tabPanel('todo',todoPanelHtml,true)}
-        ${tabPanel('collaboration',collaborationPanelHtml,false)}
+        ${tabPanel('task',todoPanelHtml,true)}
         ${tabPanel('result',resultPanelHtml,false)}
+        ${tabPanel('process',collaborationPanelHtml,false)}
       </div>
     </div>`;
   }

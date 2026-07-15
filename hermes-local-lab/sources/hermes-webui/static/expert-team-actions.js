@@ -150,7 +150,9 @@
   }
   function normalizeExpertTeamWorkspaceTab(tab){
     tab=String(tab||'');
-    return tab==='flow'||tab==='members'?'collaboration':tab;
+    if(tab==='todo')return 'task';
+    if(tab==='flow'||tab==='members'||tab==='collaboration')return 'process';
+    return tab;
   }
   function applyExpertTeamWorkspaceTab(root,tab){
     tab=normalizeExpertTeamWorkspaceTab(tab);
@@ -197,8 +199,168 @@
     const panel=root&&root.querySelector?root:document.getElementById('expertTeamWorkspacePanel');
     const inner=panel&&panel.querySelector?panel.querySelector('.expert-team-panel-inner'):(panel&&panel.classList&&panel.classList.contains('expert-team-panel-inner')?panel:null);
     if(!inner)return false;
-    const tab=normalizeExpertTeamWorkspaceTab(workspaceTabByRun[workspaceRunId(inner)]||'todo');
-    return applyExpertTeamWorkspaceTab(inner,tab)||applyExpertTeamWorkspaceTab(inner,'todo');
+    const tab=normalizeExpertTeamWorkspaceTab(workspaceTabByRun[workspaceRunId(inner)]||'task');
+    return applyExpertTeamWorkspaceTab(inner,tab)||applyExpertTeamWorkspaceTab(inner,'task');
+  }
+
+  function expertTeamBriefForm(btn){
+    return btn&&btn.closest?btn.closest('[data-expert-team-brief-editor]'):null;
+  }
+  function assignExpertTeamBriefValue(target,path,value){
+    const parts=String(path||'').split('.').filter(Boolean);
+    if(!parts.length)return target;
+    let cursor=target;
+    parts.forEach((part,index)=>{
+      if(index===parts.length-1)cursor[part]=value;
+      else cursor=cursor[part]||(cursor[part]={});
+    });
+    return target;
+  }
+  function collectExpertTeamBriefPayload(form){
+    const patch={};
+    if(!form||!form.querySelectorAll)return patch;
+    const serializedControl=form.dataset&&form.dataset.expertTeamDocumentControl;
+    if(serializedControl){
+      try{
+        const control=JSON.parse(serializedControl);
+        if(control&&typeof control==='object'&&!Array.isArray(control))patch.document_control=control;
+      }catch(_){}
+    }
+    form.querySelectorAll('[name]').forEach(control=>{
+      if(control.disabled)return;
+      assignExpertTeamBriefValue(patch,control.name,String(control.value==null?'':control.value).trim());
+    });
+    return patch;
+  }
+  function focusFirstExpertTeamBriefError(form,field,message){
+    if(!form)return false;
+    const name=String(field||'').replace(/^patch\./,'');
+    const control=form.querySelector&&form.querySelector(`[name="${name.replace(/"/g,'\\"')}"]`);
+    const error=form.querySelector&&form.querySelector(`[data-expert-team-field-error="${name.replace(/"/g,'\\"')}"]`);
+    if(error)error.textContent=String(message||'请检查此字段。');
+    if(control){
+      if(control.setAttribute)control.setAttribute('aria-invalid','true');
+      if(control.focus){try{control.focus({preventScroll:false});}catch(_){control.focus();}}
+      return true;
+    }
+    return false;
+  }
+  function expertTeamBriefContract(btn,action){
+    const card=activeExpertTeamCard(btn);
+    const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||card.sourceSessionId||'';
+    if(card.readOnly||Number(card.schemaVersion||0)<2)throw new Error('历史专家团任务仅支持查看，请新建任务后继续。');
+    if(!card.runId||!sid||!Number.isFinite(Number(card.version)))throw new Error('专家团任务状态不完整，请刷新后重试。');
+    const form=expertTeamBriefForm(btn);
+    const revision=Number(form&&form.dataset&&form.dataset.expertTeamBriefRevision||card.brief&&card.brief.revision||0);
+    const base=`${card.runId}:${card.version}:brief:${action}`;
+    return {card,form,base,payload:{
+      run_id:String(card.runId),session_id:String(sid),expected_version:Number(card.version),
+      expected_brief_revision:revision,
+      idempotency_key:mutationIdempotencyKey(base,{...card,currentStageId:'brief'},action),
+    }};
+  }
+  async function submitExpertTeamBrief(btn,confirmAfterSave){
+    let contract;
+    try{contract=expertTeamBriefContract(btn,confirmAfterSave?'brief_confirm':'brief_update');}
+    catch(error){if(typeof showToast==='function')showToast(error.message||String(error));return false;}
+    if(mutationInFlight.has(contract.base))return mutationInFlight.get(contract.base);
+    const snapshot=captureMutationFormState(btn);
+    setMutationButtonBusy(btn,true,confirmAfterSave?'正在确认...':'正在保存...');
+    const request=(async()=>{
+      try{
+        const saved=await api('/api/expert-teams/brief/update',{method:'POST',body:JSON.stringify({
+          ...contract.payload,patch:collectExpertTeamBriefPayload(contract.form),
+        })});
+        let response=saved;
+        if(confirmAfterSave){
+          const updated=saved&&saved.run||{};
+          response=await api('/api/expert-teams/brief/confirm',{method:'POST',body:JSON.stringify({
+            run_id:contract.payload.run_id,session_id:contract.payload.session_id,
+            expected_version:Number(updated.version||contract.payload.expected_version),
+            expected_brief_revision:Number(updated.document_brief&&updated.document_brief.revision||contract.payload.expected_brief_revision+1),
+            idempotency_key:`${contract.payload.idempotency_key}:confirm`,
+          })});
+        }
+        applyExpertTeamActionResponse(response);
+        if(typeof showToast==='function')showToast(confirmAfterSave?'文档规格已确认，请点击“开始生成”继续。':'文档规格已保存。');
+        return true;
+      }catch(error){
+        const payload=error&&error.payload||{};
+        if(payload.run)applyExpertTeamActionResponse({run:payload.run});
+        if(payload.run)restoreMutationFormState(snapshot);
+        const livePanel=(typeof document!=='undefined'&&document.getElementById&&document.getElementById('expertTeamWorkspacePanel'))||contract.form;
+        focusFirstExpertTeamBriefError(livePanel,payload.field,error&&error.message||payload.error);
+        if(typeof showToast==='function')showToast(payload.code==='brief_revision_conflict'?'规格已被更新，草稿仍保留，请核对后重试。':'文档规格未保存：'+(error&&error.message||error));
+        return false;
+      }finally{
+        mutationInFlight.delete(contract.base);
+        if(!btn||btn.isConnected!==false)setMutationButtonBusy(btn,false);
+      }
+    })();
+    mutationInFlight.set(contract.base,request);
+    return request;
+  }
+  function expertTeamIdentityCapability(status){
+    status=status&&typeof status==='object'?status:{};
+    const principal=status.principal&&typeof status.principal==='object'?status.principal:{};
+    const roles=Array.isArray(principal.roles)?principal.roles:[];
+    if(status.enabled===false)return {allowed:false,label:'未配置企业身份提供方'};
+    if(status.expired)return {allowed:false,label:'企业身份已过期'};
+    if(!status.authenticated)return {allowed:false,label:'使用企业审批身份登录'};
+    if(!roles.includes('document-approver'))return {allowed:false,label:'当前身份缺少文档审批权限'};
+    return {allowed:true,label:String(principal.display_name||'企业审批身份')};
+  }
+  function applyExpertTeamIdentityStatus(status,returnFocus){
+    const safeStatus=status&&typeof status==='object'?status:{};
+    window._expertTeamIdentityStatus=safeStatus;
+    if(window._activeExpertTeamStatusCard){
+      window._activeExpertTeamStatusCard.identityStatus=safeStatus;
+      if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(window._activeExpertTeamStatusCard);
+    }
+    const capability=expertTeamIdentityCapability(safeStatus);
+    if(typeof showToast==='function')showToast(capability.label);
+    if(returnFocus&&returnFocus.focus){try{returnFocus.focus({preventScroll:true});}catch(_){returnFocus.focus();}}
+    return capability;
+  }
+  async function refreshExpertTeamIdentityStatus(btn,options){
+    options=options||{};
+    try{
+      const status=await api('/api/expert-teams/identity/status');
+      return applyExpertTeamIdentityStatus(status,options.restoreFocus?btn:null);
+    }catch(error){
+      if(typeof showToast==='function')showToast('企业身份状态检查失败：'+(error&&error.message||error));
+      return {allowed:false,label:'企业身份状态检查失败'};
+    }
+  }
+  async function startExpertTeamIdentityLogin(btn){
+    setMutationButtonBusy(btn,true,'正在打开登录...');
+    let popup=null;
+    try{
+      const redirectUri=(window.location&&window.location.origin?window.location.origin:'')+'/api/expert-teams/identity/callback';
+      const flow=await api('/api/expert-teams/identity/start',{method:'POST',body:JSON.stringify({redirect_uri:redirectUri,purpose:'login'})});
+      popup=window.open(String(flow&&flow.authorization_url||''),'_blank','noopener,noreferrer');
+      if(!popup){if(typeof showToast==='function')showToast('登录窗口未打开，请允许弹出窗口后重试。');return false;}
+      for(let attempt=0;attempt<120;attempt+=1){
+        await new Promise(resolve=>setTimeout(resolve,1000));
+        const status=await api('/api/expert-teams/identity/status');
+        if(status&&status.authenticated){applyExpertTeamIdentityStatus(status,btn);return true;}
+        if(popup.closed){if(typeof showToast==='function')showToast('登录已取消，当前审批仍保持禁用。');return false;}
+      }
+      if(typeof showToast==='function')showToast('企业身份登录已过期，请重新登录。');
+      return false;
+    }catch(error){
+      if(typeof showToast==='function')showToast('企业身份登录失败：'+(error&&error.message||error));
+      return false;
+    }finally{
+      if(!btn||btn.isConnected!==false)setMutationButtonBusy(btn,false);
+    }
+  }
+  async function logoutExpertTeamIdentity(btn){
+    try{
+      await api('/api/expert-teams/identity/logout',{method:'POST',body:'{}'});
+      applyExpertTeamIdentityStatus({enabled:true,authenticated:false,provider:'oidc_pkce'},btn);
+      return true;
+    }catch(error){if(typeof showToast==='function')showToast('退出企业身份失败：'+(error&&error.message||error));return false;}
   }
   async function refreshExpertTeamRun(btn){
     const card=activeExpertTeamCard(btn);
@@ -369,6 +531,13 @@
     window.expertTeamMutationContract=expertTeamMutationContract;
     window.expertTeamMutationEndpoint=expertTeamMutationEndpoint;
     window.refreshExpertTeamRun=refreshExpertTeamRun;
+    window.submitExpertTeamBrief=submitExpertTeamBrief;
+    window.collectExpertTeamBriefPayload=collectExpertTeamBriefPayload;
+    window.focusFirstExpertTeamBriefError=focusFirstExpertTeamBriefError;
+    window.refreshExpertTeamIdentityStatus=refreshExpertTeamIdentityStatus;
+    window.startExpertTeamIdentityLogin=startExpertTeamIdentityLogin;
+    window.logoutExpertTeamIdentity=logoutExpertTeamIdentity;
+    window.expertTeamIdentityCapability=expertTeamIdentityCapability;
     window.openExpertTeamFileArtifact=openExpertTeamFileArtifact;
     window.downloadExpertTeamFileArtifact=downloadExpertTeamFileArtifact;
     window.handleExpertTeamWorkspaceTabKeydown=handleExpertTeamWorkspaceTabKeydown;

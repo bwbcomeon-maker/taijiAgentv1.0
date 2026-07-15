@@ -3835,9 +3835,9 @@ function openWriteflowTeamModal(teamId) {
             <div class="writeflow-examples writeflow-modal-template-list">${examples}</div>
           </div>
           <div class="writeflow-modal-section writeflow-modal-prompt-card">
-            <label for="writeflowTeamPrompt" class="writeflow-modal-prompt-label">本次需求</label>
-            <textarea id="writeflowTeamPrompt" rows="5" placeholder="写清材料类型、主题、对象、素材、语气和边界；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
-            <p class="writeflow-modal-note">召唤后会新建一个聊天任务，运行状态、阶段确认和产物入口会显示在对话框上方。</p>
+            <label for="writeflowTeamPrompt" class="writeflow-modal-prompt-label">原始诉求</label>
+            <textarea id="writeflowTeamPrompt" aria-describedby="writeflowTeamPromptHelp" rows="5" placeholder="写清材料类型、主题、对象、素材、语气和边界；召唤后会进入新的聊天任务。">${esc(seedPrompt)}</textarea>
+            <p id="writeflowTeamPromptHelp" class="writeflow-modal-note">这里会作为文档规格中的“原始诉求”。召唤后先核对并确认完整规格，不会自动开始生成。</p>
           </div>
         </div>
       </div>

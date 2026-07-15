@@ -41,6 +41,13 @@ def test_expert_team_modal_labels_draft_capability_and_has_a_visible_prompt_labe
     assert 'id="writeflowTeamPrompt"' in PANELS_JS
 
 
+def test_expert_team_modal_names_original_request_and_explains_no_automatic_generation():
+    assert '>原始诉求</label>' in PANELS_JS
+    assert 'aria-describedby="writeflowTeamPromptHelp"' in PANELS_JS
+    assert '作为文档规格中的“原始诉求”' in PANELS_JS
+    assert '不会自动开始生成' in PANELS_JS
+
+
 def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
     helper = _function_body(
         PANELS_JS,
@@ -1151,3 +1158,250 @@ def test_capsule_aria_expanded_is_updated_by_the_same_workspace_toggle_result():
         "toggleExpertTeamWorkspaceFromControl(this)",
     ):
         assert token in EXPERT_UI_JS
+
+
+def test_task_result_process_tabs_top_gates_and_collapsed_capsule_match_plan_a():
+    for token in (
+        'data-expert-team-workspace-tab="task"',
+        'data-expert-team-workspace-tab="result"',
+        'data-expert-team-workspace-tab="process"',
+        '<span>任务</span>',
+        '<span>成果</span>',
+        '<span>过程</span>',
+        'expert-team-completion-gates',
+        '内容确认',
+        'DOCX 生成',
+        'Office 验收',
+        'expert-team-capsule-todo-count',
+        'aria-expanded="false"',
+        'aria-controls="expert-team-workspace-expanded"',
+    ):
+        assert token in EXPERT_UI_JS
+
+
+def test_brief_editor_groups_fields_labels_original_request_and_explains_freeze():
+    for token in (
+        'data-expert-team-brief-editor',
+        '<legend>文档目标</legend>',
+        '<legend>使用与资料边界</legend>',
+        '<legend>交付控制</legend>',
+        '>原始诉求<',
+        '这是创建任务时的原始要求，可在首阶段启动前修正。',
+        'aria-describedby=',
+        'data-expert-team-field-error',
+        '基于当前规格创建新任务',
+        '首阶段已经启动，整份文档规格已冻结',
+    ):
+        assert token in EXPERT_UI_JS
+    rendered = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');
+            const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-ui.js','utf8'),context);
+            const html=context.window.renderExpertTeamWorkspaceFromPresentation({
+              runId:'run-1',schemaVersion:2,version:2,presentation:{state:'collecting_required'},
+              brief:{editable:true,revision:2,originalRequest:'原始诉求',exactTitle:'标题',documentTypeLabel:'工作汇报',documentControl:{},validation:{}},
+              workflow:{currentStage:{},stages:[],progress:{}},workspace:{},members:[],
+            });
+            console.log(JSON.stringify({original:html.includes('name="original_request"'),context:html.includes('name="additional_context"')}));
+            """
+        )
+    )
+    assert rendered == {'original': True, 'context': True}
+
+
+def test_brief_mutations_are_separate_from_generation_and_handle_field_and_revision_errors():
+    for token in (
+        '/api/expert-teams/brief/update',
+        '/api/expert-teams/brief/confirm',
+        'function collectExpertTeamBriefPayload',
+        'function focusFirstExpertTeamBriefError',
+        'brief_revision_conflict',
+        '文档规格已确认，请点击“开始生成”继续。',
+    ):
+        assert token in ACTIONS_JS
+    brief_body = _function_body(
+        ACTIONS_JS,
+        'async function submitExpertTeamBrief',
+        'function expertTeamIdentityCapability',
+    )
+    assert 'start_generation' not in brief_body
+    assert '/api/expert-teams/resume' not in brief_body
+    assert 'focusFirstExpertTeamBriefError' in brief_body
+
+
+def test_brief_confirmation_runtime_saves_then_confirms_without_starting_generation():
+    result = _run_node(
+        _actions_harness(
+            """
+            const calls=[];
+            context.api=async(path,opts)=>{
+              const payload=JSON.parse(opts.body);calls.push({path,payload});
+              if(path.endsWith('/update'))return {run:{run_id:'run-1',version:8,document_brief:{revision:4}}};
+              return {run:{run_id:'run-1',version:9,workflow_state:'ready_to_generate',document_brief:{revision:4,status:'confirmed'}}};
+            };
+            context.window._activeExpertTeamStatusCard={
+              runId:'run-1',sourceSessionId:'session-1',schemaVersion:2,version:7,currentStageId:'intake',readOnly:false,
+              brief:{revision:3},
+            };
+            const controls=[
+              {name:'original_request',value:'原始诉求',disabled:false},
+              {name:'exact_title',value:'精确标题',disabled:false},
+              {name:'additional_context',value:'补充背景',disabled:false},
+            ];
+            const form={dataset:{expertTeamBriefRevision:'3'},querySelectorAll:()=>controls,querySelector:()=>null};
+            const root={dataset:{expertTeamRunId:'run-1',expertTeamSchemaVersion:'2',expertTeamVersion:'7',expertTeamStageId:'intake',expertTeamReadOnly:'false'}};
+            const button={disabled:false,isConnected:true,textContent:'确认文档规格',setAttribute:()=>{},removeAttribute:()=>{},closest:(selector)=>selector==='[data-expert-team-brief-editor]'?form:root};
+            context.window.submitExpertTeamBrief(button,true).then(ok=>console.log(JSON.stringify({ok,calls})));
+            """
+        )
+    )
+    assert result['ok'] is True
+    assert [call['path'] for call in result['calls']] == [
+        '/api/expert-teams/brief/update',
+        '/api/expert-teams/brief/confirm',
+    ]
+    assert result['calls'][0]['payload']['patch'] == {
+        'original_request': '原始诉求',
+        'exact_title': '精确标题',
+        'additional_context': '补充背景',
+    }
+    for call in result['calls']:
+        assert not ({'token', 'principal', 'role', 'roles'} & set(call['payload']))
+
+
+def test_brief_control_patch_preserves_non_rendered_enterprise_metadata():
+    result = _run_node(
+        _actions_harness(
+            """
+            const form={
+              dataset:{expertTeamDocumentControl:JSON.stringify({render_template_id:'enterprise-work-report',client_unit:'客户单位',compiler_unit:'编制单位',classification:'internal'})},
+              querySelectorAll:()=>[{name:'document_control.classification',value:'restricted',disabled:false}],
+            };
+            console.log(JSON.stringify(context.window.collectExpertTeamBriefPayload(form)));
+            """
+        )
+    )
+    assert result['document_control'] == {
+        'render_template_id': 'enterprise-work-report',
+        'client_unit': '客户单位',
+        'compiler_unit': '编制单位',
+        'classification': 'restricted',
+    }
+
+
+def test_brief_revision_conflict_restores_draft_against_authoritative_run():
+    result = _run_node(
+        _actions_harness(
+            """
+            const events=[];
+            context.captureExpertTeamWorkspaceFormState=()=>({controls:[{name:'exact_title',value:'本地草稿'}]});
+            context.restoreExpertTeamWorkspaceFormState=(_root,state)=>{events.push(['restore',state.controls[0].value]);return true;};
+            context._expertTeamStatusCardFromRun=(run)=>({runId:run.run_id});
+            context.renderExpertTeamStatusSurface=(card)=>events.push(['render',card.runId]);
+            context.api=()=>{const error=new Error('规格已被更新');error.status=409;error.payload={code:'brief_revision_conflict',field:'expected_brief_revision',run:{run_id:'run-1',version:8,workflow_state:'collecting_required'}};return Promise.reject(error);};
+            context.window._activeExpertTeamStatusCard={runId:'run-1',sourceSessionId:'session-1',schemaVersion:2,version:7,currentStageId:'intake',readOnly:false,brief:{revision:3}};
+            const form={dataset:{expertTeamBriefRevision:'3'},querySelectorAll:()=>[],querySelector:()=>null};
+            const root={dataset:{expertTeamRunId:'run-1',expertTeamSchemaVersion:'2',expertTeamVersion:'7',expertTeamStageId:'intake',expertTeamReadOnly:'false'}};
+            const button={disabled:false,isConnected:true,textContent:'保存规格',setAttribute:()=>{},removeAttribute:()=>{},closest:(selector)=>selector==='[data-expert-team-brief-editor]'?form:root};
+            context.window.submitExpertTeamBrief(button,false).then(ok=>console.log(JSON.stringify({ok,events})));
+            """
+        )
+    )
+    assert result == {'ok': False, 'events': [['render', 'run-1'], ['restore', '本地草稿']]}
+
+
+def test_identity_flow_is_discoverable_fail_closed_and_never_persists_credentials():
+    for token in (
+        '/api/expert-teams/identity/status',
+        '/api/expert-teams/identity/start',
+        '/api/expert-teams/identity/logout',
+        '使用企业审批身份登录',
+        '未配置企业身份提供方',
+        '登录已取消',
+        '企业身份已过期',
+        '当前身份缺少文档审批权限',
+        'window.open',
+        'document-approver',
+    ):
+        assert token in ACTIONS_JS or token in EXPERT_UI_JS
+    assert 'localStorage.setItem' not in ACTIONS_JS
+    assert 'token:' not in ACTIONS_JS
+    assert "body:JSON.stringify({redirect_uri:redirectUri,purpose:'login'})" in ACTIONS_JS
+    assert "body:'{}'" in ACTIONS_JS
+    mutation_body = _function_body(ACTIONS_JS, 'async function submitExpertTeamBrief', 'function expertTeamIdentityCapability')
+    assert 'principal' not in mutation_body
+    assert 'roles' not in mutation_body
+
+
+def test_identity_capability_runtime_is_fail_closed_for_provider_login_expiry_and_role():
+    result = _run_node(
+        _actions_harness(
+            """
+            const capability=context.window.expertTeamIdentityCapability;
+            console.log(JSON.stringify({
+              noProvider:capability({enabled:false}),
+              signedOut:capability({enabled:true,authenticated:false}),
+              expired:capability({enabled:true,authenticated:true,expired:true,principal:{roles:['document-approver']}}),
+              wrongRole:capability({enabled:true,authenticated:true,principal:{display_name:'王工',roles:['office-reviewer']}}),
+              approved:capability({enabled:true,authenticated:true,principal:{display_name:'李工',roles:['document-approver']}}),
+            }));
+            """
+        )
+    )
+    assert result['noProvider']['allowed'] is False
+    assert result['signedOut']['allowed'] is False
+    assert result['expired']['allowed'] is False
+    assert result['wrongRole']['allowed'] is False
+    assert result['approved'] == {'allowed': True, 'label': '李工'}
+
+
+def test_stage_approval_requires_valid_approver_and_zero_unresolved_warnings():
+    source = textwrap.dedent(
+        """
+        const fs=require('fs');
+        const vm=require('vm');
+        const context={window:{},console};
+        vm.createContext(context);
+        vm.runInContext(fs.readFileSync('static/expert-team-ui.js','utf8'),context);
+        function render(identityStatus,validation){
+          return context.window.renderExpertTeamWorkspaceFromPresentation({
+            runId:'run-1',schemaVersion:2,version:7,currentStageId:'review',stageReviewId:'review-1',
+            presentation:{state:'awaiting_review',title:'待复核',secondaryActions:[
+              {id:'view_result',label:'查看本阶段成果'},{id:'approve_stage',label:'确认并继续'},{id:'revise_stage',label:'需要修改'}
+            ]},
+            workflow:{currentStage:{id:'review',phase:'复核交付'},stages:[],progress:{}},workspace:{},members:[],
+            identityStatus,artifactValidation:validation,stageResult:{summary:'待复核'},
+          });
+        }
+        const scenarios={
+          disabled:render({enabled:false,authenticated:false},{unresolved_warning_count:0}),
+          missing:render({enabled:true,authenticated:false},{unresolved_warning_count:0}),
+          wrongRole:render({enabled:true,authenticated:true,principal:{display_name:'王工',roles:['office-reviewer']}},{unresolved_warning_count:0}),
+          approver:render({enabled:true,authenticated:true,principal:{display_name:'李工',roles:['document-approver']}},{unresolved_warning_count:0}),
+          warning:render({enabled:true,authenticated:true,principal:{display_name:'李工',roles:['document-approver']}},{unresolved_warning_count:1}),
+        };
+        function state(html){
+          const match=html.match(/data-expert-team-action="approve_stage"[^>]*>/);
+          return {button:match&&match[0],hasReason:/审批身份|阻断问题|warning|警告/.test(html),waiver:/申请授权/.test(html)};
+        }
+        console.log(JSON.stringify(Object.fromEntries(Object.entries(scenarios).map(([key,html])=>[key,state(html)]))));
+        """
+    )
+    result = _run_node(source)
+    assert 'disabled' in result['disabled']['button']
+    assert 'disabled' in result['missing']['button']
+    assert 'disabled' in result['wrongRole']['button']
+    assert 'disabled' not in result['approver']['button']
+    assert 'disabled' in result['warning']['button']
+    assert result['warning']['waiver'] is False
+
+
+def test_chat_keeps_conclusion_and_full_result_but_never_embeds_brief_or_review_mutations():
+    lifecycle = _function_body(UI_JS, 'function _expertTeamLifecycleCardHtml', 'function renderExpertTeamLifecycleNotice')
+    assert 'data-expert-team-action' not in lifecycle
+    assert 'brief/confirm' not in lifecycle
+    assert 'approve_stage' not in lifecycle
+    assert '查看完整成果' in UI_JS
+    assert '下一步' in UI_JS
