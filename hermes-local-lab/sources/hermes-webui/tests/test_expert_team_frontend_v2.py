@@ -467,6 +467,7 @@ def test_silent_poll_always_fetches_authoritative_run_even_with_a_focused_local_
           return {{run:{{run_id:'run-1',session_id:'session-1',workflow_state:'awaiting_review'}}}};
         }};
         const _isWriteflowHydrationForActiveSession=(sid)=>sid==='session-1';
+        const _expertTeamLatestAppliedVersionByRun=new Map();
         const shouldPreserveExpertTeamDraftDock=()=>true;
         const _expertTeamStatusCardFromRun=(run)=>({{runId:run.run_id,state:run.workflow_state}});
         const renderExpertTeamStatusSurface=(card)=>rendered.push(card);
@@ -501,6 +502,92 @@ def test_workspace_rerender_preserves_all_form_controls_focus_selection_tab_and_
     assert "restoreExpertTeamWorkspaceFormState(panel,formState,card)" in mount
     assert mount.index("_captureExpertTeamQuestionPopoverState(panel)") < mount.index("panel.innerHTML=")
     assert mount.index("panel.innerHTML=") < mount.index("restoreExpertTeamWorkspaceFormState(panel,formState,card)")
+
+
+def test_workspace_drafts_use_a_window_memory_map_scoped_by_form_kind_and_identity():
+    for token in (
+        "const _expertTeamWorkspaceDraftStore=new Map()",
+        "function _expertTeamWorkspaceFormKind",
+        "function _expertTeamWorkspaceIdentity",
+        "function _expertTeamWorkspaceDraftKey",
+        "dirty,",
+        "expanded,",
+        "serverVersion:",
+    ):
+        assert token in UI_JS
+    draft_block = UI_JS[
+        UI_JS.index("const _expertTeamWorkspaceDraftStore=new Map()"):
+        UI_JS.index("function _expertTeamWorkspaceActiveTab")
+    ]
+    assert "localStorage" not in draft_block
+    assert "token" not in draft_block.lower()
+    assert "path" not in draft_block.lower()
+
+
+def test_dirty_same_identity_reuses_editable_subtree_and_stage_advance_moves_draft_to_recovery():
+    mount = _function_body(UI_JS, "function mountExpertTeamWorkspacePanel", "function _expertTeamWorkspaceStorageKey")
+    for token in (
+        "_expertTeamCaptureWorkspaceDraft",
+        "_expertTeamMergeDirtyWorkspace",
+        "_expertTeamRememberRecoverableDraft",
+    ):
+        assert token in mount
+    assert "panel.innerHTML=" in mount
+    assert "if(draft&&draft.dirty&&sameIdentity)" in mount
+    assert "const merged=_expertTeamMergeDirtyWorkspace" in mount
+    assert "if(merged)" in mount
+
+
+def test_polling_discards_overlapping_older_run_versions_but_keeps_five_second_refresh():
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_end = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)
+    hydrate = SESSIONS_JS[hydrate_start:hydrate_end]
+    assert "_WRITEFLOW_STATUS_REFRESH_MS = 5000" in SESSIONS_JS
+    assert "_expertTeamLatestAppliedVersionByRun" in SESSIONS_JS
+    assert "reason:'stale_version'" in hydrate
+    assert "run.version" in hydrate
+
+
+def test_overlapping_poll_responses_never_render_an_older_run_version():
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_end = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)
+    hydrate = SESSIONS_JS[hydrate_start:hydrate_end]
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            const S={{session:{{session_id:'session-1'}}}};
+            const resolvers=[];
+            const rendered=[];
+            const api=()=>new Promise(resolve=>resolvers.push(resolve));
+            const _isWriteflowHydrationForActiveSession=()=>true;
+            const _expertTeamLatestAppliedVersionByRun=new Map();
+            const _expertTeamStatusCardFromRun=(run)=>({{runId:run.run_id,version:run.version}});
+            const renderExpertTeamStatusSurface=(card)=>rendered.push(card.version);
+            const _scheduleWriteflowStatusRefresh=()=>{{}};
+            const _removeWriteflowStatusCardsFromMessages=()=>{{}};
+            const renderSessionArtifacts=()=>{{}};
+            {hydrate}
+            const older=_hydrateExpertTeamStatusCardForSession('session-1');
+            const newer=_hydrateExpertTeamStatusCardForSession('session-1');
+            resolvers[1]({{run:{{run_id:'run-1',session_id:'session-1',version:9}}}});
+            setTimeout(()=>resolvers[0]({{run:{{run_id:'run-1',session_id:'session-1',version:8}}}}),0);
+            Promise.all([older,newer]).then(results=>console.log(JSON.stringify({{rendered,results}})));
+            """
+        )
+    )
+    assert result["rendered"] == [9]
+    assert result["results"] == [
+        {"status": "preserved", "reason": "stale_version"},
+        {"status": "handled"},
+    ]
+
+
+def test_electron_smoke_has_real_out_dir_and_playwright_preflight():
+    smoke = (REPO_ROOT / "tests" / "expert_team_electron_artifact_smoke.js").read_text(encoding="utf-8")
+    assert 'argv[index] === "--out-dir"' in smoke
+    assert "path.resolve(cli.outDir" in smoke
+    assert "require.resolve(moduleId)" in smoke
+    assert "Electron smoke preflight failed: cannot resolve Playwright" in smoke
 
 
 def test_workspace_tabs_and_result_dialog_have_complete_keyboard_semantics():
@@ -728,11 +815,14 @@ def test_advanced_authoritative_state_keeps_text_only_as_one_recoverable_draft_h
 def test_recoverable_draft_hint_is_bounded_to_the_same_session_and_run():
     match_start = UI_JS.index("function _expertTeamWorkspaceFormStateMatchesCard")
     match_end = UI_JS.index("function restoreExpertTeamWorkspaceFormState", match_start)
+    identity_start = UI_JS.index("function _expertTeamWorkspaceIdentity")
+    identity_end = UI_JS.index("function _expertTeamWorkspaceDraftKey", identity_start)
     draft_start = UI_JS.index("let _expertTeamRecoverableDraft=null;")
     draft_end = UI_JS.index("function _expertTeamCanRestoreQuestionPopover", draft_start)
     source = textwrap.dedent(
         f"""
         const esc=(value)=>String(value||'');
+        {UI_JS[identity_start:identity_end]}
         {UI_JS[match_start:match_end]}
         {UI_JS[draft_start:draft_end]}
         const state={{

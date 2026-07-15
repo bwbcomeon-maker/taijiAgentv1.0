@@ -5,17 +5,39 @@
 const fs = require("fs");
 const path = require("path");
 
-function loadPlaywright() {
-  return require(process.env.PLAYWRIGHT_NODE_PATH || "playwright");
+function parseArgs(argv) {
+  const args = { outDir: "" };
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--out-dir") args.outDir = argv[index + 1] || "";
+  }
+  if (argv.includes("--out-dir") && !args.outDir) {
+    throw new Error("Electron smoke preflight failed: --out-dir requires a directory path");
+  }
+  return args;
 }
 
+function loadPlaywright() {
+  const moduleId = process.env.PLAYWRIGHT_NODE_PATH || "playwright";
+  try {
+    require.resolve(moduleId);
+    return require(moduleId);
+  } catch (error) {
+    throw new Error(
+      `Electron smoke preflight failed: cannot resolve Playwright from ${moduleId}. ` +
+      "Set PLAYWRIGHT_NODE_PATH to the installed Playwright module directory.",
+      { cause: error }
+    );
+  }
+}
+
+const cli = parseArgs(process.argv.slice(2));
 const { _electron } = loadPlaywright();
 
 const repoRoot = path.resolve(__dirname, "..", "..", "..", "..");
 const appDir = path.join(repoRoot, "apps", "taiji-desktop");
 const labDir = path.join(repoRoot, "hermes-local-lab");
 const electronBin = path.join(appDir, "node_modules", "electron", "dist", "Electron.app", "Contents", "MacOS", "Electron");
-const outDir = path.join(repoRoot, "output", "playwright");
+const outDir = path.resolve(cli.outDir || path.join(repoRoot, "output", "playwright"));
 
 function assertState(condition, message, detail) {
   if (!condition) throw new Error(`${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
@@ -198,6 +220,8 @@ function runFixture(sessionId, state, overrides = {}) {
   };
   return {
     run_id: `electron-plan-a-${state}`,
+    schema_version: 2,
+    version: Number(overrides.version || 1),
     session_id: sessionId,
     team_id: teamId,
     team_title: isResearchTeam ? "深度材料研究团" : "内容创作专家团",
@@ -217,6 +241,7 @@ function runFixture(sessionId, state, overrides = {}) {
 async function renderRun(page, state, overrides) {
   await page.evaluate(({ state, overrides }) => {
     const run = window.__expertTeamRunFixture(S.session.session_id, state, overrides || {});
+    window.__expertTeamRunFixtureCurrent = run;
     const card = _expertTeamStatusCardFromRun(run, { session_id: S.session.session_id });
     renderExpertTeamStatusSurface(card);
   }, { state, overrides });
@@ -262,7 +287,9 @@ async function activeWorkbenchTab(page) {
 async function main() {
   assertState(fs.existsSync(electronBin), `Electron binary not found: ${electronBin}`);
   fs.mkdirSync(outDir, { recursive: true });
-  const tmpRoot = fs.mkdtempSync(path.join(outDir, "electron-expert-team-runtime-"));
+  const runtimeBase = path.join(repoRoot, "output", "playwright");
+  fs.mkdirSync(runtimeBase, { recursive: true });
+  const tmpRoot = fs.mkdtempSync(path.join(runtimeBase, "electron-expert-team-runtime-"));
   const workspace = path.join(tmpRoot, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
 
@@ -315,6 +342,30 @@ async function main() {
     assertState(realStart.dockHidden && !realStart.dockText, "Real start still exposes the legacy bottom dock", realStart);
     assertState(realStart.chatText.includes("专家团已创建") && realStart.chatText.includes("右侧专家团工作台"), "Real start lifecycle message is missing or still points to bottom dock", realStart);
     assertState(realStart.panelRect && realStart.panelRect.left > 600 && realStart.panelRect.width >= 240 && realStart.panelRect.bottom <= 900, "Workbench is not positioned as a right-side surface", realStart);
+    await page.evaluate(() => {
+      const originalApi = api;
+      window.__expertTeamApiOriginal = originalApi;
+      window.__expertTeamPollRequestCount = 0;
+      window.__expertTeamPollResponses = [];
+      window.__expertTeamRejectRevision409 = false;
+      window.__expertTeamRevision409Count = 0;
+      api = async (url, options) => {
+        if (String(url).startsWith("/api/expert-teams/run?") && window.__expertTeamRunFixtureCurrent) {
+          window.__expertTeamPollRequestCount += 1;
+          if (window.__expertTeamPollResponses.length) {
+            window.__expertTeamRunFixtureCurrent = window.__expertTeamPollResponses.shift();
+          }
+          return { run: window.__expertTeamRunFixtureCurrent };
+        }
+        if (String(url) === "/api/expert-teams/stage/revise" && window.__expertTeamRejectRevision409) {
+          window.__expertTeamRevision409Count += 1;
+          const error = new Error("状态已更新，请核对后重试。");
+          error.status = 409;
+          throw error;
+        }
+        return originalApi(url, options);
+      };
+    });
 
     await renderRun(page, "collecting_required");
     const collecting = await snapshotState(page);
@@ -324,19 +375,19 @@ async function main() {
     const oldTabs = await page.evaluate(() => ({
       flow: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='flow']")),
       members: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='members']")),
-      collaboration: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']")),
+      process: Boolean(document.querySelector("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']")),
     }));
-    assertState(!oldTabs.flow && !oldTabs.members && oldTabs.collaboration, "Workbench still exposes separate Flow/Members tabs", oldTabs);
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    assertState(!oldTabs.flow && !oldTabs.members && oldTabs.process, "Workbench does not expose the consolidated Process tab", oldTabs);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']");
     const collaborationBeforeRefresh = await activeWorkbenchTab(page);
-    assertState(collaborationBeforeRefresh.tab === "collaboration" && collaborationBeforeRefresh.panel === "collaboration", "Collaboration tab did not become active before refresh", collaborationBeforeRefresh);
+    assertState(collaborationBeforeRefresh.tab === "process" && collaborationBeforeRefresh.panel === "process", "Process tab did not become active before refresh", collaborationBeforeRefresh);
     await renderRun(page, "collecting_required");
     const collaborationAfterRefresh = await activeWorkbenchTab(page);
-    assertState(collaborationAfterRefresh.tab === "collaboration" && collaborationAfterRefresh.panel === "collaboration", "Collaboration tab did not survive workbench refresh", collaborationAfterRefresh);
+    assertState(collaborationAfterRefresh.tab === "process" && collaborationAfterRefresh.panel === "process", "Process tab did not survive workbench refresh", collaborationAfterRefresh);
     const contentTeamLayout = await page.evaluate(() => {
       const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
       const tabs = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-tabs");
-      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='collaboration']");
+      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='process']");
       const list = panel?.querySelector(".expert-team-member-list");
       const card = panel?.querySelector(".expert-team-collaboration-card");
       const current = panel?.querySelector(".expert-team-collaboration-current");
@@ -358,16 +409,16 @@ async function main() {
       };
     });
     assertState(
-      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && contentTeamLayout.noBodyOverflow && contentTeamLayout.cardFillsAvailableSpace && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && !contentTeamLayout.text.includes("generated_invalid"),
-      "Collaboration tab does not show the 5-person content team in one screen with Chinese states and filled layout",
+      contentTeamLayout.hasVerticalList && contentTeamLayout.rowCount === 5 && contentTeamLayout.avatarCount >= 5 && contentTeamLayout.currentCount === 1 && contentTeamLayout.currentText.includes("当前处理") && contentTeamLayout.currentText.includes("正在处理：") && !contentTeamLayout.hasHorizontalStrip && contentTeamLayout.scrollWidth <= contentTeamLayout.clientWidth + 1 && !contentTeamLayout.text.includes("generated_invalid"),
+      "Process tab does not show the 5-person content team with Chinese states",
       contentTeamLayout
     );
     await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-collaboration-tab-content-team.png"), fullPage: false });
     await renderRun(page, "collecting_required", { run_id: "electron-plan-a-research-run", team_id: "deep-research-team" });
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']");
     const researchTeamLayout = await page.evaluate(() => {
       const body = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
-      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='collaboration']");
+      const panel = document.querySelector("#expertTeamWorkspacePanel [data-expert-team-tab-panel='process']");
       const list = panel?.querySelector(".expert-team-member-list");
       return {
         text: panel?.textContent.replace(/\s+/g, " ").trim() || "",
@@ -379,20 +430,20 @@ async function main() {
       };
     });
     assertState(
-      researchTeamLayout.text.includes("深度材料研究团") && researchTeamLayout.rowCount === 6 && researchTeamLayout.avatarCount >= 6 && researchTeamLayout.noBodyOverflow && researchTeamLayout.scrollWidth <= researchTeamLayout.clientWidth + 1,
-      "Collaboration tab does not dynamically render the 6-person research team in one screen",
+      researchTeamLayout.text.includes("深度材料研究团") && researchTeamLayout.rowCount === 6 && researchTeamLayout.avatarCount >= 6 && researchTeamLayout.scrollWidth <= researchTeamLayout.clientWidth + 1,
+      "Process tab does not dynamically render the 6-person research team",
       researchTeamLayout
     );
     await page.screenshot({ path: path.join(outDir, "expert-team-plan-a-collaboration-tab-research-team.png"), fullPage: false });
     await renderRun(page, "collecting_required", { run_id: "electron-plan-a-stable-run" });
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']");
     await renderRun(page, "generating", { run_id: "electron-plan-a-stable-run" });
     const collaborationAfterStateRefresh = await activeWorkbenchTab(page);
-    assertState(collaborationAfterStateRefresh.tab === "collaboration" && collaborationAfterStateRefresh.panel === "collaboration", "Collaboration tab did not survive same-run state refresh", collaborationAfterStateRefresh);
+    assertState(collaborationAfterStateRefresh.tab === "process" && collaborationAfterStateRefresh.panel === "process", "Process tab did not survive same-run state refresh", collaborationAfterStateRefresh);
     await renderRun(page, "collecting_required", { run_id: "electron-plan-a-new-run" });
     const newRunTab = await activeWorkbenchTab(page);
-    assertState(newRunTab.tab === "todo" && newRunTab.panel === "todo", "A different expert-team run inherited the previous run tab", newRunTab);
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='todo']");
+    assertState(newRunTab.tab === "task" && newRunTab.panel === "task", "A different expert-team run inherited the previous run tab", newRunTab);
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='task']");
 
     await page.click("#expertTeamWorkspacePanel [data-expert-team-action='answer_required']");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-question-popover:not([hidden]) textarea", { timeout: 10000 });
@@ -440,10 +491,10 @@ async function main() {
     assertState(!invalid.panelText.includes("generated_invalid"), "Generated-invalid state leaked the raw backend state into the UI", invalid);
     assertState(!invalid.panelText.includes("专家团正在生成") && !invalid.panelText.includes("阶段成果待复核"), "Generated-invalid state is mixed with running or review state", invalid);
     assertState(invalid.dockHidden && invalid.chatConfirmButtons === 0, "Generated-invalid state leaks duplicate actions", invalid);
-    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='collaboration']");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='process']");
     const invalidCollaboration = await activeWorkbenchTab(page);
     assertState(
-      invalidCollaboration.tab === "collaboration" && invalidCollaboration.text.includes("当前处理") && invalidCollaboration.text.includes("正在处理：") && !invalidCollaboration.text.includes("generated_invalid"),
+      invalidCollaboration.tab === "process" && invalidCollaboration.text.includes("当前处理") && invalidCollaboration.text.includes("正在处理：") && !invalidCollaboration.text.includes("generated_invalid"),
       "Generated-invalid collaboration tab leaked raw status or lost the current collaboration summary",
       invalidCollaboration
     );
@@ -462,7 +513,7 @@ async function main() {
     assertState(collapsed.collapsed && collapsed.panelText.includes("处理") && !collapsed.panelText.includes("工作流程"), "Workbench did not collapse to the right capsule", collapsed);
     await page.click("#expertTeamWorkspacePanel .expert-team-capsule-action");
     const expanded = await snapshotState(page);
-    assertState(!expanded.collapsed && expanded.panelText.includes("专家团协作状态"), "Capsule action did not expand the workbench", expanded);
+    assertState(!expanded.collapsed && expanded.panelText.includes("专家团工作台"), "Capsule action did not expand the workbench", expanded);
 
     await renderRun(page, "awaiting_review");
     await page.waitForSelector("#expertTeamWorkspacePanel .expert-team-result-card", { timeout: 10000 });
@@ -495,6 +546,121 @@ async function main() {
       focusedTag: document.activeElement ? document.activeElement.tagName : "",
     }));
     assertState(revision.textareaVisible && revision.focusedTag === "TEXTAREA", "Review revision action did not reveal and focus the textarea", revision);
+
+    await renderRun(page, "awaiting_review", { run_id: "electron-poll-draft-run", version: 7, reviewItemCount: 12 });
+    await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
+    const pollDraft = "POLL-DRAFT-7F3A\n" + Array.from({ length: 18 }, (_, index) => `第 ${index + 1} 行修改意见，用于验证输入区滚动保留。`).join("\n");
+    await page.fill("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea", pollDraft);
+    const pollBefore = await page.evaluate(({ pollDraft }) => {
+      const input = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea");
+      const scroller = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(5, 15);
+      input.scrollTop = input.scrollHeight;
+      scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const makeRun = (version, label) => {
+        const run = window.__expertTeamRunFixture(S.session.session_id, "awaiting_review", {
+          run_id: "electron-poll-draft-run", version, reviewItemCount: 12,
+        });
+        run.view.stage_result.summary = label;
+        run.view.workspace.stage_result.summary = label;
+        return run;
+      };
+      window.__expertTeamPollRequestCount = 0;
+      window.__expertTeamPollResponses = [makeRun(8, "轮询状态版本 8"), makeRun(9, "轮询状态版本 9")];
+      return {
+        value: input.value,
+        selectionStart: input.selectionStart,
+        selectionEnd: input.selectionEnd,
+        inputScrollTop: input.scrollTop,
+        panelScrollTop: scroller.scrollTop,
+        panelBottomGap: Math.max(0, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop),
+        tab: document.querySelector("[data-expert-team-workspace-tab].is-active")?.dataset.expertTeamWorkspaceTab || "",
+        expected: pollDraft,
+      };
+    }, { pollDraft });
+    await page.waitForFunction(() => window.__expertTeamPollRequestCount >= 2, { timeout: 13000 });
+    const pollAfter = await page.evaluate(() => {
+      const input = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea");
+      const scroller = document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-expanded-body");
+      return {
+        requests: window.__expertTeamPollRequestCount,
+        panelText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
+        value: input?.value || "",
+        expanded: Boolean(input),
+        focused: document.activeElement === input,
+        selectionStart: input?.selectionStart,
+        selectionEnd: input?.selectionEnd,
+        inputScrollTop: input?.scrollTop || 0,
+        panelScrollTop: scroller?.scrollTop || 0,
+        panelBottomGap: scroller ? Math.max(0, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop) : 0,
+        tab: document.querySelector("[data-expert-team-workspace-tab].is-active")?.dataset.expertTeamWorkspaceTab || "",
+      };
+    });
+    assertState(
+      pollAfter.requests >= 2 && pollAfter.panelText.includes("轮询状态版本 9") && pollAfter.value === pollBefore.expected && pollAfter.expanded && pollAfter.focused && pollAfter.selectionStart === 5 && pollAfter.selectionEnd === 15 && pollAfter.panelBottomGap <= pollBefore.panelBottomGap + 8 && pollAfter.tab === pollBefore.tab,
+      "Dirty review draft did not survive two authoritative polling cycles",
+      { before: pollBefore, after: pollAfter }
+    );
+    await page.screenshot({ path: path.join(outDir, "expert-team-polling-draft-preserved.png"), fullPage: false });
+
+    await page.evaluate(() => {
+      const advanced = window.__expertTeamRunFixture(S.session.session_id, "awaiting_stage_input", {
+        run_id: "electron-poll-draft-run", version: 10,
+      });
+      window.__expertTeamPollResponses = [advanced];
+    });
+    await page.waitForFunction(() => window.__expertTeamPollRequestCount >= 3, { timeout: 7000 });
+    const advancedState = await page.evaluate(() => {
+      const recovery = document.querySelector("[data-expert-team-recoverable-draft] [data-expert-team-draft-copy]");
+      const editable = Array.from(document.querySelectorAll("#expertTeamWorkspacePanel textarea:not([readonly])"));
+      return {
+        recoveryValue: recovery?.value || "",
+        editableValues: editable.map((input) => input.value),
+        panelText: document.querySelector("#expertTeamWorkspacePanel")?.textContent.replace(/\s+/g, " ").trim() || "",
+      };
+    });
+    assertState(
+      advancedState.recoveryValue.includes("POLL-DRAFT-7F3A") && !advancedState.editableValues.some((value) => value.includes("POLL-DRAFT-7F3A")) && advancedState.panelText.includes("上一项未提交内容已保留"),
+      "Stage advance did not isolate the old draft in the recovery area",
+      advancedState
+    );
+    await page.evaluate(() => {
+      document.querySelector("[data-expert-team-recoverable-draft]")?.scrollIntoView({ block: "center" });
+    });
+    await page.screenshot({ path: path.join(outDir, "expert-team-polling-draft-recovery.png"), fullPage: false });
+
+    await renderRun(page, "awaiting_review", { run_id: "electron-poll-409-run", version: 20 });
+    await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
+    await page.fill("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea", "POLL-409-DRAFT-29C1");
+    await page.evaluate(() => {
+      const input = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea");
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(5, 12);
+      window.__expertTeamRejectRevision409 = true;
+      window.__expertTeamRevision409Count = 0;
+    });
+    await page.click("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) button");
+    await page.waitForFunction(() => window.__expertTeamRevision409Count >= 1, { timeout: 5000 });
+    const conflictState = await page.evaluate(() => {
+      const input = document.querySelector("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea");
+      window.__expertTeamRejectRevision409 = false;
+      return {
+        requests: window.__expertTeamRevision409Count,
+        value: input?.value || "",
+        expanded: Boolean(input),
+        focused: document.activeElement === input,
+        selectionStart: input?.selectionStart,
+        selectionEnd: input?.selectionEnd,
+      };
+    });
+    assertState(
+      conflictState.requests === 1 && conflictState.value === "POLL-409-DRAFT-29C1" && conflictState.expanded && conflictState.selectionStart === 5 && conflictState.selectionEnd === 12,
+      "409 conflict did not preserve the complete review draft",
+      conflictState
+    );
+    await page.screenshot({ path: path.join(outDir, "expert-team-polling-409-preserved.png"), fullPage: false });
+
     await page.click("#expertTeamWorkspacePanel .expert-team-result-card [data-expert-team-action='view_result']");
     await page.waitForSelector("#expertTeamResultViewer:not([hidden])", { timeout: 10000 });
     const viewer = await page.evaluate(() => ({
@@ -528,6 +694,9 @@ async function main() {
         path.join(outDir, "expert-team-plan-a-collaboration-tab-research-team.png"),
         path.join(outDir, "expert-team-plan-a-collaboration-tab-generated-invalid.png"),
         path.join(outDir, "expert-team-plan-a-review-scroll-preserved.png"),
+        path.join(outDir, "expert-team-polling-draft-preserved.png"),
+        path.join(outDir, "expert-team-polling-draft-recovery.png"),
+        path.join(outDir, "expert-team-polling-409-preserved.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),
         path.join(outDir, `expert-team-plan-a-capsule-${width}.png`),

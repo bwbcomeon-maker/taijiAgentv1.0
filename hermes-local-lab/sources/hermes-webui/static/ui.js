@@ -1281,15 +1281,114 @@ function _expertTeamWorkspaceControlKey(control,index){
   return `${owner}::${field}::${index}`;
 }
 
+const _expertTeamWorkspaceDraftStore=new Map();
+
+function _expertTeamWorkspaceFormKind(root){
+  if(!root||!root.querySelector)return 'workspace';
+  if(root.querySelector('[data-expert-team-brief-editor]'))return 'brief';
+  if(root.querySelector('.expert-team-stage-feedback:not([hidden]) [data-expert-team-stage-feedback]'))return 'stage-feedback';
+  if(root.querySelector('[data-expert-team-stage-input-text], [data-expert-team-stage-input-choice].is-selected'))return 'stage-input';
+  if(root.querySelector('.expert-team-question-popover:not([hidden]) [data-expert-team-answer-input]'))return 'question';
+  return 'workspace';
+}
+
+function _expertTeamWorkspaceIdentity(card,state){
+  state=state||{};
+  const sourceSessionId=String((card&&card.sourceSessionId)||(card&&card.source_session_id)||state.sessionId||'');
+  const runId=String((card&&card.runId)||(card&&card.sessionId)||state.runId||'');
+  const stageId=String((card&&card.currentStageId)||state.stageId||'');
+  const pendingQuestion=Array.isArray(card&&card.questions)
+    ? card.questions.find(question=>String(question&&question.status||'pending')==='pending')
+    : null;
+  const itemId=String((card&&card.pendingInputId)||(pendingQuestion&&pendingQuestion.id)||state.inputId||state.questionId||'');
+  return `${sourceSessionId}::${runId}::${stageId}::${itemId}`;
+}
+
+function _expertTeamWorkspaceDraftKey(formKind,identity){
+  return `${String(formKind||'workspace')}::${String(identity||'')}`;
+}
+
+function _expertTeamWorkspaceControlIsDirty(control){
+  if(!control||control.readOnly||control.disabled)return false;
+  if(control.type==='checkbox'||control.type==='radio')return !!control.checked!==!!control.defaultChecked;
+  if(control.tagName==='SELECT'){
+    return Array.from(control.options||[]).some(option=>!!option.selected!==!!option.defaultSelected);
+  }
+  return String(control.value==null?'':control.value)!==String(control.defaultValue==null?'':control.defaultValue);
+}
+
+function _expertTeamCaptureWorkspaceDraft(panel,card){
+  if(!panel||!panel.querySelector)return null;
+  const state=captureExpertTeamWorkspaceFormState(panel);
+  const formKind=_expertTeamWorkspaceFormKind(panel);
+  const identity=_expertTeamWorkspaceIdentity(null,state);
+  const controls=Array.from(panel.querySelectorAll('textarea,input,select'));
+  const expanded={
+    question:Boolean(panel.querySelector('.expert-team-question-popover:not([hidden])')),
+    feedback:Boolean(panel.querySelector('.expert-team-stage-feedback:not([hidden])')),
+    brief:Boolean(panel.querySelector('[data-expert-team-brief-editor]:not([hidden])')),
+  };
+  const dirty=controls.some(_expertTeamWorkspaceControlIsDirty)
+    ||state.selectedStageChoices.length>0
+    ||expanded.feedback;
+  const draft={
+    formKind,
+    identity,
+    value:state.controls,
+    dirty,
+    expanded,
+    focus:state.activeKey,
+    selection:Object.fromEntries(Object.entries(state.controls).map(([key,value])=>[key,{start:value.selectionStart,end:value.selectionEnd}])),
+    scroll:state.scrollTop,
+    tab:state.activeTab,
+    serverVersion:Number(state.serverVersion||card&&card.version||0),
+    state,
+  };
+  if(identity&&dirty)_expertTeamWorkspaceDraftStore.set(_expertTeamWorkspaceDraftKey(formKind,identity),draft);
+  return draft;
+}
+
+function _expertTeamDirtyEditableSelector(formKind){
+  if(formKind==='brief')return '[data-expert-team-brief-editor]';
+  if(formKind==='stage-feedback')return '.expert-team-stage-feedback';
+  if(formKind==='stage-input')return '.expert-team-stage-input-card';
+  if(formKind==='question')return '.expert-team-question-popover';
+  return '';
+}
+
+function _expertTeamMergeDirtyWorkspace(panel,card,draft,popoverState){
+  const currentInner=panel&&panel.querySelector&&panel.querySelector('.expert-team-panel-inner');
+  if(!currentInner)return false;
+  const shell=document.createElement('div');
+  shell.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation==='function'
+    ? renderExpertTeamWorkspaceFromPresentation(card)
+    : '';
+  const nextInner=shell.querySelector('.expert-team-panel-inner');
+  if(!nextInner)return false;
+  const selector=_expertTeamDirtyEditableSelector(draft&&draft.formKind);
+  const currentEditable=selector?currentInner.querySelector(selector):null;
+  const nextEditable=selector?nextInner.querySelector(selector):null;
+  if(currentEditable&&nextEditable)nextEditable.replaceWith(currentEditable);
+  currentInner.replaceWith(nextInner);
+  const restoredPopover=_restoreExpertTeamQuestionPopoverState(panel,card,popoverState||{});
+  _setExpertTeamWorkspaceMode(restoredPopover||draft&&draft.expanded&&draft.expanded.question?'confirm':'summary');
+  restoreExpertTeamWorkspaceFormState(panel,draft.state,card);
+  const scroller=panel.querySelector('.expert-team-panel-expanded-body');
+  const restoredScroll=_restoreExpertTeamWorkspaceScrollState(panel,popoverState&&popoverState.scrollState);
+  if(!restoredScroll&&scroller&&typeof draft.scroll==='number')scroller.scrollTop=draft.scroll;
+  return true;
+}
+
 function captureExpertTeamWorkspaceFormState(root){
   const scope=root&&root.querySelector?(root.querySelector('.expert-team-panel-inner')||root):null;
-  const state={sessionId:'',runId:'',stageId:'',questionId:'',inputId:'',activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
+  const state={sessionId:'',runId:'',stageId:'',questionId:'',inputId:'',serverVersion:0,activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
   if(!scope||!scope.querySelectorAll||typeof document==='undefined')return state;
   const panel=(scope.closest&&scope.closest('.expert-team-workspace-panel'))||(root&&root.classList&&root.classList.contains('expert-team-workspace-panel')?root:null);
   state.sessionId=String((panel&&panel.dataset&&panel.dataset.expertTeamSourceSessionId)||(root&&root.dataset&&root.dataset.expertTeamSourceSessionId)||'');
   state.runId=String((scope.dataset&&scope.dataset.expertTeamRunId)||'');
   state.stageId=String((scope.dataset&&scope.dataset.expertTeamStageId)||'');
   state.inputId=String((scope.dataset&&scope.dataset.expertTeamInputId)||'');
+  state.serverVersion=Number((scope.dataset&&scope.dataset.expertTeamVersion)||0);
   const currentQuestion=scope.querySelector('.status-card-expert-question.pending.is-current[data-expert-team-question-id]');
   state.questionId=String((currentQuestion&&currentQuestion.dataset&&currentQuestion.dataset.expertTeamQuestionId)||'');
   state.activeTab=_expertTeamWorkspaceActiveTab(scope)||'todo';
@@ -1310,10 +1409,10 @@ function captureExpertTeamWorkspaceFormState(root){
       selectionEnd:typeof control.selectionEnd==='number'?control.selectionEnd:null,
     };
     if(active===control)state.activeKey=key;
-    const isRecoverableDraft=!!(control.getAttribute&&(
-      control.getAttribute('data-expert-team-answer-input')||
-      control.getAttribute('data-expert-team-stage-input-text')||
-      control.getAttribute('data-expert-team-stage-feedback')
+    const isRecoverableDraft=!!(control.hasAttribute&&(
+      control.hasAttribute('data-expert-team-answer-input')||
+      control.hasAttribute('data-expert-team-stage-input-text')||
+      control.hasAttribute('data-expert-team-stage-feedback')
     ));
     const draftText=String(control.value==null?'':control.value).trim();
     if(isRecoverableDraft&&!control.readOnly&&draftText){
@@ -1542,7 +1641,7 @@ let _expertTeamRecoverableDraft=null;
 function _expertTeamRememberRecoverableDraft(card,state){
   const draft=state&&state.draftCandidate;
   if(!draft||!String(draft.text||'').trim())return false;
-  if(_expertTeamWorkspaceFormStateMatchesCard(card,state))return false;
+  if(_expertTeamWorkspaceIdentity(card,{})===_expertTeamWorkspaceIdentity(null,state))return false;
   const sourceSessionId=String(card&&card.sourceSessionId||card&&card.source_session_id||'');
   const runId=String(card&&card.runId||card&&card.sessionId||'');
   if((state.sessionId&&sourceSessionId&&state.sessionId!==sourceSessionId)||(state.runId&&runId&&state.runId!==runId))return false;
@@ -2274,8 +2373,14 @@ function mountExpertTeamWorkspacePanel(card){
   const popoverState=_captureExpertTeamQuestionPopoverState(panel);
   const formState=popoverState.formState;
   const scrollState=popoverState.scrollState;
+  const draft=_expertTeamCaptureWorkspaceDraft(panel,card);
   const canRestoreForm=_expertTeamWorkspaceFormStateMatchesCard(card,formState);
-  if(!canRestoreForm)_expertTeamRememberRecoverableDraft(card,formState);
+  const incomingIdentity=_expertTeamWorkspaceIdentity(card,{});
+  const sameIdentity=!!(draft&&draft.identity&&draft.identity===incomingIdentity);
+  if(!canRestoreForm||!sameIdentity){
+    _expertTeamRememberRecoverableDraft(card,formState);
+    if(draft)_expertTeamWorkspaceDraftStore.delete(_expertTeamWorkspaceDraftKey(draft.formKind,draft.identity));
+  }
   panel.dataset.expertTeamRunId=card.runId||card.sessionId||'';
   panel.dataset.expertTeamSourceSessionId=card.sourceSessionId||'';
   panel.hidden=false;
@@ -2287,6 +2392,14 @@ function mountExpertTeamWorkspacePanel(card){
     }else{
       _expertTeamQuestionPopoverOpen=false;
       _expertTeamQuestionPopoverQuestionId='';
+    }
+  }
+  if(draft&&draft.dirty&&sameIdentity){
+    const merged=_expertTeamMergeDirtyWorkspace(panel,card,draft,popoverState);
+    if(merged){
+      _setExpertTeamWorkspaceActive(true);
+      _syncExpertTeamWorkspacePanelVisibility();
+      return true;
     }
   }
   panel.innerHTML=typeof renderExpertTeamWorkspaceFromPresentation==='function'

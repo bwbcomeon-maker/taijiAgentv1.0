@@ -967,6 +967,7 @@ async function openChatSession(sid, options={}){
 const _WRITEFLOW_STATUS_REFRESH_MS = 5000;
 let _writeflowStatusRefreshTimer = null;
 let _writeflowStatusRefreshSid = '';
+const _expertTeamLatestAppliedVersionByRun=new Map();
 
 function _writeflowRunIsActive(run){
   const status=String(run&&run.status||'').toLowerCase();
@@ -1022,11 +1023,16 @@ async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
   if(!_isWriteflowHydrationForActiveSession(sid))return {status:'preserved',reason:'stale_session'};
   const run=(data&&data.run&&data.run.session_id===sid)?data.run:null;
   if(!run||!run.run_id)return {status:'preserved',reason:'invalid_response'};
+  const runId=String(run.run_id);
+  const runVersion=Number(run.version||0);
+  const latestVersion=Number(_expertTeamLatestAppliedVersionByRun.get(runId)||0);
+  if(runVersion<latestVersion)return {status:'preserved',reason:'stale_version'};
   const card=typeof _expertTeamStatusCardFromRun==='function'
     ? _expertTeamStatusCardFromRun(run,data)
     : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);
   if(!card)return {status:'preserved',reason:'invalid_response'};
   if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
+  _expertTeamLatestAppliedVersionByRun.set(runId,runVersion);
   _scheduleWriteflowStatusRefresh(sid,run);
   _removeWriteflowStatusCardsFromMessages();
   if(typeof renderSessionArtifacts==='function')renderSessionArtifacts();
