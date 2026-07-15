@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
 import requests
+import yaml
 
 from agent.alibaba_endpoints import (
     DEFAULT_REGION,
@@ -119,10 +122,23 @@ def _save_safe_image_url(
 
 def _load_config_data() -> dict[str, Any]:
     try:
-        from hermes_cli.config import load_config
+        configured_path = str(os.getenv("HERMES_CONFIG_PATH") or "").strip()
+        if configured_path:
+            config_path = Path(configured_path).expanduser()
+        else:
+            from hermes_cli.config import get_config_path
 
-        cfg = load_config()
-        return cfg if isinstance(cfg, dict) else {}
+            config_path = Path(get_config_path())
+        try:
+            config_path.stat()
+        except FileNotFoundError:
+            return {}
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if loaded is None:
+            return {}
+        if not isinstance(loaded, dict):
+            raise ValueError("DashScope configuration root must be a mapping")
+        return loaded
     except Exception as exc:
         raise DashScopeConfigurationError("DashScope configuration could not be loaded") from exc
 

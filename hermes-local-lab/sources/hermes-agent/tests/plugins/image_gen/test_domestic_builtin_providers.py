@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+import yaml
 
 
 @pytest.fixture(autouse=True)
@@ -134,7 +135,9 @@ class TestDashScopeQwenImageProvider:
         assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer dashscope-secret"
         assert mock_post.call_args.kwargs["json"]["parameters"]["size"] == "1664*928"
 
-    def test_named_credential_is_used_for_availability_and_generation(self, monkeypatch):
+    def test_named_credential_is_used_for_availability_and_generation(
+        self, monkeypatch, tmp_path
+    ):
         monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
         monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://legacy.example.com")
         monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "legacy-workspace")
@@ -158,11 +161,13 @@ class TestDashScopeQwenImageProvider:
                 "options": {"workspace_id": "llm-demo", "region": "cn-beijing"},
             },
         }
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
         from plugins.image_gen.dashscope import DashScopeQwenImageProvider
 
         payload = {"output": {"image": "https://dashscope/result.png"}}
         with (
-            patch("hermes_cli.config.load_config", return_value=config),
             patch(
                 "plugins.image_gen.dashscope.requests.post",
                 return_value=_response(payload),
@@ -187,17 +192,16 @@ class TestDashScopeQwenImageProvider:
         )
 
     def test_named_credential_config_load_failure_never_uses_legacy_state(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-must-not-be-used")
         monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "legacy-workspace")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("image_gen: [\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
         from plugins.image_gen.dashscope import DashScopeQwenImageProvider
 
         with (
-            patch(
-                "hermes_cli.config.load_config",
-                side_effect=OSError("config unavailable"),
-            ),
             patch("plugins.image_gen.dashscope.requests.post") as mock_post,
         ):
             provider = DashScopeQwenImageProvider()
@@ -208,7 +212,47 @@ class TestDashScopeQwenImageProvider:
         assert result["error_type"] == "configuration_error"
         mock_post.assert_not_called()
 
-    def test_named_credential_never_falls_back_to_legacy_key(self, monkeypatch):
+    def test_named_credential_config_read_error_never_uses_legacy_state(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-must-not-be-used")
+        monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "legacy-workspace")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "image_gen": {
+                        "provider": "dashscope",
+                        "credential_ref": "alibaba-default",
+                        "options": {"workspace_id": "named-workspace"},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+        original_read_text = Path.read_text
+
+        def deny_config_read(path, *args, **kwargs):
+            if path == config_path:
+                raise PermissionError("config unreadable")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", deny_config_read)
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        with patch("plugins.image_gen.dashscope.requests.post") as mock_post:
+            provider = DashScopeQwenImageProvider()
+            assert provider.is_available() is False
+            result = provider.generate("A city skyline")
+
+        assert result["success"] is False
+        assert result["error_type"] == "configuration_error"
+        mock_post.assert_not_called()
+
+    def test_named_credential_never_falls_back_to_legacy_key(
+        self, monkeypatch, tmp_path
+    ):
         monkeypatch.setenv("DASHSCOPE_API_KEY", "legacy-must-not-be-used")
         config = {
             "provider_credentials": [
@@ -226,12 +270,14 @@ class TestDashScopeQwenImageProvider:
                 "options": {"workspace_id": "llm-demo"},
             },
         }
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
         from plugins.image_gen.dashscope import DashScopeQwenImageProvider
 
-        with patch("hermes_cli.config.load_config", return_value=config):
-            provider = DashScopeQwenImageProvider()
-            assert provider.is_available() is False
-            result = provider.generate("A city skyline")
+        provider = DashScopeQwenImageProvider()
+        assert provider.is_available() is False
+        result = provider.generate("A city skyline")
 
         assert result["success"] is False
         assert result["error_type"] == "auth_required"
