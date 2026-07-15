@@ -2402,3 +2402,204 @@ def test_image_gen_probe_isolated_by_profile_and_newer_probe_wins(monkeypatch, t
     assert results["first"]["error_code"] == "image_gen_probe_superseded"
     active_profile["name"] = "profile-b"
     assert model_config.get_image_gen_config()["image_gen"]["verification"]["status"] == "configured_unverified"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("base_url", "https://other.example.com/v1"),
+        ("default_model", "image-model-v2"),
+        ("transport", "vendor_native_images"),
+        ("response_format", "url"),
+        ("timeout_seconds", 90),
+    ],
+)
+def test_custom_image_identity_changes_verification_fingerprint(
+    monkeypatch, tmp_path, field, value
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    base_entry = {
+        "id": "router",
+        "name": "Router",
+        "base_url": "https://images.example.com/v1",
+        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+        "models": ["image-model-v1", "image-model-v2"],
+        "default_model": "image-model-v1",
+        "transport": "openai_images",
+        "response_format": "auto",
+        "timeout_seconds": 30,
+    }
+    config = {
+        "image_gen": {"provider": "custom:router", "model": "image-model-v1"},
+        "custom_image_providers": [base_entry],
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=custom-secret\n", encoding="utf-8"
+    )
+    before = model_config._image_gen_config_fingerprint(
+        config["image_gen"], profile="default", config_data=config
+    )
+    config["custom_image_providers"][0] = {**base_entry, field: value}
+
+    after = model_config._image_gen_config_fingerprint(
+        config["image_gen"], profile="default", config_data=config
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps({"fingerprint": before, "status": "verified"}), encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path)
+    provider = _ProbeImageProvider({})
+    provider.name = "custom:router"
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr(
+        "agent.image_gen_registry.get_provider",
+        lambda name: provider if name == "custom:router" else None,
+    )
+
+    assert before != after
+    assert "custom-secret" not in before + after
+    assert model_config._public_image_gen_verification(
+        config["image_gen"], profile="default"
+    )["status"] == "configured_unverified"
+    assert "custom-secret" not in state_path.read_text(encoding="utf-8")
+
+
+def test_custom_image_key_rotation_changes_verification_fingerprint(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config = {
+        "image_gen": {"provider": "custom:router", "model": "image-model"},
+        "custom_image_providers": [{
+            "id": "router",
+            "base_url": "https://images.example.com/v1",
+            "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+            "models": ["image-model"],
+            "default_model": "image-model",
+        }],
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=before\n", encoding="utf-8")
+    before = model_config._image_gen_config_fingerprint(
+        config["image_gen"], profile="default", config_data=config
+    )
+    env_path.write_text("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=after\n", encoding="utf-8")
+
+    after = model_config._image_gen_config_fingerprint(
+        config["image_gen"], profile="default", config_data=config
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps({"fingerprint": before, "status": "verified"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path)
+    provider = _ProbeImageProvider({})
+    provider.name = "custom:router"
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr(
+        "agent.image_gen_registry.get_provider",
+        lambda name: provider if name == "custom:router" else None,
+    )
+
+    assert before != after
+    assert "before" not in before + after
+    assert "after" not in before + after
+    assert model_config._public_image_gen_verification(
+        config["image_gen"], profile="default"
+    )["status"] == "configured_unverified"
+
+
+def test_updating_custom_image_provider_invalidates_image_verification(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    invalidated = []
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda: invalidated.append(True),
+    )
+
+    model_config.set_custom_image_provider_config({
+        "id": "router",
+        "name": "Router",
+        "base_url": "https://images.example.com/v1",
+        "models": ["image-model"],
+        "default_model": "image-model",
+        "api_key": "secret",
+    })
+
+    assert invalidated == [True]
+
+
+def test_image_probe_rejects_preexisting_cache_file_without_deleting_it(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json")
+    _write_saved_image_gen_config(tmp_path)
+    existing = tmp_path / "cache" / "images" / "existing.png"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"\x89PNG\r\n\x1a\npreexisting")
+    provider = _ProbeImageProvider({
+        "success": True,
+        "image": str(existing),
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+    })
+    _install_probe_provider(monkeypatch, provider)
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "image_gen_invalid_file"
+    assert existing.read_bytes().endswith(b"preexisting")
+
+
+@pytest.mark.parametrize("target_inside_cache", [True, False])
+def test_image_probe_rejects_new_symlink_without_deleting_link_or_target(
+    monkeypatch, tmp_path, target_inside_cache
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json")
+    _write_saved_image_gen_config(tmp_path)
+    cache = tmp_path / "cache" / "images"
+    cache.mkdir(parents=True, exist_ok=True)
+    target = (cache / "target.png") if target_inside_cache else (tmp_path / "outside.png")
+    target.write_bytes(b"\x89PNG\r\n\x1a\ntarget")
+    link = cache / "provider-result.png"
+
+    def result_payload():
+        link.symlink_to(target)
+        return {"success": True, "image": str(link), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result_payload))
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "image_gen_invalid_file"
+    assert link.is_symlink()
+    assert target.read_bytes().endswith(b"target")
+
+
+def test_image_probe_rejects_new_hardlink_to_preexisting_cache_file(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json")
+    _write_saved_image_gen_config(tmp_path)
+    cache = tmp_path / "cache" / "images"
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / "target.png"
+    target.write_bytes(b"\x89PNG\r\n\x1a\ntarget")
+    hardlink = cache / "provider-result.png"
+
+    def result_payload():
+        os.link(target, hardlink)
+        return {"success": True, "image": str(hardlink), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result_payload))
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "image_gen_invalid_file"
+    assert target.read_bytes().endswith(b"target")
+    assert hardlink.exists()

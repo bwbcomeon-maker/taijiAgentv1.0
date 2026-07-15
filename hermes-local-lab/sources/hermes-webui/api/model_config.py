@@ -14,6 +14,7 @@ import importlib
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 import uuid
@@ -1443,6 +1444,9 @@ def _image_gen_secret_digest(
                 env_var = _validate_provider_credential_secret_env(row)
         except ValueError:
             pass
+    elif provider.startswith("custom:"):
+        identity = _active_custom_image_provider_identity(provider, config_data)
+        env_var = str(identity.get("api_key_env") or "")
     else:
         env_var = _IMAGE_GEN_KEY_ENV.get(provider) or ""
     if not env_var:
@@ -1450,6 +1454,47 @@ def _image_gen_secret_digest(
     env_values = _load_env_file(_get_hermes_home() / ".env")
     secret = str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
     return hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else ""
+
+
+def _active_custom_image_provider_identity(
+    provider: str,
+    config_data: dict[str, Any],
+) -> dict[str, Any]:
+    if not provider.startswith("custom:"):
+        return {}
+    requested_id = provider.split(":", 1)[1]
+    entries = config_data.get("custom_image_providers")
+    if not isinstance(entries, list):
+        return {}
+    try:
+        from agent.custom_image_providers import (
+            normalize_custom_image_provider_entry,
+            normalize_custom_image_provider_id,
+        )
+    except Exception:
+        return {}
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        try:
+            if normalize_custom_image_provider_id(raw_entry.get("id")) != requested_id:
+                continue
+            normalized = normalize_custom_image_provider_entry(raw_entry)
+        except ValueError:
+            continue
+        return {
+            "id": normalized["id"],
+            "name": normalized["name"],
+            "base_url": normalized["base_url"],
+            "api_key_env": normalized["api_key_env"],
+            "models": list(normalized["models"]),
+            "default_model": normalized["default_model"],
+            "size_map": dict(normalized["size_map"]),
+            "response_format": normalized["response_format"],
+            "timeout_seconds": normalized["timeout_seconds"],
+            "transport": str(raw_entry.get("transport") or "openai_images").strip(),
+        }
+    return {}
 
 
 def _image_gen_config_fingerprint(
@@ -1473,6 +1518,7 @@ def _image_gen_config_fingerprint(
         "region": str(options.get("region") or "").strip(),
         "workspace_id": str(options.get("workspace_id") or "").strip(),
         "base_url": str(options.get("base_url") or "").strip().rstrip("/"),
+        "custom_provider": _active_custom_image_provider_identity(provider, data),
         "key_digest": _image_gen_secret_digest(provider, credential_ref, data),
     }
     return hashlib.sha256(
@@ -1580,24 +1626,98 @@ def _image_gen_test_response(
     return {key: response[key] for key in _IMAGE_GEN_VERIFICATION_PUBLIC_FIELDS}
 
 
-def _validated_probe_image_path(raw_path: Any) -> Path | None:
+@dataclass(frozen=True)
+class _ImageCacheSnapshot:
+    root: Path
+    paths: frozenset[Path]
+    inodes: frozenset[tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class _OwnedProbeImage:
+    path: Path
+    device: int
+    inode: int
+
+
+def _snapshot_image_cache() -> _ImageCacheSnapshot:
+    root = (_get_hermes_home() / "cache" / "images").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    paths: set[Path] = set()
+    inodes: set[tuple[int, int]] = set()
+    for current_root, dirs, files in os.walk(root, followlinks=False):
+        for name in [*dirs, *files]:
+            path = Path(current_root) / name
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            paths.add(path)
+            inodes.add((info.st_dev, info.st_ino))
+    return _ImageCacheSnapshot(
+        root=root,
+        paths=frozenset(paths),
+        inodes=frozenset(inodes),
+    )
+
+
+def _owned_probe_image(
+    raw_path: Any,
+    before: _ImageCacheSnapshot,
+) -> _OwnedProbeImage | None:
     value = str(raw_path or "").strip()
     if not value:
         return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        return None
+    lexical = Path(os.path.abspath(candidate))
     try:
-        path = Path(value).expanduser().resolve(strict=True)
-        cache_root = (_get_hermes_home() / "cache" / "images").resolve()
-        path.relative_to(cache_root)
+        relative = lexical.relative_to(before.root)
+    except ValueError:
+        return None
+    current = before.root
+    try:
+        for part in relative.parts:
+            current = current / part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                return None
+        info = lexical.lstat()
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(before.root)
     except (OSError, RuntimeError, ValueError):
         return None
-    if not path.is_file():
+    identity = (info.st_dev, info.st_ino)
+    if (
+        lexical in before.paths
+        or identity in before.inodes
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+    ):
         return None
-    return path
+    return _OwnedProbeImage(path=resolved, device=info.st_dev, inode=info.st_ino)
 
 
-def _has_safe_image_header(path: Path) -> bool:
+def _owned_probe_image_header(image: _OwnedProbeImage) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(image.path, flags)
     try:
-        header = path.read_bytes()[:12]
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (image.device, image.inode)
+        ):
+            return b""
+        return os.read(descriptor, 12)
+    finally:
+        os.close(descriptor)
+
+
+def _has_safe_image_header(image: _OwnedProbeImage) -> bool:
+    try:
+        header = _owned_probe_image_header(image)
     except OSError:
         return False
     return bool(
@@ -1605,6 +1725,22 @@ def _has_safe_image_header(path: Path) -> bool:
         or header.startswith(b"\xff\xd8\xff")
         or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
     )
+
+
+def _remove_owned_probe_image(image: _OwnedProbeImage) -> bool:
+    try:
+        info = image.path.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (image.device, image.inode)
+        ):
+            return False
+        image.path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def test_image_gen_config() -> dict[str, Any]:
@@ -1637,7 +1773,8 @@ def test_image_gen_config() -> dict[str, Any]:
     ok = False
     error_code = "image_gen_probe_failed"
     message = "生图验证失败，请检查网络、凭据、模型和账号状态后重试。"
-    generated_path: Path | None = None
+    generated_image: _OwnedProbeImage | None = None
+    cache_before = _snapshot_image_cache()
     try:
         from agent.image_gen_registry import get_provider
 
@@ -1651,15 +1788,15 @@ def test_image_gen_config() -> dict[str, Any]:
             model=snapshot.model,
         )
         if isinstance(result, dict):
-            generated_path = _validated_probe_image_path(result.get("image"))
+            generated_image = _owned_probe_image(result.get("image"), cache_before)
             identity_ok = bool(
                 result.get("success")
                 and result.get("provider") == snapshot.provider
                 and result.get("model") == snapshot.model
             )
-            if identity_ok and generated_path is None:
+            if identity_ok and generated_image is None:
                 error_code = "image_gen_invalid_file"
-            elif identity_ok and not _has_safe_image_header(generated_path):
+            elif identity_ok and not _has_safe_image_header(generated_image):
                 error_code = "image_gen_invalid_file"
             elif identity_ok:
                 ok = True
@@ -1668,10 +1805,8 @@ def test_image_gen_config() -> dict[str, Any]:
     except Exception:
         logger.warning("Image generation configuration probe failed (%s)", diagnostic_id)
     finally:
-        if generated_path is not None:
-            try:
-                generated_path.unlink(missing_ok=True)
-            except OSError:
+        if generated_image is not None:
+            if not _remove_owned_probe_image(generated_image):
                 logger.warning("Failed to remove image generation probe output (%s)", diagnostic_id)
                 ok = False
                 error_code = "image_gen_cleanup_failed"
@@ -1983,6 +2118,7 @@ def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
         _save_yaml_config_file(config_path, config_data)
     reload_config()
     invalidate_models_cache()
+    _invalidate_image_gen_verification()
     row = custom_image_provider_public_row(normalized)
     return {"ok": True, "provider": row, "providers": get_custom_image_provider_configs().get("providers", [])}
 
