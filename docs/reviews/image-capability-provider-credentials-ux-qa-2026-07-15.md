@@ -111,7 +111,20 @@
 - P2：1440px 下图片生成配置仍位于首屏下方，需要滚动；主状态摘要可见，但完整表单发现成本仍存在。
 - P2：缺少 axe-core/Lighthouse 和自动化视觉回归基线。
 - P2：当前 Mac 的代理/DNS fake-IP 使阿里 OSS 结果下载被安全策略拦截；需在不削弱 SSRF 防护的前提下调整代理直连/DNS，再做一次真实生图端到端复验。
+- 工程债务（非本任务引入）：扩大的 Agent 测试集合中有 3 个 Anthropic OAuth 测试失败，原因是测试对 `subprocess.run` 的旧 mock 同时截获 macOS Keychain 读取并返回 `MagicMock`；其余 504 项通过。本任务相关集合单独复验为 354 项通过。
+- 工程债务（非本任务引入）：`api/routes.py` 全文件严格 Ruff 仍有 20 个既有告警；本次使用致命规则、语法编译、相关测试和其他变更文件全量 Ruff 作为门禁，均通过。
 
-## 8. QA 结论
+## 8. 发布门禁结果
+
+- WebUI 相关测试：217 passed。
+- Agent 图片能力、平台凭据、阿里端点、外部视觉/图片 Provider 与 readiness：354 passed。
+- 扩大 Agent 集合：504 passed / 3 failed；失败均为上述既有 Anthropic OAuth mock 问题。
+- Agent 相关文件 Ruff：通过。
+- WebUI 相关文件 Ruff、`routes.py` 致命规则、Python 编译：通过。
+- `panels.js`、`boot.js`、`ui.js` 语法检查：通过。
+- Git diff whitespace 检查：通过。
+- 临时百炼密钥扫描：跟踪文件 0 命中、工作目录 0 命中、隔离运行目录 0 残留。
+
+## 9. QA 结论
 
 当前界面已满足“阿里百炼通用业务空间 Key + 各平台专用 Key”并存的配置路径，状态不再把字段齐全误报为已验证，浏览器和实际 Electron 主路径均可见、可发现、可访问。由于本机代理/DNS 阻断阿里图片结果安全下载，以及自动化无障碍/视觉回归尚未配置，本次结论为“带限制通过”，不是无条件发布通过。
