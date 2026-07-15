@@ -77,7 +77,7 @@ def _complete_stage(expert_teams, tmp_path, run, content, delivery_id):
     return _approve_stage(expert_teams, tmp_path, generated, f"approve-{delivery_id}")
 
 
-def test_generation_contract_names_rich_draft_requirements():
+def test_legacy_generation_contract_keeps_rich_draft_requirements():
     repo_root = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location(
         "_expert_team_catalog_rich_draft_test",
@@ -112,7 +112,7 @@ def test_generation_contract_names_rich_draft_requirements():
         assert phrase in skill_text
 
 
-def test_plan_draft_rejects_plain_prose_without_tables_or_figures():
+def test_legacy_plan_draft_rejects_plain_prose_without_tables_or_figures():
     text = "这是一个纯文字方案。目标是提升服务质效。措施包括优化流程和强化监督。"
 
     result = validate_stage_output(text, "plan", "draft", "content-creator-team")
@@ -122,7 +122,7 @@ def test_plan_draft_rejects_plain_prose_without_tables_or_figures():
     assert "图" in result["message"]
 
 
-def test_plan_draft_rejects_one_table_even_with_figure_reference():
+def test_legacy_plan_draft_rejects_one_table_even_with_figure_reference():
     text = """# 提升营业厅服务质效专项行动方案
 
 | 序号 | 重点任务 | 责任单位 |
@@ -139,7 +139,7 @@ def test_plan_draft_rejects_one_table_even_with_figure_reference():
     assert "至少 2 个 Markdown 表格" in result["message"]
 
 
-def test_plan_draft_rejects_tables_without_figure_reference():
+def test_legacy_plan_draft_rejects_tables_without_figure_reference():
     text = """# 提升营业厅服务质效专项行动方案
 
 | 序号 | 重点任务 | 责任单位 |
@@ -157,7 +157,7 @@ def test_plan_draft_rejects_tables_without_figure_reference():
     assert "架构图" in result["message"] or "图示" in result["message"]
 
 
-def test_plan_draft_accepts_markdown_tables_and_figure_brief(tmp_path):
+def test_legacy_plan_draft_accepts_markdown_tables_and_figure_brief(tmp_path):
     svg = tmp_path / "architecture.svg"
     svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"></svg>', encoding="utf-8")
     text = f"""# 提升营业厅服务质效专项行动方案
@@ -182,6 +182,111 @@ def test_plan_draft_accepts_markdown_tables_and_figure_brief(tmp_path):
     result = validate_stage_output(text, "plan", "draft", "content-creator-team")
 
     assert result["status"] == "pass"
+
+
+def _enterprise_plain_document_artifact(*, required_asset_kinds=None, asset_requests=None):
+    from api.expert_teams.stage_artifacts import build_stage_artifact, parse_stage_response
+
+    brief = {
+        "schema_version": "document-brief/v1",
+        "revision": 1,
+        "status": "confirmed",
+        "confirmed_revision": 1,
+        "confirmed_sha256": "b" * 64,
+        "exact_title": "提升营业厅服务质效专项行动方案",
+        "document_type": "work_report",
+        "content_constraints": {
+            "required_sections": ["总体目标"],
+            "required_asset_kinds": required_asset_kinds or [],
+        },
+    }
+    meta = {
+        "artifact_type": "document_draft",
+        "summary": "形成正式方案初稿",
+        "payload": {
+            "title": brief["exact_title"],
+            "document_type": "work_report",
+            "section_map": [{"section_id": "SEC-1", "heading": "总体目标"}],
+            "fact_usage": [],
+            "asset_requests": asset_requests or [],
+            "open_issues": [],
+        },
+        "blocking_issues": [],
+    }
+    raw = (
+        "<<<TAIJI_META_V1>>>\n"
+        + __import__("json").dumps(meta, ensure_ascii=False)
+        + "\n<<<TAIJI_META_END>>>\n"
+        + "<<<TAIJI_DOCUMENT_V1>>>\n"
+        + f"# {brief['exact_title']}\n\n## 总体目标\n\n围绕服务质效提升，明确责任边界和实施节奏。"
+        + "\n<<<TAIJI_DOCUMENT_END>>>"
+    )
+    parsed = parse_stage_response(raw, artifact_type="document_draft", requires_document=True)
+    artifact = build_stage_artifact(
+        parsed,
+        stage_id="draft",
+        stage_attempt=1,
+        brief=brief,
+        input_refs=[],
+        now="2026-07-15T10:00:00+08:00",
+    )
+    return brief, artifact
+
+
+def test_enterprise_plain_text_document_passes_without_visual_quota_when_brief_does_not_require_assets():
+    brief, artifact = _enterprise_plain_document_artifact()
+
+    result = validate_stage_output(
+        artifact["deliverable_markdown"],
+        "work_report",
+        "draft",
+        "content-creator-team",
+        contract_version="expert-team-contract/v1",
+        artifact=artifact,
+        brief=brief,
+    )
+
+    assert result["status"] == "pass"
+    assert "表格" not in result["message"]
+    assert "图" not in result["message"]
+
+
+def test_enterprise_visual_requirement_is_brief_driven_and_requires_typed_asset_request():
+    brief, artifact = _enterprise_plain_document_artifact(required_asset_kinds=["diagram"])
+
+    missing = validate_stage_output(
+        artifact["deliverable_markdown"],
+        "work_report",
+        "draft",
+        "content-creator-team",
+        contract_version="expert-team-contract/v1",
+        artifact=artifact,
+        brief=brief,
+    )
+    assert missing["status"] == "rewrite_required"
+    assert missing["missing_sections"] == ["asset_request:diagram"]
+
+    brief, artifact = _enterprise_plain_document_artifact(
+        required_asset_kinds=["diagram"],
+        asset_requests=[
+            {
+                "asset_request_id": "ASSET-1",
+                "kind": "diagram",
+                "purpose": "呈现实施路径",
+                "source_refs": [],
+            }
+        ],
+    )
+    passed = validate_stage_output(
+        artifact["deliverable_markdown"],
+        "work_report",
+        "draft",
+        "content-creator-team",
+        contract_version="expert-team-contract/v1",
+        artifact=artifact,
+        brief=brief,
+    )
+    assert passed["status"] == "pass"
 
 
 def test_build_rich_draft_package_writes_canonical_v2_manifest_and_assets(tmp_path):

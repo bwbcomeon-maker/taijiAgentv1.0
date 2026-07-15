@@ -176,7 +176,62 @@ def validate_final_document_text(text: str, material_type: str) -> dict:
     return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
 
 
-def validate_stage_output(text: str, material_type: str, task_id: str, team_id: str = "") -> dict:
+def validate_stage_output(
+    text: str,
+    material_type: str,
+    task_id: str,
+    team_id: str = "",
+    *,
+    contract_version: str = "legacy",
+    artifact: dict | None = None,
+    brief: dict | None = None,
+) -> dict:
+    if contract_version == "expert-team-contract/v1":
+        from .stage_artifacts import StageArtifactError, validate_stage_artifact
+
+        if not isinstance(artifact, dict) or not isinstance(brief, dict):
+            return {
+                "status": "rewrite_required",
+                "violations": [],
+                "missing_sections": ["结构化阶段产物"],
+                "message": "企业合同阶段必须使用结构化 Artifact 校验。",
+            }
+        try:
+            validation = validate_stage_artifact(
+                artifact,
+                brief=brief,
+                approved_inputs=artifact.get("input_refs") or [],
+            )
+        except StageArtifactError as exc:
+            return {
+                "status": "rewrite_required",
+                "violations": [exc.code],
+                "missing_sections": [],
+                "message": "阶段产物未通过企业语义合同校验。",
+            }
+        if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0):
+            return {
+                "status": "rewrite_required",
+                "violations": ["blocking_issues"],
+                "missing_sections": [],
+                "message": "阶段产物仍有未解决的阻断问题。",
+            }
+        constraints = brief.get("content_constraints") if isinstance(brief.get("content_constraints"), dict) else {}
+        required_assets = set(constraints.get("required_asset_kinds") or [])
+        asset_requests = (artifact.get("payload") or {}).get("asset_requests") or []
+        actual_assets = {
+            str(item.get("kind") or "") for item in asset_requests if isinstance(item, dict)
+        }
+        missing_assets = sorted(required_assets - actual_assets)
+        if missing_assets:
+            return {
+                "status": "rewrite_required",
+                "violations": [],
+                "missing_sections": [f"asset_request:{kind}" for kind in missing_assets],
+                "message": "Brief 明确要求的视觉资产尚未形成可追溯 asset request。",
+            }
+        return {"status": "pass", "violations": [], "missing_sections": [], "message": ""}
+
     normalized = normalize_output_text(text)
     task = str(task_id or "")
     team = str(team_id or "")
