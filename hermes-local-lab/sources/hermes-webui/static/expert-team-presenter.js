@@ -88,6 +88,7 @@
       reviewId:str(value.review_id||value.reviewId),documentRevision:Number(value.document_revision||value.documentRevision||1),
       documentSha256:str(value.document_sha256||value.documentSha256),canonicalSha256:str(value.canonical_sha256||value.canonicalSha256),
       status:str(value.status,'pending'),decision:str(value.decision,'pending'),validity:str(value.validity,'active'),
+      reviewSessionStatus:str(value.review_session_status||value.reviewSessionStatus,'begin_required'),
       checklist:value.checklist&&typeof value.checklist==='object'?value.checklist:{},issues,
       issueCount:Number(value.issue_count==null?issues.length:value.issue_count),reviewerLabel:str(value.reviewer_label||value.reviewerLabel),
       waivedIssueIds:arr(value.waived_issue_ids||value.waivedIssueIds).map(String)

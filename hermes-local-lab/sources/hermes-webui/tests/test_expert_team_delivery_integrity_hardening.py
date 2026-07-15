@@ -400,6 +400,62 @@ def _tokenized_wps_payload(docx_engine_v2, reviewed: dict, tmp_path: Path, *, ev
     return payload
 
 
+def test_real_first_pending_office_lifecycle_begin_get_safe_submit_and_replay(monkeypatch, tmp_path):
+    from api import docx_engine_v2, expert_teams
+    from api import routes
+    from api.expert_teams import trusted_identity
+    from api.expert_teams.office_review import OFFICE_POLICY_V1
+    from tests.test_expert_team_stage_artifact_contract import _brief, _contract_run_ready_for_attempt, _raw
+
+    run = _contract_run_ready_for_attempt(tmp_path, stage_index=3)
+    input_refs = [{"ref_type": "stage_artifact", "artifact_id": "materials:1", "sha256": "1" * 64}, {"ref_type": "stage_artifact", "artifact_id": "draft:1", "sha256": "2" * 64}]
+    reserved = expert_teams.reserve_expert_team_execution_start(tmp_path, run["run_id"], expected_version=run["version"], runtime_adapter="RunnerRuntimeAdapter", input_refs=input_refs)
+    generating = expert_teams.mark_expert_team_execution_started(tmp_path, run["run_id"], {"stream_id": "stream-first-office", "execution_start_id": reserved["execution_start_id"]})
+    content = {"title": _brief()["exact_title"], "document_type": "work_report", "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}], "fact_usage": [], "asset_requests": [], "review_report": {"schema_version": "content-review-report/v1", "checks": {key: "passed" for key in ("brief_alignment", "fact_traceability", "document_purity", "confidentiality", "document_structure")}, "issues": [], "change_summary": ["通过"], "unresolved_issue_ids": []}, "open_issues": []}
+    reviewed = expert_teams.mark_expert_team_execution_complete(tmp_path, run["run_id"], {"stream_id": generating["execution_stream_id"], "stage_id": "polish", "attempt": generating["execution_attempt"], "id": "review-first-office", "kind": "chat", "content": _raw("reviewed_document", content, document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文。")})
+    resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False);resolver._config = {"enabled": True}
+    identity_session = resolver.install_test_principal({"subject": "approver", "display_name": "审批人", "roles": ["document-approver"], "expires_at": int(time.time()) + 3600})
+    monkeypatch.setattr(trusted_identity, "get_trusted_identity_resolver", lambda: resolver)
+    approved = expert_teams.approve_expert_team_stage(tmp_path, {"session_id": reviewed["session_id"], "run_id": reviewed["run_id"], "stage_id": "polish", "expected_version": reviewed["version"], "idempotency_key": "approve-first-office", "trusted_identity_session_id": identity_session})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("system delivery must not use model gateway")))
+    delivered_payload, delivered_status = routes._start_expert_team_execution(tmp_path, approved, {})
+    assert delivered_status == 200, delivered_payload
+    reviewed = delivered_payload["run"]
+    pending = expert_teams.read_expert_team_run(tmp_path, reviewed["run_id"])
+    assert pending["view"]["office_review"] is not None, json.dumps({"ref": pending.get("current_delivery_manifest_ref"), "gate": pending.get("delivery_gate"), "office_view": pending.get("office_review_view"), "artifacts": pending.get("artifacts")}, ensure_ascii=False)
+    assert pending["view"]["office_review"]["status"] == "pending"
+    assert pending["view"]["office_review"]["review_session_status"] == "begin_required"
+    assert "review_token" not in json.dumps(pending)
+    from api.expert_teams.delivery_integrity import canonical_delivery_dir
+    delivery_dir = canonical_delivery_dir(tmp_path, reviewed["run_id"], "delivery", 1)
+    principal = {
+        "subject": "reviewer-safe", "display_name": "王审核", "roles": ["document-reviewer"],
+        "auth_method": "oidc_pkce", "identity_snapshot_sha256": "9" * 64,
+    }
+    begun, begin_status = docx_engine_v2.begin_office_review(
+        {"session_id": reviewed["session_id"], "delivery_dir": str(delivery_dir)}, tmp_path,
+        trusted_principal=principal, open_document=lambda _path: None,
+    )
+    assert begin_status == 200, begun
+    screenshot = Path(__file__).resolve().parents[1] / "docs" / "images" / "update-banner-whats-new-after.png"
+    evidence = tmp_path / begun["evidence_dir"] / "first-page.png"
+    evidence.write_bytes(screenshot.read_bytes())
+    ready = expert_teams.read_expert_team_run(tmp_path, reviewed["run_id"])
+    assert ready["view"]["office_review"]["review_session_status"] == "ready"
+    payload = {
+        "session_id": reviewed["session_id"], "run_id": reviewed["run_id"], "expected_version": reviewed["version"],
+        "status": "passed", "checklist": {key: ("passed" if disposition == "required" else "not_applicable") for key, disposition in OFFICE_POLICY_V1["checklist"].items()},
+        "issues": [], "note": "已在 WPS 打开正式文档并逐页检查目录、表格和整体版式。",
+        "idempotency_key": "first-pending-safe-submit-1",
+    }
+    accepted, accepted_status = docx_engine_v2.record_wps_visual_acceptance(payload, tmp_path, trusted_principal=principal)
+    replayed, replay_status = docx_engine_v2.record_wps_visual_acceptance(payload, tmp_path, trusted_principal=principal)
+    assert accepted_status == replay_status == 200 and accepted["ok"] is replayed["ok"] is True
+    assert replayed["idempotent_replay"] is True
+    final = expert_teams.read_expert_team_run(tmp_path, reviewed["run_id"])
+    assert final["view"]["office_review"]["decision"] == "passed"
+
+
 @pytest.mark.parametrize(
     ("corruption", "expected_code"),
     [

@@ -775,11 +775,38 @@ def _attach_office_review_view(workspace: Path, run: dict) -> dict:
     ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
     attempt = int(ref.get("delivery_attempt") or 0)
     if not attempt:
-        return run
-    from .office_review import OFFICE_ACCEPTANCE_NAME, office_acceptance_view
+        try:
+            attempt, document_delivery = _authoritative_delivery_attempt(run, "delivery")
+            ref = {
+                "delivery_attempt": attempt,
+                "delivery_binding_path": str(document_delivery.get("binding_manifest_path") or ""),
+                "delivery_binding_sha256": str(document_delivery.get("binding_manifest_sha256") or ""),
+            }
+        except (DeliveryIntegrityError, TypeError, ValueError):
+            packages = [item for item in run.get("artifacts") or [] if isinstance(item, dict) and item.get("stage") == "delivery" and item.get("kind") == "delivery_package"]
+            if not packages:
+                return run
+            package = max(packages, key=lambda item: int(item.get("attempt") or 0))
+            attempt = int(package.get("attempt") or 0)
+            ref = {"delivery_attempt": attempt, "delivery_binding_path": str(package.get("binding_manifest_path") or ""), "delivery_binding_sha256": str(package.get("binding_manifest_sha256") or "")}
+    from .office_review import OFFICE_ACCEPTANCE_NAME, office_acceptance_view, pending_office_review_view
 
     path = canonical_attempt_root(workspace, str(run.get("run_id") or ""), "delivery", attempt) / OFFICE_ACCEPTANCE_NAME
     if not path.is_file():
+        binding_path = Path(workspace).expanduser().resolve() / str(ref.get("delivery_binding_path") or "")
+        try:
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            from .delivery_integrity import office_binding_identity
+            binding = office_binding_identity(workspace, {
+                "run_id": str(run.get("run_id") or ""), "stage_id": "delivery", "attempt": attempt,
+            }, binding)
+            from api.docx_engine_v2 import active_office_review_session_status
+            run["office_review_view"] = pending_office_review_view(
+                binding,
+                review_session_status=active_office_review_session_status(workspace, run),
+            )
+        except (DeliveryIntegrityError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            run.pop("office_review_view", None)
         return run
     try:
         acceptance = json.loads(path.read_text(encoding="utf-8"))
@@ -788,7 +815,15 @@ def _attach_office_review_view(workspace: Path, run: dict) -> dict:
             waiver_refs=run.get("waiver_refs") if isinstance(run.get("waiver_refs"), list) else [],
         )
     except (DeliveryIntegrityError, json.JSONDecodeError, OSError, TypeError, ValueError):
-        run.pop("office_review_view", None)
+        binding_path = Path(workspace).expanduser().resolve() / str(ref.get("delivery_binding_path") or "")
+        try:
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            from .delivery_integrity import office_binding_identity
+            binding = office_binding_identity(workspace, {"run_id": str(run.get("run_id") or ""), "stage_id": "delivery", "attempt": attempt}, binding)
+            from api.docx_engine_v2 import active_office_review_session_status
+            run["office_review_view"] = pending_office_review_view(binding, review_session_status=active_office_review_session_status(workspace, run))
+        except (DeliveryIntegrityError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            run.pop("office_review_view", None)
     return run
 
 
@@ -833,10 +868,10 @@ def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
                 current_status = enterprise_completion_status(workspace, current)
                 if current_status.get("status") == "passed":
                     current["completion_integrity"] = current_status
-                    return current
+                    return _attach_office_review_view(workspace, current)
                 current_ref = current.get("current_delivery_manifest_ref")
                 if not isinstance(current_ref, dict):
-                    return current
+                    return _attach_office_review_view(workspace, current)
                 current_binding_path = Path(workspace).expanduser().resolve() / str(
                     current_ref.get("delivery_binding_path") or ""
                 )
@@ -851,7 +886,7 @@ def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
                     )
                 except (DeliveryIntegrityError, OSError, TypeError, ValueError):
                     current["completion_integrity"] = enterprise_completion_status(workspace, current)
-                return current
+                return _attach_office_review_view(workspace, current)
         if str(run.get("workflow_state") or "") == "completed":
             run["completion_integrity"] = enterprise_completion_status(workspace, run)
             return run

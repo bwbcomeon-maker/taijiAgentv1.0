@@ -1953,6 +1953,30 @@ def test_office_primary_submit_binds_real_safe_record_handler_and_tracks_all_dir
     assert 'data-office-checklist' in dirty
 
 
+def test_office_pending_begin_abort_and_poll_drift_are_fail_closed():
+    source = textwrap.dedent(
+        """
+        const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+        vm.runInContext(fs.readFileSync('static/expert-team-ui.js','utf8'),context);
+        const html=context.window.renderExpertTeamOfficeDrawer({
+          reviewSessionStatus:'begin_required',identity:{enabled:true,authenticated:true,principal:{displayName:'王审核',roles:['document-reviewer']}},
+          checklist:{},issues:[]
+        });
+        console.log(JSON.stringify({html}));
+        """
+    )
+    html = _run_node(source)["html"]
+    assert 'data-office-begin' in html and 'beginExpertTeamOfficeReview' in html
+    submit_tag = html[html.index('data-office-submit'):html.index('>提交验收')]
+    assert 'disabled' in submit_tag
+    handoff = _function_body(ACTIONS_JS, 'async function startExpertTeamOfficeAuthorizerHandoff', 'function abortExpertTeamOfficeAuthorizerHandoff')
+    assert 'AbortController' in handoff and 'officeAuthorizerAttempt' in handoff and 'signal.aborted' in handoff
+    close = _function_body(ACTIONS_JS, 'function closeExpertTeamOfficeDrawer', 'function handleExpertTeamOfficeDrawerKeydown')
+    assert 'abortExpertTeamOfficeAuthorizerHandoff' in close
+    submit = _function_body(ACTIONS_JS, 'async function submitExpertTeamOfficeAcceptance', 'async function submitExpertTeamOfficeRevision')
+    assert 'officeAuthoritativeIdentity' in submit and '当前草稿已保留' in submit
+
+
 def test_presenter_maps_safe_office_review_view_into_workspace_card():
     source = textwrap.dedent(
         """

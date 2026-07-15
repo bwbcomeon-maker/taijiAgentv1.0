@@ -6,6 +6,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -75,6 +76,8 @@ def build_office_acceptance(
     evidence: list[dict],
     note: str,
     now: str,
+    idempotency_key: str = "",
+    request_fingerprint: str = "",
 ) -> dict:
     if binding.get("schema_version") != "expert-office-binding/v1":
         raise DeliveryIntegrityError("enterprise Office binding is required")
@@ -145,6 +148,7 @@ def build_office_acceptance(
         "token_hash": token_state.get("token_hash"),
         "reviewer_subject": reviewer.get("subject"),
         "reviewed_at": str(now),
+        **({"request": {"idempotency_key": str(idempotency_key), "fingerprint": str(request_fingerprint)}} if idempotency_key and request_fingerprint else {}),
     }
     return {
         "schema_version": "office-acceptance/v2",
@@ -178,6 +182,12 @@ def build_office_acceptance(
         "note": str(note or "").strip(),
         "opened_at": str(token_state.get("opened_at") or ""),
         "reviewed_at": str(now),
+        **({
+            "request": {
+                "idempotency_key": str(idempotency_key),
+                "fingerprint": str(request_fingerprint),
+            }
+        } if idempotency_key and request_fingerprint else {}),
     }
 
 
@@ -218,6 +228,22 @@ def office_acceptance_view(acceptance: dict, *, waiver_refs: list[dict] | None =
         "issue_count": len(issues),
         "reviewer_label": str(reviewer.get("display_name") or reviewer.get("principal_id") or ""),
         "waived_issue_ids": waived,
+    }
+
+
+def pending_office_review_view(binding: dict, *, review_session_status: str = "begin_required") -> dict:
+    """Expose a safe first-review state without inventing an acceptance artifact."""
+    if not isinstance(binding, dict) or binding.get("schema_version") != "expert-office-binding/v1":
+        raise DeliveryIntegrityError("enterprise Office binding is required")
+    return {
+        "review_id": "pending-" + str(binding.get("delivery_binding_sha256") or "")[:20],
+        "document_revision": int(binding.get("document_revision") or binding.get("attempt") or 1),
+        "document_sha256": str(binding.get("document_sha256") or ""),
+        "canonical_sha256": str((binding.get("canonical_artifact") or {}).get("sha256") or ""),
+        "status": "pending", "decision": "pending", "validity": "active",
+        "review_session_status": "ready" if review_session_status == "ready" else "begin_required",
+        "checklist": {key: "not_checked" for key in OFFICE_POLICY_V1["checklist"]},
+        "issues": [], "issue_count": 0, "reviewer_label": "", "waived_issue_ids": [],
     }
 
 
@@ -276,6 +302,10 @@ def build_office_revision_request(
         "issue_ids": requested,
         "idempotency_key": str(idempotency_key or ""),
     }
+    request_fingerprint = hashlib.sha256(json.dumps({
+        "acceptance_sha256": str(acceptance_sha256), "delivery_binding_sha256": str(delivery_binding_sha256),
+        "issue_ids": requested,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {
         "schema_version": "office-revision-request/v1",
         "request_id": "revision-" + hashlib.sha256(
@@ -284,6 +314,8 @@ def build_office_revision_request(
         "delivery_binding_sha256": str(delivery_binding_sha256),
         "office_acceptance_sha256": str(acceptance_sha256),
         "items": items,
+        "idempotency_key": str(idempotency_key),
+        "request_fingerprint": request_fingerprint,
         "created_at": str(now),
     }
 
@@ -299,6 +331,23 @@ def create_current_office_revision_request(workspace: Path, body: dict, *, now: 
         run = read_run(workspace, run_id)
         if str(body.get("session_id") or "") != str(run.get("session_id") or ""):
             raise DeliveryIntegrityError("Office revision run identity mismatch")
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9:._-]{8,240}", idempotency_key):
+            raise DeliveryIntegrityError("Office revision idempotency_key is invalid")
+        for ref_item in run.get("office_revision_request_refs") or []:
+            if not isinstance(ref_item, dict) or not str(ref_item.get("path") or ""):
+                continue
+            request_path = Path(workspace).expanduser().resolve() / str(ref_item["path"])
+            if not request_path.is_file():
+                continue
+            existing = _read_json_object(request_path, label="Office revision request")
+            if str(existing.get("idempotency_key") or "") != idempotency_key:
+                continue
+            requested_ids = [str(item or "").strip() for item in body.get("issue_ids") or []]
+            existing_ids = [str(item.get("issue_id") or "") for item in existing.get("items") or [] if isinstance(item, dict)]
+            if requested_ids != existing_ids:
+                raise DeliveryIntegrityError("Office revision idempotency conflict")
+            return existing, run
         if int(body.get("expected_version") or -1) != int(run.get("version") or 0):
             raise DeliveryIntegrityError("Office revision version conflict")
         if str(run.get("workflow_state") or "") != "awaiting_review":

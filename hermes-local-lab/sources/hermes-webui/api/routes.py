@@ -18670,16 +18670,43 @@ def _handle_docx_engine_v2_begin_office_review(handler, body):
 
     try:
         _session, workspace = _docx_engine_v2_session_and_workspace(body)
+        structured = bool(str(body.get("run_id") or "").strip()) and not str(body.get("delivery_dir") or body.get("deliveryDir") or "").strip()
+        internal_body = body
+        if structured:
+            from api.expert_teams.delivery_integrity import canonical_delivery_dir
+            from api.expert_teams.storage import read_run
+            run = read_run(workspace, str(body.get("run_id") or ""))
+            if str(run.get("session_id") or "") != str(body.get("session_id") or ""):
+                raise ValueError("Office review run identity mismatch")
+            if int(body.get("expected_version") or -1) != int(run.get("version") or 0):
+                raise ValueError("Office review version conflict")
+            if str(body.get("action") or "") == "abandon":
+                docx_engine_v2.abandon_active_office_review(workspace, run)
+                return j(handler, {"ok": True, "review_session_status": "begin_required"})
+            attempt = docx_engine_v2._current_office_delivery_attempt(run)
+            if attempt < 1:
+                raise ValueError("current Office delivery is unavailable")
+            internal_body = {
+                "session_id": str(body.get("session_id") or ""),
+                "delivery_dir": str(canonical_delivery_dir(workspace, str(run.get("run_id") or ""), "delivery", attempt)),
+            }
         principal = resolve_trusted_principal(
             {"identity_session_id": _expert_identity_session(handler)},
             "document-reviewer",
             int(time.time()),
         )
         payload, status = docx_engine_v2.begin_office_review(
-            body,
+            internal_body,
             workspace,
             trusted_principal=principal,
         )
+        if structured and status == 200 and payload.get("ok") is True:
+            payload = {
+                "ok": True, "office_status": "pending", "review_session_status": "ready",
+                "reviewer": str(payload.get("reviewer") or ""), "opened_at": str(payload.get("opened_at") or ""),
+                "expires_at_ns": int(payload.get("expires_at_ns") or 0),
+                "document_sha256": str(payload.get("document_sha256") or ""),
+            }
         return j(handler, payload, status=status)
     except TrustedIdentityError as e:
         return j(handler, {"ok": False, "code": e.code, "error": str(e)}, status=403)

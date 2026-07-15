@@ -273,6 +273,7 @@ async function submitOfficeAcceptanceScenario(page, { decision, issues, doubleCl
     officeReviewUi: {
       review_id: `office-submit-${decision}`, document_revision: 4, document_sha256: "abcdef0123456789".repeat(4),
       status: "pending", decision: "pending", validity: "active", checklist, reviewer_label: "王审核", issues,
+      review_session_status: "ready",
     },
   });
   await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='result']");
@@ -443,6 +444,7 @@ async function main() {
       window.__officeRevisionCalls = [];
       window.__officeAcceptanceCalls = [];
       window.__officeAcceptanceResults = [];
+      window.__officeBeginCalls = [];
       window.__officeWindowOpenOriginal = window.open;
       window.open = () => null;
       api = async (url, options) => {
@@ -484,6 +486,10 @@ async function main() {
             throw error;
           }
           return result;
+        }
+        if (String(url) === "/api/docx-engine-v2/quality/wps-visual/begin") {
+          window.__officeBeginCalls.push(JSON.parse(options?.body || "{}"));
+          return { ok: true, review_session_status: "ready", reviewer: "王审核", opened_at: "now", expires_at_ns: Date.now() * 1e6 + 60000000000, document_sha256: "f".repeat(64) };
         }
         return originalApi(url, options);
       };
@@ -847,6 +853,19 @@ async function main() {
     await page.evaluate(() => {
       window._expertTeamIdentityStatus = { enabled: true, authenticated: true, authorizerHandoffReady: true, principal: { display_name: "王审核", roles: ["document-reviewer"] } };
     });
+    await renderRun(page, "awaiting_review", {
+      run_id: "electron-office-first-pending", officeReviewId: "office-first-pending",
+      officeReviewUi: { review_id: "office-first-pending", document_revision: 1, document_sha256: "f".repeat(64), status: "pending", decision: "pending", validity: "active", review_session_status: "begin_required", checklist: officeChecklist, reviewer_label: "", issues: [] },
+    });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='result']");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    assertState(await page.isVisible("body > [data-expert-team-office-drawer] [data-office-begin]"), "First pending Office view has no discoverable begin action");
+    assertState(await page.isDisabled("body > [data-expert-team-office-drawer] [data-office-submit]"), "First pending Office view enabled submit before begin");
+    await page.click("body > [data-expert-team-office-drawer] [data-office-begin]");
+    await page.waitForFunction(() => window.__officeBeginCalls.length === 1, { timeout: 5000 });
+    const firstBegin = await page.evaluate(() => ({ payload: window.__officeBeginCalls[0], submitDisabled: document.querySelector("body > [data-expert-team-office-drawer] [data-office-submit]")?.disabled }));
+    assertState(firstBegin.payload.run_id === "electron-office-first-pending" && firstBegin.payload.expected_version > 0 && !firstBegin.payload.delivery_dir && !firstBegin.payload.review_token && firstBegin.submitDisabled === false, "First pending Office begin leaked paths/token or did not unlock submit", firstBegin);
+    await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
     const passedSubmission = await submitOfficeAcceptanceScenario(page, { decision: "passed", issues: [], doubleClick: true });
     const conditionIssue = { issue_id: "condition-1", severity: "condition", target_domain: "office_issue", category: "visual_alignment", description: "第三页表格对齐略有差异", expected_fix: "授权保留或返修" };
     const conditionedSubmission = await submitOfficeAcceptanceScenario(page, { decision: "passed_with_conditions", issues: [conditionIssue] });
@@ -869,6 +888,7 @@ async function main() {
       officeReviewUi: {
         review_id: "office-review-ui-1", document_revision: 4, document_sha256: "abcdef0123456789".repeat(4),
         status: "pending", decision: "pending", validity: "active", checklist: officeChecklist, reviewer_label: "王审核",
+        review_session_status: "ready",
         issues: [
           conditionIssue,
           blockingIssue,
@@ -934,6 +954,48 @@ async function main() {
     await page.evaluate(() => { window.confirm = window.__officeConfirmOriginal; delete window.__officeConfirmOriginal; });
     await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
     await page.screenshot({ path: path.join(outDir, "expert-team-office-review-drawer.png"), fullPage: false });
+    await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
+
+    await renderRun(page, "awaiting_review", {
+      run_id: "electron-office-abort-drift", officeReviewId: "office-abort-drift-1",
+      officeReviewUi: {
+        review_id: "office-abort-drift-1", document_revision: 5, document_sha256: "e".repeat(64),
+        status: "pending", decision: "pending", validity: "active", checklist: officeChecklist,
+        reviewer_label: "王审核", review_session_status: "ready", issues: [conditionIssue],
+      },
+    });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='result']");
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    await page.fill('body > [data-expert-team-office-drawer] [data-office-waiver-reason="condition-1"]', "授权人确认该细微对齐差异不影响正式使用。");
+    const waiverBeforeClose = await page.evaluate(() => {
+      window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: true, principal: { display_name: "迟到授权人", roles: ["waiver-authorizer"] } }];
+      return window.__officeWaiverCalls.length;
+    });
+    await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
+    await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
+    await page.waitForTimeout(1200);
+    const closeAbort = await page.evaluate((before) => ({ before, after: window.__officeWaiverCalls.length }), waiverBeforeClose);
+    assertState(closeAbort.after === closeAbort.before, "Closing the Office drawer allowed a stale authorizer handoff to create a waiver", closeAbort);
+
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-office-open]");
+    await page.locator("body > [data-expert-team-office-drawer] [data-office-checklist]").evaluateAll((items) => items.forEach((item) => { item.checked = true; item.dispatchEvent(new Event("change", { bubbles: true })); }));
+    await page.check('body > [data-expert-team-office-drawer] input[name="office-decision"][value="passed_with_conditions"]');
+    await page.fill("body > [data-expert-team-office-drawer] [data-office-note]", "已用 WPS 打开正式文档并逐页检查目录、表格和整体版式，草稿需保留。");
+    const driftBefore = await page.evaluate(() => {
+      window._activeExpertTeamStatusCard = { ...window._activeExpertTeamStatusCard, version: Number(window._activeExpertTeamStatusCard.version || 0) + 1 };
+      return window.__officeAcceptanceCalls.length;
+    });
+    await page.click("body > [data-expert-team-office-drawer] [data-office-submit]");
+    const driftBlocked = await page.evaluate((before) => {
+      const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+      return {
+        before, after: window.__officeAcceptanceCalls.length,
+        live: drawer?.querySelector("[data-office-live]")?.textContent || "",
+        note: drawer?.querySelector("[data-office-note]")?.value || "",
+        checked: drawer?.querySelectorAll("[data-office-checklist]:checked").length || 0,
+      };
+    }, driftBefore);
+    assertState(driftBlocked.after === driftBlocked.before && driftBlocked.live.includes("数据已更新") && driftBlocked.note.includes("草稿需保留") && driftBlocked.checked === 9, "Polling identity drift submitted stale Office acceptance or discarded the draft", driftBlocked);
     await page.evaluate(() => { const drawer = document.querySelector("body > [data-expert-team-office-drawer]"); if (drawer) closeExpertTeamOfficeDrawer(drawer.querySelector("[data-office-close]"), true); });
     await page.click("#expertTeamWorkspacePanel [data-expert-team-workspace-tab='task']");
 

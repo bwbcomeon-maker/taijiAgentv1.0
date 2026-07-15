@@ -13,6 +13,8 @@
   let mutationNonce=0;
   let activeIdentityLoginAttempt=null;
   let officeDrawerReturnFocus=null;
+  let officeAuthorizerAttempt=0;
+  let officeAuthorizerAbortController=null;
   const OFFICE_REQUIRED_CHECKS=['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','headers_footers_pagination','no_placeholders_or_workflow_text'];
   function officeMutationKey(card,kind){
     const uuid=(typeof crypto!=='undefined'&&crypto&&typeof crypto.randomUUID==='function')?crypto.randomUUID():`${Date.now().toString(36)}-${(++mutationNonce).toString(36)}`;
@@ -72,6 +74,10 @@
       readOnly:root.dataset.expertTeamReadOnly==='true'||active.readOnly===true,
     };
   }
+  function officeAuthoritativeIdentity(card){
+    const office=card&&card.officeReview&&typeof card.officeReview==='object'?card.officeReview:{};
+    return JSON.stringify({runId:String(card&&card.runId||''),version:Number(card&&card.version||0),reviewId:String(office.reviewId||''),issues:(office.issues||[]).map(item=>[String(item.issueId||''),String(item.severity||''),String(item.category||'')])});
+  }
   function officeDrawer(btn){return btn&&btn.closest?btn.closest('[data-expert-team-office-drawer]'):null;}
   function openExpertTeamOfficeDrawer(btn){
     const root=btn&&btn.closest?btn.closest('.expert-team-panel-inner'):null;
@@ -82,6 +88,7 @@
     drawer._expertTeamOfficePlaceholder=document.createComment('expert-team-office-drawer');
     drawer.parentNode.insertBefore(drawer._expertTeamOfficePlaceholder,drawer);
     Object.keys(root.dataset||{}).forEach(key=>{drawer.dataset[key]=root.dataset[key];});
+    drawer._expertTeamOfficeAuthoritativeIdentity=officeAuthoritativeIdentity((typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||activeExpertTeamCard(btn));
     document.body.appendChild(drawer);drawer.hidden=false;
     const main=document.getElementById('mainChat');if(main)main.inert=true;
     drawer._expertTeamOfficeBaseline=officeDrawerDraftState(drawer);
@@ -102,6 +109,11 @@
   function closeExpertTeamOfficeDrawer(btn,force){
     const drawer=officeDrawer(btn);if(!drawer)return false;
     if(!force&&officeDrawerIsDirty(drawer)&&typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('验收草稿尚未提交，确定关闭吗？'))return false;
+    abortExpertTeamOfficeAuthorizerHandoff();
+    const closingCard=activeExpertTeamCard(btn);
+    if(drawer.dataset.officeReviewSessionStatus==='ready'&&typeof api==='function'){
+      Promise.resolve(api('/api/docx-engine-v2/quality/wps-visual/begin',{method:'POST',body:JSON.stringify({session_id:closingCard.sourceSessionId,run_id:closingCard.runId,expected_version:Number(closingCard.version||0),action:'abandon'})})).catch(()=>{});
+    }
     drawer.hidden=true;const main=document.getElementById('mainChat');if(main)main.inert=false;
     const placeholder=drawer._expertTeamOfficePlaceholder;
     if(placeholder&&placeholder.parentNode)placeholder.parentNode.replaceChild(drawer,placeholder);else if(drawer.parentNode)drawer.parentNode.removeChild(drawer);
@@ -119,9 +131,28 @@
     if(!items.length)return false;const first=items[0],last=items[items.length-1];
     if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}return true;
   }
-  async function submitExpertTeamOfficeAcceptance(btn){
+  async function beginExpertTeamOfficeReview(btn){
     const drawer=officeDrawer(btn);const card=activeExpertTeamCard(btn);const live=drawer&&drawer.querySelector('[data-office-live]');
+    if(!drawer||btn.disabled)return false;btn.disabled=true;btn.setAttribute('aria-busy','true');
+    try{
+      const result=await api('/api/docx-engine-v2/quality/wps-visual/begin',{method:'POST',body:JSON.stringify({session_id:card.sourceSessionId,run_id:card.runId,expected_version:Number(card.version||0)})});
+      drawer.dataset.officeReviewSessionStatus='ready';const submit=drawer.querySelector('[data-office-submit]');if(submit){submit.disabled=false;submit.removeAttribute('aria-disabled');}
+      if(live)live.textContent=`已开始 ${String(result&&result.reviewer||'当前验收人')} 的可信复核，请上传本次证据并完成检查。`;
+      btn.hidden=true;return true;
+    }catch(error){if(live)live.textContent='可信复核启动失败：'+(error&&error.message||error)+'；当前草稿已保留。';return false;}
+    finally{btn.disabled=false;btn.removeAttribute('aria-busy');}
+  }
+  async function submitExpertTeamOfficeAcceptance(btn){
+    const drawer=officeDrawer(btn);let card=activeExpertTeamCard(btn);const live=drawer&&drawer.querySelector('[data-office-live]');
     if(!drawer||btn.disabled)return false;
+    const authoritative=(typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||{};
+    if(String(authoritative.runId||'')===String(card.runId||'')){
+      if(officeAuthoritativeIdentity(authoritative)!==String(drawer._expertTeamOfficeAuthoritativeIdentity||'')){
+        if(live)live.textContent='Office 验收数据已更新，请刷新后重新核对；当前草稿已保留。';
+        return false;
+      }
+      card={...card,...authoritative};
+    }
     const decision=String(drawer.querySelector('input[name="office-decision"]:checked')?.value||'');
     const checklist=Object.fromEntries(Array.from(drawer.querySelectorAll('[data-office-checklist]')).map(item=>[String(item.dataset.officeChecklist||''),item.checked?'passed':'not_checked']));
     const submission={identity:card.identityStatus||(typeof window!=='undefined'&&window._expertTeamIdentityStatus)||{},decision,checklist,issues:Array.isArray(card.officeReview&&card.officeReview.issues)?card.officeReview.issues:[],note:String(drawer.querySelector('[data-office-note]')?.value||'')};
@@ -158,20 +189,29 @@
     const reasonField=drawer&&drawer.querySelector(`[data-office-waiver-reason="${issueId.replace(/"/g,'\\"')}"]`);
     const reason=String(reasonField&&reasonField.value||'').trim();
     if(!reason){if(live)live.textContent='请先填写授权理由。';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
-    if(btn.disabled)return false;btn.disabled=true;
+    if(btn.disabled)return false;abortExpertTeamOfficeAuthorizerHandoff();const attempt=++officeAuthorizerAttempt;
+    officeAuthorizerAbortController=typeof AbortController!=='undefined'?new AbortController():null;const signal=officeAuthorizerAbortController&&officeAuthorizerAbortController.signal;btn.disabled=true;
     try{
-      const started=await api('/api/expert-teams/identity/start',{method:'POST',body:JSON.stringify({purpose:'authorizer_handoff',session_id:card.sourceSessionId,run_id:card.runId,redirect_uri:`${location.origin}/api/expert-teams/identity/callback`})});
+      const started=await api('/api/expert-teams/identity/start',{method:'POST',signal,body:JSON.stringify({purpose:'authorizer_handoff',session_id:card.sourceSessionId,run_id:card.runId,redirect_uri:`${location.origin}/api/expert-teams/identity/callback`})});
+      if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
       if(live)live.textContent='请在系统浏览器中切换为授权人账号，完成后返回此处。';
       if(typeof window!=='undefined'&&typeof window.open==='function')window.open(started.authorization_url,'_blank','noopener,noreferrer');
-      for(let attempt=0;attempt<120;attempt+=1){
-        await expertTeamIdentityDelay(1000);
-        const status=await api('/api/expert-teams/identity/status');
+      for(let pollIndex=0;pollIndex<120;pollIndex+=1){
+        await expertTeamIdentityDelay(1000,signal);
+        if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
+        const status=await api('/api/expert-teams/identity/status',{signal});
+        if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
         const flow=String(status&&status.identity_flow_status||status&&status.login_state||'');
         if(flow==='authorizer_same_as_reviewer'){if(live)live.textContent='仍是原验收人，请换账号重试';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
         if(['cancelled','expired','stale','failed'].includes(flow)){if(live)live.textContent=flow==='expired'?'授权登录已过期，请重试；问题草稿已保留。':'授权交接未完成，可重试或退回修改。';if(reasonField&&reasonField.focus)reasonField.focus();return false;}
         const roles=Array.isArray(status&&status.principal&&status.principal.roles)?status.principal.roles:[];
         if(status&&status.authenticated&&roles.includes('waiver-authorizer')){
-          const result=await api('/api/expert-teams/waivers/create',{method:'POST',body:JSON.stringify(officeWaiverMutationPayload(card,issueId,reason))});
+          const authoritative=(typeof window!=='undefined'&&window._activeExpertTeamStatusCard)||{};
+          if(String(authoritative.runId||'')===String(card.runId||'')&&officeAuthoritativeIdentity(authoritative)!==String(drawer._expertTeamOfficeAuthoritativeIdentity||'')){
+            if(live)live.textContent='Office 验收数据已更新，已停止旧授权请求；当前草稿已保留。';return false;
+          }
+          const result=await api('/api/expert-teams/waivers/create',{method:'POST',signal,body:JSON.stringify(officeWaiverMutationPayload(card,issueId,reason))});
+          if(attempt!==officeAuthorizerAttempt||signal&&signal.aborted)return false;
           if(result&&result.run)applyExpertTeamActionResponse(result);
           if(live)live.textContent='该 Office 条件已由授权人完成逐项授权。';
           return true;
@@ -181,7 +221,12 @@
       return false;
     }
     catch(error){const code=String(error&&error.payload&&error.payload.code||'');if(live)live.textContent=code==='authorizer_same_as_reviewer'?'仍是原验收人，请换账号重试':'授权人交接失败，可重试或退回修改。';return false;}
-    finally{btn.disabled=false;}
+    finally{if(attempt===officeAuthorizerAttempt){officeAuthorizerAbortController=null;btn.disabled=false;}}
+  }
+  function abortExpertTeamOfficeAuthorizerHandoff(){
+    officeAuthorizerAttempt+=1;
+    if(officeAuthorizerAbortController&&typeof officeAuthorizerAbortController.abort==='function')officeAuthorizerAbortController.abort();
+    officeAuthorizerAbortController=null;
   }
   function mutationIdempotencyKey(base,card,action){
     if(action==='retry_cancel'&&card.cancelRequestId)return String(card.cancelRequestId);
@@ -812,9 +857,11 @@
     window.openExpertTeamOfficeDrawer=openExpertTeamOfficeDrawer;
     window.closeExpertTeamOfficeDrawer=closeExpertTeamOfficeDrawer;
     window.handleExpertTeamOfficeDrawerKeydown=handleExpertTeamOfficeDrawerKeydown;
+    window.beginExpertTeamOfficeReview=beginExpertTeamOfficeReview;
     window.submitExpertTeamOfficeAcceptance=submitExpertTeamOfficeAcceptance;
     window.submitExpertTeamOfficeRevision=submitExpertTeamOfficeRevision;
     window.startExpertTeamOfficeAuthorizerHandoff=startExpertTeamOfficeAuthorizerHandoff;
+    window.abortExpertTeamOfficeAuthorizerHandoff=abortExpertTeamOfficeAuthorizerHandoff;
     window.normalizeExpertTeamWorkspaceTab=normalizeExpertTeamWorkspaceTab;
     window.selectExpertTeamStageInputChoice=function(btn){
       const root=btn&&btn.closest&&btn.closest('.expert-team-stage-input-card');

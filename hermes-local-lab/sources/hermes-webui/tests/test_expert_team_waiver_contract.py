@@ -224,6 +224,30 @@ def test_runtime_attaches_current_office_view_without_secret_evidence(tmp_path):
     assert "/secret/page.png" not in json.dumps(projected)
 
 
+def test_runtime_projects_safe_pending_office_review_before_first_acceptance(tmp_path):
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+    from api.expert_teams.runtime import _attach_office_review_view
+
+    root = canonical_attempt_root(tmp_path, "run-pending", "delivery", 1)
+    root.mkdir(parents=True)
+    binding = {
+        "schema_version": "expert-office-binding/v1", "run_id": "run-pending", "session_id": "sid-pending",
+        "attempt": 1, "document_revision": 3, "document_sha256": "f" * 64,
+        "delivery_binding_sha256": "b" * 64, "canonical_artifact": {"sha256": "c" * 64},
+    }
+    binding_path = root / "expert-team-delivery.json"
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+    run = {
+        "run_id": "run-pending", "session_id": "sid-pending",
+        "current_delivery_manifest_ref": {"delivery_attempt": 1, "delivery_binding_path": str(binding_path.relative_to(tmp_path))},
+    }
+    projected = _attach_office_review_view(tmp_path, run)
+    office = projected["office_review_view"]
+    assert office["status"] == "pending" and office["review_session_status"] == "begin_required"
+    assert len(office["checklist"]) == 9 and office["issues"] == []
+    assert "token" not in json.dumps(office).lower() and str(tmp_path) not in json.dumps(office)
+
+
 def test_office_policy_requires_complete_versioned_checklist_and_derives_severity():
     from api.expert_teams.office_review import OFFICE_POLICY_V1, build_office_acceptance
 
@@ -316,6 +340,11 @@ def test_office_revision_mutation_invalidates_current_attempt_without_consuming_
     assert updated["workflow_state"] == "delivery_validation_required"
     assert updated["current_delivery_manifest_ref"] is None
     assert read_run(tmp_path, run["run_id"])["current_delivery_manifest_ref"] is None
+    replayed, replay_run = create_current_office_revision_request(
+        tmp_path, body, now="2026-07-15T12:59:00+08:00"
+    )
+    assert replayed == request and replayed["created_at"] == "2026-07-15T12:40:00+08:00"
+    assert replay_run["version"] == updated["version"]
     with pytest.raises(ValueError, match="free text"):
         create_current_office_revision_request(
             tmp_path, {**body, "feedback": "把这句话直接塞回模型"}, now="2026-07-15T12:41:00+08:00"

@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Hardened the enterprise Office review lifecycle with an expiring bounded review-session registry, safe first-review begin flow, idempotent acceptance and revision mutations, authoritative delivery-manifest validation, cancellable authorizer handoff, and stale-poll submission guards.
 - Fixed the structured Office drawer's primary submission so it validates all three decisions, posts only safe fields to the existing WPS visual endpoint, prevents duplicate clicks, and preserves dirty drafts on token expiry.
 - Persisted image-analysis errors now rebuild their in-memory recovery action after a session reload, so "Retry image analysis" and "Open image configuration" remain visible without storing attachment paths in browser storage.
 - Browser image turns now use one fail-closed preparation path in both Legacy and Gateway chat. Text-only main models receive successful auxiliary-vision descriptions, native vision models keep image parts, and any image failure stops the main-model request instead of silently answering without visual context.

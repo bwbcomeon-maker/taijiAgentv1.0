@@ -784,6 +784,30 @@ def test_structured_office_route_resolves_reviewer_and_reuses_wps_record_endpoin
     assert captured == {"payload": body, "workspace": tmp_path.resolve(), "principal": principal}
 
 
+def test_structured_office_begin_derives_delivery_and_never_returns_token_or_paths(monkeypatch, tmp_path):
+    from api.expert_teams import storage, trusted_identity
+
+    routes = _patch_route_json(monkeypatch, tmp_path)
+    run = {"run_id": "run-begin", "session_id": "sid-begin", "version": 4, "current_delivery_manifest_ref": {"delivery_attempt": 2}}
+    monkeypatch.setattr(storage, "read_run", lambda _workspace, _run_id: run)
+    monkeypatch.setattr(routes, "_docx_engine_v2_session_and_workspace", lambda _body: (object(), tmp_path.resolve()))
+    monkeypatch.setattr(routes, "_expert_identity_session", lambda _handler: "identity-session")
+    principal = {"subject": "reviewer-sub", "roles": ["document-reviewer"]}
+    monkeypatch.setattr(trusted_identity, "resolve_trusted_principal", lambda *_args: principal)
+    captured = {}
+
+    def fake_begin(payload, workspace, *, trusted_principal=None):
+        captured.update(payload=payload, workspace=workspace, principal=trusted_principal)
+        return {"ok": True, "review_token": "SECRET", "evidence_dir": "/secret/evidence", "document_path": "/secret/document.docx", "reviewer": "王审核", "opened_at": "now", "expires_at_ns": 99, "document_sha256": "f" * 64}, 200
+
+    monkeypatch.setattr(routes.docx_engine_v2, "begin_office_review", fake_begin)
+    result = routes._handle_docx_engine_v2_begin_office_review(object(), {"session_id": "sid-begin", "run_id": "run-begin", "expected_version": 4})
+    assert result["status"] == 200 and result["payload"]["review_session_status"] == "ready"
+    assert set(result["payload"]).isdisjoint({"review_token", "evidence_dir", "document_path"})
+    assert captured["payload"]["delivery_dir"].endswith("run-begin/delivery/attempt-2/delivery")
+    assert captured["principal"] == principal
+
+
 def test_docx_engine_v2_wps_visual_cli_validation_failure_returns_400(monkeypatch, tmp_path):
     from api import docx_engine_v2
     import json
@@ -1020,3 +1044,49 @@ def test_structured_office_submission_derives_token_and_paths_server_side(monkey
     assert expanded["evidence_files"] == [str(evidence_dir / "page-1.png")]
     assert expanded["attested_actual_office_review"] is True
     assert set(incoming).isdisjoint({"reviewer", "principal", "role", "review_token", "delivery_dir", "document_path", "evidence_files"})
+
+
+def test_structured_office_acceptance_replays_after_token_consumed_and_conflicts_stably(monkeypatch, tmp_path):
+    import json
+    from api import docx_engine_v2
+    from api.expert_teams import storage
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+
+    run = {"run_id": "run-replay", "session_id": "sid-replay", "version": 7, "current_delivery_manifest_ref": {"delivery_attempt": 1}}
+    monkeypatch.setattr(storage, "read_run", lambda _workspace, _run_id: run)
+    incoming = {
+        "session_id": "sid-replay", "run_id": "run-replay", "expected_version": 7, "status": "passed",
+        "checklist": {}, "issues": [], "note": "已用 WPS 打开并逐页检查目录和版式。", "idempotency_key": "acceptance-replay-1",
+    }
+    root = canonical_attempt_root(tmp_path, "run-replay", "delivery", 1)
+    root.mkdir(parents=True)
+    acceptance = {
+        "schema_version": "office-acceptance/v2", "decision": "passed",
+        "reviewer": {"principal_id": "reviewer-sub"},
+        "request": {"idempotency_key": incoming["idempotency_key"], "fingerprint": docx_engine_v2._structured_office_request_fingerprint(incoming)},
+    }
+    (root / "expert-team-wps-acceptance.json").write_text(json.dumps(acceptance), encoding="utf-8")
+    replay, status = docx_engine_v2._structured_office_acceptance_replay(incoming, tmp_path)
+    assert status == 200 and replay["idempotent_replay"] is True and replay["acceptance"] == acceptance
+    conflict, conflict_status = docx_engine_v2._structured_office_acceptance_replay({**incoming, "note": "不同请求内容"}, tmp_path)
+    assert conflict_status == 409 and conflict["code"] == "office_acceptance_idempotency_conflict"
+
+
+def test_active_office_review_registry_prunes_capacity_expiry_and_abandon(monkeypatch, tmp_path):
+    from api import docx_engine_v2
+
+    docx_engine_v2._ACTIVE_OFFICE_REVIEW_TOKENS.clear()
+    clock = {"now": 1_000}
+    monkeypatch.setattr(docx_engine_v2.time, "time_ns", lambda: clock["now"])
+    monkeypatch.setattr(docx_engine_v2, "_ACTIVE_OFFICE_REVIEW_TOKEN_CAPACITY", 2)
+    runs = [{"session_id": "sid", "run_id": f"run-{index}"} for index in range(3)]
+    for index, run in enumerate(runs):
+        clock["now"] += 1
+        docx_engine_v2._remember_active_office_review_token(tmp_path, run, f"token-{index}", expires_at_ns=2_000)
+    assert docx_engine_v2.active_office_review_session_status(tmp_path, runs[0]) == "begin_required"
+    assert docx_engine_v2.active_office_review_session_status(tmp_path, runs[2]) == "ready"
+    docx_engine_v2.abandon_active_office_review(tmp_path, runs[2])
+    assert docx_engine_v2.active_office_review_session_status(tmp_path, runs[2]) == "begin_required"
+    clock["now"] = 2_001
+    assert docx_engine_v2.active_office_review_session_status(tmp_path, runs[1]) == "begin_required"
+    assert docx_engine_v2._ACTIVE_OFFICE_REVIEW_TOKENS == {}

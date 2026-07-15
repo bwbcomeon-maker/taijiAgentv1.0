@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,10 @@ class _ExpertDeliveryImmutable(DocxEngineV2Error):
     pass
 
 
-_ACTIVE_OFFICE_REVIEW_TOKENS: dict[tuple[str, str, str], str] = {}
+_ACTIVE_OFFICE_REVIEW_TOKENS: dict[tuple[str, str, str], dict[str, Any]] = {}
 _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK = threading.RLock()
+_ACTIVE_OFFICE_REVIEW_TOKEN_TTL_NS = 15 * 60 * 1_000_000_000
+_ACTIVE_OFFICE_REVIEW_TOKEN_CAPACITY = 128
 
 
 def _office_review_token_key(workspace: Path, run: dict) -> tuple[str, str, str]:
@@ -31,18 +34,56 @@ def _office_review_token_key(workspace: Path, run: dict) -> tuple[str, str, str]
     )
 
 
-def _remember_active_office_review_token(workspace: Path, run: dict, token: str) -> None:
+def _current_office_delivery_attempt(run: dict) -> int:
+    ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
+    attempt = int(ref.get("delivery_attempt") or 0)
+    if attempt:
+        return attempt
+    attempts = [int(item.get("attempt") or 0) for item in run.get("artifacts") or [] if isinstance(item, dict) and item.get("stage") == "delivery" and item.get("kind") == "delivery_package"]
+    return max(attempts, default=0)
+
+
+def _prune_active_office_review_tokens_locked(now_ns: int) -> None:
+    expired = [key for key, item in _ACTIVE_OFFICE_REVIEW_TOKENS.items() if int(item.get("expires_at_ns") or 0) <= now_ns]
+    for key in expired:
+        _ACTIVE_OFFICE_REVIEW_TOKENS.pop(key, None)
+    overflow = len(_ACTIVE_OFFICE_REVIEW_TOKENS) - _ACTIVE_OFFICE_REVIEW_TOKEN_CAPACITY
+    if overflow > 0:
+        oldest = sorted(_ACTIVE_OFFICE_REVIEW_TOKENS, key=lambda key: int(_ACTIVE_OFFICE_REVIEW_TOKENS[key].get("created_at_ns") or 0))
+        for key in oldest[:overflow]:
+            _ACTIVE_OFFICE_REVIEW_TOKENS.pop(key, None)
+
+
+def _remember_active_office_review_token(workspace: Path, run: dict, token: str, *, expires_at_ns: int | None = None) -> None:
     key = _office_review_token_key(workspace, run)
     if not all(key) or not str(token or "").strip():
         raise ValueError("active Office review identity is incomplete")
+    now_ns = time.time_ns()
     with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
-        _ACTIVE_OFFICE_REVIEW_TOKENS[key] = str(token).strip()
+        _prune_active_office_review_tokens_locked(now_ns)
+        _ACTIVE_OFFICE_REVIEW_TOKENS[key] = {
+            "token": str(token).strip(), "created_at_ns": now_ns,
+            "expires_at_ns": int(expires_at_ns or now_ns + _ACTIVE_OFFICE_REVIEW_TOKEN_TTL_NS),
+        }
+        _prune_active_office_review_tokens_locked(now_ns)
 
 
 def _forget_active_office_review_token(key: tuple[str, str, str] | None) -> None:
     if key:
         with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
             _ACTIVE_OFFICE_REVIEW_TOKENS.pop(key, None)
+
+
+def abandon_active_office_review(workspace: Path, run: dict) -> None:
+    _forget_active_office_review_token(_office_review_token_key(workspace, run))
+
+
+def active_office_review_session_status(workspace: Path, run: dict) -> str:
+    key = _office_review_token_key(workspace, run)
+    now_ns = time.time_ns()
+    with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
+        _prune_active_office_review_tokens_locked(now_ns)
+        return "ready" if key in _ACTIVE_OFFICE_REVIEW_TOKENS else "begin_required"
 
 
 def _expand_structured_office_submission(
@@ -65,6 +106,10 @@ def _expand_structured_office_submission(
     if "document-reviewer" not in (principal.get("roles") or []):
         raise ValueError("trusted document reviewer is required")
     root = Path(workspace).expanduser().resolve()
+    idempotency_key = _first_text(payload, "idempotency_key")
+    if not re.fullmatch(r"[A-Za-z0-9:._-]{8,240}", idempotency_key):
+        raise ValueError("Office acceptance idempotency_key is invalid")
+    request_fingerprint = _structured_office_request_fingerprint(payload)
     session_id = _first_text(payload, "session_id")
     run_id = _first_text(payload, "run_id")
     run = read_run(root, run_id)
@@ -72,15 +117,15 @@ def _expand_structured_office_submission(
         raise ValueError("structured Office submission session does not match run")
     if int(payload.get("expected_version") or -1) != int(run.get("version") or 0):
         raise ValueError("structured Office submission version conflict")
-    ref = run.get("current_delivery_manifest_ref") if isinstance(run.get("current_delivery_manifest_ref"), dict) else {}
-    attempt = int(ref.get("delivery_attempt") or 0)
+    attempt = _current_office_delivery_attempt(run)
     if attempt < 1:
         raise ValueError("structured Office submission has no current delivery")
     key = _office_review_token_key(root, run)
     with _ACTIVE_OFFICE_REVIEW_TOKENS_LOCK:
-        token = str(_ACTIVE_OFFICE_REVIEW_TOKENS.get(key) or "")
+        _prune_active_office_review_tokens_locked(time.time_ns())
+        token = str((_ACTIVE_OFFICE_REVIEW_TOKENS.get(key) or {}).get("token") or "")
     if not token:
-        raise ValueError("active Office review token is required")
+        raise ValueError("rebegin_required: active Office review session is missing or expired")
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     evidence_dir = root / ".taiji" / "wps-evidence" / token_hash
     evidence_files = sorted(
@@ -111,7 +156,40 @@ def _expand_structured_office_submission(
         "review_token": token,
         "evidence_files": evidence_files,
         "attested_actual_office_review": True,
+        "idempotency_key": idempotency_key,
+        "request_fingerprint": request_fingerprint,
     }
+
+
+def _structured_office_request_fingerprint(payload: dict) -> str:
+    import hashlib
+    identity = {key: payload.get(key) for key in ("session_id", "run_id", "expected_version", "status", "checklist", "issues", "note")}
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _structured_office_acceptance_replay(payload: dict, workspace: Path) -> tuple[dict[str, Any], int] | None:
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+    from api.expert_teams.office_review import OFFICE_ACCEPTANCE_NAME
+    from api.expert_teams.storage import read_run
+    key = _first_text(payload, "idempotency_key")
+    if not re.fullmatch(r"[A-Za-z0-9:._-]{8,240}", key):
+        return _error_payload("office_acceptance_idempotency_invalid", "Office acceptance idempotency_key is invalid"), 400
+    run = read_run(workspace, _first_text(payload, "run_id"))
+    attempt = _current_office_delivery_attempt(run)
+    path = canonical_attempt_root(workspace, str(run.get("run_id") or ""), "delivery", attempt) / OFFICE_ACCEPTANCE_NAME
+    if not path.is_file():
+        return None
+    acceptance = json.loads(path.read_text(encoding="utf-8"))
+    request = acceptance.get("request") if isinstance(acceptance.get("request"), dict) else {}
+    if str(request.get("idempotency_key") or "") != key:
+        return _error_payload("office_acceptance_idempotency_conflict", "Office acceptance already exists for another request"), 409
+    if str(request.get("fingerprint") or "") != _structured_office_request_fingerprint(payload):
+        return _error_payload("office_acceptance_idempotency_conflict", "Office acceptance idempotency key was reused with different input"), 409
+    return {
+        "ok": True, "office_status": str(acceptance.get("decision") or ""), "acceptance": acceptance,
+        "acceptance_manifest_path": str(path.relative_to(Path(workspace).resolve())),
+        "reviewer": str((acceptance.get("reviewer") or {}).get("principal_id") or ""), "idempotent_replay": True,
+    }, 200
 
 
 def engine_root() -> Path:
@@ -498,6 +576,7 @@ def begin_office_review(
                 root,
                 {"run_id": identity["run_id"], "session_id": binding["session_id"]},
                 token,
+                expires_at_ns=int(state.get("expires_at_ns") or 0),
             )
     except _ExpertDeliveryImmutable as exc:
         return _error_payload("expert_delivery_immutable", str(exc)), 409
@@ -525,6 +604,12 @@ def record_wps_visual_acceptance(
     workspace = Path(workspace).expanduser().resolve()
     structured_token_key = None
     if _first_text(payload, "run_id") and not _first_text(payload, "delivery_dir", "deliveryDir"):
+        try:
+            replay = _structured_office_acceptance_replay(payload, workspace)
+            if replay is not None:
+                return replay
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+            return _error_payload("office_acceptance_idempotency_invalid", str(exc)), 400
         structured_token_key = (str(workspace), _first_text(payload, "session_id"), _first_text(payload, "run_id"))
         try:
             payload = _expand_structured_office_submission(
@@ -746,6 +831,8 @@ def record_wps_visual_acceptance(
                     evidence=canonical_evidence,
                     note=note,
                     now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                    idempotency_key=_first_text(payload, "idempotency_key"),
+                    request_fingerprint=_first_text(payload, "request_fingerprint"),
                 )
                 manifest_path, _manifest = write_office_acceptance(workspace, office_binding, acceptance)
                 consumed_state = prepare_consumed_review_state(
@@ -943,7 +1030,12 @@ def _validate_expert_wps_run_binding(
     binding: dict,
     supplied_session_id: str,
 ) -> None:
-    from api.expert_teams.delivery_integrity import DeliveryIntegrityError
+    from api.expert_teams.delivery_integrity import (
+        DeliveryIntegrityError,
+        binding_manifest_path,
+        classify_delivery_binding,
+        sha256_file,
+    )
     from api.expert_teams.storage import read_run
 
     run = read_run(workspace, str(binding.get("run_id") or ""))
@@ -973,6 +1065,68 @@ def _validate_expert_wps_run_binding(
             raise DeliveryIntegrityError("expert-team current stage does not match the delivery binding")
     except (TypeError, ValueError) as exc:
         raise DeliveryIntegrityError("expert-team authoritative stage is corrupt") from exc
+    if classify_delivery_binding(binding) == "enterprise_pre_office":
+        ref = (
+            run.get("current_delivery_manifest_ref")
+            if isinstance(run.get("current_delivery_manifest_ref"), dict)
+            else {}
+        )
+        try:
+            delivery_attempt = int(binding.get("delivery_attempt") or 0)
+            if (
+                not ref
+                or delivery_attempt < 1
+                or int(ref.get("delivery_attempt") or 0) != delivery_attempt
+                or int(ref.get("stage_attempt") or 0) < 1
+                or not str(ref.get("artifact_id") or "")
+                or not str(ref.get("sha256") or "")
+                or not str(ref.get("delivery_binding_path") or "")
+                or not str(ref.get("delivery_binding_sha256") or "")
+            ):
+                raise DeliveryIntegrityError("expert-team delivery manifest authority is missing or stale")
+        except (TypeError, ValueError) as exc:
+            raise DeliveryIntegrityError("expert-team delivery manifest authority is corrupt") from exc
+        binding_path = workspace / str(ref["delivery_binding_path"])
+        try:
+            binding_path.resolve().relative_to(workspace.resolve())
+        except (OSError, ValueError) as exc:
+            raise DeliveryIntegrityError("expert-team delivery manifest path escapes the workspace") from exc
+        expected_binding_path = binding_manifest_path(
+            workspace,
+            str(binding.get("run_id") or ""),
+            str(binding.get("stage_id") or ""),
+            delivery_attempt,
+        )
+        if (
+            binding_path.resolve() != expected_binding_path.resolve()
+            or not binding_path.is_file()
+            or sha256_file(binding_path) != str(ref["delivery_binding_sha256"])
+        ):
+            raise DeliveryIntegrityError("expert-team delivery manifest binding is missing or stale")
+        artifacts = [
+            item
+            for item in run.get("stage_artifacts") or []
+            if isinstance(item, dict)
+            and item.get("artifact_type") == "delivery_manifest"
+            and item.get("artifact_id") == ref["artifact_id"]
+        ]
+        if not artifacts:
+            raise DeliveryIntegrityError("expert-team delivery manifest artifact is missing")
+        artifact = artifacts[-1]
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        try:
+            if (
+                str(artifact.get("sha256") or "") != str(ref["sha256"])
+                or int(artifact.get("stage_attempt") or 0) != int(ref["stage_attempt"])
+                or int(payload.get("delivery_attempt") or 0) != delivery_attempt
+                or str(payload.get("delivery_binding_path") or "") != str(ref["delivery_binding_path"])
+                or str(payload.get("delivery_binding_sha256") or "") != str(ref["delivery_binding_sha256"])
+                or payload.get("office_review_required") is not True
+            ):
+                raise DeliveryIntegrityError("expert-team delivery manifest artifact is stale")
+        except (TypeError, ValueError) as exc:
+            raise DeliveryIntegrityError("expert-team delivery manifest artifact is corrupt") from exc
+        return
     outputs = [
         item
         for item in run.get("stage_outputs") or []
