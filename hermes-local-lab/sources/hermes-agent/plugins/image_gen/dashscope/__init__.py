@@ -25,9 +25,14 @@ from plugins.image_gen.domestic_common import (
     save_url_image,
     validate_prompt,
 )
+from tools.url_safety import is_safe_url
 
 DEFAULT_MODEL = "qwen-image-2.0-pro"
 TIMEOUT_SECONDS = 180
+
+
+def _post_without_redirects(url: str, **kwargs: Any):
+    return requests.post(url, allow_redirects=False, **kwargs)
 
 
 def _load_options() -> dict[str, Any]:
@@ -161,7 +166,18 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         aspect = normalized_aspect(aspect_ratio)
-        model = self._model(kwargs.get("model"))
+        requested_model = str(kwargs.get("model") or "").strip()
+        try:
+            model = self._model(requested_model)
+        except ValueError:
+            return error_response(
+                error="Unsupported DashScope image model.",
+                error_type="invalid_argument",
+                provider=self.name,
+                model=requested_model,
+                prompt=str(prompt or "").strip(),
+                aspect_ratio=aspect,
+            )
         prompt, prompt_error = validate_prompt(prompt, provider=self.name, model=model, aspect_ratio=aspect)
         if prompt_error:
             return prompt_error
@@ -177,6 +193,29 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             return auth_error(missing=missing, provider=self.name, model=model, prompt=prompt, aspect_ratio=aspect)
 
         api_key = env_value("DASHSCOPE_API_KEY")
+        try:
+            endpoint = self._endpoint()
+        except ValueError:
+            return error_response(
+                error="DashScope endpoint configuration is invalid.",
+                error_type="endpoint_invalid",
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+        if endpoint_mode.strip().lower() == "custom" and not is_safe_url(endpoint):
+            # This is the repository-standard DNS preflight. It cannot pin the
+            # connection's DNS answer; disabling redirects below closes the
+            # redirect hop, but the documented DNS-rebinding window remains.
+            return error_response(
+                error="DashScope custom endpoint failed URL safety validation.",
+                error_type="endpoint_invalid",
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         payload = {
             "model": model,
             "input": {
@@ -192,7 +231,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             },
         }
         body, error = post_json(
-            url=self._endpoint(),
+            url=endpoint,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             payload=payload,
             timeout=TIMEOUT_SECONDS,
@@ -201,7 +240,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             secrets=(api_key, _option_value("workspace_id", "DASHSCOPE_WORKSPACE_ID")),
-            request_post=requests.post,
+            request_post=_post_without_redirects,
         )
         if error:
             return error

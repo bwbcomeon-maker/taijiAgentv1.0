@@ -33,11 +33,13 @@ def validate_https_url(value: str | None) -> str:
     try:
         parsed = urlparse(candidate)
         hostname = (parsed.hostname or "").rstrip(".").lower()
-        _ = parsed.port
+        port = parsed.port
     except ValueError as exc:
         raise ValueError("Custom Alibaba endpoint contains an invalid host or port") from exc
     if parsed.scheme.lower() != "https" or not hostname:
         raise ValueError("Custom Alibaba endpoint must be an absolute HTTPS URL")
+    if port is not None and port < 1:
+        raise ValueError("Custom Alibaba endpoint port must be between 1 and 65535")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Custom Alibaba endpoint must not contain userinfo")
     if parsed.query or parsed.fragment or parsed.params:
@@ -64,7 +66,9 @@ def validate_https_url(value: str | None) -> str:
     if address and not address.is_global:
         raise ValueError("Custom Alibaba endpoint must not use a non-public IP address")
     normalized_path = parsed.path.rstrip("/")
-    return urlunparse(("https", parsed.netloc, normalized_path, "", "", ""))
+    canonical_host = f"[{hostname}]" if ":" in hostname else hostname
+    canonical_netloc = canonical_host if port in {None, 443} else f"{canonical_host}:{port}"
+    return urlunparse(("https", canonical_netloc, normalized_path, "", "", ""))
 
 
 def validate_workspace_prefix(value: str | None) -> str:

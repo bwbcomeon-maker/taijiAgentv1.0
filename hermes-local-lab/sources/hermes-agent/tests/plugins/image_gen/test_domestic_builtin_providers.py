@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -147,6 +148,18 @@ class TestDashScopeQwenImageProvider:
         with pytest.raises(ValueError, match="Unsupported DashScope image model"):
             DashScopeQwenImageProvider()._model("unknown-model")
 
+    def test_unknown_model_returns_structured_error_from_public_generate(self):
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        result = DashScopeQwenImageProvider().generate(
+            "A city skyline", model="unknown-model"
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_argument"
+        assert result["provider"] == "dashscope"
+        assert result["model"] == "unknown-model"
+
     def test_custom_endpoint_accepts_full_generation_url(self, monkeypatch):
         monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
         monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
@@ -162,20 +175,75 @@ class TestDashScopeQwenImageProvider:
             "https://gateway.example.com/api/v1/services/aigc/multimodal-generation/generation"
         )
 
-    def test_custom_endpoint_with_bad_port_is_unavailable_and_never_requested(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "base_url",
+        ["https://gateway.example.com:not-a-port", "https://gateway.example.com:0"],
+    )
+    def test_custom_endpoint_with_bad_port_is_unavailable_and_never_requested(
+        self, monkeypatch, base_url
+    ):
         monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
         monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
-        monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://gateway.example.com:not-a-port")
+        monkeypatch.setenv("DASHSCOPE_BASE_URL", base_url)
         from plugins.image_gen.dashscope import DashScopeQwenImageProvider
 
         provider = DashScopeQwenImageProvider()
         assert provider.is_available() is False
-        with (
-            patch("plugins.image_gen.dashscope.requests.post") as mock_post,
-            pytest.raises(ValueError, match="port"),
-        ):
-            provider.generate("A city skyline")
+        with patch("plugins.image_gen.dashscope.requests.post") as mock_post:
+            result = provider.generate("A city skyline")
+        assert result["success"] is False
+        assert result["error_type"] == "endpoint_invalid"
         mock_post.assert_not_called()
+
+    @pytest.mark.parametrize("hostname", ["localtest.me", "127.0.0.1.nip.io"])
+    def test_custom_endpoint_resolving_to_loopback_is_rejected_before_request(
+        self, monkeypatch, hostname
+    ):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+        monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
+        monkeypatch.setenv("DASHSCOPE_BASE_URL", f"https://{hostname}")
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))
+            ],
+        )
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        provider = DashScopeQwenImageProvider()
+        assert provider.is_available() is True
+        with patch("plugins.image_gen.dashscope.requests.post") as mock_post:
+            result = provider.generate("A city skyline")
+
+        assert result["success"] is False
+        assert result["error_type"] == "endpoint_invalid"
+        mock_post.assert_not_called()
+
+    def test_custom_public_endpoint_disables_redirects(self, monkeypatch):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+        monkeypatch.setenv("DASHSCOPE_ENDPOINT_MODE", "custom")
+        monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://public.example")
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))
+            ],
+        )
+        from plugins.image_gen.dashscope import DashScopeQwenImageProvider
+
+        with (
+            patch(
+                "plugins.image_gen.dashscope.requests.post",
+                return_value=_response({"output": {"image": "https://dashscope/result.png"}}),
+            ) as mock_post,
+            patch("plugins.image_gen.dashscope.save_url_image", return_value=Path("/tmp/result.png")),
+        ):
+            result = DashScopeQwenImageProvider().generate("A city skyline")
+
+        assert result["success"] is True
+        assert mock_post.call_args.kwargs["allow_redirects"] is False
 
     @pytest.mark.parametrize(
         ("values", "available"),

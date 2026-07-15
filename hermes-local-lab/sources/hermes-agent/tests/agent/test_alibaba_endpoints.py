@@ -78,10 +78,27 @@ def test_https_url_rejects_invalid_ports(url):
         validate_https_url(url)
 
 
+def test_https_url_rejects_port_zero():
+    with pytest.raises(ValueError, match="port"):
+        validate_https_url("https://gateway.example.com:0")
+
+
 def test_https_url_accepts_numeric_port():
     assert validate_https_url(
         "https://gateway.example.com:8443"
     ) == "https://gateway.example.com:8443"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("HTTPS://Gateway.Example.COM.:443/", "https://gateway.example.com"),
+        ("https://Gateway.Example.COM.:8443/", "https://gateway.example.com:8443"),
+        ("https://[2001:4860:4860::8888]:443/", "https://[2001:4860:4860::8888]"),
+    ],
+)
+def test_https_url_canonicalizes_equivalent_authorities(url, expected):
+    assert validate_https_url(url) == expected
 
 
 def test_workspace_prefix_allows_safe_dns_prefixes():
