@@ -368,6 +368,8 @@ def test_vision_test_route_is_registered():
     routes_source = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
     assert 'parsed.path == "/api/vision/test"' in routes_source
     assert "test_vision_config" in routes_source
+    assert 'parsed.path == "/api/image-gen/test"' in routes_source
+    assert "test_image_gen_config" in routes_source
 
 
 def test_image_generation_advanced_actions_are_outside_primary_card():

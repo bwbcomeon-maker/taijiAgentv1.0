@@ -43,6 +43,53 @@ def test_readiness_reports_configured_but_unavailable_without_provider_auth(monk
     assert "Codex" not in status["public_message"]
 
 
+def test_provider_availability_allows_probe_but_not_public_ready_before_verification(monkeypatch):
+    from tools import image_generation_tool as image_tool
+
+    monkeypatch.setattr(
+        image_tool,
+        "_load_image_gen_config",
+        lambda: {"provider": "dashscope", "model": "qwen-image-2.0-pro"},
+    )
+    monkeypatch.setattr(image_tool, "_read_image_gen_verification_status", lambda *_: "configured_unverified", raising=False)
+
+    class _Provider:
+        name = "dashscope"
+
+        def is_available(self):
+            return True
+
+    monkeypatch.setattr(image_tool, "_iter_image_generation_providers", lambda: [_Provider()])
+
+    status = image_tool.get_image_generation_readiness()
+
+    assert status["configured"] is True
+    assert status["available"] is False
+    assert status["reason_code"] == "verification_required"
+    assert status["verification_status"] == "configured_unverified"
+
+
+def test_verified_provider_is_publicly_ready(monkeypatch):
+    from tools import image_generation_tool as image_tool
+
+    monkeypatch.setattr(image_tool, "_load_image_gen_config", lambda: {"provider": "dashscope", "model": "qwen-image"})
+    monkeypatch.setattr(image_tool, "_read_image_gen_verification_status", lambda *_: "verified", raising=False)
+
+    class _Provider:
+        name = "dashscope"
+
+        def is_available(self):
+            return True
+
+    monkeypatch.setattr(image_tool, "_iter_image_generation_providers", lambda: [_Provider()])
+
+    status = image_tool.get_image_generation_readiness()
+
+    assert status["available"] is True
+    assert status["reason_code"] == "ready"
+    assert status["verification_status"] == "verified"
+
+
 def test_readiness_supports_configured_custom_image_provider(monkeypatch):
     from tools import image_generation_tool as image_tool
     from agent.custom_image_providers import ConfigurableOpenAIImageProvider
@@ -66,6 +113,11 @@ def test_readiness_supports_configured_custom_image_provider(monkeypatch):
         "_iter_image_generation_providers",
         lambda: [ConfigurableOpenAIImageProvider(entry)],
         raising=False,
+    )
+    monkeypatch.setattr(
+        image_tool,
+        "_read_image_gen_verification_status",
+        lambda *_: "verified",
     )
     monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)
 

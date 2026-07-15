@@ -11275,6 +11275,11 @@ def handle_post(handler, parsed) -> bool:
 
         return j(handler, test_vision_config())
 
+    if parsed.path == "/api/image-gen/test":
+        from api.model_config import test_image_gen_config
+
+        return j(handler, test_image_gen_config())
+
     if parsed.path == "/api/image-gen/custom-providers":
         from api.model_config import set_custom_image_provider_config
 

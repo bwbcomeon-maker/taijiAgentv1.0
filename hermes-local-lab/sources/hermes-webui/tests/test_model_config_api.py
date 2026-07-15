@@ -2090,3 +2090,315 @@ def test_openai_codex_image_provider_reflects_real_readiness(monkeypatch, tmp_pa
     assert "Codex" not in visible
     assert "openai-codex" not in visible
     assert ("her" "mes tools") not in visible
+
+
+def _write_saved_image_gen_config(
+    tmp_path, *, provider="dashscope", model="qwen-image-2.0-pro"
+):
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"image_gen": {"provider": provider, "model": model}}),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=image-test-only-key\n", encoding="utf-8"
+    )
+
+
+class _ProbeImageProvider:
+    name = "dashscope"
+
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def is_available(self):
+        return True
+
+    def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result() if callable(self.result) else self.result
+
+
+def _install_probe_provider(monkeypatch, provider):
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr("agent.image_gen_registry.get_provider", lambda name: provider if name == "dashscope" else None)
+
+
+def test_image_gen_config_distinguishes_configured_from_verified(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: tmp_path / "image-gen-verification.json",
+        raising=False,
+    )
+    _write_saved_image_gen_config(tmp_path)
+    _install_probe_provider(monkeypatch, _ProbeImageProvider({}))
+
+    result = model_config.get_image_gen_config()
+
+    assert result["image_gen"]["verification"]["status"] == "configured_unverified"
+    assert result["image_gen"]["verification"]["checked_at"] == ""
+
+
+def test_image_gen_provider_public_availability_requires_verified_probe(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _write_saved_image_gen_config(tmp_path)
+    provider = _ProbeImageProvider({})
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: None)
+    monkeypatch.setattr("agent.image_gen_registry.list_providers", lambda: [provider])
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: {
+            "configured": True,
+            "available": False,
+            "reason_code": "verification_required",
+            "public_message": "图像生成已配置但尚未通过真实生图验证。",
+        },
+    )
+
+    row = next(
+        item
+        for item in model_config._image_gen_provider_rows("dashscope")
+        if item["id"] == "dashscope"
+    )
+
+    assert row["can_attempt"] is True
+    assert row["available"] is False
+    assert row["reason_code"] == "verification_required"
+
+
+def test_image_gen_test_rejects_unconfigured_without_calling_provider(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    calls = []
+    monkeypatch.setattr(model_config, "_ensure_image_gen_plugins_registered", lambda: calls.append("registered"))
+
+    result = model_config.test_image_gen_config()
+
+    assert calls == []
+    assert result["ok"] is False
+    assert result["status"] == "unconfigured"
+    assert result["error_code"] == "image_gen_not_configured"
+    assert set(result) == {
+        "ok", "status", "checked_at", "provider", "model",
+        "error_code", "message", "diagnostic_id",
+    }
+
+
+def test_image_gen_probe_verifies_identity_magic_and_removes_probe_file(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "image-gen-verification.json"
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path, raising=False)
+    _write_saved_image_gen_config(tmp_path)
+    generated = tmp_path / "cache" / "images" / "probe.png"
+
+    def successful_result():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nprobe")
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "prompt": "must-not-persist",
+        }
+
+    provider = _ProbeImageProvider(successful_result)
+    _install_probe_provider(monkeypatch, provider)
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "verified"
+    assert provider.calls == [{
+        "prompt": "生成一张简洁的蓝色几何图形测试图，不包含人物、文字或品牌。",
+        "aspect_ratio": "square",
+        "num_images": 1,
+        "model": "qwen-image-2.0-pro",
+    }]
+    assert not generated.exists()
+    public_dump = json.dumps(result, ensure_ascii=False)
+    persisted_dump = state_path.read_text(encoding="utf-8")
+    for forbidden in ("image-test-only-key", "must-not-persist", str(generated), "digest"):
+        assert forbidden not in public_dump
+        assert forbidden not in persisted_dump
+    assert model_config.get_image_gen_config()["image_gen"]["verification"]["status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "payload", "expected_code"),
+    [
+        ({"provider": "other"}, b"\x89PNG\r\n\x1a\nprobe", "image_gen_probe_failed"),
+        ({"model": "other-model"}, b"\x89PNG\r\n\x1a\nprobe", "image_gen_probe_failed"),
+        ({}, b"not-an-image", "image_gen_invalid_file"),
+    ],
+)
+def test_image_gen_probe_rejects_wrong_identity_or_invalid_header(
+    monkeypatch, tmp_path, overrides, payload, expected_code
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json", raising=False)
+    _write_saved_image_gen_config(tmp_path)
+    generated = tmp_path / "cache" / "images" / "probe.png"
+
+    def result():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(payload)
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            **overrides,
+        }
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result))
+
+    response = model_config.test_image_gen_config()
+
+    assert response["status"] == "failed"
+    assert response["error_code"] == expected_code
+    assert not generated.exists()
+
+
+@pytest.mark.parametrize("image_value", ["", "/does/not/exist.png"])
+def test_image_gen_probe_rejects_missing_image_file(monkeypatch, tmp_path, image_value):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: tmp_path / "state.json", raising=False)
+    _write_saved_image_gen_config(tmp_path)
+    provider = _ProbeImageProvider({
+        "success": True,
+        "image": image_value,
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+    })
+    _install_probe_provider(monkeypatch, provider)
+
+    response = model_config.test_image_gen_config()
+
+    assert response["status"] == "failed"
+    assert response["error_code"] == "image_gen_invalid_file"
+
+
+def test_image_gen_verification_invalidates_when_key_changes(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path, raising=False)
+    _write_saved_image_gen_config(tmp_path)
+    generated = tmp_path / "cache" / "images" / "probe.webp"
+
+    def result():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"RIFF\x04\x00\x00\x00WEBP")
+        return {"success": True, "image": str(generated), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result))
+    assert model_config.test_image_gen_config()["status"] == "verified"
+    (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=rotated\n", encoding="utf-8")
+
+    assert model_config.get_image_gen_config()["image_gen"]["verification"]["status"] == "configured_unverified"
+
+
+def test_image_gen_verification_invalidates_when_named_key_rotates(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path, raising=False)
+    model_config.upsert_provider_credential({
+        "id": "alibaba-image",
+        "provider": "dashscope",
+        "api_key": "before",
+    })
+    saved = _read_config(tmp_path)
+    saved["image_gen"] = {
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+        "credential_ref": "alibaba-image",
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(saved), encoding="utf-8")
+    generated = tmp_path / "cache" / "images" / "probe.png"
+
+    def result():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nprobe")
+        return {"success": True, "image": str(generated), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result))
+    assert model_config.test_image_gen_config()["status"] == "verified"
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY=before",
+            "TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY=after",
+        ),
+        encoding="utf-8",
+    )
+
+    assert model_config.get_image_gen_config()["image_gen"]["verification"]["status"] == "configured_unverified"
+
+
+def test_image_gen_probe_failure_returns_only_safe_fields(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path, raising=False)
+    _write_saved_image_gen_config(tmp_path)
+    _install_probe_provider(monkeypatch, _ProbeImageProvider({
+        "success": False,
+        "error": "401 image-test-only-key /private/provider/path",
+        "raw_response": "must-not-persist",
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+    }))
+
+    response = model_config.test_image_gen_config()
+
+    assert response["status"] == "failed"
+    combined = json.dumps(response, ensure_ascii=False) + state_path.read_text(encoding="utf-8")
+    for forbidden in ("image-test-only-key", "/private/provider/path", "must-not-persist"):
+        assert forbidden not in combined
+
+
+def test_saving_image_gen_config_invalidates_previous_verification(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path, raising=False)
+    state_path.write_text('{"status":"verified"}', encoding="utf-8")
+    monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda *_: [_dashscope_image_provider_row()])
+
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "api_key": "key"})
+
+    assert not state_path.exists()
+
+
+def test_image_gen_probe_isolated_by_profile_and_newer_probe_wins(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    active_profile = {"name": "profile-a"}
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: active_profile["name"])
+    monkeypatch.setattr(model_config, "_image_gen_verification_state_root", lambda: tmp_path / "states", raising=False)
+    _write_saved_image_gen_config(tmp_path)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = {"count": 0}
+
+    def result():
+        calls["count"] += 1
+        n = calls["count"]
+        path = tmp_path / "cache" / "images" / f"probe-{n}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xd8\xffprobe")
+        if n == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        return {"success": True, "image": str(path), "provider": "dashscope", "model": "qwen-image-2.0-pro"}
+
+    _install_probe_provider(monkeypatch, _ProbeImageProvider(result))
+    results = {}
+    first = threading.Thread(target=lambda: results.setdefault("first", model_config.test_image_gen_config()))
+    first.start()
+    assert first_started.wait(timeout=5)
+    results["second"] = model_config.test_image_gen_config()
+    release_first.set()
+    first.join(timeout=5)
+
+    assert results["second"]["status"] == "verified"
+    assert results["first"]["error_code"] == "image_gen_probe_superseded"
+    active_profile["name"] = "profile-b"
+    assert model_config.get_image_gen_config()["image_gen"]["verification"]["status"] == "configured_unverified"

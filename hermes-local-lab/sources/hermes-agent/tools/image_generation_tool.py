@@ -810,7 +810,35 @@ def _image_gen_public_message(reason_code: str) -> str:
         return "图像生成未配置，请先在太极智能体中完成图像生成配置。"
     if reason_code == "authorization_required":
         return "图像生成未授权，请先在太极智能体中完成图像生成授权。"
+    if reason_code == "verification_required":
+        return "图像生成已配置但尚未通过真实生图验证。"
     return "图像生成服务暂不可用，请检查太极智能体图像生成配置。"
+
+
+def _read_image_gen_verification_status(image_cfg: Dict[str, Any]) -> str:
+    """Read the active profile's probe state; fail closed outside WebUI."""
+    try:
+        from api.model_config import (
+            _active_profile_name,
+            _image_gen_config_fingerprint,
+            _image_gen_verification_state_path,
+        )
+
+        profile = _active_profile_name()
+        state = json.loads(
+            _image_gen_verification_state_path(profile).read_text(encoding="utf-8")
+        )
+        if not isinstance(state, dict):
+            return "configured_unverified"
+        expected = _image_gen_config_fingerprint(image_cfg, profile=profile)
+        if str(state.get("fingerprint") or "") != expected:
+            return "configured_unverified"
+        status = str(state.get("status") or "")
+        return status if status in {
+            "configured_unverified", "verifying", "verified", "failed"
+        } else "configured_unverified"
+    except Exception:
+        return "configured_unverified"
 
 
 def get_image_generation_readiness() -> Dict[str, Any]:
@@ -844,19 +872,22 @@ def get_image_generation_readiness() -> Dict[str, Any]:
         or str(image_cfg.get("key_env") or image_cfg.get("api_key_env") or "").strip()
     )
     configured = bool(has_inline_config or os.getenv("FAL_KEY") or os.getenv("FAL_API_KEY"))
+    verification_status = _read_image_gen_verification_status(image_cfg)
 
     if provider in {"", "fal"}:
         try:
             if check_fal_api_key():
                 _load_fal_client()
-                reason = "ready"
+                verified = verification_status == "verified"
+                reason = "ready" if verified else "verification_required"
                 return {
                     "configured": True,
-                    "available": True,
+                    "available": verified,
                     "reason_code": reason,
                     "public_message": _image_gen_public_message(reason),
                     "provider": provider or "fal",
                     "model": model,
+                    "verification_status": verification_status,
                 }
         except ImportError:
             reason = "provider_unavailable"
@@ -886,10 +917,16 @@ def get_image_generation_readiness() -> Dict[str, Any]:
                 "model": model,
             }
         try:
-            available = bool(selected.is_available())
+            can_attempt = bool(selected.is_available())
         except Exception:
-            available = False
-        reason = "ready" if available else "authorization_required"
+            can_attempt = False
+        verified = verification_status == "verified"
+        available = bool(can_attempt and verified)
+        reason = (
+            "ready"
+            if available
+            else ("verification_required" if can_attempt else "authorization_required")
+        )
         return {
             "configured": True,
             "available": available,
@@ -897,19 +934,22 @@ def get_image_generation_readiness() -> Dict[str, Any]:
             "public_message": _image_gen_public_message(reason),
             "provider": provider,
             "model": model,
+            "verification_status": verification_status,
         }
 
     for item in providers:
         try:
             if item.is_available():
-                reason = "ready"
+                verified = verification_status == "verified"
+                reason = "ready" if verified else "verification_required"
                 return {
                     "configured": True,
-                    "available": True,
+                    "available": verified,
                     "reason_code": reason,
                     "public_message": _image_gen_public_message(reason),
                     "provider": str(getattr(item, "name", "") or ""),
                     "model": model,
+                    "verification_status": verification_status,
                 }
         except Exception:
             continue

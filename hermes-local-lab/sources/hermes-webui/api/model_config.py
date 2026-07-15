@@ -395,6 +395,8 @@ _VISION_VERIFICATION_PUBLIC_FIELDS = {
     "message",
     "diagnostic_id",
 }
+_IMAGE_GEN_VERIFICATION_PUBLIC_FIELDS = _VISION_VERIFICATION_PUBLIC_FIELDS
+_IMAGE_GEN_PROBE_PROMPT = "生成一张简洁的蓝色几何图形测试图，不包含人物、文字或品牌。"
 _IMAGE_GEN_FALLBACK_META: dict[str, dict[str, Any]] = {
     "doubao": {
         "name": "Doubao Seedream",
@@ -750,6 +752,7 @@ def _blocked_image_gen_row(
         "description": "历史非国产图片生成配置，只读显示。",
         "badge": "已阻止",
         "available": False,
+        "can_attempt": False,
         "active": active,
         "requires_env": [],
         "key_status": {"configured": False, "source": "policy_blocked", "env_var": ""},
@@ -854,12 +857,14 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
         display_name = str(schema.get("name") or getattr(provider, "display_name", "") or pid)
         description = str(schema.get("tag") or "")
         badge = str(schema.get("badge") or ("外部" if is_custom else "国产"))
-        if active and readiness:
+        can_attempt = bool(available)
+        if active:
             available = bool(readiness.get("available"))
             reason_code = str(readiness.get("reason_code") or "")
             status_message = str(readiness.get("public_message") or "")
         else:
-            reason_code = "ready" if available else ""
+            available = False
+            reason_code = ""
             status_message = ""
         rows.append(
             {
@@ -868,6 +873,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 "description": description,
                 "badge": badge,
                 "available": bool(available),
+                "can_attempt": can_attempt,
                 "active": active,
                 "requires_env": env_vars or ([env_var] if env_var else []),
                 "key_status": key_status,
@@ -906,13 +912,16 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
             credential_fields,
             active_options=active_options if active else {},
         )
+        can_attempt = bool(_key_status_for_env(env_var).get("configured"))
+        public_available = bool(active and readiness.get("available"))
         rows.append(
             {
                 "id": pid,
                 "name": str(fallback.get("name") or pid.replace("-", " ").title()),
                 "description": "",
                 "badge": "国产",
-                "available": bool(_key_status_for_env(env_var).get("configured")),
+                "available": public_available,
+                "can_attempt": can_attempt,
                 "active": active,
                 "requires_env": [env_var],
                 "key_status": _image_gen_primary_key_status(credential_fields, credential_status),
@@ -969,6 +978,10 @@ def get_image_gen_config() -> dict[str, Any]:
             "use_gateway": bool(image_cfg.get("use_gateway")),
             "credential_ref": str(image_cfg.get("credential_ref") or "").strip(),
             "options": public_options,
+            "verification": _public_image_gen_verification(
+                image_cfg,
+                profile=_active_profile_name(),
+            ),
         },
         "providers": _image_gen_provider_rows(active_provider),
         "custom_image_providers": get_custom_image_provider_configs().get("providers", []),
@@ -1222,8 +1235,16 @@ def _invalidate_vision_verification() -> None:
 
 
 def _invalidate_image_gen_verification() -> None:
-    """Extension hook for Task 5's persisted image-generation verification."""
-    pass
+    profile = _active_profile_name()
+    with _image_gen_profile_lock(profile):
+        _IMAGE_GEN_PROBE_GENERATIONS[profile] = (
+            _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0) + 1
+        )
+        path = _image_gen_verification_state_path(profile)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _atomic_write_json(path, {})
 
 def _vision_test_response(
     *,
@@ -1339,6 +1360,352 @@ def test_vision_config() -> dict[str, Any]:
             diagnostic_id=diagnostic_id,
         )
     return _vision_test_response(
+        ok=ok,
+        status=status,
+        checked_at=checked_at,
+        provider=snapshot.provider,
+        model=snapshot.model,
+        error_code=error_code,
+        message=message,
+        diagnostic_id=diagnostic_id,
+    )
+
+
+_IMAGE_GEN_STATE_LOCKS_GUARD = threading.Lock()
+_IMAGE_GEN_STATE_LOCKS: dict[str, threading.Lock] = {}
+_IMAGE_GEN_PROBE_GENERATIONS: dict[str, int] = {}
+
+
+@dataclass(frozen=True)
+class _ImageGenConfigSnapshot:
+    profile: str
+    provider: str
+    model: str
+    credential_ref: str
+    endpoint_mode: str
+    region: str
+    workspace_id: str
+    base_url: str
+    configured: bool
+    fingerprint: str
+
+
+def _image_gen_verification_state_root() -> Path:
+    from api.config import STATE_DIR
+
+    return Path(STATE_DIR) / "image-gen-verification"
+
+
+def _image_gen_verification_state_path(profile: str | None = None) -> Path:
+    profile_name = str(profile or _active_profile_name() or "default")
+    profile_id = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:24]
+    return _image_gen_verification_state_root() / f"{profile_id}.json"
+
+
+def _image_gen_profile_lock(profile: str) -> threading.Lock:
+    with _IMAGE_GEN_STATE_LOCKS_GUARD:
+        lock = _IMAGE_GEN_STATE_LOCKS.get(profile)
+        if lock is None:
+            lock = threading.Lock()
+            _IMAGE_GEN_STATE_LOCKS[profile] = lock
+        return lock
+
+
+def _begin_image_gen_probe(profile: str, state: dict[str, Any]) -> int:
+    with _image_gen_profile_lock(profile):
+        generation = _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0) + 1
+        _IMAGE_GEN_PROBE_GENERATIONS[profile] = generation
+        _atomic_write_json(_image_gen_verification_state_path(profile), state)
+        return generation
+
+
+def _read_image_gen_verification_state(profile: str) -> dict[str, Any]:
+    with _image_gen_profile_lock(profile):
+        try:
+            data = json.loads(
+                _image_gen_verification_state_path(profile).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _image_gen_secret_digest(
+    provider: str,
+    credential_ref: str,
+    config_data: dict[str, Any],
+) -> str:
+    env_var = ""
+    if credential_ref:
+        try:
+            row = load_credential(credential_ref, config_data=config_data)
+            if provider_family(row.get("provider_family")) == provider_family(provider):
+                env_var = _validate_provider_credential_secret_env(row)
+        except ValueError:
+            pass
+    else:
+        env_var = _IMAGE_GEN_KEY_ENV.get(provider) or ""
+    if not env_var:
+        return ""
+    env_values = _load_env_file(_get_hermes_home() / ".env")
+    secret = str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else ""
+
+
+def _image_gen_config_fingerprint(
+    image_cfg: dict[str, Any],
+    *,
+    profile: str,
+    config_data: dict[str, Any] | None = None,
+) -> str:
+    data = config_data or _load_yaml_config_file(_get_config_path())
+    options = image_cfg.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    provider = str(image_cfg.get("provider") or "").strip().lower()
+    credential_ref = str(image_cfg.get("credential_ref") or "").strip()
+    material = {
+        "profile": profile,
+        "provider": provider,
+        "model": str(image_cfg.get("model") or "").strip(),
+        "credential_ref": credential_ref,
+        "endpoint_mode": str(options.get("endpoint_mode") or "").strip(),
+        "region": str(options.get("region") or "").strip(),
+        "workspace_id": str(options.get("workspace_id") or "").strip(),
+        "base_url": str(options.get("base_url") or "").strip().rstrip("/"),
+        "key_digest": _image_gen_secret_digest(provider, credential_ref, data),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _capture_image_gen_config_snapshot() -> _ImageGenConfigSnapshot:
+    profile = _active_profile_name()
+    config_data = _load_yaml_config_file(_get_config_path())
+    image_cfg = config_data.get("image_gen")
+    if not isinstance(image_cfg, dict):
+        image_cfg = {}
+    provider = str(image_cfg.get("provider") or "").strip().lower()
+    model = str(image_cfg.get("model") or "").strip()
+    options = image_cfg.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    available = False
+    if provider and model:
+        try:
+            _ensure_image_gen_plugins_registered()
+            from agent.image_gen_registry import get_provider
+
+            selected = get_provider(provider)
+            available = bool(selected and selected.is_available())
+        except Exception:
+            available = False
+    return _ImageGenConfigSnapshot(
+        profile=profile,
+        provider=provider,
+        model=model,
+        credential_ref=str(image_cfg.get("credential_ref") or "").strip(),
+        endpoint_mode=str(options.get("endpoint_mode") or "").strip(),
+        region=str(options.get("region") or "").strip(),
+        workspace_id=str(options.get("workspace_id") or "").strip(),
+        base_url=str(options.get("base_url") or "").strip().rstrip("/"),
+        configured=bool(provider and model and available),
+        fingerprint=_image_gen_config_fingerprint(
+            image_cfg,
+            profile=profile,
+            config_data=config_data,
+        ),
+    )
+
+
+def _public_image_gen_verification(
+    image_cfg: dict[str, Any],
+    *,
+    profile: str,
+) -> dict[str, Any]:
+    snapshot = _capture_image_gen_config_snapshot()
+    if not snapshot.configured:
+        return {
+            "status": "unconfigured",
+            "checked_at": "",
+            "error_code": "image_gen_not_configured",
+            "message": "请先保存完整的生图 Provider、模型和凭据配置。",
+            "diagnostic_id": "",
+        }
+    state = _read_image_gen_verification_state(profile)
+    fingerprint = _image_gen_config_fingerprint(image_cfg, profile=profile)
+    if state.get("fingerprint") == fingerprint and state.get("status") in {
+        "verifying",
+        "verified",
+        "failed",
+    }:
+        return {
+            "status": str(state.get("status")),
+            "checked_at": str(state.get("checked_at") or ""),
+            "error_code": str(state.get("error_code") or ""),
+            "message": str(state.get("message") or ""),
+            "diagnostic_id": str(state.get("diagnostic_id") or ""),
+        }
+    return {
+        "status": "configured_unverified",
+        "checked_at": "",
+        "error_code": "",
+        "message": "生图配置已保存，但尚未通过真实生成验证。",
+        "diagnostic_id": "",
+    }
+
+
+def _image_gen_test_response(
+    *,
+    ok: bool,
+    status: str,
+    checked_at: str,
+    provider: str,
+    model: str,
+    error_code: str,
+    message: str,
+    diagnostic_id: str,
+) -> dict[str, Any]:
+    response = {
+        "ok": bool(ok),
+        "status": status,
+        "checked_at": checked_at,
+        "provider": provider,
+        "model": model,
+        "error_code": error_code,
+        "message": message,
+        "diagnostic_id": diagnostic_id,
+    }
+    return {key: response[key] for key in _IMAGE_GEN_VERIFICATION_PUBLIC_FIELDS}
+
+
+def _validated_probe_image_path(raw_path: Any) -> Path | None:
+    value = str(raw_path or "").strip()
+    if not value:
+        return None
+    try:
+        path = Path(value).expanduser().resolve(strict=True)
+        cache_root = (_get_hermes_home() / "cache" / "images").resolve()
+        path.relative_to(cache_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not path.is_file():
+        return None
+    return path
+
+
+def _has_safe_image_header(path: Path) -> bool:
+    try:
+        header = path.read_bytes()[:12]
+    except OSError:
+        return False
+    return bool(
+        header.startswith(b"\x89PNG\r\n\x1a\n")
+        or header.startswith(b"\xff\xd8\xff")
+        or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+    )
+
+
+def test_image_gen_config() -> dict[str, Any]:
+    reload_config()
+    snapshot = _capture_image_gen_config_snapshot()
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    diagnostic_id = uuid.uuid4().hex
+    if not snapshot.configured:
+        return _image_gen_test_response(
+            ok=False,
+            status="unconfigured",
+            checked_at=checked_at,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            error_code="image_gen_not_configured",
+            message="请先保存完整的生图 Provider、模型和凭据配置。",
+            diagnostic_id=diagnostic_id,
+        )
+
+    verifying_state = {
+        "fingerprint": snapshot.fingerprint,
+        "status": "verifying",
+        "checked_at": checked_at,
+        "error_code": "",
+        "message": "正在执行真实生图测试，可能产生少量费用。",
+        "diagnostic_id": diagnostic_id,
+    }
+    generation = _begin_image_gen_probe(snapshot.profile, verifying_state)
+
+    ok = False
+    error_code = "image_gen_probe_failed"
+    message = "生图验证失败，请检查网络、凭据、模型和账号状态后重试。"
+    generated_path: Path | None = None
+    try:
+        from agent.image_gen_registry import get_provider
+
+        selected = get_provider(snapshot.provider)
+        if selected is None:
+            raise RuntimeError("provider not registered")
+        result = selected.generate(
+            prompt=_IMAGE_GEN_PROBE_PROMPT,
+            aspect_ratio="square",
+            num_images=1,
+            model=snapshot.model,
+        )
+        if isinstance(result, dict):
+            generated_path = _validated_probe_image_path(result.get("image"))
+            identity_ok = bool(
+                result.get("success")
+                and result.get("provider") == snapshot.provider
+                and result.get("model") == snapshot.model
+            )
+            if identity_ok and generated_path is None:
+                error_code = "image_gen_invalid_file"
+            elif identity_ok and not _has_safe_image_header(generated_path):
+                error_code = "image_gen_invalid_file"
+            elif identity_ok:
+                ok = True
+                error_code = ""
+                message = "生图验证通过，当前配置已完成真实生成探测。"
+    except Exception:
+        logger.warning("Image generation configuration probe failed (%s)", diagnostic_id)
+    finally:
+        if generated_path is not None:
+            try:
+                generated_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove image generation probe output (%s)", diagnostic_id)
+                ok = False
+                error_code = "image_gen_cleanup_failed"
+                message = "生图验证未能安全清理测试图片，请检查本地文件权限后重试。"
+
+    status = "verified" if ok else "failed"
+    state = {
+        "fingerprint": snapshot.fingerprint,
+        "status": status,
+        "checked_at": checked_at,
+        "error_code": error_code,
+        "message": message,
+        "diagnostic_id": diagnostic_id,
+    }
+    current_snapshot = _capture_image_gen_config_snapshot()
+    with _image_gen_profile_lock(snapshot.profile):
+        still_current = (
+            _IMAGE_GEN_PROBE_GENERATIONS.get(snapshot.profile) == generation
+            and current_snapshot == snapshot
+        )
+        if still_current:
+            _atomic_write_json(_image_gen_verification_state_path(snapshot.profile), state)
+    if not still_current:
+        return _image_gen_test_response(
+            ok=False,
+            status="configured_unverified",
+            checked_at=checked_at,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            error_code="image_gen_probe_superseded",
+            message="生图配置在验证期间已变更，本次结果已忽略，请重新测试。",
+            diagnostic_id=diagnostic_id,
+        )
+    return _image_gen_test_response(
         ok=ok,
         status=status,
         checked_at=checked_at,
@@ -1795,6 +2162,7 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                 raise
     reload_config()
     invalidate_models_cache()
+    _invalidate_image_gen_verification()
     return get_image_gen_config()
 
 
