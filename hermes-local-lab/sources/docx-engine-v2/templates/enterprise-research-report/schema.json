@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "enterprise-research-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cover", "sections", "tables", "images"],
+  "properties": {
+    "cover": {"type": "object", "additionalProperties": false, "required": ["title", "subtitle", "client", "issuer", "compiler", "version", "security_level", "date"], "properties": {"title": {"type": "string", "minLength": 1}, "subtitle": {"const": "研究报告"}, "client": {"type": "string"}, "issuer": {"type": "string", "minLength": 1}, "compiler": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "security_level": {"type": "string", "minLength": 1}, "date": {"type": "string", "minLength": 1}}},
+    "sections": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["sectionId", "title", "paragraphs"], "properties": {"sectionId": {"type": "string", "minLength": 1}, "title": {"type": "string", "minLength": 1}, "paragraphs": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1}}}}}}},
+    "tables": {"type": "array"},
+    "images": {"type": "array"}
+  }
+}

@@ -8,6 +8,14 @@
     {
       "templateId": "meeting-minutes",
       "path": "templates/meeting-minutes"
+    },
+    {
+      "templateId": "enterprise-work-report",
+      "path": "templates/enterprise-work-report"
+    },
+    {
+      "templateId": "enterprise-research-report",
+      "path": "templates/enterprise-research-report"
     }
   ],
   "installed": []

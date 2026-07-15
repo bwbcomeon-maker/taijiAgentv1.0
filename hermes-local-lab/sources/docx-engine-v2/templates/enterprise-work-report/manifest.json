@@ -1,0 +1,20 @@
+{
+  "id": "enterprise-work-report",
+  "name": "企业工作汇报模板",
+  "version": "1.0.0",
+  "description": "面向管理层的正式工作汇报，不改变已批准正文结构。",
+  "template": "template.docx",
+  "schema": "schema.json",
+  "prompt": "prompt.md",
+  "sample": "sample.json",
+  "dataAdapter": "data-adapter.js",
+  "adapterSample": "adapter-sample.render-plan.json",
+  "outputFormat": "docx",
+  "documentTypes": ["work_report"],
+  "requiredMetadata": ["title", "issuer", "compiler", "versionLabel", "classification", "documentDate"],
+  "contentPolicy": {"allowAdapterGeneratedBusinessContent": false, "allowPlaceholders": false},
+  "capabilities": ["sections", "tables", "images", "toc", "headers", "footers"],
+  "requiredAssets": [],
+  "qualityGates": ["schema_valid", "docx_zip", "docx_xml", "enterprise_metadata", "wps_visual"],
+  "compatibility": {"engine": "docx-engine-v2", "minVersion": "0.1.0", "format": "docx"}
+}

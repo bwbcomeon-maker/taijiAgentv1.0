@@ -12,7 +12,12 @@ const { installTemplatePackage, loadPackageFromDir } = require('../src/templates
 const { validateTemplatePackage } = require('../src/templates/validate-template-package');
 
 const rootDir = path.resolve(__dirname, '..');
-const expectedTemplateIds = ['general-proposal', 'meeting-minutes'];
+const expectedTemplateIds = [
+  'general-proposal',
+  'meeting-minutes',
+  'enterprise-work-report',
+  'enterprise-research-report',
+];
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -32,6 +37,23 @@ test('template registry lists migrated packages in stable order', () => {
     expectedTemplateIds
   );
 });
+
+test('enterprise template packages bind every rendering file outside the manifest', () => {
+  for (const templateId of ['enterprise-work-report', 'enterprise-research-report']) {
+    const template = getTemplatePackage(templateId, { rootDir });
+    const binding = readJson(path.join(template.packageDir, 'template-package.binding.json'));
+    assert.equal(binding.schemaVersion, 'docx-template-package-binding/v1');
+    assert.match(binding.packageSha256, /^[a-f0-9]{64}$/);
+    assert.equal(Object.hasOwn(binding.files, 'template-package.binding.json'), false);
+    for (const [relativePath, expected] of Object.entries(binding.files)) {
+      assert.equal(sha256File(path.join(template.packageDir, relativePath)), expected);
+    }
+  }
+});
+
+function sha256File(filePath) {
+  return require('node:crypto').createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
 
 test('template registry includes installer-verified templates after builtin templates', async (t) => {
   const tempRoot = makeTempDir(t);

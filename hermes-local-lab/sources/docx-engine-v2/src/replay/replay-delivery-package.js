@@ -99,6 +99,12 @@ async function replayDeliveryPackage({
         sourcePackage: replayedSourcePackage,
         templatePackage,
         assetPackage: files.assetPackage,
+        documentMetadata: files.jobManifest.documentMetadata,
+        canonicalBinding: files.jobManifest.canonicalBinding,
+        rendererIdentity: files.jobManifest.rendererIdentity,
+        renderInputBinding: files.jobManifest.renderInputBinding,
+        renderInputFingerprint: files.jobManifest.renderInputFingerprint,
+        assetManifestPath: files.renderPlan.assetManifestPath || '',
       });
       const renderPlanFailures = deterministicJsonFailures({
         label: 'render-plan.json',

@@ -18,7 +18,7 @@ function makeTempDir(t) {
 }
 
 test('template packages declare a package-local data adapter', () => {
-  for (const templateId of ['general-proposal', 'meeting-minutes']) {
+  for (const templateId of ['general-proposal', 'meeting-minutes', 'enterprise-work-report', 'enterprise-research-report']) {
     const template = getTemplatePackage(templateId, { rootDir: ENGINE_ROOT });
 
     assert.equal(template.files.dataAdapter, 'data-adapter.js');
@@ -30,6 +30,43 @@ test('template packages declare a package-local data adapter', () => {
     assert.equal(fs.existsSync(template.dataAdapterPath), true);
     assert.equal(fs.existsSync(template.adapterSamplePath), true);
   }
+});
+
+test('enterprise adapters map approved content and metadata without defaults or invented sections', () => {
+  for (const templateId of ['enterprise-work-report', 'enterprise-research-report']) {
+    const templatePackage = getTemplatePackage(templateId, { rootDir: ENGINE_ROOT });
+    const renderPlan = {
+      documentMetadata: {
+        title: '精确标题', documentType: templateId.includes('research') ? 'research_report' : 'work_report',
+        client: '真实客户', issuer: '真实签发单位', compiler: '真实编制单位', versionLabel: 'V2.1',
+        classification: 'internal', classificationLabel: '内部资料', documentDate: '2026-07-15',
+      },
+      templateData: {
+        title: 'Markdown 中的另一个标题',
+        sections: [{ sectionId: 'sec-1', title: '批准章节', blocks: [{ type: 'paragraph', text: '批准正文。' }] }],
+        tables: [], images: [], metadata: {},
+      },
+      tables: [], figures: [],
+    };
+    const data = buildTemplateData({ templatePackage, renderPlan });
+    const serialized = JSON.stringify(data);
+    assert.equal(data.cover.title, '精确标题');
+    assert.deepEqual(data.sections.map((item) => item.title), ['批准章节']);
+    assert.deepEqual(data.sections[0].paragraphs, [{ text: '批准正文。' }]);
+    assert.deepEqual(data.tables, []);
+    assert.deepEqual(data.images, []);
+    for (const forbidden of ['客户单位', '暂无', '待补充', '北京太极', '2026年7月']) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  }
+});
+
+test('enterprise adapters reject incomplete cover metadata', () => {
+  const templatePackage = getTemplatePackage('enterprise-work-report', { rootDir: ENGINE_ROOT });
+  assert.throws(
+    () => buildTemplateData({ templatePackage, renderPlan: { documentMetadata: { title: '只有标题' }, templateData: { sections: [] } } }),
+    /brief_incomplete/
+  );
 });
 
 test('buildTemplateData delegates render-plan mapping to the selected template package adapter', (t) => {

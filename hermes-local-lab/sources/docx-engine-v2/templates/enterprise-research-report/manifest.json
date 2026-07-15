@@ -1,0 +1,20 @@
+{
+  "id": "enterprise-research-report",
+  "name": "企业研究报告模板",
+  "version": "1.0.0",
+  "description": "面向企业决策的正式研究报告，不改变已批准正文结构和结论边界。",
+  "template": "template.docx",
+  "schema": "schema.json",
+  "prompt": "prompt.md",
+  "sample": "sample.json",
+  "dataAdapter": "data-adapter.js",
+  "adapterSample": "adapter-sample.render-plan.json",
+  "outputFormat": "docx",
+  "documentTypes": ["research_report"],
+  "requiredMetadata": ["title", "issuer", "compiler", "versionLabel", "classification", "documentDate"],
+  "contentPolicy": {"allowAdapterGeneratedBusinessContent": false, "allowPlaceholders": false},
+  "capabilities": ["sections", "tables", "images", "citations", "toc", "headers", "footers"],
+  "requiredAssets": [],
+  "qualityGates": ["schema_valid", "docx_zip", "docx_xml", "enterprise_metadata", "wps_visual"],
+  "compatibility": {"engine": "docx-engine-v2", "minVersion": "0.1.0", "format": "docx"}
+}
