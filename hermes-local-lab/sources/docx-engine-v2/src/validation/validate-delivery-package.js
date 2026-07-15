@@ -27,6 +27,7 @@ const CHECK_IDS = [
   'cover_layout',
   'template_markers',
   'asset_semantics',
+  'logical_figure_identity',
   'image_coverage',
   'figure_dimensions',
   'table_coverage',
@@ -176,6 +177,10 @@ function validateDeliveryPackage({
   addCoverLayoutCheck({ addCheck, documentXml });
   addTemplateMarkersCheck({ addCheck, documentXml });
   addAssetSemanticsCheck({ addCheck, deliveryDir, documentXml, assetPackage: jsonFiles.assetPackage });
+  addLogicalFigureIdentityCheck({
+    addCheck,
+    figures: jsonFiles.renderPlan?.templateData?.images || jsonFiles.assetPackage?.figures || [],
+  });
   addImageCoverageCheck({
     addCheck,
     deliveryDir,
@@ -1027,6 +1032,9 @@ function templateSectionBlockConsistencyFailures({ actualSections, sourcePackage
 }
 
 function expectedTemplateBlockFromSource({ block, tableIds, figureIds, sourceImagesById }) {
+  if (block.type === 'figure-derivative') {
+    return null;
+  }
   const tableId = block.metadata?.tableId;
   if (tableId && tableIds.has(tableId)) {
     return {
@@ -1526,6 +1534,7 @@ function addSourceReplayCheck({ addCheck, deliveryDir, sourcePackage, jobManifes
       sourceType,
       sourcePath: sourcePackage.sourceRef?.path || sourceRef.path,
       sourceBuffer,
+      assetManifest: sourcePackage.assetManifest,
     });
   } catch (error) {
     addCheck('source_replay', 'failed', `Original source replay failed: ${error.message}`);
@@ -3190,6 +3199,70 @@ function normalizeWpsStatus(status) {
     : 'not_verified';
 }
 
+function addLogicalFigureIdentityCheck({ addCheck, figures = [] } = {}) {
+  const issues = logicalFigureIdentityIssues({ figures });
+  if (issues.length === 0) {
+    addCheck('logical_figure_identity', 'passed');
+    return;
+  }
+  addCheck(
+    'logical_figure_identity',
+    'passed_with_warnings',
+    `Logical figure identity issues: ${issues.map((issue) => issue.code).join(', ')}`,
+    { issues }
+  );
+}
+
+function logicalFigureIdentityIssues({ figures = [] } = {}) {
+  const byOccurrence = new Map();
+  const byDigest = new Map();
+  for (const figure of figures || []) {
+    const logicalId = String(figure?.logicalAssetId || '').trim();
+    const occurrence = String(figure?.occurrenceId || '').trim();
+    if (!logicalId || !occurrence) {
+      continue;
+    }
+    const key = `${logicalId}\0${occurrence}`;
+    if (!byOccurrence.has(key)) {
+      byOccurrence.set(key, []);
+    }
+    byOccurrence.get(key).push(String(figure.figureId || '').trim());
+    const digest = String(figure?.sha256 || '').trim();
+    if (digest && /^[a-f0-9]{64}$/.test(digest)) {
+      if (!byDigest.has(digest)) {
+        byDigest.set(digest, []);
+      }
+      byDigest.get(digest).push({
+        figureId: String(figure.figureId || '').trim(),
+        logicalAssetId: logicalId,
+      });
+    }
+  }
+  const duplicateOccurrences = [...byOccurrence.entries()]
+    .filter(([, figureIds]) => figureIds.length > 1)
+    .map(([key, figureIds]) => {
+      const [logicalId, occurrence] = key.split('\0');
+      return {
+        code: 'duplicate_logical_figure_occurrence',
+        severity: 'warning',
+        logicalAssetId: logicalId,
+        occurrenceId: occurrence,
+        figureIds: figureIds.filter(Boolean).sort(),
+      };
+    });
+  const suspectedDuplicates = [...byDigest.entries()]
+    .filter(([, entries]) => new Set(entries.map((entry) => entry.logicalAssetId).filter(Boolean)).size > 1)
+    .map(([digest, entries]) => ({
+      code: 'duplicate_asset_suspected',
+      severity: 'warning',
+      sha256: digest,
+      logicalAssetIds: [...new Set(entries.map((entry) => entry.logicalAssetId).filter(Boolean))].sort(),
+      figureIds: entries.map((entry) => entry.figureId).filter(Boolean).sort(),
+    }));
+  return [...duplicateOccurrences, ...suspectedDuplicates]
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
 function collectFigureIds(renderPlan) {
   const figureIds = new Set();
   for (const figure of renderPlan.figures || []) {
@@ -3213,4 +3286,4 @@ function readZipEntries(filePath) {
   return readZipEntriesFromBuffer(fs.readFileSync(filePath));
 }
 
-module.exports = { validateDeliveryPackage };
+module.exports = { logicalFigureIdentityIssues, validateDeliveryPackage };

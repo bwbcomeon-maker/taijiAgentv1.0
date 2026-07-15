@@ -18,7 +18,10 @@ const { refreshDeliveryPackageFileHashes } = require('../src/delivery/file-hashe
 const { createDocumentJob, transitionJob } = require('../src/domain/document-job');
 const { postprocessDocx } = require('../src/rendering/postprocess-docx');
 const { renderDocx } = require('../src/rendering/render-docx');
-const { validateDeliveryPackage } = require('../src/validation/validate-delivery-package');
+const {
+  logicalFigureIdentityIssues,
+  validateDeliveryPackage,
+} = require('../src/validation/validate-delivery-package');
 const { recordWpsVisualAcceptance } = require('../src/validation/record-wps-visual-acceptance');
 const { REPLAY_INPUT_FILE_ROLES } = require('../src/delivery/file-hashes');
 
@@ -96,6 +99,8 @@ function defaultSourceLines() {
     '  A[Source] --> B[Render plan]',
     '  B --> C[Delivery package]',
     '```',
+    '',
+    'The following source image is a separate explicit occurrence.',
     '',
     '![Architecture](architecture.png)',
     '',
@@ -308,6 +313,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'cover_layout',
       'template_markers',
       'asset_semantics',
+      'logical_figure_identity',
       'image_coverage',
       'figure_dimensions',
       'table_coverage',
@@ -323,6 +329,43 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'wps_visual',
     ]
   );
+});
+
+test('logical figure identity reports a typed issue instead of silently deleting duplicate occurrences', () => {
+  const issues = logicalFigureIdentityIssues({
+    figures: [
+      { figureId: 'fig-001', logicalAssetId: 'logical-aaaaaaaaaaaaaaaa', occurrenceId: 'occurrence-bbbbbbbbbbbbbbbb' },
+      { figureId: 'fig-002', logicalAssetId: 'logical-aaaaaaaaaaaaaaaa', occurrenceId: 'occurrence-bbbbbbbbbbbbbbbb' },
+    ],
+  });
+
+  assert.deepEqual(issues, [
+    {
+      code: 'duplicate_logical_figure_occurrence',
+      severity: 'warning',
+      logicalAssetId: 'logical-aaaaaaaaaaaaaaaa',
+      occurrenceId: 'occurrence-bbbbbbbbbbbbbbbb',
+      figureIds: ['fig-001', 'fig-002'],
+    },
+  ]);
+});
+
+test('equal image digests with different logical ids are reported as suspected duplicates', () => {
+  const digest = 'a'.repeat(64);
+  const issues = logicalFigureIdentityIssues({
+    figures: [
+      { figureId: 'fig-001', logicalAssetId: 'logo-header', occurrenceId: 'occ-1', sha256: digest },
+      { figureId: 'fig-002', logicalAssetId: 'logo-footer', occurrenceId: 'occ-2', sha256: digest },
+    ],
+  });
+
+  assert.deepEqual(issues, [{
+    code: 'duplicate_asset_suspected',
+    severity: 'warning',
+    sha256: digest,
+    logicalAssetIds: ['logo-footer', 'logo-header'],
+    figureIds: ['fig-001', 'fig-002'],
+  }]);
 });
 
 test('postprocessDocx writes compact static directory entries for portable multi-entry directories', async (t) => {

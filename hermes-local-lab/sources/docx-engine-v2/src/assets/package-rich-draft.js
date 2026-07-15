@@ -4,6 +4,7 @@ const path = require('node:path');
 const { renderDeterministicMermaidSvg } = require('./mermaid-renderer');
 const { rasterizeSvgToPng, sanitizeSvgText, svgDimensions } = require('./svg-rasterizer');
 const { normalizeMarkdownSource } = require('../source/normalize-markdown');
+const { logicalAssetId, occurrenceId } = require('./logical-identity');
 
 async function packageRichDraft({ source, outDir, assetDir = '' } = {}) {
   if (!source) {
@@ -100,6 +101,25 @@ async function packageRichDraft({ source, outDir, assetDir = '' } = {}) {
 
     figures.push({
       figureId,
+      logicalAssetId: reference.logicalAssetId || logicalAssetId({
+        sourceType: mermaidBlock ? 'mermaid' : 'image',
+        sourceText: mermaidBlock?.text || '',
+        sourcePath: reference.path,
+      }),
+      occurrenceId: reference.occurrenceId || occurrenceId({
+        logicalId: reference.logicalAssetId || logicalAssetId({
+          sourceType: mermaidBlock ? 'mermaid' : 'image',
+          sourceText: mermaidBlock?.text || '',
+          sourcePath: reference.path,
+        }),
+        sectionKey: reference.sectionTitle || '',
+        ordinal: index + 1,
+      }),
+      derivation: reference.derivation || {
+        sourceRole: mermaidBlock ? 'mermaid_source' : 'imported_source',
+        displayRole: 'derived_display',
+        relation: 'derived_from',
+      },
       blockId: reference.blockId || '',
       caption,
       sectionId: reference.sectionId || '',
@@ -170,6 +190,7 @@ function assertOutputDirIsEmpty(outDir) {
 
 function buildImageReferences(sourcePackage) {
   const blocks = sourcePackage.blocks || [];
+  const figureById = new Map((sourcePackage.figures || []).map((figure) => [figure.figureId, figure]));
   const references = [];
   const usedMermaidBlocks = new Set();
   for (const block of blocks) {
@@ -197,17 +218,22 @@ function buildImageReferences(sourcePackage) {
     if (block.type !== 'mermaid' || usedMermaidBlocks.has(block.id)) {
       continue;
     }
+    const sourceFigure = figureById.get(block.metadata?.figureId) || {};
+    const derivedDisplayPath = sourceFigure.metadata?.derivedDisplayPath || '';
     references.push({
-      caption: block.sectionTitle || block.anchorText || '图示',
-      path: '',
+      caption: block.caption || sourceFigure.caption || block.sectionTitle || block.anchorText || '图示',
+      path: derivedDisplayPath,
       blockId: block.id || '',
       sectionId: block.sectionId || '',
       sectionTitle: block.sectionTitle || '',
       afterBlockId: previousBlockId(blocks, block.id),
       anchorText: block.anchorText || '',
       mermaidBlock: block,
+      logicalAssetId: sourceFigure.logicalAssetId || block.metadata?.logicalAssetId || '',
+      occurrenceId: sourceFigure.occurrenceId || block.metadata?.occurrenceId || '',
+      derivation: sourceFigure.derivation,
       mermaidOrdinal: mermaidOrdinalBefore(blocks, block),
-      generatedFromMermaid: true,
+      generatedFromMermaid: !derivedDisplayPath,
     });
   }
 

@@ -52,6 +52,8 @@ function buildRenderPlan({ sourcePackage, templatePackage, assetPackage, documen
 
       return {
         figureId: figure.figureId,
+        ...(figure.logicalAssetId ? { logicalAssetId: figure.logicalAssetId } : {}),
+        ...(figure.occurrenceId ? { occurrenceId: figure.occurrenceId } : {}),
         caption: readableFigureCaption(figure, index, sectionTitle),
         sectionId: figure.sectionId || '',
         sectionTitle,
@@ -189,6 +191,8 @@ function buildTemplateImages(sourcePackage, assetPackage, sectionById) {
 function toTemplateFigureImage(figure, index, sectionById, placement = {}) {
   return {
     figureId: figure.figureId,
+    ...(figure.logicalAssetId ? { logicalAssetId: figure.logicalAssetId } : {}),
+    ...(figure.occurrenceId ? { occurrenceId: figure.occurrenceId } : {}),
     path: figure.displayPath,
     sha256: figure.sha256,
     caption: readableFigureCaption(figure, index, sectionById.get(figure.sectionId)?.title || ''),
@@ -220,6 +224,8 @@ function toTemplateMarkdownImage(
 
   return {
     figureId,
+    ...(image.logicalAssetId ? { logicalAssetId: image.logicalAssetId } : {}),
+    ...(image.occurrenceId ? { occurrenceId: image.occurrenceId } : {}),
     path: image.displayPath,
     sha256: image.sha256,
     caption: readableFigureCaption(image, index, sectionById.get(image.sectionId)?.title || ''),
@@ -267,6 +273,9 @@ function placementMetadata(sourcePackage, item, block = null) {
 }
 
 function toTemplateBlock(block, tableIds, figureIds, imageIds, figureIdBySourceImageId) {
+  if (block.type === 'figure-derivative') {
+    return null;
+  }
   const tableId = block.metadata?.tableId;
   if (tableId && tableIds.has(tableId)) {
     return {

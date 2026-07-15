@@ -334,6 +334,8 @@ function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sour
     const raster = rasterizeSvgToPng({ svgText, pngPath: displayPath, width: dimensions.width });
     return {
       imageId: image.imageId,
+      logicalAssetId: image.logicalAssetId,
+      occurrenceId: image.occurrenceId,
       sourcePath: toRelativePath(workspace, vectorPath),
       displayPath: toRelativePath(workspace, displayPath),
       sha256: sha256File(displayPath),
@@ -355,6 +357,8 @@ function packageImage({ image, workspace, absoluteOutDir, absoluteAssetDir, sour
 
   return {
     imageId: image.imageId,
+    logicalAssetId: image.logicalAssetId,
+    occurrenceId: image.occurrenceId,
     sourcePath: toRelativePath(workspace, sourcePath),
     displayPath: toRelativePath(workspace, outputPath),
     sha256: sha256File(outputPath),

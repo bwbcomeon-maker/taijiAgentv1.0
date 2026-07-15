@@ -53,9 +53,11 @@ async function runDocumentJob({
   try {
     assertEmptyDeliveryDir(absoluteDeliveryDir);
     const resolvedSourceType = sourceType || inferSourceType(absoluteSourcePath);
+    const assetManifest = readAssetManifest(assetManifestPath);
     const sourcePackage = await normalizeSource({
       sourceType: resolvedSourceType,
       sourcePath: absoluteSourcePath,
+      assetManifest,
     });
 
     job = createDocumentJob({
@@ -361,9 +363,9 @@ function assertEmptyDeliveryDir(deliveryDir) {
   }
 }
 
-async function normalizeSource({ sourceType, sourcePath }) {
+async function normalizeSource({ sourceType, sourcePath, assetManifest }) {
   if (sourceType === 'markdown') {
-    return normalizeMarkdownSource({ sourcePath });
+    return normalizeMarkdownSource({ sourcePath, assetManifest });
   }
   if (sourceType === 'text') {
     return normalizeTextSource({ sourcePath });
@@ -372,6 +374,20 @@ async function normalizeSource({ sourceType, sourcePath }) {
     return normalizeDocxSource({ sourcePath });
   }
   throw new Error(`Unsupported source type: ${sourceType}`);
+}
+
+function readAssetManifest(assetManifestPath) {
+  if (!assetManifestPath) {
+    return undefined;
+  }
+  if (!fs.existsSync(assetManifestPath)) {
+    throw new ContractFailure('asset_manifest_missing', `Asset manifest does not exist: ${assetManifestPath}`);
+  }
+  try {
+    return JSON.parse(fs.readFileSync(assetManifestPath, 'utf8'));
+  } catch (error) {
+    throw new ContractFailure('asset_manifest_invalid', `Asset manifest is not valid JSON: ${error.message}`);
+  }
 }
 
 function inferSourceType(sourcePath) {

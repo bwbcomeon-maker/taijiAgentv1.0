@@ -188,6 +188,7 @@ function replaySourcePackage({ deliveryDir, files }) {
       sourceType,
       sourcePath: sourcePackage.sourceRef?.path || sourceRef.path,
       sourceBuffer: fs.readFileSync(originalSourcePath),
+      assetManifest: sourcePackage.assetManifest,
     });
     const replayFailures = sourceReplayFailures({
       actual: sourcePackage,

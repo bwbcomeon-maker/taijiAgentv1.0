@@ -298,6 +298,8 @@ function buildImageInstructions({ assetPackage }) {
         displayPath: figure.displayPath,
         sourcePath: figure.editable?.sourcePath,
         sectionId: figure.sectionId,
+        logicalAssetId: figure.logicalAssetId,
+        occurrenceId: figure.occurrenceId,
       }));
     }
   }
@@ -313,6 +315,8 @@ function buildImageInstructions({ assetPackage }) {
         sourcePath: image.displayPath,
         originPath: image.sourcePath,
         sectionId: image.sectionId,
+        logicalAssetId: image.logicalAssetId,
+        occurrenceId: image.occurrenceId,
       }));
     }
   }
@@ -320,7 +324,7 @@ function buildImageInstructions({ assetPackage }) {
   return `${lines.join('\n')}\n`;
 }
 
-function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, originPath, sectionId }) {
+function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, originPath, sectionId, logicalAssetId, occurrenceId }) {
   const lines = [
     `- ${idLabel}: \`${id || 'unknown'}\``,
     `  - 标题: ${caption || '未命名图片'}`,
@@ -334,6 +338,12 @@ function assetInstructionLines({ idLabel, id, caption, displayPath, sourcePath, 
   }
   if (sectionId) {
     lines.push(`  - 章节锚点: \`${sectionId}\``);
+  }
+  if (logicalAssetId) {
+    lines.push(`  - 逻辑资产: \`${logicalAssetId}\``);
+  }
+  if (occurrenceId) {
+    lines.push(`  - 正文引用: \`${occurrenceId}\``);
   }
   lines.push('');
   return lines;

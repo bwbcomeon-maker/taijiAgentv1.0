@@ -328,7 +328,8 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(sourcePackage.sourceRef.sha256, sha256File(sourcePath));
   assert.equal(sourcePackage.blocks.some((block) => block.type === 'table'), true);
   assert.equal(sourcePackage.figures.length >= 1, true);
-  assert.equal(sourcePackage.images.length >= 1, true);
+  assert.equal(sourcePackage.images.length, 0);
+  assert.equal(sourcePackage.figures[0].derivation.relation, 'derived_from');
 
   const renderPlan = readJsonFile(path.join(deliveryDir, 'render-plan.json'));
   assert.equal(renderPlan.templateData.metadata.assetDir, 'assets');
@@ -338,7 +339,7 @@ test('run-job renders rich Markdown into a complete editable delivery package', 
   assert.equal(assetPackage.schemaVersion, 'docx-engine-v2/asset-package');
   assert.equal(assetPackage.assetDir, 'assets');
   assert.equal(assetPackage.figures.length >= 1, true);
-  assert.equal(assetPackage.images.length >= 1, true);
+  assert.equal(assetPackage.images.length, 0);
   const imageInstructions = fs.readFileSync(path.join(deliveryDir, 'README-图片调整说明.md'), 'utf8');
   for (const figure of assetPackage.figures) {
     assert.match(imageInstructions, new RegExp(`\\b${escapeRegExp(figure.figureId)}\\b`));

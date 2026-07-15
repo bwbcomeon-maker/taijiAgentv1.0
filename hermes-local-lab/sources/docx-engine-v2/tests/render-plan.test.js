@@ -77,28 +77,84 @@ test('buildRenderPlan binds sections, assets, and template data in source order'
   assert.equal(renderPlan.figures[0].sectionTitle, '一、总体架构');
   assert.equal(renderPlan.tables[0].tableId, 'tbl-001');
   assert.equal(renderPlan.templateData.images[0].figureId, 'fig-001');
-  assert.equal(renderPlan.templateData.images[1].figureId, 'fig-002');
+  assert.equal(renderPlan.templateData.images.length, 1);
+  assert.match(renderPlan.templateData.images[0].logicalAssetId, /^logical-[a-f0-9]{16}$/);
+  assert.match(renderPlan.templateData.images[0].occurrenceId, /^occurrence-[a-f0-9]{16}$/);
   assert.equal(renderPlan.templateData.images[0].metadata.sectionId, 'sec-001');
   assert.equal(renderPlan.templateData.images[0].metadata.blockId, 'block-005');
   assert.equal(renderPlan.templateData.images[0].metadata.afterBlockId, 'block-004');
-  assert.equal(renderPlan.templateData.images[1].metadata.sourceType, 'image');
-  assert.equal(renderPlan.templateData.images[1].metadata.sourceImageId, 'image-001');
-  assert.equal(renderPlan.templateData.images[1].metadata.sectionId, 'sec-001');
-  assert.equal(renderPlan.templateData.images[1].metadata.blockId, 'block-006');
-  assert.equal(renderPlan.templateData.images[1].metadata.afterBlockId, 'block-005');
-  assert.ok(renderPlan.templateData.images[1].path.endsWith('architecture.png'));
   assert.match(renderPlan.templateData.images[0].sha256, /^[a-f0-9]{64}$/);
-  assert.match(renderPlan.templateData.images[1].sha256, /^[a-f0-9]{64}$/);
   assert.equal(renderPlan.templateData.tables[0].tableId, 'tbl-001');
-  assert.equal(
-    renderPlan.templateData.sections[0].blocks.some(
-      (block) => block.type === 'figure' && block.figureId === 'fig-002' && block.sourceImageId === 'image-001'
-    ),
-    true
-  );
+  assert.equal(renderPlan.templateData.sections[0].blocks.filter((block) => block.type === 'figure').length, 1);
 
   const result = validateDomainObject('RenderPlan', renderPlan);
   assert.equal(result.ok, true, JSON.stringify(result.errors || result));
+});
+
+test('explicit repeated Mermaid occurrences share logical identity but keep distinct occurrences', async (t) => {
+  const workspace = makeWorkspace(t);
+  const markdownText = [
+    '# 重复引用测试',
+    '',
+    '## 流程',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A[开始] --> B[结束]',
+    '```',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A[开始] --> B[结束]',
+    '```',
+    '',
+  ].join('\n');
+  const sourcePackage = await normalizeMarkdownSource({
+    sourcePath: path.join(workspace, 'source.md'),
+    markdownText,
+  });
+  const assetPackage = packageAssets({ sourcePackage, outDir: path.join(workspace, 'assets') });
+  const renderPlan = buildRenderPlan({
+    sourcePackage,
+    templatePackage: getTemplatePackage('general-proposal'),
+    assetPackage,
+  });
+
+  assert.equal(renderPlan.templateData.images.length, 2);
+  assert.equal(renderPlan.templateData.images[0].logicalAssetId, renderPlan.templateData.images[1].logicalAssetId);
+  assert.notEqual(renderPlan.templateData.images[0].occurrenceId, renderPlan.templateData.images[1].occurrenceId);
+});
+
+test('runtime asset manifest is the identity source for canonical Mermaid figures', async (t) => {
+  const workspace = makeWorkspace(t);
+  const sourcePackage = await normalizeMarkdownSource({
+    sourcePath: path.join(workspace, 'canonical.md'),
+    markdownText: [
+      '# 资产身份测试',
+      '',
+      '## 流程',
+      '',
+      '```mermaid',
+      'flowchart LR',
+      '  A[开始] --> B[结束]',
+      '```',
+      '',
+    ].join('\n'),
+    assetManifest: {
+      schema_version: 'expert-asset-manifest/v1',
+      assets: [{
+        logical_asset_id: 'stable-runtime-asset-id',
+        asset_revision: 3,
+        derived_from: { section_id: 'sec-001', block_id: 'block-003' },
+        occurrences: [{ occurrence_id: 'runtime-occurrence-1', block_id: 'block-003', allow_repeated: false }],
+      }],
+    },
+  });
+
+  assert.equal(sourcePackage.figures[0].logicalAssetId, 'stable-runtime-asset-id');
+  assert.equal(sourcePackage.figures[0].occurrenceId, 'runtime-occurrence-1');
+  assert.equal(sourcePackage.figures[0].metadata.assetRevision, 3);
+  assert.equal(sourcePackage.figures[0].metadata.identitySource, 'runtime_asset_manifest');
 });
 
 test('buildRenderPlan orders template images by source block order across image types', async (t) => {

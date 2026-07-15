@@ -1,12 +1,15 @@
 const zlib = require('node:zlib');
 
 const { normalizeDocxSourceFromEntries } = require('../source/normalize-docx');
-const { normalizeMarkdownText } = require('../source/normalize-markdown');
+const { bindRuntimeAssetManifest, normalizeMarkdownText } = require('../source/normalize-markdown');
 const { normalizeTextContent } = require('../source/normalize-text');
 
-function replayOriginalSourcePackage({ sourceType, sourcePath, sourceBuffer }) {
+function replayOriginalSourcePackage({ sourceType, sourcePath, sourceBuffer, assetManifest }) {
   if (sourceType === 'markdown') {
-    return normalizeMarkdownText({ sourcePath, markdownText: sourceBuffer.toString('utf8') });
+    return bindRuntimeAssetManifest(
+      normalizeMarkdownText({ sourcePath, markdownText: sourceBuffer.toString('utf8') }),
+      assetManifest
+    );
   }
   if (sourceType === 'text') {
     return normalizeTextContent({ sourcePath, text: sourceBuffer.toString('utf8') });

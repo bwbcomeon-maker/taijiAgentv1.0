@@ -87,6 +87,10 @@ test('package-rich-draft creates editable figure assets and a manifest from mark
   assert.equal(manifest.files.imageList, '图片清单.md');
   assert.equal(manifest.figures.length, 1);
   assert.equal(manifest.figures[0].figureId, 'fig-001');
+  assert.match(manifest.figures[0].logicalAssetId, /^logical-[a-f0-9]{16}$/);
+  assert.match(manifest.figures[0].occurrenceId, /^occurrence-[a-f0-9]{16}$/);
+  assert.equal(manifest.figures[0].derivation.sourceRole, 'mermaid_source');
+  assert.equal(manifest.figures[0].derivation.displayRole, 'derived_display');
   assert.equal(manifest.figures[0].caption, '实施流程图');
   assert.equal(manifest.figures[0].editable.sourceType, 'mermaid');
   assert.equal(manifest.tables.length, 1);
@@ -107,6 +111,21 @@ test('package-rich-draft creates editable figure assets and a manifest from mark
     fs.readFileSync(path.join(outDir, 'source.md'), 'utf8'),
     /!\[实施流程图\]\(assets\/fig-001-实施流程图\/figure\.png\)/
   );
+  assert.equal(
+    (fs.readFileSync(path.join(outDir, 'source.md'), 'utf8').match(/!\[[^\]]*\]\([^)]*\)/g) || []).length,
+    1
+  );
+
+  const secondOutDir = path.join(workspace, 'package-second-run');
+  const secondResult = runPackage([
+    '--source', sourcePath,
+    '--out-dir', secondOutDir,
+    '--asset-dir', assetDir,
+  ]);
+  assert.equal(secondResult.status, 0, secondResult.stderr || secondResult.stdout);
+  const secondManifest = readJson(path.join(secondOutDir, 'draft.manifest.json'));
+  assert.equal(secondManifest.figures[0].logicalAssetId, manifest.figures[0].logicalAssetId);
+  assert.equal(secondManifest.figures[0].occurrenceId, manifest.figures[0].occurrenceId);
 });
 
 test('package-rich-draft preserves a qualified display image while saving Mermaid source', (t) => {

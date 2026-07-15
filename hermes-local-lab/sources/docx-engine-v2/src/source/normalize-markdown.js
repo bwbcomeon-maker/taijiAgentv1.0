@@ -2,8 +2,10 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
+const { allocateOccurrence, logicalAssetId } = require('../assets/logical-identity');
+
 async function normalizeMarkdownSource(options = {}) {
-  const { sourcePath = 'inline.md', markdownText = '', markdown } = options;
+  const { sourcePath = 'inline.md', markdownText = '', markdown, assetManifest } = options;
   const hasMarkdownText = Object.prototype.hasOwnProperty.call(options, 'markdownText');
   const hasLegacyMarkdown = Object.prototype.hasOwnProperty.call(options, 'markdown');
   const hasSourcePath = Object.prototype.hasOwnProperty.call(options, 'sourcePath');
@@ -16,7 +18,78 @@ async function normalizeMarkdownSource(options = {}) {
     sourceText = await fs.readFile(sourcePath, 'utf8');
   }
 
-  return normalizeMarkdownText({ sourcePath, markdownText: sourceText });
+  return bindRuntimeAssetManifest(
+    normalizeMarkdownText({ sourcePath, markdownText: sourceText }),
+    assetManifest
+  );
+}
+
+function bindRuntimeAssetManifest(sourcePackage, assetManifest) {
+  if (!assetManifest || !Array.isArray(assetManifest.assets)) {
+    return sourcePackage;
+  }
+  sourcePackage.assetManifest = JSON.parse(JSON.stringify(assetManifest));
+  const identityByBlockId = new Map();
+  for (const asset of assetManifest.assets) {
+    const logicalId = String(asset?.logical_asset_id || '').trim();
+    if (!logicalId) {
+      continue;
+    }
+    const occurrences = Array.isArray(asset.occurrences) ? asset.occurrences : [];
+    for (const occurrence of occurrences) {
+      const blockId = String(occurrence?.block_id || '').trim();
+      const runtimeOccurrenceId = String(occurrence?.occurrence_id || '').trim();
+      if (blockId && runtimeOccurrenceId) {
+        identityByBlockId.set(blockId, { asset, logicalId, occurrence, runtimeOccurrenceId });
+      }
+    }
+    const derivedBlockId = String(asset?.derived_from?.block_id || '').trim();
+    if (derivedBlockId && occurrences.length === 1 && !identityByBlockId.has(derivedBlockId)) {
+      const occurrence = occurrences[0];
+      const runtimeOccurrenceId = String(occurrence?.occurrence_id || '').trim();
+      if (runtimeOccurrenceId) {
+        identityByBlockId.set(derivedBlockId, { asset, logicalId, occurrence, runtimeOccurrenceId });
+      }
+    }
+  }
+
+  for (const figure of sourcePackage.figures || []) {
+    const block = (sourcePackage.blocks || []).find((candidate) => candidate.metadata?.figureId === figure.figureId);
+    const identity = block ? identityByBlockId.get(block.id) : null;
+    if (!identity) {
+      if (assetManifest.assets.length > 0) {
+        sourcePackage.warnings.push({
+          code: 'asset_identity_missing',
+          message: `Runtime asset manifest has no identity for ${figure.figureId}.`,
+          severity: 'warning',
+          figureId: figure.figureId,
+        });
+      }
+      continue;
+    }
+    figure.logicalAssetId = identity.logicalId;
+    figure.occurrenceId = identity.runtimeOccurrenceId;
+    figure.metadata = {
+      ...(figure.metadata || {}),
+      logicalAssetId: identity.logicalId,
+      occurrenceId: identity.runtimeOccurrenceId,
+      assetRevision: Number(identity.asset?.asset_revision || 1),
+      allowRepeated: identity.occurrence?.allow_repeated === true,
+      identitySource: 'runtime_asset_manifest',
+    };
+    for (const candidate of sourcePackage.blocks || []) {
+      if (candidate.metadata?.figureId !== figure.figureId) {
+        continue;
+      }
+      candidate.metadata = {
+        ...(candidate.metadata || {}),
+        logicalAssetId: identity.logicalId,
+        occurrenceId: identity.runtimeOccurrenceId,
+        identitySource: 'runtime_asset_manifest',
+      };
+    }
+  }
+  return sourcePackage;
 }
 
 function normalizeMarkdownText({ sourcePath = 'inline.md', markdownText = '' } = {}) {
@@ -108,6 +181,7 @@ function createContext({ sourceType, sourcePath, sourceText }) {
     images: [],
     embeddedMedia: [],
     warnings: [],
+    logicalOccurrenceCounts: new Map(),
   };
 }
 
@@ -149,15 +223,62 @@ function addParagraph(context, text, sourceLine) {
 
 function addImage(context, caption, imagePath, markdown, sourceLine) {
   ensureCurrentSection(context, sourceLine);
+  const previousBlock = context.blocks.at(-1);
+  const derivedFigure = previousBlock?.type === 'mermaid'
+    ? context.figures.find((figure) => figure.figureId === previousBlock.metadata?.figureId)
+    : null;
+  if (derivedFigure && derivedFigure.sectionId === (context.currentSection?.sectionId || '')) {
+    const readableCaption = caption || derivedFigure.caption;
+    derivedFigure.caption = readableCaption;
+    derivedFigure.derivation = {
+      sourceRole: 'mermaid_source',
+      displayRole: 'derived_display',
+      relation: 'derived_from',
+    };
+    derivedFigure.metadata = {
+      ...(derivedFigure.metadata || {}),
+      derivedDisplayPath: imagePath,
+      derivedDisplaySourceLine: sourceLine,
+    };
+    previousBlock.caption = readableCaption;
+    previousBlock.metadata = {
+      ...(previousBlock.metadata || {}),
+      derivedDisplayPath: imagePath,
+    };
+    addBlock(context, {
+      type: 'figure-derivative',
+      text: readableCaption,
+      content: { markdown },
+      path: imagePath,
+      caption: readableCaption,
+      level: context.currentSection?.level || 1,
+      anchorText: markdown,
+      metadata: {
+        sourceLine,
+        figureId: derivedFigure.figureId,
+        logicalAssetId: derivedFigure.logicalAssetId,
+        occurrenceId: derivedFigure.occurrenceId,
+        relation: 'derived_from',
+      },
+    });
+    return;
+  }
   const imageId = nextId('image', context.images.length + 1);
   const readableCaption = caption || readableFigureCaption(context, context.images.length + 1);
+  const logicalId = logicalAssetId({ sourceType: 'image', sourcePath: imagePath });
+  const occurrence = allocateOccurrence(context, {
+    logicalId,
+    sectionKey: context.currentSection?.title || '',
+  });
   context.images.push({
     imageId,
+    logicalAssetId: logicalId,
+    occurrenceId: occurrence,
     path: imagePath,
     caption: readableCaption,
     sectionId: context.currentSection?.sectionId || '',
     anchorText: markdown,
-    metadata: { sourceLine },
+    metadata: { sourceLine, logicalAssetId: logicalId, occurrenceId: occurrence },
   });
 
   addBlock(context, {
@@ -168,7 +289,7 @@ function addImage(context, caption, imagePath, markdown, sourceLine) {
     caption: readableCaption,
     level: context.currentSection?.level || 1,
     anchorText: markdown,
-    metadata: { sourceLine, imageId },
+    metadata: { sourceLine, imageId, logicalAssetId: logicalId, occurrenceId: occurrence },
   });
 }
 
@@ -207,8 +328,20 @@ function addCodeBlock(context, language, sourceText, sourceLine) {
     ensureCurrentSection(context, sourceLine);
     const figureId = nextId('fig', context.figures.length + 1);
     const caption = readableFigureCaption(context, context.figures.length + 1);
+    const logicalId = logicalAssetId({ sourceType: 'mermaid', sourceText });
+    const occurrence = allocateOccurrence(context, {
+      logicalId,
+      sectionKey: context.currentSection?.title || '',
+    });
     context.figures.push({
       figureId,
+      logicalAssetId: logicalId,
+      occurrenceId: occurrence,
+      derivation: {
+        sourceRole: 'mermaid_source',
+        displayRole: 'derived_display',
+        relation: 'derived_from',
+      },
       caption,
       sectionId: context.currentSection?.sectionId || '',
       anchorText: anchorText(sourceText),
@@ -217,7 +350,7 @@ function addCodeBlock(context, language, sourceText, sourceLine) {
       displayPath: `assets/${figureId}/figure.svg`,
       dimensions: { width: 960, height: 540, unit: 'px' },
       quality: { status: 'not_verified', warnings: [] },
-      metadata: { sourceLine },
+      metadata: { sourceLine, logicalAssetId: logicalId, occurrenceId: occurrence },
     });
 
     addBlock(context, {
@@ -226,7 +359,7 @@ function addCodeBlock(context, language, sourceText, sourceLine) {
       content: { language, sourceText },
       level: context.currentSection?.level || 1,
       anchorText: anchorText(sourceText),
-      metadata: { sourceLine, figureId },
+      metadata: { sourceLine, figureId, logicalAssetId: logicalId, occurrenceId: occurrence },
     });
     return;
   }
@@ -484,4 +617,4 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-module.exports = { normalizeMarkdownSource, normalizeMarkdownText };
+module.exports = { bindRuntimeAssetManifest, normalizeMarkdownSource, normalizeMarkdownText };

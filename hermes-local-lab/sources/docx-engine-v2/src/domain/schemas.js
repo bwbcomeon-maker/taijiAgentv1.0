@@ -211,6 +211,9 @@ const figureSchema = {
   ],
   properties: {
     figureId: { type: 'string', minLength: 1 },
+    logicalAssetId: { type: 'string', minLength: 1 },
+    occurrenceId: { type: 'string', minLength: 1 },
+    derivation: metadataSchema,
     caption: { type: 'string' },
     sectionId: { type: 'string' },
     anchorText: { type: 'string' },
@@ -230,6 +233,8 @@ const sourceImageSchema = {
   required: ['imageId', 'path'],
   properties: {
     imageId: { type: 'string', minLength: 1 },
+    logicalAssetId: { type: 'string', minLength: 1 },
+    occurrenceId: { type: 'string', minLength: 1 },
     path: { type: 'string', minLength: 1 },
     caption: { type: 'string' },
     sectionId: { type: 'string' },
@@ -244,6 +249,8 @@ const assetImageSchema = {
   required: ['imageId', 'sourcePath', 'displayPath'],
   properties: {
     imageId: { type: 'string', minLength: 1 },
+    logicalAssetId: { type: 'string', minLength: 1 },
+    occurrenceId: { type: 'string', minLength: 1 },
     sourcePath: { type: 'string', minLength: 1 },
     displayPath: { type: 'string', minLength: 1 },
     sha256: sha256Schema,
@@ -273,6 +280,8 @@ const renderFigureSchema = {
   required: ['figureId', 'caption', 'sectionId', 'afterBlockId', 'anchorText', 'displayPath', 'metadata'],
   properties: {
     figureId: { type: 'string', minLength: 1 },
+    logicalAssetId: { type: 'string', minLength: 1 },
+    occurrenceId: { type: 'string', minLength: 1 },
     caption: { type: 'string' },
     sectionId: { type: 'string' },
     sectionTitle: { type: 'string' },
@@ -289,6 +298,8 @@ const templateDataImageSchema = {
   required: ['figureId', 'path', 'sha256'],
   properties: {
     figureId: { type: 'string', minLength: 1 },
+    logicalAssetId: { type: 'string', minLength: 1 },
+    occurrenceId: { type: 'string', minLength: 1 },
     path: { type: 'string', minLength: 1 },
     sha256: sha256Schema,
     caption: { type: 'string' },
@@ -495,6 +506,7 @@ const schemas = {
       schemaVersion: { const: 'docx-engine-v2/source-package' },
       sourceType: { enum: ['markdown', 'text', 'docx'] },
       sourceRef: sourceRefSchema,
+      assetManifest: metadataSchema,
       title: { type: 'string' },
       sections: {
         type: 'array',
