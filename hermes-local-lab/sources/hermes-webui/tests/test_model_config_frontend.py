@@ -39,6 +39,7 @@ const _setModelConfigStatusBadge=(id,value)=>_setModelConfigText(id,value);
 const _modelConfigVisionProviderRow=()=>({id:'alibaba',name:'阿里百炼',requires_base_url:false});
 const _modelConfigKeyLabel=()=> '凭据已配置';
 const _formatModelConfigProvider=(id,label)=>label||id;
+const _imageCapabilityCredentialRef=()=>'';
 const _syncVisionConfigControls=()=>{};
 const toggleModelConfigSection=()=>{};
 const showToast=()=>{};
@@ -122,7 +123,9 @@ const _setModelConfigStatusBadge=(id,value)=>_setModelConfigText(id,value);
 const _modelConfigImageProviderRow=()=>({id:'dashscope',name:'阿里百炼',key_status:{configured:true},available:false,can_attempt:true});
 const _modelConfigKeyLabel=()=> '凭据已配置';
 const _formatModelConfigProvider=(id,label)=>label||id;
+const _imageCapabilityCredentialRef=()=>elements.imageGenConfigCredential.value;
 const _syncImageGenConfigControls=()=>{};
+const _clearModelConfigSecrets=()=>{};
 const _collectImageGenCredentials=()=>({});
 const _closeModelConfigEditor=()=>{};
 const showToast=()=>{};
@@ -223,6 +226,7 @@ let _modelConfigData={provider_credentials:[
 ]};
 let opened=null;
 const openPlatformCredentialEditor=(id,capability)=>{opened={id,capability};};
+const _imageCapabilityCredentialRef=()=>elements.visionConfigCredential.value;
 const _invalidateVisionTest=()=>{};
 const _invalidateImageGenTest=()=>{};
 let closed=null;
@@ -335,6 +339,7 @@ const _renderPlatformCredentials=()=>{rendered++;};
 const _renderCapabilityCredentialOptions=()=>{optionsRendered++;};
 const _renderVisionConfigSummary=()=>{};
 const _renderImageGenConfigSummary=()=>{};
+const _clearModelConfigSecrets=()=>{elements.platformCredentialSecret.value='';};
 const closePlatformCredentialEditor=()=>{closed++;};
 const loadModelConfigPanel=()=>{loadCount++;};
 const showToast=()=>{};
@@ -378,6 +383,11 @@ async function run(){
  const lateAfter={secret:elements.platformCredentialSecret.value,label:elements.platformCredentialLabel.value,
   storedLabel:_modelConfigData.provider_credentials[0].label,closed};
 
+ elements.platformCredentialSecret.value='retry-secret';
+ savePromise=Promise.reject(new Error('temporary failure'));
+ await savePlatformCredential();
+ const failedSave={secret:elements.platformCredentialSecret.value,error:elements.platformCredentialError.textContent};
+
  confirmResult=false;
  apiMode='delete';
  await deletePlatformCredential('alibaba-default',deleteAction);
@@ -401,7 +411,131 @@ async function run(){
  deleteReject(new Error('凭据正在使用'));
  await failedRun;
  const deleteFailed={message:elements.platformCredentialListStatus.textContent,focused:deleteAction.focused,confirmCalls};
- return {saveDuring,saveAfter,lateAfter,cancelled,deleteDuring,deleteAfter,deleteFailed};
+ return {saveDuring,saveAfter,lateAfter,failedSave,cancelled,deleteDuring,deleteAfter,deleteFailed};
+}
+run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{console.error(err);process.exit(1);});
+"""
+
+
+_MODEL_CONFIG_DRAFT_GUARD_DRIVER = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){
+ const re=new RegExp('(?:async\\s+)?function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);
+ if(start<0) throw new Error(name+' not found');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+function control(id,value=''){
+ return {id,value,hidden:false,dataset:{},textContent:'',disabled:false,attrs:{},focused:false,
+  classList:{add(){},remove(){}},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},
+  focus(){this.focused=true;},querySelector(){return null;},querySelectorAll(){return [];}};
+}
+const ids=['modelConfigStatus','modelConfigDraftStatus','modelConfigProvider','modelConfigModel','modelConfigBaseUrl',
+ 'modelConfigApiKey','visionConfigProvider','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey',
+ 'visionConfigCredential','visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId',
+ 'imageGenConfigProvider','imageGenConfigModel','imageGenConfigApiKey','imageGenConfigCredential',
+ 'imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl',
+ 'imageGenConfigCredentials','platformCredentialEditor','platformCredentialId','platformCredentialLabel',
+ 'platformCredentialFamily','platformCredentialSecret','visionConfigCredentialRow','imageGenConfigCredentialRow',
+ 'modelConfigPlatformCredentials','btnAddPlatformCredential','modelConfigActive'];
+const elements={}; for(const id of ids) elements[id]=control(id);
+Object.assign(elements.modelConfigProvider,{value:'openai'});
+Object.assign(elements.modelConfigModel,{value:'gpt-4o'});
+Object.assign(elements.visionConfigProvider,{value:'zai'});
+Object.assign(elements.visionConfigModel,{value:'glm-4v'});
+Object.assign(elements.visionConfigEndpointMode,{value:'public'});
+Object.assign(elements.visionConfigRegion,{value:'cn-beijing'});
+Object.assign(elements.imageGenConfigProvider,{value:'doubao'});
+Object.assign(elements.imageGenConfigModel,{value:'seedream'});
+Object.assign(elements.imageGenConfigEndpointMode,{value:'workspace'});
+Object.assign(elements.imageGenConfigRegion,{value:'cn-beijing'});
+elements.platformCredentialEditor.hidden=true;
+const dynamicSecret=control('dynamicSecret'); dynamicSecret.dataset.imageGenCredential='api_key';
+const secretFields=[elements.modelConfigApiKey,elements.visionConfigApiKey,elements.imageGenConfigApiKey,elements.platformCredentialSecret,dynamicSecret];
+secretFields.forEach(item=>{item.dataset.secretField='true';});
+const $=id=>elements[id]||null;
+const document={querySelectorAll(selector){
+ if(selector.includes('data-image-gen-credential')) return [dynamicSecret];
+ return selector.includes('data-secret-field')?secretFields:[];
+}};
+let _modelConfigData={profile:'default',main:{provider:'openai',model:'gpt-4o',base_url:''},
+ vision:{provider:'zai',model:'glm-4v',base_url:'',credential_ref:'',endpoint_mode:'',region:'',workspace_id:''},
+ image_gen:{provider:'doubao',model:'seedream',credential_ref:'',options:{}},provider_credentials:[]};
+let _modelConfigLoadGeneration=0;
+const _imageCapabilityProviderDrafts={vision:{},image:{}};
+let _platformCredentialSaveSession=null,_platformCredentialDeleteSession=null;
+let _platformCredentialReturnCapability='',_platformCredentialReturnFocus=null;
+let renderCount=0,apiCount=0,confirmCount=0,confirmResult=false,resolveLoad;
+let pendingLoad=new Promise(resolve=>{resolveLoad=resolve;});
+const _renderModelConfigPanel=data=>{renderCount++;_modelConfigData=data;};
+const _loadModelConfigAuxiliaryModels=async()=>{};
+const _bindTaijiLicenseControls=()=>{};
+const loadTaijiLicenseStatus=async()=>{};
+const showToast=()=>{};
+const showConfirmDialog=async()=>{confirmCount++;return confirmResult;};
+const toggleModelConfigSection=(id,open)=>{if(elements[id]) elements[id].hidden=!open;};
+const _restorePlatformCredentialFocus=()=>{};
+const api=async()=>{apiCount++;return await pendingLoad;};
+for(const name of ['_providerSupportsNamedCredential','_imageCapabilityCredentialRef','_syncPlatformCredentialSurface',
+ '_collectImageGenCredentials','_captureImageCapabilityProviderDraft','_restoreImageCapabilityProviderDraft',
+ '_visionConfigHasUnsavedChanges','_imageGenConfigHasUnsavedChanges','_modelConfigMainHasUnsavedChanges',
+ '_platformCredentialEditorHasUnsavedChanges','_imageGenCredentialDraftHasValues','_modelConfigHasUnsavedChanges',
+ '_modelConfigDraftIdentity','_clearModelConfigSecrets','_discardImageCapabilityProviderDrafts',
+ '_setModelConfigDraftStatus','closePlatformCredentialEditor','loadModelConfigPanel']) eval(extractFunc(name));
+
+async function run(){
+ elements.platformCredentialEditor.hidden=false; elements.platformCredentialSecret.value='cancel-secret';
+ closePlatformCredentialEditor();
+ const cancelSecretCleared=elements.platformCredentialSecret.value==='';
+ _syncPlatformCredentialSurface();
+ const unsupported={visionRowHidden:elements.visionConfigCredentialRow.hidden,
+  imageRowHidden:elements.imageGenConfigCredentialRow.hidden,addHidden:elements.btnAddPlatformCredential.hidden,
+  visionRef:_imageCapabilityCredentialRef('vision','zai'),imageRef:_imageCapabilityCredentialRef('image','doubao')};
+ elements.visionConfigProvider.value='alibaba'; _syncPlatformCredentialSurface();
+ const alibabaVisible=!elements.visionConfigCredentialRow.hidden&&!elements.btnAddPlatformCredential.hidden;
+ elements.visionConfigProvider.value='custom'; elements.imageGenConfigProvider.value='dashscope'; _syncPlatformCredentialSurface();
+ const dashscopeVisible=!elements.imageGenConfigCredentialRow.hidden&&!elements.btnAddPlatformCredential.hidden;
+
+ elements.visionConfigModel.value='zai-draft'; elements.visionConfigApiKey.value='zai-secret';
+ _captureImageCapabilityProviderDraft('vision','zai');
+ elements.visionConfigModel.value=''; elements.visionConfigApiKey.value='';
+ const visionDraftRestored=_restoreImageCapabilityProviderDraft('vision','zai');
+ elements.imageGenConfigModel.value='doubao-draft'; dynamicSecret.value='doubao-secret';
+ _captureImageCapabilityProviderDraft('image','doubao');
+ elements.imageGenConfigModel.value=''; dynamicSecret.value='';
+ const imageDraftRestored=_restoreImageCapabilityProviderDraft('image','doubao');
+ const providerDrafts={visionDraftRestored,imageDraftRestored,visionModel:elements.visionConfigModel.value,
+  visionSecret:elements.visionConfigApiKey.value,imageModel:elements.imageGenConfigModel.value,imageSecret:dynamicSecret.value};
+ elements.visionConfigModel.value='glm-4v'; elements.visionConfigApiKey.value='';
+ elements.imageGenConfigModel.value='seedream'; dynamicSecret.value='';
+
+ elements.visionConfigProvider.value='zai'; elements.imageGenConfigProvider.value='doubao';
+ const initialDirty=_modelConfigHasUnsavedChanges();
+ const late=loadModelConfigPanel(true,{skipDirtyConfirm:true});
+ await Promise.resolve();
+ elements.visionConfigModel.value='new-draft';
+ const lateDirty=_modelConfigHasUnsavedChanges();
+ resolveLoad({profile:'default',main:{provider:'openai',model:'server'},vision:{provider:'zai',model:'server'},image_gen:{provider:'doubao',model:'server'}});
+ await late;
+ const lateGuard={renderCount,draft:elements.visionConfigModel.value,status:elements.modelConfigDraftStatus.textContent};
+
+ await loadModelConfigPanel(false);
+ const returnGuard={renderCount,draft:elements.visionConfigModel.value};
+
+ pendingLoad=Promise.resolve({profile:'default',main:{provider:'openai',model:'fresh'},vision:{provider:'zai',model:'fresh'},image_gen:{provider:'doubao',model:'fresh'}});
+ secretFields.forEach((item,index)=>{item.value='secret-'+index;});
+ await loadModelConfigPanel(true);
+ const cancelled={apiCount,confirmCount,renderCount,draft:elements.visionConfigModel.value};
+ confirmResult=true;
+ await loadModelConfigPanel(true);
+ const accepted={apiCount,confirmCount,renderCount,secrets:secretFields.map(item=>item.value)};
+ secretFields.forEach(item=>item.value='again');
+ _clearModelConfigSecrets();
+ const cleared=secretFields.every(item=>item.value==='');
+ return {cancelSecretCleared,unsupported,alibabaVisible,dashscopeVisible,providerDrafts,initialDirty,lateDirty,lateGuard,returnGuard,cancelled,accepted,cleared};
 }
 run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{console.error(err);process.exit(1);});
 """
@@ -452,6 +586,20 @@ def _run_image_config_interactions(tmp_path: Path) -> dict:
 def _run_credential_sessions(tmp_path: Path) -> dict:
     driver = tmp_path / "credential-session-driver.js"
     driver.write_text(_CREDENTIAL_SESSION_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def _run_model_config_draft_guard(tmp_path: Path) -> dict:
+    driver = tmp_path / "model-config-draft-guard-driver.js"
+    driver.write_text(_MODEL_CONFIG_DRAFT_GUARD_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js")],
         capture_output=True,
@@ -688,6 +836,86 @@ def test_credential_controls_expose_expansion_errors_and_touch_targets():
     assert "min-height:44px" in STYLE_CSS
 
 
+def test_named_credential_controls_are_scoped_to_supported_providers():
+    assert 'id="visionConfigCredentialRow"' in INDEX_HTML
+    assert 'id="imageGenConfigCredentialRow"' in INDEX_HTML
+    for marker in (
+        "_providerSupportsNamedCredential",
+        "_imageCapabilityCredentialRef",
+        "_syncPlatformCredentialSurface",
+        "id==='alibaba'",
+        "id==='dashscope'",
+    ):
+        assert marker in PANELS_JS
+    assert "const payload={provider,model,base_url:baseUrl,credential_ref:credentialRef" not in PANELS_JS
+    assert "const payload={provider,model,credential_ref:credentialRef}" not in PANELS_JS
+
+
+def test_model_config_load_and_secret_lifecycle_have_explicit_guards():
+    assert 'id="modelConfigDraftStatus" aria-live="polite"' in INDEX_HTML
+    for marker in (
+        "_modelConfigLoadGeneration",
+        "_modelConfigMainHasUnsavedChanges",
+        "_platformCredentialEditorHasUnsavedChanges",
+        "_modelConfigHasUnsavedChanges",
+        "_clearModelConfigSecrets",
+        "skipDirtyConfirm",
+        "检测到未保存草稿",
+    ):
+        assert marker in PANELS_JS
+    assert "_clearModelConfigSecrets();" in PANELS_JS
+    close_settings = PANELS_JS.split("function _closeSettingsPanel", 1)[1].split(
+        "function _revertSettingsPreview", 1
+    )[0]
+    hide_settings = PANELS_JS.split("function _hideSettingsPanel", 1)[1].split(
+        "function _closeSettingsPanel", 1
+    )[0]
+    assert "_clearModelConfigSecrets" in close_settings
+    assert "_clearModelConfigSecrets" in hide_settings
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_provider_scope_load_generation_and_secret_cleanup_are_state_safe(tmp_path):
+    result = _run_model_config_draft_guard(tmp_path)
+    assert result["cancelSecretCleared"] is True
+    assert result["unsupported"] == {
+        "visionRowHidden": True,
+        "imageRowHidden": True,
+        "addHidden": True,
+        "visionRef": "",
+        "imageRef": "",
+    }
+    assert result["alibabaVisible"] is True
+    assert result["dashscopeVisible"] is True
+    assert result["providerDrafts"] == {
+        "visionDraftRestored": True,
+        "imageDraftRestored": True,
+        "visionModel": "zai-draft",
+        "visionSecret": "zai-secret",
+        "imageModel": "doubao-draft",
+        "imageSecret": "doubao-secret",
+    }
+    assert result["lateGuard"] == {
+        "renderCount": 0,
+        "draft": "new-draft",
+        "status": "检测到未保存草稿，已保留当前编辑内容；服务器状态未覆盖页面。",
+    }
+    assert result["returnGuard"] == {"renderCount": 0, "draft": "new-draft"}
+    assert result["cancelled"] == {
+        "apiCount": 1,
+        "confirmCount": 1,
+        "renderCount": 0,
+        "draft": "new-draft",
+    }
+    assert result["accepted"] == {
+        "apiCount": 2,
+        "confirmCount": 2,
+        "renderCount": 1,
+        "secrets": ["", "", "", "", ""],
+    }
+    assert result["cleared"] is True
+
+
 def test_both_image_capability_cards_use_consistent_endpoint_and_test_controls():
     expected_ids = (
         "visionConfigCredential", "visionConfigEndpointMode", "visionConfigRegion",
@@ -723,6 +951,7 @@ def test_image_endpoint_fields_are_accessible_and_progressively_disclosed():
         "endpointMode==='custom'",
     ):
         assert marker in PANELS_JS
+    assert "/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/" in PANELS_JS
 
 
 def test_model_config_closing_editor_restores_focus_to_visible_toggle():
@@ -782,6 +1011,10 @@ def test_credential_save_delete_sessions_do_not_clobber_newer_drafts(tmp_path):
         "label": "新会话草稿",
         "storedLabel": "共享凭据",
         "closed": 1,
+    }
+    assert result["failedSave"] == {
+        "secret": "retry-secret",
+        "error": "凭据保存失败：temporary failure",
     }
     assert result["cancelled"] == {"loadCount": 0, "rendered": 1}
     assert result["deleteDuring"] == {"disabled": True, "add": True}
@@ -970,10 +1203,13 @@ def test_image_generation_custom_provider_new_form_generates_id():
     assert "||_customImageProviderDraftId(name,baseUrl)" in PANELS_JS
 
 
-def test_image_generation_save_forces_full_model_config_refresh():
+def test_image_generation_save_updates_only_its_capability_without_clobbering_other_drafts():
     assert "async function saveImageGenConfig" in PANELS_JS
-    assert "await loadModelConfigPanel(true)" in PANELS_JS
-    assert "image_gen:data.image_gen" not in PANELS_JS
+    save_body = PANELS_JS.split("async function saveImageGenConfig", 1)[1].split(
+        "function _imageGenConfigHasUnsavedChanges", 1
+    )[0]
+    assert "await loadModelConfigPanel(true)" not in save_body
+    assert "_modelConfigData.image_gen=data.image_gen" in save_body
 
 
 def test_image_generation_edit_uses_selected_provider_default_model():

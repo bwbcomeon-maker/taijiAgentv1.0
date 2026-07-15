@@ -1368,6 +1368,7 @@
               </div>
               <button class="btn-tiny" type="button" onclick="loadModelConfigPanel(true)">刷新状态</button>
             </div>
+            <p class="model-config-hint" id="modelConfigDraftStatus" aria-live="polite"></p>
 
             <div class="model-config-focus-layout">
               <section class="model-config-license-strip taiji-license-panel" id="taijiLicensePanel" data-license-status="unknown">
@@ -1528,7 +1529,7 @@
                         <button class="sm-btn" id="btnEditVisionConfig" type="button" data-model-config-toggle="visionConfigEdit" aria-expanded="false" aria-controls="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
                       </div>
                       <div class="model-config-collapsible" id="visionConfigEdit" hidden>
-                        <div class="model-config-field">
+                        <div class="model-config-field" id="visionConfigCredentialRow">
                           <label for="visionConfigCredential">平台凭据</label>
                           <select id="visionConfigCredential" aria-describedby="visionConfigCredentialHint visionConfigEndpointError"></select>
                           <div class="model-config-hint" id="visionConfigCredentialHint">可选择共享凭据，或新增只用于识图的独立凭据。</div>
@@ -1607,7 +1608,7 @@
                         <button class="btn-tiny" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴密钥</button>
                       </div>
                       <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
-                        <div class="model-config-field">
+                        <div class="model-config-field" id="imageGenConfigCredentialRow">
                           <label for="imageGenConfigCredential">平台凭据</label>
                           <select id="imageGenConfigCredential" aria-describedby="imageGenConfigCredentialHint imageGenConfigEndpointError"></select>
                           <div class="model-config-hint" id="imageGenConfigCredentialHint">可与识图共享同一凭据，也可使用独立凭据隔离费用。</div>
