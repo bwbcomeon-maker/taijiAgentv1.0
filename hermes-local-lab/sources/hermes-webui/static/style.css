@@ -3912,6 +3912,7 @@ main.main > #mainKanban,
 main.main > #mainWriting,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
+main.main > #mainTodos,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
 main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-writing):not(.showing-workspaces):not(.showing-profiles):not(.showing-todos):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
@@ -3923,6 +3924,7 @@ main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-writing > #mainWriting{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
+main.main.showing-todos > #mainTodos{display:flex;}
 main.main.showing-logs > #mainLogs{display:flex;}
 main.main.showing-plugin > #mainPlugin{display:flex;}
 main.main > #mainPlugin{display:none;}
@@ -4182,6 +4184,7 @@ main.main > #mainPlugin{display:none;}
 .model-config-aux-label span{display:block;margin-top:2px;font-size:10px;font-weight:400;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 @media (max-width:900px){.model-config-status{grid-template-columns:repeat(2,minmax(0,1fr));}.model-config-grid{grid-template-columns:1fr;}.model-config-aux-row{grid-template-columns:1fr;align-items:stretch;}}
 @media (max-width:560px){.model-config-status{grid-template-columns:1fr;}.model-config-actions{flex-direction:column;}.model-config-actions .sm-btn{width:100%;}}
+#settingsPaneModels{container-type:inline-size;container-name:model-config;}
 #settingsPaneModels .model-config-focus-layout{display:grid;gap:14px;margin-top:4px;color:#0d3158;}
 #settingsPaneModels .model-config-license-strip,
 #settingsPaneModels .model-config-hero,
@@ -4330,6 +4333,18 @@ main.main > #mainPlugin{display:none;}
 #settingsPaneModels .model-config-chip-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
 #settingsPaneModels .model-config-chip{display:inline-flex;align-items:center;max-width:100%;min-height:28px;padding:0 11px;border:1px solid rgba(207,226,241,.95);border-radius:999px;background:#fff;color:#456680;font-size:11px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 #settingsPaneModels .model-config-aux-edit{grid-column:1/-1;}
+@container model-config (max-width:880px){
+ #settingsPaneModels .model-config-license-facts{grid-template-columns:repeat(2,minmax(0,1fr));}
+ #settingsPaneModels .model-config-license-strip,
+ #settingsPaneModels .model-config-hero,
+ #settingsPaneModels .model-config-summary-grid,
+ #settingsPaneModels .model-config-image-capability-grid,
+ #settingsPaneModels .model-config-aux-summary{grid-template-columns:1fr;}
+ #settingsPaneModels .model-config-license-strip>.model-config-actions{justify-self:stretch;justify-items:start;max-width:none;}
+ #settingsPaneModels .model-config-license-toolbar{justify-content:flex-start;}
+ #settingsPaneModels .model-config-license-online-note{justify-content:flex-start;text-align:left;}
+ #settingsPaneModels .model-config-hero-badges{justify-content:flex-start;}
+}
 @media (max-width:1100px){
  #settingsPaneModels .model-config-license-facts{grid-template-columns:repeat(2,minmax(0,1fr));}
  #settingsPaneModels .model-config-hero,
