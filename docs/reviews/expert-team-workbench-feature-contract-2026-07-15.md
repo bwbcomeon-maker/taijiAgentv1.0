@@ -8,8 +8,8 @@
 |---|---:|---:|---:|---:|---:|---:|---:|---|---|
 | Brief 持久摘要 | 是 | 是 | 是 | 部分 | 是 | 是 | 未验证 | 通过 | 始终展示原始诉求摘要、精确标题、文种、revision 与规格详情入口；legacy 不补造 Brief。 |
 | 原始诉求完整查看 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | `original_request` 使用明确 `label`；当前为只读详情。 |
-| Brief 编辑与确认 | 是 | 是 | 是 | 是 | 是 | label、稳定错误 id、动态 `aria-describedby`、首错聚焦 | 未验证 | 通过 | 原始诉求与补充背景分栏；清错只移除错误关联并保留 help；保存、确认和开始生成相互独立。 |
-| Brief revision conflict | 是 | 是 | 是 | 是 | 是 | 草稿保留、首错可聚焦 | 未验证 | 通过 | 409 应用权威 run，明确提示核对后重试，不自动启动。 |
+| Brief 编辑与确认 | 是 | 是 | 是 | 是 | 是 | label、稳定错误 id、动态 `aria-describedby`、首错聚焦 | 未验证 | 通过 | 只提交相对权威快照的脏字段；“更新已提交、确认失败”与“更新失败”分别反馈，保存、确认和开始生成相互独立。 |
+| Brief revision conflict | 是 | 是 | 是 | 是 | 是 | 草稿保留、首错可聚焦 | 未验证 | 通过 | 409 先应用权威 run，再只恢复本地脏字段；服务端并发更新的其他字段不被旧快照覆盖，不自动启动。 |
 | 需求确认 0/N | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | intake 阶段固定 0/N，首模型阶段开始后才进入 1/N。 |
 | 三道完成门 | 是 | 是 | 是 | 是 | 是 | 状态不只靠颜色 | 未验证 | 通过 | content/document/office 只接受稳定状态；document 不以 DOCX 文件存在或旧 `delivery_gate=passed` 推导通过。 |
 | 七类质量状态到三门派生 | 是 | 是 | 是 | fail-closed | 是 | 不适用 | 未验证 | 通过 | brief/semantic/evidence/asset/render 任一缺失、pending、failed 均阻止 document passed；Office failed 不被完整性摘要覆盖。 |
@@ -19,8 +19,8 @@
 | 唯一下一步 | 是 | 是 | 是 | 是 | 是 | 可见文字按钮/状态 | 未验证 | 通过 | view 输出单一 `next_action`；presenter 纯映射。 |
 | 历史任务诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“历史任务，未按企业合同验证”，三门 invalidated。 |
 | 未放行文种诚实标签 | 是 | 是 | 是 | fail-closed | 是 | 是 | 未验证 | 通过 | 显示“AI 草稿能力”，不承诺企业交付。 |
-| 收起态状态胶囊 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | 展开按钮具有 accessible name、`aria-expanded` 与 `aria-controls`；点击展开/切换时使用实际工作台返回状态同步 ARIA。 |
-| 企业审批身份 | start/status/logout | 是 | 是 | 是 | provider/显式取消/callback 失败/超时/缺 role 均禁用 | 可见取消入口、成功/取消/失败/超时焦点恢复 | Node 运行时契约通过；真实 Electron 未验证 | 通过 | http(s) PKCE URL 由 Electron 主进程转交系统浏览器，窗口请求一律 deny；renderer 即使收到 `window.open=null` 仍轮询权威 status，不依赖 popup handle/`closed` 或 Node。UI mutation 不提交 token/principal/role，不把 credential 写入 localStorage。 |
+| 收起态状态胶囊 | 是 | 是 | 是 | 不适用 | 是 | 是 | 未验证 | 通过 | 胶囊展开按钮和工作台收起按钮都具有 `aria-expanded` 与同一个 `aria-controls`，每次展开/收起同步两个控制器。 |
+| 企业审批身份 | start/status/logout | 是 | 是 | 是 | provider/显式取消/callback 失败/超时/缺 role 均禁用 | 可见取消入口、成功/取消/失败/超时焦点恢复 | Node 运行时契约通过；真实 Electron 未验证 | 通过 | 主进程只允许 `TAIJI_TRUSTED_OIDC_ORIGINS` 中精确匹配的 HTTPS origin，默认空并 fail-closed；仅未打包本地开发允许显式配置 localhost HTTP。拒绝 userinfo、路径、查询、hash、相似域名和任意 HTTPS。每次登录具有独立 attempt token 与 `AbortController`；新登录、取消、登出会中止旧轮询，旧响应不能覆盖新状态或抢焦点。UI mutation 不提交 token/principal/role，不把 credential 写入 localStorage。 |
 | 阶段批准门禁 | 是 | 是 | 是 | fail-closed | 无合法 approver 或有 unresolved warning 时禁用并解释 | 禁用原因可读 | 未验证 | 通过 | pre-Office warning 不提供“申请授权”。 |
 | 聊天区无可操作确认卡 | 是 | 是 | 是 | 不适用 | 不适用 | 是 | 未验证 | 通过 | 生命周期提示只引导右侧工作台；完成成果入口继续保留。 |
 | 真实 Brief 编辑与阶段复核 | 是 | 是 | 是 | 是 | 是 | 人工语义检查完成 | 未验证 | 未验证 | 代码与自动化契约已覆盖；真实 Electron 留待 Task 7。 |
@@ -35,7 +35,7 @@
 - 真实浏览器测试：未验证。原因：计划将真实 Electron/浏览器验收集中在 Task 7；本轮不启动 rollout。
 - 截图与视觉回归：未验证。Task 3 已改布局/样式，真实视觉验收按计划留待 Task 7。
 - 自动化可访问性：未验证。未发现本轮计划要求可直接复用的 axe 检查命令，且未新增依赖。
-- Electron 外链安全契约：Node 单测已覆盖 http/https allowlist、非 http(s) 拒绝、`shell.openExternal` 转发和 `setWindowOpenHandler` 接线；真实系统浏览器回返仍留 Task 7。
+- Electron 外链安全契约：Node 单测已覆盖配置归一化、默认空白名单、精确 HTTPS origin、相似域名/userinfo/路径/非 HTTPS 拒绝、仅本地开发 HTTP 例外、`shell.openExternal` 转发和主进程环境变量注入；真实系统浏览器回返仍留 Task 7。
 - 长时间工作体验与响应式布局：未验证。本轮不改变布局，待 Task 3 与 Task 7 在真实视口审查。
 
 ## 当前问题分级
@@ -52,6 +52,10 @@
 - 已修复未 committed 或 delivery attempt 漂移的事务错误显示企业完成的问题。
 - 已修复启动/生成/reservation 已发生但 `stage_outputs=[]` 时 Brief 仍可编辑的问题。
 - 已补充胶囊 `aria-expanded` 与展开/切换结果同步，真实浏览器焦点与持久化恢复仍待 Task 7 验证。
+- 已补充工作台收起按钮的 `aria-expanded`/`aria-controls`，并与胶囊控制器同步。
+- 已将 OIDC 外链策略从“任意 http(s)”收紧为配置驱动的精确 origin 白名单；生产默认拒绝全部未配置 origin。
+- 已为身份登录轮询增加可取消的 attempt 边界，取消、登出和重启登录不会再被旧响应反写。
+- 已将 Brief 保存改为最小脏字段 patch；冲突时只恢复本地编辑字段，并区分“保存成功但确认失败”。
 - 已改用生产实际的 `completion_integrity.transaction_state`，不再依赖 transaction ref 中不存在的虚构 status。
 - 已让内容门状态、阻断计数和 reason code 从同一组 unresolved blocking issues 派生。
 

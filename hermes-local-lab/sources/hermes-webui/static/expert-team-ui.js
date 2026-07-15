@@ -10,8 +10,8 @@
   }
   function setExpertTeamCapsuleExpanded(trigger,expanded){
     const root=trigger&&trigger.closest?trigger.closest('.expert-team-panel-inner'):null;
-    const capsule=root&&root.querySelector?root.querySelector('.expert-team-capsule-action'):null;
-    if(capsule)capsule.setAttribute('aria-expanded',expanded?'true':'false');
+    const controls=root&&root.querySelectorAll?root.querySelectorAll('[aria-controls="expert-team-workspace-expanded"]'):[];
+    controls.forEach(control=>control.setAttribute('aria-expanded',expanded?'true':'false'));
     return !!expanded;
   }
   function showExpertTeamWorkspaceFromCapsule(trigger){
@@ -145,8 +145,9 @@
       return `<label class="expert-team-brief-field"><span>${safeEsc(label)}</span>${control}${options.help?`<small id="${safeEsc(helpId)}">${safeEsc(options.help)}</small>`:''}<small id="${safeEsc(errorId)}" data-expert-team-field-error="${safeEsc(name)}" role="alert">${safeEsc(error&&error.message||'')}</small></label>`;
     };
     const control=brief.documentControl||{};
+    const briefSnapshot={original_request:brief.originalRequest||'',exact_title:brief.exactTitle||'',purpose:brief.purpose||'',audience:brief.audience||'',usage_scenario:brief.usageScenario||'',additional_context:brief.additionalContext||'',document_control:control};
     const editor=brief.editable
-      ? `<form class="expert-team-brief-editor" data-expert-team-brief-editor data-expert-team-brief-revision="${safeEsc(brief.revision||0)}" data-expert-team-document-control="${safeEsc(JSON.stringify(control))}" onsubmit="return false">
+      ? `<form class="expert-team-brief-editor" data-expert-team-brief-editor data-expert-team-brief-revision="${safeEsc(brief.revision||0)}" data-expert-team-brief-snapshot="${safeEsc(JSON.stringify(briefSnapshot))}" data-expert-team-document-control="${safeEsc(JSON.stringify(control))}" onsubmit="return false">
           <fieldset><legend>文档目标</legend>
             ${field('original_request','原始诉求',brief.originalRequest,{rows:4,help:'这是创建任务时的原始要求，可在首阶段启动前修正。'})}
             ${field('exact_title','精确标题',brief.exactTitle)}
@@ -464,7 +465,7 @@
             <strong class="expert-team-panel-title">${safeEsc(card&&card.brief&&card.brief.exactTitle||presentation.visibleTitle||'专家团任务')}</strong>
             <span class="expert-team-panel-summary">${safeEsc(card&&card.brief?`${card.brief.documentTypeLabel||'待选择文种'} · Brief revision ${card.brief.revision||0}`:(card&&card.team&&card.team.title||'专家团'))}</span>
           </span>
-          <button type="button" class="expert-team-panel-hide expert-team-panel-collapse-toggle" onclick="toggleExpertTeamWorkspaceFromControl(this);event.stopPropagation()" aria-label="展开或合上专家团工作台">
+          <button type="button" class="expert-team-panel-hide expert-team-panel-collapse-toggle" onclick="toggleExpertTeamWorkspaceFromControl(this);event.stopPropagation()" aria-label="展开或合上专家团工作台" aria-expanded="true" aria-controls="expert-team-workspace-expanded">
             <span class="expert-team-panel-collapse-icon is-collapse">合上</span>
             <span class="expert-team-panel-collapse-icon is-expand">展开</span>
           </button>

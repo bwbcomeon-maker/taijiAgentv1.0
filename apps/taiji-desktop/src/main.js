@@ -6,7 +6,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
-const { createExternalWindowOpenHandler } = require("./external-link-policy");
+const { createExternalWindowOpenHandler, normalizeTrustedExternalOrigins } = require("./external-link-policy");
 
 const APP_NAME = "太极 Agent";
 const DEFAULT_AGENT_PORT = 18642;
@@ -548,7 +548,8 @@ async function createWindow() {
   });
   mainWindow.webContents.setWindowOpenHandler(createExternalWindowOpenHandler(
     (url) => shell.openExternal(url),
-    (error) => desktopBootLog(`external URL open failed: ${error && error.message ? error.message : String(error)}`)
+    (error) => desktopBootLog(`external URL open failed: ${error && error.message ? error.message : String(error)}`),
+    normalizeTrustedExternalOrigins(process.env.TAIJI_TRUSTED_OIDC_ORIGINS || "", { allowLocalHttp: !app.isPackaged })
   ));
   installDesktopPermissionHandlers(mainWindow);
 

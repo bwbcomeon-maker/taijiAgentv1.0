@@ -101,6 +101,8 @@ def _actions_harness(body: str) -> str:
           console,
           setTimeout,
           clearTimeout,
+          AbortController,
+          DOMException,
           crypto:{{randomUUID:()=> 'uuid-fixed'}},
           window:{{}},
           document:{{getElementById:()=>null}},
@@ -1291,25 +1293,41 @@ def test_brief_control_patch_preserves_non_rendered_enterprise_metadata():
     }
 
 
-def test_brief_revision_conflict_restores_draft_against_authoritative_run():
+def test_brief_revision_conflict_restores_only_dirty_fields_against_authoritative_run():
     result = _run_node(
         _actions_harness(
             """
             const events=[];
-            context.captureExpertTeamWorkspaceFormState=()=>({controls:[{name:'exact_title',value:'本地草稿'}]});
-            context.restoreExpertTeamWorkspaceFormState=(_root,state)=>{events.push(['restore',state.controls[0].value]);return true;};
+            const controls={
+              exact_title:{name:'exact_title',value:'本地草稿',disabled:false,setAttribute:()=>{},removeAttribute:()=>{},focus:()=>{}},
+              purpose:{name:'purpose',value:'服务端并发新用途',disabled:false,setAttribute:()=>{},removeAttribute:()=>{},focus:()=>{}},
+            };
+            const form={
+              dataset:{expertTeamBriefRevision:'3',expertTeamBriefSnapshot:JSON.stringify({exact_title:'旧标题',purpose:'服务端并发新用途'})},
+              querySelectorAll:()=>Object.values(controls),
+              querySelector:(selector)=>selector.includes('exact_title')?controls.exact_title:(selector.includes('purpose')?controls.purpose:null),
+            };
+            context.document.getElementById=()=>form;
             context._expertTeamStatusCardFromRun=(run)=>({runId:run.run_id});
-            context.renderExpertTeamStatusSurface=(card)=>events.push(['render',card.runId]);
+            context.renderExpertTeamStatusSurface=(card)=>{
+              events.push(['render',card.runId]);
+              controls.exact_title.value='服务端标题';
+              controls.purpose.value='服务端并发新用途';
+            };
             context.api=()=>{const error=new Error('规格已被更新');error.status=409;error.payload={code:'brief_revision_conflict',field:'expected_brief_revision',run:{run_id:'run-1',version:8,workflow_state:'collecting_required'}};return Promise.reject(error);};
             context.window._activeExpertTeamStatusCard={runId:'run-1',sourceSessionId:'session-1',schemaVersion:2,version:7,currentStageId:'intake',readOnly:false,brief:{revision:3}};
-            const form={dataset:{expertTeamBriefRevision:'3'},querySelectorAll:()=>[],querySelector:()=>null};
             const root={dataset:{expertTeamRunId:'run-1',expertTeamSchemaVersion:'2',expertTeamVersion:'7',expertTeamStageId:'intake',expertTeamReadOnly:'false'}};
             const button={disabled:false,isConnected:true,textContent:'保存规格',setAttribute:()=>{},removeAttribute:()=>{},closest:(selector)=>selector==='[data-expert-team-brief-editor]'?form:root};
-            context.window.submitExpertTeamBrief(button,false).then(ok=>console.log(JSON.stringify({ok,events})));
+            context.window.submitExpertTeamBrief(button,false).then(ok=>console.log(JSON.stringify({ok,events,title:controls.exact_title.value,purpose:controls.purpose.value})));
             """
         )
     )
-    assert result == {'ok': False, 'events': [['render', 'run-1'], ['restore', '本地草稿']]}
+    assert result == {
+        'ok': False,
+        'events': [['render', 'run-1']],
+        'title': '本地草稿',
+        'purpose': '服务端并发新用途',
+    }
 
 
 def test_identity_flow_is_discoverable_fail_closed_and_never_persists_credentials():
@@ -1443,6 +1461,53 @@ def test_dynamic_brief_error_merges_and_clears_aria_describedby_without_losing_h
         'focusCount': 1,
     }
     assert result['afterClear'] == {'describedby': 'title-help', 'invalid': '', 'message': ''}
+
+
+def test_brief_payload_contains_only_dirty_fields_against_authoritative_snapshot():
+    result = _run_node(_actions_harness("""
+      const form={dataset:{expertTeamBriefSnapshot:JSON.stringify({original_request:'原始诉求',exact_title:'旧标题',purpose:'审议'}),expertTeamDocumentControl:JSON.stringify({render_template_id:'enterprise-work-report',classification:'internal'})},querySelectorAll:()=>[
+        {name:'original_request',value:'原始诉求',disabled:false},{name:'exact_title',value:'新标题',disabled:false},{name:'purpose',value:'审议',disabled:false},{name:'document_control.classification',value:'internal',disabled:false},
+      ]};
+      console.log(JSON.stringify(context.window.collectExpertTeamBriefPayload(form)));
+    """))
+    assert result == {'exact_title': '新标题'}
+
+
+def test_brief_confirm_failure_after_committed_update_reports_saved_but_unconfirmed():
+    result = _run_node(_actions_harness("""
+      const toasts=[];context.showToast=(message)=>toasts.push(message);
+      let calls=0;context.api=async(path)=>{calls+=1;if(path.endsWith('/update'))return {run:{run_id:'run-1',version:8,document_brief:{revision:4}}};throw new Error('confirm offline');};
+      context.window._activeExpertTeamStatusCard={runId:'run-1',sourceSessionId:'session-1',schemaVersion:2,version:7,currentStageId:'intake',readOnly:false,brief:{revision:3}};
+      const form={dataset:{expertTeamBriefRevision:'3',expertTeamBriefSnapshot:'{}'},querySelectorAll:()=>[{name:'exact_title',value:'新标题',disabled:false}],querySelector:()=>null};
+      const root={dataset:{expertTeamRunId:'run-1',expertTeamSchemaVersion:'2',expertTeamVersion:'7',expertTeamStageId:'intake',expertTeamReadOnly:'false'}};
+      const button={disabled:false,isConnected:true,textContent:'确认',setAttribute:()=>{},removeAttribute:()=>{},closest:(selector)=>selector==='[data-expert-team-brief-editor]'?form:root};
+      context.window.submitExpertTeamBrief(button,true).then(ok=>console.log(JSON.stringify({ok,calls,toasts})));
+    """))
+    assert result['ok'] is False and result['calls'] == 2
+    assert any('规格已保存，但确认未完成' in message for message in result['toasts'])
+
+
+def test_logout_aborts_old_identity_attempt_and_stale_authenticated_response_is_ignored():
+    result = _run_node(_actions_harness("""
+      context.setTimeout=(fn)=>{fn();return 1;};context.window.location={origin:'http://127.0.0.1:18787'};context.window.open=()=>null;
+      let resolveOld;let statusRequested=false;
+      context.api=async(path)=>{if(path.endsWith('/start'))return {authorization_url:'https://login.example.test/authorize'};if(path.endsWith('/status')){statusRequested=true;return new Promise(resolve=>{resolveOld=resolve;});}if(path.endsWith('/logout'))return {ok:true};throw new Error(path);};
+      function button(action){return {disabled:false,isConnected:true,textContent:'身份',dataset:{expertTeamIdentityAction:action},focusCount:0,setAttribute:()=>{},removeAttribute:()=>{},focus(){this.focusCount+=1;}};}
+      (async()=>{const loginButton=button('login');const logoutButton=button('logout');const login=context.window.startExpertTeamIdentityLogin(loginButton);while(!statusRequested)await Promise.resolve();const logout=await context.window.logoutExpertTeamIdentity(logoutButton);resolveOld({enabled:true,authenticated:true,principal:{display_name:'旧身份',roles:['document-approver']}});await login;console.log(JSON.stringify({logout,identity:context.window._expertTeamIdentityStatus,loginFocus:loginButton.focusCount,logoutFocus:logoutButton.focusCount}));})();
+    """))
+    assert result['logout'] is True
+    assert result['identity']['authenticated'] is False
+    assert result['loginFocus'] == 0
+    assert result['logoutFocus'] == 1
+
+
+def test_both_workspace_expand_controls_publish_and_sync_the_same_aria_state():
+    assert 'expert-team-panel-collapse-toggle"' in EXPERT_UI_JS
+    collapse_markup = EXPERT_UI_JS[EXPERT_UI_JS.index('expert-team-panel-collapse-toggle"') :]
+    assert 'aria-expanded="true"' in collapse_markup
+    assert 'aria-controls="expert-team-workspace-expanded"' in collapse_markup
+    sync = _function_body(EXPERT_UI_JS, 'function setExpertTeamCapsuleExpanded', 'function showExpertTeamWorkspaceFromCapsule')
+    assert "querySelectorAll('[aria-controls=\"expert-team-workspace-expanded\"]')" in sync
 
 
 def test_stage_approval_requires_valid_approver_and_zero_unresolved_warnings():
