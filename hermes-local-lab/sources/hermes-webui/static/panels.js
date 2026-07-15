@@ -8183,6 +8183,12 @@ let _visionVerificationSnapshot=null;
 let _imageGenTestGeneration=0;
 let _imageGenVerificationSnapshot=null;
 let _platformCredentialReturnCapability='';
+let _platformCredentialReturnFocus=null;
+let _platformCredentialEditorGeneration=0;
+let _platformCredentialSaveGeneration=0;
+let _platformCredentialSaveSession=null;
+let _platformCredentialDeleteGeneration=0;
+let _platformCredentialDeleteSession=null;
 let _modelConfigAuxProviders=[];
 let _modelConfigAuxOriginalConfig=null;
 
@@ -8245,6 +8251,18 @@ function _setModelConfigStatusBadge(id,label,state){
  if(!el) return;
  el.textContent=label||'—';
  el.dataset.state=state||'neutral';
+}
+
+function _setFieldError(errorId,message,fieldIds){
+ const error=$(errorId);
+ const text=String(message||'');
+ if(error) error.textContent=text;
+ (Array.isArray(fieldIds)?fieldIds:[]).forEach(id=>{
+  const field=$(id);
+  if(!field) return;
+  if(text) field.setAttribute('aria-invalid','true');
+  else field.removeAttribute('aria-invalid');
+ });
 }
 
 function _modelConfigProviderDisplay(providerId,data){
@@ -8416,7 +8434,10 @@ function _renderPlatformCredentials(data){
   update.type='button';
   update.textContent='更新凭据';
   update.setAttribute('aria-label','更新凭据 '+title.textContent);
-  update.onclick=()=>openPlatformCredentialEditor(String(row.id||''));
+  update.setAttribute('aria-expanded','false');
+  update.setAttribute('aria-controls','platformCredentialEditor');
+  update.dataset.credentialUpdate=String(row.id||'');
+  update.onclick=()=>openPlatformCredentialEditor(String(row.id||''),'',{credentialId:String(row.id||'')});
   actions.appendChild(update);
   if(!Array.isArray(row.used_by)||!row.used_by.length){
    const remove=document.createElement('button');
@@ -8424,7 +8445,7 @@ function _renderPlatformCredentials(data){
    remove.type='button';
    remove.textContent='删除';
    remove.setAttribute('aria-label','删除凭据 '+title.textContent);
-   remove.onclick=()=>deletePlatformCredential(String(row.id||''));
+   remove.onclick=()=>deletePlatformCredential(String(row.id||''),remove);
    actions.appendChild(remove);
   }
   item.appendChild(copy);
@@ -8447,15 +8468,87 @@ function _uniqueCredentialId(baseId){
  return base+'-'+suffix;
 }
 
-function openPlatformCredentialEditor(credentialId,returnCapability){
+function _setPlatformCredentialActionsBusy(busy){
+ const editor=$('platformCredentialEditor');
+ if(editor){
+  editor.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
+ }
+ const add=$('btnAddPlatformCredential');
+ if(add) add.disabled=!!busy;
+ const list=$('modelConfigPlatformCredentialList');
+ if(list) list.querySelectorAll('button').forEach(control=>{control.disabled=!!busy;});
+ const save=$('btnSavePlatformCredential');
+ if(save) save.setAttribute('aria-busy',busy?'true':'false');
+ if(!busy){
+  const id=(($('platformCredentialId')||{}).value||'').trim();
+  const rows=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials:[];
+  const family=$('platformCredentialFamily');
+  if(family) family.disabled=rows.some(row=>String(row&&row.id||'')===id);
+ }
+}
+
+function _platformCredentialSessionIsCurrent(session){
+ if(!session) return false;
+ if(session.kind==='delete'){
+  return _platformCredentialDeleteSession===session
+   && session.generation===_platformCredentialDeleteGeneration
+   && session.profile===String(_modelConfigData&&_modelConfigData.profile||'default');
+ }
+ return _platformCredentialSaveSession===session
+  && session.generation===_platformCredentialSaveGeneration
+  && session.editorGeneration===_platformCredentialEditorGeneration
+  && session.profile===String(_modelConfigData&&_modelConfigData.profile||'default');
+}
+
+function _restorePlatformCredentialFocus(){
+ let target=null;
+ const hint=_platformCredentialReturnFocus;
+ if(hint&&hint.control&&hint.control.isConnected!==false) target=hint.control;
+ if(!target&&hint&&hint.credentialId&&document.querySelector){
+  target=document.querySelector('[data-credential-update="'+hint.credentialId+'"]');
+ }
+ if(!target) target=$('btnAddPlatformCredential');
+ if(target&&target.setAttribute) target.setAttribute('aria-expanded','false');
+ if(target&&!target.hidden&&!target.disabled) target.focus();
+ _platformCredentialReturnFocus=null;
+}
+
+function _applyProviderCredentialResult(result,context){
+ if(!_modelConfigData||!result||!result.credential) return;
+ const id=String(context&&context.id||'');
+ const existing=context&&context.existing;
+ const apiKey=String(context&&context.apiKey||'');
+ const rows=Array.isArray(_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials.slice():[];
+ const next=rows.filter(row=>String(row&&row.id||'')!==id);
+ next.push(result.credential);
+ _modelConfigData.provider_credentials=next;
+ if(apiKey&&existing){
+  const usedBy=Array.isArray(existing.used_by)?existing.used_by:[];
+  if(usedBy.includes('auxiliary.vision')&&_modelConfigData.vision){
+   _invalidateVisionTest();
+   _modelConfigData.vision.verification={status:'configured_unverified',message:'凭据已更新，请重新测试识图。'};
+  }
+  if(usedBy.includes('image_gen')&&_modelConfigData.image_gen){
+   _invalidateImageGenTest();
+   _modelConfigData.image_gen.verification={status:'configured_unverified',message:'凭据已更新，请重新测试生图。'};
+  }
+ }
+}
+
+function openPlatformCredentialEditor(credentialId,returnCapability,returnFocus){
+ if(_platformCredentialSaveSession||_platformCredentialDeleteSession){
+  _setFieldError('platformCredentialListStatus','凭据请求正在处理，请稍候。',[]);
+  return false;
+ }
  const rows=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials:[];
  const row=rows.find(item=>String(item&&item.id||'')===String(credentialId||''))||null;
  _platformCredentialReturnCapability=String(returnCapability||'');
+ _platformCredentialReturnFocus=returnFocus||(row?{credentialId:String(row.id||'')}:{control:$('btnAddPlatformCredential')});
+ _platformCredentialEditorGeneration++;
  const id=$('platformCredentialId');
  const label=$('platformCredentialLabel');
  const family=$('platformCredentialFamily');
  const secret=$('platformCredentialSecret');
- const error=$('platformCredentialError');
  if(id) id.value=String((row&&row.id)||_uniqueCredentialId(_defaultCredentialId(_platformCredentialReturnCapability)));
  if(label) label.value=String((row&&row.label)||'');
  if(family){
@@ -8463,16 +8556,27 @@ function openPlatformCredentialEditor(credentialId,returnCapability){
   family.disabled=!!row;
  }
  if(secret) secret.value='';
- if(error) error.textContent='';
+ _setFieldError('platformCredentialError','',['platformCredentialLabel','platformCredentialFamily','platformCredentialSecret']);
+ _setFieldError('platformCredentialListStatus','',[]);
  toggleModelConfigSection('platformCredentialEditor',true);
+ const add=$('btnAddPlatformCredential');
+ if(add) add.setAttribute('aria-expanded','true');
+ if(row&&document.querySelector){
+  const update=document.querySelector('[data-credential-update="'+String(row.id||'')+'"]');
+  if(update) update.setAttribute('aria-expanded','true');
+ }
  if(label) setTimeout(()=>label.focus(),0);
+ return true;
 }
 
 function closePlatformCredentialEditor(){
+ if(_platformCredentialSaveSession||_platformCredentialDeleteSession) return false;
  toggleModelConfigSection('platformCredentialEditor',false);
  _platformCredentialReturnCapability='';
  const add=$('btnAddPlatformCredential');
- if(add) add.focus();
+ if(add) add.setAttribute('aria-expanded','false');
+ _restorePlatformCredentialFocus();
+ return true;
 }
 
 async function savePlatformCredential(){
@@ -8481,40 +8585,30 @@ async function savePlatformCredential(){
  const providerFamily=(($('platformCredentialFamily')||{}).value||'').trim();
  const secretInput=$('platformCredentialSecret');
  const apiKey=String((secretInput&&secretInput.value)||'').trim();
- const error=$('platformCredentialError');
- const btn=$('btnSavePlatformCredential');
- if(error) error.textContent='';
+ if(_platformCredentialSaveSession||_platformCredentialDeleteSession) return;
+ _setFieldError('platformCredentialError','',['platformCredentialLabel','platformCredentialFamily','platformCredentialSecret']);
  if(!id||!label||!providerFamily){
-  if(error) error.textContent='请完整填写凭据名称和平台。';
+  _setFieldError('platformCredentialError','请完整填写凭据名称和平台。',['platformCredentialLabel','platformCredentialFamily']);
   return;
  }
  const existing=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)
   ? _modelConfigData.provider_credentials.find(row=>String(row&&row.id||'')===id):null;
  if(!existing&&!apiKey){
-  if(error) error.textContent='新凭据需要填写 API Key。';
+  _setFieldError('platformCredentialError','新凭据需要填写 API Key。',['platformCredentialSecret']);
   return;
  }
- if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');}
+ const session={kind:'save',generation:++_platformCredentialSaveGeneration,
+  editorGeneration:_platformCredentialEditorGeneration,
+  profile:String(_modelConfigData&&_modelConfigData.profile||'default'),secretInput,secretValue:apiKey};
+ _platformCredentialSaveSession=session;
+ _setPlatformCredentialActionsBusy(true);
  try{
   const payload={id,label,provider_family:providerFamily,auth_type:'api_key'};
   if(apiKey) payload.api_key=apiKey;
   const result=await api('/api/provider-credentials',{method:'POST',body:JSON.stringify(payload)});
-  if(secretInput) secretInput.value='';
-  if(_modelConfigData&&result&&result.credential){
-   const rows=Array.isArray(_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials.slice():[];
-   const next=rows.filter(row=>String(row&&row.id||'')!==id);
-   next.push(result.credential);
-   _modelConfigData.provider_credentials=next;
-   if(apiKey&&existing){
-    const usedBy=Array.isArray(existing.used_by)?existing.used_by:[];
-    if(usedBy.includes('auxiliary.vision')&&_modelConfigData.vision){
-     _modelConfigData.vision.verification={status:'configured_unverified',message:'凭据已更新，请重新测试识图。'};
-    }
-    if(usedBy.includes('image_gen')&&_modelConfigData.image_gen){
-     _modelConfigData.image_gen.verification={status:'configured_unverified',message:'凭据已更新，请重新测试生图。'};
-    }
-   }
-  }
+  if(!_platformCredentialSessionIsCurrent(session)) return;
+  _applyProviderCredentialResult(result,{id,existing,apiKey});
+  if(session.secretInput&&session.secretInput.value===session.secretValue) session.secretInput.value='';
   _renderPlatformCredentials(_modelConfigData);
   const capability=_platformCredentialReturnCapability;
   const visionSelect=$('visionConfigCredential');
@@ -8525,27 +8619,73 @@ async function savePlatformCredential(){
   if(capability&&select){select.value=id;select.dataset.lastValue=id;}
   _renderVisionConfigSummary(_modelConfigData);
   _renderImageGenConfigSummary(_modelConfigData);
+  _platformCredentialSaveSession=null;
+  _setPlatformCredentialActionsBusy(false);
   closePlatformCredentialEditor();
   if(typeof showToast==='function') showToast('平台凭据已保存');
  }catch(e){
-  if(error) error.textContent='凭据保存失败：'+(e.message||e);
+  if(!_platformCredentialSessionIsCurrent(session)) return;
+  _setFieldError('platformCredentialError','凭据保存失败：'+(e.message||e),['platformCredentialSecret']);
   if(typeof showToast==='function') showToast('凭据保存失败',5000,'error');
  }finally{
-  if(btn){btn.disabled=false;btn.setAttribute('aria-busy','false');}
+  if(_platformCredentialSaveSession===session){
+   _platformCredentialSaveSession=null;
+   if(session.editorGeneration===_platformCredentialEditorGeneration) _setPlatformCredentialActionsBusy(false);
+  }
  }
 }
 
-async function deletePlatformCredential(credentialId){
- const error=$('platformCredentialError');
- if(error) error.textContent='';
+async function deletePlatformCredential(credentialId,trigger){
+ if(_platformCredentialSaveSession||_platformCredentialDeleteSession) return;
+ const session={kind:'delete',generation:++_platformCredentialDeleteGeneration,
+  profile:String(_modelConfigData&&_modelConfigData.profile||'default'),trigger:trigger||document.activeElement};
+ _platformCredentialDeleteSession=session;
+ let ok=false;
  try{
-  await api('/api/provider-credentials/'+encodeURIComponent(String(credentialId||'')),{method:'DELETE'});
-  await loadModelConfigPanel(true);
+  ok=await showConfirmDialog({title:'删除这份凭据？',message:'删除后无法恢复；正在使用的凭据不会被删除。',confirmLabel:'删除',danger:true,focusCancel:true});
+ }catch(e){
+  if(_platformCredentialDeleteSession===session) _platformCredentialDeleteSession=null;
+  _setFieldError('platformCredentialListStatus','无法打开删除确认：'+(e.message||e),[]);
+  if(session.trigger&&session.trigger.isConnected!==false) session.trigger.focus();
+  return;
+ }
+ if(!_platformCredentialSessionIsCurrent(session)){
+  if(_platformCredentialDeleteSession===session) _platformCredentialDeleteSession=null;
+  return;
+ }
+ if(!ok){
+  _platformCredentialDeleteSession=null;
+  if(session.trigger&&session.trigger.isConnected!==false) session.trigger.focus();
+  return;
+ }
+ _setFieldError('platformCredentialListStatus','',[]);
+ _setPlatformCredentialActionsBusy(true);
+ try{
+  const result=await api('/api/provider-credentials/'+encodeURIComponent(String(credentialId||'')),{method:'DELETE'});
+  if(!_platformCredentialSessionIsCurrent(session)) return;
+  const visionSelect=$('visionConfigCredential');
+  const imageSelect=$('imageGenConfigCredential');
+  if(_modelConfigData) _modelConfigData.provider_credentials=Array.isArray(result&&result.credentials)?result.credentials:[];
+  _renderPlatformCredentials(_modelConfigData);
+  _renderCapabilityCredentialOptions('vision',(($('visionConfigProvider')||{}).value||''),visionSelect&&visionSelect.value);
+  _renderCapabilityCredentialOptions('image',(($('imageGenConfigProvider')||{}).value||''),imageSelect&&imageSelect.value);
+  _platformCredentialDeleteSession=null;
+  _setPlatformCredentialActionsBusy(false);
+  const add=$('btnAddPlatformCredential');
+  if(add) add.focus();
   if(typeof showToast==='function') showToast('凭据已删除');
  }catch(e){
-  if(error) error.textContent='凭据删除失败：'+(e.message||e);
-  toggleModelConfigSection('platformCredentialEditor',true);
+  if(!_platformCredentialSessionIsCurrent(session)) return;
+  _setFieldError('platformCredentialListStatus','凭据删除失败：'+(e.message||e),[]);
+  _platformCredentialDeleteSession=null;
+  _setPlatformCredentialActionsBusy(false);
+  if(session.trigger&&session.trigger.isConnected!==false) session.trigger.focus();
   if(typeof showToast==='function') showToast('凭据删除失败',5000,'error');
+ }finally{
+  if(_platformCredentialDeleteSession===session){
+   _platformCredentialDeleteSession=null;
+   _setPlatformCredentialActionsBusy(false);
+  }
  }
 }
 
@@ -8575,7 +8715,7 @@ function _renderCapabilityCredentialOptions(capability,providerId,currentRef){
  select.onchange=()=>{
   if(select.value==='__new__'){
    select.value=String(select.dataset.lastValue||previous);
-   openPlatformCredentialEditor('',capability);
+   openPlatformCredentialEditor('',capability,{control:select});
    return;
   }
   select.dataset.lastValue=select.value;
@@ -8603,7 +8743,6 @@ function _renderImageCapabilityEndpointPreview(capability){
  const workspace=String(($(prefix+'WorkspaceId')||{}).value||'').trim();
  const baseUrl=String(($(prefix+'BaseUrl')||{}).value||'').trim();
  const preview=$(prefix+'EndpointPreview');
- const error=$(prefix+'EndpointError');
  let value='';
  let problem='';
  const alibaba=capability==='vision'?provider==='alibaba':provider==='dashscope';
@@ -8633,7 +8772,7 @@ function _renderImageCapabilityEndpointPreview(capability){
  }
  if(capability==='vision'&&provider==='custom'&&!baseUrl) problem='Custom 识图需要填写完整的 HTTPS Base URL。';
  if(preview) preview.textContent=problem?'端点尚不完整':(value||'由所选平台管理端点');
- if(error) error.textContent=problem;
+ _setFieldError(prefix+'EndpointError',problem,[prefix+'EndpointMode',prefix+'Region',prefix+'WorkspaceId',prefix+'BaseUrl']);
  return !problem;
 }
 
@@ -9719,11 +9858,10 @@ async function saveVisionConfig(){
  const endpointMode=(($('visionConfigEndpointMode')||{}).value||'public').trim();
  const region=(($('visionConfigRegion')||{}).value||'cn-beijing').trim();
  const workspaceId=(($('visionConfigWorkspaceId')||{}).value||'').trim();
- const error=$('visionConfigEndpointError');
- if(error) error.textContent='';
+ _setFieldError('visionConfigEndpointError','',['visionConfigCredential','visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId','visionConfigBaseUrl','visionConfigApiKey','visionConfigModel']);
  if(!_renderImageCapabilityEndpointPreview('vision')) return;
  if(credentialRef&&apiKey){
-  if(error) error.textContent='已选择平台凭据，请在“平台凭据”中更新 Key。';
+  _setFieldError('visionConfigEndpointError','已选择平台凭据，请在“平台凭据”中更新 Key。',['visionConfigCredential','visionConfigApiKey']);
   return;
  }
  _setVisionConfigTestBusy(true);
@@ -9744,7 +9882,7 @@ async function saveVisionConfig(){
   _closeModelConfigEditor('visionConfigEdit','btnEditVisionConfig');
   if(typeof showToast==='function') showToast('识图配置已保存');
  }catch(e){
-  if(error) error.textContent='识图配置保存失败：'+(e.message||e);
+  _setFieldError('visionConfigEndpointError','识图配置保存失败：'+(e.message||e),['visionConfigCredential','visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId','visionConfigBaseUrl','visionConfigModel']);
   if(typeof showToast==='function') showToast('保存识图配置失败：'+(e.message||e),5000,'error');
  }finally{
   _renderVisionConfigSummary(_modelConfigData);
@@ -9820,11 +9958,10 @@ async function saveImageGenConfig(){
  const workspaceId=(($('imageGenConfigWorkspaceId')||{}).value||'').trim();
  const baseUrl=(($('imageGenConfigBaseUrl')||{}).value||'').trim();
  const credentials=_collectImageGenCredentials();
- const error=$('imageGenConfigEndpointError');
- if(error) error.textContent='';
+ _setFieldError('imageGenConfigEndpointError','',['imageGenConfigCredential','imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl','imageGenConfigApiKey','imageGenConfigModel']);
  if(!_renderImageCapabilityEndpointPreview('image')) return;
  if(credentialRef&&apiKey){
-  if(error) error.textContent='已选择平台凭据，请在“平台凭据”中更新 Key。';
+  _setFieldError('imageGenConfigEndpointError','已选择平台凭据，请在“平台凭据”中更新 Key。',['imageGenConfigCredential','imageGenConfigApiKey']);
   return;
  }
  if(provider==='dashscope'){
@@ -9845,7 +9982,7 @@ async function saveImageGenConfig(){
   _closeModelConfigEditor('imageGenConfigEdit','btnEditImageGenConfig');
   if(typeof showToast==='function') showToast('图片生成配置已保存');
  }catch(e){
-  if(error) error.textContent='生图配置保存失败：'+(e.message||e);
+  _setFieldError('imageGenConfigEndpointError','生图配置保存失败：'+(e.message||e),['imageGenConfigCredential','imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId','imageGenConfigBaseUrl','imageGenConfigModel']);
   if(typeof showToast==='function') showToast('保存图片生成配置失败：'+(e.message||e),5000,'error');
  }finally{
   _renderImageGenConfigSummary(_modelConfigData);

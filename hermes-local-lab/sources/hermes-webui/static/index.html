@@ -1469,7 +1469,7 @@
                       <strong>图片能力</strong>
                       <span>看图识别和生成图片是两套能力，分别配置，互不误伤。</span>
                     </div>
-                    <button class="btn-tiny" type="button" data-model-config-toggle="modelConfigImageAdvanced" onclick="toggleModelConfigSection('modelConfigImageAdvanced')">高级图片模型</button>
+                    <button class="btn-tiny" type="button" data-model-config-toggle="modelConfigImageAdvanced" aria-expanded="false" aria-controls="modelConfigImageAdvanced" onclick="toggleModelConfigSection('modelConfigImageAdvanced')">高级图片模型</button>
                   </div>
                   <section class="model-config-platform-credentials" id="modelConfigPlatformCredentials" aria-labelledby="modelConfigPlatformCredentialsTitle">
                     <div class="model-config-platform-credentials-head">
@@ -1477,9 +1477,10 @@
                         <strong id="modelConfigPlatformCredentialsTitle">平台凭据</strong>
                         <span>一份凭据可同时用于识图和生图；列表会显示配置状态和使用范围。需要隔离账号或费用时，再新增独立凭据。</span>
                       </div>
-                      <button class="btn-tiny" id="btnAddPlatformCredential" type="button" onclick="openPlatformCredentialEditor()">新增独立凭据</button>
+                      <button class="btn-tiny" id="btnAddPlatformCredential" type="button" aria-expanded="false" aria-controls="platformCredentialEditor" onclick="openPlatformCredentialEditor()">新增独立凭据</button>
                     </div>
                     <div class="model-config-platform-credential-list" id="modelConfigPlatformCredentialList" aria-live="polite">正在读取已保存凭据。</div>
+                    <p class="model-config-field-error" id="platformCredentialListStatus" aria-live="polite"></p>
                     <div class="model-config-collapsible model-config-platform-credential-editor" id="platformCredentialEditor" hidden>
                       <input id="platformCredentialId" type="hidden">
                       <div class="model-config-field">
@@ -1503,7 +1504,7 @@
                       <p class="model-config-field-error" id="platformCredentialError" aria-live="polite"></p>
                       <div class="model-config-actions">
                         <button class="sm-btn" id="btnSavePlatformCredential" type="button" onclick="savePlatformCredential()">保存凭据</button>
-                        <button class="btn-tiny" type="button" onclick="closePlatformCredentialEditor()">取消</button>
+                        <button class="btn-tiny" id="btnCancelPlatformCredential" type="button" onclick="closePlatformCredentialEditor()">取消</button>
                       </div>
                     </div>
                   </section>
@@ -1524,7 +1525,7 @@
                       <p class="model-config-muted" id="visionConfigSummary">配置后，上传图片时可以直接让 agent 理解图片内容。</p>
                       <p class="model-config-hint">测试图片会发送给你配置的外部视觉服务；请勿上传密钥或隐私截图。</p>
                       <div class="model-config-actions">
-                        <button class="sm-btn" id="btnEditVisionConfig" type="button" data-model-config-toggle="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
+                        <button class="sm-btn" id="btnEditVisionConfig" type="button" data-model-config-toggle="visionConfigEdit" aria-expanded="false" aria-controls="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
                       </div>
                       <div class="model-config-collapsible" id="visionConfigEdit" hidden>
                         <div class="model-config-field">
@@ -1602,7 +1603,7 @@
                       <p class="model-config-muted" id="imageGenConfigSummary">配置后，调用 image_generate 或需要出图时会使用这里的模型。</p>
                       <p class="model-config-hint">真实生图测试可能产生少量费用；测试图会在验证后删除。</p>
                       <div class="model-config-actions">
-                        <button class="sm-btn" id="btnEditImageGenConfig" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">配置生图</button>
+                        <button class="sm-btn" id="btnEditImageGenConfig" type="button" data-model-config-toggle="imageGenConfigEdit" aria-expanded="false" aria-controls="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">配置生图</button>
                         <button class="btn-tiny" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴密钥</button>
                       </div>
                       <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>

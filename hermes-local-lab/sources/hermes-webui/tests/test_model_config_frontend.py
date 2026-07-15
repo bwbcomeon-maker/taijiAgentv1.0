@@ -30,7 +30,7 @@ const ids=['visionConfigProvider','visionConfigModel','visionConfigBaseUrl','vis
  'visionConfigProviderSummary','visionConfigModelSummary','visionConfigKeyState',
  'visionConfigEffective','visionConfigStatusBadge','visionConfigSummary','visionConfigVerificationStatus'];
 const elements={};
-for(const id of ids) elements[id]={id,value:'',disabled:false,dataset:{},textContent:'',attrs:{},setAttribute(k,v){this.attrs[k]=v;}};
+for(const id of ids) elements[id]={id,value:'',disabled:false,dataset:{},textContent:'',attrs:{},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];}};
 elements.visionConfigProvider.value='alibaba';
 elements.visionConfigModel.value='qwen3-vl-plus';
 const $=id=>elements[id]||null;
@@ -55,7 +55,7 @@ const api=(url)=>{
 };
 for(const name of ['_visionConfigIdentity','_setVisionConfigTestBusy','_restoreVisionTestSnapshot',
  '_invalidateVisionTest','_bindVisionConfigEditInvalidation','_renderVisionConfigSummary','_visionConfigHasUnsavedChanges',
- '_safeEndpointPreview','_renderImageCapabilityEndpointPreview','saveVisionConfig','testVisionConfig']) eval(extractFunc(name));
+ '_setFieldError','_safeEndpointPreview','_renderImageCapabilityEndpointPreview','saveVisionConfig','testVisionConfig']) eval(extractFunc(name));
 _bindVisionConfigEditInvalidation();
 
 async function run(scenario){
@@ -108,7 +108,7 @@ const ids=['imageGenConfigProvider','imageGenConfigCredential','imageGenConfigEn
  'imageGenConfigProviderSummary','imageGenConfigModelSummary','imageGenConfigKeyState'];
 const elements={};
 for(const id of ids) elements[id]={id,value:'',disabled:false,dataset:{},textContent:'',attrs:{},
- setAttribute(k,v){this.attrs[k]=v;},querySelector(){return null;},querySelectorAll(){return [];}};
+ setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},querySelector(){return null;},querySelectorAll(){return [];}};
 elements.imageGenConfigProvider.value='dashscope';
 elements.imageGenConfigCredential.value='alibaba-default';
 elements.imageGenConfigEndpointMode.value='workspace';
@@ -140,7 +140,7 @@ const api=(url)=>{
 };
 for(const name of ['_imageGenConfigIdentity','_setImageGenConfigTestBusy','_restoreImageGenTestSnapshot',
  '_invalidateImageGenTest','_bindImageGenConfigEditInvalidation','_renderImageGenConfigSummary',
- '_imageGenConfigHasUnsavedChanges','_safeEndpointPreview','_renderImageCapabilityEndpointPreview',
+ '_imageGenConfigHasUnsavedChanges','_setFieldError','_safeEndpointPreview','_renderImageCapabilityEndpointPreview',
  'saveImageGenConfig','testImageGenConfig']) eval(extractFunc(name));
 _bindImageGenConfigEditInvalidation();
 
@@ -189,6 +189,7 @@ function extractFunc(name){
 }
 function element(id,value=''){
  return {id,value,hidden:false,dataset:{},textContent:'',children:[],focused:false,
+  attrs:{},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},
   appendChild(child){this.children.push(child);},set innerHTML(_value){this.children=[];},
   get options(){return this.children;},focus(){this.focused=true;}};
 }
@@ -228,7 +229,7 @@ let closed=null;
 const toggleModelConfigSection=(id,open)=>{closed={id,open};};
 for(const name of ['_providerCredentialFamily','_defaultCredentialId','_renderCapabilityCredentialOptions',
  '_uniqueCredentialId',
- '_safeEndpointPreview','_renderImageCapabilityEndpointPreview','_closeModelConfigEditor',
+ '_setFieldError','_safeEndpointPreview','_renderImageCapabilityEndpointPreview','_closeModelConfigEditor',
  '_visionConfigHasUnsavedChanges']) eval(extractFunc(name));
 
 _renderCapabilityCredentialOptions('vision','alibaba','alibaba-default');
@@ -245,6 +246,7 @@ elements.visionConfigEndpointMode.value='custom';
 elements.visionConfigBaseUrl.value='https://user:pass@example.com/private/path?token=secret#fragment';
 _renderImageCapabilityEndpointPreview('vision');
 const preview={text:elements.visionConfigEndpointPreview.textContent,error:elements.visionConfigEndpointError.textContent};
+preview.ariaInvalid=elements.visionConfigBaseUrl.attrs['aria-invalid'];
 elements.imageGenConfigEndpointMode.value='custom';
 elements.imageGenConfigBaseUrl.value='https://example.com/not-supported';
 _renderImageCapabilityEndpointPreview('image');
@@ -262,8 +264,146 @@ elements.visionConfigEndpointMode.value='public';
 elements.visionConfigRegion.value='cn-beijing';
 elements.visionConfigWorkspaceId.value='';
 elements.visionConfigBaseUrl.value='';
+_renderImageCapabilityEndpointPreview('vision');
+const endpointInvalidCleared=!('aria-invalid' in elements.visionConfigBaseUrl.attrs);
 const publicEndpointDirty=_visionConfigHasUnsavedChanges();
-process.stdout.write(JSON.stringify({sharedSwitch,preview,invalidImageEndpoint,focus,publicEndpointDirty}));
+process.stdout.write(JSON.stringify({sharedSwitch,preview,invalidImageEndpoint,focus,endpointInvalidCleared,publicEndpointDirty}));
+"""
+
+
+_CREDENTIAL_SESSION_DRIVER = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){
+ const re=new RegExp('(?:async\\s+)?function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);
+ if(start<0) throw new Error(name+' not found');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+function control(id,value=''){
+ return {id,value,disabled:false,hidden:false,dataset:{},textContent:'',attrs:{},focused:false,isConnected:true,
+  setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},focus(){this.focused=true;},
+  querySelectorAll(){return [];}};
+}
+const elements={
+ platformCredentialId:control('platformCredentialId','alibaba-default'),
+ platformCredentialLabel:control('platformCredentialLabel','共享凭据'),
+ platformCredentialFamily:control('platformCredentialFamily','alibaba_dashscope'),
+ platformCredentialSecret:control('platformCredentialSecret','rotated-secret'),
+ platformCredentialError:control('platformCredentialError'),
+ platformCredentialListStatus:control('platformCredentialListStatus'),
+ platformCredentialEditor:control('platformCredentialEditor'),
+ btnSavePlatformCredential:control('btnSavePlatformCredential'),
+ btnCancelPlatformCredential:control('btnCancelPlatformCredential'),
+ btnAddPlatformCredential:control('btnAddPlatformCredential'),
+ modelConfigPlatformCredentialList:control('modelConfigPlatformCredentialList'),
+ visionConfigCredential:control('visionConfigCredential','alibaba-default'),
+ imageGenConfigCredential:control('imageGenConfigCredential','alibaba-default'),
+ visionConfigProvider:control('visionConfigProvider','alibaba'),
+ imageGenConfigProvider:control('imageGenConfigProvider','dashscope'),
+ visionConfigModel:control('visionConfigModel','vision-draft'),
+ imageGenConfigModel:control('imageGenConfigModel','image-draft')
+};
+const editorControls=[elements.platformCredentialLabel,elements.platformCredentialFamily,elements.platformCredentialSecret,
+ elements.btnSavePlatformCredential,elements.btnCancelPlatformCredential];
+elements.platformCredentialEditor.querySelectorAll=()=>editorControls;
+const action=control('update-action');
+const deleteAction=control('delete-action');
+elements.modelConfigPlatformCredentialList.querySelectorAll=()=>[action,deleteAction];
+const $=id=>elements[id]||null;
+const document={activeElement:action,querySelector(selector){
+ if(selector.includes('data-credential-update')) return action;
+ return null;
+}};
+let _modelConfigData={provider_credentials:[{id:'alibaba-default',provider_family:'alibaba_dashscope',label:'共享凭据',
+ configured:true,used_by:['auxiliary.vision','image_gen']}],
+ vision:{verification:{status:'verifying',message:'old vision probe'}},
+ image_gen:{verification:{status:'verifying',message:'old image probe'}}};
+let _platformCredentialReturnCapability='';
+let _platformCredentialReturnFocus={credentialId:'alibaba-default'};
+let _platformCredentialEditorGeneration=1;
+let _platformCredentialSaveGeneration=0;
+let _platformCredentialSaveSession=null;
+let _platformCredentialDeleteGeneration=0;
+let _platformCredentialDeleteSession=null;
+let invalidatedVision=0,invalidatedImage=0,closed=0,rendered=0,optionsRendered=0,loadCount=0;
+const _invalidateVisionTest=()=>{invalidatedVision++;};
+const _invalidateImageGenTest=()=>{invalidatedImage++;};
+const _renderPlatformCredentials=()=>{rendered++;};
+const _renderCapabilityCredentialOptions=()=>{optionsRendered++;};
+const _renderVisionConfigSummary=()=>{};
+const _renderImageGenConfigSummary=()=>{};
+const closePlatformCredentialEditor=()=>{closed++;};
+const loadModelConfigPanel=()=>{loadCount++;};
+const showToast=()=>{};
+let confirmResult=true;
+let confirmCalls=0;
+const showConfirmDialog=async()=>{confirmCalls++;return confirmResult;};
+let saveResolve;
+let savePromise=new Promise(resolve=>{saveResolve=resolve;});
+let deleteResolve,deleteReject;
+let deletePromise=new Promise((resolve,reject)=>{deleteResolve=resolve;deleteReject=reject;});
+let apiMode='save';
+const api=(url)=>{
+ if(url==='/api/provider-credentials'&&apiMode==='save') return savePromise;
+ if(url.startsWith('/api/provider-credentials/')&&apiMode==='delete') return deletePromise;
+ throw new Error('unexpected '+url);
+};
+for(const name of ['_setFieldError','_setPlatformCredentialActionsBusy','_platformCredentialSessionIsCurrent',
+ '_applyProviderCredentialResult','savePlatformCredential','deletePlatformCredential']) eval(extractFunc(name));
+
+async function run(){
+ const saveRun=savePlatformCredential();
+ await Promise.resolve();
+ const saveDuring={editor:editorControls.map(item=>item.disabled),add:elements.btnAddPlatformCredential.disabled,
+  actions:[action.disabled,deleteAction.disabled],busy:elements.btnSavePlatformCredential.attrs['aria-busy']};
+ saveResolve({credential:{id:'alibaba-default',provider_family:'alibaba_dashscope',label:'共享凭据',configured:true,
+  used_by:['auxiliary.vision','image_gen']}});
+ await saveRun;
+ const saveAfter={secret:elements.platformCredentialSecret.value,invalidatedVision,invalidatedImage,
+  visionStatus:_modelConfigData.vision.verification.status,imageStatus:_modelConfigData.image_gen.verification.status,closed};
+
+ elements.platformCredentialSecret.value='old-request-secret';
+ elements.platformCredentialLabel.value='旧请求';
+ savePromise=new Promise(resolve=>{saveResolve=resolve;});
+ const lateRun=savePlatformCredential();
+ await Promise.resolve();
+ _platformCredentialEditorGeneration++;
+ elements.platformCredentialSecret.value='new-session-draft';
+ elements.platformCredentialLabel.value='新会话草稿';
+ saveResolve({credential:{id:'alibaba-default',provider_family:'alibaba_dashscope',label:'过期响应',configured:true,used_by:[]}});
+ await lateRun;
+ const lateAfter={secret:elements.platformCredentialSecret.value,label:elements.platformCredentialLabel.value,
+  storedLabel:_modelConfigData.provider_credentials[0].label,closed};
+
+ confirmResult=false;
+ apiMode='delete';
+ await deletePlatformCredential('alibaba-default',deleteAction);
+ const cancelled={loadCount,rendered};
+ confirmResult=true;
+ elements.visionConfigModel.value='vision-dirty';
+ elements.imageGenConfigModel.value='image-dirty';
+ deletePromise=new Promise((resolve,reject)=>{deleteResolve=resolve;deleteReject=reject;});
+ const deleteRun=deletePlatformCredential('unused',deleteAction);
+ await Promise.resolve();
+ await deletePlatformCredential('competing-delete',deleteAction);
+ const deleteDuring={disabled:deleteAction.disabled,add:elements.btnAddPlatformCredential.disabled};
+ deleteResolve({credentials:[]});
+ await deleteRun;
+ const deleteAfter={visionDraft:elements.visionConfigModel.value,imageDraft:elements.imageGenConfigModel.value,
+  rows:_modelConfigData.provider_credentials.length,loadCount,focused:elements.btnAddPlatformCredential.focused};
+
+ deletePromise=new Promise((resolve,reject)=>{deleteResolve=resolve;deleteReject=reject;});
+ const failedRun=deletePlatformCredential('unused-2',deleteAction);
+ await Promise.resolve();
+ deleteReject(new Error('凭据正在使用'));
+ await failedRun;
+ const deleteFailed={message:elements.platformCredentialListStatus.textContent,focused:deleteAction.focused,confirmCalls};
+ return {saveDuring,saveAfter,lateAfter,cancelled,deleteDuring,deleteAfter,deleteFailed};
+}
+run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{console.error(err);process.exit(1);});
 """
 
 
@@ -298,6 +438,20 @@ def _run_image_gen_race(tmp_path: Path, scenario: str) -> dict:
 def _run_image_config_interactions(tmp_path: Path) -> dict:
     driver = tmp_path / "image-config-interaction-driver.js"
     driver.write_text(_IMAGE_CONFIG_INTERACTION_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def _run_credential_sessions(tmp_path: Path) -> dict:
+    driver = tmp_path / "credential-session-driver.js"
+    driver.write_text(_CREDENTIAL_SESSION_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js")],
         capture_output=True,
@@ -510,6 +664,30 @@ def test_image_capability_has_visible_safe_platform_credential_surface():
     assert "Key 片段" not in INDEX_HTML
 
 
+def test_credential_controls_expose_expansion_errors_and_touch_targets():
+    for marker in (
+        'id="btnAddPlatformCredential"',
+        'aria-expanded="false"',
+        'aria-controls="platformCredentialEditor"',
+        'id="platformCredentialListStatus" aria-live="polite"',
+        'id="btnCancelPlatformCredential"',
+        'id="btnEditVisionConfig"',
+        'aria-controls="visionConfigEdit"',
+        'id="btnEditImageGenConfig"',
+        'aria-controls="imageGenConfigEdit"',
+    ):
+        assert marker in INDEX_HTML
+    for marker in (
+        "_setFieldError",
+        "aria-invalid",
+        "showConfirmDialog",
+        "_setPlatformCredentialActionsBusy",
+        "_platformCredentialSessionIsCurrent",
+    ):
+        assert marker in PANELS_JS
+    assert "min-height:44px" in STYLE_CSS
+
+
 def test_both_image_capability_cards_use_consistent_endpoint_and_test_controls():
     expected_ids = (
         "visionConfigCredential", "visionConfigEndpointMode", "visionConfigRegion",
@@ -567,6 +745,7 @@ def test_image_config_switching_preview_and_focus_are_state_safe(tmp_path):
     assert result["preview"] == {
         "text": "端点尚不完整",
         "error": "自定义 Base URL 不得包含账号信息、查询参数或片段。",
+        "ariaInvalid": "true",
     }
     assert result["invalidImageEndpoint"] == {
         "text": "端点尚不完整",
@@ -576,7 +755,48 @@ def test_image_config_switching_preview_and_focus_are_state_safe(tmp_path):
         "closed": {"id": "visionConfigEdit", "open": False},
         "focused": True,
     }
+    assert result["endpointInvalidCleared"] is True
     assert result["publicEndpointDirty"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_credential_save_delete_sessions_do_not_clobber_newer_drafts(tmp_path):
+    result = _run_credential_sessions(tmp_path)
+
+    assert result["saveDuring"] == {
+        "editor": [True] * 5,
+        "add": True,
+        "actions": [True, True],
+        "busy": "true",
+    }
+    assert result["saveAfter"] == {
+        "secret": "",
+        "invalidatedVision": 1,
+        "invalidatedImage": 1,
+        "visionStatus": "configured_unverified",
+        "imageStatus": "configured_unverified",
+        "closed": 1,
+    }
+    assert result["lateAfter"] == {
+        "secret": "new-session-draft",
+        "label": "新会话草稿",
+        "storedLabel": "共享凭据",
+        "closed": 1,
+    }
+    assert result["cancelled"] == {"loadCount": 0, "rendered": 1}
+    assert result["deleteDuring"] == {"disabled": True, "add": True}
+    assert result["deleteAfter"] == {
+        "visionDraft": "vision-dirty",
+        "imageDraft": "image-dirty",
+        "rows": 0,
+        "loadCount": 0,
+        "focused": True,
+    }
+    assert result["deleteFailed"] == {
+        "message": "凭据删除失败：凭据正在使用",
+        "focused": True,
+        "confirmCalls": 3,
+    }
 
 
 def test_vision_verification_has_visible_accessible_status_and_action():
