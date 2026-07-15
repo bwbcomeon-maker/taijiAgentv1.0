@@ -214,7 +214,14 @@ function runFixture(sessionId, state, overrides = {}) {
     primary_confirmation: state === "awaiting_stage_input" ? { type: "stage_input", title: pendingInput.question } : state.startsWith("collecting") ? { type: "question", title: "需求待确认" } : state === "awaiting_review" ? { type: "stage_review", title: "阶段成果待复核" } : null,
     pending_confirmations: state === "awaiting_stage_input" || state.startsWith("collecting") || state === "awaiting_review" ? [{}] : [],
     review_items: state === "awaiting_review" ? stageResult.review_items : [],
-    stage_review: { display_state: state === "generating" ? "running" : state, actionable: state === "awaiting_review", output },
+    stage_review: {
+      review_id: String(overrides.reviewId || "review-1"),
+      attempt: Number(overrides.stageAttempt || 1),
+      display_state: state === "generating" ? "running" : state,
+      actionable: state === "awaiting_review",
+      output: { ...output, attempt: Number(overrides.artifactAttempt || overrides.stageAttempt || 1) },
+    },
+    office_review: { review_id: String(overrides.officeReviewId || "office-review-1") },
     actions: { can_submit_stage_input: state === "awaiting_stage_input", can_approve_stage: state === "awaiting_review", can_request_revision: state === "awaiting_review", can_cancel: state === "generating", can_retry: state === "generated_invalid" },
     timeline_events: [],
   };
@@ -222,6 +229,12 @@ function runFixture(sessionId, state, overrides = {}) {
     run_id: `electron-plan-a-${state}`,
     schema_version: 2,
     version: Number(overrides.version || 1),
+    execution_attempt: Number(overrides.executionAttempt || 1),
+    document_brief: { revision: Number(overrides.briefRevision || 1) },
+    current_stage_attempt_reservation: {
+      stage_id: currentStage.id,
+      stage_attempt: Number(overrides.stageAttempt || 1),
+    },
     session_id: sessionId,
     team_id: teamId,
     team_title: isResearchTeam ? "深度材料研究团" : "内容创作专家团",
@@ -246,6 +259,38 @@ async function renderRun(page, state, overrides) {
     renderExpertTeamStatusSurface(card);
   }, { state, overrides });
   await page.waitForSelector("#expertTeamWorkspacePanel:not([hidden])", { timeout: 10000 });
+}
+
+async function verifySameStageIdentityAdvance(page, { marker, from, to, screenshot }) {
+  await renderRun(page, "awaiting_review", from);
+  await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
+  await page.fill("#expertTeamWorkspacePanel .expert-team-stage-feedback:not([hidden]) textarea", marker);
+  await page.evaluate(async ({ to }) => {
+    const next = window.__expertTeamRunFixture(S.session.session_id, "awaiting_review", to);
+    window.__expertTeamPollResponses = [next];
+    await _hydrateExpertTeamStatusCardForSession(S.session.session_id, { silent: true });
+  }, { to });
+  await page.waitForSelector("#expertTeamWorkspacePanel [data-expert-team-recoverable-draft]", { timeout: 5000 });
+  const state = await page.evaluate(({ marker }) => {
+    const recovery = document.querySelector("[data-expert-team-recoverable-draft] [data-expert-team-draft-copy]");
+    const editableValues = Array.from(document.querySelectorAll("#expertTeamWorkspacePanel textarea:not([readonly])"))
+      .map((input) => input.value);
+    return {
+      recoveryValue: recovery?.value || "",
+      editableValues,
+      marker,
+      stageId: document.querySelector("#expertTeamWorkspacePanel .expert-team-panel-inner")?.dataset.expertTeamStageId || "",
+    };
+  }, { marker });
+  assertState(
+    state.recoveryValue === marker && !state.editableValues.some((value) => value.includes(marker)) && state.stageId === "materials",
+    "Same-stage identity advance leaked a dirty draft into the new editable form",
+    state
+  );
+  await page.evaluate(() => document.querySelector("[data-expert-team-recoverable-draft]")?.scrollIntoView({ block: "center" }));
+  await page.screenshot({ path: screenshot, fullPage: false });
+  await page.click("#expertTeamWorkspacePanel [data-expert-team-recoverable-draft] .secondary");
+  return state;
 }
 
 async function snapshotState(page) {
@@ -605,8 +650,8 @@ async function main() {
     await page.screenshot({ path: path.join(outDir, "expert-team-polling-draft-preserved.png"), fullPage: false });
 
     await page.evaluate(() => {
-      const advanced = window.__expertTeamRunFixture(S.session.session_id, "awaiting_stage_input", {
-        run_id: "electron-poll-draft-run", version: 10,
+      const advanced = window.__expertTeamRunFixture(S.session.session_id, "awaiting_review", {
+        run_id: "electron-poll-draft-run", version: 10, stageAttempt: 2,
       });
       window.__expertTeamPollResponses = [advanced];
     });
@@ -629,6 +674,26 @@ async function main() {
       document.querySelector("[data-expert-team-recoverable-draft]")?.scrollIntoView({ block: "center" });
     });
     await page.screenshot({ path: path.join(outDir, "expert-team-polling-draft-recovery.png"), fullPage: false });
+    await page.click("#expertTeamWorkspacePanel [data-expert-team-recoverable-draft] .secondary");
+
+    await verifySameStageIdentityAdvance(page, {
+      marker: "POLL-BRIEF-REVISION-DRAFT-88A1",
+      from: { run_id: "electron-poll-draft-run", version: 10, stageAttempt: 2, briefRevision: 1 },
+      to: { run_id: "electron-poll-draft-run", version: 11, stageAttempt: 2, briefRevision: 2 },
+      screenshot: path.join(outDir, "expert-team-polling-brief-revision-recovery.png"),
+    });
+    await verifySameStageIdentityAdvance(page, {
+      marker: "POLL-REVIEW-ID-DRAFT-17B2",
+      from: { run_id: "electron-poll-draft-run", version: 11, stageAttempt: 2, briefRevision: 2, reviewId: "review-1" },
+      to: { run_id: "electron-poll-draft-run", version: 12, stageAttempt: 2, briefRevision: 2, reviewId: "review-2" },
+      screenshot: path.join(outDir, "expert-team-polling-review-id-recovery.png"),
+    });
+    await verifySameStageIdentityAdvance(page, {
+      marker: "POLL-OFFICE-REVIEW-ID-DRAFT-63C4",
+      from: { run_id: "electron-poll-draft-run", version: 12, stageAttempt: 2, briefRevision: 2, reviewId: "review-2", officeReviewId: "office-review-1" },
+      to: { run_id: "electron-poll-draft-run", version: 13, stageAttempt: 2, briefRevision: 2, reviewId: "review-2", officeReviewId: "office-review-2" },
+      screenshot: path.join(outDir, "expert-team-polling-office-review-id-recovery.png"),
+    });
 
     await renderRun(page, "awaiting_review", { run_id: "electron-poll-409-run", version: 20 });
     await page.click("#expertTeamWorkspacePanel .expert-team-stage-review [data-expert-team-action='revise_stage']");
@@ -696,6 +761,9 @@ async function main() {
         path.join(outDir, "expert-team-plan-a-review-scroll-preserved.png"),
         path.join(outDir, "expert-team-polling-draft-preserved.png"),
         path.join(outDir, "expert-team-polling-draft-recovery.png"),
+        path.join(outDir, "expert-team-polling-brief-revision-recovery.png"),
+        path.join(outDir, "expert-team-polling-review-id-recovery.png"),
+        path.join(outDir, "expert-team-polling-office-review-id-recovery.png"),
         path.join(outDir, "expert-team-polling-409-preserved.png"),
         ...[1024, 1280, 1440].flatMap((width) => [
         path.join(outDir, `expert-team-plan-a-stage-input-${width}.png`),

@@ -1294,6 +1294,7 @@ function _expertTeamWorkspaceFormKind(root){
 
 function _expertTeamWorkspaceIdentity(card,state){
   state=state||{};
+  const structured=card&&card.draftIdentity||{};
   const sourceSessionId=String((card&&card.sourceSessionId)||(card&&card.source_session_id)||state.sessionId||'');
   const runId=String((card&&card.runId)||(card&&card.sessionId)||state.runId||'');
   const stageId=String((card&&card.currentStageId)||state.stageId||'');
@@ -1301,7 +1302,13 @@ function _expertTeamWorkspaceIdentity(card,state){
     ? card.questions.find(question=>String(question&&question.status||'pending')==='pending')
     : null;
   const itemId=String((card&&card.pendingInputId)||(pendingQuestion&&pendingQuestion.id)||state.inputId||state.questionId||'');
-  return `${sourceSessionId}::${runId}::${stageId}::${itemId}`;
+  const stageAttempt=Number(structured.stageAttempt||state.stageAttempt||0);
+  const artifactAttempt=Number(structured.artifactAttempt||state.artifactAttempt||0);
+  const executionAttempt=Number(structured.executionAttempt||state.executionAttempt||0);
+  const briefRevision=Number(structured.briefRevision||state.briefRevision||0);
+  const reviewId=String(structured.reviewId||state.reviewId||'');
+  const officeReviewId=String(structured.officeReviewId||state.officeReviewId||'');
+  return `session:${sourceSessionId}::run:${runId}::stage:${stageId}::stage-attempt:${stageAttempt}::artifact-attempt:${artifactAttempt}::execution-attempt:${executionAttempt}::brief-revision:${briefRevision}::review:${reviewId}::office-review:${officeReviewId}::item:${itemId}`;
 }
 
 function _expertTeamWorkspaceDraftKey(formKind,identity){
@@ -1381,12 +1388,18 @@ function _expertTeamMergeDirtyWorkspace(panel,card,draft,popoverState){
 
 function captureExpertTeamWorkspaceFormState(root){
   const scope=root&&root.querySelector?(root.querySelector('.expert-team-panel-inner')||root):null;
-  const state={sessionId:'',runId:'',stageId:'',questionId:'',inputId:'',serverVersion:0,activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
+  const state={sessionId:'',runId:'',stageId:'',stageAttempt:0,artifactAttempt:0,executionAttempt:0,briefRevision:0,reviewId:'',officeReviewId:'',questionId:'',inputId:'',serverVersion:0,activeKey:'',activeTab:'',scrollTop:null,controls:{},selectedStageChoices:[],draftCandidate:null};
   if(!scope||!scope.querySelectorAll||typeof document==='undefined')return state;
   const panel=(scope.closest&&scope.closest('.expert-team-workspace-panel'))||(root&&root.classList&&root.classList.contains('expert-team-workspace-panel')?root:null);
   state.sessionId=String((panel&&panel.dataset&&panel.dataset.expertTeamSourceSessionId)||(root&&root.dataset&&root.dataset.expertTeamSourceSessionId)||'');
   state.runId=String((scope.dataset&&scope.dataset.expertTeamRunId)||'');
   state.stageId=String((scope.dataset&&scope.dataset.expertTeamStageId)||'');
+  state.stageAttempt=Number((scope.dataset&&scope.dataset.expertTeamStageAttempt)||0);
+  state.artifactAttempt=Number((scope.dataset&&scope.dataset.expertTeamArtifactAttempt)||0);
+  state.executionAttempt=Number((scope.dataset&&scope.dataset.expertTeamExecutionAttempt)||0);
+  state.briefRevision=Number((scope.dataset&&scope.dataset.expertTeamBriefRevision)||0);
+  state.reviewId=String((scope.dataset&&scope.dataset.expertTeamReviewId)||'');
+  state.officeReviewId=String((scope.dataset&&scope.dataset.expertTeamOfficeReviewId)||'');
   state.inputId=String((scope.dataset&&scope.dataset.expertTeamInputId)||'');
   state.serverVersion=Number((scope.dataset&&scope.dataset.expertTeamVersion)||0);
   const currentQuestion=scope.querySelector('.status-card-expert-question.pending.is-current[data-expert-team-question-id]');

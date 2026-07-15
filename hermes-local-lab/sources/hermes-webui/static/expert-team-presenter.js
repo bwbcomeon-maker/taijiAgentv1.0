@@ -153,6 +153,9 @@
     const currentStage=workflow.current_stage||workspace.currentStage||run.current_stage||{};
     const stageReview=view.stage_review||{};
     const stageReviewOutput=stageReview.output||{};
+    const stageAttemptReservation=run.current_stage_attempt_reservation||{};
+    const officeReview=view.office_review||view.office_acceptance||run.office_review_ref||{};
+    const brief=view.brief||run.document_brief||{};
     const schemaVersion=Number(run.schema_version||0);
     const teamTitle=str(teamView.title||run.team_title,'专家团');
     const workflowStages=arr(workflow.stages);
@@ -192,6 +195,14 @@
       confirmationGroup:str(question&&question.confirmation_group)
     }));
     const phaseProgress=(workflow&&workflow.progress)||view.phase_progress||{};
+    const draftIdentity={
+      stageAttempt:Number(stageReview.stage_attempt||stageReview.attempt||stageResult.stage_attempt||stageResult.attempt||currentStage.stage_attempt||currentStage.attempt||stageAttemptReservation.stage_attempt||0),
+      artifactAttempt:Number(stageReviewOutput.stage_attempt||stageReviewOutput.attempt||stageResult.artifact_attempt||0),
+      executionAttempt:Number(run.execution_attempt||run.current_execution_attempt||(run.execution_context&&run.execution_context.attempt)||0),
+      briefRevision:Number(brief.revision||brief.brief_revision||0),
+      reviewId:str(stageReview.review_id||stageReviewOutput.review_id||stageReviewOutput.id||stageReviewOutput.task_id),
+      officeReviewId:str(officeReview.review_id||officeReview.office_review_id||officeReview.acceptance_id),
+    };
     return {
       type:'writeflow',
       kind:'expert_team',
@@ -207,6 +218,7 @@
       currentStageId:str(currentStage.task_id||currentStage.id),
       pendingInputId:str(pendingInput.id||pendingInput.input_id),
       stageReviewId:str(stageReview.review_id||stageReviewOutput.review_id||stageReviewOutput.id||stageReviewOutput.task_id),
+      draftIdentity,
       cancelRequestId:str(run.cancel_request_id),
       team:{id:str(teamView.id||run.team_id),title:teamTitle,category:str((data.team||{}).category,'专家团'),image:str(teamView.image||run.team_image),members},
       status:presentation.state,

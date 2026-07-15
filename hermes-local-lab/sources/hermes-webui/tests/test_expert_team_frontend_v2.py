@@ -524,6 +524,86 @@ def test_workspace_drafts_use_a_window_memory_map_scoped_by_form_kind_and_identi
     assert "path" not in draft_block.lower()
 
 
+def test_presenter_exposes_complete_structured_draft_identity_without_text_inference():
+    for token in (
+        "const draftIdentity={",
+        "draftIdentity,",
+        "stageAttempt:",
+        "artifactAttempt:",
+        "executionAttempt:",
+        "briefRevision:",
+        "reviewId:",
+        "officeReviewId:",
+    ):
+        assert token in PRESENTER_JS
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');
+            const vm=require('vm');
+            const context={window:{},console};
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const run={
+              run_id:'run-1',session_id:'session-1',schema_version:2,workflow_state:'awaiting_review',
+              execution_attempt:4,
+              document_brief:{revision:7},
+              current_stage_attempt_reservation:{stage_id:'stage-1',stage_attempt:3},
+              view:{
+                presentation:{state:'awaiting_review'},
+                workflow:{current_stage:{id:'stage-1'}},
+                stage_review:{review_id:'review-8',attempt:3,output:{id:'artifact-1',attempt:3}},
+                office_review:{review_id:'office-9'},
+              },
+            };
+            const card=context.window.buildExpertTeamCardFromRun(run,{});
+            console.log(JSON.stringify(card.draftIdentity));
+            """
+        )
+    )
+    assert result == {
+        "stageAttempt": 3,
+        "artifactAttempt": 3,
+        "executionAttempt": 4,
+        "briefRevision": 7,
+        "reviewId": "review-8",
+        "officeReviewId": "office-9",
+    }
+
+
+def test_workspace_identity_changes_for_same_stage_attempt_brief_review_and_office_review():
+    identity_start = UI_JS.index("function _expertTeamWorkspaceIdentity")
+    identity_end = UI_JS.index("function _expertTeamWorkspaceDraftKey", identity_start)
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            {UI_JS[identity_start:identity_end]}
+            const base={{
+              sourceSessionId:'session-1',runId:'run-1',currentStageId:'stage-1',pendingInputId:'input-1',
+              draftIdentity:{{stageAttempt:1,artifactAttempt:1,executionAttempt:1,briefRevision:2,reviewId:'review-1',officeReviewId:'office-1'}},
+              title:'自由文本 A',questions:[],
+            }};
+            const identity=(patch={{}})=>_expertTeamWorkspaceIdentity({{...base,...patch,draftIdentity:{{...base.draftIdentity,...(patch.draftIdentity||{{}})}}}},{{}});
+            console.log(JSON.stringify({{
+              stable:identity({{title:'完全不同的自由文本'}})===identity(),
+              attempt:identity({{draftIdentity:{{stageAttempt:2}}}})!==identity(),
+              brief:identity({{draftIdentity:{{briefRevision:3}}}})!==identity(),
+              review:identity({{draftIdentity:{{reviewId:'review-2'}}}})!==identity(),
+              office:identity({{draftIdentity:{{officeReviewId:'office-2'}}}})!==identity(),
+              key:identity(),
+            }}));
+            """
+        )
+    )
+    assert result["stable"] is True
+    assert result["attempt"] is True
+    assert result["brief"] is True
+    assert result["review"] is True
+    assert result["office"] is True
+    for part in ("session-1", "run-1", "stage-1", "input-1", "review-1", "office-1"):
+        assert part in result["key"]
+
+
 def test_dirty_same_identity_reuses_editable_subtree_and_stage_advance_moves_draft_to_recovery():
     mount = _function_body(UI_JS, "function mountExpertTeamWorkspacePanel", "function _expertTeamWorkspaceStorageKey")
     for token in (
