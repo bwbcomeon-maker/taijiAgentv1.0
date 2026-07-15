@@ -407,6 +407,7 @@ def test_real_first_pending_office_lifecycle_begin_get_safe_submit_and_replay(mo
     from api.expert_teams.office_review import OFFICE_POLICY_V1
     from tests.test_expert_team_stage_artifact_contract import _brief, _contract_run_ready_for_attempt, _raw
 
+    monkeypatch.setenv("TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT", "pilot")
     run = _contract_run_ready_for_attempt(tmp_path, stage_index=3)
     input_refs = [{"ref_type": "stage_artifact", "artifact_id": "materials:1", "sha256": "1" * 64}, {"ref_type": "stage_artifact", "artifact_id": "draft:1", "sha256": "2" * 64}]
     reserved = expert_teams.reserve_expert_team_execution_start(tmp_path, run["run_id"], expected_version=run["version"], runtime_adapter="RunnerRuntimeAdapter", input_refs=input_refs)

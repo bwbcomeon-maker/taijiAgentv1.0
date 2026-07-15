@@ -53,7 +53,9 @@ def test_presenter_is_the_only_source_of_main_state_and_action():
     assert "window.buildExpertTeamPresentation=buildExpertTeamPresentation" in PRESENTER_JS
     assert "window.buildExpertTeamCardFromRun=buildExpertTeamCardFromRun" in PRESENTER_JS
 
-    for old_source in ("statusLabel", "can_retry", "stage_confirmation_points"):
+    assert "statusLabel:STATE_LABELS[state]" in PRESENTER_JS
+    assert "presentation.statusLabel" in EXPERT_UI_JS
+    for old_source in ("can_retry", "stage_confirmation_points"):
         assert old_source not in PRESENTER_JS
     assert "view.timeline_events" in PRESENTER_JS
     assert "member&&member.image" in PRESENTER_JS
@@ -134,12 +136,16 @@ def test_expert_team_workspace_uses_reserved_layout_not_overlay():
 
 def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "expert-team-panel-tabs" in EXPERT_UI_JS
-    assert "data-expert-team-workspace-tab=\"todo\"" in EXPERT_UI_JS
-    assert "data-expert-team-workspace-tab=\"collaboration\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"task\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"process\"" in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"todo\"" not in EXPERT_UI_JS
+    assert "data-expert-team-workspace-tab=\"collaboration\"" not in EXPERT_UI_JS
     assert "data-expert-team-workspace-tab=\"flow\"" not in EXPERT_UI_JS
     assert "data-expert-team-workspace-tab=\"members\"" not in EXPERT_UI_JS
     assert "data-expert-team-workspace-tab=\"result\"" in EXPERT_UI_JS
-    assert "协作" in EXPERT_UI_JS
+    assert "<span>任务</span>" in EXPERT_UI_JS
+    assert "<span>成果</span>" in EXPERT_UI_JS
+    assert "<span>过程</span>" in EXPERT_UI_JS
     assert "专家团协作状态" in EXPERT_UI_JS
     assert "expert-team-confirmation-wizard" in EXPERT_UI_JS
     assert "需求确认 1/" in EXPERT_UI_JS
@@ -159,7 +165,8 @@ def test_expert_team_workspace_uses_summary_tabs_and_confirmation_wizard():
     assert "data-expert-team-workspace-mode=\"confirm\"" in EXPERT_UI_JS
     assert "window.restoreExpertTeamWorkspaceTab=restoreExpertTeamWorkspaceTab" in ACTIONS_JS
     assert "function normalizeExpertTeamWorkspaceTab" in ACTIONS_JS
-    assert "tab==='flow'||tab==='members'?'collaboration':tab" in ACTIONS_JS
+    assert "if(tab==='todo')return 'task'" in ACTIONS_JS
+    assert "if(tab==='flow'||tab==='members'||tab==='collaboration')return 'process'" in ACTIONS_JS
     assert "restoreExpertTeamWorkspaceTab(panel)" in UI_JS
     assert "expert-team-member-list" in EXPERT_UI_JS
     assert "expert-team-member-row" in EXPERT_UI_JS
@@ -199,7 +206,9 @@ def test_workspace_panel_can_collapse_and_expand_without_becoming_chat_message()
     assert "shell.classList.toggle('taiji-expert-team-panel-collapsed',collapsed)" in sync_body
     assert "panel.hidden=!visible" in sync_body
     assert "expert-team-panel-collapse-toggle" in EXPERT_UI_JS
-    assert "toggleExpertTeamWorkspacePanel(this)" in EXPERT_UI_JS
+    assert "toggleExpertTeamWorkspaceFromControl(this)" in EXPERT_UI_JS
+    assert 'aria-expanded="true"' in EXPERT_UI_JS
+    assert 'aria-controls="expert-team-workspace-expanded"' in EXPERT_UI_JS
 
 
 def test_question_popover_scrolls_into_workspace_panel_when_opened():
@@ -323,6 +332,7 @@ def test_default_user_visible_copy_has_no_public_account_language():
     joined = "\n".join([COMMANDS_JS, PANELS_JS, SESSIONS_JS, UI_JS, PRESENTER_JS, EXPERT_UI_JS, ACTIONS_JS])
     for text in ("公众号长文", "文章大纲", "标题党", "你有没有", "读者", "封面配图", "发布前检查"):
         assert text not in joined
+    assert "适用对象" in EXPERT_UI_JS
 
 
 def test_expert_team_actions_never_call_legacy_writeflow_api():

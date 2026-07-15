@@ -155,7 +155,7 @@
             ${field('purpose','用途',brief.purpose)}
           </fieldset>
           <fieldset><legend>使用与资料边界</legend>
-            ${field('audience','读者',brief.audience)}
+            ${field('audience','适用对象',brief.audience)}
             ${field('usage_scenario','使用场景',brief.usageScenario)}
             ${field('additional_context','补充背景',brief.additionalContext,{rows:4,help:'补充可核对的背景和资料使用边界，不会覆盖原始诉求。'})}
             <p class="expert-team-brief-boundary">已绑定资料：${safeEsc(brief.sourcePolicySummary&&brief.sourcePolicySummary.source_count||0)} 项；资料策略由企业配置管理。</p>
