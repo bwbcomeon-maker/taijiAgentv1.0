@@ -2311,6 +2311,7 @@ def get_model_config() -> dict[str, Any]:
     key_env = str(model_cfg.get("key_env") or model_cfg.get("api_key_env") or "").strip()
     image_gen_config = get_image_gen_config()
     vision_config = get_vision_config()
+    provider_credentials = get_provider_credentials_config().get("credentials", [])
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -2328,6 +2329,7 @@ def get_model_config() -> dict[str, Any]:
         "vision_providers": vision_config.get("providers", []),
         "image_gen": image_gen_config.get("image_gen", {}),
         "image_gen_providers": image_gen_config.get("providers", []),
+        "provider_credentials": provider_credentials,
         "custom": {"supported": True, "key_env": _CUSTOM_MODEL_KEY_ENV},
     }
 

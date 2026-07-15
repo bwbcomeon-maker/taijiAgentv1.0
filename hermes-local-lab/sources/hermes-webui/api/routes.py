@@ -9590,6 +9590,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_model_config())
 
+    if parsed.path == "/api/provider-credentials":
+        from api.model_config import get_provider_credentials_config
+
+        return j(handler, get_provider_credentials_config())
+
     if parsed.path == "/api/license/status":
         return _handle_license_status(handler)
 
@@ -11233,6 +11238,16 @@ def handle_post(handler, parsed) -> bool:
 
         try:
             return j(handler, set_main_model_config(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=500)
+
+    if parsed.path == "/api/provider-credentials":
+        from api.model_config import upsert_provider_credential
+
+        try:
+            return j(handler, upsert_provider_credential(body))
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
@@ -13362,6 +13377,16 @@ def handle_delete(handler, parsed) -> bool:
         name = parsed.path[len("/api/image-gen/custom-providers/"):]
         try:
             return j(handler, delete_custom_image_provider_config(name))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=500)
+    if parsed.path.startswith("/api/provider-credentials/"):
+        from api.model_config import delete_provider_credential
+
+        credential_id = parsed.path[len("/api/provider-credentials/"):]
+        try:
+            return j(handler, delete_provider_credential(credential_id))
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:

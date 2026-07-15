@@ -1471,6 +1471,42 @@
                     </div>
                     <button class="btn-tiny" type="button" data-model-config-toggle="modelConfigImageAdvanced" onclick="toggleModelConfigSection('modelConfigImageAdvanced')">高级图片模型</button>
                   </div>
+                  <section class="model-config-platform-credentials" id="modelConfigPlatformCredentials" aria-labelledby="modelConfigPlatformCredentialsTitle">
+                    <div class="model-config-platform-credentials-head">
+                      <div>
+                        <strong id="modelConfigPlatformCredentialsTitle">平台凭据</strong>
+                        <span>一份凭据可同时用于识图和生图；列表会显示配置状态和使用范围。需要隔离账号或费用时，再新增独立凭据。</span>
+                      </div>
+                      <button class="btn-tiny" id="btnAddPlatformCredential" type="button" onclick="openPlatformCredentialEditor()">新增独立凭据</button>
+                    </div>
+                    <div class="model-config-platform-credential-list" id="modelConfigPlatformCredentialList" aria-live="polite">正在读取已保存凭据。</div>
+                    <div class="model-config-collapsible model-config-platform-credential-editor" id="platformCredentialEditor" hidden>
+                      <input id="platformCredentialId" type="hidden">
+                      <div class="model-config-field">
+                        <label for="platformCredentialLabel">凭据名称</label>
+                        <input id="platformCredentialLabel" placeholder="例如：阿里云百炼默认凭据" autocomplete="off" aria-describedby="platformCredentialError">
+                      </div>
+                      <div class="model-config-field">
+                        <label for="platformCredentialFamily">平台</label>
+                        <select id="platformCredentialFamily" aria-describedby="platformCredentialError">
+                          <option value="alibaba_dashscope">阿里云百炼</option>
+                        </select>
+                      </div>
+                      <div class="model-config-field">
+                        <label for="platformCredentialSecret">API Key</label>
+                        <div class="model-config-secret-row">
+                          <input id="platformCredentialSecret" type="password" placeholder="更新时留空可保留现有凭据" autocomplete="off" data-secret-field="true" aria-describedby="platformCredentialSecretHint platformCredentialError">
+                          <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('platformCredentialSecret')">粘贴</button>
+                        </div>
+                        <div class="model-config-hint" id="platformCredentialSecretHint">密钥只保存在本机，页面不会回显。</div>
+                      </div>
+                      <p class="model-config-field-error" id="platformCredentialError" aria-live="polite"></p>
+                      <div class="model-config-actions">
+                        <button class="sm-btn" id="btnSavePlatformCredential" type="button" onclick="savePlatformCredential()">保存凭据</button>
+                        <button class="btn-tiny" type="button" onclick="closePlatformCredentialEditor()">取消</button>
+                      </div>
+                    </div>
+                  </section>
                   <div class="model-config-image-capability-grid">
                     <section class="model-config-capability-card" id="modelConfigVisionSummaryCard" data-state="warn">
                       <div class="model-config-card-head">
@@ -1486,34 +1522,68 @@
                         <span><b>密钥状态</b><em id="visionConfigKeyState">—</em></span>
                       </div>
                       <p class="model-config-muted" id="visionConfigSummary">配置后，上传图片时可以直接让 agent 理解图片内容。</p>
-                      <p class="model-config-hint" id="visionConfigVerificationStatus" aria-live="polite">尚未检查识图配置。</p>
                       <p class="model-config-hint">测试图片会发送给你配置的外部视觉服务；请勿上传密钥或隐私截图。</p>
                       <div class="model-config-actions">
-                        <button class="sm-btn" type="button" data-model-config-toggle="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
-                        <button class="btn-tiny" type="button" id="btnTestVisionConfig" aria-label="测试识图配置" onclick="testVisionConfig()">测试识图</button>
-                        <button class="btn-tiny" type="button" onclick="openVisionConfigKeyEditor()">粘贴密钥</button>
+                        <button class="sm-btn" id="btnEditVisionConfig" type="button" data-model-config-toggle="visionConfigEdit" onclick="toggleModelConfigSection('visionConfigEdit')">配置识图</button>
                       </div>
                       <div class="model-config-collapsible" id="visionConfigEdit" hidden>
-                        <label for="visionConfigProvider">Provider</label>
-                        <select id="visionConfigProvider"></select>
-                        <div class="model-config-hint" id="visionProviderScopeHint">看图识别只显示视觉理解模型；它不能直接生成图片。</div>
-                        <label for="visionConfigModel">模型 ID</label>
-                        <input id="visionConfigModel" list="visionConfigModelOptions" placeholder="选择或输入视觉模型 ID" autocomplete="off">
-                        <datalist id="visionConfigModelOptions"></datalist>
-                        <div id="visionConfigBaseUrlRow">
-                          <label for="visionConfigBaseUrl">Base URL</label>
-                          <input id="visionConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+                        <div class="model-config-field">
+                          <label for="visionConfigCredential">平台凭据</label>
+                          <select id="visionConfigCredential" aria-describedby="visionConfigCredentialHint visionConfigEndpointError"></select>
+                          <div class="model-config-hint" id="visionConfigCredentialHint">可选择共享凭据，或新增只用于识图的独立凭据。</div>
                         </div>
-                        <div id="visionConfigApiKeyRow">
-                          <label for="visionConfigApiKey">API 密钥</label>
+                        <div class="model-config-field">
+                          <label for="visionConfigProvider">模型平台</label>
+                          <select id="visionConfigProvider" aria-describedby="visionProviderScopeHint visionConfigEndpointError"></select>
+                          <div class="model-config-hint" id="visionProviderScopeHint">看图识别只显示视觉理解模型；它不能直接生成图片。</div>
+                        </div>
+                        <div class="model-config-field" id="visionConfigEndpointModeRow">
+                          <label for="visionConfigEndpointMode">接入方式</label>
+                          <select id="visionConfigEndpointMode" aria-describedby="visionConfigEndpointError">
+                            <option value="public">公共端点</option>
+                            <option value="workspace">业务空间专属端点</option>
+                            <option value="custom">自定义 Base URL</option>
+                          </select>
+                        </div>
+                        <div class="model-config-field" id="visionConfigRegionRow">
+                          <label for="visionConfigRegion">地域</label>
+                          <select id="visionConfigRegion" aria-describedby="visionConfigEndpointError">
+                            <option value="cn-beijing">华北 2（北京）</option>
+                            <option value="ap-southeast-1">新加坡</option>
+                          </select>
+                        </div>
+                        <div class="model-config-field" id="visionConfigWorkspaceRow">
+                          <label for="visionConfigWorkspaceId">Workspace ID</label>
+                          <input id="visionConfigWorkspaceId" placeholder="例如：llm-demo" autocomplete="off" aria-describedby="visionConfigEndpointError">
+                        </div>
+                        <div class="model-config-field" id="visionConfigBaseUrlRow">
+                          <label for="visionConfigBaseUrl">Base URL</label>
+                          <input id="visionConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off" aria-describedby="visionConfigEndpointError">
+                        </div>
+                        <div class="model-config-field" id="visionConfigApiKeyRow">
+                          <label for="visionConfigApiKey">旧配置 API Key</label>
                           <div class="model-config-secret-row">
-                            <input id="visionConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                            <input id="visionConfigApiKey" type="password" placeholder="仅无命名凭据的兼容平台使用" autocomplete="off" data-secret-field="true" aria-describedby="visionConfigKeyHint visionConfigEndpointError">
                             <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('visionConfigApiKey')">粘贴</button>
                           </div>
                           <div class="model-config-hint" id="visionConfigKeyHint">—</div>
                         </div>
+                        <div class="model-config-field">
+                          <label for="visionConfigModel">模型</label>
+                          <input id="visionConfigModel" list="visionConfigModelOptions" placeholder="选择或输入视觉模型 ID" autocomplete="off" aria-describedby="visionConfigEndpointError">
+                          <datalist id="visionConfigModelOptions"></datalist>
+                        </div>
+                        <div class="model-config-endpoint-preview">
+                          <b>端点预览</b>
+                          <output id="visionConfigEndpointPreview" aria-live="polite">请选择接入方式。</output>
+                        </div>
+                        <p class="model-config-field-error" id="visionConfigEndpointError" aria-live="polite"></p>
                         <button class="sm-btn" id="btnSaveVisionConfig" type="button" onclick="saveVisionConfig()">保存识图配置</button>
                       </div>
+                      <div class="model-config-actions model-config-test-actions">
+                        <button class="btn-tiny" type="button" id="btnTestVisionConfig" aria-label="测试识图配置" onclick="testVisionConfig()">真实测试识图</button>
+                      </div>
+                      <p class="model-config-hint" id="visionConfigVerificationStatus" aria-live="polite">尚未检查识图配置。</p>
                     </section>
 
                     <section class="model-config-capability-card model-config-image-card" id="modelConfigImageSummaryCard" data-state="warn">
@@ -1530,28 +1600,69 @@
                         <span><b>密钥状态</b><em id="imageGenConfigKeyState">—</em></span>
                       </div>
                       <p class="model-config-muted" id="imageGenConfigSummary">配置后，调用 image_generate 或需要出图时会使用这里的模型。</p>
+                      <p class="model-config-hint">真实生图测试可能产生少量费用；测试图会在验证后删除。</p>
                       <div class="model-config-actions">
-                        <button class="sm-btn" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴密钥</button>
-                        <button class="btn-tiny" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">配置生图</button>
+                        <button class="sm-btn" id="btnEditImageGenConfig" type="button" data-model-config-toggle="imageGenConfigEdit" onclick="toggleModelConfigSection('imageGenConfigEdit')">配置生图</button>
+                        <button class="btn-tiny" id="modelConfigImagePasteAction" type="button" onclick="openImageGenKeyEditor()">粘贴密钥</button>
                       </div>
                       <div class="model-config-collapsible" id="imageGenConfigEdit" hidden>
-                        <label for="imageGenConfigProvider">Provider</label>
-                        <select id="imageGenConfigProvider"></select>
-                        <div class="model-config-hint" id="imageGenProviderScopeHint">生成图片只显示中国可用的稳定出图服务；外部国产兼容端点放在高级配置。</div>
-                        <label for="imageGenConfigModel">模型 ID</label>
-                        <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off">
-                        <datalist id="imageGenConfigModelOptions"></datalist>
+                        <div class="model-config-field">
+                          <label for="imageGenConfigCredential">平台凭据</label>
+                          <select id="imageGenConfigCredential" aria-describedby="imageGenConfigCredentialHint imageGenConfigEndpointError"></select>
+                          <div class="model-config-hint" id="imageGenConfigCredentialHint">可与识图共享同一凭据，也可使用独立凭据隔离费用。</div>
+                        </div>
+                        <div class="model-config-field">
+                          <label for="imageGenConfigProvider">模型平台</label>
+                          <select id="imageGenConfigProvider" aria-describedby="imageGenProviderScopeHint imageGenConfigEndpointError"></select>
+                          <div class="model-config-hint" id="imageGenProviderScopeHint">生成图片只显示中国可用的稳定出图服务；外部国产兼容端点放在高级配置。</div>
+                        </div>
+                        <div class="model-config-field" id="imageGenConfigEndpointModeRow">
+                          <label for="imageGenConfigEndpointMode">接入方式</label>
+                          <select id="imageGenConfigEndpointMode" aria-describedby="imageGenConfigEndpointError">
+                            <option value="workspace">业务空间专属端点</option>
+                            <option value="custom">自定义 Base URL</option>
+                          </select>
+                        </div>
+                        <div class="model-config-field" id="imageGenConfigRegionRow">
+                          <label for="imageGenConfigRegion">地域</label>
+                          <select id="imageGenConfigRegion" aria-describedby="imageGenConfigEndpointError">
+                            <option value="cn-beijing">华北 2（北京）</option>
+                            <option value="ap-southeast-1">新加坡</option>
+                          </select>
+                        </div>
+                        <div class="model-config-field" id="imageGenConfigWorkspaceRow">
+                          <label for="imageGenConfigWorkspaceId">Workspace ID</label>
+                          <input id="imageGenConfigWorkspaceId" placeholder="例如：llm-demo" autocomplete="off" aria-describedby="imageGenConfigEndpointError">
+                        </div>
+                        <div class="model-config-field" id="imageGenConfigBaseUrlRow">
+                          <label for="imageGenConfigBaseUrl">Base URL</label>
+                          <input id="imageGenConfigBaseUrl" placeholder="https://gateway.example.com" autocomplete="off" aria-describedby="imageGenConfigEndpointError">
+                        </div>
                         <div class="model-config-credentials" id="imageGenConfigCredentials" aria-label="生图 Provider 凭据"></div>
                         <div id="imageGenConfigApiKeyRow">
                           <label for="imageGenConfigApiKey">API 密钥</label>
                           <div class="model-config-secret-row">
-                            <input id="imageGenConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
+                            <input id="imageGenConfigApiKey" type="password" placeholder="仅无命名凭据的兼容平台使用" autocomplete="off" data-secret-field="true" aria-describedby="imageGenConfigKeyHint imageGenConfigEndpointError">
                             <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('imageGenConfigApiKey')">粘贴</button>
                           </div>
                           <div class="model-config-hint" id="imageGenConfigKeyHint">—</div>
                         </div>
+                        <div class="model-config-field">
+                          <label for="imageGenConfigModel">模型</label>
+                          <input id="imageGenConfigModel" list="imageGenConfigModelOptions" placeholder="选择或输入模型 ID" autocomplete="off" aria-describedby="imageGenConfigEndpointError">
+                          <datalist id="imageGenConfigModelOptions"></datalist>
+                        </div>
+                        <div class="model-config-endpoint-preview">
+                          <b>端点预览</b>
+                          <output id="imageGenConfigEndpointPreview" aria-live="polite">请选择接入方式。</output>
+                        </div>
+                        <p class="model-config-field-error" id="imageGenConfigEndpointError" aria-live="polite"></p>
                         <button class="sm-btn" id="btnSaveImageGenConfig" type="button" onclick="saveImageGenConfig()">保存生图配置</button>
                       </div>
+                      <div class="model-config-actions model-config-test-actions">
+                        <button class="btn-tiny" type="button" id="btnTestImageGenConfig" aria-label="测试生图配置" onclick="testImageGenConfig()">真实测试生图</button>
+                      </div>
+                      <p class="model-config-hint" id="imageGenConfigVerificationStatus" aria-live="polite">尚未检查生图配置。</p>
                     </section>
                   </div>
                   <div class="model-config-collapsible model-config-image-advanced" id="modelConfigImageAdvanced" hidden>

@@ -16,6 +16,7 @@ import yaml
 
 import api.providers as providers
 import api.profiles as profiles
+import api.routes as routes
 from api import model_config
 
 
@@ -138,6 +139,73 @@ def test_provider_credentials_report_vision_and_image_gen_usage(monkeypatch, tmp
             "used_by": ["auxiliary.vision", "image_gen"],
         }
     ]
+
+
+def test_model_config_includes_only_safe_provider_credential_fields(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    secret = "must-never-reach-model-config"
+    monkeypatch.setenv("TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY", secret)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "alibaba-default",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "阿里云百炼默认凭据",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+                    }
+                ],
+                "auxiliary": {"vision": {"credential_ref": "alibaba-default"}},
+                "image_gen": {"credential_ref": "alibaba-default"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_model_config()
+
+    assert result["provider_credentials"] == [
+        {
+            "id": "alibaba-default",
+            "provider_family": "alibaba_dashscope",
+            "label": "阿里云百炼默认凭据",
+            "auth_type": "api_key",
+            "configured": True,
+            "used_by": ["auxiliary.vision", "image_gen"],
+        }
+    ]
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert secret not in dumped
+    assert "secret_env" not in dumped
+
+
+def test_provider_credential_routes_map_validation_errors_to_400(monkeypatch):
+    responses = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"id": "bad"})
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: responses.append((message, status)) or True,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "upsert_provider_credential",
+        lambda _body: (_ for _ in ()).throw(ValueError("凭据无效")),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "delete_provider_credential",
+        lambda _credential_id: (_ for _ in ()).throw(ValueError("凭据正在使用")),
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/provider-credentials")) is True
+    assert routes.handle_delete(
+        object(), SimpleNamespace(path="/api/provider-credentials/alibaba-default")
+    ) is True
+    assert responses == [("凭据无效", 400), ("凭据正在使用", 400)]
 
 
 def test_provider_credential_in_use_cannot_be_deleted(monkeypatch, tmp_path):

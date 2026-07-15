@@ -8180,6 +8180,9 @@ let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
 let _modelConfigData=null;
 let _visionTestGeneration=0;
 let _visionVerificationSnapshot=null;
+let _imageGenTestGeneration=0;
+let _imageGenVerificationSnapshot=null;
+let _platformCredentialReturnCapability='';
 let _modelConfigAuxProviders=[];
 let _modelConfigAuxOriginalConfig=null;
 
@@ -8266,7 +8269,8 @@ function _renderImageGenCredentialFields(provider){
  const box=$('imageGenConfigCredentials');
  if(!box) return;
  box.innerHTML='';
- const fields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
+ const allFields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
+ const fields=String(provider&&provider.id||'')==='dashscope'?[]:allFields;
  if(!fields.length){
   box.hidden=true;
   return;
@@ -8368,6 +8372,287 @@ function _formatModelConfigProvider(providerId,display){
  return label||id;
 }
 
+function _providerCredentialFamily(providerId){
+ const id=String(providerId||'').trim().toLowerCase();
+ if(id==='alibaba'||id==='dashscope') return 'alibaba_dashscope';
+ return id;
+}
+
+function _credentialUsageLabel(usedBy){
+ const labels=[];
+ const values=Array.isArray(usedBy)?usedBy:[];
+ if(values.includes('auxiliary.vision')) labels.push('识图');
+ if(values.includes('image_gen')) labels.push('生图');
+ return labels.length?labels.join('、'):'尚未绑定';
+}
+
+function _renderPlatformCredentials(data){
+ const box=$('modelConfigPlatformCredentialList');
+ if(!box) return;
+ box.innerHTML='';
+ const rows=Array.isArray(data&&data.provider_credentials)?data.provider_credentials:[];
+ if(!rows.length){
+  const empty=document.createElement('p');
+  empty.className='model-config-platform-credential-empty';
+  empty.textContent='尚未保存平台凭据。新增一份后，可同时绑定识图和生图。';
+  box.appendChild(empty);
+  return;
+ }
+ rows.forEach(row=>{
+  const item=document.createElement('article');
+  item.className='model-config-platform-credential-item';
+  const copy=document.createElement('div');
+  copy.className='model-config-platform-credential-copy';
+  const title=document.createElement('strong');
+  title.textContent=String(row.label||row.id||'未命名凭据');
+  const meta=document.createElement('span');
+  meta.textContent=(row.configured?'已保存':'待填写')+' · 使用范围：'+_credentialUsageLabel(row.used_by);
+  copy.appendChild(title);
+  copy.appendChild(meta);
+  const actions=document.createElement('div');
+  actions.className='model-config-platform-credential-actions';
+  const update=document.createElement('button');
+  update.className='btn-tiny';
+  update.type='button';
+  update.textContent='更新凭据';
+  update.setAttribute('aria-label','更新凭据 '+title.textContent);
+  update.onclick=()=>openPlatformCredentialEditor(String(row.id||''));
+  actions.appendChild(update);
+  if(!Array.isArray(row.used_by)||!row.used_by.length){
+   const remove=document.createElement('button');
+   remove.className='btn-tiny';
+   remove.type='button';
+   remove.textContent='删除';
+   remove.setAttribute('aria-label','删除凭据 '+title.textContent);
+   remove.onclick=()=>deletePlatformCredential(String(row.id||''));
+   actions.appendChild(remove);
+  }
+  item.appendChild(copy);
+  item.appendChild(actions);
+  box.appendChild(item);
+ });
+}
+
+function _defaultCredentialId(capability){
+ return capability==='vision'?'alibaba-vision':(capability==='image'?'alibaba-image':'alibaba-extra');
+}
+
+function _uniqueCredentialId(baseId){
+ const base=String(baseId||'alibaba-extra');
+ const rows=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials:[];
+ const used=new Set(rows.map(row=>String(row&&row.id||'')));
+ if(!used.has(base)) return base;
+ let suffix=2;
+ while(used.has(base+'-'+suffix)) suffix++;
+ return base+'-'+suffix;
+}
+
+function openPlatformCredentialEditor(credentialId,returnCapability){
+ const rows=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials:[];
+ const row=rows.find(item=>String(item&&item.id||'')===String(credentialId||''))||null;
+ _platformCredentialReturnCapability=String(returnCapability||'');
+ const id=$('platformCredentialId');
+ const label=$('platformCredentialLabel');
+ const family=$('platformCredentialFamily');
+ const secret=$('platformCredentialSecret');
+ const error=$('platformCredentialError');
+ if(id) id.value=String((row&&row.id)||_uniqueCredentialId(_defaultCredentialId(_platformCredentialReturnCapability)));
+ if(label) label.value=String((row&&row.label)||'');
+ if(family){
+  family.value=String((row&&row.provider_family)||'alibaba_dashscope');
+  family.disabled=!!row;
+ }
+ if(secret) secret.value='';
+ if(error) error.textContent='';
+ toggleModelConfigSection('platformCredentialEditor',true);
+ if(label) setTimeout(()=>label.focus(),0);
+}
+
+function closePlatformCredentialEditor(){
+ toggleModelConfigSection('platformCredentialEditor',false);
+ _platformCredentialReturnCapability='';
+ const add=$('btnAddPlatformCredential');
+ if(add) add.focus();
+}
+
+async function savePlatformCredential(){
+ const id=(($('platformCredentialId')||{}).value||'').trim();
+ const label=(($('platformCredentialLabel')||{}).value||'').trim();
+ const providerFamily=(($('platformCredentialFamily')||{}).value||'').trim();
+ const secretInput=$('platformCredentialSecret');
+ const apiKey=String((secretInput&&secretInput.value)||'').trim();
+ const error=$('platformCredentialError');
+ const btn=$('btnSavePlatformCredential');
+ if(error) error.textContent='';
+ if(!id||!label||!providerFamily){
+  if(error) error.textContent='请完整填写凭据名称和平台。';
+  return;
+ }
+ const existing=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)
+  ? _modelConfigData.provider_credentials.find(row=>String(row&&row.id||'')===id):null;
+ if(!existing&&!apiKey){
+  if(error) error.textContent='新凭据需要填写 API Key。';
+  return;
+ }
+ if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');}
+ try{
+  const payload={id,label,provider_family:providerFamily,auth_type:'api_key'};
+  if(apiKey) payload.api_key=apiKey;
+  const result=await api('/api/provider-credentials',{method:'POST',body:JSON.stringify(payload)});
+  if(secretInput) secretInput.value='';
+  if(_modelConfigData&&result&&result.credential){
+   const rows=Array.isArray(_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials.slice():[];
+   const next=rows.filter(row=>String(row&&row.id||'')!==id);
+   next.push(result.credential);
+   _modelConfigData.provider_credentials=next;
+   if(apiKey&&existing){
+    const usedBy=Array.isArray(existing.used_by)?existing.used_by:[];
+    if(usedBy.includes('auxiliary.vision')&&_modelConfigData.vision){
+     _modelConfigData.vision.verification={status:'configured_unverified',message:'凭据已更新，请重新测试识图。'};
+    }
+    if(usedBy.includes('image_gen')&&_modelConfigData.image_gen){
+     _modelConfigData.image_gen.verification={status:'configured_unverified',message:'凭据已更新，请重新测试生图。'};
+    }
+   }
+  }
+  _renderPlatformCredentials(_modelConfigData);
+  const capability=_platformCredentialReturnCapability;
+  const visionSelect=$('visionConfigCredential');
+  const imageSelect=$('imageGenConfigCredential');
+  _renderCapabilityCredentialOptions('vision',(($('visionConfigProvider')||{}).value||''),visionSelect&&visionSelect.value);
+  _renderCapabilityCredentialOptions('image',(($('imageGenConfigProvider')||{}).value||''),imageSelect&&imageSelect.value);
+  const select=$(capability==='vision'?'visionConfigCredential':'imageGenConfigCredential');
+  if(capability&&select){select.value=id;select.dataset.lastValue=id;}
+  _renderVisionConfigSummary(_modelConfigData);
+  _renderImageGenConfigSummary(_modelConfigData);
+  closePlatformCredentialEditor();
+  if(typeof showToast==='function') showToast('平台凭据已保存');
+ }catch(e){
+  if(error) error.textContent='凭据保存失败：'+(e.message||e);
+  if(typeof showToast==='function') showToast('凭据保存失败',5000,'error');
+ }finally{
+  if(btn){btn.disabled=false;btn.setAttribute('aria-busy','false');}
+ }
+}
+
+async function deletePlatformCredential(credentialId){
+ const error=$('platformCredentialError');
+ if(error) error.textContent='';
+ try{
+  await api('/api/provider-credentials/'+encodeURIComponent(String(credentialId||'')),{method:'DELETE'});
+  await loadModelConfigPanel(true);
+  if(typeof showToast==='function') showToast('凭据已删除');
+ }catch(e){
+  if(error) error.textContent='凭据删除失败：'+(e.message||e);
+  toggleModelConfigSection('platformCredentialEditor',true);
+  if(typeof showToast==='function') showToast('凭据删除失败',5000,'error');
+ }
+}
+
+function _renderCapabilityCredentialOptions(capability,providerId,currentRef){
+ const select=$(capability==='vision'?'visionConfigCredential':'imageGenConfigCredential');
+ if(!select) return;
+ const previous=String(currentRef||select.value||'');
+ const family=_providerCredentialFamily(providerId);
+ const rows=Array.isArray(_modelConfigData&&_modelConfigData.provider_credentials)?_modelConfigData.provider_credentials:[];
+ select.innerHTML='';
+ const legacy=document.createElement('option');
+ legacy.value='';
+ legacy.textContent='使用旧配置凭据';
+ select.appendChild(legacy);
+ rows.filter(row=>String(row&&row.provider_family||'')===family).forEach(row=>{
+  const opt=document.createElement('option');
+  opt.value=String(row.id||'');
+  opt.textContent=String(row.label||row.id||'')+(row.configured?' · 已保存':' · 待填写');
+  select.appendChild(opt);
+ });
+ const independent=document.createElement('option');
+ independent.value='__new__';
+ independent.textContent='+ 新增独立凭据';
+ select.appendChild(independent);
+ select.value=Array.from(select.options||[]).some(opt=>opt.value===previous)?previous:'';
+ select.dataset.lastValue=select.value;
+ select.onchange=()=>{
+  if(select.value==='__new__'){
+   select.value=String(select.dataset.lastValue||previous);
+   openPlatformCredentialEditor('',capability);
+   return;
+  }
+  select.dataset.lastValue=select.value;
+  if(capability==='vision') _invalidateVisionTest(); else _invalidateImageGenTest();
+ };
+}
+
+function _safeEndpointPreview(raw){
+ const value=String(raw||'').trim();
+ if(!value) return '';
+ try{
+  const parsed=new URL(value);
+  if(parsed.protocol!=='https:') return '';
+  return parsed.origin+parsed.pathname.replace(/\/$/,'');
+ }catch(_error){
+  return '';
+ }
+}
+
+function _renderImageCapabilityEndpointPreview(capability){
+ const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
+ const provider=String(($(prefix+'Provider')||{}).value||'').trim();
+ const endpointMode=String(($(prefix+'EndpointMode')||{}).value||'').trim();
+ const region=String(($(prefix+'Region')||{}).value||'cn-beijing').trim();
+ const workspace=String(($(prefix+'WorkspaceId')||{}).value||'').trim();
+ const baseUrl=String(($(prefix+'BaseUrl')||{}).value||'').trim();
+ const preview=$(prefix+'EndpointPreview');
+ const error=$(prefix+'EndpointError');
+ let value='';
+ let problem='';
+ const alibaba=capability==='vision'?provider==='alibaba':provider==='dashscope';
+ if(!alibaba){
+  value=_safeEndpointPreview(baseUrl);
+  if(baseUrl&&!value) problem='Base URL 必须是完整的 HTTPS 地址。';
+ }else if(endpointMode==='workspace'){
+  if(!workspace) problem='业务空间专属端点需要填写 Workspace ID。';
+  else if(!/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(workspace)) problem='Workspace ID 只能包含字母、数字和连字符。';
+  else value='https://'+workspace+'.'+region+'.maas.aliyuncs.com'+(capability==='vision'?'/compatible-mode/v1':'/api/v1/services/aigc/multimodal-generation/generation');
+ }else if(endpointMode==='custom'){
+  value=_safeEndpointPreview(baseUrl);
+  if(!value) problem='自定义 Base URL 必须是完整的 HTTPS 地址。';
+  else{
+   const parsed=new URL(baseUrl);
+   if(parsed.username||parsed.password||parsed.search||parsed.hash){
+    problem='自定义 Base URL 不得包含账号信息、查询参数或片段。';
+   }else if(capability==='image'){
+    const generationPath='/api/v1/services/aigc/multimodal-generation/generation';
+    const path=parsed.pathname.replace(/\/$/,'');
+    if(path&&path!==generationPath) problem='生图自定义端点必须是根地址或完整生成接口。';
+    else value=parsed.origin+generationPath;
+   }
+  }
+ }else if(capability==='vision'){
+  value=(region==='ap-southeast-1'?'https://dashscope-intl.aliyuncs.com':'https://dashscope.aliyuncs.com')+'/compatible-mode/v1';
+ }
+ if(capability==='vision'&&provider==='custom'&&!baseUrl) problem='Custom 识图需要填写完整的 HTTPS Base URL。';
+ if(preview) preview.textContent=problem?'端点尚不完整':(value||'由所选平台管理端点');
+ if(error) error.textContent=problem;
+ return !problem;
+}
+
+function _syncImageCapabilityEndpointFields(capability){
+ const prefix=capability==='vision'?'visionConfig':'imageGenConfig';
+ const provider=String(($(prefix+'Provider')||{}).value||'').trim();
+ const endpointMode=String(($(prefix+'EndpointMode')||{}).value||'').trim();
+ const alibaba=capability==='vision'?provider==='alibaba':provider==='dashscope';
+ const modeRow=$(prefix+'EndpointModeRow');
+ const regionRow=$(prefix+'RegionRow');
+ const workspaceRow=$(prefix+'WorkspaceRow');
+ const baseRow=$(prefix+'BaseUrlRow');
+ if(modeRow) modeRow.hidden=!alibaba;
+ if(regionRow) regionRow.hidden=!alibaba||endpointMode==='custom';
+ if(workspaceRow) workspaceRow.hidden=!alibaba||endpointMode!=='workspace';
+ if(baseRow) baseRow.hidden=alibaba?endpointMode!=='custom':capability!=='vision';
+ _renderImageCapabilityEndpointPreview(capability);
+}
+
 function _visionConfigIdentity(data){
  const vision=(data&&data.vision)||{};
  const keyStatus=vision.key_status||{};
@@ -8377,6 +8662,10 @@ function _visionConfigIdentity(data){
   String(vision.model||'').trim(),
   String(vision.base_url||'').trim().replace(/\/$/,''),
   String(vision.api_mode||'').trim(),
+  String(vision.credential_ref||'').trim(),
+  String(vision.endpoint_mode||'').trim(),
+  String(vision.region||'').trim(),
+  String(vision.workspace_id||'').trim(),
   !!keyStatus.configured,
   String(keyStatus.source||''),
   String(keyStatus.env_var||'')
@@ -8384,7 +8673,8 @@ function _visionConfigIdentity(data){
 }
 
 function _setVisionConfigTestBusy(busy){
- ['visionConfigProvider','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey','btnSaveVisionConfig'].forEach(id=>{
+ ['visionConfigProvider','visionConfigCredential','visionConfigEndpointMode','visionConfigRegion',
+  'visionConfigWorkspaceId','visionConfigModel','visionConfigBaseUrl','visionConfigApiKey','btnSaveVisionConfig'].forEach(id=>{
   const control=$(id);
   if(control) control.disabled=!!busy;
  });
@@ -8411,12 +8701,83 @@ function _invalidateVisionTest(){
 }
 
 function _bindVisionConfigEditInvalidation(){
- ['visionConfigModel','visionConfigBaseUrl','visionConfigApiKey'].forEach(id=>{
+ ['visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId',
+  'visionConfigModel','visionConfigBaseUrl','visionConfigApiKey'].forEach(id=>{
   const control=$(id);
   if(!control) return;
-  control.oninput=_invalidateVisionTest;
-  control.onchange=_invalidateVisionTest;
+  const handle=()=>{
+   _invalidateVisionTest();
+   if(id!=='visionConfigModel'&&id!=='visionConfigApiKey') _syncImageCapabilityEndpointFields('vision');
+  };
+  control.oninput=handle;
+  control.onchange=handle;
  });
+}
+
+function _imageGenConfigIdentity(data){
+ const imageGen=(data&&data.image_gen)||{};
+ const options=imageGen.options||{};
+ return JSON.stringify([
+  String(data&&data.profile||'default'),
+  String(imageGen.provider||'').trim(),
+  String(imageGen.model||'').trim(),
+  String(imageGen.credential_ref||'').trim(),
+  String(options.endpoint_mode||'').trim(),
+  String(options.region||'').trim(),
+  String(options.workspace_id||'').trim(),
+  String(options.base_url||'').trim().replace(/\/$/,'')
+ ]);
+}
+
+function _setImageGenConfigTestBusy(busy){
+ ['imageGenConfigProvider','imageGenConfigCredential','imageGenConfigEndpointMode','imageGenConfigRegion',
+  'imageGenConfigWorkspaceId','imageGenConfigBaseUrl','imageGenConfigModel','imageGenConfigApiKey',
+  'btnSaveImageGenConfig'].forEach(id=>{
+  const control=$(id);
+  if(control) control.disabled=!!busy;
+ });
+ const credentials=$('imageGenConfigCredentials');
+ if(credentials){
+  credentials.querySelectorAll('input,select,button').forEach(control=>{control.disabled=!!busy;});
+ }
+}
+
+function _restoreImageGenTestSnapshot(runGeneration){
+ const snapshot=_imageGenVerificationSnapshot;
+ if(!snapshot||snapshot.generation!==runGeneration) return false;
+ const imageGen=(_modelConfigData&&_modelConfigData.image_gen)||null;
+ if(imageGen) imageGen.verification=Object.assign({},snapshot.verification);
+ _imageGenVerificationSnapshot=null;
+ _renderImageGenConfigSummary(_modelConfigData);
+ return true;
+}
+
+function _invalidateImageGenTest(){
+ const snapshot=_imageGenVerificationSnapshot;
+ if(!snapshot) return false;
+ _imageGenTestGeneration++;
+ return _restoreImageGenTestSnapshot(snapshot.generation);
+}
+
+function _bindImageGenConfigEditInvalidation(){
+ ['imageGenConfigEndpointMode','imageGenConfigRegion','imageGenConfigWorkspaceId',
+  'imageGenConfigBaseUrl','imageGenConfigModel','imageGenConfigApiKey'].forEach(id=>{
+  const control=$(id);
+  if(!control) return;
+  const handle=()=>{
+   _invalidateImageGenTest();
+   if(id!=='imageGenConfigModel'&&id!=='imageGenConfigApiKey') _syncImageCapabilityEndpointFields('image');
+  };
+  control.oninput=handle;
+  control.onchange=handle;
+ });
+ const credentials=$('imageGenConfigCredentials');
+ if(credentials){
+  credentials.querySelectorAll('input,select').forEach(control=>{
+   control.oninput=_invalidateImageGenTest;
+   control.onchange=_invalidateImageGenTest;
+  });
+ }
 }
 
 function _renderVisionConfigSummary(data){
@@ -8456,6 +8817,41 @@ function _renderVisionConfigSummary(data){
  _setVisionConfigTestBusy(status==='verifying');
 }
 
+function _renderImageGenConfigSummary(data){
+ const imageGen=(data&&data.image_gen)||{};
+ const provider=String(imageGen.provider||'').trim();
+ const model=String(imageGen.model||'').trim();
+ const row=_modelConfigImageProviderRow(provider,data)||{};
+ const keyLabel=_modelConfigKeyLabel(row.key_status||{});
+ const verification=imageGen.verification||{};
+ const configured=!!(provider&&model&&(row.can_attempt===true||(row.key_status&&row.key_status.configured)));
+ const status=String(verification.status||(configured?'configured_unverified':'unconfigured'));
+ const stateMeta={
+  unconfigured:{label:'待配置',badge:'图片生成待配置',tone:'warn',summary:'需要选择生图模型并配置凭据。'},
+  configured_unverified:{label:'已配置，尚未验证',badge:'图片生成尚未验证',tone:'warn',summary:'配置已保存，请执行真实生图测试。'},
+  verifying:{label:'正在验证',badge:'图片生成正在验证',tone:'warn',summary:'正在执行最小真实生图测试，可能产生少量费用。'},
+  verified:{label:'已验证',badge:'图片生成已验证',tone:'ok',summary:'当前配置已通过真实生图测试。'},
+  failed:{label:'验证失败',badge:'图片生成验证失败',tone:'danger',summary:'请检查网络、凭据、端点、模型和账号状态后重试。'}
+ };
+ const meta=stateMeta[status]||stateMeta.configured_unverified;
+ _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(provider,row.name));
+ _setModelConfigText('imageGenConfigModelSummary',model||String(row.default_model||''));
+ _setModelConfigText('imageGenConfigKeyState',keyLabel);
+ _setModelConfigStatusBadge('imageGenConfigEffective',meta.label,meta.tone);
+ _setModelConfigStatusBadge('imageGenConfigStatusBadge',meta.badge,meta.tone);
+ const card=$('modelConfigImageSummaryCard');
+ if(card) card.dataset.state=status==='verified'?'ok':'warn';
+ _setModelConfigText('imageGenConfigCardTitle',status==='verified'?'生成图片已验证':'生成图片');
+ _setModelConfigText('imageGenConfigSummary',meta.summary);
+ _setModelConfigText('imageGenConfigVerificationStatus',String(verification.message||meta.summary));
+ const testBtn=$('btnTestImageGenConfig');
+ if(testBtn){
+  testBtn.disabled=status==='verifying'||!configured;
+  testBtn.setAttribute('aria-busy',status==='verifying'?'true':'false');
+ }
+ _setImageGenConfigTestBusy(status==='verifying');
+}
+
 function _renderModelConfigFocusSummary(data){
  const main=(data&&data.main)||{};
  const mainProvider=String(main.provider||'').trim();
@@ -8484,30 +8880,13 @@ function _renderModelConfigFocusSummary(data){
 
  const imageGen=(data&&data.image_gen)||{};
  const imageProvider=String(imageGen.provider||'').trim();
- const imageModel=String(imageGen.model||'').trim();
  const imageRow=_modelConfigImageProviderRow(imageProvider,data)||{};
- const imageKeyStatus=imageRow.key_status||{};
- const imageKeyLabel=_modelConfigKeyLabel(imageKeyStatus);
- const imageReady=!!(imageProvider&&imageModel&&imageRow.available===true);
- const managedAuth=!!(imageRow&&imageRow.oauth_managed);
- const policyBlocked=!!(imageRow&&imageRow.policy_blocked);
+ const managedAuth=!!imageRow.oauth_managed;
+ const policyBlocked=!!imageRow.policy_blocked;
+ const namedCredential=imageProvider==='dashscope';
  const pasteAction=$('modelConfigImagePasteAction');
- if(pasteAction) pasteAction.style.display=(managedAuth||policyBlocked)?'none':'';
- _setModelConfigText('imageGenConfigProviderSummary',_formatModelConfigProvider(imageProvider,imageRow.name));
- _setModelConfigText('imageGenConfigModelSummary',imageModel||String(imageRow.default_model||''));
- _setModelConfigText('imageGenConfigKeyState',imageKeyLabel);
- _setModelConfigStatusBadge('imageGenConfigEffective',imageReady?'已可用':'待配置',imageReady?'ok':'warn');
- _setModelConfigStatusBadge('imageGenConfigStatusBadge',imageReady?'图片生成可用':'图片生成待配置',imageReady?'ok':'warn');
- const imageCard=$('modelConfigImageSummaryCard');
- if(imageCard){
-  imageCard.dataset.state=imageReady?'ok':'warn';
-  const icon=imageCard.querySelector('.model-config-warning-icon');
-  if(icon) icon.textContent=imageReady?'✓':'!';
- }
- _setModelConfigText('imageGenConfigCardTitle',imageReady?'生成图片已配置':(policyBlocked?'生成图片配置需切换':(managedAuth?'生成图片待授权':'生成图片待配置')));
- _setModelConfigText('imageGenConfigSummary',imageReady
-  ? '图片生成配置已可用于 image_generate；正文写作仍由主模型负责。'
-  : (policyBlocked?'当前历史配置不符合国产策略，请切换到中国可用的稳定出图服务。':(managedAuth?'只有调用 image_generate 或需要实际生成图片时才会失败。请完成授权后刷新状态。':'只有调用 image_generate 或需要实际生成图片时才会失败。配置后密钥只保存到本机凭据区。')));
+ if(pasteAction) pasteAction.style.display=(managedAuth||policyBlocked||namedCredential)?'none':'';
+ _renderImageGenConfigSummary(data);
 }
 
 function toggleModelConfigSection(sectionId,forceOpen){
@@ -8530,6 +8909,12 @@ function toggleModelConfigSection(sectionId,forceOpen){
   btn.setAttribute('aria-expanded',open?'true':'false');
  });
  return open;
+}
+
+function _closeModelConfigEditor(sectionId,toggleId){
+ toggleModelConfigSection(sectionId,false);
+ const toggle=$(toggleId);
+ if(toggle&&!toggle.hidden) toggle.focus();
 }
 
 function openModelConfigSecretEditor(sectionId,inputId){
@@ -8904,7 +9289,6 @@ function _syncMainModelConfigControls(){
 
 function _syncVisionConfigControls(){
  const providerSel=$('visionConfigProvider');
- const baseRow=$('visionConfigBaseUrlRow');
  const keyRow=$('visionConfigApiKeyRow');
  const hint=$('visionConfigKeyHint');
  if(!providerSel||!_modelConfigData) return;
@@ -8913,17 +9297,20 @@ function _syncVisionConfigControls(){
  const provider=providers.find(p=>String(p.id||'')===providerId)||null;
  const models=(provider&&Array.isArray(provider.models))?provider.models:[];
  _setDatalistOptions('visionConfigModelOptions',models);
- const requiresBase=!!(provider&&provider.requires_base_url);
  const envVar=provider&&provider.key_status&&provider.key_status.env_var;
- if(baseRow) baseRow.style.display=requiresBase?'':'none';
- if(keyRow) keyRow.style.display=envVar?'':'none';
+ _renderCapabilityCredentialOptions('vision',providerId,((_modelConfigData.vision||{}).credential_ref||''));
+ const named=providerId==='alibaba';
+ if(keyRow) keyRow.hidden=named||!envVar;
  if(hint){
-  if(envVar){
+  if(named){
+   hint.textContent='阿里百炼密钥请在上方“平台凭据”中管理。';
+  }else if(envVar){
    hint.textContent=_modelConfigKeyLabel(provider.key_status)+' · 保存后只写入本机凭据区。';
   }else{
    hint.textContent='此识图 Provider 暂不需要 WebUI 管理 API key。';
   }
  }
+ _syncImageCapabilityEndpointFields('vision');
 }
 
 function _syncImageGenConfigControls(){
@@ -8944,7 +9331,9 @@ function _syncImageGenConfigControls(){
  const blocked=!!(provider&&provider.policy_blocked);
  const fields=Array.isArray(provider&&provider.credential_fields)?provider.credential_fields:[];
  const oauth=!!(provider&&provider.oauth_managed);
- if(keyRow) keyRow.style.display=fields.length?'none':'';
+ const named=providerId==='dashscope';
+ _renderCapabilityCredentialOptions('image',providerId,((_modelConfigData.image_gen||{}).credential_ref||''));
+ if(keyRow) keyRow.hidden=named||fields.length>0;
  if(imageGenConfigApiKey){
   imageGenConfigApiKey.disabled=oauth||blocked;
   imageGenConfigApiKey.placeholder=blocked?'当前配置已被国产策略阻止':(oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥');
@@ -8966,12 +9355,17 @@ function _syncImageGenConfigControls(){
    hint.textContent='此图片 provider 不需要 WebUI 管理 API key。';
   }
  }
+ _syncImageCapabilityEndpointFields('image');
+ _bindImageGenConfigEditInvalidation();
 }
 
 function _renderModelConfigPanel(data){
  const previousVisionIdentity=_modelConfigData?_visionConfigIdentity(_modelConfigData):'';
  const nextVisionIdentity=_visionConfigIdentity(data||{});
  if(previousVisionIdentity&&previousVisionIdentity!==nextVisionIdentity) _invalidateVisionTest();
+ const previousImageIdentity=_modelConfigData?_imageGenConfigIdentity(_modelConfigData):'';
+ const nextImageIdentity=_imageGenConfigIdentity(data||{});
+ if(previousImageIdentity&&previousImageIdentity!==nextImageIdentity) _invalidateImageGenTest();
  _modelConfigData=data||{};
  const main=data.main||{};
  const profile=$('modelConfigProfile');
@@ -8983,6 +9377,7 @@ function _renderModelConfigPanel(data){
  if(active) active.textContent=[main.provider,main.model].filter(Boolean).join(' / ')||'—';
  if(keyState) keyState.textContent=_modelConfigKeyLabel(main.key_status);
  _renderModelConfigFocusSummary(data);
+ _renderPlatformCredentials(data);
 
  const providerSel=$('modelConfigProvider');
  if(providerSel){
@@ -9024,6 +9419,7 @@ function _renderModelConfigPanel(data){
     modelInput.value=(p&&p.default_model)||'';
    }
    _syncVisionConfigControls();
+   _bindVisionConfigEditInvalidation();
   };
  }
  const visionModelInput=$('visionConfigModel');
@@ -9032,7 +9428,15 @@ function _renderModelConfigPanel(data){
   visionModelInput.value=vision.model||String((selected&&selected.default_model)||'');
  }
  const visionBaseInput=$('visionConfigBaseUrl');
- if(visionBaseInput) visionBaseInput.value=vision.base_url||'';
+ if(visionBaseInput) visionBaseInput.value=vision.endpoint_mode==='custom'||vision.provider!=='alibaba'?(vision.base_url||''):'';
+ const visionCredential=$('visionConfigCredential');
+ if(visionCredential) visionCredential.value=vision.credential_ref||'';
+ const visionMode=$('visionConfigEndpointMode');
+ if(visionMode) visionMode.value=vision.endpoint_mode||'public';
+ const visionRegion=$('visionConfigRegion');
+ if(visionRegion) visionRegion.value=vision.region||'cn-beijing';
+ const visionWorkspace=$('visionConfigWorkspaceId');
+ if(visionWorkspace) visionWorkspace.value=vision.workspace_id||'';
  const visionKeyInput=$('visionConfigApiKey');
  if(visionKeyInput) visionKeyInput.value='';
  _bindVisionConfigEditInvalidation();
@@ -9050,6 +9454,7 @@ function _renderModelConfigPanel(data){
   });
   imageProviderSel.value=imageGen.provider||((data.image_gen_providers||[])[0]||{}).id||'';
   imageProviderSel.onchange=()=>{
+   _invalidateImageGenTest();
    const p=(data.image_gen_providers||[]).find(item=>String(item.id||'')===imageProviderSel.value)||null;
    const modelInput=$('imageGenConfigModel');
    if(modelInput){
@@ -9065,7 +9470,19 @@ function _renderModelConfigPanel(data){
  }
  const imageKeyInput=$('imageGenConfigApiKey');
  if(imageKeyInput) imageKeyInput.value='';
+ const imageOptions=imageGen.options||{};
+ const imageCredential=$('imageGenConfigCredential');
+ if(imageCredential) imageCredential.value=imageGen.credential_ref||'';
+ const imageMode=$('imageGenConfigEndpointMode');
+ if(imageMode) imageMode.value=imageOptions.endpoint_mode||'workspace';
+ const imageRegion=$('imageGenConfigRegion');
+ if(imageRegion) imageRegion.value=imageOptions.region||'cn-beijing';
+ const imageWorkspace=$('imageGenConfigWorkspaceId');
+ if(imageWorkspace) imageWorkspace.value=imageOptions.workspace_id||'';
+ const imageBase=$('imageGenConfigBaseUrl');
+ if(imageBase) imageBase.value=imageOptions.endpoint_mode==='custom'?(imageOptions.base_url||''):'';
  _syncImageGenConfigControls();
+ _bindImageGenConfigEditInvalidation();
  _renderCustomImageProviderList(data);
 }
 
@@ -9298,9 +9715,21 @@ async function saveVisionConfig(){
  const model=(($('visionConfigModel')||{}).value||'').trim();
  const baseUrl=(($('visionConfigBaseUrl')||{}).value||'').trim();
  const apiKey=(($('visionConfigApiKey')||{}).value||'').trim();
+ const credentialRef=(($('visionConfigCredential')||{}).value||'').trim();
+ const endpointMode=(($('visionConfigEndpointMode')||{}).value||'public').trim();
+ const region=(($('visionConfigRegion')||{}).value||'cn-beijing').trim();
+ const workspaceId=(($('visionConfigWorkspaceId')||{}).value||'').trim();
+ const error=$('visionConfigEndpointError');
+ if(error) error.textContent='';
+ if(!_renderImageCapabilityEndpointPreview('vision')) return;
+ if(credentialRef&&apiKey){
+  if(error) error.textContent='已选择平台凭据，请在“平台凭据”中更新 Key。';
+  return;
+ }
  _setVisionConfigTestBusy(true);
  try{
-  const payload={provider,model,base_url:baseUrl};
+  const payload={provider,model,base_url:baseUrl,credential_ref:credentialRef,
+   endpoint_mode:endpointMode,region,workspace_id:workspaceId};
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
   if(_modelConfigData&&data&&data.vision){
@@ -9312,9 +9741,10 @@ async function saveVisionConfig(){
    _syncVisionConfigControls();
    _renderVisionConfigSummary(_modelConfigData);
   }
-  toggleModelConfigSection('visionConfigEdit',false);
+  _closeModelConfigEditor('visionConfigEdit','btnEditVisionConfig');
   if(typeof showToast==='function') showToast('识图配置已保存');
  }catch(e){
+  if(error) error.textContent='识图配置保存失败：'+(e.message||e);
   if(typeof showToast==='function') showToast('保存识图配置失败：'+(e.message||e),5000,'error');
  }finally{
   _renderVisionConfigSummary(_modelConfigData);
@@ -9327,10 +9757,19 @@ function _visionConfigHasUnsavedChanges(){
  const model=(($('visionConfigModel')||{}).value||'').trim();
  const baseUrl=(($('visionConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'');
  const apiKey=(($('visionConfigApiKey')||{}).value||'').trim();
+ const credentialRef=(($('visionConfigCredential')||{}).value||'').trim();
+ const endpointMode=(($('visionConfigEndpointMode')||{}).value||'public').trim();
+ const region=(($('visionConfigRegion')||{}).value||'cn-beijing').trim();
+ const workspaceId=(($('visionConfigWorkspaceId')||{}).value||'').trim();
+ const compareBase=provider!=='alibaba'||endpointMode==='custom';
  return !!apiKey
   || provider!==String(saved.provider||'').trim()
   || model!==String(saved.model||'').trim()
-  || baseUrl!==String(saved.base_url||'').trim().replace(/\/$/,'');
+  || (compareBase&&baseUrl!==String(saved.base_url||'').trim().replace(/\/$/,''))
+  || credentialRef!==String(saved.credential_ref||'').trim()
+  || endpointMode!==String(saved.endpoint_mode||'public').trim()
+  || region!==String(saved.region||'cn-beijing').trim()
+  || workspaceId!==String(saved.workspace_id||'').trim();
 }
 
 async function testVisionConfig(){
@@ -9371,24 +9810,95 @@ async function testVisionConfig(){
 }
 
 async function saveImageGenConfig(){
- const btn=$('btnSaveImageGenConfig');
+ _invalidateImageGenTest();
  const provider=($('imageGenConfigProvider')||{}).value||'';
  const model=(($('imageGenConfigModel')||{}).value||'').trim();
  const apiKey=(($('imageGenConfigApiKey')||{}).value||'').trim();
+ const credentialRef=(($('imageGenConfigCredential')||{}).value||'').trim();
+ const endpointMode=(($('imageGenConfigEndpointMode')||{}).value||'workspace').trim();
+ const region=(($('imageGenConfigRegion')||{}).value||'cn-beijing').trim();
+ const workspaceId=(($('imageGenConfigWorkspaceId')||{}).value||'').trim();
+ const baseUrl=(($('imageGenConfigBaseUrl')||{}).value||'').trim();
  const credentials=_collectImageGenCredentials();
- if(btn) btn.disabled=true;
+ const error=$('imageGenConfigEndpointError');
+ if(error) error.textContent='';
+ if(!_renderImageCapabilityEndpointPreview('image')) return;
+ if(credentialRef&&apiKey){
+  if(error) error.textContent='已选择平台凭据，请在“平台凭据”中更新 Key。';
+  return;
+ }
+ if(provider==='dashscope'){
+  credentials.endpoint_mode=endpointMode;
+  credentials.region=region;
+  if(workspaceId) credentials.workspace_id=workspaceId;
+  if(baseUrl) credentials.base_url=baseUrl;
+ }
+ _setImageGenConfigTestBusy(true);
  try{
-  const payload={provider,model};
+  const payload={provider,model,credential_ref:credentialRef};
   if(apiKey) payload.api_key=apiKey;
   if(Object.keys(credentials).length) payload.credentials=credentials;
   await api('/api/image-gen/config',{method:'POST',body:JSON.stringify(payload)});
   await loadModelConfigPanel(true);
-  toggleModelConfigSection('imageGenConfigEdit',false);
+  const keyInput=$('imageGenConfigApiKey');
+  if(keyInput&&keyInput.value===apiKey) keyInput.value='';
+  _closeModelConfigEditor('imageGenConfigEdit','btnEditImageGenConfig');
   if(typeof showToast==='function') showToast('图片生成配置已保存');
  }catch(e){
+  if(error) error.textContent='生图配置保存失败：'+(e.message||e);
   if(typeof showToast==='function') showToast('保存图片生成配置失败：'+(e.message||e),5000,'error');
  }finally{
-  if(btn) btn.disabled=false;
+  _renderImageGenConfigSummary(_modelConfigData);
+ }
+}
+
+function _imageGenConfigHasUnsavedChanges(){
+ const saved=(_modelConfigData&&_modelConfigData.image_gen)||{};
+ const options=saved.options||{};
+ return (($('imageGenConfigApiKey')||{}).value||'').trim()!==''
+  || (($('imageGenConfigProvider')||{}).value||'').trim()!==String(saved.provider||'').trim()
+  || (($('imageGenConfigModel')||{}).value||'').trim()!==String(saved.model||'').trim()
+  || (($('imageGenConfigCredential')||{}).value||'').trim()!==String(saved.credential_ref||'').trim()
+  || (($('imageGenConfigEndpointMode')||{}).value||'workspace').trim()!==String(options.endpoint_mode||'workspace').trim()
+  || (($('imageGenConfigRegion')||{}).value||'cn-beijing').trim()!==String(options.region||'cn-beijing').trim()
+  || (($('imageGenConfigWorkspaceId')||{}).value||'').trim()!==String(options.workspace_id||'').trim()
+  || (($('imageGenConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'')!==String(options.base_url||'').trim().replace(/\/$/,'');
+}
+
+async function testImageGenConfig(){
+ const saved=(_modelConfigData&&_modelConfigData.image_gen)||{};
+ const verification=saved.verification||{};
+ if(_imageGenVerificationSnapshot) return;
+ if(_imageGenConfigHasUnsavedChanges()){
+  _setModelConfigText('imageGenConfigVerificationStatus','请先保存当前生图配置，再开始真实测试。');
+  if(typeof showToast==='function') showToast('请先保存当前生图配置',5000,'error');
+  return;
+ }
+ if(String(verification.status||'')==='unconfigured'){
+  _setModelConfigText('imageGenConfigVerificationStatus','请先完整配置 Provider、模型、端点和凭据。');
+  if(typeof showToast==='function') showToast('生图配置不完整',5000,'error');
+  return;
+ }
+ const startIdentity=_imageGenConfigIdentity(_modelConfigData);
+ const runGeneration=++_imageGenTestGeneration;
+ _imageGenVerificationSnapshot={generation:runGeneration,verification:Object.assign({},verification)};
+ saved.verification={status:'verifying',message:'正在执行真实生图测试，可能产生少量费用…'};
+ _renderImageGenConfigSummary(_modelConfigData);
+ try{
+  const result=await api('/api/image-gen/test',{method:'POST',body:'{}',timeoutMs:210000});
+  if(runGeneration!==_imageGenTestGeneration||_imageGenConfigIdentity(_modelConfigData)!==startIdentity) return;
+  saved.verification=result||{};
+  _imageGenVerificationSnapshot=null;
+  _renderImageGenConfigSummary(_modelConfigData);
+  if(typeof showToast==='function') showToast(result&&result.ok?'生图验证通过':'生图验证失败',5000,result&&result.ok?'success':'error');
+ }catch(e){
+  if(runGeneration!==_imageGenTestGeneration||_imageGenConfigIdentity(_modelConfigData)!==startIdentity) return;
+  saved.verification={status:'failed',message:'生图验证请求失败，请稍后重试。'};
+  _imageGenVerificationSnapshot=null;
+  _renderImageGenConfigSummary(_modelConfigData);
+  if(typeof showToast==='function') showToast('生图验证请求失败：'+(e.message||e),5000,'error');
+ }finally{
+  _restoreImageGenTestSnapshot(runGeneration);
  }
 }
 
