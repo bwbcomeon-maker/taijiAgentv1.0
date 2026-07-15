@@ -1,5 +1,7 @@
 import hashlib
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -412,3 +414,351 @@ def test_catalog_declares_executor_artifact_dependencies_and_hidden_research_del
             "visible_progress": False,
         }
     ]
+
+
+def _contract_run_ready_for_attempt(tmp_path, *, stage_index=0):
+    from api import expert_teams
+    from api.expert_teams.storage import read_run, write_run
+
+    run = expert_teams.start_expert_team(
+        tmp_path,
+        {
+            "contract_version": "expert-team-contract/v1",
+            "session_id": "sid-attempt",
+            "team_id": "content-creator-team",
+            "document_type": "work_report",
+            "template_id": "work_report",
+            "prompt": "起草工作汇报",
+            "document_brief_seed": {
+                "document_control": {"render_template_id": "enterprise-work-report"}
+            },
+        },
+    )
+    stored = read_run(tmp_path, run["run_id"])
+    stored["workflow_state"] = "ready_to_generate"
+    stored["document_brief"] = _brief()
+    stored["current_stage_index"] = stage_index
+    task = stored["_tasks_template"][stage_index]
+    stored["current_stage"] = {
+        "index": stage_index,
+        "id": task["id"],
+        "task_id": task["id"],
+        "status": "pending",
+    }
+    return write_run(tmp_path, stored)
+
+
+def test_stage_attempt_reservation_is_monotonic_idempotent_and_not_output_count_based(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.storage import read_run, write_run
+
+    run = _contract_run_ready_for_attempt(tmp_path)
+    first_run, first, created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        run["run_id"],
+        stage_id="plan",
+        executor="model",
+        input_refs=[],
+        idempotency_key="lineage-1",
+    )
+    assert created is True
+    assert first["stage_attempt"] == 1
+    replay_run, replay, replay_created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        run["run_id"],
+        stage_id="plan",
+        executor="model",
+        input_refs=[],
+        idempotency_key="lineage-1",
+    )
+    assert replay_created is False
+    assert replay == first
+    assert replay_run["version"] == first_run["version"]
+
+    stored = read_run(tmp_path, run["run_id"])
+    stored["stage_outputs"] = [{"task_id": "plan"}] * 99
+    stored["stage_attempt_reservations"][-1]["status"] = "failed"
+    stored["current_stage_attempt_reservation"] = {}
+    write_run(tmp_path, stored)
+    _, second, second_created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        run["run_id"],
+        stage_id="plan",
+        executor="model",
+        input_refs=[],
+        idempotency_key="lineage-2",
+    )
+    assert second_created is True
+    assert second["stage_attempt"] == 2
+
+
+def test_concurrent_stage_attempt_reserve_creates_only_one_authoritative_attempt(tmp_path):
+    from api import expert_teams
+
+    run = _contract_run_ready_for_attempt(tmp_path)
+
+    def reserve(key):
+        try:
+            return expert_teams.reserve_stage_attempt(
+                tmp_path,
+                run["run_id"],
+                stage_id="plan",
+                executor="model",
+                input_refs=[],
+                idempotency_key=key,
+            )[1]["stage_attempt"]
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reserve, ["concurrent-a", "concurrent-b"]))
+    assert sorted(map(str, results)) == ["1", "stage_attempt_in_progress"]
+
+
+def test_system_executor_uses_the_same_stage_attempt_allocator(tmp_path):
+    from api import expert_teams
+
+    run = _contract_run_ready_for_attempt(tmp_path, stage_index=4)
+    _, reservation, created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        run["run_id"],
+        stage_id="delivery",
+        executor="system",
+        input_refs=[{"ref_type": "stage_artifact", "artifact_id": "polish:1", "sha256": "f" * 64}],
+        idempotency_key="system-delivery-1",
+    )
+    assert created is True
+    assert reservation["stage_attempt"] == 1
+    assert reservation["executor"] == "system"
+    assert reservation["artifact_type"] == "delivery_manifest"
+
+
+def _generated_contract_plan(expert_teams, tmp_path):
+    run = _contract_run_ready_for_attempt(tmp_path)
+    reserved = expert_teams.reserve_expert_team_execution_start(
+        tmp_path,
+        run["run_id"],
+        expected_version=run["version"],
+        runtime_adapter="RunnerRuntimeAdapter",
+        input_refs=[],
+    )
+    generating = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        run["run_id"],
+        {
+            "stream_id": "stream-contract-1",
+            "runtime_run_id": "runner-contract-1",
+            "runtime_adapter": "RunnerRuntimeAdapter",
+            "execution_start_id": reserved["execution_start_id"],
+        },
+    )
+    raw = _raw("writing_plan", _writing_plan_payload())
+    reviewed = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        run["run_id"],
+        {
+            "stream_id": generating["execution_stream_id"],
+            "stage_id": "plan",
+            "attempt": generating["execution_attempt"],
+            "id": "output-contract-1",
+            "kind": "chat",
+            "content": raw,
+        },
+    )
+    return reviewed, raw
+
+
+def test_contract_model_result_persists_raw_and_immutable_structured_artifact(tmp_path):
+    from api import expert_teams
+
+    reviewed, raw = _generated_contract_plan(expert_teams, tmp_path)
+    assert reviewed["workflow_state"] == "awaiting_review"
+    assert reviewed["stage_outputs"][-1]["content"] == raw
+    artifact = reviewed["stage_artifacts"][-1]
+    assert artifact["artifact_id"] == "plan:1"
+    assert artifact["artifact_type"] == "writing_plan"
+    assert reviewed["current_stage_artifact_ref"] == {
+        "artifact_id": "plan:1",
+        "sha256": artifact["sha256"],
+        "stage_attempt": 1,
+    }
+    assert reviewed["current_stage_attempt_reservation"]["status"] == "generated_valid"
+    view_json = json.dumps(reviewed["view"], ensure_ascii=False)
+    assert "<<<TAIJI_META_V1>>>" not in view_json
+    assert reviewed["view"]["stage_result"]["artifact_type"] == "writing_plan"
+
+
+def test_contract_approval_requires_trusted_identity_and_records_safe_snapshot(monkeypatch, tmp_path):
+    from api import expert_teams
+    from api.expert_teams import trusted_identity
+
+    reviewed, _ = _generated_contract_plan(expert_teams, tmp_path)
+    body = {
+        "session_id": reviewed["session_id"],
+        "run_id": reviewed["run_id"],
+        "stage_id": "plan",
+        "expected_version": reviewed["version"],
+        "idempotency_key": "approve-plan-1",
+        "trusted_identity_session_id": "missing",
+    }
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as error:
+        expert_teams.approve_expert_team_stage(tmp_path, body)
+    assert error.value.code == "trusted_identity_required"
+
+    resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False)
+    resolver._config = {"enabled": True}
+    identity_session = resolver.install_test_principal(
+        {
+            "subject": "approver-001",
+            "display_name": "张三",
+            "roles": ["document-approver"],
+            "issuer": "test",
+            "audience": "test",
+            "authenticated_at": 1,
+            "credential_jti_sha256": "a" * 64,
+            "key_fingerprint": "b" * 64,
+            "auth_method": "test",
+        }
+    )
+    monkeypatch.setattr(trusted_identity, "get_trusted_identity_resolver", lambda: resolver)
+    body["trusted_identity_session_id"] = identity_session
+    approved = expert_teams.approve_expert_team_stage(tmp_path, body)
+    assert approved["workflow_state"] == "ready_to_generate"
+    assert approved["stage_outputs"][-1]["status"] == "approved"
+    approval = approved["stage_approvals"][-1]
+    assert approval["artifact_id"] == "plan:1"
+    assert approval["approved_principal"]["subject"] == "approver-001"
+    serialized = json.dumps(approved, ensure_ascii=False)
+    assert identity_session not in serialized
+    replay = expert_teams.approve_expert_team_stage(tmp_path, body)
+    assert replay == approved
+    assert len(replay["stage_approvals"]) == 1
+
+
+def test_invalid_contract_result_keeps_raw_but_never_creates_artifact(tmp_path):
+    from api import expert_teams
+
+    run = _contract_run_ready_for_attempt(tmp_path)
+    reserved = expert_teams.reserve_expert_team_execution_start(
+        tmp_path,
+        run["run_id"],
+        expected_version=run["version"],
+        runtime_adapter="RunnerRuntimeAdapter",
+        input_refs=[],
+    )
+    generating = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        run["run_id"],
+        {"stream_id": "stream-invalid", "execution_start_id": reserved["execution_start_id"]},
+    )
+    invalid = "负责专家：写作总导演\nStage 1 已完成"
+    result = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        run["run_id"],
+        {
+            "stream_id": generating["execution_stream_id"],
+            "stage_id": "plan",
+            "attempt": generating["execution_attempt"],
+            "id": "output-invalid",
+            "kind": "chat",
+            "content": invalid,
+        },
+    )
+    assert result["workflow_state"] == "generated_invalid"
+    assert result["stage_outputs"][-1]["content"] == invalid
+    assert result["stage_outputs"][-1]["status"] == "invalid"
+    assert result["stage_artifacts"] == []
+    assert result["current_stage_attempt_reservation"]["status"] == "generated_invalid"
+
+
+def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_delivery(monkeypatch, tmp_path):
+    from api import expert_teams
+    from api.expert_teams import trusted_identity
+
+    run = _contract_run_ready_for_attempt(tmp_path, stage_index=3)
+    input_refs = [
+        {"ref_type": "stage_artifact", "artifact_id": "materials:1", "sha256": "1" * 64},
+        {"ref_type": "stage_artifact", "artifact_id": "draft:1", "sha256": "2" * 64},
+    ]
+    reserved = expert_teams.reserve_expert_team_execution_start(
+        tmp_path,
+        run["run_id"],
+        expected_version=run["version"],
+        runtime_adapter="RunnerRuntimeAdapter",
+        input_refs=input_refs,
+    )
+    generating = expert_teams.mark_expert_team_execution_started(
+        tmp_path,
+        run["run_id"],
+        {"stream_id": "stream-review", "execution_start_id": reserved["execution_start_id"]},
+    )
+    checks = {
+        "brief_alignment": "passed",
+        "fact_traceability": "passed",
+        "document_purity": "passed",
+        "confidentiality": "passed",
+        "document_structure": "passed",
+    }
+    payload = {
+        "title": _brief()["exact_title"],
+        "document_type": "work_report",
+        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "fact_usage": [],
+        "asset_requests": [],
+        "review_report": {
+            "schema_version": "content-review-report/v1",
+            "checks": checks,
+            "issues": [],
+            "change_summary": ["完成语义复核"],
+            "unresolved_issue_ids": [],
+        },
+        "open_issues": [],
+    }
+    raw = _raw(
+        "reviewed_document",
+        payload,
+        document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。",
+    )
+    reviewed = expert_teams.mark_expert_team_execution_complete(
+        tmp_path,
+        run["run_id"],
+        {
+            "stream_id": generating["execution_stream_id"],
+            "stage_id": "polish",
+            "attempt": generating["execution_attempt"],
+            "id": "output-review",
+            "kind": "chat",
+            "content": raw,
+        },
+    )
+    resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False)
+    resolver._config = {"enabled": True}
+    identity_session = resolver.install_test_principal(
+        {
+            "subject": "approver-review",
+            "display_name": "李四",
+            "roles": ["document-approver"],
+            "expires_at": int(time.time()) + 3600,
+        }
+    )
+    monkeypatch.setattr(trusted_identity, "get_trusted_identity_resolver", lambda: resolver)
+    approved = expert_teams.approve_expert_team_stage(
+        tmp_path,
+        {
+            "session_id": reviewed["session_id"],
+            "run_id": reviewed["run_id"],
+            "stage_id": "polish",
+            "expected_version": reviewed["version"],
+            "idempotency_key": "approve-review",
+            "trusted_identity_session_id": identity_session,
+        },
+    )
+    artifact = reviewed["stage_artifacts"][-1]
+    assert approved["canonical_document_ref"] == {
+        "artifact_id": artifact["artifact_id"],
+        "sha256": artifact["sha256"],
+        "brief_revision": _brief()["confirmed_revision"],
+        "brief_sha256": _brief()["confirmed_sha256"],
+    }
+    assert approved["workflow_state"] == "delivery_validation_required"
+    assert approved.get("completion_integrity") is None

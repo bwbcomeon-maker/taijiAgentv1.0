@@ -23,6 +23,7 @@ STATE_LABELS = {
     "awaiting_stage_input": "需要确认后继续",
     "generated_invalid": "草稿未通过校验",
     "awaiting_review": "阶段成果待复核",
+    "delivery_validation_required": "正文已确认，等待文档交付",
     "revising": "正在按修改意见调整",
     "completed": "专家团任务已完成",
     "failed": "生成失败",
@@ -142,6 +143,37 @@ def _stage_result(run: dict) -> dict:
     }
 
 
+def _enterprise_stage_result(run: dict) -> dict:
+    ref = run.get("current_stage_artifact_ref") if isinstance(run.get("current_stage_artifact_ref"), dict) else {}
+    artifacts = [item for item in run.get("stage_artifacts") or [] if isinstance(item, dict)]
+    artifact = next(
+        (
+            item for item in reversed(artifacts)
+            if not ref or (item.get("artifact_id") == ref.get("artifact_id") and item.get("sha256") == ref.get("sha256"))
+        ),
+        None,
+    )
+    if not isinstance(artifact, dict):
+        return {}
+    blocking_count = sum(
+        1 for issue in artifact.get("blocking_issues") or []
+        if isinstance(issue, dict) and issue.get("severity") in {"blocking", "error", "warning"}
+    )
+    approved_ref = (run.get("approved_stage_artifact_refs") or {}).get(str(artifact.get("stage_id") or ""))
+    return {
+        "stage_id": str(artifact.get("stage_id") or ""),
+        "artifact_type": str(artifact.get("artifact_type") or ""),
+        "stage_attempt": int(artifact.get("stage_attempt") or 0),
+        "summary": str(artifact.get("summary") or ""),
+        "deliverable": str(artifact.get("deliverable_markdown") or ""),
+        "validation": {
+            "status": str(artifact.get("validation_status") or "invalid"),
+            "blocking_count": blocking_count,
+        },
+        "approved_ref": deepcopy(approved_ref) if isinstance(approved_ref, dict) else None,
+    }
+
+
 def _stage_review(run: dict, state: str) -> dict:
     output = _stage_output(run)
     actionable = state == "awaiting_review"
@@ -189,6 +221,8 @@ def _presentation(run: dict, business_context: dict) -> dict:
             detail = str(run.get("last_validation_error") or "请完成 WPS/Word 验收后再确认交付。")
         else:
             detail = "阶段结果已生成，请查看后确认是否进入下一阶段。"
+    elif state == "delivery_validation_required":
+        detail = "正文语义已由受信人员确认，正在等待系统生成并校验唯一 DOCX 交付物。"
     elif state == "completed":
         detail = "所有阶段已完成，结果已写入当前对话。"
     elif state == "completed_invalid":
@@ -446,4 +480,14 @@ def expert_team_run_view(run: dict) -> dict:
         brief["gate"] = "confirmed" if brief.get("status") == "confirmed" else "needs_confirmation"
         result["contract_version"] = contract_version
         result["brief"] = brief
+        enterprise_result = _enterprise_stage_result(run)
+        result["stage_result"] = enterprise_result
+        result["presentation"]["result"] = enterprise_result
+        result["presentation"]["summary"] = str(enterprise_result.get("summary") or "")
+        result["workspace"]["stage_result"] = enterprise_result
+        result["stage_review"] = {
+            "display_state": stage_review.get("display_state"),
+            "actionable": stage_review.get("actionable"),
+            "output": enterprise_result,
+        }
     return result

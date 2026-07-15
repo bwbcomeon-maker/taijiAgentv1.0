@@ -88,6 +88,12 @@ def _session_field(session, field, default=None):
     return getattr(session, field, default)
 
 
+def _expert_identity_session(handler) -> str:
+    from api.expert_teams.trusted_identity import identity_session_from_cookie_header
+
+    return identity_session_from_cookie_header(str(handler.headers.get("Cookie") or ""))
+
+
 def _session_counts_toward_pin_quota(session) -> bool:
     """Return True when a pinned session should consume visible pin quota."""
     if not _session_field(session, "pinned", False):
@@ -2541,6 +2547,7 @@ def _start_expert_team_execution(
                 str(run.get("run_id") or ""),
                 expected_version=int(run.get("version") or 0),
                 runtime_adapter=planned_runtime_adapter,
+                input_refs=copy.deepcopy((enterprise_gateway_request or {}).get("input_refs") or []),
             )
         except expert_teams.ExpertTeamStateConflict as exc:
             return {
@@ -2615,6 +2622,11 @@ def _start_expert_team_execution(
             }, 503
 
     current_stage = _expert_team_current_task(reserved_run)
+    stage_attempt_reservation = (
+        reserved_run.get("current_stage_attempt_reservation")
+        if isinstance(reserved_run.get("current_stage_attempt_reservation"), dict)
+        else {}
+    )
     start_request = StartRunRequest(
         session_id=sid,
         message=execution_prompt,
@@ -2632,6 +2644,8 @@ def _start_expert_team_execution(
             "expert_team_run_id": str(run.get("run_id") or ""),
             "expert_team_stage_id": str(current_stage.get("task_id") or current_stage.get("id") or ""),
             "expert_team_version": int(run.get("version") or 0),
+            "expert_team_stage_attempt": int(stage_attempt_reservation.get("stage_attempt") or 0),
+            "expert_team_stage_reservation_id": str(stage_attempt_reservation.get("reservation_id") or ""),
             "execution_start_id": reservation_id,
             "system_template_version": str((enterprise_gateway_request or {}).get("system_template_version") or ""),
             "system_template_sha256": str((enterprise_gateway_request or {}).get("system_template_sha256") or ""),
@@ -9397,6 +9411,42 @@ def handle_get(handler, parsed) -> bool:
             "passkey_feature_flag": passkey_flag,
         })
 
+    if parsed.path == "/api/expert-teams/identity/status":
+        from api.expert_teams.trusted_identity import get_trusted_identity_resolver
+
+        return j(
+            handler,
+            get_trusted_identity_resolver().status(_expert_identity_session(handler)),
+        )
+
+    if parsed.path == "/api/expert-teams/identity/callback":
+        from api.expert_teams.trusted_identity import IDENTITY_COOKIE_NAME, get_trusted_identity_resolver
+
+        query = parse_qs(parsed.query or "", keep_blank_values=True)
+        try:
+            result = get_trusted_identity_resolver().complete_login(
+                state=str((query.get("state") or [""])[0]),
+                code=str((query.get("code") or [""])[0]),
+            )
+        except Exception as exc:
+            return bad(handler, f"Trusted identity callback failed: {_sanitize_error(exc)}", 401)
+        response = json.dumps(
+            {"ok": True, "principal": result["principal"]},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(response)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header(
+            "Set-Cookie",
+            f"{IDENTITY_COOKIE_NAME}={result['session_id']}; Path=/api/expert-teams; HttpOnly; Secure; SameSite=Lax",
+        )
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(response)
+        return True
+
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
 
@@ -11855,6 +11905,35 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
 
+    if parsed.path == "/api/expert-teams/identity/start":
+        from api.expert_teams.trusted_identity import get_trusted_identity_resolver
+
+        try:
+            return j(
+                handler,
+                get_trusted_identity_resolver().start_login(str(body.get("redirect_uri") or "")),
+            )
+        except Exception as exc:
+            return bad(handler, f"Failed to start trusted identity login: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/identity/logout":
+        from api.expert_teams.trusted_identity import IDENTITY_COOKIE_NAME, get_trusted_identity_resolver
+
+        get_trusted_identity_resolver().logout(_expert_identity_session(handler))
+        response = b'{"ok":true}'
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(response)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header(
+            "Set-Cookie",
+            f"{IDENTITY_COOKIE_NAME}=; Path=/api/expert-teams; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        )
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(response)
+        return True
+
     if parsed.path == "/api/expert-teams/start":
         from api import expert_teams
 
@@ -11957,7 +12036,11 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "expert team run does not belong to this session", 404)
             run = expert_teams.approve_expert_team_stage(
                 workspace,
-                {**body, "run_id": str(run.get("run_id") or "")},
+                {
+                    **body,
+                    "run_id": str(run.get("run_id") or ""),
+                    "trusted_identity_session_id": _expert_identity_session(handler),
+                },
             )
             payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
             if (

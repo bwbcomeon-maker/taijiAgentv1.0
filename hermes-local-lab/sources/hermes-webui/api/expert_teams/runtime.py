@@ -1002,6 +1002,9 @@ def _authoritative_stage_for_mutation(run: dict) -> dict:
         "phase": task.get("phase"),
         "worker_id": task.get("worker_id"),
         "worker_name": task.get("worker_name"),
+        "executor": task.get("executor"),
+        "artifact_type": task.get("artifact_type"),
+        "depends_on": deepcopy(task.get("depends_on") or []),
         "status": str(persisted.get("status") or task.get("status") or "pending"),
     }
 
@@ -1486,6 +1489,149 @@ def _intake_state(run: dict) -> str:
     return "ready_to_generate"
 
 
+def _stage_input_binding_sha256(run: dict, stage: dict, input_refs: list[dict]) -> str:
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    payload = {
+        "run_id": str(run.get("run_id") or ""),
+        "stage_id": str(stage.get("id") or stage.get("task_id") or ""),
+        "executor": str(stage.get("executor") or ""),
+        "artifact_type": str(stage.get("artifact_type") or ""),
+        "brief_revision": int(brief.get("confirmed_revision") or 0),
+        "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        "input_refs": deepcopy(input_refs),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reserve_stage_attempt_in_run(
+    run: dict,
+    *,
+    stage: dict,
+    executor: str,
+    input_refs: list[dict],
+    idempotency_key: str,
+) -> tuple[dict, dict, bool]:
+    stage_id = str(stage.get("id") or stage.get("task_id") or "").strip()
+    requested_executor = str(executor or "").strip()
+    lineage_key = str(idempotency_key or "").strip()
+    if not stage_id or not lineage_key:
+        raise ValueError("stage_id and idempotency_key are required to reserve a stage attempt")
+    if requested_executor != str(stage.get("executor") or ""):
+        raise ExpertTeamStateConflict("stage_executor_mismatch", "stage executor does not match the catalog", run)
+    if not isinstance(input_refs, list):
+        raise ValueError("stage input refs must be a list")
+    binding_sha256 = _stage_input_binding_sha256(run, stage, input_refs)
+    reservations = [
+        deepcopy(item) for item in run.get("stage_attempt_reservations") or [] if isinstance(item, dict)
+    ]
+    for item in reservations:
+        if item.get("stage_id") == stage_id and item.get("idempotency_key") == lineage_key:
+            if item.get("input_binding_sha256") != binding_sha256 or item.get("executor") != requested_executor:
+                raise ExpertTeamStateConflict(
+                    "stage_attempt_idempotency_conflict",
+                    "stage attempt idempotency key was reused with different inputs",
+                    run,
+                )
+            return run, deepcopy(item), False
+    active = next(
+        (
+            item
+            for item in reversed(reservations)
+            if item.get("stage_id") == stage_id
+            and item.get("status") in {"reserved", "dispatching", "generating"}
+        ),
+        None,
+    )
+    if active is not None:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_in_progress",
+            "another stage attempt is already authoritative for this stage",
+            run,
+        )
+    counters = deepcopy(run.get("stage_attempt_counters")) if isinstance(run.get("stage_attempt_counters"), dict) else {}
+    attempt = int(counters.get(stage_id) or 0) + 1
+    counters[stage_id] = attempt
+    reservation = {
+        "reservation_id": "stage-attempt-" + uuid.uuid4().hex[:16],
+        "stage_id": stage_id,
+        "stage_attempt": attempt,
+        "executor": requested_executor,
+        "artifact_type": str(stage.get("artifact_type") or ""),
+        "input_refs": deepcopy(input_refs),
+        "input_binding_sha256": binding_sha256,
+        "idempotency_key": lineage_key,
+        "status": "reserved",
+        "created_at": _now(),
+    }
+    reservations.append(reservation)
+    next_run = deepcopy(run)
+    next_run["stage_attempt_counters"] = counters
+    next_run["stage_attempt_reservations"] = reservations
+    next_run["current_stage_attempt_reservation"] = deepcopy(reservation)
+    return next_run, reservation, True
+
+
+def reserve_stage_attempt(
+    workspace: Path,
+    run_id: str,
+    *,
+    stage_id: str,
+    executor: str,
+    input_refs: list[dict],
+    idempotency_key: str,
+) -> tuple[dict, dict, bool]:
+    """Allocate a monotonic stage attempt under the authoritative run lock."""
+    with _run_mutation_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        _require_mutable_v2(run)
+        if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+            raise ExpertTeamStateConflict("stage_attempt_not_available", "legacy runs do not use stage reservations", run)
+        stage = _authoritative_stage_for_mutation(run)
+        if str(stage.get("task_id") or "") != str(stage_id or ""):
+            raise ExpertTeamStateConflict("stale_stage", "stage attempt target is no longer current", run)
+        next_run, reservation, created = _reserve_stage_attempt_in_run(
+            run,
+            stage=stage,
+            executor=executor,
+            input_refs=input_refs,
+            idempotency_key=idempotency_key,
+        )
+        if not created:
+            return _sync_derived(run), reservation, False
+        next_run["version"] = int(run.get("version") or 0) + 1
+        next_run["updated_at"] = _now()
+        return write_run(workspace, _sync_derived(next_run)), reservation, True
+
+
+def _stage_reservation_status_patch(run: dict, status: str) -> dict:
+    current = run.get("current_stage_attempt_reservation")
+    if not isinstance(current, dict) or not current.get("reservation_id"):
+        return {}
+    updated = deepcopy(current)
+    updated["status"] = str(status)
+    updated["updated_at"] = _now()
+    reservations = [
+        deepcopy(item) for item in run.get("stage_attempt_reservations") or [] if isinstance(item, dict)
+    ]
+    matched = False
+    for index, item in enumerate(reservations):
+        if item.get("reservation_id") == updated["reservation_id"]:
+            reservations[index] = deepcopy(updated)
+            matched = True
+            break
+    if not matched:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_reservation_missing",
+            "current stage attempt reservation is not in the durable ledger",
+            run,
+        )
+    return {
+        "stage_attempt_reservations": reservations,
+        "current_stage_attempt_reservation": updated,
+    }
+
+
 def _execution_start_reservation_patch(runtime_adapter: str) -> dict:
     """Build one durable start reservation.
 
@@ -1503,6 +1649,33 @@ def _execution_start_reservation_patch(runtime_adapter: str) -> dict:
         "execution_start_dispatch_state": "reserved",
         "execution_start_dispatching_at": "",
         "execution_runtime_adapter": adapter_name,
+    }
+
+
+def _execution_start_patch_for_run(
+    run: dict,
+    runtime_adapter: str,
+    *,
+    input_refs: list[dict] | None = None,
+) -> dict:
+    patch = _execution_start_reservation_patch(runtime_adapter)
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        return patch
+    stage = _authoritative_stage_for_mutation(run)
+    staged = deepcopy(run)
+    staged.update(patch)
+    staged, _reservation, _created = _reserve_stage_attempt_in_run(
+        staged,
+        stage=stage,
+        executor=str(stage.get("executor") or ""),
+        input_refs=deepcopy(input_refs or []),
+        idempotency_key=str(patch["execution_start_id"]),
+    )
+    return {
+        **patch,
+        "stage_attempt_counters": staged["stage_attempt_counters"],
+        "stage_attempt_reservations": staged["stage_attempt_reservations"],
+        "current_stage_attempt_reservation": staged["current_stage_attempt_reservation"],
     }
 
 
@@ -1636,7 +1809,7 @@ def answer_and_reserve_expert_team_execution_start(
                 duplicate,
                 "starting",
                 "generation_start_reserved",
-                _execution_start_reservation_patch(adapter_name),
+                _execution_start_patch_for_run(duplicate, adapter_name),
             )
             return reserved, True
         return duplicate, False
@@ -1659,7 +1832,7 @@ def answer_and_reserve_expert_team_execution_start(
         run,
         "starting",
         "generation_start_reserved",
-        _execution_start_reservation_patch(adapter_name),
+        _execution_start_patch_for_run(run, adapter_name),
     )
     return reserved, True
 
@@ -1670,6 +1843,7 @@ def reserve_expert_team_execution_start(
     *,
     expected_version: int | None = None,
     runtime_adapter: str = "",
+    input_refs: list[dict] | None = None,
 ) -> dict:
     """Atomically reserve a ready stage and its planned runtime boundary."""
     with _run_mutation_lock(workspace, run_id):
@@ -1690,7 +1864,7 @@ def reserve_expert_team_execution_start(
             run,
             "starting",
             "generation_start_reserved",
-            _execution_start_reservation_patch(runtime_adapter),
+            _execution_start_patch_for_run(run, runtime_adapter, input_refs=input_refs),
         )
 
 
@@ -1737,6 +1911,7 @@ def mark_expert_team_execution_start_dispatching(
             run,
         )
     next_run = deepcopy(run)
+    next_run.update(_stage_reservation_status_patch(run, "dispatching"))
     next_run["execution_start_dispatch_state"] = "dispatching"
     next_run["execution_start_dispatching_at"] = _now()
     next_run["runtime_revision"] = int(next_run.get("runtime_revision") or 0) + 1
@@ -1838,6 +2013,7 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
             )
         current = _current_stage(_sync_derived(deepcopy(run)))
         patch = {
+            **_stage_reservation_status_patch(run, "generating"),
             "execution_started_at": _now(),
             "execution_stream_id": stream_id,
             "execution_turn_id": str(response.get("turn_id") or ""),
@@ -1890,6 +2066,7 @@ def mark_expert_team_execution_start_failed(
             "generation_start_failed",
             {
                 **_clear_execution_patch(),
+                **_stage_reservation_status_patch(run, "failed"),
                 "orphan_runtime_run_id": str(orphan_runtime_run_id or ""),
                 "orphan_runtime_adapter": str(orphan_runtime_adapter or ""),
                 "execution_cleanup_status": str(execution_cleanup_status or ""),
@@ -2303,6 +2480,119 @@ def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
     )
 
 
+def _complete_enterprise_stage_artifact(
+    workspace: Path,
+    run: dict,
+    output: dict,
+    *,
+    task_id: str,
+) -> dict:
+    from .stage_artifacts import (
+        StageArtifactError,
+        artifact_digest,
+        build_stage_artifact,
+        parse_stage_response,
+    )
+
+    stage = _authoritative_stage_for_mutation(run)
+    reservation = run.get("current_stage_attempt_reservation")
+    if not isinstance(reservation, dict) or reservation.get("stage_id") != task_id:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_reservation_missing",
+            "enterprise result has no authoritative stage attempt reservation",
+            run,
+        )
+    if reservation.get("status") != "generating" or reservation.get("executor") != "model":
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "enterprise result does not match a generating model reservation",
+            run,
+        )
+    stage_attempt = int(reservation.get("stage_attempt") or 0)
+    raw_content = str(output.get("content") or "")
+    output["stage_attempt"] = stage_attempt
+    output["status"] = "generated"
+    run.setdefault("stage_outputs", []).append(output)
+    requires_document = str(stage.get("artifact_type") or "") in {
+        "document_draft",
+        "reviewed_document",
+        "research_document_draft",
+        "reviewed_research_document",
+    }
+    source_snapshot = None
+    if str(stage.get("artifact_type") or "") in {"material_ledger", "source_register", "evidence_matrix"}:
+        source_snapshot = verify_source_context_snapshot(workspace, run)
+    try:
+        parsed = parse_stage_response(
+            raw_content,
+            artifact_type=str(stage.get("artifact_type") or ""),
+            requires_document=requires_document,
+        )
+        artifact = build_stage_artifact(
+            parsed,
+            stage_id=task_id,
+            stage_attempt=stage_attempt,
+            brief=run.get("document_brief") or {},
+            input_refs=deepcopy(reservation.get("input_refs") or []),
+            source_snapshot=source_snapshot,
+            now=_now(),
+        )
+    except (StageArtifactError, ValueError) as exc:
+        output["status"] = "invalid"
+        output["artifact_error"] = {
+            "code": str(getattr(exc, "code", "stage_artifact_invalid")),
+            "field": str(getattr(exc, "field", "")),
+            "message": str(exc),
+        }
+        run["stage_outputs"][-1] = output
+        run["validation"] = {
+            "status": "rewrite_required",
+            "message": "阶段产物未通过企业合同校验",
+            "code": output["artifact_error"]["code"],
+        }
+        run["last_validation_error"] = run["validation"]["message"]
+        patch = _stage_reservation_status_patch(run, "generated_invalid")
+        return _transition(workspace, run, "generated_invalid", "generation_invalid", patch)
+
+    blocking_count = sum(
+        1 for issue in artifact.get("blocking_issues") or []
+        if issue.get("severity") in {"blocking", "error", "warning"}
+    )
+    if blocking_count:
+        artifact["validation_status"] = "invalid"
+        artifact["sha256"] = artifact_digest(artifact)
+    existing = next(
+        (item for item in run.get("stage_artifacts") or [] if item.get("artifact_id") == artifact["artifact_id"]),
+        None,
+    )
+    if existing is not None and existing != artifact:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_immutable_conflict",
+            "stage artifact identity already exists with different content",
+            run,
+        )
+    if existing is None:
+        run.setdefault("stage_artifacts", []).append(artifact)
+    output["artifact"] = deepcopy(artifact)
+    output["status"] = "invalid" if blocking_count else "generated"
+    run["stage_outputs"][-1] = output
+    run["current_stage_artifact_ref"] = {
+        "artifact_id": artifact["artifact_id"],
+        "sha256": artifact["sha256"],
+        "stage_attempt": stage_attempt,
+    }
+    run["validation"] = {
+        "status": "rewrite_required" if blocking_count else "pass",
+        "blocking_count": blocking_count,
+        "message": "阶段产物存在阻断问题" if blocking_count else "阶段产物合同校验通过",
+    }
+    run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
+    status = "generated_invalid" if blocking_count else "generated_valid"
+    state = "generated_invalid" if blocking_count else "awaiting_review"
+    event = "generation_invalid" if blocking_count else "generation_completed"
+    return _transition(workspace, run, state, event, _stage_reservation_status_patch(run, status))
+
+
 @_serialized_run_mutation
 def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: dict | None = None) -> dict:
     run = read_run(workspace, run_id)
@@ -2358,6 +2648,13 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         output["visible_title"] = current.get("title") or "专家团计划"
     material_type = str(business_context.get("material_type") or "office_material")
     task_id = str(current.get("task_id") or "")
+    if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1:
+        return _complete_enterprise_stage_artifact(
+            workspace,
+            run,
+            output,
+            task_id=task_id,
+        )
     stage_attempt = 1 + sum(
         1
         for item in run.get("stage_outputs") or []
@@ -2701,6 +2998,103 @@ def record_expert_team_execution_observation(
     return write_run(workspace, _sync_derived(next_run))
 
 
+def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
+    from .stage_artifacts import StageArtifactError, validate_stage_artifact
+    from .trusted_identity import get_trusted_identity_resolver
+
+    authoritative_stage = _authoritative_stage_for_mutation(run)
+    stage_id = str(authoritative_stage.get("task_id") or "")
+    artifact_ref = run.get("current_stage_artifact_ref")
+    if not isinstance(artifact_ref, dict):
+        raise ExpertTeamStateConflict("stage_artifact_missing", "current stage has no artifact to approve", run)
+    artifact = next(
+        (
+            item for item in run.get("stage_artifacts") or []
+            if isinstance(item, dict)
+            and item.get("artifact_id") == artifact_ref.get("artifact_id")
+            and item.get("sha256") == artifact_ref.get("sha256")
+        ),
+        None,
+    )
+    if not isinstance(artifact, dict) or artifact.get("stage_id") != stage_id:
+        raise ExpertTeamStateConflict("stage_artifact_identity_mismatch", "stage artifact identity changed", run)
+    try:
+        validation = validate_stage_artifact(
+            artifact,
+            brief=run.get("document_brief") or {},
+            approved_inputs=artifact.get("input_refs") or [],
+        )
+    except StageArtifactError as exc:
+        raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
+    if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0) != 0:
+        raise ExpertTeamStateConflict("stage_artifact_blocked", "stage artifact has unresolved issues", run)
+    identity_session_id = str(body.get("trusted_identity_session_id") or "").strip()
+    try:
+        principal = get_trusted_identity_resolver().resolve(
+            identity_session_id,
+            required_role="document-approver",
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise ExpertTeamStateConflict("trusted_identity_required", str(exc), run) from exc
+
+    approved_at = _now()
+    approval = {
+        "schema_version": "stage-approval/v1",
+        "stage_id": stage_id,
+        "artifact_id": artifact["artifact_id"],
+        "artifact_sha256": artifact["sha256"],
+        "approved_at": approved_at,
+        "approved_principal": deepcopy(principal),
+        "identity_snapshot_sha256": principal["identity_snapshot_sha256"],
+    }
+    approvals = [deepcopy(item) for item in run.get("stage_approvals") or [] if isinstance(item, dict)]
+    approvals.append(approval)
+    run["stage_approvals"] = approvals
+    outputs = [deepcopy(output) for output in run.get("stage_outputs") or [] if isinstance(output, dict)]
+    for output in reversed(outputs):
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
+            output["status"] = "approved"
+            output["approved_at"] = approved_at
+            output["approved_principal"] = {
+                "subject": principal["subject"],
+                "display_name": principal["display_name"],
+                "roles": deepcopy(principal["roles"]),
+            }
+            output["identity_snapshot_sha256"] = principal["identity_snapshot_sha256"]
+            break
+    run["stage_outputs"] = outputs
+    run["approved_stage_artifact_refs"] = {
+        **(deepcopy(run.get("approved_stage_artifact_refs")) if isinstance(run.get("approved_stage_artifact_refs"), dict) else {}),
+        stage_id: {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]},
+    }
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        brief = run.get("document_brief") or {}
+        run["canonical_document_ref"] = {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+            "brief_revision": int(brief.get("confirmed_revision") or 0),
+            "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        }
+    index = int(run.get("current_stage_index") or 0)
+    run["current_stage_index"] = index + 1
+    _record_action(run, body, "approve_stage")
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        return _transition(
+            workspace,
+            run,
+            "delivery_validation_required",
+            "semantic_document_approved",
+            _clear_execution_patch(),
+        )
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "stage_approved",
+        {**_clear_execution_patch(), "current_stage_artifact_ref": None},
+    )
+
+
 @_serialized_body_mutation
 def approve_expert_team_stage(workspace: Path, body: dict) -> dict:
     run, duplicate = _prepare_mutation(workspace, body, "approve_stage")
@@ -2709,6 +3103,8 @@ def approve_expert_team_stage(workspace: Path, body: dict) -> dict:
     run = _refresh_artifact_existence(workspace, run)
     if str(run.get("workflow_state") or "") != "awaiting_review":
         raise ValueError("Expert team stage is not awaiting review")
+    if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1:
+        return _approve_enterprise_stage(workspace, run, body)
     index = int(run.get("current_stage_index") or 0)
     total = len(run.get("_tasks_template") or [])
     authoritative_stage = _authoritative_stage_for_mutation(run)

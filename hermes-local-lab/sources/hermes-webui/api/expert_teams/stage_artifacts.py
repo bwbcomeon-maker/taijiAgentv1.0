@@ -611,7 +611,7 @@ def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, 
         if not isinstance(source_snapshot, dict):
             raise StageArtifactError("source_snapshot_required", "source_snapshot")
         expected_snapshot_id = source_snapshot.get("snapshot_id")
-        expected_sha = source_snapshot.get("sha256")
+        expected_sha = source_snapshot.get("snapshot_sha256") or source_snapshot.get("sha256")
         if not any(
             ref.get("ref_type") == "source_context"
             and ref.get("snapshot_id") == expected_snapshot_id
