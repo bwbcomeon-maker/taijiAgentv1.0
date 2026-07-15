@@ -1269,8 +1269,41 @@ def test_brief_confirmation_runtime_saves_then_confirms_without_starting_generat
         'exact_title': '精确标题',
         'additional_context': '补充背景',
     }
+    assert result['calls'][1]['payload']['expected_brief_revision'] == 4
     for call in result['calls']:
         assert not ({'token', 'principal', 'role', 'roles'} & set(call['payload']))
+
+
+def test_brief_confirmation_without_dirty_fields_skips_update_and_uses_current_revision():
+    result = _run_node(
+        _actions_harness(
+            """
+            const calls=[];
+            context.api=async(path,opts)=>{
+              calls.push({path,payload:JSON.parse(opts.body)});
+              return {run:{run_id:'run-1',version:8,workflow_state:'ready_to_generate',document_brief:{revision:3,status:'confirmed'}}};
+            };
+            context.window._activeExpertTeamStatusCard={
+              runId:'run-1',sourceSessionId:'session-1',schemaVersion:2,version:7,currentStageId:'intake',readOnly:false,
+              brief:{revision:3},
+            };
+            const controls=[
+              {name:'original_request',value:'原始诉求',disabled:false},
+              {name:'exact_title',value:'精确标题',disabled:false},
+            ];
+            const form={
+              dataset:{expertTeamBriefRevision:'3',expertTeamBriefSnapshot:JSON.stringify({original_request:'原始诉求',exact_title:'精确标题'})},
+              querySelectorAll:()=>controls,querySelector:()=>null,
+            };
+            const root={dataset:{expertTeamRunId:'run-1',expertTeamSchemaVersion:'2',expertTeamVersion:'7',expertTeamStageId:'intake',expertTeamReadOnly:'false'}};
+            const button={disabled:false,isConnected:true,textContent:'确认文档规格',setAttribute:()=>{},removeAttribute:()=>{},closest:(selector)=>selector==='[data-expert-team-brief-editor]'?form:root};
+            context.window.submitExpertTeamBrief(button,true).then(ok=>console.log(JSON.stringify({ok,calls})));
+            """
+        )
+    )
+    assert result['ok'] is True
+    assert [call['path'] for call in result['calls']] == ['/api/expert-teams/brief/confirm']
+    assert result['calls'][0]['payload']['expected_brief_revision'] == 3
 
 
 def test_brief_control_patch_preserves_non_rendered_enterprise_metadata():

@@ -319,7 +319,9 @@
           response=await api('/api/expert-teams/brief/confirm',{method:'POST',body:JSON.stringify({
             run_id:contract.payload.run_id,session_id:contract.payload.session_id,
             expected_version:Number(updated.version||contract.payload.expected_version),
-            expected_brief_revision:Number(updated.document_brief&&updated.document_brief.revision||contract.payload.expected_brief_revision+1),
+            expected_brief_revision:saved
+              ?Number(updated.document_brief&&updated.document_brief.revision||contract.payload.expected_brief_revision+1)
+              :contract.payload.expected_brief_revision,
             idempotency_key:`${contract.payload.idempotency_key}:confirm`,
           })});
         }
