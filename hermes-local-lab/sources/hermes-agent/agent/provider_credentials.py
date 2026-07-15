@@ -163,7 +163,7 @@ def default_credential_ref(
     rows = data.get("provider_credentials")
     if not isinstance(rows, list):
         return ""
-    candidates: list[str] = []
+    marked_defaults: list[str] = []
     for row in rows:
         if not isinstance(row, dict) or provider_family(row.get("provider_family")) != family:
             continue
@@ -176,12 +176,15 @@ def default_credential_ref(
         if str(row.get("secret_env") or "").strip() != credential_secret_env(credential_id):
             continue
         if bool(row.get("default")):
-            candidates.append(credential_id)
-    if not candidates:
+            marked_defaults.append(credential_id)
+    if not marked_defaults:
         return ""
-    if len(candidates) > 1:
+    if len(marked_defaults) > 1:
         raise ValueError("当前 Provider 配置了多个默认凭据，请保留一个。")
-    return candidates[0]
+    credential_id = marked_defaults[0]
+    if not os.getenv(credential_secret_env(credential_id), "").strip():
+        return ""
+    return credential_id
 
 
 def resolve_api_key(

@@ -248,6 +248,7 @@ def _public_provider_credential(
         "provider_family": family,
         "label": label,
         "auth_type": str(row.get("auth_type") or "api_key").strip(),
+        "default": bool(row.get("default")),
         "configured": bool(secret_env and _key_status_for_env(secret_env).get("configured")),
         "used_by": _provider_credential_used_by(config_data, credential_id),
     }
@@ -287,13 +288,9 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
     if secret is None:
         secret = body.get("secret")
     secret_value = str(secret or "").strip()
-    stored = {
-        "id": credential_id,
-        "provider_family": family,
-        "label": label,
-        "auth_type": auth_type,
-        "secret_env": secret_env,
-    }
+    requested_default = body.get("default") if "default" in body else None
+    if requested_default is not None and not isinstance(requested_default, bool):
+        raise ValueError("default must be a boolean")
     config_path = _get_config_path()
     env_path = _get_hermes_home() / ".env"
     with credential_transaction():
@@ -305,6 +302,31 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
             previous_family = provider_family(previous_row.get("provider_family"))
             if previous_family != family:
                 raise ValueError("已有凭据 ID 属于不同 Provider，请使用新的凭据 ID。")
+        default_value = (
+            bool(requested_default)
+            if requested_default is not None
+            else bool(previous_row and previous_row.get("default"))
+        )
+        if default_value:
+            rows = config_data.get("provider_credentials")
+            for row in (rows if isinstance(rows, list) else []):
+                if not isinstance(row, dict) or not bool(row.get("default")):
+                    continue
+                try:
+                    row_id = normalize_credential_id(row.get("id"))
+                except ValueError:
+                    continue
+                if row_id != credential_id and provider_family(row.get("provider_family")) == family:
+                    raise ValueError("当前 Provider 已有默认凭据，请先取消原默认凭据。")
+        stored = {
+            "id": credential_id,
+            "provider_family": family,
+            "label": label,
+            "auth_type": auth_type,
+            "secret_env": secret_env,
+        }
+        if default_value:
+            stored["default"] = True
         env_snapshot = _credential_env_snapshot(env_path, secret_env)
         env_touched = False
         metadata_touched = False
@@ -2191,7 +2213,7 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             workspace_prefix=workspace_id,
             custom_url=base_url,
         )
-        if not credential_ref:
+        if not credential_ref and not str(api_key or "").strip():
             credential_ref = default_credential_ref(
                 provider_id,
                 config_data=_load_yaml_config_file(_get_config_path()),
@@ -2208,23 +2230,19 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
 
     config_path = _get_config_path()
     with credential_transaction():
-        if credential_ref:
-            row = load_credential(
-                credential_ref,
-                config_data=_load_yaml_config_file(config_path),
-            )
-            if provider_family(row.get("provider_family")) != provider_family(provider_id):
-                raise ValueError("所选凭据不属于当前 Provider。")
-        env_var = _VISION_KEY_ENV.get(provider_id)
-        if api_key is not None and str(api_key).strip():
-            if not env_var:
-                raise ValueError(f"{provider_id} does not accept an API key from WebUI")
-            _write_env_file(
-                _get_hermes_home() / ".env", {env_var: str(api_key).strip()}
-            )
-
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
+            if credential_ref:
+                row = load_credential(credential_ref, config_data=config_data)
+                if provider_family(row.get("provider_family")) != provider_family(provider_id):
+                    raise ValueError("所选凭据不属于当前 Provider。")
+            env_var = _VISION_KEY_ENV.get(provider_id)
+            secret_value = str(api_key or "").strip()
+            if secret_value and not env_var:
+                raise ValueError(f"{provider_id} does not accept an API key from WebUI")
+            env_path = _get_hermes_home() / ".env"
+            env_snapshot = _credential_env_snapshot(env_path, env_var) if secret_value else None
+            env_touched = False
             auxiliary = config_data.get("auxiliary")
             if not isinstance(auxiliary, dict):
                 auxiliary = {}
@@ -2262,7 +2280,15 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 vision_cfg.pop("workspace_id", None)
             auxiliary["vision"] = vision_cfg
             config_data["auxiliary"] = auxiliary
-            _save_yaml_config_file(config_path, config_data)
+            try:
+                if secret_value and env_var:
+                    env_touched = True
+                    _write_env_file(env_path, {env_var: secret_value})
+                _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_touched and env_var and env_snapshot is not None:
+                    _restore_credential_env(env_path, env_var, env_snapshot)
+                raise
     reload_config()
     invalidate_models_cache()
     _invalidate_vision_verification()
@@ -2560,11 +2586,6 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
         credentials = {}
     if not requested_provider_id:
         raise ValueError("provider is required")
-    if provider_id == "dashscope" and not credential_ref:
-        credential_ref = default_credential_ref(
-            provider_id,
-            config_data=_load_yaml_config_file(_get_config_path()),
-        )
     if credential_ref and provider_id != "dashscope":
         raise ValueError("credential_ref is only supported for DashScope image generation")
 
@@ -2602,6 +2623,11 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             raw_value = credentials.get(env_var)
         if raw_value is not None and str(raw_value).strip():
             inline_secret_supplied = True
+    if provider_id == "dashscope" and not credential_ref and not inline_secret_supplied:
+        credential_ref = default_credential_ref(
+            provider_id,
+            config_data=_load_yaml_config_file(_get_config_path()),
+        )
     if credential_ref and inline_secret_supplied:
         raise ValueError("credential_ref and api_key cannot be used together")
     if credential_ref:
