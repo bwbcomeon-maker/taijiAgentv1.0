@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .contracts import EXPERT_TEAM_CONTRACT_V1, brief_summary, classify_contract_version
+
 from .materials import business_context_for_run, content_summary
 
 
@@ -374,6 +376,7 @@ def _timeline_events(run: dict) -> list[dict]:
 
 
 def expert_team_run_view(run: dict) -> dict:
+    contract_version = classify_contract_version(run)
     business_context = business_context_for_run(run)
     state = _effective_state(run)
     intake = _question_state(run)
@@ -406,7 +409,7 @@ def expert_team_run_view(run: dict) -> dict:
         pending_input = _pending_input(run)
     if state != "awaiting_stage_input":
         pending_input = _pending_input(run)
-    return {
+    result = {
         "business_context": business_context,
         "presentation": presentation,
         "team": _team(run),
@@ -431,3 +434,11 @@ def expert_team_run_view(run: dict) -> dict:
             "can_request_revision": state == "awaiting_review",
         },
     }
+    if contract_version == EXPERT_TEAM_CONTRACT_V1:
+        brief = brief_summary(run.get("document_brief") or {})
+        brief["editable"] = not bool(run.get("stage_outputs"))
+        brief["edit_policy"] = "editable" if brief["editable"] else "new_run_required"
+        brief["validation"] = {"valid_for_confirmation": False, "field_errors": []}
+        result["contract_version"] = contract_version
+        result["brief"] = brief
+    return result

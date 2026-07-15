@@ -244,3 +244,76 @@ def test_legacy_run_read_does_not_add_contract_fields_or_write_disk(tmp_path):
     assert "contract_version" not in opened
     assert "document_brief" not in opened
     assert path.read_bytes() == before
+
+
+def test_contract_run_persists_draft_brief_without_starting_generation(tmp_path):
+    from api import expert_teams
+
+    run = expert_teams.start_expert_team(tmp_path, {"session_id": "contract-session", **_payload()})
+
+    assert run["schema_version"] == 2
+    assert run["contract_version"] == CONTRACT_VERSION
+    assert run["document_brief"]["status"] == "draft"
+    assert run["document_brief"]["original_request"].endswith(CANARY)
+    assert run["stage_artifacts"] == []
+    assert run["canonical_document_ref"] is None
+    assert run["workflow_state"] == "collecting_required"
+    assert run["view"]["brief"]["document_type"] == "work_report"
+    assert run["view"]["phase_progress"]["done"] == 0
+    assert run["view"]["phase_progress"]["total"] == 5
+    assert run["view"]["phase_progress"]["is_intake"] is True
+
+
+def test_catalog_examples_expose_explicit_intake_and_document_semantics():
+    from api import expert_teams
+
+    catalog = expert_teams.expert_team_catalog()
+    examples = {
+        example["intake_example_id"]: example
+        for team in catalog["teams"]
+        for example in team["examples"]
+    }
+    assert examples["work_report"]["document_type"] == "work_report"
+    assert examples["work_report"]["task_mode"] == "create"
+    assert examples["work_report"]["document_brief_seed"]["document_control"]["render_template_id"] == "enterprise-work-report"
+    assert examples["research_report"]["document_type"] == "research_report"
+    assert examples["polish"]["task_mode"] == "polish"
+
+
+def test_unknown_persisted_contract_version_fails_closed_without_rewrite(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.contracts import ContractError
+    from api.expert_teams.storage import run_path, write_run
+
+    persisted = {
+        "schema_version": 2,
+        "version": 1,
+        "run_id": "et-unknown-contract",
+        "session_id": "unknown-contract-session",
+        "contract_version": "expert-team-contract/v9",
+        "workflow_state": "collecting_required",
+    }
+    write_run(tmp_path, persisted)
+    path = run_path(tmp_path, persisted["run_id"])
+    before = path.read_bytes()
+
+    with pytest.raises(ContractError) as error:
+        expert_teams.read_expert_team_run(tmp_path, persisted["run_id"])
+
+    assert error.value.code == "unsupported_contract_version"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("contract_version", [None, "", "expert-team-contract/v2", "expert-team-contract/V1"])
+def test_explicit_invalid_contract_version_fails_closed_without_creating_run(tmp_path, contract_version):
+    from api import expert_teams
+    from api.expert_teams.contracts import ContractError
+
+    with pytest.raises(ContractError) as error:
+        expert_teams.start_expert_team(
+            tmp_path,
+            {"session_id": "invalid-contract", **_payload(), "contract_version": contract_version},
+        )
+
+    assert error.value.code == "unsupported_contract_version"
+    assert list(tmp_path.rglob("et-*.json")) == []

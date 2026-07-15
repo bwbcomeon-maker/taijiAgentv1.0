@@ -14,6 +14,11 @@ from functools import wraps
 from pathlib import Path
 
 from .catalog import CONTENT_CREATOR_TEAM_ID, get_template
+from .contracts import (
+    EXPERT_TEAM_CONTRACT_V1,
+    build_document_brief,
+    classify_contract_version,
+)
 from .documents import (
     FinalDocumentDeliveryError,
     build_final_document_delivery,
@@ -1064,6 +1069,7 @@ def _serialized_run_mutation(function):
 
 
 def _require_mutable_v2(run: dict) -> None:
+    classify_contract_version(run)
     if int(run.get("schema_version") or 0) < 2:
         raise ExpertTeamStateConflict(
             "legacy_read_only",
@@ -1363,9 +1369,15 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
 
 
 def start_expert_team(workspace: Path, body: dict) -> dict:
+    contract_version = classify_contract_version(body)
     template = get_template(str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID))
-    prompt = str(body.get("prompt") or body.get("message") or "").strip()
-    if not prompt:
+    if contract_version == EXPERT_TEAM_CONTRACT_V1:
+        prompt = str(body.get("prompt") or "")
+        document_brief = build_document_brief(template["id"], body, now=_now())
+    else:
+        prompt = str(body.get("prompt") or body.get("message") or "").strip()
+        document_brief = None
+    if not prompt and contract_version == "legacy":
         prompt = "请起草一份办公材料。"
     session_id = str(body.get("session_id") or "").strip()
     if not session_id:
@@ -1396,6 +1408,15 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "events": [{"type": "team_created", "to": "collecting_required", "at": _now()}],
         "timeline_events": _initial_timeline_events(template),
     }
+    if contract_version == EXPERT_TEAM_CONTRACT_V1:
+        run.update(
+            {
+                "contract_version": EXPERT_TEAM_CONTRACT_V1,
+                "document_brief": document_brief,
+                "stage_artifacts": [],
+                "canonical_document_ref": None,
+            }
+        )
     return write_run(workspace, _sync_derived(run))
 
 
