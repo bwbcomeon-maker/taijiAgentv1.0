@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import logging
@@ -35,15 +36,23 @@ from api.brand_privacy import (
     scrub_public_session_payload,
     scrub_streaming_token_delta,
 )
-from api.models import get_session
+from api.models import (
+    get_session,
+    get_state_db_session_messages,
+    reconciled_state_db_messages_for_session,
+)
 from api.run_journal import RunJournalWriter
+from api.turn_envelope import TurnEnvelope
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.turn_duration import stamp_turn_duration_on_latest_assistant
 from api.streaming import (
     WebUIChatInputCancelled,
     WebUIChatInputError,
+    _deduplicate_context_messages,
     _finalize_public_reasoning,
+    _new_turn_context_from_messages,
     _persist_webui_chat_input_error,
+    _sanitize_messages_for_api,
     prepare_webui_chat_input,
 )
 
@@ -442,10 +451,7 @@ def _gateway_run_request_body(
     if non_system:
         last = non_system[-1]
         user_message = last.get("content", "")
-        for msg in non_system[:-1]:
-            role = str(msg.get("role") or "")
-            if role in {"user", "assistant"}:
-                conversation_history.append({"role": role, "content": msg.get("content", "")})
+        conversation_history = [dict(msg) for msg in non_system[:-1]]
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "system":
             content = msg.get("content")
@@ -458,11 +464,43 @@ def _gateway_run_request_body(
     }
     if body.get("provider"):
         run_body["provider"] = body.get("provider")
+    if body.get("platform_message_id"):
+        run_body["platform_message_id"] = body.get("platform_message_id")
     if system_parts:
         run_body["instructions"] = "\n\n".join(system_parts)
     if conversation_history:
         run_body["conversation_history"] = conversation_history
     return run_body
+
+
+def _gateway_messages_for_new_turn(
+    session,
+    display_user_message: str,
+    ephemeral_messages: list[dict],
+    prepared_user_content: Any,
+    *,
+    cfg: dict | None = None,
+    state_messages: list[dict] | None = None,
+) -> list[dict]:
+    """Build Gateway input through the standard WebUI context pipeline."""
+    if state_messages is None:
+        state_messages = get_state_db_session_messages(
+            getattr(session, "session_id", None),
+            profile=getattr(session, "profile", None) or None,
+        )
+    history = reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state_messages,
+    )
+    history = _new_turn_context_from_messages(history, display_user_message)
+    history = _deduplicate_context_messages(history)
+    history = _sanitize_messages_for_api(history, cfg=cfg)
+    return [
+        *[dict(message) for message in (ephemeral_messages or [])],
+        *history,
+        {"role": "user", "content": prepared_user_content},
+    ]
 
 
 def _gateway_run_error_event(payload: dict, default_message: str = "") -> dict:
@@ -676,6 +714,7 @@ def _run_gateway_chat_streaming(
     model_provider=None,
     display_msg=None,
     turn_id=None,
+    turn_envelope=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -816,10 +855,30 @@ def _run_gateway_chat_streaming(
             record_turn_interrupted("cancelled")
             put_gateway_event("cancel", {"message": "Cancelled by user"})
             return
+        model_messages = _gateway_messages_for_new_turn(
+            s,
+            str(persist_msg_text or ""),
+            prefill_messages,
+            message_content,
+            cfg=cfg,
+        )
+        if turn_envelope is None:
+            turn_envelope = TurnEnvelope.create(
+                turn_id=str(turn_id or uuid.uuid4().hex),
+                session_id=session_id,
+                submitted_at=getattr(s, "pending_started_at", None) or time.time(),
+                display_user_message=str(persist_msg_text or ""),
+                model_messages=model_messages,
+                attachments=attachments,
+            )
+        else:
+            turn_envelope = turn_envelope.with_model_messages(model_messages)
+        model_messages = [copy.deepcopy(message) for message in turn_envelope.model_messages]
         body = {
             "model": model or "default",
             "stream": True,
-            "messages": [*prefill_messages, {"role": "user", "content": message_content}],
+            "messages": model_messages,
+            "platform_message_id": turn_envelope.platform_message_id,
         }
         if model_provider:
             body["provider"] = model_provider
@@ -978,7 +1037,12 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(persist_msg_text or ""), "timestamp": now}
+            user_msg = {
+                "role": "user",
+                "content": str(persist_msg_text or ""),
+                "timestamp": now,
+                "platform_message_id": turn_envelope.platform_message_id,
+            }
             if attachments:
                 user_msg["attachments"] = list(attachments)
             internal_assistant_msg = {

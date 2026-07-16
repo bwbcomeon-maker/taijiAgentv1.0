@@ -614,7 +614,7 @@ def _webui_session_context_message(config_data: Optional[dict] = None) -> dict:
     lines.append("")
     lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID. Do not invent private IDs.*")
 
-    return {"role": "user", "content": "\n".join(lines)}
+    return {"role": "system", "content": "\n".join(lines)}
 
 
 def _prefill_messages_with_webui_context(prefill_context: dict, config_data: Optional[dict] = None) -> list[dict]:
@@ -3826,7 +3826,13 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             ).strip()
             latest_turn_id = str(latest.get('turn_id') or latest.get('_turn_id') or '').strip()
             same_turn_id = bool(pending_turn_id and latest_turn_id == pending_turn_id)
-            if same_turn_id or (timestamps_match and latest_attachments == pending_attachments):
+            latest_platform_id = str(latest.get('platform_message_id') or '').strip()
+            is_eager_webui_checkpoint = latest_platform_id.startswith('webui-turn:')
+            if (
+                same_turn_id
+                or is_eager_webui_checkpoint
+                or (timestamps_match and latest_attachments == pending_attachments)
+            ):
                 return False
     recovered_ts = int(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
@@ -4215,6 +4221,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     display_msg=None,
+    turn_envelope=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -5537,7 +5544,10 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _external_state_messages = get_state_db_session_messages(getattr(s, 'session_id', None))
+            _external_state_messages = get_state_db_session_messages(
+                getattr(s, 'session_id', None),
+                profile=getattr(s, 'profile', None) or None,
+            )
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
@@ -5650,12 +5660,37 @@ def _run_agent_streaming(
                         _finalize_cancelled_turn(s, ephemeral=False)
                 put('cancel', {'message': 'Cancelled by user'})
                 return
+            canonical_history = _sanitize_messages_for_api(
+                _previous_context_messages,
+                cfg=_cfg,
+            )
+            from api.turn_envelope import TurnEnvelope
+
+            if turn_envelope is None:
+                turn_envelope = TurnEnvelope.create(
+                    turn_id=uuid.uuid4().hex,
+                    session_id=session_id,
+                    submitted_at=_turn_started_at,
+                    display_user_message=persist_msg_text,
+                    model_messages=[],
+                    attachments=attachments,
+                )
+            turn_envelope = turn_envelope.with_model_messages([
+                *canonical_history,
+                {"role": "user", "content": user_message},
+            ])
+            effective_model_messages = [
+                copy.deepcopy(message) for message in turn_envelope.model_messages
+            ]
             result = agent.run_conversation(
-                user_message=user_message,
+                user_message=effective_model_messages[-1]["content"],
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                conversation_history=effective_model_messages[:-1],
                 task_id=session_id,
                 persist_user_message=persist_msg_text,
+                persist_user_platform_message_id=(
+                    turn_envelope.platform_message_id if turn_envelope is not None else None
+                ),
             )
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:

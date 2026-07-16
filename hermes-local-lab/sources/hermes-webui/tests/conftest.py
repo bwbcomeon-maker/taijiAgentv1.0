@@ -758,6 +758,8 @@ def make_session_tracked(created_list, ws=None):
         body["workspace"] = str(ws)
     d = _post(TEST_BASE, "/api/session/new", body)
     sid = d["session"]["session_id"]
-    ws_path = pathlib.Path(d["session"]["workspace"])
+    # Internal runtime-home workspaces are deliberately omitted by the public
+    # session projection. Tests still need the isolated workspace for cleanup.
+    ws_path = pathlib.Path(d["session"].get("workspace") or ws or TEST_WORKSPACE)
     created_list.append(sid)
     return sid, ws_path

@@ -1534,6 +1534,15 @@ class SessionDB:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            if platform_message_id:
+                existing = conn.execute(
+                    """SELECT id FROM messages
+                       WHERE session_id = ? AND role = ? AND platform_message_id = ?
+                       ORDER BY id ASC LIMIT 1""",
+                    (session_id, role, platform_message_id),
+                ).fetchone()
+                if existing is not None:
+                    return existing["id"] if isinstance(existing, sqlite3.Row) else existing[0]
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -1577,7 +1586,14 @@ class SessionDB:
 
         return self._execute_write(_do)
 
-    def replace_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+    def replace_messages(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        *,
+        ensure_source: Optional[str] = None,
+        ensure_model: Optional[str] = None,
+    ) -> None:
         """Atomically replace every message for a session.
 
         Used by transcript-rewrite flows such as /retry, /undo, and /compress.
@@ -1586,6 +1602,13 @@ class SessionDB:
         """
 
         def _do(conn):
+            if ensure_source:
+                conn.execute(
+                    """INSERT OR IGNORE INTO sessions
+                       (id, source, model, started_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (session_id, ensure_source, ensure_model, time.time()),
+                )
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
@@ -1597,6 +1620,7 @@ class SessionDB:
             now_ts = time.time()
             total_messages = 0
             total_tool_calls = 0
+            seen_platform_message_keys = set()
             for msg in messages:
                 role = msg.get("role", "unknown")
                 tool_calls = msg.get("tool_calls")
@@ -1623,6 +1647,11 @@ class SessionDB:
                 platform_msg_id = (
                     msg.get("platform_message_id") or msg.get("message_id")
                 )
+                if platform_msg_id:
+                    platform_key = (role, str(platform_msg_id))
+                    if platform_key in seen_platform_message_keys:
+                        continue
+                    seen_platform_message_keys.add(platform_key)
 
                 conn.execute(
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
@@ -3311,4 +3340,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

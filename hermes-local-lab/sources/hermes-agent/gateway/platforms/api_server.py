@@ -303,6 +303,24 @@ def _normalize_multimodal_content(content: Any) -> Any:
     return normalized_parts
 
 
+def _normalized_conversation_message(entry: Dict[str, Any], content: Any) -> Dict[str, Any]:
+    """Keep provider-relevant tool correlation fields on normalized history."""
+    message = {"role": str(entry.get("role") or ""), "content": content}
+    for key in ("tool_calls", "tool_call_id", "name", "tool_name"):
+        if key in entry:
+            message[key] = entry[key]
+    return message
+
+
+def _normalized_platform_message_id(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 256 or re.search(r"[\r\n\x00]", value):
+        return None
+    return value
+
+
 def _content_has_visible_payload(content: Any) -> bool:
     """True when content has any text or image attachment.  Used to reject empty turns."""
     if isinstance(content, str):
@@ -1829,12 +1847,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     system_prompt = content
                 else:
                     system_prompt = system_prompt + "\n" + content
-            elif role in {"user", "assistant"}:
+            elif role in {"user", "assistant", "tool"}:
                 try:
                     content = _normalize_multimodal_content(raw_content)
                 except ValueError as exc:
                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
-                conversation_messages.append({"role": role, "content": content})
+                conversation_messages.append(_normalized_conversation_message(msg, content))
 
         # Extract the last user message as the primary input
         user_message: Any = ""
@@ -1911,6 +1929,8 @@ class APIServerAdapter(BasePlatformAdapter):
         model_name = body.get("model", self._model_name)
         created = int(time.time())
 
+        platform_message_id = _normalized_platform_message_id(body.get("platform_message_id"))
+
         if stream:
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
@@ -1983,6 +2003,11 @@ class APIServerAdapter(BasePlatformAdapter):
             # The structured callbacks are strictly richer (they carry the
             # tool_call id), so they own the chat-completions SSE channel.
             agent_ref = [None]
+            persist_kwargs = (
+                {"persist_user_platform_message_id": platform_message_id}
+                if platform_message_id
+                else {}
+            )
             agent_task = asyncio.ensure_future(self._run_agent(
                 user_message=user_message,
                 conversation_history=history,
@@ -1993,6 +2018,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                **persist_kwargs,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2006,12 +2032,18 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
         async def _compute_completion():
+            persist_kwargs = (
+                {"persist_user_platform_message_id": platform_message_id}
+                if platform_message_id
+                else {}
+            )
             return await self._run_agent(
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                **persist_kwargs,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3536,6 +3568,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        persist_user_platform_message_id: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3563,10 +3596,17 @@ class APIServerAdapter(BasePlatformAdapter):
             if agent_ref is not None:
                 agent_ref[0] = agent
             effective_task_id = session_id or str(uuid.uuid4())
+            conversation_kwargs = {
+                "user_message": user_message,
+                "conversation_history": conversation_history,
+                "task_id": effective_task_id,
+            }
+            if persist_user_platform_message_id:
+                conversation_kwargs["persist_user_platform_message_id"] = (
+                    persist_user_platform_message_id
+                )
             result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-                task_id=effective_task_id,
+                **conversation_kwargs,
             )
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
@@ -3719,6 +3759,7 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
         instructions = body.get("instructions")
+        platform_message_id = _normalized_platform_message_id(body.get("platform_message_id"))
         previous_response_id = body.get("previous_response_id")
 
         # Accept explicit conversation_history from the request body.
@@ -3742,7 +3783,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     content = _normalize_multimodal_content(entry["content"])
                 except ValueError as exc:
                     return _multimodal_validation_error(exc, param=f"conversation_history[{i}].content")
-                conversation_history.append({"role": str(entry["role"]), "content": content})
+                conversation_history.append(_normalized_conversation_message(entry, content))
             if previous_response_id:
                 logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
 
@@ -3846,11 +3887,16 @@ class APIServerAdapter(BasePlatformAdapter):
                             session_key=approval_session_key,
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)
-                        r = agent.run_conversation(
-                            user_message=user_message,
-                            conversation_history=conversation_history,
-                            task_id=effective_task_id,
-                        )
+                        conversation_kwargs = {
+                            "user_message": user_message,
+                            "conversation_history": conversation_history,
+                            "task_id": effective_task_id,
+                        }
+                        if platform_message_id:
+                            conversation_kwargs["persist_user_platform_message_id"] = (
+                                platform_message_id
+                            )
+                        r = agent.run_conversation(**conversation_kwargs)
                     finally:
                         try:
                             unregister_gateway_notify(approval_session_key)

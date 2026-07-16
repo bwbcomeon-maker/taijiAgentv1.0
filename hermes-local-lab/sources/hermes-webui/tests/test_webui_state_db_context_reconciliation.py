@@ -1,4 +1,5 @@
 import json
+import copy
 import queue
 import sqlite3
 from collections import OrderedDict
@@ -47,6 +48,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
     monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
@@ -63,6 +65,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
         title="Context Reconcile",
         workspace=str(tmp_path),
         model="test-model",
+        profile="maiko",
         messages=list(sidecar_messages),
         context_messages=list(sidecar_messages),
     )
@@ -71,6 +74,11 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     session.pending_started_at = 1004.0
     session.save(touch_updated_at=False)
     models.SESSIONS[sid] = session
+    monkeypatch.setattr(
+        models,
+        "_get_profile_home",
+        lambda profile: tmp_path if profile == "maiko" else tmp_path / "wrong-profile",
+    )
 
     _make_state_db(
         tmp_path / "state.db",
@@ -84,6 +92,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     )
 
     captured = {}
+    profile_reads = []
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -92,7 +101,10 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
             self.ephemeral_system_prompt = None
 
         def run_conversation(self, **kwargs):
-            captured["conversation_history"] = kwargs.get("conversation_history")
+            captured["conversation_history"] = copy.deepcopy(
+                kwargs.get("conversation_history")
+            )
+            captured["user_message"] = copy.deepcopy(kwargs.get("user_message"))
             history = kwargs.get("conversation_history") or []
             return {
                 "completed": True,
@@ -108,6 +120,33 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     monkeypatch.setattr(streaming, "get_config", lambda: {})
     monkeypatch.setattr(config, "get_config", lambda: {})
     monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    real_state_reader = streaming.get_state_db_session_messages
+
+    def profile_aware_state_reader(session_id, *, profile=None, **kwargs):
+        profile_reads.append(profile)
+        return real_state_reader(session_id, profile=profile, **kwargs)
+
+    monkeypatch.setattr(streaming, "get_state_db_session_messages", profile_aware_state_reader)
+
+    from api.turn_envelope import TurnEnvelope
+
+    placeholder_envelope = TurnEnvelope.create(
+        turn_id="turn-context-reconcile",
+        session_id=sid,
+        submitted_at=1004.0,
+        display_user_message="new webui turn",
+        model_messages=[{"role": "user", "content": "placeholder only"}],
+        attachments=[],
+    )
+    effective_messages = []
+    original_with_model_messages = TurnEnvelope.with_model_messages
+
+    def capture_effective(self, messages):
+        effective = original_with_model_messages(self, messages)
+        effective_messages.append(effective.model_messages)
+        return effective
+
+    monkeypatch.setattr(TurnEnvelope, "with_model_messages", capture_effective)
 
     stream_id = "stream-context-reconcile"
     config.STREAMS[stream_id] = queue.Queue()
@@ -119,6 +158,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
             workspace=str(tmp_path),
             stream_id=stream_id,
             attachments=[],
+            turn_envelope=placeholder_envelope,
         )
     finally:
         config.STREAMS.pop(stream_id, None)
@@ -130,6 +170,18 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
         "external gateway user",
         "external gateway assistant",
     ]
+    assert profile_reads == [session.profile]
+    effective_contents = [m.get("content") for m in effective_messages[-1]]
+    assert effective_contents[:-1] == [
+        "old user",
+        "old assistant",
+        "external gateway user",
+        "external gateway assistant",
+    ]
+    assert effective_contents[-1].endswith("\nnew webui turn")
+    assert effective_messages[-1][:-1] == tuple(captured["conversation_history"])
+    assert effective_messages[-1][-1]["content"] == captured["user_message"]
+    assert "placeholder only" not in effective_contents
 
 
 def test_legacy_final_save_validates_visible_assistant_fields_only(monkeypatch, tmp_path):
@@ -150,6 +202,8 @@ def test_legacy_final_save_validates_visible_assistant_fields_only(monkeypatch, 
     monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()

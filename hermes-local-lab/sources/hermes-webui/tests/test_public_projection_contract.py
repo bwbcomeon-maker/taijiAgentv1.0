@@ -158,6 +158,31 @@ def test_session_projection_hides_only_internal_workspace_not_customer_workspace
     assert customer["workspace"] == "/Users/customer/taiji-project"
 
 
+def test_session_status_projection_drops_runtime_paths_but_keeps_business_fields():
+    from api.brand_privacy import public_session_status_projection
+
+    projected = public_session_status_projection({
+        "session_id": "status-1",
+        "profile": "research",
+        "model": "customer-model",
+        "workspace": "/Users/customer/taiji-project",
+        "hermes_home": "/Users/customer/.hermes/profiles/research",
+        "runtime_path": "/opt/taiji-agent/runtime",
+        "config": {"token": "canary-secret"},
+        "agent_running": False,
+        "total_tokens": 42,
+    })
+
+    assert projected == {
+        "session_id": "status-1",
+        "profile": "research",
+        "model": "customer-model",
+        "workspace": "/Users/customer/taiji-project",
+        "agent_running": False,
+        "total_tokens": 42,
+    }
+
+
 def test_sync_chat_and_import_response_projection_canaries():
     from api.brand_privacy import public_response_projection
 

@@ -304,7 +304,9 @@ def test_webui_session_context_adds_gateway_like_metadata(monkeypatch, tmp_path)
 
     assert messages[0] == {"role": "user", "content": "recall"}
     context = messages[-1]
-    assert context["role"] == "user"
+    # Runtime provenance is an ephemeral instruction, never a synthetic user
+    # turn that can be replayed as conversation history.
+    assert context["role"] == "system"
     assert "## Current Session Context" in context["content"]
     assert "**Source:** WebUI (browser session)" in context["content"]
     assert "telegram: Connected" in context["content"]

@@ -1695,6 +1695,24 @@ def public_session_projection(payload: Any) -> dict:
     return _mask_public_sensitive_text(cleaned)
 
 
+def public_session_status_projection(payload: Any) -> dict:
+    """Return session status without runtime-home or profile-home paths."""
+    source = payload if isinstance(payload, dict) else {}
+    projected = {
+        key: copy.deepcopy(source.get(key))
+        for key in (
+            "session_id", "title", "model", "profile", "message_count",
+            "created_at", "updated_at", "agent_running", "input_tokens",
+            "output_tokens", "total_tokens", "estimated_cost",
+        )
+        if key in source
+    }
+    workspace = source.get("workspace")
+    if workspace and not is_internal_workspace(workspace):
+        projected["workspace"] = str(workspace)
+    return _mask_public_sensitive_text(projected)
+
+
 def public_session_search_projection(item: Any) -> dict:
     """Return a strict sidebar-search row with only its two search fields added."""
     source = item if isinstance(item, dict) else {}

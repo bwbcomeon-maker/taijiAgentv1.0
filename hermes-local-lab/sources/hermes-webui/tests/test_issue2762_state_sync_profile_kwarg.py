@@ -344,6 +344,33 @@ def test_api_session_metadata_only_passes_session_profile_to_summary(
     assert b'"message_count": 3' in handler.wfile.getvalue()
 
 
+def test_restarted_session_recovers_only_its_own_profile_history(
+    two_profile_message_homes, monkeypatch
+):
+    """A restarted empty sidecar must not read the active profile's same-id rows."""
+    import api.models as models_mod
+
+    sid = two_profile_message_homes["sid"]
+    restarted = models_mod.Session(
+        session_id=sid,
+        title="Restarted maiko session",
+        workspace=str(two_profile_message_homes["session_dir"]),
+        model="test-model",
+        profile="maiko",
+        messages=[],
+        context_messages=[],
+    )
+
+    recovered = models_mod.reconciled_state_db_messages_for_session(restarted)
+
+    assert [message["content"] for message in recovered] == [
+        "maiko message 1",
+        "maiko message 2",
+        "maiko message 3",
+    ]
+    assert all("hiyuki" not in message["content"] for message in recovered)
+
+
 def test_unknown_explicit_profile_returns_none_not_falls_back(two_profile_homes):
     """Copilot review of PR #2827: when ``profile`` is explicit and
     resolution fails (e.g. typoed profile name, IO error), the

@@ -528,7 +528,7 @@ def test_default_title_cli_compression_chain_is_kept_by_lineage():
             conn,
             'cli_default_compress_tip_001',
             source='cli',
-            title='Cli Session',
+            title='Cli Session #2',
             started_at=t0 + 101,
             parent_session_id='cli_default_compress_root_001',
             messages=1,
@@ -542,6 +542,9 @@ def test_default_title_cli_compression_chain_is_kept_by_lineage():
         assert 'cli_default_compress_tip_001' in ids
         assert 'cli_default_compress_root_001' not in ids
         tip = next(s for s in data.get('sessions', []) if s.get('session_id') == 'cli_default_compress_tip_001')
+        # Collapsed lineage keeps the root display title while addressing the
+        # chain by its live tip session id.
+        assert tip.get('title') == 'Cli Session'
         assert tip.get('_compression_segment_count') == 2
         assert tip.get('_lineage_root_id') == 'cli_default_compress_root_001'
     finally:

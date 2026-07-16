@@ -6019,6 +6019,7 @@ from api.brand_privacy import (
     public_response_projection,
     public_session_search_projection,
     public_session_projection,
+    public_session_status_projection,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
     scrub_public_export_payload,
@@ -10058,7 +10059,7 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.session_ops import session_status
             _clear_stale_stream_state(get_session(sid, metadata_only=True))
-            return j(handler, session_status(sid))
+            return j(handler, public_session_status_projection(session_status(sid)))
         except KeyError:
             return bad(handler, "Session not found", 404)
 
@@ -11026,6 +11027,138 @@ def handle_get(handler, parsed) -> bool:
 # ── GET route helpers
 
 
+_SESSION_RUNTIME_RESET_FIELDS = {
+    "active_stream_id": None,
+    "pending_user_message": None,
+    "pending_attachments": [],
+    "pending_started_at": None,
+    "compression_anchor_visible_idx": None,
+    "compression_anchor_message_key": None,
+    "compression_anchor_summary": None,
+    "compression_anchor_engine": None,
+    "compression_anchor_mode": None,
+    "compression_anchor_details": {},
+    "context_engine_state": {},
+    "last_prompt_tokens": None,
+    "gateway_routing": None,
+    "gateway_routing_history": [],
+}
+
+
+def _completed_semantic_messages(messages) -> list[dict]:
+    """Project visible rows into durable user/assistant/tool truth.
+
+    This reuses the canonical provider-history validator so orphaned tool rows,
+    empty partials, error markers, and display-only metadata cannot become
+    model history.  Stable WebUI platform IDs are restored because they are a
+    persistence identity, not a provider-facing field.
+    """
+    from api.state_sync import semantic_messages_for_state
+
+    return semantic_messages_for_state(messages)
+
+
+def _snapshot_session_truth(session) -> dict:
+    fields = {
+        "messages",
+        "context_messages",
+        "tool_calls",
+        "title",
+        "truncation_watermark",
+        "privacy_context",
+        *_SESSION_RUNTIME_RESET_FIELDS.keys(),
+    }
+    return {name: copy.deepcopy(getattr(session, name, None)) for name in fields}
+
+
+def _restore_session_truth(session, snapshot: dict) -> None:
+    for name, value in snapshot.items():
+        setattr(session, name, copy.deepcopy(value))
+
+
+def _reset_unfinished_session_state(session, *, privacy_reason: str) -> None:
+    for name, value in _SESSION_RUNTIME_RESET_FIELDS.items():
+        setattr(session, name, copy.deepcopy(value))
+    _reset_session_privacy_context(session, privacy_reason)
+
+
+def _replace_state_db_truth(session, messages: list[dict]) -> bool:
+    from api.state_sync import replace_webui_session_messages
+
+    replaced = replace_webui_session_messages(
+        session_id=session.session_id,
+        messages=messages,
+        model=getattr(session, "model", None),
+        profile=getattr(session, "profile", None),
+    )
+    if replaced is not True:
+        raise RuntimeError(
+            f"state.db transcript rewrite was not confirmed for {session.session_id}"
+        )
+    return True
+
+
+def _rewrite_existing_session_truth(session, mutate, *, privacy_reason: str) -> list[dict]:
+    """Coordinate one sidecar rewrite with the transactional state.db rewrite.
+
+    The sidecar is written first.  Therefore a sidecar write failure cannot
+    leave state.db ahead.  If the later DB transaction fails, the sidecar is
+    restored from an in-memory snapshot and saved again before the error is
+    surfaced to the endpoint.
+    """
+    snapshot = _snapshot_session_truth(session)
+    try:
+        mutate()
+        _reset_unfinished_session_state(session, privacy_reason=privacy_reason)
+        semantic_messages = _completed_semantic_messages(session.messages)
+        session.context_messages = copy.deepcopy(semantic_messages)
+        session.save()
+    except Exception:
+        _restore_session_truth(session, snapshot)
+        raise
+
+    try:
+        _replace_state_db_truth(session, semantic_messages)
+    except Exception:
+        _restore_session_truth(session, snapshot)
+        try:
+            session.save()
+        except Exception:
+            logger.critical(
+                "failed to restore session %s after state.db rewrite failure",
+                session.session_id,
+                exc_info=True,
+            )
+        raise
+    return semantic_messages
+
+
+def _persist_new_session_truth(session) -> list[dict]:
+    """Persist a new sidecar, then atomically create/replace its DB truth.
+
+    The DB bridge creates the new session row and messages in one transaction.
+    If it fails, that transaction rolls back and the not-yet-published sidecar
+    is removed, so neither store exposes a half-created conversation.
+    """
+    semantic_messages = _completed_semantic_messages(session.messages)
+    session.save()
+    try:
+        _replace_state_db_truth(session, semantic_messages)
+    except Exception:
+        try:
+            session.path.unlink(missing_ok=True)
+            session.path.with_suffix(".json.bak").unlink(missing_ok=True)
+            prune_session_from_index(session.session_id)
+        except Exception:
+            logger.critical(
+                "failed to remove unpublished session %s after state.db failure",
+                session.session_id,
+                exc_info=True,
+            )
+        raise
+    return semantic_messages
+
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
@@ -11184,6 +11317,8 @@ def handle_post(handler, parsed) -> bool:
             # list object in memory; appending to one mutates the other.
             # Items inside `messages` are dicts with mutable values (tool_calls,
             # content arrays), so a shallow `list(...)` is not enough.
+            copied_messages = copy.deepcopy(session.messages)
+            copied_context = _completed_semantic_messages(copied_messages)
             copied_session = Session(
                 session_id=uuid.uuid4().hex[:12],
                 # Defensive: legacy sessions may have title=None on disk; fall back to 'Untitled'
@@ -11192,7 +11327,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
+                messages=copied_messages,
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
                 # archived conversation should produce a visible (un-archived)
@@ -11215,36 +11350,34 @@ def handle_post(handler, parsed) -> bool:
                 context_length=getattr(session, "context_length", None),
                 threshold_tokens=getattr(session, "threshold_tokens", None),
                 truncation_watermark=getattr(session, "truncation_watermark", None),
-                # context_messages is the authoritative model-facing prefix — must be
-                # deepcopied so the duplicate has its own independent context that won't
-                # be mutated when the original session's context changes (#2914).
-                context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
-                # Gateway routing — if the user customized routing for this session,
-                # the duplicate should behave identically.
-                gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
-                gateway_routing_history=copy.deepcopy(getattr(session, "gateway_routing_history", None) or []),
+                # Rebuild model truth from completed semantic display rows. Never copy
+                # a stale compacted context or any in-flight Gateway state.
+                context_messages=copy.deepcopy(copied_context),
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 # Composer draft — preserve per-session draft state.
                 composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
-                # Context engine state — preserve so the duplicate's context engine
-                # starts from the same point as the original.
+                # Preserve the selected engine, but make it rebuild its state from the
+                # completed semantic context in this new session.
                 context_engine=getattr(session, "context_engine", None),
-                context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
                 created_at=time.time(),
                 updated_at=time.time(),
             )
+
+            try:
+                _persist_new_session_truth(copied_session)
+            except Exception:
+                logger.exception(
+                    "failed to persist duplicate truth for %s",
+                    copied_session.session_id,
+                )
+                return bad(handler, "Failed to duplicate session state", 500)
 
             with LOCK:
                 SESSIONS[copied_session.session_id] = copied_session
                 SESSIONS.move_to_end(copied_session.session_id)
                 while len(SESSIONS) > SESSIONS_MAX:
                     SESSIONS.popitem(last=False)
-            # Persist immediately. The pre-PR flow (/api/session/new + /api/session/rename)
-            # accidentally avoided this because `/api/session/rename` calls `s.save()`.
-            # Without this explicit save, the duplicate is in-memory only — if the user
-            # refreshes before sending a turn, the duplicate vanishes.
-            copied_session.save()
             publish_session_list_changed("session_duplicate")
 
             return j(handler, {"session": public_session_projection(
@@ -11797,11 +11930,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
-            s.messages = []
-            s.tool_calls = []
-            s.title = "Untitled"
-            _reset_session_privacy_context(s, "session_clear")
-            s.save()
+            try:
+                def _clear_session():
+                    s.messages = []
+                    s.context_messages = []
+                    s.tool_calls = []
+                    s.title = "Untitled"
+                    s.truncation_watermark = 0.0
+
+                _rewrite_existing_session_truth(
+                    s,
+                    _clear_session,
+                    privacy_reason="session_clear",
+                )
+            except Exception:
+                logger.exception("failed to clear session truth for %s", sid)
+                return bad(handler, "Failed to clear session state", 500)
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
@@ -11824,27 +11968,31 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             old_msg_count = len(s.messages or [])
             old_ctx_count = len(getattr(s, 'context_messages', None) or [])
-            s.messages = s.messages[:keep]
-            # Truncate context_messages in sync with messages so the agent's
-            # model-facing context doesn't retain rows the user removed via
-            # Edit / Regenerate.  Without this, context_messages still contains
-            # the full pre-truncation history and the agent sees "deleted"
-            # turns on the next turn (#2914).
-            if isinstance(getattr(s, 'context_messages', None), list):
-                s.context_messages = s.context_messages[:keep]
-            _reset_session_privacy_context(s, "session_truncate")
             try:
-                from api.session_ops import _truncation_watermark_for
-                s.truncation_watermark = _truncation_watermark_for(s.messages)
+                def _truncate_session():
+                    s.messages = list(s.messages or [])[:keep]
+                    s.tool_calls = []
+                    from api.session_ops import _truncation_watermark_for
+                    s.truncation_watermark = _truncation_watermark_for(s.messages)
+
+                _rewrite_existing_session_truth(
+                    s,
+                    _truncate_session,
+                    privacy_reason="session_truncate",
+                )
             except Exception:
-                s.truncation_watermark = 0.0
-            s.save()
+                logger.exception(
+                    "failed to truncate session truth for %s", body["session_id"]
+                )
+                return bad(handler, "Failed to truncate session state", 500)
             logger.info(
                 "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
                 body["session_id"], old_msg_count, len(s.messages or []),
                 old_ctx_count, len(getattr(s, 'context_messages', None) or []),
                 s.truncation_watermark or 0,
             )
+        from api.config import _evict_session_agent
+        _evict_session_agent(body["session_id"])
         return j(
             handler, {"ok": True, "session": public_session_projection(
                 s.compact() | {"messages": s.messages}
@@ -11906,6 +12054,8 @@ def handle_post(handler, parsed) -> bool:
             forked_messages = source_messages[:keep_count]
         else:
             forked_messages = list(source_messages)
+        forked_messages = copy.deepcopy(forked_messages)
+        forked_context = _completed_semantic_messages(forked_messages)
 
         # Derive title
         if custom_title:
@@ -11921,32 +12071,32 @@ def handle_post(handler, parsed) -> bool:
             model_provider=getattr(source, "model_provider", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
-            messages=forked_messages,
+            messages=copy.deepcopy(forked_messages),
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
-            # context_messages — deep copy so the branch has independent context
-            context_messages=copy.deepcopy(getattr(source, "context_messages", None) or []),
-            # Gateway routing — inherit from source
-            gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
-            # Context engine — inherit state so branch's context engine starts correctly
+            # Rebuild in the same retained-message coordinate space as the UI.
+            # Copying the source's full context leaks rows beyond keep_count.
+            context_messages=copy.deepcopy(forked_context),
+            # Keep the selected engine, but never inherit its in-flight state.
             context_engine=getattr(source, "context_engine", None),
-            context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
             parent_session_id=source.session_id,
             session_source="fork",
         )
+        try:
+            _persist_new_session_truth(branch)
+        except Exception:
+            logger.exception("failed to persist branch truth for %s", branch.session_id)
+            return bad(handler, "Failed to create branch session state", 500)
         with LOCK:
             SESSIONS[branch.session_id] = branch
             SESSIONS.move_to_end(branch.session_id)
             while len(SESSIONS) > SESSIONS_MAX:
                 SESSIONS.popitem(last=False)
 
-        # Persist only if there are messages (matches new_session pattern)
-        if forked_messages:
-            branch.save()
-            publish_session_list_changed("session_branch")
+        publish_session_list_changed("session_branch")
 
         return j(handler, {
             "session_id": branch.session_id,
@@ -16097,7 +16247,9 @@ def _handle_background(handler, body):
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
-def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None) -> None:
+def _checkpoint_user_message_for_eager_session_save(
+    s, msg: str, attachments, started_at: float | None, turn_id: str | None = None
+) -> None:
     """Materialize the current user turn for eager first-turn persistence.
 
     The streaming thread still receives ``pending_user_message`` so existing
@@ -16115,6 +16267,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
+    if turn_id:
+        user_msg["platform_message_id"] = f"webui-turn:{turn_id}"
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = int(started_at)
     if attachments:
@@ -16624,6 +16778,7 @@ def _prepare_chat_start_session_for_stream(
     model: str,
     model_provider,
     stream_id: str,
+    turn_id: str | None = None,
     started_at: float | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
@@ -16654,6 +16809,7 @@ def _prepare_chat_start_session_for_stream(
             persisted_msg,
             attachments,
             s.pending_started_at,
+            turn_id,
         )
     s.save()
 
@@ -16964,6 +17120,8 @@ def _start_chat_stream_for_session(
     attachments = attachments or []
     deterministic_stream_id = str(stream_id or "").strip()
     stream_id = deterministic_stream_id or uuid.uuid4().hex
+    from api.turn_journal import new_turn_id
+    reserved_turn_id = new_turn_id()
     persisted_msg = display_msg if display_msg is not None else msg
     session_lock = _get_session_agent_lock(s.session_id)
     privacy_decision = None
@@ -17013,6 +17171,7 @@ def _start_chat_stream_for_session(
                     model=model,
                     model_provider=model_provider,
                     stream_id=stream_id,
+                    turn_id=reserved_turn_id,
                 )
                 diag.stage("stream_registration") if diag else None
                 stream = create_stream_channel()
@@ -17054,8 +17213,7 @@ def _start_chat_stream_for_session(
                 logger.exception("Failed to roll back unstarted stream claim %s", stream_id)
 
     journal_event = {}
-    from api.turn_journal import new_turn_id
-    reserved_turn_id = new_turn_id()
+    from api.turn_envelope import TurnEnvelope
     try:
         if was_hidden_empty_session:
             publish_session_list_changed("session_new")
@@ -17081,6 +17239,23 @@ def _start_chat_stream_for_session(
             )
         except Exception:
             logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        profile_name = getattr(s, "profile", None)
+        if not profile_name:
+            from api.profiles import get_active_profile_name
+            profile_name = get_active_profile_name() or "default"
+            s.profile = profile_name
+        from api.state_sync import sync_webui_user_turn
+        checkpointed = sync_webui_user_turn(
+            session_id=s.session_id,
+            content=persisted_msg,
+            turn_id=reserved_turn_id,
+            model=model,
+            profile=profile_name,
+        )
+        if checkpointed is not True:
+            raise RuntimeError(
+                f"state.db user checkpoint was not confirmed for {s.session_id}"
+            )
         diag.stage("set_last_workspace") if diag else None
         set_last_workspace(workspace)
         if deterministic_stream_id:
@@ -17106,7 +17281,19 @@ def _start_chat_stream_for_session(
         diag.stage("worker_thread_start") if diag else None
         backend_is_gateway = webui_gateway_chat_enabled(get_config())
         worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-        worker_kwargs = {"model_provider": model_provider, "display_msg": persisted_msg}
+        turn_envelope = TurnEnvelope.create(
+            turn_id=reserved_turn_id,
+            session_id=s.session_id,
+            submitted_at=s.pending_started_at or time.time(),
+            display_user_message=persisted_msg,
+            model_messages=[{"role": "user", "content": msg}],
+            attachments=attachments,
+        )
+        worker_kwargs = {
+            "model_provider": model_provider,
+            "display_msg": persisted_msg,
+            "turn_envelope": turn_envelope,
+        }
         if backend_is_gateway:
             worker_kwargs["turn_id"] = reserved_turn_id
         if not backend_is_gateway:
@@ -17125,6 +17312,20 @@ def _start_chat_stream_for_session(
             _commit_session_brand_privacy_decision(s, privacy_decision)
             s.save()
     except BaseException:
+        try:
+            from api.turn_journal import append_turn_journal_event
+            append_turn_journal_event(
+                s.session_id,
+                {
+                    "event": "interrupted",
+                    "stream_id": stream_id,
+                    "turn_id": reserved_turn_id,
+                    "created_at": time.time(),
+                    "reason": "worker_start_failed",
+                },
+            )
+        except Exception:
+            logger.warning("Failed to mark unstarted WebUI turn interrupted", exc_info=True)
         _rollback_unstarted_stream_claim()
         raise
     response = {
@@ -21007,20 +21208,28 @@ def _handle_session_import(handler, body):
     except (TypeError, ValueError) as e:
         return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name() or "default"
     s = Session(
         title=title,
         workspace=workspace,
         model=model,
-        messages=messages,
+        profile=active_profile,
+        messages=copy.deepcopy(messages),
         tool_calls=body.get("tool_calls", []),
+        context_messages=_completed_semantic_messages(messages),
     )
     s.pinned = body.get("pinned", False)
+    try:
+        _persist_new_session_truth(s)
+    except Exception:
+        logger.exception("failed to persist imported session truth for %s", s.session_id)
+        return bad(handler, "Failed to import session state", 500)
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
-    s.save()
     publish_session_list_changed("session_import")
     public_session = public_session_projection(
         redact_session_data(s.compact() | {"messages": s.messages, "tool_calls": s.tool_calls})

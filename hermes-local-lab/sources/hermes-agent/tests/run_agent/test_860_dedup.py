@@ -101,6 +101,77 @@ class TestFlushDeduplication:
             rows = db.get_messages(agent.session_id)
             assert len(rows) == 3, f"Expected 3 total messages, got {len(rows)}"
 
+    def test_flush_skips_pre_persisted_webui_user_but_keeps_assistant(self):
+        """A crash-safe WebUI user checkpoint must not suppress later output."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            agent = self._make_agent(db)
+            platform_id = "webui-turn:turn-123"
+            db.append_message(
+                session_id=agent.session_id,
+                role="user",
+                content="question",
+                platform_message_id=platform_id,
+            )
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": "question",
+                    "platform_message_id": platform_id,
+                },
+                {"role": "assistant", "content": "answer"},
+            ]
+            agent._flush_messages_to_session_db(messages, [])
+
+            rows = db.get_messages(agent.session_id)
+            assert [(row["role"], row["content"]) for row in rows] == [
+                ("user", "question"),
+                ("assistant", "answer"),
+            ]
+            assert db.get_session(agent.session_id)["message_count"] == 2
+
+    def test_fresh_agent_after_four_to_two_rewrite_flushes_next_turn(self):
+        """A rewritten transcript needs a fresh flush cursor for its next pair."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            first_agent = self._make_agent(db)
+            original = [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+            first_agent._flush_messages_to_session_db(original, [])
+            assert len(db.get_messages(first_agent.session_id)) == 4
+
+            retained = original[:2]
+            db.replace_messages(first_agent.session_id, retained)
+
+            fresh_agent = self._make_agent(db)
+            next_turn = retained + [
+                {
+                    "role": "user",
+                    "content": "q3",
+                    "platform_message_id": "webui-turn:q3",
+                },
+                {"role": "assistant", "content": "a3"},
+            ]
+            fresh_agent._flush_messages_to_session_db(next_turn, retained)
+
+            rows = db.get_messages(first_agent.session_id)
+            assert [(row["role"], row["content"]) for row in rows] == [
+                ("user", "q1"),
+                ("assistant", "a1"),
+                ("user", "q3"),
+                ("assistant", "a3"),
+            ]
+            assert db.get_session(first_agent.session_id)["message_count"] == 4
+
     def test_persist_session_multiple_calls_no_duplication(self):
         """Multiple _persist_session calls don't duplicate DB entries."""
         from hermes_state import SessionDB

@@ -102,6 +102,45 @@ def auth_adapter():
 
 class TestStartRun:
     @pytest.mark.asyncio
+    async def test_start_preserves_tool_history_and_webui_turn_identity(self, adapter):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+                history = [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+                    },
+                    {"role": "tool", "tool_call_id": "call-1", "content": "42"},
+                ]
+
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": [{"role": "user", "content": "follow up"}],
+                        "conversation_history": history,
+                        "platform_message_id": "webui-turn:turn-123",
+                        "session_id": "session-phase2",
+                    },
+                )
+                assert resp.status == 202, await resp.text()
+                for _ in range(20):
+                    if mock_agent.run_conversation.called:
+                        break
+                    await asyncio.sleep(0.05)
+
+                kwargs = mock_agent.run_conversation.call_args.kwargs
+                assert kwargs["conversation_history"] == history
+                assert kwargs["persist_user_platform_message_id"] == "webui-turn:turn-123"
+
+    @pytest.mark.asyncio
     async def test_start_accepts_bare_multimodal_content_parts(self, adapter):
         image_input = [
             {"type": "input_text", "text": "Describe this image."},

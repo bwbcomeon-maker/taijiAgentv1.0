@@ -47,7 +47,7 @@ def test_default_model_updates_hermes_config():
     """
     try:
         d, status = post("/api/default-model", {"model": "anthropic/claude-sonnet-4.6"})
-        assert status == 200
+        assert status == 200, d
         # Lightweight ack — no longer the full catalog
         assert d.get("ok") is True, f"expected ok=True, got {d}"
         assert 'claude-sonnet-4.6' in d.get("model", ""), (

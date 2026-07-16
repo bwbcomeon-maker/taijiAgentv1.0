@@ -6,6 +6,7 @@ Behavior parity reference: gateway/run.py:_handle_*_command in
 the hermes-agent repo.
 """
 from __future__ import annotations
+import copy
 import logging
 from typing import Any
 
@@ -13,6 +14,41 @@ from api.config import LOCK, _get_session_agent_lock
 from api.models import get_session, SESSIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _persist_rewritten_session_truth(session, snapshot: dict) -> None:
+    """Save a retry/undo rewrite and keep state.db in the same prefix."""
+    from api.state_sync import (
+        replace_webui_session_messages,
+        semantic_messages_for_state,
+    )
+
+    semantic_messages = semantic_messages_for_state(session.messages)
+    session.save()
+    try:
+        replaced = replace_webui_session_messages(
+            session_id=session.session_id,
+            messages=semantic_messages,
+            model=getattr(session, "model", None),
+            profile=getattr(session, "profile", None),
+        )
+        if replaced is not True:
+            raise RuntimeError(
+                f"state.db transcript rewrite was not confirmed for {session.session_id}"
+            )
+    except Exception:
+        session.messages = snapshot["messages"]
+        session.context_messages = snapshot["context_messages"]
+        session.truncation_watermark = snapshot["truncation_watermark"]
+        try:
+            session.save()
+        except Exception:
+            logger.critical(
+                "failed to restore session %s after retry/undo state.db failure",
+                session.session_id,
+                exc_info=True,
+            )
+        raise
 
 
 def _truncate_at_last_user(messages):
@@ -73,6 +109,11 @@ def retry_last(session_id: str) -> dict[str, Any]:
         s = get_session(session_id)  # raises KeyError if missing
         with LOCK:
             s = SESSIONS.get(session_id, s)
+            snapshot = {
+                "messages": copy.deepcopy(s.messages),
+                "context_messages": copy.deepcopy(getattr(s, "context_messages", None) or []),
+                "truncation_watermark": getattr(s, "truncation_watermark", None),
+            }
             history = s.messages or []
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
@@ -90,7 +131,9 @@ def retry_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
-        s.save()
+        _persist_rewritten_session_truth(s, snapshot)
+    from api.config import _evict_session_agent
+    _evict_session_agent(session_id)
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
@@ -113,6 +156,11 @@ def undo_last(session_id: str) -> dict[str, Any]:
         with LOCK:
             # Stale-object guard — see retry_last for the rationale.
             s = SESSIONS.get(session_id, s)
+            snapshot = {
+                "messages": copy.deepcopy(s.messages),
+                "context_messages": copy.deepcopy(getattr(s, "context_messages", None) or []),
+                "truncation_watermark": getattr(s, "truncation_watermark", None),
+            }
             history = s.messages or []
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
@@ -130,7 +178,9 @@ def undo_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
-        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+        _persist_rewritten_session_truth(s, snapshot)
+    from api.config import _evict_session_agent
+    _evict_session_agent(session_id)
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,

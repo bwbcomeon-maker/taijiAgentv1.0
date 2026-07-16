@@ -21,7 +21,31 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _get_state_db(profile: Optional[str] = None):
+def semantic_messages_for_state(messages) -> list[dict]:
+    """Return completed user/assistant/tool rows using canonical validation."""
+    import copy
+    from api.streaming import _api_safe_message_positions
+
+    source = list(messages or [])
+    completed = []
+    for source_index, safe_message in _api_safe_message_positions(source):
+        if safe_message.get("role") not in {"user", "assistant", "tool"}:
+            continue
+        projected = copy.deepcopy(safe_message)
+        original = source[source_index]
+        platform_message_id = original.get("platform_message_id") or original.get("message_id")
+        if platform_message_id:
+            projected["platform_message_id"] = platform_message_id
+        completed.append(projected)
+    return completed
+
+
+def _get_state_db(
+    profile: Optional[str] = None,
+    *,
+    strict: bool = False,
+    create_if_missing: bool = False,
+):
     """Get a SessionDB instance for a profile's state.db.
 
     When ``profile`` is provided the function resolves *that* profile's
@@ -40,15 +64,13 @@ def _get_state_db(profile: Optional[str] = None):
     ``sync_session_usage`` after a stream completes on a background
     thread) should pass it explicitly to avoid that race.
 
-    Returns None if hermes_state is not importable, the explicit
-    profile cannot be resolved, or the DB is unavailable. Each caller
-    is responsible for calling db.close() when done.
+    In the default best-effort mode, returns ``None`` if hermes_state is not
+    importable, the explicit profile cannot be resolved, or the DB is
+    unavailable.  ``strict=True`` surfaces those conditions as RuntimeError;
+    ``create_if_missing=True`` lets SessionDB initialize a first-install
+    profile through its normal schema path.  Each successful caller is
+    responsible for calling ``db.close()`` when done.
     """
-    try:
-        from hermes_state import SessionDB
-    except ImportError:
-        return None
-
     if profile is not None:
         # Explicit-profile path — a resolution failure here MUST NOT
         # silently fall back to HERMES_HOME or the caller's "write to
@@ -76,9 +98,15 @@ def _get_state_db(profile: Optional[str] = None):
                     "write rather than leaking to the default state.db (#2762).",
                     profile,
                 )
+                if strict:
+                    raise RuntimeError(f"invalid state.db profile {profile!r}")
                 return None
             hermes_home = Path(_resolve_profile_home_for_name(profile)).expanduser().resolve()
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(
+                    f"could not resolve state.db profile {profile!r}"
+                ) from exc
             logger.warning(
                 "state_sync: could not resolve profile %r — skipping write rather "
                 "than leaking to the active profile (#2762).", profile,
@@ -96,11 +124,31 @@ def _get_state_db(profile: Optional[str] = None):
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
+        if not create_if_missing:
+            if strict:
+                raise RuntimeError(f"state.db does not exist at {db_path}")
+            return None
+        try:
+            hermes_home.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(
+                    f"failed to create state.db home at {hermes_home}"
+                ) from exc
+            return None
+
+    try:
+        from hermes_state import SessionDB
+    except ImportError as exc:
+        if strict:
+            raise RuntimeError("state.db support is unavailable") from exc
         return None
 
     try:
         return SessionDB(db_path)
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"failed to open existing state.db at {db_path}") from exc
         logger.debug("Failed to open state.db")
         return None
 
@@ -130,6 +178,81 @@ def sync_session_start(session_id: str, model=None, profile: Optional[str] = Non
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+def sync_webui_user_turn(
+    *,
+    session_id: str,
+    content,
+    turn_id: str,
+    model=None,
+    profile: Optional[str] = None,
+) -> bool:
+    """Durably checkpoint one accepted WebUI user turn before its worker runs."""
+    db = _get_state_db(
+        profile=profile,
+        strict=True,
+        create_if_missing=True,
+    )
+    if not db:
+        raise RuntimeError(f"state.db unavailable for WebUI session {session_id}")
+    try:
+        db.ensure_session(session_id=session_id, source="webui", model=model)
+        db.append_message(
+            session_id=session_id,
+            role="user",
+            content=content,
+            platform_message_id=f"webui-turn:{turn_id}",
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"failed to checkpoint WebUI user turn {turn_id}"
+        ) from exc
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close state.db")
+
+
+def replace_webui_session_messages(
+    *,
+    session_id: str,
+    messages,
+    model=None,
+    profile: Optional[str] = None,
+) -> bool:
+    """Atomically replace the semantic transcript in the profile state.db.
+
+    A first-install profile gets its database through SessionDB's normal schema
+    creation path. Resolution, creation, open, or replacement failures are
+    surfaced so lifecycle endpoints cannot report success with stale history.
+    """
+    db = _get_state_db(
+        profile=profile,
+        strict=True,
+        create_if_missing=True,
+    )
+    if not db:
+        raise RuntimeError(f"state.db unavailable for session {session_id}")
+    try:
+        db.replace_messages(
+            session_id,
+            list(messages or []),
+            ensure_source="webui",
+            ensure_model=model,
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"failed to replace state.db transcript for session {session_id}"
+        ) from exc
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.warning("Failed to close state.db after transcript replacement")
 
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,

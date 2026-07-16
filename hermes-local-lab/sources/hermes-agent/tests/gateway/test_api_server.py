@@ -921,6 +921,37 @@ class TestToolsetsEndpoint:
 
 class TestChatCompletionsEndpoint:
     @pytest.mark.asyncio
+    async def test_preserves_tool_history_and_webui_turn_identity(self, adapter):
+        app = _create_app(adapter)
+        history = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "42"},
+        ]
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as run_agent:
+                run_agent.return_value = (
+                    {"final_response": "done", "messages": history + [{"role": "user", "content": "follow up"}, {"role": "assistant", "content": "done"}]},
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [*history, {"role": "user", "content": "follow up"}],
+                        "platform_message_id": "webui-turn:turn-123",
+                    },
+                )
+                assert resp.status == 200, await resp.text()
+
+                kwargs = run_agent.call_args.kwargs
+                assert kwargs["conversation_history"] == history
+                assert kwargs["persist_user_platform_message_id"] == "webui-turn:turn-123"
+
+    @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:

@@ -4,9 +4,9 @@ Verifies that critical Session fields are copied when duplicating or
 branching a session, preventing data loss scenarios like:
   - truncation_watermark not carried → merge with state.db drops messages
   - context_messages not carried → agent sees different context
-  - gateway_routing not carried → routing customization lost
+  - gateway_routing carried → an obsolete run leaks into the duplicate
   - enabled_toolsets not carried → toolset override lost
-  - context_engine_state not carried → context engine state lost
+  - context_engine_state carried → in-flight context work leaks into the duplicate
 
 These are static-analysis tests (source inspection) matching the
 conventions of the existing test suite.
@@ -84,24 +84,20 @@ def test_duplicate_copies_context_messages():
         "context_messages must be deepcopied (mutable list)"
 
 
-def test_duplicate_copies_gateway_routing():
-    """gateway_routing customization must survive duplication."""
+def test_duplicate_resets_gateway_routing():
+    """Gateway routing is run state and must not survive duplication."""
     block, _ = _extract_duplicate_block()
     ctor = _find_session_ctor(block)
-    assert _has_field(ctor, 'gateway_routing'), \
-        "Duplicate must copy gateway_routing"
-    assert _has_deepcopy_for(ctor, 'gateway_routing'), \
-        "gateway_routing must be deepcopied (mutable dict)"
+    assert not _has_field(ctor, 'gateway_routing'), \
+        "Duplicate must rebuild routing rather than copy source run state"
 
 
-def test_duplicate_copies_gateway_routing_history():
-    """gateway_routing_history must survive duplication."""
+def test_duplicate_resets_gateway_routing_history():
+    """Gateway routing history is run state and must not survive duplication."""
     block, _ = _extract_duplicate_block()
     ctor = _find_session_ctor(block)
-    assert _has_field(ctor, 'gateway_routing_history'), \
-        "Duplicate must copy gateway_routing_history"
-    assert _has_deepcopy_for(ctor, 'gateway_routing_history'), \
-        "gateway_routing_history must be deepcopied (mutable list)"
+    assert not _has_field(ctor, 'gateway_routing_history'), \
+        "Duplicate must not copy source routing history"
 
 
 def test_duplicate_copies_cache_tokens():
@@ -141,15 +137,13 @@ def test_duplicate_copies_composer_draft():
 
 
 def test_duplicate_copies_context_engine():
-    """Context engine must be preserved so duplicate's context engine starts correctly."""
+    """Keep the engine selection, but rebuild its state for the duplicate."""
     block, _ = _extract_duplicate_block()
     ctor = _find_session_ctor(block)
     assert _has_field(ctor, 'context_engine'), \
         "Duplicate must copy context_engine"
-    assert _has_field(ctor, 'context_engine_state'), \
-        "Duplicate must copy context_engine_state"
-    assert _has_deepcopy_for(ctor, 'context_engine_state'), \
-        "context_engine_state must be deepcopied (mutable dict)"
+    assert not _has_field(ctor, 'context_engine_state'), \
+        "Duplicate must not copy source context_engine_state"
 
 
 def test_duplicate_copies_model_provider():
@@ -234,8 +228,13 @@ def test_duplicate_deepcopies_messages():
     """messages must be deepcopied to prevent shared list mutation."""
     block, _ = _extract_duplicate_block()
     ctor = _find_session_ctor(block)
-    assert _has_deepcopy_for(ctor, 'messages'), \
-        "messages must be deepcopied (mutable list of dicts)"
+    assert (
+        _has_deepcopy_for(ctor, 'messages')
+        or (
+            'messages=copied_messages' in ctor
+            and 'copied_messages = copy.deepcopy(session.messages)' in block
+        )
+    ), "messages must be deepcopied (mutable list of dicts)"
 
 
 def test_duplicate_deepcopies_tool_calls():
@@ -361,14 +360,14 @@ def test_branch_copies_context_messages():
         "context_messages must be deepcopied in branch"
 
 
-def test_branch_copies_gateway_routing():
-    """Branch must inherit gateway_routing from source."""
+def test_branch_does_not_copy_gateway_routing_runtime():
+    """A branch must not inherit the source run's routing lifecycle state."""
     block, _ = _extract_branch_block()
     ctor = _find_session_ctor(block, 'branch')
-    assert _has_field(ctor, 'gateway_routing'), \
-        "Branch must copy gateway_routing"
-    assert _has_deepcopy_for(ctor, 'gateway_routing'), \
-        "gateway_routing must be deepcopied in branch"
+    assert not _has_field(ctor, 'gateway_routing'), \
+        "Branch must reset gateway_routing"
+    assert not _has_field(ctor, 'gateway_routing_history'), \
+        "Branch must reset gateway_routing_history"
 
 
 def test_branch_copies_context_length():
@@ -387,16 +386,14 @@ def test_branch_copies_threshold_tokens():
         "Branch must copy threshold_tokens"
 
 
-def test_branch_copies_context_engine():
-    """Branch must inherit context_engine state from source."""
+def test_branch_copies_context_engine_selection_but_resets_runtime_state():
+    """The engine selection is configuration; its in-flight state is not."""
     block, _ = _extract_branch_block()
     ctor = _find_session_ctor(block, 'branch')
     assert _has_field(ctor, 'context_engine'), \
         "Branch must copy context_engine"
-    assert _has_field(ctor, 'context_engine_state'), \
-        "Branch must copy context_engine_state"
-    assert _has_deepcopy_for(ctor, 'context_engine_state'), \
-        "context_engine_state must be deepcopied in branch"
+    assert not _has_field(ctor, 'context_engine_state'), \
+        "Branch must reset context_engine_state"
 
 
 # ── Branch: intentionally NOT copied ────────────────────────────────────────

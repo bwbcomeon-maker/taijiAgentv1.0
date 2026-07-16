@@ -4190,7 +4190,10 @@ def reconciled_state_db_messages_for_session(
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
-        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+        state_messages = get_state_db_session_messages(
+            getattr(session, 'session_id', None),
+            profile=getattr(session, 'profile', None) or None,
+        )
     if prefer_context and local_messages:
         state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(

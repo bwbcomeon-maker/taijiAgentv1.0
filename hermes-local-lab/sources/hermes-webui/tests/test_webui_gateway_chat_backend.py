@@ -361,6 +361,25 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     channel = create_stream_channel()
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
+    from api.turn_envelope import TurnEnvelope
+
+    placeholder_envelope = TurnEnvelope.create(
+        turn_id="turn-gateway-test",
+        session_id=s.session_id,
+        submitted_at=s.pending_started_at,
+        display_user_message="Say hello",
+        model_messages=[{"role": "user", "content": "placeholder only"}],
+        attachments=[],
+    )
+    effective_envelopes = []
+    original_with_model_messages = TurnEnvelope.with_model_messages
+
+    def capture_effective(self, messages):
+        effective = original_with_model_messages(self, messages)
+        effective_envelopes.append(effective)
+        return effective
+
+    monkeypatch.setattr(TurnEnvelope, "with_model_messages", capture_effective)
 
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
@@ -369,6 +388,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         str(tmp_path),
         stream_id,
         [],
+        turn_envelope=placeholder_envelope,
     )
 
     saved = models.get_session(s.session_id)
@@ -388,6 +408,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
+    assert payload["messages"] == list(effective_envelopes[-1].model_messages)
+    assert "placeholder only" not in str(payload["messages"])
     expected_system_prompt = f"{gateway_chat.BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{streaming._WEBUI_PROGRESS_PROMPT}"
     assert [m["content"] for m in payload["messages"]] == [
         expected_system_prompt,

@@ -553,6 +553,7 @@ def test_concurrent_deterministic_legacy_starts_have_one_stream_owner(monkeypatc
         active_stream_id=None,
         pending_user_message=None,
         pending_started_at=None,
+        save=lambda **_kwargs: None,
     )
     session_lock = threading.Lock()
     callers_ready = threading.Barrier(2)
