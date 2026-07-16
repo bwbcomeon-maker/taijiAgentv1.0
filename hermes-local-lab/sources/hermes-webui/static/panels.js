@@ -3521,9 +3521,13 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   `;
 }
 
+function _clearConversationConfirmMessage() {
+  return `${t('clear_conversation_message')}\n\n${t('clear_conversation_artifact_retention')}`;
+}
+
 async function clearConversation() {
   if(!S.session) return;
-  const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
+  const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:_clearConversationConfirmMessage(),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
   try {
     const data = await api('/api/session/clear', {method:'POST',

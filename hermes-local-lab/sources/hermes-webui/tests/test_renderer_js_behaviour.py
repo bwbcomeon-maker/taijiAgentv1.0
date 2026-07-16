@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,10 @@ const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+const _PDF_EXTS=/\.pdf$/i;
+const _HTML_EXTS=/\.(html?|htm)$/i;
+const _CSV_EXTS=/\.csv$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
@@ -201,6 +206,27 @@ class TestRendererSanitization:
         assert '<img' in out and 'msg-media-img' in out
         assert 'onclick' not in out
         assert '_openimglightbox' not in out
+
+    def test_media_token_inside_fenced_or_inline_code_stays_literal(self, driver_path):
+        fenced = _render(driver_path, "```text\nMEDIA:/tmp/private image.png\n```")
+        inline = _render(driver_path, "Use `MEDIA:/tmp/private.png` literally")
+        assert "api/media?path=" not in fenced
+        assert "api/media?path=" not in inline
+        assert "MEDIA:/tmp/private image.png" in fenced
+        assert "MEDIA:/tmp/private.png" in inline
+
+    @pytest.mark.parametrize(
+        "token, expected_path",
+        [
+            ('MEDIA:"/tmp/generated image.png"', "/tmp/generated image.png"),
+            ("MEDIA:'/tmp/生成 图片.png'", "/tmp/生成 图片.png"),
+        ],
+    )
+    def test_quoted_media_token_preserves_spaces_without_quotes(self, driver_path, token, expected_path):
+        out = _render(driver_path, token)
+        assert "msg-artifact-image" in out
+        assert urllib.parse.quote(expected_path, safe="") in out
+        assert "&quot;" not in out
 
     def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(self, driver_path):
         out = _render(driver_path, '<img src=x onerror=alert(1)//').lower()

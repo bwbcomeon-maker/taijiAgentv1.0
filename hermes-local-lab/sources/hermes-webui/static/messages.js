@@ -670,6 +670,9 @@ async function send(){
     if(typeof showToast==='function') showToast('只读导入会话不能修改。',3000);
     return;
   }
+  if(typeof _discardTransientImageTerminalMessages==='function'){
+    S.messages=_discardTransientImageTerminalMessages(S.messages||[]);
+  }
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -2556,6 +2559,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
+      const _imageTerminalEvents=typeof _finalizeLiveImageGenerationStates==='function'?_finalizeLiveImageGenerationStates('failed','生成进程被服务错误中断。'):[];
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2605,6 +2609,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
+        }
+        if(!isRecoveryControlMessage&&typeof _attachImageGenerationTerminalEventsToCurrentTurn==='function'){
+          _attachImageGenerationTerminalEventsToCurrentTurn(S.messages||[],_imageTerminalEvents);
         }
         _attachFallbackTurnDuration(S.messages,_errorTurnStartedAt);
         if(isRecoveryControlMessage){
@@ -2692,6 +2699,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('cancel',e=>{
+      const _imageTerminalEvents=typeof _finalizeLiveImageGenerationStates==='function'?_finalizeLiveImageGenerationStates('cancelled','用户已取消本次生成。'):[];
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2717,6 +2725,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.session=(typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session);
             const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+            if(typeof _attachImageGenerationTerminalEventsToCurrentTurn==='function'){
+              _attachImageGenerationTerminalEventsToCurrentTurn(S.messages||[],_imageTerminalEvents);
+            }
             _attachFallbackTurnDuration(S.messages,_cancelTurnStartedAt);
             clearLiveToolCards();if(!assistantText)removeThinking();
             _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
@@ -2729,6 +2740,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             clearLiveToolCards();if(!assistantText)removeThinking();
             const cancelAgentName=(assistantDisplayName()+'').trim()||'taiji Agent';
             S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});
+            if(typeof _attachImageGenerationTerminalEventsToCurrentTurn==='function') _attachImageGenerationTerminalEventsToCurrentTurn(S.messages||[],_imageTerminalEvents);
             _attachFallbackTurnDuration(S.messages,_cancelTurnStartedAt);
             renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
@@ -2762,7 +2774,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','image_generation_events'];
   function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
@@ -2853,6 +2865,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
+    const _imageTerminalEvents=typeof _finalizeLiveImageGenerationStates==='function'?_finalizeLiveImageGenerationStates('timeout','浏览器与生成服务的连接已超时。'):[];
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -2867,7 +2880,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      S.messages.push({role:'assistant',content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.'});renderMessages({preserveScroll:true});
+      const _terminalAssistant={role:'assistant',content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.'};
+      S.messages.push(_terminalAssistant);
+      if(typeof _attachImageGenerationTerminalEventsToCurrentTurn==='function') _attachImageGenerationTerminalEventsToCurrentTurn(S.messages||[],_imageTerminalEvents);
+      renderMessages({preserveScroll:true});
       _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){

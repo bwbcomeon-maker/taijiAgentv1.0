@@ -93,11 +93,11 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("\\x00D", UI_JS,
                       "MEDIA stash must use null-byte token (\\x00D) to avoid conflicts")
 
-    def test_media_stash_runs_before_fence_stash(self):
+    def test_media_stash_runs_after_fence_stash(self):
         media_pos = UI_JS.find("media_stash")
         fence_pos = UI_JS.find("fence_stash")
-        self.assertGreater(fence_pos, media_pos,
-                           "media_stash must be defined before fence_stash in renderMd()")
+        self.assertGreater(media_pos, fence_pos,
+                           "fence_stash must protect code blocks before legacy MEDIA parsing in renderMd()")
 
     def test_image_extension_regex_covers_common_types(self):
         # The JS source has these extensions in a regex like /\.png|jpg|.../i

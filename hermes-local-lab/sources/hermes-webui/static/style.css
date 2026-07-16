@@ -2099,6 +2099,8 @@
      its .msg-media-img lightbox-on-click behavior; no permanent card chrome —
      matches the ChatGPT/Claude/Gemini pattern of letting the image be the hero. */
   .msg-artifact-image{position:relative;display:inline-block;width:fit-content;max-width:min(360px,100%);vertical-align:bottom;margin:6px 4px 6px 0;line-height:0;}
+  .msg-artifact-image[data-state="loading"]{width:min(360px,100%);height:140px;}
+  .msg-artifact-image[data-state="loading"] .chat-artifact-image{position:absolute;inset:0;opacity:0;}
   /* Generated images are the subject of the message, not a small attachment
      thumbnail — render them prominently at natural aspect ratio (the base
      .msg-media-img is a cropped 120x90 upload thumbnail). Capped + responsive so
@@ -2110,6 +2112,33 @@
   .msg-artifact-download:hover{background:rgba(0,0,0,.82);border-color:rgba(255,255,255,.4);}
   .msg-artifact-download:focus-visible{opacity:1;pointer-events:auto;outline:2px solid var(--accent-bg-strong);outline-offset:1px;}
   @media (hover:none){.msg-artifact-download{opacity:1;pointer-events:auto;transform:none;}}
+  .message-artifacts{display:flex;flex-direction:column;align-items:flex-start;gap:10px;max-width:100%;margin:8px 0;}
+  .chat-artifact-card{display:flex;flex-direction:column;align-items:flex-start;gap:7px;max-width:100%;color:var(--text);}
+  .chat-artifact-loading{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;min-height:140px;border-radius:8px;background:linear-gradient(100deg,var(--surface-subtle) 25%,var(--hover-bg) 45%,var(--surface-subtle) 65%);background-size:240% 100%;color:var(--muted);font-size:12px;line-height:1.4;animation:artifact-loading 1.35s ease-in-out infinite;}
+  .msg-artifact-image[data-state="ready"] .chat-artifact-loading,.chat-artifact-loading[hidden]{display:none;}
+  .chat-artifact-error,.chat-artifact-unavailable{width:min(440px,100%);padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle);line-height:1.45;}
+  .chat-artifact-error strong,.chat-artifact-unavailable strong{font-size:13px;color:var(--text);}
+  .chat-artifact-error span,.chat-artifact-unavailable span{font-size:12px;color:var(--muted);}
+  .chat-artifact-retry{min-height:44px;padding:7px 14px;border:1px solid var(--accent-bg-strong);border-radius:8px;background:var(--accent-bg);color:var(--accent-text);font-weight:600;cursor:pointer;}
+  .chat-artifact-retry:hover{background:var(--accent-bg-strong);}
+  .chat-artifact-retry:focus-visible,.chat-artifact-image:focus-visible{outline:2px solid var(--accent);outline-offset:3px;}
+  .image-generation-state{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:center;gap:9px;width:min(440px,100%);padding:10px 12px;margin:5px 0;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle);}
+  .image-generation-state-icon{width:10px;height:10px;border:2px solid var(--accent-bg-strong);border-top-color:var(--accent);border-radius:50%;animation:artifact-spin .8s linear infinite;}
+  .image-generation-state:not(.is-loading):not(.is-saving) .image-generation-state-icon{border:0;background:currentColor;animation:none;}
+  .image-generation-state-copy{display:flex;flex-direction:column;gap:2px;min-width:0;line-height:1.35;}
+  .image-generation-state-copy strong{font-size:13px;}
+  .image-generation-state-copy small{font-size:11px;color:var(--muted);overflow-wrap:anywhere;}
+  @keyframes artifact-spin{to{transform:rotate(360deg)}}
+  @keyframes artifact-loading{0%{background-position:100% 0}100%{background-position:-100% 0}}
+  @media(max-width:640px){
+    .message-artifacts,.chat-artifact-card,.image-generation-state{width:100%;max-width:100%;}
+    .msg-artifact-image,.msg-artifact-image .msg-media-img{width:100%;max-width:100%;}
+    .image-generation-state{grid-template-columns:18px minmax(0,1fr);}
+    .image-generation-state .chat-artifact-retry{grid-column:1 / -1;width:100%;}
+    .msg-artifact-download{width:44px;height:44px;opacity:1;pointer-events:auto;transform:none;}
+    .img-lightbox-close{width:44px;height:44px;}
+  }
+  @media(prefers-reduced-motion:reduce){.chat-artifact-loading,.image-generation-state-icon,.img-lightbox{animation:none!important;transition:none!important;}}
 
   /* ── Inline SVG rendering ── */
   .msg-media-svg{display:block;max-width:100%;height:auto;border-radius:6px;margin:6px 0;border:1px solid var(--border);background:var(--surface);}

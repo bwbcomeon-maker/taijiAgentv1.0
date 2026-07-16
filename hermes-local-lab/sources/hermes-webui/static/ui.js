@@ -3697,12 +3697,14 @@ let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
+let _visWithIdxCacheSignature='';
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
   _clearRenderCache();
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
+  _visWithIdxCacheSignature='';
 }
 
 // ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
@@ -3981,20 +3983,22 @@ function _openImgLightbox(imgEl) {
       }
     }
   }
-  _openImgLightboxWithNav(src, alt, allImages, startIndex);
+  _openImgLightboxWithNav(src, alt, allImages, startIndex, imgEl);
 }
-function _openImgLightboxWithNav(src, alt, images, index) {
+function _openImgLightboxWithNav(src, alt, images, index, returnFocus) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-modal', 'true');
   lb.setAttribute('aria-label', alt || 'Image');
+  lb._returnFocus=returnFocus||document.activeElement||null;
   const img = document.createElement('img');
   img.src = src;
   img.alt = alt || '';
   img.onclick = e => e.stopPropagation();
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
-  cls.setAttribute('aria-label', 'Close');
+  cls.setAttribute('aria-label', '关闭图片查看器');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
   lb.appendChild(img);
@@ -4025,13 +4029,23 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   document.body.appendChild(lb);
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
-    if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    if(e.key==='Escape'){ e.preventDefault(); _closeImgLightbox(lb); return; }
+    if(e.key==='Tab'){
+      const focusable=Array.from(lb.querySelectorAll('button:not([disabled]),a[href]'));
+      if(focusable.length){
+        const current=focusable.indexOf(document.activeElement);
+        const next=e.shiftKey?(current<=0?focusable.length-1:current-1):(current===focusable.length-1?0:current+1);
+        e.preventDefault();focusable[next].focus();
+      }
+      return;
+    }
     if(lb._navImages){
       if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
       if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
     }
   };
   document.addEventListener('keydown', lb._keyHandler);
+  cls.focus();
 }
 function _navigateLightbox(lb, direction) {
   const images = lb._navImages;
@@ -4051,9 +4065,69 @@ function _navigateLightbox(lb, direction) {
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  const returnFocus=lb._returnFocus;
+  const remove=()=>{
+    if(lb.parentNode)lb.parentNode.removeChild(lb);
+    if(returnFocus&&typeof returnFocus.focus==='function')returnFocus.focus();
+  };
+  const reduceMotion=!!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  if(reduceMotion){remove();return;}
   lb.style.animation = 'lb-in .12s ease reverse';
-  setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
+  setTimeout(remove,120);
 }
+
+function _handleMessageImageKeydown(e){
+  if(!e||!['Enter',' '].includes(e.key))return;
+  const target=e.target;
+  const image=target&&target.closest?target.closest('.msg-media-img[role="button"]'):null;
+  const direct=!image&&target&&target.tagName==='IMG'&&String(target.className||'').includes('msg-media-img')?target:image;
+  if(!direct)return;
+  e.preventDefault();
+  _openImgLightbox(direct);
+}
+document.addEventListener('keydown',_handleMessageImageKeydown);
+
+function _settleLoadedArtifactLayout(wrap,status){
+  if(!wrap)return;
+  const pane=$('messages');
+  const shouldCompensate=!!(pane&&(_messageUserUnpinned||!_scrollPinned));
+  const before=wrap.getBoundingClientRect();
+  const paneRect=shouldCompensate?pane.getBoundingClientRect():null;
+  wrap.dataset.state='ready';
+  if(status)status.hidden=true;
+  if(!shouldCompensate||!paneRect||before.bottom>paneRect.top+1)return;
+  const after=wrap.getBoundingClientRect();
+  const growth=after.height-before.height;
+  if(Math.abs(growth)<0.5)return;
+  pane.scrollTop+=growth;
+  _lastScrollTop=pane.scrollTop;
+}
+function _handleChatArtifactImageLoad(e){
+  const img=e&&e.target;
+  if(!img||!img.classList||!img.classList.contains('chat-artifact-image'))return;
+  const wrap=img.closest('.msg-artifact-image');
+  if(wrap){
+    const status=wrap.querySelector('.chat-artifact-loading');
+    _settleLoadedArtifactLayout(wrap,status);
+  }
+  // Late image dimensions may grow the transcript. Follow only when the user
+  // is still pinned; a manual upward scroll is never overridden.
+  if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollIfPinned==='function')scrollIfPinned();
+}
+function _handleChatArtifactImageError(e){
+  const img=e&&e.target;
+  if(!img||!img.classList||!img.classList.contains('chat-artifact-image'))return;
+  const card=img.closest('.chat-artifact-card');
+  if(!card)return;
+  card.classList.add('chat-artifact-unavailable');
+  card.setAttribute('role','status');
+  const title=document.createElement('strong');title.textContent='资源已不可用';
+  const detail=document.createElement('span');detail.textContent='图片文件缺失或已损坏，可以重新生成。';
+  const retry=document.createElement('button');retry.type='button';retry.className='chat-artifact-retry';retry.textContent='重新生成';retry.setAttribute('aria-label','重新生成图片');retry.onclick=()=>retryImageArtifact(retry);
+  card.replaceChildren(title,detail,retry);
+}
+document.addEventListener('load',_handleChatArtifactImageLoad,true);
+document.addEventListener('error',_handleChatArtifactImageError,true);
 
 document.addEventListener('click', e => {
   if(!e.target || !e.target.closest) return;
@@ -6681,14 +6755,7 @@ function renderMd(raw){
     return out.join('\n');
   })(s);
   // ── MEDIA: token stash (must run first, before any other processing) ───────
-  // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
-  // generated images) and replace them with inline <img> or download links.
-  // Stashed so the path/URL is never processed as markdown.
-  const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
-    media_stash.push(raw_ref);
-    return '\x00D'+(media_stash.length-1)+'\x00';
-  });
+  // MEDIA references are protected later, after code regions are stashed.
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.
   // This prevents double-escaping when LLM outputs entities like &lt; &gt; &amp;
@@ -6786,6 +6853,16 @@ function renderMd(raw){
   // backticks for multiline code and break subsequent code-box rendering.
   const rawPreStash=[];
   s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
+  // Legacy MEDIA: compatibility runs only after code/preformatted regions are
+  // stashed. Quoted references preserve spaces; unquoted legacy references
+  // remain whitespace-delimited. Authorization is still enforced server-side
+  // by the restricted legacy path endpoint.
+  const media_stash=[];
+  s=s.replace(/(^|[\s(])MEDIA:(?:"([^"\n]+)"|'([^'\n]+)'|([^\s\)\]]+))/g,(_,lead,doubleQuoted,singleQuoted,bare)=>{
+    const raw_ref=doubleQuoted||singleQuoted||bare||'';
+    media_stash.push(raw_ref);
+    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+  });
   // Bare file:// artifact links → media. Some gateway/tool surfaces emit bare
   // file:// links for local artifacts instead of MEDIA: tokens; browser clients
   // cannot open the server filesystem directly, so route them through /api/media.
@@ -9265,6 +9342,46 @@ function msgContent(m){
   return String(c).trim();
 }
 
+function _artifactMediaUrl(sessionId,artifactId,download=false,cacheVersion=''){
+  const sid=String(sessionId||'').trim();
+  const aid=String(artifactId||'').trim();
+  const version=String(cacheVersion||'').trim()||'artifact-v1';
+  if(!sid||!aid)return '';
+  return 'api/media?session_id='+encodeURIComponent(sid)+'&artifact_id='+encodeURIComponent(aid)+'&v='+encodeURIComponent(version)+(download?'&download=1':'');
+}
+function _messageArtifactsHtml(message,sessionId,messageIndex){
+  const m=message&&typeof message==='object'?message:{};
+  const artifacts=Array.isArray(m.artifacts)?m.artifacts:[];
+  const errors=Array.isArray(m.artifact_errors)?m.artifact_errors:[];
+  const cards=[];
+  for(const artifact of artifacts){
+    if(!artifact||String(artifact.kind||'')!=='image')continue;
+    const id=String(artifact.artifact_id||'').trim();
+    const name=String(artifact.name||'生成图片').trim()||'生成图片';
+    const status=String(artifact.status||'').trim().toLowerCase();
+    const cacheVersion=String(artifact.sha256||'').trim();
+    const src=_artifactMediaUrl(sessionId,id,false,cacheVersion);
+    if(status!=='ready'||!src){
+      cards.push(`<section class="chat-artifact-card chat-artifact-unavailable" role="status" data-artifact-id="${esc(id)}"><strong>资源已不可用</strong><span>该图片无法继续读取，可以重新生成。</span><button type="button" class="chat-artifact-retry" aria-label="重新生成图片" onclick="retryImageArtifact(this)">重新生成</button></section>`);
+      continue;
+    }
+    const download=_artifactMediaUrl(sessionId,id,true,cacheVersion);
+    const viewLabel=`查看图片 ${name}`;
+    const downloadLabel=`下载 ${name}`;
+    cards.push(`<section class="chat-artifact-card" data-artifact-id="${esc(id)}" data-message-index="${esc(messageIndex)}">
+      <span class="msg-artifact-image" data-state="loading">
+        <span class="chat-artifact-loading" role="status" aria-live="polite">图片加载中…</span>
+        <img class="msg-media-img chat-artifact-image" src="${esc(src)}" alt="${esc(name)}" role="button" tabindex="0" aria-label="${esc(viewLabel)}" loading="lazy">
+        <a class="msg-artifact-download" href="${esc(download)}" download="${esc(name)}" title="${esc(downloadLabel)}" aria-label="${esc(downloadLabel)}" onclick="event.stopPropagation()">${li('download',15)}</a>
+      </span>
+    </section>`);
+  }
+  if(errors.length){
+    cards.push(`<section class="chat-artifact-card chat-artifact-error" role="alert"><strong>图片未能保存</strong><span>生成结果未通过安全校验或资源已丢失，请重新生成。</span><button type="button" class="chat-artifact-retry" aria-label="重新生成图片" onclick="retryImageArtifact(this)">重新生成</button></section>`);
+  }
+  return cards.length?`<div class="message-artifacts" aria-label="生成的图片">${cards.join('')}</div>`:'';
+}
+
 function _isRecoveryControlMessageText(text){
   const normalized=String(text||'').replace(/\s+/g,' ').trim();
   if(!normalized) return false;
@@ -9285,7 +9402,7 @@ function _isRecoveryControlMessage(m){
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
-  return !!(msgContent(m)||m.vision_recovery);
+  return !!(msgContent(m)||m.vision_recovery||(Array.isArray(m.artifacts)&&m.artifacts.length)||(Array.isArray(m.artifact_errors)&&m.artifact_errors.length)||(Array.isArray(m.image_generation_events)&&m.image_generation_events.length));
 }
 
 function _visionRecoveryCardHtml(recovery){
@@ -10039,6 +10156,9 @@ function _messageRenderCacheSignature(){
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
     add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);add(m.vision_recovery&&JSON.stringify(m.vision_recovery));
+    add(Array.isArray(m.artifacts)?JSON.stringify(m.artifacts):'');
+    add(Array.isArray(m.artifact_errors)?JSON.stringify(m.artifact_errors):'');
+    add(Array.isArray(m.image_generation_events)?JSON.stringify(m.image_generation_events):'');
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -11691,9 +11811,11 @@ function renderMessages(options){
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
   // Cache visWithIdx so expanding the render window (Load earlier) doesn't
-  // re-scan S.messages from scratch.  Invalidate only when the message array
-  // length changes — i.e. new messages arrived or session was truncated.
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
+  // re-scan S.messages from scratch. A completed image turn can replace the
+  // live assistant message in-place without changing the array length, so the
+  // public render signature (including artifacts) must also invalidate it.
+  const visCacheSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSignature!==visCacheSignature){
     const rebuilt=[];
     let ri=0;
     for(const m of S.messages){
@@ -11707,6 +11829,7 @@ function renderMessages(options){
     }
     _visWithIdxCache=rebuilt;
     _visWithIdxCacheLen=S.messages.length;
+    _visWithIdxCacheSignature=visCacheSignature;
   }
   const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
@@ -11867,6 +11990,8 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
+    const artifactsHtml=!isUser?_messageArtifactsHtml(m,(S.session&&S.session.session_id)||'',rawIdx):'';
+    const imageGenerationHtml=!isUser&&Array.isArray(m.image_generation_events)?_historyImageGenerationStatusHtml(m,m.image_generation_events):'';
     const expertTeamDelivery=null;
     let bodyHtml = expertTeamDelivery ? _expertTeamDeliveryCardHtml(expertTeamDelivery) : _getCachedRender(displayContent, isUser);
     if(!isUser&&m.provider_details){
@@ -11956,12 +12081,12 @@ function renderMessages(options){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||docxTemplateSelectionHtml||docxTemplateDeliveryHtml||docxSourceRequestHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml||visionRecoveryHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||artifactsHtml||imageGenerationHtml||statusHtml||docxTemplateSelectionHtml||docxTemplateDeliveryHtml||docxSourceRequestHtml||docxEngineWorkbenchHtml||docxFigureAdjustmentHtml||visionRecoveryHtml);
     if(statusHtml){
-      seg.insertAdjacentHTML('beforeend', statusHtml);
+      seg.insertAdjacentHTML('beforeend', statusHtml+artifactsHtml+imageGenerationHtml);
     }else if(hasVisibleBody){
       const bodyBlock=String(content||'').trim()?`<div class="msg-body">${bodyHtml}</div>`:'';
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${docxTemplateSelectionHtml}${docxTemplateDeliveryHtml}${docxSourceRequestHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${visionRecoveryHtml}${footHtml}`);
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}${artifactsHtml}${imageGenerationHtml}${docxTemplateSelectionHtml}${docxTemplateDeliveryHtml}${docxSourceRequestHtml}${docxEngineWorkbenchHtml}${docxFigureAdjustmentHtml}${visionRecoveryHtml}${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
@@ -12084,7 +12209,7 @@ function renderMessages(options){
     if(derived.length) S.toolCalls=derived;
   }
   if(!S.busy){
-    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]),.agent-public-activity-status').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]),.agent-public-activity-status,.image-generation-state[data-history-image-state="1"]').forEach(el=>el.remove());
     const byAssistant = {};
     for(const tc of (S.toolCalls||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
@@ -12093,6 +12218,18 @@ function renderMessages(options){
     }
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
+    for(const [key,cards] of Object.entries(byAssistant)){
+      const aIdx=parseInt(key);
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        if(aIdx<assistantIdxs[0])continue;
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      }
+      if(!anchorRow)continue;
+      const stateNode=_renderHistoryImageGenerationState(anchorRow.parentElement,anchorRow,S.messages[aIdx]||{},cards);
+      if(stateNode)anchorInsertAfter.set(anchorRow,stateNode);
+    }
     const _renderPublicActivityForAssistant=(aIdx)=>{
       let anchorRow=assistantSegments.get(aIdx)||null;
       if(!anchorRow&&assistantIdxs.length){
@@ -12346,6 +12483,136 @@ function buildToolCard(tc,options){
   return row;
 }
 
+function _imageGenerationStatusHtml(tc){
+  const event=tc&&typeof tc==='object'?tc:{};
+  if(String(event.name||'')!=='image_generate')return '';
+  const status=String(event.status||'').trim().toLowerCase();
+  const tid=String(event.tid||'image-generate').trim();
+  let state='loading';
+  let title='正在生成图片';
+  let detail='已开始生成，完成后会自动显示在当前回复中。';
+  let retry=false;
+  if(status==='timeout'||status==='timed_out'){
+    state='timeout';title='图片生成超时';detail='生成服务未在限时内返回结果。';retry=true;
+  }else if(status==='cancelled'||status==='canceled'){
+    state='cancelled';title='图片生成已取消';detail='本次生成已停止，未保存图片。';retry=true;
+  }else if(event.is_error||status==='failed'||status==='error'){
+    state='failed';title='图片生成失败';detail=String(event.summary||'').trim()||'生成服务返回了安全可展示的错误。';retry=true;
+  }else if(event.done===true||['completed','complete','done','success'].includes(status)){
+    state='saving';title='图片已生成，正在保存';detail='正在安全校验并绑定到当前会话。';
+  }
+  const action=retry?'<button type="button" class="chat-artifact-retry" aria-label="重新生成图片" onclick="retryImageArtifact(this)">重新生成</button>':'';
+  return `<section class="image-generation-state is-${esc(state)}" data-live-image-tid="${esc(tid)}" data-state="${esc(state)}" role="status" aria-live="polite"><span class="image-generation-state-icon" aria-hidden="true"></span><span class="image-generation-state-copy"><strong>${esc(title)}</strong><small>${esc(detail)}</small></span>${action}</section>`;
+}
+function _historyImageGenerationStatusHtml(message,toolCalls){
+  const m=message&&typeof message==='object'?message:{};
+  const hasReadyArtifact=Array.isArray(m.artifacts)&&m.artifacts.some(item=>item&&item.kind==='image'&&String(item.status||'').toLowerCase()==='ready');
+  if(hasReadyArtifact)return '';
+  const imageEvents=(Array.isArray(toolCalls)?toolCalls:[]).filter(item=>item&&String(item.name||'')==='image_generate');
+  const event=imageEvents.length?imageEvents[imageEvents.length-1]:null;
+  if(!event)return '';
+  const status=String(event.status||'').trim().toLowerCase();
+  const settledSuccess=event.done===true&&!event.is_error&&['completed','complete','done','success'].includes(status);
+  if(settledSuccess)return '';
+  return _imageGenerationStatusHtml(event);
+}
+function _attachImageGenerationTerminalEvents(message,events){
+  if(!message||message.role!=='assistant')return message;
+  const allowedStatuses=new Set(['failed','error','cancelled','canceled','timeout','timed_out']);
+  const safe=[];
+  const existing=Array.isArray(message.image_generation_events)?message.image_generation_events:[];
+  for(const value of [...existing,...(Array.isArray(events)?events:[])]){
+    if(!value||String(value.name||'')!=='image_generate')continue;
+    const status=String(value.status||'').trim().toLowerCase();
+    if(!allowedStatuses.has(status))continue;
+    safe.push({
+      event_type:'tool.completed',
+      name:'image_generate',
+      status,
+      duration:Number.isFinite(Number(value.duration))?Number(value.duration):0,
+      summary:String(value.summary||'').slice(0,500),
+      is_error:status!=='cancelled'&&status!=='canceled',
+      done:true,
+      tid:String(value.tid||'image-generate').slice(0,160),
+    });
+  }
+  if(!safe.length)return message;
+  const merged=new Map();
+  for(const event of safe){
+    const key=`${String(event.tid||'')}|${String(event.status||'')}`;
+    merged.set(key,event);
+  }
+  message.image_generation_events=Array.from(merged.values());
+  return message;
+}
+function _attachImageGenerationTerminalEventsToCurrentTurn(messages,events){
+  if(!Array.isArray(messages)||!messages.length)return null;
+  let lastUserIndex=-1;
+  for(let index=messages.length-1;index>=0;index--){
+    if(messages[index]&&messages[index].role==='user'){lastUserIndex=index;break;}
+  }
+  if(lastUserIndex<0)return null;
+  let target=null;
+  for(let index=messages.length-1;index>lastUserIndex;index--){
+    if(messages[index]&&messages[index].role==='assistant'){target=messages[index];break;}
+  }
+  if(target)return _attachImageGenerationTerminalEvents(target,events);
+  const transient={role:'assistant',content:'',_transient:true,_ts:Date.now()/1000};
+  _attachImageGenerationTerminalEvents(transient,events);
+  if(!Array.isArray(transient.image_generation_events)||!transient.image_generation_events.length)return null;
+  messages.push(transient);
+  return transient;
+}
+function _discardTransientImageTerminalMessages(messages){
+  if(!Array.isArray(messages))return [];
+  return messages.filter(message=>!(message&&message._transient===true&&Array.isArray(message.image_generation_events)));
+}
+function _renderHistoryImageGenerationState(parent,anchor,message,toolCalls){
+  if(!parent||!anchor)return null;
+  if(Array.isArray(message&&message.image_generation_events)&&message.image_generation_events.length)return null;
+  const html=_historyImageGenerationStatusHtml(message,toolCalls);
+  if(!html)return null;
+  const holder=document.createElement('div');
+  holder.innerHTML=html;
+  const node=holder.firstElementChild;
+  if(!node)return null;
+  node.dataset.historyImageState='1';
+  const ref=anchor.nextSibling;
+  if(ref)parent.insertBefore(node,ref);
+  else parent.appendChild(node);
+  return node;
+}
+function _upsertLiveImageGenerationStatus(tc,inner){
+  if(!inner||String(tc&&tc.name||'')!=='image_generate')return null;
+  const html=_imageGenerationStatusHtml(tc);
+  if(!html)return null;
+  const tid=String(tc&&tc.tid||'image-generate');
+  const existing=Array.from(inner.querySelectorAll('.image-generation-state[data-live-image-tid]')).find(node=>String(node.dataset&&node.dataset.liveImageTid||'')===tid)||null;
+  const holder=document.createElement('div');
+  holder.innerHTML=html;
+  const node=holder.firstElementChild;
+  if(existing)existing.replaceWith(node);
+  else inner.appendChild(node);
+  if(typeof scrollIfPinned==='function')scrollIfPinned();
+  return node;
+}
+function _finalizeLiveImageGenerationStates(state,message=''){
+  const turn=$('liveAssistantTurn');
+  const inner=_assistantTurnBlocks(turn);
+  if(!inner)return [];
+  const nodes=Array.from(inner.querySelectorAll('.image-generation-state[data-live-image-tid]'));
+  const events=[];
+  for(const node of nodes){
+    const current=String(node.dataset&&node.dataset.state||'');
+    if(!['loading','saving'].includes(current))continue;
+    const tc={name:'image_generate',tid:String(node.dataset&&node.dataset.liveImageTid||''),status:state,done:true,is_error:state!=='cancelled',summary:String(message||'')};
+    events.push({event_type:'tool.completed',...tc,duration:0});
+    const holder=document.createElement('div');holder.innerHTML=_imageGenerationStatusHtml(tc);
+    if(holder.firstElementChild)node.replaceWith(holder.firstElementChild);
+  }
+  return events;
+}
+
 function _syncToolCallGroupSummary(group){
   if(!group) return;
   const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
@@ -12419,6 +12686,7 @@ function appendLiveToolCard(tc){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
+  _upsertLiveImageGenerationStatus(tc,inner);
   const tid=tc.tid||'';
   if(!isActivityDetailsVisible()){
     renderPublicActivityStatus(inner,{live:true,state:'executing'});
@@ -12502,7 +12770,7 @@ function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   if(typeof _clearPublicActivityElapsedTimer==='function') _clearPublicActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],.agent-public-activity-status[data-live-public-activity="1"]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],.agent-public-activity-status[data-live-public-activity="1"],.image-generation-state[data-live-image-tid]').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
@@ -12582,6 +12850,19 @@ async function submitEdit(msgIdx, newText) {
   } catch(e) { setStatus(t('edit_failed') + e.message); }
 }
 
+async function retryImageArtifact(btn){
+  if(S.busy){
+    if(typeof showToast==='function')showToast('请等待当前回复结束后重试。',2400);
+    return;
+  }
+  const row=btn&&btn.closest?btn.closest('[data-msg-idx]'):null;
+  if(!row){
+    if(typeof showToast==='function')showToast('当前图片无法原位重试，请再次发送生成要求。',3200);
+    return;
+  }
+  await regenerateResponse(btn);
+}
+
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
   // Find the last user message and re-run it
@@ -12609,6 +12890,7 @@ async function regenerateResponse(btn) {
 }
 
 function postProcessRenderedMessages(container) {
+  _prepareMessageImagesForLightbox(container);
   highlightCode(container);
   addCopyButtons(container);
   loadDiffInline(container);
@@ -12619,6 +12901,15 @@ function postProcessRenderedMessages(container) {
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
+}
+
+function _prepareMessageImagesForLightbox(container){
+  const root=container||document;
+  root.querySelectorAll('.msg-media-img').forEach(img=>{
+    if(!img.hasAttribute('role'))img.setAttribute('role','button');
+    if(!img.hasAttribute('tabindex'))img.setAttribute('tabindex','0');
+    if(!img.hasAttribute('aria-label'))img.setAttribute('aria-label',`查看图片 ${img.alt||''}`.trim());
+  });
 }
 
 function highlightCode(container) {

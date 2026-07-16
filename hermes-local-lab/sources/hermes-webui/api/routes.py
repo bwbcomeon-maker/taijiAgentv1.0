@@ -14525,6 +14525,8 @@ def _serve_verified_artifact_bytes(
     mime: str,
     name: str,
     cache_control: str,
+    *,
+    disposition: str = "inline",
 ):
     """Serve the exact payload authorized from one already-verified descriptor."""
     file_size = len(data)
@@ -14547,7 +14549,7 @@ def _serve_verified_artifact_bytes(
     if byte_range:
         handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
     handler.send_header("Cache-Control", cache_control)
-    handler.send_header("Content-Disposition", _content_disposition_value("inline", name))
+    handler.send_header("Content-Disposition", _content_disposition_value(disposition, name))
     _security_headers(handler)
     handler.end_headers()
     if content_length and getattr(handler, "command", "GET") != "HEAD":
@@ -14866,12 +14868,16 @@ def _handle_media(handler, parsed):
         mime = authorized.mime
         if not mime.startswith("image/") or mime == "image/svg+xml":
             return bad(handler, "Artifact not available", 403)
+        force_download = qs.get("download", [""])[0].strip().lower() in {
+            "1", "true", "yes", "on",
+        }
         return _serve_verified_artifact_bytes(
             handler,
             authorized.data,
             mime,
             authorized.name,
             "private, max-age=3600",
+            disposition="attachment" if force_download else "inline",
         )
     raw_path = qs.get("path", [""])[0].strip()
     if not raw_path:

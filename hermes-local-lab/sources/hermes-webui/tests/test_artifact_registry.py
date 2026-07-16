@@ -800,6 +800,40 @@ def test_media_endpoint_authorizes_session_and_artifact_without_path(tmp_path):
         assert str(source) not in wrong.body.getvalue().decode("utf-8", errors="replace")
 
 
+@pytest.mark.parametrize(
+    ("download_value", "expected_disposition"),
+    [(None, "inline"), ("0", "inline"), ("1", "attachment")],
+)
+def test_artifact_media_download_flag_controls_content_disposition(
+    tmp_path, download_value, expected_disposition
+):
+    from api import routes
+    from api.artifacts import ArtifactRegistry
+
+    root = tmp_path / "artifacts"
+    source = tmp_path / "本地验收图片.png"
+    source.write_bytes(PNG_1X1)
+    registry = ArtifactRegistry(root)
+    public = registry.register_image_file("session-a", "turn-a", "tool-a", source)
+    query = {"session_id": "session-a", "artifact_id": public["artifact_id"]}
+    if download_value is not None:
+        query["download"] = download_value
+
+    with mock.patch.object(routes, "_artifact_registry", return_value=registry), \
+         mock.patch("api.auth.is_auth_enabled", lambda: False):
+        handler = _Handler()
+        routes._handle_media(handler, SimpleNamespace(
+            path="/api/media",
+            query=urllib.parse.urlencode(query),
+        ))
+
+    assert handler.status == 200
+    assert handler.body.getvalue() == PNG_1X1
+    disposition = handler.headers["Content-Disposition"]
+    assert disposition.startswith(expected_disposition + ";")
+    assert "filename*=UTF-8''" in disposition
+
+
 def test_media_route_serves_same_verified_bytes_when_path_is_swapped(
     tmp_path, monkeypatch
 ):
