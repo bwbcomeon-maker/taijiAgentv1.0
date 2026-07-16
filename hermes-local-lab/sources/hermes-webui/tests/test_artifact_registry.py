@@ -475,6 +475,60 @@ def test_commit_manifest_failure_leaves_every_artifact_pending(tmp_path, monkeyp
     assert manifest["artifacts"][0]["commit_state"] == "pending"
 
 
+def test_registered_artifact_rollback_unlink_failure_is_explicit_and_quarantined(
+    tmp_path, monkeypatch
+):
+    from api.artifacts import ArtifactRegistry, ArtifactValidationError
+
+    registry = ArtifactRegistry(tmp_path / "artifacts")
+    existing = registry.register_image_bytes(
+        "session-a", "old-turn", "old-tool", PNG_1X1,
+        mime="image/png", name="existing.png",
+    )
+    created = registry.register_image_bytes(
+        "session-a", "new-turn", "new-tool", PNG_1X1,
+        mime="image/png", name="created.png",
+    )
+    session_dir = tmp_path / "artifacts" / "session-a"
+    manifest_path = session_dir / "manifest.json"
+    before = json.loads(manifest_path.read_text("utf-8"))
+    records = {row["artifact_id"]: row for row in before["artifacts"]}
+    old_path = Path(records[existing["artifact_id"]]["storage_path"])
+    new_path = Path(records[created["artifact_id"]]["storage_path"])
+    old_sha = hashlib.sha256(old_path.read_bytes()).hexdigest()
+    real_unlink = Path.unlink
+
+    def _fail_created_unlink(path, *args, **kwargs):
+        if path == new_path:
+            raise OSError("injected persistent unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _fail_created_unlink)
+    with pytest.raises(ArtifactValidationError, match="rollback.*quarantine"):
+        registry.rollback_registered_artifacts(
+            "session-a", {created["artifact_id"]}
+        )
+
+    after = json.loads(manifest_path.read_text("utf-8"))
+    assert [row["artifact_id"] for row in after["artifacts"]] == [
+        existing["artifact_id"]
+    ]
+    assert hashlib.sha256(old_path.read_bytes()).hexdigest() == old_sha
+    assert registry.authorize("session-a", existing["artifact_id"]).data == PNG_1X1
+    with pytest.raises(FileNotFoundError):
+        registry.authorize("session-a", created["artifact_id"])
+    assert {path.name for path in session_dir.iterdir()} == {
+        "manifest.json", old_path.name,
+    }
+    quarantined = list((tmp_path / "artifacts" / ".quarantine").glob(
+        "migration-rollback-session-a-*"
+    ))
+    assert len(quarantined) == 1
+    assert (quarantined[0] / new_path.name).read_bytes() == PNG_1X1
+    receipt = json.loads((quarantined[0] / "quarantine.json").read_text("utf-8"))
+    assert receipt["reason"] == "migration_artifact_rollback_unlink_failed"
+
+
 def test_registry_rejects_corrupt_oversize_and_symlink_images(tmp_path):
     from api.artifacts import ArtifactRegistry, ArtifactValidationError
 
@@ -1077,7 +1131,8 @@ def test_legacy_json_import_strips_artifacts_and_persists_untrusted_origin(
     reloaded = models.Session.load(session_id)
     assert reloaded is not None
     assert reloaded.legacy_import is True
-    assert reloaded.messages[0]["_legacy_imported"] is True
+    assert "_legacy_imported" not in reloaded.messages[0]
+    assert "MEDIA:" not in reloaded.messages[0]["content"]
     assert "artifacts" not in reloaded.messages[0]
     assert not routes._session_media_token_allows_image_path(
         session_id, Path(forged_path), {"image/png"}

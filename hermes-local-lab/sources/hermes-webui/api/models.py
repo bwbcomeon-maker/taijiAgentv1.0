@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from contextlib import closing
+from functools import wraps
 from pathlib import Path
 
 import api.config as _cfg
@@ -28,6 +29,17 @@ from api.agent_sessions import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _migration_guarded_session_write(func):
+    """Keep every sidecar/index commit outside an exclusive migration window."""
+    @wraps(func)
+    def guarded(*args, **kwargs):
+        from api.legacy_session_migration import legacy_migration_state_guard
+
+        with legacy_migration_state_guard():
+            return func(*args, **kwargs)
+    return guarded
 CLI_VISIBLE_SESSION_LIMIT = 20
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
@@ -155,12 +167,11 @@ def _start_session_index_rebuild_thread() -> None:
             and _SESSION_INDEX_REBUILD_THREAD.is_alive()
         ):
             return
-        _SESSION_INDEX_REBUILD_THREAD = threading.Thread(
-            target=_rebuild_session_index_background,
+        from api.legacy_session_migration import start_legacy_migration_guarded_worker
+        _SESSION_INDEX_REBUILD_THREAD = start_legacy_migration_guarded_worker(
+            _rebuild_session_index_background,
             name="session-index-rebuild",
-            daemon=True,
         )
-        _SESSION_INDEX_REBUILD_THREAD.start()
 
 
 def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
@@ -674,7 +685,13 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
+    @_migration_guarded_session_write
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        if getattr(self, '_invalidated_by_legacy_migration', False):
+            raise RuntimeError(
+                f"Session {self.session_id!r} was invalidated by legacy migration; "
+                "reload it before saving"
+            )
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────

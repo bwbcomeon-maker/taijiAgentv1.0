@@ -47,7 +47,10 @@ def _collect_via_node(messages):
     # Pull in the function under test plus the helpers it transitively calls.
     import re
     consts = []
-    for name in ("ARTIFACT_IGNORE_RE", "ARTIFACT_MUTATION_TOOLS"):
+    for name in (
+        "ARTIFACT_IGNORE_RE", "ARTIFACT_DIRECT_PATH_RE",
+        "ARTIFACT_MUTATION_TOOLS",
+    ):
         m = re.search(rf"const {name} = .*?;", WORKSPACE_JS)
         assert m, f"{name} not found"
         consts.append(m.group(0))

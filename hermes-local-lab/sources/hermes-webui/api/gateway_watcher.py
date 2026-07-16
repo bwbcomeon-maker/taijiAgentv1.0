@@ -55,21 +55,27 @@ def _get_agent_sessions_from_db() -> list:
         return []
 
     try:
-        sessions = []
-        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
-            sessions.append({
-                'session_id': row['id'],
-                'title': row['title'] or 'Agent Session',
-                'model': row['model'] or None,
-                'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                'created_at': row['started_at'],
-                'updated_at': row['last_activity'] or row['started_at'],
-                'source': row['source'] or 'cli',
-                'raw_source': row.get('raw_source'),
-                'session_source': row.get('session_source'),
-                'source_label': row.get('source_label'),
-            })
-        return sessions
+        from api.legacy_session_migration import legacy_migration_state_guard
+
+        # The watcher is long-lived, but each database snapshot is finite.  Hold
+        # the migration read lease only for this snapshot so events are wholly
+        # pre-apply or post-apply without starving an exclusive migration.
+        with legacy_migration_state_guard():
+            sessions = []
+            for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+                sessions.append({
+                    'session_id': row['id'],
+                    'title': row['title'] or 'Agent Session',
+                    'model': row['model'] or None,
+                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                    'created_at': row['started_at'],
+                    'updated_at': row['last_activity'] or row['started_at'],
+                    'source': row['source'] or 'cli',
+                    'raw_source': row.get('raw_source'),
+                    'session_source': row.get('session_source'),
+                    'source_label': row.get('source_label'),
+                })
+            return sessions
     except Exception:
         return []
 

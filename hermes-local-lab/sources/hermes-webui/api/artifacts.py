@@ -20,6 +20,7 @@ import time
 import uuid
 import zlib
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,17 @@ _MIME_EXTENSIONS = {
 _ROOT_LOCKS_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, threading.RLock] = {}
 logger = logging.getLogger(__name__)
+
+
+def _migration_guarded_artifact_write(func):
+    """Enter the migration barrier before any registry/file lock."""
+    @wraps(func)
+    def guarded(*args, **kwargs):
+        from api.legacy_session_migration import legacy_migration_state_guard
+
+        with legacy_migration_state_guard():
+            return func(*args, **kwargs)
+    return guarded
 
 
 class ArtifactValidationError(ValueError):
@@ -729,6 +741,7 @@ class ArtifactRegistry:
         max_bytes: int = _DEFAULT_MAX_BYTES,
         max_pixels: int = _DEFAULT_MAX_PIXELS,
         allowed_source_roots: list[Path] | None = None,
+        create_root: bool = True,
     ):
         self.root = Path(root).expanduser().resolve()
         self.max_bytes = max(1, int(max_bytes))
@@ -745,7 +758,8 @@ class ArtifactRegistry:
         self.allowed_source_roots = [
             Path(path).expanduser().resolve() for path in allowed_source_roots
         ]
-        self.root.mkdir(parents=True, exist_ok=True)
+        if create_root:
+            self.root.mkdir(parents=True, exist_ok=True)
         root_key = str(self.root)
         with _ROOT_LOCKS_GUARD:
             self._lock = _ROOT_LOCKS.setdefault(root_key, threading.RLock())
@@ -781,6 +795,7 @@ class ArtifactRegistry:
         encoded = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
         _atomic_write(self._manifest_path(session_id), encoded)
 
+    @_migration_guarded_artifact_write
     def register_image_file(
         self,
         session_id: str,
@@ -821,6 +836,7 @@ class ArtifactRegistry:
             _include_pending_owner=_include_pending_owner,
         )
 
+    @_migration_guarded_artifact_write
     def register_image_bytes(
         self,
         session_id: str,
@@ -913,6 +929,7 @@ class ArtifactRegistry:
             if _include_pending_owner else projected
         )
 
+    @_migration_guarded_artifact_write
     def commit_artifacts(
         self,
         session_id: str,
@@ -952,6 +969,7 @@ class ArtifactRegistry:
                 self._save_manifest(session_id, manifest)
             return changed
 
+    @_migration_guarded_artifact_write
     def discard_pending_artifacts(
         self,
         session_id: str,
@@ -1060,6 +1078,7 @@ class ArtifactRegistry:
                 continue
         return False
 
+    @_migration_guarded_artifact_write
     def retire_session(self, session_id: str, *, now: float | None = None) -> Path | None:
         session_id = _safe_id(session_id, "session_id")
         with self._session_lock(session_id):
@@ -1087,6 +1106,7 @@ class ArtifactRegistry:
                 raise
         return destination
 
+    @_migration_guarded_artifact_write
     def restore_session(self, retired: Path) -> None:
         """Restore one just-retired directory when the enclosing mutation fails."""
         retired = Path(retired)
@@ -1102,6 +1122,173 @@ class ArtifactRegistry:
             os.replace(retired, destination)
             (destination / ".retired.json").unlink(missing_ok=True)
 
+    @_migration_guarded_artifact_write
+    def discard_unpublished_session(self, session_id: str) -> bool:
+        """Remove artifacts for a fresh session that was never published.
+
+        Callers must use this only while rolling back creation of a new,
+        unobservable session id.  Existing sessions use ``retire_session`` so
+        the seven-day recovery contract remains intact.
+        """
+        session_id = _safe_id(session_id, "session_id")
+        with self._session_lock(session_id):
+            session_dir = self._session_dir(session_id)
+            if not session_dir.exists():
+                return False
+            if session_dir.is_symlink():
+                raise ArtifactValidationError("artifact session path is not a directory")
+            manifest_path = session_dir / "manifest.json"
+            # Delete payloads and manifest as separate, observable stages so a
+            # caller can verify cleanup and quarantine a partially cleaned
+            # unpublished import.  A recursive best-effort delete would hide
+            # exactly which durable state survived a failure.
+            for entry in sorted(session_dir.iterdir()):
+                if entry == manifest_path:
+                    continue
+                if entry.is_dir() or entry.is_symlink():
+                    raise ArtifactValidationError(
+                        "unpublished artifact directory contains an invalid entry"
+                    )
+                entry.unlink()
+            manifest_path.unlink(missing_ok=True)
+            session_dir.rmdir()
+            return True
+
+    @_migration_guarded_artifact_write
+    def quarantine_unpublished_session(
+        self, session_id: str, *, failed_stages: list[str] | None = None
+    ) -> Path:
+        """Move unpublished residue outside the authorized artifact namespace."""
+        session_id = _safe_id(session_id, "session_id")
+        with self._session_lock(session_id):
+            quarantine_root = self.root / ".quarantine"
+            quarantine_root.mkdir(parents=True, exist_ok=True)
+            destination = quarantine_root / (
+                f"bundle-import-{session_id}-{uuid.uuid4().hex[:12]}"
+            )
+            source = self._session_dir(session_id)
+            if source.exists():
+                if source.is_symlink() or not source.is_dir():
+                    raise ArtifactValidationError(
+                        "unpublished artifact residue cannot be quarantined"
+                    )
+                os.replace(source, destination)
+            else:
+                destination.mkdir(parents=False, exist_ok=False)
+            _atomic_write(
+                destination / "quarantine.json",
+                json.dumps({
+                    "schema_version": 1,
+                    "reason": "bundle_import_rollback_incomplete",
+                    "failed_stages": sorted(set(failed_stages or [])),
+                    "created_at": time.time(),
+                }, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+            return destination
+
+    @_migration_guarded_artifact_write
+    def rollback_registered_artifacts(
+        self, session_id: str, artifact_ids: set[str]
+    ) -> int:
+        """Remove only artifacts created by an uncommitted migration batch.
+
+        This is intentionally narrower than session retirement: an existing
+        session may already own durable artifacts that must survive rollback.
+        """
+        session_id = _safe_id(session_id, "session_id")
+        wanted = {_safe_id(value, "artifact_id") for value in artifact_ids}
+        if not wanted:
+            return 0
+        with self._session_lock(session_id):
+            session_dir = self._session_dir(session_id)
+            manifest = self._load_manifest(session_id)
+            removed = [
+                record for record in manifest["artifacts"]
+                if str(record.get("artifact_id") or "") in wanted
+            ]
+            if not removed:
+                return 0
+            removed_ids = {str(record.get("artifact_id")) for record in removed}
+            remaining = [
+                record for record in manifest["artifacts"]
+                if str(record.get("artifact_id") or "") not in removed_ids
+            ]
+            targets: list[Path] = []
+            for record in removed:
+                target = Path(str(record.get("storage_path") or ""))
+                if (
+                    target.parent.resolve() != session_dir.resolve()
+                    or target.is_symlink()
+                ):
+                    raise ArtifactValidationError(
+                        "registered artifact rollback target is invalid"
+                    )
+                targets.append(target)
+
+            unlink_failures: list[Path] = []
+            for target in targets:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Failed to rollback registered artifact", exc_info=True)
+                    unlink_failures.append(target)
+
+            if unlink_failures:
+                quarantine_root = self.root / ".quarantine"
+                quarantine_root.mkdir(parents=True, exist_ok=True)
+                quarantine_dir = quarantine_root / (
+                    f"migration-rollback-{session_id}-{uuid.uuid4().hex[:12]}"
+                )
+                quarantine_dir.mkdir(parents=False, exist_ok=False)
+                try:
+                    for target in unlink_failures:
+                        if target.exists():
+                            os.replace(target, quarantine_dir / target.name)
+                    _atomic_write(
+                        quarantine_dir / "quarantine.json",
+                        json.dumps({
+                            "schema_version": 1,
+                            "reason": "migration_artifact_rollback_unlink_failed",
+                            "created_at": time.time(),
+                        }, ensure_ascii=False, indent=2).encode("utf-8"),
+                    )
+                except Exception as exc:
+                    raise ArtifactValidationError(
+                        "registered artifact rollback quarantine failed"
+                    ) from exc
+
+            manifest["artifacts"] = remaining
+            if remaining:
+                self._save_manifest(session_id, manifest)
+            elif session_dir.exists() and not session_dir.is_symlink():
+                self._manifest_path(session_id).unlink(missing_ok=True)
+                session_dir.rmdir()
+
+            if remaining:
+                expected_files = {
+                    Path(str(record.get("storage_path") or "")).name
+                    for record in remaining
+                }
+                actual_files = {
+                    entry.name for entry in session_dir.iterdir()
+                    if entry.name != "manifest.json"
+                }
+                if actual_files != expected_files:
+                    raise ArtifactValidationError(
+                        "registered artifact rollback directory verification failed"
+                    )
+            elif session_dir.exists():
+                raise ArtifactValidationError(
+                    "registered artifact rollback directory verification failed"
+                )
+
+            if unlink_failures:
+                raise ArtifactValidationError(
+                    "registered artifact rollback required quarantine"
+                )
+            return len(removed)
+
+    @_migration_guarded_artifact_write
     def cleanup_retired(self, *, now: float | None = None) -> int:
         cutoff = float(time.time() if now is None else now) - _RETENTION_SECONDS
         trash = self.root / ".trash"

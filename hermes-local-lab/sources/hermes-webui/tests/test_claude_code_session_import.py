@@ -230,7 +230,8 @@ def test_read_only_source_badge_ui_guards_are_present():
     assert "function _isReadOnlySession" in sessions_js
     assert "read-only-session" in sessions_js
     assert "if(!readOnly)" in sessions_js
-    assert "Read-only imported sessions cannot be renamed" in sessions_js
+    # The renderer's rename guard is localized for the Chinese desktop UI.
+    assert "只读导入会话不能重命名" in sessions_js
     assert "Read-only imported sessions cannot be modified" in sessions_js
     assert "S.session.read_only||S.session.is_read_only" in messages_js
     assert "topbar-source-badge" in ui_js

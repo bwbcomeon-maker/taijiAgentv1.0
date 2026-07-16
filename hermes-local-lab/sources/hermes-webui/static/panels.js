@@ -6505,6 +6505,7 @@ function _syncHermesPanelSessionActions(){
     el.classList.toggle('disabled',!!disabled);
   };
   setDisabled('btnDownload',!hasSession||visibleMessages===0);
+  setDisabled('btnExportBundle',!hasSession);
   setDisabled('btnExportJSON',!hasSession);
   setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
 }
@@ -7176,6 +7177,7 @@ async function loadSettingsPanel(){
     if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
     loadPluginsPanel(); // load plugin/hook visibility in background
+    await loadLegacyMigrationAudit(); // read-only; apply remains user-confirmed
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);

@@ -4037,6 +4037,16 @@ main.main > #mainPlugin{display:none;}
 .settings-action-btn.danger:hover{background:color-mix(in srgb,var(--error,#e05) 8%,transparent);border-color:var(--error,#e05);color:var(--error,#e05);}
 .settings-action-btn:disabled,.settings-action-btn.disabled{opacity:.45;cursor:not-allowed;}
 .settings-action-btn:disabled:hover,.settings-action-btn.disabled:hover{background:var(--sidebar);border-color:var(--border);color:var(--text);}
+.legacy-migration-card{margin-top:18px;padding:16px;border:1px solid color-mix(in srgb,var(--warning,#d68a00) 38%,var(--border));border-radius:14px;background:color-mix(in srgb,var(--warning,#d68a00) 7%,var(--sidebar));}
+.legacy-migration-card[hidden]{display:none!important;}
+.legacy-migration-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;}
+.legacy-migration-head h3{margin:0 0 5px;font-size:14px;color:var(--text);}
+.legacy-migration-head p{margin:0;color:var(--muted);font-size:12px;line-height:1.55;max-width:620px;}
+.legacy-migration-badge{flex:0 0 auto;border-radius:999px;padding:4px 8px;background:color-mix(in srgb,var(--warning,#d68a00) 14%,transparent);color:var(--warning,#a96700);font-size:11px;font-weight:650;}
+.legacy-migration-status{min-height:20px;margin-top:12px;color:var(--text);font-size:12px;line-height:1.5;}
+.legacy-migration-result{margin-top:8px;padding:10px 12px;border-radius:10px;background:var(--surface);color:var(--muted);font-size:12px;line-height:1.65;}
+.legacy-migration-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}
+.legacy-migration-actions .settings-action-btn{min-width:116px;}
 
 /* Primary save buttons (Appearance / Preferences "Save Settings"). */
 #mainSettings .settings-btn,

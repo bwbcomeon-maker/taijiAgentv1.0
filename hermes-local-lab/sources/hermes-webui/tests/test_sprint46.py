@@ -155,7 +155,13 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     loaded = get_session(sid)
     assert loaded.compression_anchor_summary == payload["session"]["compression_anchor_summary"]
     assert loaded.compression_anchor_visible_idx == payload["session"]["compression_anchor_visible_idx"]
-    assert loaded.compression_anchor_message_key == payload["session"]["compression_anchor_message_key"]
+    # The sidecar keeps internal zero/null anchor fields for deterministic
+    # recovery, while the browser contract intentionally drops empty metadata.
+    from api.brand_privacy import public_session_projection
+    assert (
+        public_session_projection(loaded.compact())["compression_anchor_message_key"]
+        == payload["session"]["compression_anchor_message_key"]
+    )
     assert _FakeAgent.last_instance is not None
     assert _FakeAgent.last_instance.context_compressor.calls[0]["focus_topic"] == "database schema"
 

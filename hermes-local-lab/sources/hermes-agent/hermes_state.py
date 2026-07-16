@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -30,6 +31,44 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Optional host-process write barrier. Hermes Agent itself keeps the historical
+# no-op behavior; an embedding host such as WebUI may register a short shared
+# guard around core SQLite write transactions.  This one-way hook avoids making
+# Agent import or depend on WebUI modules.
+_STATE_WRITE_GUARD_LOCK = threading.Lock()
+_STATE_WRITE_GUARD_FACTORY: Callable[[], Any] = nullcontext
+
+
+def install_state_write_guard(factory: Callable[[], Any]) -> Callable[[], Any]:
+    """Install a process-local SessionDB write guard and return the prior one."""
+    if not callable(factory):
+        raise TypeError("state write guard factory must be callable")
+    global _STATE_WRITE_GUARD_FACTORY
+    with _STATE_WRITE_GUARD_LOCK:
+        previous = _STATE_WRITE_GUARD_FACTORY
+        _STATE_WRITE_GUARD_FACTORY = factory
+    return previous
+
+
+def restore_state_write_guard(
+    expected: Callable[[], Any], previous: Callable[[], Any]
+) -> bool:
+    """Restore only when *expected* still owns the hook (test/host isolation)."""
+    if not callable(previous):
+        raise TypeError("previous state write guard factory must be callable")
+    global _STATE_WRITE_GUARD_FACTORY
+    with _STATE_WRITE_GUARD_LOCK:
+        if _STATE_WRITE_GUARD_FACTORY is not expected:
+            return False
+        _STATE_WRITE_GUARD_FACTORY = previous
+        return True
+
+
+def _state_write_guard():
+    with _STATE_WRITE_GUARD_LOCK:
+        factory = _STATE_WRITE_GUARD_FACTORY
+    return factory()
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
@@ -424,42 +463,44 @@ class SessionDB:
 
         Returns whatever *fn* returns.
         """
-        last_err: Optional[Exception] = None
-        for attempt in range(self._WRITE_MAX_RETRIES):
-            try:
-                with self._lock:
-                    self._conn.execute("BEGIN IMMEDIATE")
-                    try:
-                        result = fn(self._conn)
-                        self._conn.commit()
-                    except BaseException:
+        # Lock order is host migration barrier -> SessionDB._lock -> SQLite.
+        with _state_write_guard():
+            last_err: Optional[Exception] = None
+            for attempt in range(self._WRITE_MAX_RETRIES):
+                try:
+                    with self._lock:
+                        self._conn.execute("BEGIN IMMEDIATE")
                         try:
-                            self._conn.rollback()
-                        except Exception:
-                            pass
-                        raise
-                # Success — periodic best-effort checkpoint.
-                self._write_count += 1
-                if self._write_count % self._CHECKPOINT_EVERY_N_WRITES == 0:
-                    self._try_wal_checkpoint()
-                return result
-            except sqlite3.OperationalError as exc:
-                err_msg = str(exc).lower()
-                if "locked" in err_msg or "busy" in err_msg:
-                    last_err = exc
-                    if attempt < self._WRITE_MAX_RETRIES - 1:
-                        jitter = random.uniform(
-                            self._WRITE_RETRY_MIN_S,
-                            self._WRITE_RETRY_MAX_S,
-                        )
-                        time.sleep(jitter)
-                        continue
-                # Non-lock error or retries exhausted — propagate.
-                raise
-        # Retries exhausted (shouldn't normally reach here).
-        raise last_err or sqlite3.OperationalError(
-            "database is locked after max retries"
-        )
+                            result = fn(self._conn)
+                            self._conn.commit()
+                        except BaseException:
+                            try:
+                                self._conn.rollback()
+                            except Exception:
+                                pass
+                            raise
+                    # Success — periodic best-effort checkpoint.
+                    self._write_count += 1
+                    if self._write_count % self._CHECKPOINT_EVERY_N_WRITES == 0:
+                        self._try_wal_checkpoint()
+                    return result
+                except sqlite3.OperationalError as exc:
+                    err_msg = str(exc).lower()
+                    if "locked" in err_msg or "busy" in err_msg:
+                        last_err = exc
+                        if attempt < self._WRITE_MAX_RETRIES - 1:
+                            jitter = random.uniform(
+                                self._WRITE_RETRY_MIN_S,
+                                self._WRITE_RETRY_MAX_S,
+                            )
+                            time.sleep(jitter)
+                            continue
+                    # Non-lock error or retries exhausted — propagate.
+                    raise
+            # Retries exhausted (shouldn't normally reach here).
+            raise last_err or sqlite3.OperationalError(
+                "database is locked after max retries"
+            )
 
     def _try_wal_checkpoint(self) -> None:
         """Best-effort PASSIVE WAL checkpoint.  Never blocks, never raises.
@@ -585,6 +626,11 @@ class SessionDB:
                         )
 
     def _init_schema(self):
+        """Initialize schema inside the optional host-process write guard."""
+        with _state_write_guard():
+            self._init_schema_unlocked()
+
+    def _init_schema_unlocked(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
         Schema management follows the declarative reconciliation pattern

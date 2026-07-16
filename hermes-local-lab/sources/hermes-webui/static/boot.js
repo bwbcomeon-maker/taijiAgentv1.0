@@ -1147,6 +1147,224 @@ $('btnExportJSON').onclick=()=>{
   const a=document.createElement('a');a.href=url;
   a.download=`taiji-agent-${S.session.session_id}.json`;a.click();
 };
+$('btnExportBundle').onclick=downloadSessionBundle;
+
+async function _binaryResponseError(response,fallback){
+  try{
+    const payload=await response.json();
+    return (payload&&payload.error)||fallback;
+  }catch(_){return fallback;}
+}
+
+async function downloadSessionBundle(){
+  if(!S.session)return;
+  const button=$('btnExportBundle');
+  if(button)button.disabled=true;
+  try{
+    const url=new URL('api/session/export-bundle',document.baseURI||location.href);
+    url.searchParams.set('session_id',S.session.session_id);
+    const response=await fetch(url.href,{credentials:'include',cache:'no-store'});
+    if(!response.ok)throw new Error(await _binaryResponseError(response,'资源包导出失败'));
+    const blob=await response.blob();
+    const objectUrl=URL.createObjectURL(blob);
+    const anchor=document.createElement('a');
+    anchor.href=objectUrl;
+    anchor.download=`taiji-session-${S.session.session_id}.zip`;
+    anchor.click();
+    URL.revokeObjectURL(objectUrl);
+  }catch(error){
+    showToast(`资源包导出失败：${error.message||error}`,'error');
+  }finally{
+    if(button)button.disabled=false;
+  }
+}
+
+$('btnImportBundle').onclick=()=>$('importBundleFileInput').click();
+$('importBundleFileInput').onchange=async event=>{
+  const file=event.target.files[0];
+  event.target.value='';
+  if(file)await importSessionBundle(file);
+};
+
+async function importSessionBundle(file){
+  const maxBundleBytes=30 * 1024 * 1024;
+  if(!file||file.size<=0){showToast('请选择有效的 ZIP 资源包','error');return;}
+  if(file.size>maxBundleBytes){showToast('资源包超过 30 MB 上限','error');return;}
+  if(file.type&&file.type!=='application/zip'&&file.type!=='application/x-zip-compressed'){
+    showToast('只能导入 ZIP 资源包','error');return;
+  }
+  const button=$('btnImportBundle');
+  if(button)button.disabled=true;
+  try{
+    const url=new URL('api/session/import-bundle',document.baseURI||location.href);
+    const response=await fetch(url.href,{
+      method:'POST',credentials:'include',headers:{'Content-Type':'application/zip'},body:file
+    });
+    if(!response.ok)throw new Error(await _binaryResponseError(response,'资源包导入失败'));
+    const result=await response.json();
+    if(!result.ok||!result.session)throw new Error('服务器未返回新会话');
+    await loadSession(result.session.session_id);
+    await renderSessionList();
+    if(_currentPanel==='settings')switchPanel('chat');
+    showToast('会话资源包已导入');
+  }catch(error){
+    showToast(`资源包导入失败：${error.message||error}`,'error');
+  }finally{
+    if(button)button.disabled=false;
+  }
+}
+
+let _legacyMigrationAudit=null;
+
+function _legacyMigrationIsRepairable(report){
+  if(!report||report.needs_repair!==true)return false;
+  const repairable=new Set(['legacy_privacy_taint','state_db_user_backfill_exact','legacy_cached_image']);
+  return !!(report&&Array.isArray(report.items)&&report.items.some(item=>repairable.has(item&&item.code)));
+}
+
+function _legacyMigrationApplyOutcome(fresh,applied){
+  const failed=Number(applied&&applied.failed||0);
+  const rollbackIncomplete=!!(applied&&Array.isArray(applied.items)&&applied.items.some(item=>
+    item&&(item.reason==='rollback_incomplete'||item.code==='rollback_incomplete'||item.rollback_complete===false)
+  ));
+  const quarantineCount=Number(fresh&&fresh.quarantine_count||0);
+  const needsRepair=!!(fresh&&fresh.needs_repair===true);
+  if(rollbackIncomplete){
+    return {
+      kind:'error',toast_type:'error',success:false,
+      status:'修复失败，回滚未完整；相关数据已隔离，需人工处理。',
+      toast:'旧会话修复失败：回滚未完整，请人工处理。',
+    };
+  }
+  if(failed>0){
+    return {
+      kind:'error',toast_type:'error',success:false,
+      status:'修复未完全成功，失败批次已回滚。',
+      toast:'旧会话修复失败，失败批次已回滚。',
+    };
+  }
+  if(needsRepair||quarantineCount>0){
+    return {
+      kind:'warning',toast_type:'warning',success:false,
+      status:quarantineCount>0
+        ?'修复后仍有隔离项待处理。'
+        :'修复后仍发现待处理项，请检查后重试。',
+      toast:quarantineCount>0
+        ?'旧会话仍有隔离项待处理。'
+        :'旧会话仍有待处理项，请检查后重试。',
+    };
+  }
+  return {
+    kind:'success',toast_type:'success',success:true,status:'修复已执行。',
+    toast:applied&&applied.backup_created
+      ?'旧会话修复完成，已创建本地备份'
+      :'旧会话无需修复',
+  };
+}
+
+function _legacyMigrationPostApplyReport(fresh,applied){
+  // Repairability and remaining findings always come from the fresh audit.
+  // The apply response contributes only bounded operation counters so users
+  // retain a visible success/rollback receipt without reviving stale state.
+  return {
+    ...fresh,
+    modified:Number(applied&&applied.modified||0),
+    skipped:Number(applied&&applied.skipped||0),
+    failed:Number(applied&&applied.failed||0),
+    backup_created:Boolean(applied&&applied.backup_created),
+    needs_repair:fresh&&fresh.needs_repair===true,
+    apply_outcome:_legacyMigrationApplyOutcome(fresh,applied),
+  };
+}
+
+function _renderLegacyMigrationReport(report,{forceVisible=false}={}){
+  const card=$('legacyMigrationCard'),status=$('legacyMigrationStatus'),result=$('legacyMigrationResult');
+  const title=$('legacyMigrationTitle'),badge=$('legacyMigrationBadge');
+  const apply=$('btnApplyLegacyMigration');
+  if(!card||!status||!result)return;
+  const visible=!!(forceVisible||(report&&report.needs_repair));
+  card.hidden=!visible;
+  if(!visible){result.hidden=true;result.textContent='';return;}
+  const outcome=report&&report.apply_outcome;
+  const hasFailure=Number(report.failed||0)>0||(outcome&&outcome.kind==='error');
+  const hasWarning=!!(outcome&&outcome.kind==='warning');
+  const quarantineCount=Number(report.quarantine_count||0);
+  if(title)title.textContent=report.needs_repair
+    ?(hasFailure?'旧会话修复需要处理':(hasWarning?'旧会话仍需处理':'旧会话需要修复'))
+    :(Number(report.modified||0)>0?'旧会话修复已完成':'旧会话无需修复');
+  status.textContent=outcome?outcome.status:(hasFailure
+    ?'修复未完全成功，失败批次已回滚。'
+    :(Number(report.modified||0)>0?'修复已执行。':'只读检测已完成，尚未修改任何数据。'));
+  const summary=[
+    `已扫描 ${report.scanned||0} 个会话`,
+    `已修改 ${report.modified||0} 项`,
+    `已跳过 ${report.skipped||0} 项`,
+    `失败 ${report.failed||0} 批`,
+  ];
+  if(report.backup_created)summary.push('已创建本地备份');
+  if(quarantineCount>0)summary.push(`隔离待人工处理 ${quarantineCount} 项`);
+  result.textContent=summary.join(' · ');
+  result.hidden=false;
+  if(badge)badge.textContent=outcome
+    ?(outcome.kind==='success'?(Number(report.modified||0)>0?'已修复':'无需修复'):(hasFailure?'需处理':'待处理'))
+    :(!report.needs_repair
+      ?(Number(report.modified||0)>0?'已修复':'无需修复')
+      :(hasFailure?'需处理':'需确认'));
+  if(apply)apply.disabled=!_legacyMigrationIsRepairable(report);
+}
+
+async function loadLegacyMigrationAudit(){
+  const status=$('legacyMigrationStatus');
+  if(status)status.textContent='正在只读检测旧会话…';
+  try{
+    const report=await api('/api/session/migration/audit');
+    _legacyMigrationAudit=report;
+    _renderLegacyMigrationReport(report);
+    return report;
+  }catch(error){
+    _legacyMigrationAudit=null;
+    const card=$('legacyMigrationCard');
+    if(card)card.hidden=false;
+    if(status)status.textContent=`旧会话检测失败：${error.message||error}`;
+    const apply=$('btnApplyLegacyMigration');
+    if(apply)apply.disabled=true;
+    return null;
+  }
+}
+
+$('btnAuditLegacySessions').onclick=loadLegacyMigrationAudit;
+$('btnApplyLegacyMigration').onclick=async()=>{
+  if(!_legacyMigrationIsRepairable(_legacyMigrationAudit))return;
+  const confirmed=await showConfirmDialog({
+    title:'备份后修复旧会话？',
+    message:'系统会先创建完整本地备份，再改写可精确确认的旧会话。无法确认的项目会跳过，用户原文不会被改写；历史上已泄露的内容和已导出的不安全文件不可追回。',
+    confirmLabel:'创建备份并修复',cancelLabel:'取消',danger:true,focusCancel:true
+  });
+  if(!confirmed)return;
+  const button=$('btnApplyLegacyMigration');
+  if(button)button.disabled=true;
+  const status=$('legacyMigrationStatus');
+  if(status)status.textContent='正在备份并修复…';
+  try{
+    const applied=await api('/api/session/migration/apply',{
+      method:'POST',body:JSON.stringify({confirm:true})
+    });
+    await renderSessionList();
+    const fresh=await loadLegacyMigrationAudit();
+    if(!fresh)throw new Error('修复后重新检测失败，请稍后重试');
+    const report=_legacyMigrationPostApplyReport(fresh,applied);
+    _renderLegacyMigrationReport(report,{forceVisible:true});
+    const outcome=report.apply_outcome;
+    showToast(outcome.toast,outcome.kind==='error'?20000:5000,outcome.toast_type);
+  }catch(error){
+    const message=`修复失败：${error.message||error}`;
+    if(status)status.textContent=message;
+    showToast(message,20000,'error');
+  }finally{
+    if(button)button.disabled=!_legacyMigrationIsRepairable(_legacyMigrationAudit);
+  }
+};
+
 $('btnImportJSON').onclick=()=>$('importFileInput').click();
 $('importFileInput').onchange=async(e)=>{
   const file=e.target.files[0];

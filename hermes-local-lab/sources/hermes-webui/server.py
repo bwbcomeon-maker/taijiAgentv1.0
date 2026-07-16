@@ -682,6 +682,27 @@ def main() -> None:
         # Recovery is best-effort; never block server startup.
         print(f"[recovery] startup recovery failed: {exc}", flush=True)
 
+    # Legacy repair is opt-in.  Startup performs a read-only audit only; it
+    # never rewrites session JSON, state.db, journals, or artifact manifests.
+    try:
+        from api.artifacts import ArtifactRegistry
+        from api.legacy_session_migration import audit_legacy_sessions
+        from api.models import _active_state_db_path
+
+        legacy_report = audit_legacy_sessions(
+            SESSION_DIR,
+            _active_state_db_path(),
+            ArtifactRegistry(STATE_DIR / "artifacts", create_root=False),
+        )
+        if legacy_report.get("needs_repair"):
+            print(
+                f"[migration] {legacy_report['scanned']} sessions audited; "
+                "open Settings to review legacy repairs.",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[migration] startup audit failed: {exc}", flush=True)
+
     within_container = False
     # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
     try:

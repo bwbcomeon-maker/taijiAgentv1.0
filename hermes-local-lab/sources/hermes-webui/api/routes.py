@@ -40,6 +40,7 @@ from api.session_events import (
     subscribe_session_events,
     unsubscribe_session_events,
 )
+from api.legacy_session_migration import migration_consistent_http_routes
 
 logger = logging.getLogger(__name__)
 
@@ -6633,7 +6634,38 @@ def _send_no_content(handler, status: int = 204) -> bool:
 
 
 def _safe_content_length(handler, max_bytes: int) -> int:
-    raw_length = handler.headers.get("Content-Length", 0)
+    headers = handler.headers
+    try:
+        transfer_values = headers.get_all("Transfer-Encoding") or []
+    except AttributeError:
+        transfer = headers.get("Transfer-Encoding")
+        transfer_values = [transfer] if transfer else []
+    if any(str(value or "").strip() for value in transfer_values):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError("Transfer-Encoding is not supported")
+    try:
+        length_values = headers.get_all("Content-Length")
+    except AttributeError:
+        length_values = None
+    if length_values is not None:
+        if len(length_values) != 1:
+            try:
+                handler.close_connection = True
+            except Exception:
+                pass
+            raise ValueError("Duplicate Content-Length is not allowed")
+        raw_length = length_values[0]
+    else:
+        raw_length = headers.get("Content-Length", 0)
+    if "," in str(raw_length):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError("Duplicate Content-Length is not allowed")
     try:
         length = int(raw_length)
     except (TypeError, ValueError):
@@ -9366,6 +9398,7 @@ def _serve_manifest(handler) -> bool:
     return j(handler, {"error": "not found"}, status=404)
 
 
+@migration_consistent_http_routes("GET")
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -10052,6 +10085,14 @@ def handle_get(handler, parsed) -> bool:
         from api.session_recovery import audit_session_recovery
         return j(handler, audit_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path()))
 
+    if parsed.path == "/api/session/migration/audit":
+        from api.legacy_session_migration import audit_legacy_sessions
+
+        report = audit_legacy_sessions(
+            SESSION_DIR, _active_state_db_path(), _read_only_artifact_registry()
+        )
+        return j(handler, _public_migration_report(report))
+
     if parsed.path == "/api/session/status":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -10217,6 +10258,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
+
+    if parsed.path == "/api/session/export-bundle":
+        return _handle_session_bundle_export(handler, parsed)
 
     if parsed.path == "/api/workspaces":
         return j(
@@ -11159,6 +11203,7 @@ def _persist_new_session_truth(session) -> list[dict]:
     return semantic_messages
 
 
+@migration_consistent_http_routes("POST")
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
@@ -11200,6 +11245,11 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
 
+    # Portable bundles are binary.  Handle them before the generic JSON body
+    # parser and reject oversized requests before reading from the socket.
+    if parsed.path == "/api/session/import-bundle":
+        return _handle_session_bundle_import(handler)
+
     if parsed.path == "/api/client-events/log":
         if diag:
             diag.stage("read_client_event_body")
@@ -11223,6 +11273,21 @@ def handle_post(handler, parsed) -> bool:
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
+
+    if parsed.path == "/api/session/migration/apply":
+        if body.get("confirm") is not True:
+            return bad(handler, "Explicit migration confirmation is required", 400)
+        from api.legacy_session_migration import migrate_legacy_sessions
+
+        report = migrate_legacy_sessions(
+            SESSION_DIR,
+            _active_state_db_path(),
+            _artifact_registry(),
+            dry_run=False,
+            backup_root=STATE_DIR / "session-migration-backups",
+        )
+        publish_session_list_changed("legacy_session_migration")
+        return j(handler, _public_migration_report(report))
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
@@ -13819,6 +13884,127 @@ def _handle_session_export(handler, parsed):
     return True
 
 
+_SESSION_BUNDLE_REQUEST_MAX_BYTES = 30 * 1024 * 1024
+
+
+def _handle_session_bundle_export(handler, parsed):
+    from api.session_bundle import BundleValidationError, build_session_bundle
+
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid or not is_safe_session_id(sid):
+        return bad(handler, "session_id is required", 400)
+    try:
+        session = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        payload = build_session_bundle(session, _artifact_registry())
+    except BundleValidationError as exc:
+        logger.info("session bundle export rejected for %s: %s", sid, exc)
+        return bad(handler, "Session bundle could not be created", 409)
+    except Exception:
+        logger.exception("session bundle export failed for %s", sid)
+        return bad(handler, "Session bundle could not be created", 500)
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header(
+        "Content-Disposition", f'attachment; filename="taiji-session-{sid}.zip"'
+    )
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(payload)
+    return True
+
+
+def _handle_session_bundle_import(handler):
+    from api.session_bundle import (
+        BundleImportRollbackError,
+        BundleValidationError,
+        import_session_bundle,
+    )
+    from api.profiles import get_active_profile_name
+
+    content_type = str(handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    if content_type not in {"application/zip", "application/x-zip-compressed"}:
+        return bad(handler, "Content-Type must be application/zip", 415)
+    try:
+        length = _safe_content_length(handler, _SESSION_BUNDLE_REQUEST_MAX_BYTES)
+    except (ValueError, OverflowError) as exc:
+        status = 413 if "too large" in str(exc).lower() else 400
+        return bad(handler, str(exc), status)
+    if length <= 0:
+        return bad(handler, "Session bundle is empty", 400)
+    raw = handler.rfile.read(length)
+    if len(raw) != length:
+        return bad(handler, "Session bundle body is incomplete", 400)
+    try:
+        session = import_session_bundle(
+            raw,
+            _artifact_registry(),
+            workspace=resolve_trusted_workspace(str(DEFAULT_WORKSPACE)),
+            profile=get_active_profile_name() or "default",
+            persist_session=_persist_new_session_truth,
+        )
+    except BundleValidationError as exc:
+        logger.info("session bundle import rejected: %s", exc)
+        return bad(handler, "Session bundle is invalid", 400)
+    except BundleImportRollbackError:
+        logger.critical("session bundle import rollback required quarantine", exc_info=True)
+        return j(handler, {
+            "error": "Failed to import session bundle",
+            "code": "rollback_incomplete",
+        }, status=500)
+    except Exception:
+        logger.exception("session bundle import failed")
+        return bad(handler, "Failed to import session bundle", 500)
+    with LOCK:
+        SESSIONS[session.session_id] = session
+        SESSIONS.move_to_end(session.session_id)
+        while len(SESSIONS) > SESSIONS_MAX:
+            SESSIONS.popitem(last=False)
+    publish_session_list_changed("session_bundle_import")
+    public_session = public_session_projection(redact_session_data(
+        session.compact() | {
+            "messages": session.messages,
+            "tool_calls": session.tool_calls,
+        }
+    ))
+    return j(handler, public_response_projection(
+        {"ok": True, "session": public_session},
+        surface="session_bundle_import",
+    ))
+
+
+def _public_migration_report(report: dict) -> dict:
+    """Whitelist migration diagnostics and keep backup paths server-side."""
+    allowed_item_fields = {
+        "session_id", "code", "reason", "location", "message_index", "missing_users",
+        "stage", "failed_index", "rollback_complete",
+    }
+    items = []
+    for item in report.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        items.append({
+            key: item[key] for key in allowed_item_fields if key in item
+        })
+    return {
+        "scanned": int(report.get("scanned") or 0),
+        "modified": int(report.get("modified") or 0),
+        "skipped": int(report.get("skipped") or 0),
+        "failed": int(report.get("failed") or 0),
+        "needs_repair": bool(report.get("needs_repair")),
+        "backup_created": bool(report.get("backup_path")),
+        "quarantine_count": int(report.get("quarantine_count") or 0),
+        "quarantine_status": (
+            "manual_review_required"
+            if int(report.get("quarantine_count") or 0) else "clean"
+        ),
+        "items": items,
+    }
+
+
 def _session_search_message_text(message):
     content = message.get("content") if isinstance(message, dict) else ""
     if isinstance(content, list):
@@ -14361,7 +14547,9 @@ def _handle_gateway_sse_stream(handler, parsed):
     try:
         # Send initial snapshot immediately
         from api.models import get_cli_sessions
-        initial = get_cli_sessions()
+        from api.legacy_session_migration import legacy_migration_state_guard
+        with legacy_migration_state_guard():
+            initial = get_cli_sessions()
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
         while True:
@@ -14808,6 +14996,12 @@ def _artifact_registry():
     except Exception:
         logger.debug("Failed to clean retired artifacts", exc_info=True)
     return registry
+
+
+def _read_only_artifact_registry():
+    from api.artifacts import ArtifactRegistry
+
+    return ArtifactRegistry(STATE_DIR / "artifacts", create_root=False)
 
 
 def _path_is_within_root(child: Path, root: Path) -> bool:
@@ -16247,13 +16441,12 @@ def _handle_btw(handler, body):
         STREAMS[stream_id] = stream
     from api.background import track_btw
     track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
-    thr = threading.Thread(
-        target=_run_agent_streaming,
+    from api.legacy_session_migration import start_legacy_migration_guarded_worker
+    start_legacy_migration_guarded_worker(
+        _run_agent_streaming,
         args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
         kwargs={"ephemeral": True, "model_provider": model_provider},
-        daemon=True,
     )
-    thr.start()
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -16343,8 +16536,8 @@ def _handle_background(handler, body):
             except Exception:
                 pass
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    from api.legacy_session_migration import start_legacy_migration_guarded_worker
+    start_legacy_migration_guarded_worker(_run_bg_and_notify)
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
@@ -17399,13 +17592,12 @@ def _start_chat_stream_for_session(
             worker_kwargs["turn_id"] = reserved_turn_id
         if not backend_is_gateway:
             worker_kwargs["goal_related"] = goal_related
-        thr = threading.Thread(
-            target=worker_target,
+        from api.legacy_session_migration import start_legacy_migration_guarded_worker
+        start_legacy_migration_guarded_worker(
+            worker_target,
             args=(s.session_id, msg, model, workspace, stream_id, attachments),
             kwargs=worker_kwargs,
-            daemon=True,
         )
-        thr.start()
         # Only an accepted, successfully-started turn may consume or reset the
         # adjacent privacy budget. Keep that lifecycle write under the same
         # per-session lock used for ownership claims.
@@ -18193,7 +18385,20 @@ def _handle_cron_run(handler, body):
 
     _profile_home = get_active_hermes_home()
     _execution_profile_home = _profile_home_for_cron_job(job)
-    threading.Thread(target=_run_cron_tracked, args=(job, _profile_home, _execution_profile_home), daemon=True).start()
+    from api.legacy_session_migration import start_legacy_migration_guarded_worker
+
+    try:
+        start_legacy_migration_guarded_worker(
+            _run_cron_tracked,
+            args=(job, _profile_home, _execution_profile_home),
+            name=f"cron-run-{job_id[:12]}",
+        )
+    except BaseException:
+        # The wrapper releases its reserved lease when Thread.start() fails;
+        # also undo the optimistic running marker because the target's finally
+        # block never had a chance to execute.
+        _mark_cron_done(job_id)
+        raise
     return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
@@ -19845,13 +20050,12 @@ def _handle_session_compress_start(handler, body):
         }
         _MANUAL_COMPRESSION_JOBS[sid] = job
 
-    worker = threading.Thread(
-        target=_run_manual_compression_job,
+    from api.legacy_session_migration import start_legacy_migration_guarded_worker
+    start_legacy_migration_guarded_worker(
+        _run_manual_compression_job,
         args=(sid, job_body),
         name=f"manual-compress-{sid[:8]}",
-        daemon=True,
     )
-    worker.start()
 
     with _MANUAL_COMPRESSION_JOBS_LOCK:
         return j(handler, _manual_compression_status_payload(_MANUAL_COMPRESSION_JOBS.get(sid, job)))
@@ -21296,6 +21500,45 @@ def _handle_session_import_cli(handler, body):
     ))
 
 
+_LEGACY_MEDIA_DIRECTIVE_RE = re.compile(r"^\s*MEDIA:\s*.+?\s*$")
+
+
+def _legacy_import_text(value: str) -> str:
+    """Remove active MEDIA directives while preserving fenced examples as text."""
+    kept: list[str] = []
+    fence: str | None = None
+    for line in str(value).splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            marker = stripped[:len(stripped) - len(stripped.lstrip("`"))]
+            if len(marker) >= 3:
+                fence = None if fence else marker
+                kept.append(line)
+                continue
+        if fence is None and _LEGACY_MEDIA_DIRECTIVE_RE.fullmatch(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _legacy_json_text_messages(messages) -> list[dict]:
+    """Rebuild old JSON imports from a deliberately tiny text-only allowlist."""
+    result: list[dict] = []
+    for raw in messages if isinstance(messages, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        role = str(raw.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"} or not isinstance(raw.get("content"), str):
+            continue
+        projected = {"role": role, "content": _legacy_import_text(raw["content"])}
+        for field in ("timestamp", "_ts"):
+            value = raw.get(field)
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                projected[field] = value
+        result.append(projected)
+    return result
+
+
 def _handle_session_import(handler, body):
     """Import a session from a JSON export. Creates a new session with a new ID."""
     if not body or not isinstance(body, dict):
@@ -21303,35 +21546,37 @@ def _handle_session_import(handler, body):
     messages = body.get("messages")
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
+    if "workspace" in body:
+        imported_workspace = body.get("workspace")
+        if not isinstance(imported_workspace, str):
+            return bad(handler, "Imported workspace must be a path string")
+        try:
+            # Validate hostile/blocked values even though portable legacy JSON
+            # never inherits the source machine's workspace authority.
+            resolve_trusted_workspace(imported_workspace)
+        except (OSError, TypeError, ValueError) as exc:
+            return bad(handler, str(exc) or "Imported workspace is not allowed")
     title = body.get("title", "Imported session")
-    try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
-    except (TypeError, ValueError) as e:
-        return bad(handler, str(e))
+    if not isinstance(title, str):
+        title = "Imported session"
+    workspace = str(resolve_trusted_workspace(str(DEFAULT_WORKSPACE)))
     model = body.get("model", DEFAULT_MODEL)
+    if not isinstance(model, str):
+        model = DEFAULT_MODEL
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name() or "default"
-    imported_messages = []
-    for raw_message in messages:
-        if not isinstance(raw_message, dict):
-            continue
-        imported = copy.deepcopy(raw_message)
-        # Text-only compatibility import: an old path string is not an
-        # ownership proof and structured artifacts require a portable bundle.
-        imported.pop("artifacts", None)
-        imported["_legacy_imported"] = True
-        imported_messages.append(imported)
+    imported_messages = _legacy_json_text_messages(messages)
     s = Session(
         title=title,
         workspace=workspace,
         model=model,
         profile=active_profile,
         messages=imported_messages,
-        tool_calls=body.get("tool_calls", []),
+        tool_calls=[],
         context_messages=_completed_semantic_messages(imported_messages),
     )
     s.legacy_import = True
-    s.pinned = body.get("pinned", False)
+    s.pinned = body.get("pinned") is True
     try:
         _persist_new_session_truth(s)
     except Exception:

@@ -184,8 +184,9 @@ def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
     # The spawn site must call get_active_hermes_home() unguarded (no
     # try/except around it specifically), because a silent fallback to None
     # is exactly what would re-introduce #1573.
-    spawn_idx = body.find("threading.Thread(target=_run_cron_tracked")
-    assert spawn_idx != -1, "thread spawn not found in _handle_cron_run"
+    spawn_idx = body.find("start_legacy_migration_guarded_worker(")
+    assert spawn_idx != -1, "migration-guarded worker spawn not found in _handle_cron_run"
+    assert "threading.Thread(target=_run_cron_tracked" not in body
 
     # Look at the 1500 chars before the spawn — should NOT contain the
     # `_profile_home = None` fallback pattern.
@@ -312,3 +313,145 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
         "cron subprocess target appears to catch profile-context setup before "
         "entering the context; do not fall back to an unpinned run_job call."
     )
+
+
+def _prepare_manual_cron_route(monkeypatch, tmp_path, jobs, worker):
+    import cron.jobs as cron_jobs
+    from api import profiles, routes
+
+    monkeypatch.setattr(cron_jobs, "get_job", lambda job_id: jobs.get(job_id))
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path / "owner")
+    monkeypatch.setattr(routes, "_profile_home_for_cron_job", lambda _job: tmp_path / "execution")
+    monkeypatch.setattr(routes, "_run_cron_tracked", worker)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: {"error": message, "status": status},
+    )
+    routes._RUNNING_CRON_JOBS.clear()
+    return routes
+
+
+def test_manual_cron_worker_blocks_apply_and_queued_writer_blocks_new_cron(
+    tmp_path, monkeypatch
+):
+    """The cron lease spans the complete worker/subprocess lifecycle."""
+    import time
+
+    from api import legacy_session_migration as migration
+
+    barrier = migration._MigrationStateBarrier()
+    monkeypatch.setattr(migration, "_MIGRATION_STATE_BARRIER", barrier)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    writer_entered = threading.Event()
+    release_writer = threading.Event()
+
+    def worker(job, _profile_home, _execution_profile_home):
+        try:
+            if job["id"] == "cron-one":
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            else:
+                second_started.set()
+                assert release_second.wait(timeout=5)
+        finally:
+            routes._mark_cron_done(job["id"])
+
+    jobs = {
+        "cron-one": {"id": "cron-one"},
+        "cron-two": {"id": "cron-two"},
+    }
+    routes = _prepare_manual_cron_route(monkeypatch, tmp_path, jobs, worker)
+    assert migration._route_touches_migration_state("POST", "/api/crons/run") is True
+    assert migration._route_touches_migration_state("POST", "/api/cron/run") is True
+    assert routes._handle_cron_run(None, {"job_id": "cron-one"})["status"] == "running"
+    assert first_started.wait(timeout=2)
+
+    def apply():
+        with barrier.write():
+            writer_entered.set()
+            assert release_writer.wait(timeout=5)
+
+    writer = threading.Thread(target=apply, daemon=True)
+    writer.start()
+    deadline = time.monotonic() + 2
+    while barrier._waiting_writers == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert barrier._waiting_writers == 1
+    assert not writer_entered.is_set(), "Apply entered before the active cron finished"
+
+    second_response = {}
+
+    def start_second():
+        second_response.update(routes._handle_cron_run(None, {"job_id": "cron-two"}))
+
+    second_request = threading.Thread(target=start_second, daemon=True)
+    second_request.start()
+    time.sleep(0.05)
+    assert not second_started.is_set(), "new cron bypassed a queued migration writer"
+
+    release_first.set()
+    assert writer_entered.wait(timeout=2), "Apply did not acquire after the active cron ended"
+    assert not second_started.is_set(), "new cron started inside the exclusive Apply window"
+    release_writer.set()
+    writer.join(timeout=2)
+    assert second_started.wait(timeout=2), "new cron did not resume after Apply"
+    release_second.set()
+    second_request.join(timeout=2)
+    assert second_response["status"] == "running"
+    deadline = time.monotonic() + 2
+    while barrier._readers and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert barrier._readers == 0
+    assert routes._is_cron_running("cron-one")[0] is False
+    assert routes._is_cron_running("cron-two")[0] is False
+
+
+def test_manual_cron_start_failure_and_cancel_release_lease_and_running_marker(
+    tmp_path, monkeypatch
+):
+    from api import legacy_session_migration as migration
+
+    barrier = migration._MigrationStateBarrier()
+    monkeypatch.setattr(migration, "_MIGRATION_STATE_BARRIER", barrier)
+    cancelled = threading.Event()
+    worker_started = threading.Event()
+
+    def cancellable(job, _profile_home, _execution_profile_home):
+        try:
+            worker_started.set()
+            assert cancelled.wait(timeout=5)
+        finally:
+            routes._mark_cron_done(job["id"])
+
+    jobs = {
+        "cron-cancel": {"id": "cron-cancel"},
+        "cron-start-failure": {"id": "cron-start-failure"},
+    }
+    routes = _prepare_manual_cron_route(monkeypatch, tmp_path, jobs, cancellable)
+    routes._handle_cron_run(None, {"job_id": "cron-cancel"})
+    assert worker_started.wait(timeout=2)
+    assert barrier._readers == 1
+    cancelled.set()
+    deadline = __import__("time").monotonic() + 2
+    while barrier._readers and __import__("time").monotonic() < deadline:
+        __import__("time").sleep(0.005)
+    assert barrier._readers == 0
+    assert routes._is_cron_running("cron-cancel")[0] is False
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("injected cron thread start failure")
+
+    monkeypatch.setattr(migration.threading, "Thread", FailingThread)
+    with pytest.raises(RuntimeError, match="injected cron thread start failure"):
+        routes._handle_cron_run(None, {"job_id": "cron-start-failure"})
+    assert barrier._readers == 0
+    assert routes._is_cron_running("cron-start-failure")[0] is False

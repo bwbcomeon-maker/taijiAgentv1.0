@@ -2657,11 +2657,12 @@ def _maybe_schedule_title_refresh(session, put_event, agent):
     last_u, last_a = _latest_exchange_snippets(session.messages)
     if not last_u and not last_a:
         return
-    threading.Thread(
-        target=_run_background_title_refresh,
+    from api.legacy_session_migration import start_legacy_migration_guarded_worker
+    start_legacy_migration_guarded_worker(
+        _run_background_title_refresh,
         args=(session.session_id, last_u, last_a, current_title, put_event, agent),
-        daemon=True,
-    ).start()
+        name=f"title-refresh-{session.session_id[:8]}",
+    )
 
 
 def _strip_native_image_parts_from_content(content):
@@ -4484,6 +4485,9 @@ def _run_agent_streaming(
             stats['usage'] = _live_usage_snapshot()
             put('metering', stats)
 
+    # Journal-only emitter: migration never mutates run journals, so this
+    # short-lived ticker intentionally does not hold the session-state lease.
+    # The owning agent worker already guards all Session/DB/artifact writes.
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
     _metering_thread.start()
 
@@ -5636,11 +5640,11 @@ def _run_agent_streaming(
             with _agent_lock:
                 s.save(touch_updated_at=True, skip_index=False)
 
-            _ckpt_thread = threading.Thread(
-                target=_periodic_checkpoint, daemon=True,
+            from api.legacy_session_migration import start_legacy_migration_guarded_worker
+            _ckpt_thread = start_legacy_migration_guarded_worker(
+                _periodic_checkpoint,
                 name=f"ckpt-{session_id[:8]}",
             )
-            _ckpt_thread.start()
 
             _process_notifications = _drain_webui_process_notifications(session_id)
             _agent_msg_text = msg_text
@@ -6951,11 +6955,12 @@ def _run_agent_streaming(
             meter_stats.setdefault('estimated', False)
             put('metering', meter_stats)
             if _should_bg_title and _u0 and _a0:
-                threading.Thread(
-                    target=_run_background_title_update,
+                from api.legacy_session_migration import start_legacy_migration_guarded_worker
+                start_legacy_migration_guarded_worker(
+                    _run_background_title_update,
                     args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
-                    daemon=True,
-                ).start()
+                    name=f"title-update-{s.session_id[:8]}",
+                )
             else:
                 # Use the original session_id parameter (never reassigned), not s.session_id
                 # which may be rotated during context compression. The client captured

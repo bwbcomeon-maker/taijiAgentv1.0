@@ -7907,6 +7907,10 @@ function _ensureAppDialogBindings(){
     if(!_isAppDialogOpen()) return;
     if(e.key==='Escape'){
       e.preventDefault();
+      // The dialog owns Escape while open.  Without consuming the event,
+      // settings/page-level shortcuts also run and hide the panel underneath
+      // the just-cancelled confirmation.
+      e.stopImmediatePropagation();
       _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
       return;
     }
