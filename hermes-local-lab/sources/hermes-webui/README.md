@@ -173,7 +173,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Edit any past user message inline and regenerate from that point
 - Retry the last assistant response with one click
 - Cancel a running task directly from the composer footer (Stop button next to Send)
-- Tool call cards inline -- each shows the tool name, args, and result snippet; expand/collapse all toggle for multi-tool turns
+- Tool call cards inline -- each shows only the public tool name, status, and summary; raw args, result snippets, and expand controls are never exposed
 - Subagent delegation cards -- child agent activity shown with distinct icon and indented border
 - Mermaid diagram rendering inline (flowcharts, sequence diagrams, gantt charts)
 - Thinking/reasoning display -- collapsible gold-themed cards for Claude extended thinking and o3 reasoning blocks
@@ -509,7 +509,7 @@ api/
 ```
 index.html        HTML template
 style.css         All CSS incl. mobile responsive, themes + skins
-ui.js             DOM helpers, renderMd, tool cards, context indicator
+ui.js             DOM helpers, renderMd, public tool cards (name/status/summary only), context indicator
 workspace.js      File preview, file ops, git badge, central api() fetch wrapper
 sessions.js       Session CRUD, collapsible groups, search, reload recovery
 messages.js       send(), SSE handlers, live streaming, session recovery

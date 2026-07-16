@@ -130,3 +130,118 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
         "external gateway user",
         "external gateway assistant",
     ]
+
+
+def test_legacy_final_save_validates_visible_assistant_fields_only(monkeypatch, tmp_path):
+    import api.config as config
+    import api.models as models
+    import api.profiles as profiles
+    import api.streaming as streaming
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    index_file = session_dir / "_index.json"
+    sessions = OrderedDict()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "SESSIONS", sessions, raising=False)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
+    config.STREAMS.clear()
+    config.CANCEL_FLAGS.clear()
+    config.AGENT_INSTANCES.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    sid = "legacy-visible-assistant-gate"
+    stream_id = "stream-legacy-visible-assistant-gate"
+    raw_user = "inspect /tmp/customer/input.txt with token sk-user-original"
+    raw_content = "业务结果已保存到 /Users/alice/customer/output/report.docx。"
+    raw_reasoning = "读取 /private/customer/source.md 后完成。"
+    raw_args = '{"path":"/private/customer/input.txt","token":"sk-tool-original"}'
+    session = Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        model="test-model",
+        active_stream_id=stream_id,
+        pending_user_message=raw_user,
+        pending_started_at=1.0,
+    )
+    session.save(touch_updated_at=False)
+    sessions[sid] = session
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            self.session_id = sid
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            return {
+                "completed": True,
+                "final_response": raw_content,
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {
+                        "role": "assistant",
+                        "content": raw_content,
+                        "reasoning": raw_reasoning,
+                        "tool_calls": [{
+                            "id": "call-internal",
+                            "function": {"name": "read_file", "arguments": raw_args},
+                        }],
+                    },
+                ],
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    event_queue = queue.Queue()
+    config.STREAMS[stream_id] = event_queue
+    try:
+        streaming._run_agent_streaming(
+            session_id=sid,
+            msg_text=raw_user,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+            attachments=[],
+        )
+    finally:
+        config.STREAMS.pop(stream_id, None)
+
+    saved = Session.load(sid)
+    visible_assistant = saved.messages[-1]
+    internal_assistant = saved.context_messages[-1]
+    assert saved.messages[-2]["content"] == raw_user
+    assert "/Users/alice" not in visible_assistant["content"]
+    assert "/private/customer" not in visible_assistant["reasoning"]
+    assert visible_assistant["tool_calls"] == [
+        {"event_type": "tool.started", "name": "read_file", "tid": "call-internal"}
+    ]
+    assert internal_assistant["content"] == raw_content
+    assert internal_assistant["reasoning"] == raw_reasoning
+    assert internal_assistant["tool_calls"][0]["function"]["arguments"] == raw_args
+
+    from api.brand_privacy import public_session_projection, scrub_public_export_payload
+
+    live_events = []
+    while not event_queue.empty():
+        live_events.append(event_queue.get_nowait())
+    public_reload = public_session_projection({
+        **saved.compact(),
+        "messages": saved.messages,
+    })
+    public_export = scrub_public_export_payload(saved.__dict__)
+    public_serialized = json.dumps(
+        {"live": live_events, "reload": public_reload, "export": public_export},
+        ensure_ascii=False,
+    )
+    assert "/Users/alice" not in public_serialized
+    assert "/private/customer" not in public_serialized
+    assert "sk-tool-original" not in public_serialized

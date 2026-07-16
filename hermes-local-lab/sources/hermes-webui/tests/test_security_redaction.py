@@ -11,7 +11,6 @@ Tests run against the isolated test test_server on port 8788.
 """
 
 import json
-import importlib
 import pathlib
 import sys
 import types
@@ -239,8 +238,43 @@ def test_redact_text_prefilter_admits_plain_text_without_url_or_credentials():
     assert helpers._might_contain_sensitive_text(None) is False  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "sensitive_text, canary",
+    [
+        ("jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5hcnkifQ.signatureCanary123", "signatureCanary123"),
+        ("postgresql://admin:postgres-canary@db.internal/app", "postgres-canary"),
+        ("mysql://admin:mysql-canary@db.internal/app", "mysql-canary"),
+        ("mongodb://admin:mongodb-canary@db.internal/app", "mongodb-canary"),
+        ("redis://admin:redis-canary@db.internal/0", "redis-canary"),
+        ("amqp://admin:amqp-canary@mq.internal/vhost", "amqp-canary"),
+    ],
+)
+def test_local_fallback_redacts_agent_recognized_jwt_and_database_urls(
+    monkeypatch,
+    sensitive_text,
+    canary,
+):
+    """The local hard boundary must stand alone when agent.redact is unavailable."""
+    import builtins
+    import api.helpers as helpers
+
+    real_import = builtins.__import__
+
+    def import_without_agent_redact(name, *args, **kwargs):
+        if name == "agent.redact":
+            raise ImportError("agent.redact unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_agent_redact)
+    fallback_redact = helpers._build_redact_fn()
+    result = fallback_redact(sensitive_text)
+
+    assert sensitive_text not in result
+    assert canary not in result
+
+
 def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
-    """_redact_text must tolerate older redact_sensitive_text(text) signatures."""
+    """Legacy agent signatures still compose with the complete local fallback."""
     fake_agent = types.ModuleType("agent")
     fake_redact = types.ModuleType("agent.redact")
 
@@ -252,13 +286,16 @@ def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
     monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
 
     import api.helpers as helpers
-    helpers = importlib.reload(helpers)
-    try:
-        result = helpers._redact_value(f"token={_FAKE_GITHUB_PAT}")
-        assert _FAKE_GITHUB_PAT not in result
-        assert "ghp_Te" in result
-    finally:
-        importlib.reload(helpers)
+    legacy_combined_redact = helpers._build_redact_fn()
+    sensitive_text = (
+        f"token={_FAKE_GITHUB_PAT} "
+        "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5hcnkifQ.legacySignatureCanary "
+        "postgres://admin:legacy-db-canary@db.internal/app"
+    )
+    result = legacy_combined_redact(sensitive_text)
+    assert _FAKE_GITHUB_PAT not in result
+    assert "legacySignatureCanary" not in result
+    assert "legacy-db-canary" not in result
 
 
 def test_redact_session_data_messages():
@@ -314,6 +351,65 @@ def test_redact_session_data_non_sensitive_unchanged():
     assert result["title"] == "Hello world"
     assert result["messages"][0]["content"] == "What is 2+2?"
     assert result["tool_calls"][0]["snippet"] == "4"
+
+
+def test_redact_session_data_recurses_through_internal_history_and_pending_fields():
+    from api.helpers import redact_session_data
+
+    session = {
+        "messages": [],
+        "context_messages": [{"role": "user", "content": f"token={_FAKE_GITHUB_PAT}"}],
+        "pending_user_message": f"api_key={_FAKE_SK_KEY}",
+        "pending_attachments": [{"name": f"secret-{_FAKE_HF_TOKEN}.txt"}],
+        "dynamic_state": {"nested": {"credential": _FAKE_AWS_KEY}},
+    }
+    result = redact_session_data(session)
+    _assert_no_plaintext_credentials(json.dumps(result), "recursive session redaction")
+
+
+def test_public_session_export_uses_allowlist_and_drops_operational_state():
+    from api.brand_privacy import scrub_public_export_payload
+
+    raw_args = {"path": "/Users/me/private.docx", "token": _FAKE_GITHUB_PAT}
+    exported = scrub_public_export_payload({
+        "session_id": "export-safe",
+        "title": "Safe export",
+        "model": "test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": f"my token is {_FAKE_GITHUB_PAT}",
+                "attachments": [{"path": "/Users/me/private.docx"}],
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [{"name": "read_file", "args": raw_args, "summary": "read file"}],
+            },
+        ],
+        "tool_calls": [{"name": "read_file", "args": raw_args, "summary": "read file"}],
+        "context_messages": [{"role": "user", "content": "private model context"}],
+        "pending_user_message": "pending private turn",
+        "pending_attachments": [{"path": "/Users/me/pending.docx"}],
+        "active_stream_id": "private-stream",
+        "privacy_context": {"risk_type": "runtime_access"},
+        "_private_runtime": "private canary",
+        "dynamic_private_attr": {"token": _FAKE_SK_KEY},
+    })
+    serialized = json.dumps(exported, ensure_ascii=False)
+    assert set(exported) <= {
+        "export_schema_version", "session_id", "title", "model", "model_provider",
+        "created_at", "updated_at", "pinned", "archived", "project_id", "profile",
+        "personality", "messages", "tool_calls",
+    }
+    for forbidden in (
+        "context_messages", "pending_user_message", "pending_attachments",
+        "active_stream_id", "privacy_context", "_private_runtime", "dynamic_private_attr",
+        "attachments", "/Users/me/private.docx", "private model context", "private canary",
+    ):
+        assert forbidden not in serialized
+    assert "args" not in serialized
+    _assert_no_plaintext_credentials(serialized, "public export")
 
 
 # ── API-level tests (require running test server started by conftest.py) ─────

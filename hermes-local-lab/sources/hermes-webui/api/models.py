@@ -534,6 +534,37 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+def normalize_session_privacy_context(value):
+    """Return the bounded one-turn privacy context persisted with a session.
+
+    The former ``brand_privacy_tainted`` boolean had no expiry and could make
+    unrelated future turns inherit a sensitive classification indefinitely.
+    Only an explicit, positive ``remaining_turns`` context is accepted here;
+    legacy booleans intentionally normalize to no active context.
+    """
+    if not isinstance(value, dict):
+        return None
+    try:
+        remaining_turns = int(value.get("remaining_turns") or 0)
+    except (TypeError, ValueError):
+        return None
+    risk_type = str(value.get("risk_type") or "").strip()
+    source_turn_id = str(value.get("source_turn_id") or "").strip()
+    if remaining_turns <= 0 or not risk_type or not source_turn_id:
+        return None
+    return {
+        "risk_type": risk_type,
+        "source_turn_id": source_turn_id,
+        # Phase 1 deliberately supports only the immediately adjacent turn.
+        "remaining_turns": min(remaining_turns, 1),
+        "reset_reason": (
+            str(value.get("reset_reason")).strip()
+            if value.get("reset_reason") not in (None, "")
+            else None
+        ),
+    }
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -568,8 +599,9 @@ class Session:
                 worktree_branch=None,
                 worktree_repo_root=None,
                 worktree_created_at=None,
-                enabled_toolsets=None,
-                composer_draft=None,
+                 enabled_toolsets=None,
+                 composer_draft=None,
+                privacy_context=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -624,6 +656,10 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        # Legacy brand_privacy_tainted values are intentionally ignored. They
+        # had no source turn or expiry, so carrying them forward would recreate
+        # the indefinite cross-turn pollution this field replaces.
+        self.privacy_context = normalize_session_privacy_context(privacy_context)
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -680,6 +716,7 @@ class Session:
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
+            'privacy_context',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -688,6 +725,7 @@ class Session:
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')
+                 and k != 'brand_privacy_tainted'
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 

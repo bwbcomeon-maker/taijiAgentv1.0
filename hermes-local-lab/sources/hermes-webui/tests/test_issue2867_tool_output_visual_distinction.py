@@ -7,7 +7,7 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 def test_tool_cards_use_legacy_compact_header_without_tool_output_badge():
     """Tool cards keep the legacy compact header: icon, tool name, preview."""
-    build_start = UI_JS.index('function buildToolCard(tc){')
+    build_start = UI_JS.index('function buildToolCard(tc')
     build_end = UI_JS.index('function _syncToolCallGroupSummary', build_start)
     build_tool_card = UI_JS[build_start:build_end]
 

@@ -77,12 +77,20 @@ def post_multipart(path, fields, files):
 
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
-    body = {}
-    if ws: body["workspace"] = str(ws)
+    # The isolated server's default workspace is implementation-owned and is
+    # intentionally omitted from the public session projection. HTTP tests
+    # that need file-browser access therefore create an explicit customer
+    # workspace instead of depending on that internal path.
+    workspace = pathlib.Path(ws) if ws else (
+        pathlib.Path.home() / ".cache" / "taiji-webui-sprint1-customer"
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
-    return sid, pathlib.Path(d["session"]["workspace"])
+    assert d["session"]["workspace"] == str(workspace)
+    return sid, workspace
 
 
 
@@ -142,11 +150,11 @@ def test_session_create_and_load():
 
 
 def test_session_update():
-    """Create session, update workspace and model, verify persisted."""
+    """Internal workspaces stay private; an explicit customer workspace persists."""
     data, _ = post("/api/session/new", {})
     sid = data["session"]["session_id"]
-    current_ws = pathlib.Path(data["session"]["workspace"])
-    child_ws = current_ws / f"session-update-{uuid.uuid4().hex[:6]}"
+    assert "workspace" not in data["session"]
+    child_ws = pathlib.Path.home() / ".cache" / "taiji-webui-sprint1-customer-update"
     child_ws.mkdir(parents=True, exist_ok=True)
 
     updated, status = post("/api/session/update", {
@@ -156,10 +164,12 @@ def test_session_update():
     })
     assert status == 200
     assert updated["session"]["model"] == "anthropic/claude-sonnet-4.6"
+    assert updated["session"]["workspace"] == str(child_ws)
 
     # Reload and verify persistence
     reloaded = get(f"/api/session?session_id={sid}")
     assert reloaded["session"]["model"] == "anthropic/claude-sonnet-4.6"
+    assert reloaded["session"]["workspace"] == str(child_ws)
 
 
 def test_session_delete():
@@ -187,9 +197,12 @@ def test_session_delete_removes_attachment_inbox(cleanup_test_sessions):
         "file": ("delete-me.txt", b"temporary attachment")
     })
     assert status == 200, f"Upload failed {status}: {result}"
-    attachment_dir = pathlib.Path(result["path"]).parent
+    assert "path" not in result
+    from api.upload import _session_attachment_dir
+    attachment_dir = _session_attachment_dir(sid)
+    uploaded_path = attachment_dir / result["ref"]
     assert attachment_dir.name == sid
-    assert attachment_dir.exists()
+    assert uploaded_path.exists()
 
     delete_result, delete_status = post("/api/session/delete", {"session_id": sid})
 
@@ -325,7 +338,10 @@ def test_upload_text_file(cleanup_test_sessions):
     assert "filename" in result
     assert result["size"] == len(b"sprint1 test content")
 
-    uploaded_path = pathlib.Path(result["path"])
+    assert "path" not in result
+    assert result["ref"] == result["filename"]
+    from api.upload import _session_attachment_dir
+    uploaded_path = _session_attachment_dir(sid) / result["ref"]
     assert uploaded_path.exists()
     assert uploaded_path.read_bytes() == b"sprint1 test content"
     assert uploaded_path.parent.name == sid
@@ -426,7 +442,9 @@ def test_approval_submit_and_respond():
     # Poll should now show the pending entry
     data = get(f"/api/approval/pending?session_id={urllib.parse.quote(test_sid)}")
     assert data["pending"] is not None, "Pending entry not visible after inject"
-    assert data["pending"]["command"] == cmd
+    assert data["pending"]["summary"]
+    assert "command" not in data["pending"]
+    assert cmd not in json.dumps(data["pending"], ensure_ascii=False)
 
     # Respond with deny
     result, status = post("/api/approval/respond", {

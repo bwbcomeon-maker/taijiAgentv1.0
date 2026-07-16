@@ -97,7 +97,11 @@ def parse_multipart(rfile, content_type, content_length) -> tuple:
 
 
 def _sanitize_upload_name(filename: str) -> str:
-    safe_name = _re.sub(r'[^\w.\-]', '_', Path(filename).name)[:200]
+    # Browsers normally submit a basename, but some clients still send a
+    # Windows or UNC path.  Normalize both separator flavours before deriving
+    # the public display name so client-side directories never survive.
+    basename = Path(str(filename or '').replace('\\', '/')).name
+    safe_name = _re.sub(r'[^\w.\-]', '_', basename)[:200]
     if not safe_name or safe_name.strip('.') == '':
         raise ValueError('Invalid filename')
     return safe_name
@@ -166,8 +170,9 @@ def handle_upload(handler):
         dest.write_bytes(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         return j(handler, {
+            'name': safe_name,
             'filename': dest.name,
-            'path': str(dest),
+            'ref': dest.name,
             'size': dest.stat().st_size,
             'mime': mime,
             'is_image': mime.startswith('image/'),

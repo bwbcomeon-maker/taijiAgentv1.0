@@ -135,6 +135,118 @@ def test_api_session_includes_state_db_messages_newer_than_webui_sidecar(monkeyp
     assert payload["session"]["message_count"] == 4
 
 
+def test_webui_session_get_uses_strict_public_egress_for_tool_messages(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui-public-egress-get"
+    session = _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [{
+                    "id": "call-private",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": '{"command":"cat /private/runtime"}',
+                    },
+                    "summary": "checked",
+                }],
+            },
+            {
+                "role": "tool",
+                "name": "terminal",
+                "content": "raw result",
+                "tool_call_id": "call-private",
+                "args": {"command": "cat /private/runtime"},
+                "result": "private-result-canary",
+                "summary": "checked",
+            },
+        ],
+    )
+    session.tool_calls = [{
+        "name": "terminal",
+        "summary": "checked history",
+        "assistant_msg_idx": 0,
+        "done": True,
+        "args": {"command": "cat /private/runtime"},
+    }]
+    session.save(touch_updated_at=False)
+    real_projection = routes.public_session_projection
+    calls = []
+
+    def canary(payload):
+        calls.append("session_get")
+        return real_projection(payload)
+
+    monkeypatch.setattr(routes, "public_session_projection", canary)
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert calls == ["session_get"]
+    messages = handler.response_json["session"]["messages"]
+    assert messages[0]["tool_calls"] == [{
+        "event_type": "tool.started",
+        "name": "terminal",
+        "summary": "checked",
+        "tid": "call-private",
+    }]
+    assert set(messages[1]) <= {
+        "role", "event_type", "name", "status", "duration", "summary",
+        "is_error", "tid", "tool_call_id",
+    }
+    assert "args" not in messages[1]
+    assert "result" not in messages[1]
+    assert handler.response_json["session"]["tool_calls"] == [{
+        "event_type": "tool.completed",
+        "name": "terminal",
+        "status": "completed",
+        "summary": "checked history",
+        "assistant_msg_idx": 0,
+        "done": True,
+    }]
+
+
+def test_cli_session_get_uses_strict_public_egress_for_tool_messages(monkeypatch):
+    import api.routes as routes
+
+    sid = "cli-public-egress-get"
+    cli_messages = [{
+        "role": "tool",
+        "name": "terminal",
+        "content": "raw result",
+        "tool_call_id": "call-cli-private",
+        "args": {"command": "cat /private/runtime"},
+        "result": "private-cli-result-canary",
+        "summary": "checked",
+    }]
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError(sid)))
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: cli_messages)
+    real_projection = routes.public_session_projection
+    calls = []
+
+    def canary(payload):
+        calls.append("session_cli_get")
+        return real_projection(payload)
+
+    monkeypatch.setattr(routes, "public_session_projection", canary)
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert calls == ["session_cli_get"]
+    tool_message = handler.response_json["session"]["messages"][0]
+    assert set(tool_message) <= {
+        "role", "event_type", "name", "status", "duration", "summary",
+        "is_error", "tid", "tool_call_id",
+    }
+    assert "args" not in tool_message
+    assert "result" not in tool_message
+
+
 def test_metadata_poll_uses_sidecar_message_count_for_external_updates(monkeypatch, tmp_path):
     """Active-session external refresh relies on metadata-only counts.
 
@@ -274,11 +386,19 @@ def test_state_db_reconciliation_preserves_sidecar_order_when_timestamps_collide
     routes.handle_get(handler, urlparse(handler.path))
     assert handler.status == 200
     messages = handler.response_json["session"]["messages"]
-    assert [m["content"] for m in messages] == [
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool"]
+    assert [m["content"] for m in messages[:2]] == [
         "z user happened first",
         "a assistant happened second",
-        "m tool happened third",
     ]
+    assert messages[2] == {
+        "role": "tool",
+        "event_type": "tool.completed",
+        "status": "completed",
+        "tid": "call_1",
+        "tool_call_id": "call_1",
+        "timestamp": 1000,
+    }
     assert handler.response_json["session"]["message_count"] == 3
 
 
@@ -642,5 +762,10 @@ def test_state_db_reconciliation_preserves_tool_metadata(monkeypatch, tmp_path):
     assert handler.status == 200
     messages = handler.response_json["session"]["messages"]
     assert messages[-1]["content"] == "used a tool"
-    assert messages[-1]["tool_name"] == "terminal"
-    assert messages[-1]["tool_calls"] == [{"id": "call_1", "function": {"name": "terminal"}}]
+    assert "tool_name" not in messages[-1]
+    # GET /api/session is a public boundary: preserve lifecycle identity/name,
+    # but never expose the raw provider function/argument envelope.
+    assert messages[-1]["tool_calls"] == [
+        {"event_type": "tool.started", "name": "terminal", "tid": "call_1"}
+    ]
+    assert "function" not in messages[-1]["tool_calls"][0]

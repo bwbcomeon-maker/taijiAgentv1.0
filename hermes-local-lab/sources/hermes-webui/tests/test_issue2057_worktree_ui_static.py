@@ -67,7 +67,9 @@ def test_worktree_archive_delete_api_responses_are_explicit():
     assert "def _worktree_retained_payload_for_session_id(sid: str)" in src
     assert '"worktree_retained": True' in src
     assert '{"ok": True, **worktree_retained}' in src
-    assert '{"ok": True, "session": s.compact(), **_worktree_retained_payload(s)}' in src
+    assert '"session": public_session_projection(s.compact())' in src
+    assert 'payload = {"worktree_retained": True}' in src
+    assert 'payload["worktree_path"]' not in src
 
 
 def test_remove_worktree_ui_does_not_force_unsafe_status_by_default():

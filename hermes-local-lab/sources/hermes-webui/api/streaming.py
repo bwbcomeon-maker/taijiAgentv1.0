@@ -44,8 +44,10 @@ from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     brand_safety_validate,
     classify_brand_safety_prompt,
+    public_attachment_projection,
     public_egress_scrub,
     safe_toolsets_for_workspace,
+    sanitize_persisted_assistant_message,
     scrub_brand_leaks,
     scrub_messages,
     scrub_public_session_payload,
@@ -55,6 +57,7 @@ from api.compression_anchor import is_context_compression_marker, visible_messag
 from api.attachment_context import (
     build_attachment_context,
     has_configured_vision,
+    resolve_attachment_path,
 )
 from api.metering import meter
 from api.run_journal import RunJournalWriter
@@ -66,6 +69,22 @@ from api.models import (
     get_state_db_session_messages,
     reconciled_state_db_messages_for_session,
 )
+
+
+def _finalize_public_reasoning(raw_text: str) -> str:
+    """Validate one complete reasoning trace before it reaches a public surface."""
+    value = str(raw_text or "")
+    if not value:
+        return ""
+    decision = brand_safety_validate(value)
+    if decision.action == "replace_output":
+        return str(
+            public_egress_scrub(
+                decision.safe_reply,
+                surface="reasoning_full_buffer_replacement",
+            )
+        )
+    return str(public_egress_scrub(value, surface="reasoning_full_buffer"))
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -1180,6 +1199,23 @@ def _attachment_name(att) -> str:
     return str(att or '').strip()
 
 
+def _public_attachment_descriptors_for_persistence(
+    attachments,
+    *,
+    session_id: str,
+) -> list[dict]:
+    """Keep safe reload fields while preserving the upload's opaque ref."""
+    projected = []
+    for attachment in list(attachments or []):
+        descriptor = public_attachment_projection(
+            attachment,
+            session_id=session_id,
+        )
+        if descriptor:
+            projected.append(descriptor)
+    return projected
+
+
 _IMAGE_MAGIC: dict[bytes | None, frozenset[str]] = {
     b'\x89PNG\r\n\x1a\n': frozenset({'image/png'}),
     b'\xff\xd8\xff': frozenset({'image/jpeg'}),
@@ -1385,6 +1421,7 @@ def prepare_webui_chat_input(
     attachments,
     *,
     workspace: str,
+    session_id: str,
     cfg: dict,
     provider: str | None = None,
     model: str | None = None,
@@ -1407,6 +1444,7 @@ def prepare_webui_chat_input(
     attachment_context = build_attachment_context(
         attachments,
         workspace=workspace,
+        session_id=session_id,
         cfg=cfg,
         image_mode=image_mode,
         vision_available=vision_available,
@@ -1427,6 +1465,7 @@ def prepare_webui_chat_input(
         text,
         attachments,
         workspace,
+        session_id=session_id,
         cfg=cfg,
         provider=provider,
         model=model,
@@ -1452,6 +1491,7 @@ def _build_native_multimodal_message(
     attachments,
     workspace: str,
     *,
+    session_id: str,
     cfg: dict = None,
     provider: str | None = None,
     model: str | None = None,
@@ -1475,35 +1515,21 @@ def _build_native_multimodal_message(
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
-    workspace_root = Path(workspace).expanduser().resolve()
-    # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
-    # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
-    # design). The pre-existing `path.relative_to(workspace_root)` guard would
-    # silently reject every image upload for vision-capable models. Allow the
-    # configured attachment root in addition to workspace_root so native
-    # multimodal embeds still build the base64 image_url part. The
-    # _attachment_root() helper applies expanduser+resolve and is also reused
-    # by _upload_destination — single source of truth for the inbox root.
-    try:
-        from api.upload import _attachment_root
-        attachment_root = _attachment_root()
-        _allowed_roots = (workspace_root, attachment_root)
-    except Exception:
-        _allowed_roots = (workspace_root,)
     image_count = 0
 
     for att in attachments or []:
         if not isinstance(att, dict):
             continue
-        raw_path = str(att.get('path') or '').strip()
+        raw_path = str(att.get('path') or att.get('ref') or '').strip()
         if not raw_path:
             continue
         try:
-            path = Path(raw_path).expanduser().resolve()
-            # Uploads should live inside the selected workspace OR the
-            # session attachment inbox (#2319). Do not read arbitrary paths
-            # from client-provided attachment metadata.
-            if not any(path.is_relative_to(r) for r in _allowed_roots):
+            path = resolve_attachment_path(
+                raw_path,
+                workspace=workspace,
+                session_id=session_id,
+            )
+            if path is None:
                 continue
             if not path.is_file():
                 continue
@@ -4458,6 +4484,7 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        data = public_egress_scrub(data, surface="stream", event_name=event)
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -4720,6 +4747,8 @@ def _run_agent_streaming(
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
+            _reasoning_buffer = []  # raw trace; never public before whole-output validation
+            _reasoning_finalized = [False]
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
             _brand_token_tail = ['']
 
@@ -4748,8 +4777,16 @@ def _run_agent_streaming(
                 candidate = _compact_for_echo_compare(text)
                 if not candidate:
                     return False
+                _pending_token_state = _brand_token_tail[0] if _brand_token_tail else ""
+                if isinstance(_pending_token_state, dict):
+                    _pending_token_text = str(_pending_token_state.get("pending") or "")
+                else:
+                    _pending_token_text = str(_pending_token_state or "")
                 visible_tail = _compact_for_echo_compare(
-                    STREAM_PARTIAL_TEXT.get(stream_id, '')[-max(len(str(text)) * 2, 512):]
+                    (
+                        STREAM_PARTIAL_TEXT.get(stream_id, '')
+                        + _pending_token_text
+                    )[-max(len(str(text)) * 2, 512):]
                 )
                 return bool(visible_tail and visible_tail.endswith(candidate))
 
@@ -4772,34 +4809,42 @@ def _run_agent_streaming(
                 meter().record_token(stream_id, _metering_output_deltas[0])
                 _emit_metering()
 
-            def _flush_brand_token_tail():
-                safe_text = scrub_streaming_token_delta('', _brand_token_tail, final=True)
-                if not safe_text:
-                    return
-                if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += safe_text
-                put('token', {'text': safe_text})
-
-            def on_reasoning(text):
+            def _emit_reasoning_delta(text, *, final=False):
                 nonlocal _reasoning_text
-                if text is None:
+                if not final:
+                    raw_delta = str(text or '')
+                    if raw_delta:
+                        _reasoning_buffer.append(raw_delta)
+                        _metering_reasoning_deltas[0] += 1
+                        meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
+                        _emit_metering()
                     return
-                reasoning_delta = public_egress_scrub(str(text), surface="stream_reasoning")
-                # Some runtimes mirror user-visible progress text through the
-                # reasoning channel after it already streamed as normal assistant
-                # output. Treat that as an echo, otherwise the UI renders the
-                # same sentence again inside a Thinking card.
-                if _is_visible_output_echo(reasoning_delta):
+                if _reasoning_finalized[0]:
+                    return
+                _reasoning_finalized[0] = True
+                reasoning_delta = _finalize_public_reasoning(''.join(_reasoning_buffer))
+                if not reasoning_delta or _is_visible_output_echo(reasoning_delta):
                     return
                 _reasoning_text += reasoning_delta
-                # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
                 put('reasoning', {'text': reasoning_delta})
-                # Track reasoning deltas in the meter so live TPS reflects all AI output.
-                _metering_reasoning_deltas[0] += 1
-                meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
-                _emit_metering()
+
+            def _flush_brand_token_tail(*, include_reasoning=True):
+                safe_text = scrub_streaming_token_delta('', _brand_token_tail, final=True)
+                if safe_text:
+                    if stream_id in STREAM_PARTIAL_TEXT:
+                        STREAM_PARTIAL_TEXT[stream_id] += safe_text
+                    put('token', {'text': safe_text})
+                if include_reasoning:
+                    _emit_reasoning_delta('', final=True)
+
+            def on_reasoning(text):
+                if text is None:
+                    return
+                # Use the same stateful boundary filter as visible tokens so
+                # sensitive markers split across provider chunks cannot leak.
+                _emit_reasoning_delta(text)
 
             def on_interim_assistant(text, **cb_kwargs):
                 if text is None:
@@ -4819,14 +4864,6 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
-
-            def _tool_args_snapshot(args):
-                args_snap = {}
-                if isinstance(args, dict):
-                    for k, v in list(args.items())[:4]:
-                        s2 = str(v)
-                        args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
-                return args_snap
 
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
@@ -4880,23 +4917,8 @@ def _run_agent_streaming(
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
-                        reason_delta = public_egress_scrub(str(reason_text), surface="stream_tool_reasoning")
-                        # Older tool-progress paths can mirror the same visible
-                        # progress text already emitted through stream_delta_callback.
-                        # Suppress those echoes like the dedicated reasoning callback.
-                        if _is_visible_output_echo(reason_delta):
-                            return
-                        _reasoning_text += reason_delta
-                        # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
-                        if stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += reason_delta
-                        put('reasoning', {'text': reason_delta})
-                        _metering_reasoning_deltas[0] += 1
-                        meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
-                        _emit_metering()
+                        _emit_reasoning_delta(reason_text)
                     return
-
-                args_snap = _tool_args_snapshot(args)
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
@@ -4920,8 +4942,7 @@ def _run_agent_streaming(
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': public_egress_scrub(name, surface="stream_tool_name"),
-                        'preview': public_egress_scrub(preview, surface="stream_tool_preview"),
-                        'args': args_snap,
+                        'status': 'running',
                     })
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
@@ -4970,8 +4991,7 @@ def _run_agent_streaming(
                     event_payload = {
                         'event_type': event_type,
                         'name': public_egress_scrub(name, surface="stream_tool_name"),
-                        'preview': public_egress_scrub(preview, surface="stream_tool_preview"),
-                        'args': args_snap,
+                        'status': 'failed' if result_is_error else 'completed',
                         'duration': cb_kwargs.get('duration'),
                         'is_error': result_is_error,
                     }
@@ -5004,8 +5024,7 @@ def _run_agent_streaming(
                         put('tool', {
                             'event_type': 'tool.started',
                             'name': public_egress_scrub(name, surface="stream_tool_name"),
-                            'preview': None,
-                            'args': _tool_args_snapshot(args),
+                            'status': 'running',
                             'tid': tool_call_id,
                         })
                     _tool_stats = meter().get_stats()
@@ -5047,8 +5066,7 @@ def _run_agent_streaming(
                         event_payload = {
                             'event_type': 'tool.completed',
                             'name': public_egress_scrub(name, surface="stream_tool_name"),
-                            'preview': result_snippet,
-                            'args': _tool_args_snapshot(args),
+                            'status': 'failed' if result_is_error else 'completed',
                             'tid': tool_call_id,
                             'is_error': result_is_error,
                         }
@@ -5591,6 +5609,7 @@ def _run_agent_streaming(
                     _agent_msg_text,
                     attachments,
                     workspace=workspace,
+                    session_id=session_id,
                     cfg=_cfg,
                     provider=model_provider,
                     model=model,
@@ -5746,13 +5765,13 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
-                s.context_messages = scrub_messages(_deduplicate_context_messages(_next_context_messages))
-                s.messages = scrub_messages(_merge_display_messages_after_agent_result(
+                s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
                     _previous_context_messages,
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     persist_msg_text,
-                ))
+                )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -5893,13 +5912,13 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = scrub_messages(_deduplicate_context_messages(_next_context_messages))
-                                s.messages = scrub_messages(_merge_display_messages_after_agent_result(
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                                s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     persist_msg_text,
-                                ))
+                                )
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -5937,7 +5956,7 @@ def _run_agent_streaming(
                             _err_type,
                             scrub_brand_leaks(_err_hint),
                         )
-                        _flush_brand_token_tail()
+                        _flush_brand_token_tail(include_reasoning=False)
                         put('apperror', _error_payload)
                         # Clear stream/pending state so the session does not appear
                         # "agent_running" on reload after a silent failure.
@@ -6231,11 +6250,16 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
-                # Tag the matching user message with attachment filenames for display on reload
+                # Tag the matching user message with safe attachment descriptors for
+                # reload/retry.  The display name is not necessarily the server-selected
+                # upload ref (same-name uploads are renamed in the session inbox).
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
                 if attachments:
-                    display_attachments = [_attachment_name(a) for a in attachments if _attachment_name(a)]
+                    display_attachments = _public_attachment_descriptors_for_persistence(
+                        attachments,
+                        session_id=session_id,
+                    )
                     for m in reversed(s.messages):
                         if m.get('role') == 'user':
                             content = str(m.get('content', ''))
@@ -6248,7 +6272,16 @@ def _run_agent_streaming(
                 # Must run BEFORE s.save() — otherwise the mutation lives only in
                 # memory until the next turn's save, and the last-turn thinking card
                 # is lost when the user reloads immediately after a response.
+                # Finalization is intentionally delayed until the complete trace is
+                # available; semantic output validation cannot be done per chunk.
+                _emit_reasoning_delta('', final=True)
                 if _reasoning_text and s.messages:
+                    _reasoning_text = str(
+                        public_egress_scrub(
+                            _reasoning_text,
+                            surface="persisted_reasoning",
+                        )
+                    )
                     for _rm in reversed(s.messages):
                         if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
                             _rm['reasoning'] = _reasoning_text
@@ -6474,6 +6507,13 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', {'message': 'Cancelled by user'})
                     return
+                s.messages = [
+                    sanitize_persisted_assistant_message(_display_message)
+                    if isinstance(_display_message, dict)
+                    and _display_message.get('role') in {'assistant', 'tool'}
+                    else _display_message
+                    for _display_message in s.messages
+                ]
                 s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -6951,13 +6991,13 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = scrub_messages(_deduplicate_context_messages(_next_context_messages))
-                                s.messages = scrub_messages(_merge_display_messages_after_agent_result(
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                                s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     persist_msg_text,
-                                ))
+                                )
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
@@ -7045,7 +7085,7 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
         if '_flush_brand_token_tail' in locals():
-            _flush_brand_token_tail()
+            _flush_brand_token_tail(include_reasoning=False)
         put('apperror', _error_payload)
     finally:
         # Stop the periodic checkpoint thread before the final recovery path.

@@ -59,6 +59,16 @@ def _make_jpeg(path: Path, size: int = 107) -> Path:
     return path
 
 
+def _chat_inbox(tmp_path: Path, monkeypatch, session_id: str = "test-session") -> tuple[Path, Path]:
+    attachment_root = tmp_path / "attachments"
+    inbox = attachment_root / session_id
+    workspace = tmp_path / "workspace"
+    inbox.mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    return inbox, workspace
+
+
 # ── _attachment_name ────────────────────────────────────────────────────────
 
 class TestAttachmentName:
@@ -126,54 +136,51 @@ class TestNormalizeChatAttachments:
 
 class TestBuildNativeMultimodalMessage:
     def test_no_attachments_returns_string(self):
-        result = _build_native_multimodal_message('[WS: x]\n', 'describe', [], '/ws')
+        result = _build_native_multimodal_message('[WS: x]\n', 'describe', [], '/ws', session_id='test-session')
         assert result == '[WS: x]\ndescribe'
 
-    def test_single_image_in_workspace(self):
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            img = root / 'pic.png'
-            _make_png(img)
-            atts = _normalize_chat_attachments([{
-                'name': 'pic.png', 'path': str(img),
-                'mime': 'image/png', 'size': img.stat().st_size, 'is_image': True,
-            }])
-            result = _build_native_multimodal_message('[WS]\n', 'look', atts, str(root))
-            assert isinstance(result, list)
-            assert result[0] == {'type': 'text', 'text': '[WS]\nlook'}
-            assert len(result) == 2
-            assert result[1]['type'] == 'image_url'
-            url = result[1]['image_url']['url']
-            assert url.startswith('data:image/png;base64,')
-            decoded = base64.b64decode(url.split(',', 1)[1])
-            assert decoded[:4] == b'\x89PNG'
+    def test_single_image_in_session_inbox(self, tmp_path, monkeypatch):
+        inbox, workspace = _chat_inbox(tmp_path, monkeypatch)
+        img = inbox / 'pic.png'
+        _make_png(img)
+        atts = _normalize_chat_attachments([{
+            'name': 'pic.png', 'ref': 'pic.png',
+            'mime': 'image/png', 'size': img.stat().st_size, 'is_image': True,
+        }])
+        result = _build_native_multimodal_message('[WS]\n', 'look', atts, str(workspace), session_id='test-session')
+        assert isinstance(result, list)
+        assert result[0] == {'type': 'text', 'text': '[WS]\nlook'}
+        assert len(result) == 2
+        assert result[1]['type'] == 'image_url'
+        url = result[1]['image_url']['url']
+        assert url.startswith('data:image/png;base64,')
+        decoded = base64.b64decode(url.split(',', 1)[1])
+        assert decoded[:4] == b'\x89PNG'
 
-    def test_jpeg_image_in_workspace(self):
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            img = root / 'photo.jpeg'
-            _make_jpeg(img)
-            atts = _normalize_chat_attachments([{
-                'name': 'photo.jpeg', 'path': str(img),
-                'mime': 'image/jpeg', 'size': img.stat().st_size, 'is_image': True,
-            }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
-            assert result[1]['image_url']['url'].startswith('data:image/jpeg;base64,')
+    def test_jpeg_image_in_session_inbox(self, tmp_path, monkeypatch):
+        inbox, workspace = _chat_inbox(tmp_path, monkeypatch)
+        img = inbox / 'photo.jpeg'
+        _make_jpeg(img)
+        atts = _normalize_chat_attachments([{
+            'name': 'photo.jpeg', 'ref': 'photo.jpeg',
+            'mime': 'image/jpeg', 'size': img.stat().st_size, 'is_image': True,
+        }])
+        result = _build_native_multimodal_message('', 'hi', atts, str(workspace), session_id='test-session')
+        assert result[1]['image_url']['url'].startswith('data:image/jpeg;base64,')
 
-    def test_multiple_images_become_multiple_parts(self):
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            img1 = root / 'a.png'
-            img2 = root / 'b.png'
-            _make_png(img1)
-            _make_png(img2)
-            atts = _normalize_chat_attachments([
-                {'name': 'a.png', 'path': str(img1), 'mime': 'image/png', 'size': img1.stat().st_size, 'is_image': True},
-                {'name': 'b.png', 'path': str(img2), 'mime': 'image/png', 'size': img2.stat().st_size, 'is_image': True},
-            ])
-            result = _build_native_multimodal_message('', 'multi', atts, str(root))
-            image_parts = [p for p in result if p['type'] == 'image_url']
-            assert len(image_parts) == 2
+    def test_multiple_images_become_multiple_parts(self, tmp_path, monkeypatch):
+        inbox, workspace = _chat_inbox(tmp_path, monkeypatch)
+        img1 = inbox / 'a.png'
+        img2 = inbox / 'b.png'
+        _make_png(img1)
+        _make_png(img2)
+        atts = _normalize_chat_attachments([
+            {'name': 'a.png', 'ref': 'a.png', 'mime': 'image/png', 'size': img1.stat().st_size, 'is_image': True},
+            {'name': 'b.png', 'ref': 'b.png', 'mime': 'image/png', 'size': img2.stat().st_size, 'is_image': True},
+        ])
+        result = _build_native_multimodal_message('', 'multi', atts, str(workspace), session_id='test-session')
+        image_parts = [p for p in result if p['type'] == 'image_url']
+        assert len(image_parts) == 2
 
     def test_non_image_attachment_stays_text_fallback(self):
         with TemporaryDirectory() as d:
@@ -184,7 +191,7 @@ class TestBuildNativeMultimodalMessage:
                 'name': 'notes.txt', 'path': str(doc),
                 'mime': 'text/plain', 'size': doc.stat().st_size, 'is_image': False,
             }])
-            result = _build_native_multimodal_message('[WS]\n', 'read', atts, str(root))
+            result = _build_native_multimodal_message('[WS]\n', 'read', atts, str(root), session_id='test-session')
             assert isinstance(result, str)
             assert 'read' in result
 
@@ -198,26 +205,23 @@ class TestBuildNativeMultimodalMessage:
                 'name': 'outside.png', 'path': str(outside),
                 'mime': 'image/png', 'size': outside.stat().st_size, 'is_image': True,
             }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
+            result = _build_native_multimodal_message('', 'hi', atts, str(root), session_id='test-session')
             # Should fall back to string; outside path is rejected
             assert isinstance(result, str)
 
-    def test_symlink_inside_workspace_resolved(self):
-        """Symlink inside workspace pointing to workspace file is allowed."""
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            real_file = root / 'real.png'
-            _make_png(real_file)
-            link = root / 'link.png'
-            os.symlink(str(real_file), str(link))
-            atts = _normalize_chat_attachments([{
-                'name': 'link.png', 'path': str(link),
-                'mime': 'image/png', 'size': real_file.stat().st_size, 'is_image': True,
-            }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
-            # Symlink resolves inside workspace, so it should be accepted
-            assert isinstance(result, list)
-            assert result[1]['type'] == 'image_url'
+    def test_symlink_inside_session_inbox_rejected(self, tmp_path, monkeypatch):
+        """Chat attachment refs never follow symlinks, even within the inbox."""
+        inbox, workspace = _chat_inbox(tmp_path, monkeypatch)
+        real_file = inbox / 'real.png'
+        _make_png(real_file)
+        link = inbox / 'link.png'
+        os.symlink(str(real_file), str(link))
+        atts = _normalize_chat_attachments([{
+            'name': 'link.png', 'ref': 'link.png',
+            'mime': 'image/png', 'size': real_file.stat().st_size, 'is_image': True,
+        }])
+        result = _build_native_multimodal_message('', 'hi', atts, str(workspace), session_id='test-session')
+        assert isinstance(result, str)
 
     def test_symlink_pointing_outside_workspace_rejected(self):
         """Symlink inside workspace pointing outside must be rejected by .resolve()."""
@@ -232,7 +236,7 @@ class TestBuildNativeMultimodalMessage:
                 'name': 'trap.link', 'path': str(link),
                 'mime': 'image/png', 'size': outside_file.stat().st_size, 'is_image': True,
             }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
+            result = _build_native_multimodal_message('', 'hi', atts, str(root), session_id='test-session')
             assert isinstance(result, str)
 
     def test_size_above_cap_rejected(self):
@@ -245,7 +249,7 @@ class TestBuildNativeMultimodalMessage:
                 'name': 'huge.png', 'path': str(huge),
                 'mime': 'image/png', 'size': huge.stat().st_size, 'is_image': True,
             }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
+            result = _build_native_multimodal_message('', 'hi', atts, str(root), session_id='test-session')
             assert isinstance(result, str)
 
     def test_missing_path_skipped(self):
@@ -255,69 +259,71 @@ class TestBuildNativeMultimodalMessage:
                 'name': 'ghost.png', 'path': str(root / 'no-such.png'),
                 'mime': 'image/png', 'is_image': True,
             }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
+            result = _build_native_multimodal_message('', 'hi', atts, str(root), session_id='test-session')
             assert isinstance(result, str)
 
-    def test_no_mime_guessed_from_extension(self):
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            img = root / 'pic.png'
-            _make_png(img)
-            atts = _normalize_chat_attachments([{
-                'name': 'pic.png', 'path': str(img),
-                'mime': '', 'size': img.stat().st_size, 'is_image': True,
-            }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
-            assert isinstance(result, list)
-            assert result[1]['image_url']['url'].startswith('data:image/png;base64,')
+    def test_no_mime_guessed_from_extension(self, tmp_path, monkeypatch):
+        inbox, workspace = _chat_inbox(tmp_path, monkeypatch)
+        img = inbox / 'pic.png'
+        _make_png(img)
+        atts = _normalize_chat_attachments([{
+            'name': 'pic.png', 'ref': 'pic.png',
+            'mime': '', 'size': img.stat().st_size, 'is_image': True,
+        }])
+        result = _build_native_multimodal_message('', 'hi', atts, str(workspace), session_id='test-session')
+        assert isinstance(result, list)
+        assert result[1]['image_url']['url'].startswith('data:image/png;base64,')
 
-    def test_mixed_image_and_nonimage(self):
+    def test_mixed_image_and_nonimage(self, tmp_path, monkeypatch):
         """Non-image is skipped; image still goes through."""
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            img = root / 'pic.png'
-            _make_png(img)
-            doc = root / 'readme.md'
-            doc.write_text('# hello')
-            atts = _normalize_chat_attachments([
-                {'name': 'pic.png', 'path': str(img), 'mime': 'image/png', 'size': img.stat().st_size, 'is_image': True},
-                {'name': 'readme.md', 'path': str(doc), 'mime': 'text/markdown', 'size': doc.stat().st_size, 'is_image': False},
-            ])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
-            assert isinstance(result, list)
-            image_parts = [p for p in result if p['type'] == 'image_url']
-            assert len(image_parts) == 1
-            assert 'hi' in result[0]['text']
+        inbox, workspace = _chat_inbox(tmp_path, monkeypatch)
+        img = inbox / 'pic.png'
+        _make_png(img)
+        doc = inbox / 'readme.md'
+        doc.write_text('# hello')
+        atts = _normalize_chat_attachments([
+            {'name': 'pic.png', 'ref': 'pic.png', 'mime': 'image/png', 'size': img.stat().st_size, 'is_image': True},
+            {'name': 'readme.md', 'ref': 'readme.md', 'mime': 'text/markdown', 'size': doc.stat().st_size, 'is_image': False},
+        ])
+        result = _build_native_multimodal_message('', 'hi', atts, str(workspace), session_id='test-session')
+        assert isinstance(result, list)
+        image_parts = [p for p in result if p['type'] == 'image_url']
+        assert len(image_parts) == 1
+        assert 'hi' in result[0]['text']
 
-    def test_upload_result_structure_roundtrip(self):
+    def test_upload_result_structure_roundtrip(self, tmp_path, monkeypatch):
         """Simulate the full flow: upload result → normalize → build message."""
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            img = root / 'screenshot.png'
-            _make_png(img)
-            # what /api/upload returns
-            upload_result = {
-                'filename': 'screenshot.png',
-                'path': str(img),
-                'mime': 'image/png',
-                'size': img.stat().st_size,
-                'is_image': True,
-            }
-            # what the frontend sends to /api/chat/start
-            frontend_payload = [{
-                'name': upload_result['filename'],
-                'path': upload_result['path'],
-                'mime': upload_result['mime'],
-                'size': upload_result['size'],
-                'is_image': upload_result['is_image'],
-            }]
-            normalized = _normalize_chat_attachments(frontend_payload)
-            result = _build_native_multimodal_message('[WS]\n', 'describe this', normalized, str(root))
-            assert isinstance(result, list)
-            assert result[1]['type'] == 'image_url'
-            data_url = result[1]['image_url']['url']
-            assert data_url.startswith('data:image/png;base64,')
-            assert len(result) == 2
+        root = tmp_path / 'workspace'
+        root.mkdir()
+        attachment_root = tmp_path / 'attachments'
+        session_dir = attachment_root / 'test-session'
+        session_dir.mkdir(parents=True)
+        monkeypatch.setenv('HERMES_WEBUI_ATTACHMENT_DIR', str(attachment_root))
+        img = session_dir / 'screenshot.png'
+        _make_png(img)
+        upload_result = {
+            'filename': 'screenshot.png',
+            'ref': 'screenshot.png',
+            'mime': 'image/png',
+            'size': img.stat().st_size,
+            'is_image': True,
+        }
+        frontend_payload = [{
+            'name': upload_result['filename'],
+            'ref': upload_result['ref'],
+            'mime': upload_result['mime'],
+            'size': upload_result['size'],
+            'is_image': upload_result['is_image'],
+        }]
+        normalized = _normalize_chat_attachments(frontend_payload)
+        result = _build_native_multimodal_message(
+            '[WS]\n', 'describe this', normalized, str(root), session_id='test-session'
+        )
+        assert isinstance(result, list)
+        assert result[1]['type'] == 'image_url'
+        data_url = result[1]['image_url']['url']
+        assert data_url.startswith('data:image/png;base64,')
+        assert len(result) == 2
 
     def test_text_image_mode_strips_historical_image_url_parts(self):
         """#2297: text-only providers must not replay old native image parts."""
@@ -374,7 +380,7 @@ class TestBuildNativeMultimodalMessage:
                 'name': 'not-really.png', 'path': str(fake),
                 'mime': 'image/png', 'size': fake.stat().st_size, 'is_image': True,
             }])
-            result = _build_native_multimodal_message('', 'hi', atts, str(root))
+            result = _build_native_multimodal_message('', 'hi', atts, str(root), session_id='test-session')
             assert isinstance(result, str)
 
 
@@ -456,12 +462,14 @@ class TestAttachmentRootIntegration:
 
         atts = _normalize_chat_attachments([{
             "name": "photo.png",
-            "path": str(image_path),
+            "ref": image_path.name,
             "mime": "image/png",
             "size": image_path.stat().st_size,
             "is_image": True,
         }])
-        result = _build_native_multimodal_message("", "describe this", atts, str(workspace))
+        result = _build_native_multimodal_message(
+            "", "describe this", atts, str(workspace), session_id="sess123"
+        )
 
         # PRE-FIX: result would be a plain string (image silently rejected).
         # POST-FIX: result is a list with the image_url part included.
@@ -473,6 +481,27 @@ class TestAttachmentRootIntegration:
         )
         assert result[1]["type"] == "image_url"
         assert result[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_other_session_attachment_rejected_for_native_multimodal(self, tmp_path, monkeypatch):
+        attachment_root = tmp_path / "attachments"
+        other_inbox = attachment_root / "other-session"
+        other_inbox.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+        image_path = other_inbox / "private.png"
+        _make_png(image_path)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        atts = _normalize_chat_attachments([{
+            "name": image_path.name,
+            "path": str(image_path),
+            "mime": "image/png",
+            "size": image_path.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message(
+            "", "describe", atts, str(workspace), session_id="current-session"
+        )
+        assert isinstance(result, str)
 
     def test_path_outside_both_workspace_and_attachment_root_still_rejected(self, tmp_path, monkeypatch):
         """Paths outside BOTH allowed roots remain rejected — no security regression."""
@@ -496,7 +525,9 @@ class TestAttachmentRootIntegration:
             "size": rogue_image.stat().st_size,
             "is_image": True,
         }])
-        result = _build_native_multimodal_message("", "hi", atts, str(workspace))
+        result = _build_native_multimodal_message(
+            "", "hi", atts, str(workspace), session_id="sess123"
+        )
 
         # Should fall back to string — rogue path rejected by both root checks
         assert isinstance(result, str), (
@@ -504,8 +535,8 @@ class TestAttachmentRootIntegration:
             "root was accepted. The _allowed_roots check should reject."
         )
 
-    def test_workspace_path_still_allowed(self, tmp_path, monkeypatch):
-        """Workspace-resident images still work (backward compat with pre-#2319 uploads)."""
+    def test_workspace_absolute_path_is_not_a_chat_attachment(self, tmp_path, monkeypatch):
+        """Workspace preview paths are handled by a separate endpoint, not chat."""
         attachment_root = tmp_path / "attachments"
         attachment_root.mkdir()
         monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
@@ -522,7 +553,8 @@ class TestAttachmentRootIntegration:
             "size": image_path.stat().st_size,
             "is_image": True,
         }])
-        result = _build_native_multimodal_message("", "describe", atts, str(workspace))
+        result = _build_native_multimodal_message(
+            "", "describe", atts, str(workspace), session_id="sess123"
+        )
 
-        assert isinstance(result, list)
-        assert result[1]["type"] == "image_url"
+        assert isinstance(result, str)

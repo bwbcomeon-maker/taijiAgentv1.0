@@ -18,43 +18,32 @@ from typing import Any, Iterator
 
 _PUBLIC_CHAT_GUARD: ContextVar[bool] = ContextVar("taiji_public_chat_guard", default=False)
 
-_SENSITIVE_PATH_RE = re.compile(
+_EXPLICIT_INTERNAL_TARGET_RE = re.compile(
     r"(?i)"
     r"(?:"
-    r"/opt/taiji-agent(?:/|$)|"
+    r"/opt/taiji-agent(?:/|$|[ \n\r\t`'\"<>])|"
+    r"(?<![A-Za-z0-9])taiji[-_ ]agent(?:\.service)?(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])com\.taiji\.(?:agent|desktop|webui)(?![A-Za-z0-9])|"
+    r"太极(?:智能体|\s*Agent)(?:的)?(?:内部|运行时|本机|服务|进程|配置|日志|许可证|版权)|"
     r"(?:^|/)\.local/state/taiji-agent/logs(?:/|$)|"
     r"(?:^|/)taiji-agent/logs(?:/|$)|"
-    r"(?:taiji-desktop|agent|web)\.log|"
+    r"taiji-desktop\.log|"
     r"(?:runtime-env|start-agent|start-webui|health-check|taiji-native-verify|taiji-agent-diagnose)\.sh|"
-    r"(?:^|/)(?:config\.yaml|\.env|license\.jwt)(?:$|[ \n\r\t`'\"<>])|"
     r"hermes-local-lab|hermes-agent|hermes-webui|hermes-home|\.hermes(?:/|$)|"
     r"agent-runtime\.license|web-runtime\.license|claw\.pyc|"
+    r"HERMES_HOME|HERMES_WEBUI_|X-Hermes-CSRF-Token|"
+    r"TAIJI_WEBUI_PORT|WEBUI_PORT|AGENT_API_PORT|API_SERVER_PORT|"
+    r"(?:localhost|127\.0\.0\.1).{0,80}/taiji(?:/|$)|"
     r"(?:runtime|site-packages|dist-info|licenses?)[^ \n\r\t`'\"<>]{0,80}"
     r"(?:agent-runtime|web-runtime|hermes|claw)"
     r")"
 )
 
-_SENSITIVE_TEXT_RE = re.compile(
-    r"(?i)(?:"
-    r"Nous\s+Research|Hermes\s+Web\s+UI\s+Contributors|agent-runtime|web-runtime|"
-    r"claw\.pyc|HERMES_HOME|HERMES_WEBUI_|X-Hermes-CSRF-Token|"
-    r"TAIJI_WEBUI_PORT|WEBUI_PORT|AGENT_API_PORT|API_SERVER_PORT|"
-    r"127\.0\.0\.1|localhost|listen|listening|端口|访问地址|服务地址|浏览器"
-    r")"
+_SYSTEM_PROBE_RE = re.compile(
+    r"(?is)(?:\b(?:lsof|netstat|ss|ps|printenv|env|curl|wget)\b|/proc/|cmdline|environ)"
 )
 
-_SENSITIVE_COMMAND_RE = re.compile(
-    r"(?is)"
-    r"(?:"
-    r"(?:find|rg|grep|cat|head|tail|ls|tree|python|python3|sed|awk).{0,120}"
-    r"(?:/opt/taiji-agent|taiji-agent/logs|hermes-local-lab|hermes-agent|hermes-webui|\.hermes|"
-    r"license|dist-info|site-packages|runtime|config\.yaml|\.env|web\.log|agent\.log|taiji-desktop\.log)|"
-    r"(?:lsof|netstat|ss\s+-|ps\s+(?:aux|ef|-ef)|printenv|env\s*$|/proc/|cmdline|environ)|"
-    r"(?:curl|wget).{0,40}(?:localhost|127\.0\.0\.1|/health)|"
-    r"(?:localhost|127\.0\.0\.1).{0,80}(?:port|端口|url|访问地址|health)|"
-    r"(?:端口|监听|服务地址|访问地址|浏览器|地址栏).{0,80}(?:taiji|agent|web|服务|server|port|listen|health)"
-    r")"
-)
+_TAIJI_REFERENCE_RE = re.compile(r"(?i)(?:\btaiji(?:-agent|\s+agent)?\b|太极智能体)")
 
 _PUBLIC_BLOCK_MESSAGE = (
     "该信息属于产品内部实现、部署或合规材料，不在普通对话中公开。"
@@ -93,7 +82,7 @@ def block_reason_for_file_path(path: Any) -> str | None:
     value = _normalize_path_text(path)
     if not value:
         return None
-    if _SENSITIVE_PATH_RE.search(value) or _SENSITIVE_TEXT_RE.search(value):
+    if _EXPLICIT_INTERNAL_TARGET_RE.search(value):
         return _PUBLIC_BLOCK_MESSAGE
     return None
 
@@ -102,7 +91,7 @@ def block_reason_for_search(pattern: Any, path: Any) -> str | None:
     if not public_chat_guard_enabled():
         return None
     combined = f"{pattern or ''}\n{_normalize_path_text(path)}"
-    if _SENSITIVE_PATH_RE.search(combined) or _SENSITIVE_TEXT_RE.search(combined):
+    if _EXPLICIT_INTERNAL_TARGET_RE.search(combined):
         return _PUBLIC_BLOCK_MESSAGE
     return None
 
@@ -112,11 +101,16 @@ def block_reason_for_terminal(command: Any, *, workdir: Any = None) -> str | Non
         return None
     command_text = str(command or "")
     combined = f"{command_text}\n{_normalize_path_text(workdir)}"
-    if (
-        _SENSITIVE_PATH_RE.search(combined)
-        or _SENSITIVE_TEXT_RE.search(combined)
-        or _SENSITIVE_COMMAND_RE.search(combined)
-    ):
+    # A terminal invocation already establishes operational intent. Once the
+    # target is an explicit taiji/Hermes runtime identifier, fail closed without
+    # maintaining a brittle allowlist of process/service commands. Keep the
+    # legacy narrow process-probe rule only for ambiguous bare "taiji" wording.
+    explicit_target = bool(_EXPLICIT_INTERNAL_TARGET_RE.search(combined))
+    ambiguous_bare_taiji_probe = bool(
+        _TAIJI_REFERENCE_RE.search(combined)
+        and _SYSTEM_PROBE_RE.search(combined)
+    )
+    if explicit_target or ambiguous_bare_taiji_probe:
         return _PUBLIC_BLOCK_MESSAGE
     return None
 
@@ -157,7 +151,11 @@ def block_reason_for_tool(tool_name: str, args: dict[str, Any] | None) -> str | 
         return block_reason_for_terminal(command_value, workdir=workdir_value)
 
     combined = _args_to_text(args)
-    if _SENSITIVE_PATH_RE.search(combined) or _SENSITIVE_TEXT_RE.search(combined):
+    has_access_shape = any(
+        value not in (None, "")
+        for value in (path_value, workdir_value, command_value, query_value)
+    ) or bool(re.search(r"(?:read|list|search|find|open|navigate|browse|call)", name))
+    if has_access_shape and _EXPLICIT_INTERNAL_TARGET_RE.search(combined):
         return _PUBLIC_BLOCK_MESSAGE
     return None
 

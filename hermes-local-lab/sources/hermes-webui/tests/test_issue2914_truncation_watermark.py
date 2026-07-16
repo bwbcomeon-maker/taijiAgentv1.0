@@ -111,6 +111,12 @@ def test_truncate_endpoint_also_truncates_context_messages(monkeypatch, tmp_path
             _msg("user", "second", 3.0, "u2"),
             _msg("assistant", "reply second", 4.0, "a2"),
         ],
+        privacy_context={
+            "risk_type": "runtime_access",
+            "source_turn_id": "turn-sensitive",
+            "remaining_turns": 1,
+            "reset_reason": None,
+        },
     )
     session.save()
 
@@ -137,6 +143,7 @@ def test_truncate_endpoint_also_truncates_context_messages(monkeypatch, tmp_path
     assert [m["content"] for m in loaded.messages] == ["first", "reply first"]
     assert [m["content"] for m in loaded.context_messages] == ["first", "reply first"]
     assert loaded.truncation_watermark == 2.0
+    assert loaded.privacy_context is None
 
 
 def test_truncate_without_context_messages_truncation_leaks_to_agent(monkeypatch, tmp_path):

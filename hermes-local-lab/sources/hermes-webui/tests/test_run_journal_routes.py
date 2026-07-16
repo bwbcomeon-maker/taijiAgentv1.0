@@ -162,6 +162,49 @@ def test_replay_run_journal_honors_after_seq_cursor(monkeypatch):
     assert "event: done\n" in body
 
 
+def test_replay_projects_raw_tool_event_before_public_sse(monkeypatch):
+    import api.routes as routes
+
+    handler = SimpleNamespace(wfile=io.BytesIO())
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None: {
+            "events": [
+                {
+                    "event": "tool_complete",
+                    "payload": {
+                        "event_type": "tool.completed",
+                        "name": "terminal",
+                        "summary": "已生成报告 /private/runtime/report.md",
+                        "args": {"command": "cat /private/runtime/config.yaml"},
+                        "result": "canary-result",
+                        "tid": "call-1",
+                    },
+                    "event_id": f"{run_id}:1",
+                }
+            ]
+        },
+    )
+
+    assert routes._replay_run_journal(handler, "run_1", 0) is True
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "已生成报告" in body
+    assert '"summary"' in body
+    assert '"args"' not in body
+    assert "/private/runtime" not in body
+    assert "canary-result" not in body
+
+
 def test_parse_run_journal_after_seq_is_run_aware():
     import api.routes as routes
 

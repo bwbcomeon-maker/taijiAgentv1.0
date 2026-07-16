@@ -61,7 +61,7 @@ def test_delete_worktree_session_reports_retained_worktree_without_cleanup(tmp_p
     assert captured["status"] == 200
     assert captured["payload"]["ok"] is True
     assert captured["payload"]["worktree_retained"] is True
-    assert captured["payload"]["worktree_path"] == str(worktree.resolve())
+    assert "worktree_path" not in captured["payload"]
     assert captured["payload"]["worktree_branch"] == "hermes/wtdelete1"
     assert not (session_dir / "wtdelete1.json").exists()
     assert worktree.exists(), "session delete must not remove the git worktree directory"
@@ -81,6 +81,6 @@ def test_archive_worktree_session_reports_retained_worktree_without_cleanup(tmp_
     assert captured["payload"]["ok"] is True
     assert captured["payload"]["session"]["archived"] is True
     assert captured["payload"]["worktree_retained"] is True
-    assert captured["payload"]["worktree_path"] == str(worktree.resolve())
+    assert "worktree_path" not in captured["payload"]
     assert worktree.exists(), "session archive must not remove the git worktree directory"
     assert Session.load("wtarchive1").archived is True

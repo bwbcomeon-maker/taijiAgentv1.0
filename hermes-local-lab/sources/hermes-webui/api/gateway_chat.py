@@ -29,8 +29,9 @@ from api.config import (
 from api.helpers import redact_session_data
 from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
+    public_egress_scrub,
+    sanitize_persisted_assistant_message,
     scrub_brand_leaks,
-    scrub_messages,
     scrub_public_session_payload,
     scrub_streaming_token_delta,
 )
@@ -41,6 +42,7 @@ from api.turn_duration import stamp_turn_duration_on_latest_assistant
 from api.streaming import (
     WebUIChatInputCancelled,
     WebUIChatInputError,
+    _finalize_public_reasoning,
     _persist_webui_chat_input_error,
     prepare_webui_chat_input,
 )
@@ -238,6 +240,24 @@ def _gateway_sse_delta(payload: dict) -> str:
         return ""
 
 
+def _gateway_sse_reasoning_delta(payload: dict) -> str:
+    """Extract hidden reasoning text without mixing it into visible content."""
+    try:
+        choices = payload.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] or {}
+        for container_name in ("delta", "message"):
+            container = choice.get(container_name) or {}
+            for key in ("reasoning_content", "reasoning"):
+                value = container.get(key)
+                if isinstance(value, str):
+                    return value
+        return ""
+    except Exception:
+        return ""
+
+
 def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
@@ -262,8 +282,7 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     event_payload = {
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
-        "preview": payload.get("label") or payload.get("preview"),
-        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "status": "failed" if status in {"error", "failed"} else ("completed" if is_complete else "running"),
         "is_error": status in {"error", "failed"},
     }
     if tid:
@@ -479,6 +498,8 @@ def _stream_gateway_run_events(
     if not run_id:
         return {
             "final_text": "",
+            "public_final_text": "",
+            "raw_final_text": "",
             "usage": {},
             "error_event": _gateway_run_error_event(run_start, "Gateway run did not return a run_id."),
         }
@@ -490,17 +511,29 @@ def _stream_gateway_run_events(
         headers={**headers, "Accept": "text/event-stream"},
         method="GET",
     )
-    final_text = ""
+    raw_final_text = ""
+    public_final_text = ""
     usage: dict[str, Any] = {}
     error_event = None
     saw_run_completed = False
+    reasoning_buffer: list[str] = []
+
+    def emit_reasoning() -> None:
+        safe_text = _finalize_public_reasoning("".join(reasoning_buffer))
+        if safe_text:
+            if stream_id in STREAM_REASONING_TEXT:
+                STREAM_REASONING_TEXT[stream_id] += safe_text
+            put_gateway_event("reasoning", {"text": safe_text})
+
     with urllib.request.urlopen(event_req, timeout=600) as resp:
         for raw_line in resp:
             if cancel_event.is_set():
                 _stop_gateway_run(base_url, headers, run_id)
                 _clear_gateway_run_approvals_from_webui(session_id, run_id)
                 return {
-                    "final_text": final_text,
+                    "final_text": public_final_text,
+                    "public_final_text": public_final_text,
+                    "raw_final_text": raw_final_text,
                     "usage": usage,
                     "error_event": None,
                     "terminal_outcome": "cancelled",
@@ -517,25 +550,24 @@ def _stream_gateway_run_events(
                 continue
             event_name = str(payload.get("event") or "").strip()
             if event_name == "message.delta":
-                delta = scrub_streaming_token_delta(str(payload.get("delta") or ""), brand_token_tail)
-                if delta:
-                    final_text += delta
+                raw_delta = str(payload.get("delta") or "")
+                raw_final_text += raw_delta
+                public_delta = scrub_streaming_token_delta(raw_delta, brand_token_tail)
+                if public_delta:
+                    public_final_text += public_delta
                     if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] += delta
-                    put_gateway_event("token", {"text": delta})
+                        STREAM_PARTIAL_TEXT[stream_id] += public_delta
+                    put_gateway_event("token", {"text": public_delta})
                 continue
             if event_name == "reasoning.available":
-                text = scrub_brand_leaks(str(payload.get("text") or ""))
-                if text:
-                    put_gateway_event("reasoning", {"text": text})
+                reasoning_buffer.append(str(payload.get("text") or ""))
                 continue
             if event_name == "tool.started":
                 tool_name = str(payload.get("tool") or "").strip()
                 event_payload = {
                     "event_type": "tool.started",
                     "name": tool_name,
-                    "preview": payload.get("preview"),
-                    "args": {},
+                    "status": "running",
                 }
                 if stream_id in STREAM_LIVE_TOOL_CALLS:
                     STREAM_LIVE_TOOL_CALLS[stream_id].append({
@@ -556,6 +588,7 @@ def _stream_gateway_run_events(
                 put_gateway_event("tool_complete", {
                     "event_type": "tool.completed",
                     "name": tool_name,
+                    "status": "failed" if payload.get("error") else "completed",
                     "duration": payload.get("duration"),
                     "is_error": bool(payload.get("error")),
                 })
@@ -570,9 +603,13 @@ def _stream_gateway_run_events(
                 continue
             if event_name == "run.completed":
                 saw_run_completed = True
-                output = scrub_brand_leaks(str(payload.get("output") or "")).strip()
-                if output and not final_text:
-                    final_text = output
+                raw_output = str(payload.get("output") or "").strip()
+                if raw_output and not raw_final_text:
+                    raw_final_text = raw_output
+                if raw_output and not public_final_text:
+                    public_final_text = str(
+                        public_egress_scrub(raw_output, surface="gateway_done_output")
+                    ).strip()
                 if isinstance(payload.get("usage"), dict):
                     usage.update(payload.get("usage") or {})
                 _clear_gateway_run_approvals_from_webui(session_id, run_id)
@@ -580,7 +617,9 @@ def _stream_gateway_run_events(
             if event_name == "run.cancelled":
                 _clear_gateway_run_approvals_from_webui(session_id, run_id)
                 return {
-                    "final_text": final_text,
+                    "final_text": public_final_text,
+                    "public_final_text": public_final_text,
+                    "raw_final_text": raw_final_text,
                     "usage": usage,
                     "error_event": None,
                     "terminal_outcome": "cancelled",
@@ -588,6 +627,14 @@ def _stream_gateway_run_events(
             if event_name == "run.failed":
                 error_event = _gateway_run_error_event(payload, str(payload.get("error") or event_name))
                 break
+    if error_event is None and saw_run_completed:
+        emit_reasoning()
+    public_tail = scrub_streaming_token_delta("", brand_token_tail, final=True)
+    if public_tail:
+        public_final_text += public_tail
+        if stream_id in STREAM_PARTIAL_TEXT:
+            STREAM_PARTIAL_TEXT[stream_id] += public_tail
+        put_gateway_event("token", {"text": public_tail})
     if error_event is not None:
         _clear_gateway_run_approvals_from_webui(session_id, run_id)
     if error_event is None and not saw_run_completed:
@@ -595,7 +642,9 @@ def _stream_gateway_run_events(
             {}, "Gateway run event stream ended before run.completed."
         )
     return {
-        "final_text": final_text,
+        "final_text": public_final_text,
+        "public_final_text": public_final_text,
+        "raw_final_text": raw_final_text,
         "usage": usage,
         "error_event": error_event,
         "terminal_outcome": "failed" if error_event is not None else "completed",
@@ -671,8 +720,7 @@ def _run_gateway_chat_streaming(
                 **data,
                 "session": scrub_public_session_payload(data.get("session")),
             }
-        else:
-            data = scrub_brand_leaks(data)
+        data = public_egress_scrub(data, surface="gateway_stream", event_name=event)
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -706,7 +754,11 @@ def _run_gateway_chat_streaming(
             logger.warning("Failed to append Gateway interrupted turn journal event", exc_info=True)
 
     s = None
-    final_text = ""
+    raw_final_text = ""
+    public_final_text = ""
+    public_reasoning_text = ""
+    raw_reasoning_buffer: list[str] = []
+    chat_stream_completed = False
     brand_token_tail = [""]
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
@@ -744,6 +796,7 @@ def _run_gateway_chat_streaming(
                 message_text,
                 attachments,
                 workspace=str(workspace),
+                session_id=session_id,
                 cfg=cfg,
                 provider=model_provider,
                 model=model,
@@ -793,7 +846,12 @@ def _run_gateway_chat_streaming(
                 logger.info("Gateway /v1/runs unavailable (HTTP %s), falling back to chat completions", exc.code)
                 run_result = None
         if run_result is not None:
-            final_text = str(run_result.get("final_text") or "")
+            raw_final_text = str(run_result.get("raw_final_text") or "")
+            public_final_text = str(
+                run_result.get("public_final_text")
+                or run_result.get("final_text")
+                or ""
+            )
             usage.update({k: v for k, v in (run_result.get("usage") or {}).items() if v})
             gateway_error_event = run_result.get("error_event")
             if str(run_result.get("terminal_outcome") or "") == "cancelled":
@@ -824,6 +882,7 @@ def _run_gateway_chat_streaming(
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        chat_stream_completed = True
                         break
                     try:
                         payload = json.loads(data)
@@ -863,20 +922,32 @@ def _run_gateway_chat_streaming(
                         update_active_run(stream_id, phase="gateway-error")
                         usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                         continue
+                    reasoning_delta = _gateway_sse_reasoning_delta(payload)
+                    if reasoning_delta:
+                        raw_reasoning_buffer.append(reasoning_delta)
                     delta = _gateway_sse_delta(payload)
                     if delta:
-                        delta = scrub_streaming_token_delta(delta, brand_token_tail)
-                        if not delta:
+                        raw_final_text += delta
+                        public_delta = scrub_streaming_token_delta(delta, brand_token_tail)
+                        if not public_delta:
                             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                             continue
-                        final_text += delta
+                        public_final_text += public_delta
                         if stream_id in STREAM_PARTIAL_TEXT:
-                            STREAM_PARTIAL_TEXT[stream_id] += delta
-                        put_gateway_event("token", {"text": delta})
+                            STREAM_PARTIAL_TEXT[stream_id] += public_delta
+                        put_gateway_event("token", {"text": public_delta})
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            if chat_stream_completed and gateway_error_event is None:
+                public_reasoning_text = _finalize_public_reasoning(
+                    "".join(raw_reasoning_buffer)
+                )
+                if public_reasoning_text:
+                    if stream_id in STREAM_REASONING_TEXT:
+                        STREAM_REASONING_TEXT[stream_id] += public_reasoning_text
+                    put_gateway_event("reasoning", {"text": public_reasoning_text})
         tail_delta = scrub_streaming_token_delta("", brand_token_tail, final=True)
         if tail_delta:
-            final_text += tail_delta
+            public_final_text += tail_delta
             if stream_id in STREAM_PARTIAL_TEXT:
                 STREAM_PARTIAL_TEXT[stream_id] += tail_delta
             put_gateway_event("token", {"text": tail_delta})
@@ -885,8 +956,9 @@ def _run_gateway_chat_streaming(
             record_turn_interrupted(str(gateway_error_event.get("type") or "gateway_error"))
             put_gateway_event("apperror", gateway_error_event)
             return
-        assistant_text = scrub_brand_leaks(final_text).strip()
-        if not assistant_text:
+        internal_assistant_text = str(raw_final_text or "").strip()
+        public_assistant_text = str(public_final_text or "").strip()
+        if not internal_assistant_text:
             record_turn_interrupted("gateway_empty_response")
             put_gateway_event("apperror", {
                 "label": "太极本地对话服务未返回内容",
@@ -909,9 +981,18 @@ def _run_gateway_chat_streaming(
             user_msg = {"role": "user", "content": str(persist_msg_text or ""), "timestamp": now}
             if attachments:
                 user_msg["attachments"] = list(attachments)
-            assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            internal_assistant_msg = {
+                "role": "assistant",
+                "content": internal_assistant_text,
+                "timestamp": assistant_ts,
+            }
+            assistant_msg = sanitize_persisted_assistant_message({
+                **internal_assistant_msg,
+                "content": public_assistant_text,
+            })
+            assistant_text = str(assistant_msg.get("content") or "")
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
-            s.context_messages = list(previous_context + [user_msg, assistant_msg])
+            s.context_messages = list(previous_context + [user_msg, internal_assistant_msg])
             display = list(getattr(s, "messages", None) or [])
             # Avoid duplicating the eager-save checkpointed user message.
             if display:
@@ -921,7 +1002,7 @@ def _run_gateway_chat_streaming(
                     msg_norm = " ".join(str(persist_msg_text or "").split())
                     if latest_text == msg_norm:
                         display = display[:-1]
-            s.messages = scrub_messages(display + [user_msg, assistant_msg])
+            s.messages = display + [user_msg, assistant_msg]
             assistant_message_index = next(
                 (idx for idx in range(len(s.messages) - 1, -1, -1)
                  if isinstance(s.messages[idx], dict) and s.messages[idx].get("role") == "assistant"),

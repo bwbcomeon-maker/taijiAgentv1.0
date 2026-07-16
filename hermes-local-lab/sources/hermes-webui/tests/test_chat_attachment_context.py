@@ -90,13 +90,14 @@ def test_document_attachments_are_extracted_into_agent_context(tmp_path, monkeyp
 
     result = build_attachment_context(
         [
-            {"name": txt.name, "path": str(txt), "mime": "text/plain", "is_image": False},
-            {"name": pptx.name, "path": str(pptx), "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "is_image": False},
-            {"name": docx.name, "path": str(docx), "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "is_image": False},
-            {"name": xlsx.name, "path": str(xlsx), "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "is_image": False},
-            {"name": pdf.name, "path": str(pdf), "mime": "application/pdf", "is_image": False},
+            {"name": txt.name, "ref": txt.name, "mime": "text/plain", "is_image": False},
+            {"name": pptx.name, "ref": pptx.name, "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "is_image": False},
+            {"name": docx.name, "ref": docx.name, "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "is_image": False},
+            {"name": xlsx.name, "ref": xlsx.name, "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "is_image": False},
+            {"name": pdf.name, "ref": pdf.name, "mime": "application/pdf", "is_image": False},
         ],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg={},
         image_mode="native",
     )
@@ -121,8 +122,9 @@ def test_image_text_mode_without_vision_gets_clear_notice(tmp_path, monkeypatch)
     _make_png(image)
 
     result = build_attachment_context(
-        [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+        [{"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg={"agent": {"image_input_mode": "text"}},
         image_mode="text",
         vision_available=False,
@@ -145,8 +147,9 @@ def test_native_image_mode_keeps_image_for_multimodal_without_text_notice(tmp_pa
     _make_png(image)
 
     result = build_attachment_context(
-        [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+        [{"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg={"agent": {"image_input_mode": "native"}},
         image_mode="native",
     )
@@ -208,10 +211,11 @@ def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
     result = prepare_webui_chat_input(
         "compare them",
         [
-            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+            {"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}
             for image in images
         ],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg=_text_vision_config(),
         provider="deepseek",
         model="deepseek-chat",
@@ -259,8 +263,9 @@ def test_prepare_webui_chat_input_force_redacts_vision_credentials_before_main_m
     monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
     result = prepare_webui_chat_input(
         "请描述图片",
-        [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+        [{"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg=_text_vision_config(),
         provider="deepseek",
         model="deepseek-chat",
@@ -292,8 +297,9 @@ def test_vision_provider_warning_logs_only_safe_category_and_diagnostic_id(
     with caplog.at_level("WARNING"), pytest.raises(WebUIChatInputError):
         prepare_webui_chat_input(
             "describe",
-            [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+            [{"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}],
             workspace=str(tmp_path / "workspace"),
+            session_id="session-a",
             cfg=_text_vision_config(),
             provider="deepseek",
             model="deepseek-chat",
@@ -335,8 +341,9 @@ def test_prepare_webui_chat_input_blocks_failed_or_empty_vision_result(
     with pytest.raises(WebUIChatInputError) as raised:
         prepare_webui_chat_input(
             "describe",
-            [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+            [{"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}],
             workspace=str(tmp_path / "workspace"),
+            session_id="session-a",
             cfg=_text_vision_config(),
             provider="deepseek",
             model="deepseek-chat",
@@ -372,10 +379,11 @@ def test_prepare_webui_chat_input_blocks_vision_exception_and_stops_later_images
         prepare_webui_chat_input(
             "compare",
             [
-                {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+                {"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}
                 for image in images
             ],
             workspace=str(tmp_path / "workspace"),
+            session_id="session-a",
             cfg=_text_vision_config(),
             provider="deepseek",
             model="deepseek-chat",
@@ -401,8 +409,9 @@ def test_prepare_webui_chat_input_requires_auxiliary_vision_for_text_mode(
     with pytest.raises(WebUIChatInputError) as raised:
         prepare_webui_chat_input(
             "describe",
-            [{"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}],
+            [{"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}],
             workspace=str(tmp_path / "workspace"),
+            session_id="session-a",
             cfg={"agent": {"image_input_mode": "text"}},
             provider="deepseek",
             model="deepseek-chat",
@@ -433,10 +442,11 @@ def test_prepare_webui_chat_input_preserves_document_and_vision_context(
     result = prepare_webui_chat_input(
         "summarize",
         [
-            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True},
-            {"name": doc.name, "path": str(doc), "mime": "text/plain", "is_image": False},
+            {"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True},
+            {"name": doc.name, "ref": doc.name, "mime": "text/plain", "is_image": False},
         ],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg=_text_vision_config(),
         provider="deepseek",
         model="deepseek-chat",
@@ -463,10 +473,11 @@ def test_prepare_webui_chat_input_keeps_native_images_as_multimodal_parts(
     result = prepare_webui_chat_input(
         "compare",
         [
-            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+            {"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}
             for image in images
         ],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg={"agent": {"image_input_mode": "native"}},
         provider="openai",
         model="gpt-4o",
@@ -494,7 +505,7 @@ def test_legacy_cancellation_after_first_auxiliary_image_skips_second_and_main_m
     monkeypatch.setattr(config, "SESSION_DIR", session_dir)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
     attachment_root = tmp_path / "attachments"
-    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir = attachment_root / "legacy_cancel_session"
     uploaded_dir.mkdir(parents=True)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
     images = [uploaded_dir / "first.png", uploaded_dir / "second.png"]
@@ -574,7 +585,7 @@ def test_legacy_cancellation_after_first_auxiliary_image_skips_second_and_main_m
         str(tmp_path),
         stream_id,
         [
-            {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+            {"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}
             for image in images
         ],
         model_provider="deepseek",
@@ -608,15 +619,15 @@ def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_
     monkeypatch.setattr(config, "SESSION_DIR", session_dir)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
     attachment_root = tmp_path / "attachments"
-    uploaded_dir = attachment_root / "session-a"
+    uploaded_dir = attachment_root / "legacy_vision_failure_reload"
     uploaded_dir.mkdir(parents=True)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
     old_image = uploaded_dir / "old.png"
     image = uploaded_dir / "current.png"
     _make_png(old_image)
     _make_png(image)
-    old_attachment = {"name": old_image.name, "path": str(old_image), "mime": "image/png", "is_image": True}
-    attachment = {"name": image.name, "path": str(image), "mime": "image/png", "is_image": True}
+    old_attachment = {"name": old_image.name, "ref": old_image.name, "mime": "image/png", "is_image": True}
+    attachment = {"name": image.name, "ref": image.name, "mime": "image/png", "is_image": True}
     cfg = _text_vision_config()
     stream_id = "stream-legacy-vision-failure-reload"
     run_calls = []
@@ -712,14 +723,43 @@ def test_secret_like_attachment_is_not_extracted(tmp_path, monkeypatch):
     env_file.write_text("API_KEY=should-not-leak", encoding="utf-8")
 
     result = build_attachment_context(
-        [{"name": env_file.name, "path": str(env_file), "mime": "text/plain", "is_image": False}],
+        [{"name": env_file.name, "ref": env_file.name, "mime": "text/plain", "is_image": False}],
         workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
         cfg={},
         image_mode="native",
     )
 
     assert "should-not-leak" not in result.text_context
     assert "出于安全保护未注入" in result.text_context
+
+
+def test_attachment_context_rejects_another_sessions_upload(tmp_path, monkeypatch):
+    from api.attachment_context import build_attachment_context
+
+    attachment_root = tmp_path / "attachments"
+    own_dir = attachment_root / "session-a"
+    other_dir = attachment_root / "session-b"
+    own_dir.mkdir(parents=True)
+    other_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    own = own_dir / "own.txt"
+    other = other_dir / "other.txt"
+    own.write_text("own-session-canary", encoding="utf-8")
+    other.write_text("cross-session-secret-canary", encoding="utf-8")
+
+    result = build_attachment_context(
+        [
+            {"name": own.name, "ref": own.name, "mime": "text/plain"},
+            {"name": other.name, "ref": "../session-b/other.txt", "mime": "text/plain"},
+        ],
+        workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
+        cfg={},
+    )
+    assert "own-session-canary" in result.text_context
+    assert "cross-session-secret-canary" not in result.text_context
+    assert "other.txt" in result.skipped_files
 
 
 def test_frontend_does_not_send_absolute_paths_as_user_text():

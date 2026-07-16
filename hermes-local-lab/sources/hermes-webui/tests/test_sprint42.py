@@ -395,7 +395,8 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
         self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
-        self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("Match the normal product messaging style", captured["agent"].ephemeral_system_prompt)
+        self.assertNotIn("normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
         self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
 
         interim_events = []
@@ -698,11 +699,14 @@ def test_streaming_persists_reasoning_in_session():
     assert "_rm['reasoning'] = _reasoning_text" in src, \
         "Code to set _rm['reasoning'] not found in streaming.py"
 
-    # Persistence block must come BEFORE raw_session assignment
+    # Persistence must happen before the strict public session projection is
+    # built. Do not weaken this back to a raw s.compact() browser payload.
     persist_idx = src.index("Persist reasoning trace in the session")
-    raw_session_idx = src.index("raw_session = s.compact()")
+    raw_session_idx = src.index("raw_session = public_egress_scrub(")
+    assert "scrub_public_session_payload(s.compact()" in src[raw_session_idx:raw_session_idx + 300]
+    assert "raw_session = s.compact()" not in src
     assert persist_idx < raw_session_idx, \
-        "Reasoning persistence block must appear before raw_session assignment"
+        "Reasoning persistence must happen before the public session projection"
 
 
 def test_done_handler_patches_reasoning_field():

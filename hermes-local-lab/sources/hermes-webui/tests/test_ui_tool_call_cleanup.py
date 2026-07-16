@@ -102,8 +102,8 @@ class TestToolCallGroupingStatic:
         assert "isSimplifiedToolCalling()" in fn, (
             "Settled compact inline activity rendering should be gated by the Compact tool activity toggle."
         )
-        assert "tool-cards-toggle" in fn, (
-            "The non-simplified path should preserve the upstream loose tool-card controls."
+        assert "tool-cards-toggle" not in fn, (
+            "Loose public tool cards have no details, so global expand/collapse controls must be removed."
         )
         assert "data-tool-call-group" in helper, (
             "Tool-call groups need a stable data-tool-call-group attribute for CSS and tests."

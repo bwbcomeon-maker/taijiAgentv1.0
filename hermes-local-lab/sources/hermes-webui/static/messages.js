@@ -2023,7 +2023,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
+      const tc={
+        name:d.name,
+        summary:typeof d.summary==='string'?d.summary:'',
+        status:typeof d.status==='string'?d.status:'running',
+        done:typeof d.done==='boolean'?d.done:false,
+        tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`
+      };
       const inflight = INFLIGHT[activeSid] || (INFLIGHT[activeSid] = {
         messages:[...S.messages],
         uploaded:[],
@@ -2081,20 +2087,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       if(!tc){
-        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
+        tc={
+          name:d.name||'tool',
+          summary:typeof d.summary==='string'?d.summary:'',
+          status:typeof d.status==='string'?d.status:'completed',
+          done:typeof d.done==='boolean'?d.done:true,
+          tid:d.tid||''
+        };
         inflight.toolCalls.push(tc);
       }
-      // Route result to .snippet (detail) instead of overwriting .preview
-      // (header).  During streaming .preview already holds the last progress
-      // text — replacing it with the same content caused header/detail
-      // duplication.  Fallback: if no progress events were sent, use the
-      // result as preview so the header is not blank.
-      if(d.preview){
-        tc.snippet=tc.snippet||d.preview;
-        if(!tc.preview) tc.preview=d.preview;
-      }
-      tc.args=d.args||tc.args||{};
-      tc.done=true;
+      if(typeof d.summary==='string') tc.summary=d.summary;
+      if(typeof d.status==='string') tc.status=d.status;
+      tc.done=typeof d.done==='boolean'?d.done:true;
       tc.is_error=!!d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
@@ -3155,8 +3159,8 @@ function showApprovalCard(pending, pendingCount) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = isCapability ? (pending.description || "当前能力未开启，授权后继续当前任务。") : ((pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : ""));
   const cmd = isCapability
-    ? `能力：${_capabilityApprovalLabel(capability)}\n授权变量：${pending.allow_var || ""}\n范围：仅开启该能力；危险命令仍需审批`
-    : (pending.command || "");
+    ? `能力：${_capabilityApprovalLabel(capability)}\n范围：仅开启该能力；危险命令仍需审批`
+    : (pending.summary || pending.description || "受限操作需要你的授权");
   const sig = JSON.stringify({type: isCapability ? "capability" : "command", desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;

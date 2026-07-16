@@ -12,8 +12,24 @@ class _FakeSession:
         self.model_provider = None
         self.messages = messages
         self.tool_calls = [
-            {"name": "old-tool", "snippet": "historical snippet", "assistant_msg_idx": 0},
-            {"name": "visible-tool", "snippet": "visible snippet", "assistant_msg_idx": 1},
+            {
+                "name": "old-tool",
+                "summary": "Historical tool completed",
+                "status": "completed",
+                "done": True,
+                "snippet": "historical raw snippet canary",
+                "args": {"token": "historical-raw-arg-canary"},
+                "assistant_msg_idx": 0,
+            },
+            {
+                "name": "visible-tool",
+                "summary": "Visible tool completed",
+                "status": "completed",
+                "done": True,
+                "snippet": "visible raw snippet canary",
+                "args": {"token": "visible-raw-arg-canary"},
+                "assistant_msg_idx": 1,
+            },
         ]
         self.input_tokens = 0
         self.output_tokens = 0
@@ -78,7 +94,11 @@ def test_tail_window_omits_historical_tool_calls_when_messages_have_tool_metadat
 
     payload = _invoke(session)
 
-    assert payload["messages"] == [session.messages[-1]]
+    assert payload["messages"] == [{
+        "role": "assistant",
+        "content": "visible",
+        "tool_calls": [{"event_type": "tool.started", "name": "tool", "tid": "call_1"}],
+    }]
     assert payload["tool_calls"] == []
     assert payload["_messages_truncated"] is True
 
@@ -93,8 +113,17 @@ def test_tail_window_keeps_only_visible_session_tool_calls_for_legacy_messages_w
 
     assert payload["messages"] == [session.messages[-1]]
     assert payload["tool_calls"] == [
-        {"name": "visible-tool", "snippet": "visible snippet", "assistant_msg_idx": 0}
+        {
+            "event_type": "tool.completed",
+            "name": "visible-tool",
+            "status": "completed",
+            "summary": "Visible tool completed",
+            "assistant_msg_idx": 0,
+            "done": True,
+        }
     ]
+    assert "visible raw snippet canary" not in str(payload)
+    assert "visible-raw-arg-canary" not in str(payload)
     assert session.tool_calls[-1]["assistant_msg_idx"] == 1
 
 
@@ -110,7 +139,26 @@ def test_full_load_keeps_all_session_tool_calls_for_legacy_messages_without_meta
     )
 
     assert payload["messages"] == session.messages
-    assert payload["tool_calls"] == session.tool_calls
+    assert payload["tool_calls"] == [
+        {
+            "event_type": "tool.completed",
+            "name": "old-tool",
+            "status": "completed",
+            "summary": "Historical tool completed",
+            "assistant_msg_idx": 0,
+            "done": True,
+        },
+        {
+            "event_type": "tool.completed",
+            "name": "visible-tool",
+            "status": "completed",
+            "summary": "Visible tool completed",
+            "assistant_msg_idx": 1,
+            "done": True,
+        },
+    ]
+    assert "raw snippet canary" not in str(payload)
+    assert "raw-arg-canary" not in str(payload)
 
 
 def test_msg_before_window_keeps_only_that_page_session_tool_calls():
@@ -121,10 +169,10 @@ def test_msg_before_window_keeps_only_that_page_session_tool_calls():
         {"role": "assistant", "content": "fourth legacy message"},
     ])
     session.tool_calls = [
-        {"name": "first-page-tool", "snippet": "kept", "assistant_msg_idx": 1},
-        {"name": "second-page-tool", "snippet": "also kept", "assistant_msg_idx": 2},
-        {"name": "tail-tool", "snippet": "not in page", "assistant_msg_idx": 3},
-        {"name": "unindexed-tool", "snippet": "cannot place"},
+        {"name": "first-page-tool", "summary": "First completed", "status": "completed", "done": True, "snippet": "raw-first", "assistant_msg_idx": 1},
+        {"name": "second-page-tool", "summary": "Second running", "status": "running", "done": False, "args": {"secret": "raw-second"}, "assistant_msg_idx": 2},
+        {"name": "tail-tool", "summary": "Tail completed", "status": "completed", "done": True, "snippet": "not in page", "assistant_msg_idx": 3},
+        {"name": "unindexed-tool", "summary": "Cannot place", "status": "completed", "done": True, "snippet": "cannot place"},
     ]
 
     payload = _invoke(
@@ -134,9 +182,11 @@ def test_msg_before_window_keeps_only_that_page_session_tool_calls():
 
     assert payload["messages"] == session.messages[1:3]
     assert payload["tool_calls"] == [
-        {"name": "first-page-tool", "snippet": "kept", "assistant_msg_idx": 0},
-        {"name": "second-page-tool", "snippet": "also kept", "assistant_msg_idx": 1},
+        {"event_type": "tool.completed", "name": "first-page-tool", "status": "completed", "summary": "First completed", "assistant_msg_idx": 0, "done": True},
+        {"event_type": "tool.started", "name": "second-page-tool", "status": "running", "summary": "Second running", "assistant_msg_idx": 1, "done": False},
     ]
+    assert "raw-first" not in str(payload)
+    assert "raw-second" not in str(payload)
     assert session.tool_calls[0]["assistant_msg_idx"] == 1
     assert session.tool_calls[1]["assistant_msg_idx"] == 2
     assert payload["_messages_offset"] == 1

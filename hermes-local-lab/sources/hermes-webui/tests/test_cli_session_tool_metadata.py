@@ -148,5 +148,25 @@ def test_existing_cli_import_refreshes_same_length_tool_metadata(monkeypatch):
 
     assert response["imported"] is False
     assert existing.messages == enriched
-    assert response["session"]["messages"] == enriched
+    assert response["session"]["messages"] == [
+        {
+            "role": "assistant",
+            "content": "",
+            "timestamp": 1.0,
+            "tool_calls": [{
+                "event_type": "tool.started",
+                "name": "terminal",
+                "tid": "call_123",
+            }],
+        },
+        {
+            "role": "tool",
+            "event_type": "tool.completed",
+            "name": "terminal",
+            "status": "completed",
+            "tool_call_id": "call_123",
+            "tid": "call_123",
+            "timestamp": 2.0,
+        },
+    ]
     assert save_calls == [False]

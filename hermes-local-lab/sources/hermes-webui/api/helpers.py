@@ -147,7 +147,7 @@ def _build_redact_fn():
     # Keep this active even when hermes-agent is importable so API responses do
     # not regress if the agent redactor misses a token shape.
     _CRED_RE = _re.compile(
-        r"(?<![A-Za-z0-9_-])("
+        r"(?<![A-Za-z0-9_])("
         r"sk-[A-Za-z0-9_-]{10,}"          # OpenAI / Anthropic / OpenRouter
         r"|ghp_[A-Za-z0-9]{10,}"          # GitHub PAT (classic)
         r"|github_pat_[A-Za-z0-9_]{10,}"  # GitHub PAT (fine-grained)
@@ -183,7 +183,7 @@ def _build_redact_fn():
         r"|hsk-[A-Za-z0-9]{10,}"          # Hindsight API key
         r"|mem0_[A-Za-z0-9]{10,}"         # Mem0 Platform API key
         r"|brv_[A-Za-z0-9]{10,}"          # ByteRover API key
-        r")(?![A-Za-z0-9_-])"
+        r")(?![A-Za-z0-9_])"
     )
     _AUTH_HDR_RE = _re.compile(r"(Authorization:\s*Bearer\s+)(\S+)", _re.IGNORECASE)
     _ENV_RE = _re.compile(
@@ -192,6 +192,12 @@ def _build_redact_fn():
     )
     _PRIVKEY_RE = _re.compile(
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
+    )
+    _JWT_RE = _re.compile(
+        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+    )
+    _DATABASE_URL_RE = _re.compile(
+        r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp)://[^\s'\"<>]+"
     )
 
     def _mask(token: str) -> str:
@@ -206,6 +212,8 @@ def _build_redact_fn():
             lambda m: f"{m.group(1)}={m.group(2)}{_mask(m.group(3))}{m.group(2)}", text
         )
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        text = _JWT_RE.sub("[REDACTED JWT]", text)
+        text = _DATABASE_URL_RE.sub("[REDACTED DATABASE URL]", text)
         return text
 
     try:
@@ -367,9 +375,8 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
 
 def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials from message content and tool_call data before API response.
+    """Recursively redact credentials from every session response field.
 
-    Applies to: messages[], tool_calls[], and title.
     The underlying session file is not modified; redaction is response-layer only.
 
     Reads the ``api_redact_enabled`` setting ONCE for the entire response and
@@ -380,14 +387,7 @@ def redact_session_data(session_dict: dict) -> dict:
     """
     from api.config import load_settings
     _enabled = bool(load_settings().get("api_redact_enabled", True))
-    result = dict(session_dict)
-    if isinstance(result.get('title'), str):
-        result['title'] = _redact_text(result['title'], _enabled=_enabled)
-    if 'messages' in result:
-        result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
-    if 'tool_calls' in result:
-        result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
-    return result
+    return _redact_value(dict(session_dict), _enabled=_enabled)
 
 
 def read_body(handler) -> dict:

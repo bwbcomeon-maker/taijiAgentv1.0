@@ -12,12 +12,15 @@ def test_session_html_cache_uses_render_signature_not_only_count():
 
 
 def test_render_signature_tracks_message_content_and_settled_tool_cards():
-    signature_fn = UI_JS[UI_JS.index("function _messageRenderCacheSignature()"):UI_JS.index("function _clipCliToolSnippet")]
+    signature_fn = UI_JS[UI_JS.index("function _messageRenderCacheSignature()"):UI_JS.index("function _captureMessageScrollSnapshot")]
     assert "msgContent(m)" in signature_fn
     assert "m.tool_calls" in signature_fn
-    assert "m._partial_tool_calls" in signature_fn
     assert "S.toolCalls" in signature_fn
-    assert "tc.snippet" in signature_fn
+    assert "tc.status" in signature_fn
+    assert "tc.summary" in signature_fn
+    assert "tc.snippet" not in signature_fn
+    assert "tc.args" not in signature_fn
+    assert "tc.function" not in signature_fn
     assert "compression_anchor_summary" in signature_fn
 
 

@@ -11,34 +11,34 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 COMPACT_UI = re.sub(r"\s+", "", UI_JS)
 
 
-def test_cli_tool_result_diff_snippet_is_not_cut_to_200_chars():
-    """Diff-like CLI tool results should reach the existing tool-card expander."""
-    assert "function _cliToolResultSnippet" in UI_JS
-    assert "function _cliLooksLikePatchDiff" in UI_JS
-    assert r"\*\*\* Begin Patch" in UI_JS
-    assert "diff --git" in UI_JS
-    assert (
-        "if(_cliLooksLikePatchDiff(fullText))return_clipCliToolSnippet(fullText);"
-        in COMPACT_UI
-    )
-    assert "returnString(fullText||'').slice(0,4000);" in COMPACT_UI
+def test_cli_raw_result_diff_helpers_are_not_part_of_public_ui():
+    """The browser must not reconstruct tool output or diffs from history."""
+    for helper in ("_cliToolResultText", "_cliLooksLikePatchDiff", "_cliToolResultSnippet"):
+        assert f"function {helper}" not in UI_JS
 
 
-def test_cli_tool_fallback_promotes_apply_patch_args_to_tool_card_snippet():
-    """A successful apply_patch result may only say 'Success'; keep the patch visible."""
-    assert "function _cliPatchSnippetFromArgs" in UI_JS
-    assert "toolName==='apply_patch'" in COMPACT_UI
-    assert "'old_string'" in UI_JS
-    assert "'new_string'" in UI_JS
-    assert "constpatchSnippet=_cliPatchSnippetFromArgs(name,args);" in COMPACT_UI
-    assert "snippet:_cliToolCardSnippet(resultSnippet,patchSnippet)" in COMPACT_UI
-    assert "is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet)" in COMPACT_UI
+def test_cli_tool_fallback_does_not_promote_apply_patch_args_or_results():
+    """Historical cards consume the server-owned public lifecycle projection."""
+    start = UI_JS.index("if(!S.busy && (!S.toolCalls||!S.toolCalls.length))")
+    end = UI_JS.index("if(!S.busy){", start + 1)
+    block = UI_JS[start:end]
+    for forbidden in ("function.arguments", "fn.arguments", "resultSnippet", "patchSnippet", "snippet:", "is_diff:", "args:"):
+        assert forbidden not in block
+    for required in ("name", "status", "summary", "assistant_msg_idx"):
+        assert required in block
 
 
-def test_diff_tool_cards_use_show_diff_expander_label():
-    assert "const moreLabel=tc.is_diff?'Show diff':'Show more';" in UI_JS
-    assert "const lessLabel=tc.is_diff?'Hide diff':'Show less';" in UI_JS
-    assert 'data-more-label="${esc(moreLabel)}"' in UI_JS
+def test_public_tool_cards_do_not_expose_diff_expanders_or_raw_detail_helpers():
+    for dead_helper in (
+        "_toolArgPreviewValue",
+        "_toolArgPreviewKeyIsHidden",
+        "_formatToolArgPreview",
+        "_snippetLooksLikeDiff",
+        "_colorDiffLines",
+        "_toggleToolDiff",
+    ):
+        assert f"function {dead_helper}" not in UI_JS
+    assert "Show diff" not in UI_JS
 
 
 def _function_source(src: str, name: str) -> str:
@@ -97,27 +97,9 @@ def _function_source(src: str, name: str) -> str:
     return src[match.start() : i]
 
 
-def test_rendered_apply_patch_tool_card_html_contains_diff_lines():
-    """Drive the actual snippet helpers and buildToolCard() through Node."""
-    function_names = [
-        "_clipCliToolSnippet",
-        "_cliToolResultText",
-        "_cliLooksLikePatchDiff",
-        "_cliToolResultSnippet",
-        "_prefixedCliDiffLines",
-        "_firstOwnedValue",
-        "_cliPatchSnippetFromArgs",
-        "_cliToolCardSnippet",
-        "_cliToolCardHasDiffSnippet",
-        "_toolArgPreviewValue",
-        "_toolArgPreviewKeyIsHidden",
-        "_formatToolArgPreview",
-        "_toolCardPreviewText",
-        # #3336: buildToolCard now wraps diff snippets via these helpers.
-        "_snippetLooksLikeDiff",
-        "_colorDiffLines",
-        "buildToolCard",
-    ]
+def test_rendered_apply_patch_tool_card_keeps_raw_diff_out_of_public_html():
+    """Legacy raw fields supplied client-side are ignored by the card renderer."""
+    function_names = ["_toolCardPreviewText", "buildToolCard"]
     functions = "\n".join(_function_source(UI_JS, name) for name in function_names)
     script = textwrap.dedent(
         f"""
@@ -130,36 +112,28 @@ def test_rendered_apply_patch_tool_card_html_contains_diff_lines():
         }};
         {functions}
 
-        const longPatch = [
-          '*** Begin Patch',
-          '*** Update File: app.py',
-          '@@',
-          '-old',
-          '+new',
-          ...Array.from({{length: 150}}, (_, i) => '+line ' + i),
-          '*** End Patch'
-        ].join('\\n');
-        const resultSnippet = _cliToolResultSnippet(JSON.stringify({{output:'Success'}}));
-        const patchSnippet = _cliPatchSnippetFromArgs('apply_patch', {{patch: longPatch}});
         const row = buildToolCard({{
           name: 'apply_patch',
-          snippet: _cliToolCardSnippet(resultSnippet, patchSnippet),
-          is_diff: _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet),
-          args: {{patch: '(shown in diff)'}},
+          status: 'completed',
+          summary: 'Patch completed',
+          snippet: '-old\\n+new',
+          result: 'private result',
+          is_diff: true,
+          args: {{patch: '*** Begin Patch'}},
           done: true
         }});
-        const errorSnippet = _cliToolCardSnippet('Patch failed: context not found', patchSnippet);
-        process.stdout.write(JSON.stringify({{html: row.innerHTML, errorSnippet}}));
+        process.stdout.write(JSON.stringify({{html: row.innerHTML}}));
         """
     )
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     payload = json.loads(proc.stdout)
     html = payload["html"]
-    assert "-old" in html
-    assert "+new" in html
-    assert "Show diff" in html
-    assert "Patch failed: context not found" in payload["errorSnippet"]
-    assert "-old" in payload["errorSnippet"]
+    assert "-old" not in html
+    assert "+new" not in html
+    assert "private result" not in html
+    assert "Begin Patch" not in html
+    assert "Show diff" not in html
+    assert "Patch completed" in html
 
 
 def _make_state_db(path: Path) -> None:

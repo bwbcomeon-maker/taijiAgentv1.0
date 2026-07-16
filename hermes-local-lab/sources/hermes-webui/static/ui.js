@@ -10044,25 +10044,23 @@ function _messageRenderCacheSignature(){
       add('content-array');
       m.content.forEach(part=>{
         if(!part||typeof part!=='object'){ add(part); return; }
-        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
+        add(part.type);add(part.id);add(part.name);add(part.text);add(part.status);add(part.summary);
       });
     }
     if(Array.isArray(m.tool_calls)){
       add('message-tool-calls');add(m.tool_calls.length);
-      m.tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);add(JSON.stringify(tc&&tc.function||{}));});
-    }
-    if(Array.isArray(m._partial_tool_calls)){
-      add('partial-tool-calls');add(m._partial_tool_calls.length);
-      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
+      m.tool_calls.forEach(tc=>{
+        add(tc&&tc.tid);add(tc&&tc.name);add(tc&&tc.status);add(tc&&tc.summary);
+        add(tc&&tc.done);add(tc&&tc.is_error);add(tc&&tc.assistant_msg_idx);
+      });
     }
     if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
-    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>add(a&&typeof a==='object'?JSON.stringify(a):a));
   }
   const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
   add('settled-tool-calls');add(toolCalls.length);
   toolCalls.forEach(tc=>{
     if(!tc||typeof tc!=='object'){ add(tc); return; }
-    add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);add(tc.snippet);add(JSON.stringify(tc.args||{}));
+    add(tc.tid);add(tc.id);add(tc.name);add(tc.status);add(tc.summary);add(tc.done);add(tc.is_error);add(tc.duration);add(tc.assistant_msg_idx);
   });
   if(S.session){
     add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
@@ -10070,113 +10068,6 @@ function _messageRenderCacheSignature(){
     add(S.session.compression_anchor_summary||'');
   }
   return `${messages.length}:${toolCalls.length}:${hash.toString(16)}`;
-}
-
-function _clipCliToolSnippet(text, maxLen=20000){
-  const s=String(text||'');
-  if(s.length<=maxLen) return s;
-  return `${s.slice(0,maxLen)}\n\n... truncated ${s.length-maxLen} chars ...`;
-}
-
-function _cliToolResultText(raw){
-  const s=String(raw||'');
-  try{
-    const rd=JSON.parse(s);
-    if(rd && typeof rd==='object'){
-      for(const key of ['output','result','error','content','diff','patch']){
-        if(Object.prototype.hasOwnProperty.call(rd,key)){
-          const v=rd[key];
-          if(v==null) return '';
-          return typeof v==='string' ? v : JSON.stringify(v,null,2);
-        }
-      }
-    }
-  }catch(e){}
-  return s;
-}
-
-function _cliLooksLikePatchDiff(text){
-  const s=String(text||'');
-  if(!s) return false;
-  if(/\*\*\* Begin Patch/.test(s)) return true;
-  if(/^diff --git /m.test(s)) return true;
-  if(/^@@\s/m.test(s)) return true;
-  if(/(^|\n)---\s+/.test(s) && /(^|\n)\+\+\+\s+/.test(s)) return true;
-  return false;
-}
-
-function _cliToolResultSnippet(raw){
-  const fullText=_cliToolResultText(raw);
-  if(_cliLooksLikePatchDiff(fullText)) return _clipCliToolSnippet(fullText);
-  return String(fullText||'').slice(0,4000);
-}
-
-function _prefixedCliDiffLines(prefix, value){
-  return String(value||'').split('\n').map(line=>`${prefix}${line}`).join('\n');
-}
-
-function _firstOwnedValue(obj, keys){
-  for(const key of keys){
-    if(obj && Object.prototype.hasOwnProperty.call(obj,key)) return obj[key];
-  }
-  return undefined;
-}
-
-function _cliPatchSnippetFromArgs(name, args){
-  if(!args || typeof args!=='object') return '';
-  const toolName=String(name||'').toLowerCase();
-  for(const key of ['patch','diff']){
-    const v=args[key];
-    if(typeof v==='string' && v.trim()) return _clipCliToolSnippet(v);
-  }
-  for(const key of ['input','content']){
-    const v=args[key];
-    if(typeof v==='string' && _cliLooksLikePatchDiff(v)) return _clipCliToolSnippet(v);
-  }
-  const isEditLike=toolName==='apply_patch'
-    || toolName==='patch'
-    || toolName.includes('edit')
-    || toolName==='replace'
-    || toolName==='str_replace';
-  if(!isEditLike) return '';
-  const oldValue=_firstOwnedValue(args,['old_string','old_str','old','before']);
-  const newValue=_firstOwnedValue(args,['new_string','new_str','new','after']);
-  if(oldValue!==undefined || newValue!==undefined){
-    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
-    const lines=[];
-    if(path) lines.push(path);
-    if(oldValue!==undefined) lines.push(_prefixedCliDiffLines('-', oldValue));
-    if(newValue!==undefined) lines.push(_prefixedCliDiffLines('+', newValue));
-    return _clipCliToolSnippet(lines.join('\n'));
-  }
-  if(Array.isArray(args.edits)){
-    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
-    const chunks=[];
-    if(path) chunks.push(path);
-    args.edits.slice(0,5).forEach(edit=>{
-      if(!edit || typeof edit!=='object') return;
-      const before=_firstOwnedValue(edit,['old_string','old_str','old','before']);
-      const after=_firstOwnedValue(edit,['new_string','new_str','new','after']);
-      if(before!==undefined) chunks.push(_prefixedCliDiffLines('-', before));
-      if(after!==undefined) chunks.push(_prefixedCliDiffLines('+', after));
-    });
-    if(chunks.length) return _clipCliToolSnippet(chunks.join('\n'));
-  }
-  return '';
-}
-
-function _cliToolCardSnippet(resultSnippet, patchSnippet){
-  if(_cliLooksLikePatchDiff(resultSnippet)) return resultSnippet;
-  if(!patchSnippet) return resultSnippet || '';
-  const result=String(resultSnippet||'').trim();
-  if(!result) return patchSnippet;
-  const generic=/^(success|ok|done|done\.|exit code: 0)$/i.test(result);
-  if(generic) return patchSnippet;
-  return `${resultSnippet}\n\n${patchSnippet}`;
-}
-
-function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
-  return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
 }
 
 function _captureMessageScrollSnapshot(){
@@ -12163,90 +12054,32 @@ function renderMessages(options){
   // During live streaming, tool cards are rendered in #liveToolCards by the
   // tool SSE handler and never mixed into the message list until done fires.
   //
-  // Fallback: if S.toolCalls is empty (sessions that predate session-level tool
-  // tracking, or runs that didn't go through the normal streaming path), build
-  // a display list from per-message tool_calls (OpenAI format) stored in each
-  // assistant message. This covers the reload case described in issue #140.
+  // Fallback: session-level summaries can be absent for imported history. The
+  // server now projects message tool_calls onto the same public lifecycle
+  // contract, so this path consumes only name/status/summary/ids/coordinates.
   if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
-    // Index tool outputs by tool_call_id / tool_use_id so the
-    // fallback-built cards carry their result snippet (not just the command).
-    // Without this step CLI-origin sessions reload with empty tool cards.
-    const resultsByTid={};
-    const fallbackToolSources=[];
-    S.messages.forEach((m,rawIdx)=>{
-      if(!m) return;
-      // OpenAI / Hermes CLI format: role=tool with tool_call_id
-      if(m.role==='tool'){
-        const tid=m.tool_call_id||m.tool_use_id||'';
-        if(tid) resultsByTid[tid]=_cliToolResultSnippet(m.content);
-        return;
-      }
-      // Anthropic format: tool_result blocks inside a user message content array
-      if(Array.isArray(m.content)){
-        m.content.forEach(p=>{
-          if(!p||typeof p!=='object'||p.type!=='tool_result') return;
-          const tid=p.tool_use_id||'';
-          if(!tid) return;
-          const raw=typeof p.content==='string'?p.content
-                   :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
-                   :'';
-          resultsByTid[tid]=_cliToolResultSnippet(raw);
-        });
-      }
-      if(m.role==='assistant'){
-        const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        if(hasTopLevelToolCalls||hasContentToolUse) fallbackToolSources.push({m,rawIdx});
-      }
-    });
     const derived=[];
-    fallbackToolSources.forEach(({m,rawIdx})=>{
-      // OpenAI format: top-level tool_calls field on the assistant message
-      (m.tool_calls||[]).forEach(tc=>{
+    S.messages.forEach((m,rawIdx)=>{
+      if(!m||m.role!=='assistant') return;
+      const publicCalls=[];
+      if(Array.isArray(m.tool_calls)) publicCalls.push(...m.tool_calls);
+      if(Array.isArray(m.content)){
+        publicCalls.push(...m.content.filter(p=>p&&typeof p==='object'&&p.type==='tool_use'));
+      }
+      publicCalls.forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
-        const fn=tc.function||{};
-        const name=fn.name||tc.name||'tool';
-        let args={};
-        try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
-        const tid=tc.id||tc.call_id||'';
-        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-        const resultSnippet=resultsByTid[tid]||'';
-        let argsSnap={};
-        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
         derived.push({
-          name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
-          tid,
-          assistant_msg_idx:rawIdx,
-          args:argsSnap,
-          done:true,
+          name:tc.name||'tool',
+          status:tc.status||'completed',
+          summary:typeof tc.summary==='string'?tc.summary:'',
+          tid:tc.tid||tc.id||'',
+          assistant_msg_idx:Number.isInteger(tc.assistant_msg_idx)?tc.assistant_msg_idx:rawIdx,
+          done:typeof tc.done==='boolean'?tc.done:true,
+          is_error:!!tc.is_error,
+          duration:tc.duration,
+          event_type:tc.event_type||'tool.completed',
         });
       });
-      // Anthropic format: tool_use blocks inside assistant content array
-      if(Array.isArray(m.content)){
-        m.content.forEach(p=>{
-          if(!p||typeof p!=='object'||p.type!=='tool_use') return;
-          const name=p.name||'tool';
-          const args=p.input||{};
-          const tid=p.id||'';
-          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-          const resultSnippet=resultsByTid[tid]||'';
-          const argsSnap={};
-          if(args && typeof args==='object'){
-            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-          }
-          derived.push({
-            name,
-            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
-            tid,
-            assistant_msg_idx:rawIdx,
-            args:argsSnap,
-            done:true,
-          });
-        });
-      }
     });
     if(derived.length) S.toolCalls=derived;
   }
@@ -12336,22 +12169,6 @@ function renderMessages(options){
           const card=buildToolCard(tc);
           frag.appendChild(card);
           lastInsertedNode=card;
-        }
-        // Add expand/collapse toggle for groups with 2+ cards
-        if(cards.length>=2){
-          const toggle=document.createElement('div');
-          toggle.className='tool-cards-toggle';
-          // Collect card elements before they get moved to DOM
-          const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
-          const expandBtn=document.createElement('button');
-          expandBtn.textContent=t('expand_all');
-          expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
-          const collapseBtn=document.createElement('button');
-          collapseBtn.textContent=t('collapse_all');
-          collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
-          toggle.appendChild(expandBtn);
-          toggle.appendChild(collapseBtn);
-          frag.insertBefore(toggle,frag.firstChild);
         }
         const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
         const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
@@ -12491,149 +12308,42 @@ function toolIcon(name){
   return icons[name]||li('wrench');
 }
 
-function _toolArgPreviewValue(value){
-  if(value===null||value===undefined) return '';
-  if(Array.isArray(value)){
-    if(!value.length) return '[]';
-    if(value.length<=3&&value.every(v=>v===null||['string','number','boolean'].includes(typeof v))){
-      return value.map(v=>String(v)).join(', ');
-    }
-    return `${value.length} items`;
-  }
-  if(typeof value==='object') return 'object';
-  return String(value).replace(/\s+/g,' ').trim();
-}
-// Secret/sensitive-arg guard for collapsed tool-card previews. Exact-name hiding
-// alone misses camelCase / variant spellings (apiKey, access_token, clientSecret,
-// Authorization, …), so a normalized substring check runs first so secret-shaped
-// argument names are never surfaced in the always-visible collapsed header (#3267).
-function _toolArgPreviewKeyIsHidden(key){
-  const k=String(key||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-  // verbose-but-not-secret bodies we keep out of the compact preview
-  const verbose=['content','filecontent','newstring','oldstring','patch','text','message','prompt','code','script','cookies','headers'];
-  if(verbose.includes(k)) return true;
-  // secret-shaped substrings (covers api_key/apiKey, access_token/auth_token/bearer,
-  // client_secret, password, credential, private_key, authorization, etc.)
-  return /(apikey|token|secret|password|passwd|credential|authorization|\bauth\b|auth$|^auth|bearer|privatekey|accesskey|sessionkey|signingkey|cookie)/.test(k)
-    || k==='auth' || k==='key' || k==='pat';
-}
-function _formatToolArgPreview(args){
-  if(!args||typeof args!=='object') return '';
-  const preferred=['path','file_path','target','pattern','query','url','urls','name','ref','command','action','mode','schedule','workdir'];
-  const keys=[];
-  for(const key of preferred){
-    if(Object.prototype.hasOwnProperty.call(args,key)&&!_toolArgPreviewKeyIsHidden(key)) keys.push(key);
-  }
-  for(const key of Object.keys(args)){
-    if(keys.length>=3) break;
-    if(keys.includes(key)||_toolArgPreviewKeyIsHidden(key)) continue;
-    keys.push(key);
-  }
-  const parts=[];
-  for(const key of keys){
-    const raw=_toolArgPreviewValue(args[key]);
-    if(!raw) continue;
-    const val=raw.length>96?`${raw.slice(0,93)}…`:raw;
-    parts.push(`${key}=${val}`);
-    if(parts.join(' · ').length>=150) break;
-  }
-  const out=parts.join(' · ');
-  return out.length>180?`${out.slice(0,177)}…`:out;
-}
-function _toolCardPreviewText(tc, displaySnippet){
-  const explicit=String(tc&&tc.preview||'').trim();
-  if(explicit) return explicit;
-  const argPreview=_formatToolArgPreview(tc&&tc.args);
-  if(argPreview) return argPreview;
+function _toolCardPreviewText(tc){
+  const status=String(tc&&tc.status||'').trim().toLowerCase();
+  if(status==='failed'||status==='error'||(tc&&tc.is_error)) return 'Failed';
+  const summary=String(tc&&tc.summary||'').trim();
+  if(summary) return summary;
+  if(status==='running'||status==='started'||status==='pending') return 'Running';
+  if(status==='completed'||status==='complete'||status==='done'||status==='success') return 'Completed';
   if(tc&&tc.done===false) return 'Running';
   if(tc&&tc.is_error) return 'Failed';
   return 'Completed';
 }
-function buildToolCard(tc){
+function buildToolCard(tc,options){
+  const live=!!(options&&options.live);
   const row=document.createElement('div');
   row.className='tool-card-row';
   const icon=toolIcon(tc.name);
-  const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
-  let displaySnippet='';
-  if(tc.snippet){
-    const s=tc.snippet;
-    if(s.length<=800){displaySnippet=s;}
-    else{
-      const cutoff=s.slice(0,800);
-      const lastBreak=Math.max(cutoff.lastIndexOf('. '),cutoff.lastIndexOf('\n'),cutoff.lastIndexOf('; '));
-      displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
-    }
-  }
-  const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
-  const moreLabel=tc.is_diff?'Show diff':'Show more';
-  const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
-  let previewText=_toolCardPreviewText(tc, displaySnippet);
+  let previewText=_toolCardPreviewText(tc);
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
+  const accessibleLabel=`${displayName}: ${previewText}`;
+  const liveAttributes=live?' role="status" aria-live="polite"':'';
   row.innerHTML=`
     <div class="${cardClass}">
-      <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+      <div class="tool-card-header"${liveAttributes} aria-label="${esc(accessibleLabel)}">
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>
-        ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
-      ${hasDetail?`<div class="tool-card-detail">
-        ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
-          Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
-        }</div>`:''}
-        ${displaySnippet?`<div class="tool-card-result">
-          <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
-        </div>`:''}
-      </div>`:''}
     </div>`;
   return row;
-}
-
-function _colorDiffLines(text){
-  if(typeof text !== 'string') return esc(String(text||''));
-  return esc(text).split('\n').map(line=>{
-    if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
-    if(line.startsWith('+')&&!line.startsWith('+++')) return `<span class="diff-line diff-plus">${line}</span>`;
-    if(line.startsWith('-')&&!line.startsWith('---')) return `<span class="diff-line diff-minus">${line}</span>`;
-    return `<span class="diff-line">${line}</span>`;
-  }).join('\n');
-}
-
-// Detect if text looks like a unified diff (has @@ hunk headers and +/- lines).
-function _snippetLooksLikeDiff(text){
-  if(typeof text!=='string'||text.length<10) return false;
-  if(!/^@@\s/.test(text)) return false;
-  const lines=text.split('\n');
-  let plusMinus=0;
-  for(let i=0;i<lines.length&&i<50;i++){
-    const l=lines[i];
-    if(l.startsWith('+')||l.startsWith('-')) plusMinus++;
-  }
-  return plusMinus>=2;
-}
-
-function _toggleToolDiff(btn){
-  const pre=btn.closest('.tool-card-result')?.querySelector('pre');
-  if(!pre) return;
-  const isDiff=btn.dataset.isDiff==='1';
-  const expanded=btn.textContent===btn.dataset.moreLabel;
-  const raw=expanded?btn.dataset.full:btn.dataset.short;
-  if(isDiff){
-    let code=pre.querySelector('code');
-    if(!code){code=document.createElement('code');code.className='diff-block';pre.textContent='';pre.appendChild(code);}
-    code.innerHTML=_colorDiffLines(raw);
-  }else{
-    pre.textContent=raw;
-  }
-  btn.textContent=expanded?btn.dataset.lessLabel:btn.dataset.moreLabel;
 }
 
 function _syncToolCallGroupSummary(group){
@@ -12720,7 +12430,7 @@ function appendLiveToolCard(tc){
     if(tid){
       const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
       if(existing){
-        const replacement=buildToolCard(tc);
+        const replacement=buildToolCard(tc,{live:true});
         replacement.dataset.liveTid=tid;
         existing.replaceWith(replacement);
         // Keep #toolRunningRow alive — dots stay until text starts streaming
@@ -12729,7 +12439,7 @@ function appendLiveToolCard(tc){
         return;
       }
     }
-    const row=buildToolCard(tc);
+    const row=buildToolCard(tc,{live:true});
     if(tid) row.dataset.liveTid=tid;
     // Insert after whichever comes last: the current live assistant segment or
     // the last tool card. This handles both cases:
@@ -12764,7 +12474,7 @@ function appendLiveToolCard(tc){
     id:toolEventId,
     kind:'tool',
     label:toolDone?`Tool finished: ${toolName}`:`Running tool: ${toolName}`,
-    detail:tc.preview||tc.snippet||'',
+    detail:tc.summary||'',
     status:toolDone?(tc.is_error?'error':'done'):'waiting',
     ts:_activityNowSeconds(),
   });
@@ -12774,14 +12484,14 @@ function appendLiveToolCard(tc){
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
     if(existing){
-      const replacement=buildToolCard(tc);
+      const replacement=buildToolCard(tc,{live:true});
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
       _syncToolCallGroupSummary(group);
       return;
     }
   }
-  const row=buildToolCard(tc);
+  const row=buildToolCard(tc,{live:true});
   if(tid) row.dataset.liveTid=tid;
   body.appendChild(row);
   _syncToolCallGroupSummary(group);
@@ -14503,7 +14213,7 @@ async function uploadPendingFiles(){
         names.push({name: data.dest, path: data.dest, extracted: data.extracted});
         if(typeof loadDir==='function')loadDir(S.currentDir||'.');
       }else{
-        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
+        names.push({name: data.name||data.filename, ref: data.ref, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;

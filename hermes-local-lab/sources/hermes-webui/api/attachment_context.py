@@ -15,7 +15,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from api.config import MAX_UPLOAD_BYTES
-from api.upload import _attachment_root
+from api.upload import _attachment_root, _session_attachment_dir
 
 
 _MAX_FILES = int(os.getenv("HERMES_WEBUI_ATTACHMENT_CONTEXT_MAX_FILES", "20") or "20")
@@ -71,6 +71,7 @@ def build_attachment_context(
     attachments,
     *,
     workspace: str,
+    session_id: str,
     cfg: dict | None = None,
     image_mode: str = "native",
     vision_available: bool | None = None,
@@ -89,12 +90,14 @@ def build_attachment_context(
 
     blocks: list[str] = []
     total_chars = 0
-    allowed_roots = _allowed_roots(workspace)
-
     for raw in list(attachments or [])[:_MAX_FILES]:
         if not isinstance(raw, dict):
             continue
-        path = _resolve_allowed_path(str(raw.get("path") or ""), allowed_roots)
+        path = resolve_attachment_path(
+            str(raw.get("ref") or ""),
+            workspace=workspace,
+            session_id=session_id,
+        )
         name = _attachment_name(raw, path)
         if path is None:
             blocks.append(_format_skip(name, "附件路径不在可信上传目录或工作区内，未注入模型上下文。"))
@@ -161,32 +164,37 @@ def build_attachment_context(
     return result
 
 
-def _allowed_roots(workspace: str) -> tuple[Path, ...]:
-    roots: list[Path] = []
-    for raw in (workspace, str(_attachment_root())):
-        try:
-            root = Path(raw).expanduser().resolve()
-        except Exception:
-            continue
-        if root not in roots:
-            roots.append(root)
-    return tuple(roots)
+def resolve_attachment_path(
+    raw_path: str,
+    *,
+    workspace: str,
+    session_id: str,
+) -> Path | None:
+    """Resolve one opaque, single-file ref inside this session's upload inbox.
 
-
-def _resolve_allowed_path(raw_path: str, allowed_roots: tuple[Path, ...]) -> Path | None:
-    if not raw_path:
+    Chat attachments are not workspace previews.  Absolute paths, path
+    separators and traversal are rejected before touching the filesystem; the
+    resolved target must also remain inside the current session directory so a
+    symlink cannot escape it.
+    """
+    if (
+        not raw_path
+        or not session_id
+        or raw_path in {".", ".."}
+        or "/" in raw_path
+        or "\\" in raw_path
+        or Path(raw_path).is_absolute()
+    ):
         return None
     try:
-        path = Path(raw_path).expanduser().resolve()
+        session_root = _session_attachment_dir(str(session_id)).resolve()
+        candidate = session_root / raw_path
+        if candidate.is_symlink():
+            return None
+        path = candidate.resolve()
+        return path if path.is_relative_to(session_root) else None
     except Exception:
         return None
-    for root in allowed_roots:
-        try:
-            if path.is_relative_to(root):
-                return path
-        except Exception:
-            continue
-    return None
 
 
 def _attachment_name(raw: dict, path: Path | None) -> str:
@@ -195,7 +203,7 @@ def _attachment_name(raw: dict, path: Path | None) -> str:
         return Path(name).name
     if path is not None:
         return path.name
-    raw_path = str(raw.get("path") or "").strip()
+    raw_path = str(raw.get("path") or raw.get("ref") or "").strip()
     return Path(raw_path).name if raw_path else "attachment"
 
 

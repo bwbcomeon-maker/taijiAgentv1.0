@@ -291,7 +291,8 @@ class TestSSENotify:
             entry = {"command": "rm -rf /tmp/test", "pattern_key": "delete"}
             r._approval_sse_notify(sid, entry, 1)
             payload = q.get(timeout=1)
-            assert payload["pending"]["command"] == "rm -rf /tmp/test"
+            assert "command" not in payload["pending"]
+            assert payload["pending"]["summary"] == "受限操作需要你的授权"
             assert payload["pending_count"] == 1
         finally:
             r._approval_sse_unsubscribe(sid, q)
@@ -308,7 +309,8 @@ class TestSSENotify:
             r._approval_sse_notify(sid, entry, 2)
             for q in [q1, q2, q3]:
                 payload = q.get(timeout=1)
-                assert payload["pending"]["command"] == "test-cmd"
+                assert "command" not in payload["pending"]
+                assert payload["pending"]["summary"] == "受限操作需要你的授权"
                 assert payload["pending_count"] == 2
         finally:
             for q in [q1, q2, q3]:
@@ -326,7 +328,8 @@ class TestSSENotify:
             r._approval_sse_notify(sid_a, entry, 1)
             # qa should have the event
             payload = qa.get(timeout=1)
-            assert payload["pending"]["command"] == "only-for-a"
+            assert "command" not in payload["pending"]
+            assert payload["pending"]["summary"] == "受限操作需要你的授权"
             # qb should be empty
             assert qb.empty(), "Session B subscriber must not receive session A events"
         finally:
@@ -383,7 +386,8 @@ class TestSSENotifyFromSubmitPending:
                 "description": "recursive delete",
             })
             payload = q.get(timeout=1)
-            assert payload["pending"]["command"] == "rm -rf /tmp/test"
+            assert "command" not in payload["pending"]
+            assert payload["pending"]["summary"] == "recursive delete"
             assert payload["pending_count"] == 1
         finally:
             r._approval_sse_unsubscribe(sid, q)

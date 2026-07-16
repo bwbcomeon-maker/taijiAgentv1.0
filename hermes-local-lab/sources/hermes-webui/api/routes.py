@@ -1354,7 +1354,7 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
         },
     ]
     messages.extend(new_messages)
-    session.messages = scrub_messages(messages)
+    session.messages = messages
     if _is_default_or_empty_session_title(getattr(session, "title", None)):
         session.title = title_from(session.messages, getattr(session, "title", None) or "Untitled")
     try:
@@ -5126,20 +5126,14 @@ def _writeflow_compose_message(body: dict) -> dict:
 
 
 def _worktree_retained_payload(session) -> dict:
-    """Return explicit no-cleanup metadata for worktree-backed session actions."""
+    """Return public no-cleanup metadata without filesystem locations."""
     worktree_path = getattr(session, "worktree_path", None) if session else None
     if not worktree_path:
         return {}
-    payload = {
-        "worktree_retained": True,
-        "worktree_path": worktree_path,
-    }
+    payload = {"worktree_retained": True}
     worktree_branch = getattr(session, "worktree_branch", None)
-    worktree_repo_root = getattr(session, "worktree_repo_root", None)
     if worktree_branch:
         payload["worktree_branch"] = worktree_branch
-    if worktree_repo_root:
-        payload["worktree_repo_root"] = worktree_repo_root
     return payload
 
 
@@ -6019,10 +6013,14 @@ from api.brand_privacy import (
     BRAND_PRIVACY_SYSTEM_PROMPT,
     brand_safe_reply,
     classify_brand_safety_prompt,
+    public_approval_projection,
     public_egress_scrub,
+    public_profile_projection,
+    public_response_projection,
+    public_session_search_projection,
+    public_session_projection,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
-    scrub_messages,
     scrub_public_export_payload,
     scrub_public_session_payload,
 )
@@ -8062,7 +8060,10 @@ def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) 
     `_handle_approval_respond` popped the last entry) so the client knows to
     hide its approval card.
     """
-    payload = {"pending": dict(head) if head else None, "pending_count": total}
+    payload = {
+        "pending": public_approval_projection(head) if head else None,
+        "pending_count": total,
+    }
     subs = _approval_sse_subscribers.get(session_id, ())
     for q in subs:
         try:
@@ -9989,7 +9990,7 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
-            redact = redact_session_data(raw)
+            redact = public_session_projection(redact_session_data(raw))
             _t5 = _time.monotonic()
             resp = j(handler, {"session": redact})
             _t6 = _time.monotonic()
@@ -10032,7 +10033,9 @@ def handle_get(handler, parsed) -> bool:
                     "tool_calls": [],
                 }
                 sess = _merge_cli_sidebar_metadata(sess, cli_meta)
-                return j(handler, {"session": redact_session_data(sess)})
+                return j(handler, {
+                    "session": public_session_projection(redact_session_data(sess))
+                })
             return bad(handler, "Session not found", 404)
 
     if parsed.path == "/api/session/lineage/report":
@@ -10723,23 +10726,28 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name, taiji_single_runtime_mode
 
+        active_profile = public_profile_projection({"name": get_active_profile_name()})
         return j(
             handler,
             {
-                "profiles": list_profiles_api(),
-                "active": get_active_profile_name(),
+                "profiles": [
+                    public_profile_projection(profile)
+                    for profile in list_profiles_api()
+                    if isinstance(profile, dict)
+                ],
+                "active": active_profile.get("name", "default"),
                 "single_runtime": taiji_single_runtime_mode(),
             },
         )
 
     if parsed.path == "/api/profile/active":
-        from api.profiles import get_active_profile_name, get_active_hermes_home, taiji_single_runtime_mode
+        from api.profiles import get_active_profile_name, taiji_single_runtime_mode
 
+        active_profile = public_profile_projection({"name": get_active_profile_name()})
         return j(
             handler,
             {
-                "name": get_active_profile_name(),
-                "path": str(get_active_hermes_home()),
+                "name": active_profile.get("name", "default"),
                 "single_runtime": taiji_single_runtime_mode(),
             },
         )
@@ -11155,7 +11163,9 @@ def handle_post(handler, parsed) -> bool:
         )
         if worktree_info:
             publish_session_list_changed("session_new")
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(handler, {"session": public_session_projection(
+            s.compact() | {"messages": s.messages}
+        )})
 
     if parsed.path == "/api/session/duplicate":
         try:
@@ -11237,7 +11247,9 @@ def handle_post(handler, parsed) -> bool:
             copied_session.save()
             publish_session_list_changed("session_duplicate")
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+            return j(handler, {"session": public_session_projection(
+                copied_session.compact() | {"messages": copied_session.messages}
+            )})
         except Exception as e:
             return bad(handler, str(e))
 
@@ -11470,7 +11482,7 @@ def handle_post(handler, parsed) -> bool:
             s.title = str(body["title"]).strip()[:80] or "Untitled"
             s.save()
         publish_session_list_changed("session_rename")
-        return j(handler, {"session": s.compact()})
+        return j(handler, {"session": public_session_projection(s.compact())})
 
 
     if parsed.path == "/api/session/title/regenerate":
@@ -11497,7 +11509,7 @@ def handle_post(handler, parsed) -> bool:
         _sync_session_title_to_insights(s)
         publish_session_list_changed("session_title_regenerate")
         return j(handler, {
-            "session": s.compact(),
+            "session": public_session_projection(s.compact()),
             "title": s.title,
             "status": reason,
             "raw_preview": (raw_preview or "")[:240],
@@ -11690,7 +11702,9 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(handler, {"session": public_session_projection(
+            s.compact() | {"messages": s.messages}
+        )})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -11786,13 +11800,14 @@ def handle_post(handler, parsed) -> bool:
             s.messages = []
             s.tool_calls = []
             s.title = "Untitled"
+            _reset_session_privacy_context(s, "session_clear")
             s.save()
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        return j(handler, {"ok": True, "session": s.compact()})
+        return j(handler, {"ok": True, "session": public_session_projection(s.compact())})
 
     if parsed.path == "/api/session/truncate":
         try:
@@ -11817,6 +11832,7 @@ def handle_post(handler, parsed) -> bool:
             # turns on the next turn (#2914).
             if isinstance(getattr(s, 'context_messages', None), list):
                 s.context_messages = s.context_messages[:keep]
+            _reset_session_privacy_context(s, "session_truncate")
             try:
                 from api.session_ops import _truncation_watermark_for
                 s.truncation_watermark = _truncation_watermark_for(s.messages)
@@ -11830,7 +11846,9 @@ def handle_post(handler, parsed) -> bool:
                 s.truncation_watermark or 0,
             )
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler, {"ok": True, "session": public_session_projection(
+                s.compact() | {"messages": s.messages}
+            )}
         )
 
     if parsed.path == "/api/session/branch":
@@ -12924,7 +12942,7 @@ def handle_post(handler, parsed) -> bool:
                 s.pinned = pin_requested
                 s.save()
         publish_session_list_changed("session_pin")
-        return j(handler, {"ok": True, "session": s.compact()})
+        return j(handler, {"ok": True, "session": public_session_projection(s.compact())})
 
     # ── Session archive (POST) ──
     if parsed.path == "/api/session/archive":
@@ -13001,7 +13019,11 @@ def handle_post(handler, parsed) -> bool:
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
         publish_session_list_changed("session_archive")
-        return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
+        return j(handler, {
+            "ok": True,
+            "session": public_session_projection(s.compact()),
+            **_worktree_retained_payload(s),
+        })
 
     # ── Session move to project (POST) ──
     if parsed.path == "/api/session/move":
@@ -13036,7 +13058,7 @@ def handle_post(handler, parsed) -> bool:
             s.project_id = target_pid
             s.save()
         publish_session_list_changed("session_move")
-        return j(handler, {"ok": True, "session": s.compact()})
+        return j(handler, {"ok": True, "session": public_session_projection(s.compact())})
 
     # ── Project CRUD (POST) ──
     if parsed.path == "/api/projects/create":
@@ -13677,21 +13699,17 @@ def _handle_sessions_search(handler, parsed):
     content_search = qs.get("content", ["1"])[0] == "1"
     depth = int(qs.get("depth", ["5"])[0])
     if not q:
-        safe_sessions = []
-        for s in all_sessions():
-            item = dict(s)
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
-            safe_sessions.append(item)
+        safe_sessions = [
+            public_session_search_projection(redact_session_data(dict(s)))
+            for s in all_sessions()
+        ]
         return j(handler, {"sessions": safe_sessions})
     results = []
     for s in all_sessions():
         title_match = q in (s.get("title") or "").lower()
         if title_match:
             item = dict(s, match_type="title")
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
-            results.append(item)
+            results.append(public_session_search_projection(redact_session_data(item)))
             continue
         if content_search:
             try:
@@ -13704,9 +13722,9 @@ def _handle_sessions_search(handler, parsed):
                         preview = _session_search_preview(c, q)
                         if preview:
                             item["match_preview"] = _redact_text(preview)
-                        if isinstance(item.get("title"), str):
-                            item["title"] = _redact_text(item["title"])
-                        results.append(item)
+                        results.append(
+                            public_session_search_projection(redact_session_data(item))
+                        )
                         break
             except (KeyError, Exception):
                 pass
@@ -13795,10 +13813,15 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
         after_seq=after_seq,
     )
     for entry in journal.get("events") or []:
+        event_name = entry.get("event") or entry.get("type") or "message"
         _sse_with_id(
             handler,
-            entry.get("event") or entry.get("type") or "message",
-            entry.get("payload"),
+            event_name,
+            public_egress_scrub(
+                entry.get("payload"),
+                surface="run_journal_replay",
+                event_name=event_name,
+            ),
             entry.get("event_id"),
         )
     if not summary.get("terminal"):
@@ -13808,7 +13831,16 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
             after_seq=after_seq,
         )
         if stale:
-            _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
+            _sse_with_id(
+                handler,
+                stale["event"],
+                public_egress_scrub(
+                    stale["payload"],
+                    surface="run_journal_replay",
+                    event_name=stale["event"],
+                ),
+                stale["event_id"],
+            )
     return True
 
 
@@ -15146,7 +15178,10 @@ def _handle_approval_pending(handler, parsed):
             p = None
             total = 0
     if p:
-        return j(handler, {"pending": dict(p), "pending_count": total})
+        return j(handler, {
+            "pending": public_approval_projection(p),
+            "pending_count": total,
+        })
     return j(handler, {"pending": None, "pending_count": 0})
 
 
@@ -15174,10 +15209,10 @@ def _handle_approval_sse_stream(handler, parsed):
         _approval_sse_subscribers.setdefault(sid, []).append(q)
         q_list = _pending.get(sid)
         if isinstance(q_list, list):
-            initial_pending = dict(q_list[0]) if q_list else None
+            initial_pending = public_approval_projection(q_list[0]) if q_list else None
             initial_count = len(q_list)
         elif q_list:
-            initial_pending = dict(q_list)
+            initial_pending = public_approval_projection(q_list)
             initial_count = 1
 
     handler.send_response(200)
@@ -16341,7 +16376,9 @@ def _docx_template_invocation_result_for_session(prompt: str, session, attachmen
         return _docx_template_invocation_result(prompt)
     template_id = str(selected.get("template_id") or "").strip()
     template = selected.get("template") if isinstance(selected.get("template"), dict) else {"id": template_id}
-    explicit_source = _docx_template_source_path_from_text(prompt) or _docx_template_source_path_from_attachments(attachments)
+    explicit_source = _docx_template_source_path_from_text(prompt) or _docx_template_source_path_from_attachments(
+        attachments, session=session
+    )
     if explicit_source:
         return _docx_template_apply_source_for_session(session, template_id=template_id, template=template, source_path=explicit_source)
     workspace = Path(getattr(session, "workspace", "")).expanduser().resolve()
@@ -16376,14 +16413,27 @@ def _docx_template_source_path_from_text(text: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _docx_template_source_path_from_attachments(attachments) -> str:
+def _docx_template_source_path_from_attachments(attachments, *, session=None) -> str:
     if not isinstance(attachments, list):
         return ""
     for item in attachments:
         if not isinstance(item, dict):
             continue
-        candidate = str(item.get("path") or item.get("name") or "").strip()
+        candidate = str(item.get("path") or item.get("ref") or item.get("name") or "").strip()
         if Path(candidate).suffix.lower() in _DOCX_TEMPLATE_SOURCE_SUFFIXES:
+            if item.get("ref") and not item.get("path") and session is not None:
+                try:
+                    from api.attachment_context import resolve_attachment_path
+
+                    resolved = resolve_attachment_path(
+                        candidate,
+                        workspace=str(getattr(session, "workspace", "") or ""),
+                        session_id=str(getattr(session, "session_id", "") or ""),
+                    )
+                    if resolved is not None:
+                        return str(resolved)
+                except Exception:
+                    continue
             return candidate
     return ""
 
@@ -16407,7 +16457,9 @@ def _docx_template_pending_source_result_for_session(prompt: str, session, attac
     request = _latest_docx_source_request(session)
     if not request:
         return None
-    source_path = _docx_template_source_path_from_text(prompt) or _docx_template_source_path_from_attachments(attachments)
+    source_path = _docx_template_source_path_from_text(prompt) or _docx_template_source_path_from_attachments(
+        attachments, session=session
+    )
     template_id = str(request.get("template_id") or "").strip()
     template = request.get("template") if isinstance(request.get("template"), dict) else {"id": template_id}
     if not source_path:
@@ -16529,8 +16581,7 @@ def _record_docx_non_streaming_turn_for_session(s, msg: str, result: dict | None
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": str(assistant.get("content") or "")},
     ]
-    s.messages = scrub_messages(s.messages)
-    s.context_messages = scrub_messages(s.context_messages)
+    _reset_session_privacy_context(s, "non_streaming_business_turn")
     if _is_default_or_empty_session_title(getattr(s, "title", None)):
         s.title = scrub_brand_leaks(title_from(s.messages, getattr(s, "title", None) or "Untitled"))
     s.save()
@@ -16617,6 +16668,45 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _classify_session_brand_privacy(s, text: str, *, source_turn_id: str | None = None):
+    """Classify ``text`` without mutating the session privacy lifecycle."""
+    del source_turn_id  # Kept for compatibility with callers that reserve a turn id.
+    adjacent_text = ""
+    for message in reversed(list(getattr(s, "messages", None) or [])):
+        if isinstance(message, dict) and str(message.get("role") or "") == "user":
+            adjacent_text = str(message.get("content") or "")
+            break
+    decision = classify_brand_safety_prompt(
+        text,
+        privacy_context=getattr(s, "privacy_context", None),
+        adjacent_text=adjacent_text,
+    )
+    return decision
+
+
+def _commit_session_brand_privacy_decision(
+    s,
+    decision,
+    *,
+    source_turn_id: str | None = None,
+) -> None:
+    """Commit one accepted turn's privacy lifecycle while its session lock is held."""
+    s.privacy_context = None
+    if decision.action == "safe_reply" and decision.taint_session:
+        s.privacy_context = {
+            "risk_type": decision.risk,
+            "source_turn_id": str(source_turn_id or uuid.uuid4().hex),
+            "remaining_turns": 1,
+            "reset_reason": None,
+        }
+
+
+def _reset_session_privacy_context(s, reason: str) -> None:
+    """Clear adjacent-turn privacy state at explicit conversation boundaries."""
+    del reason  # Reason documents the lifecycle edge; cleared state is not persisted.
+    s.privacy_context = None
+
+
 def _start_brand_privacy_safe_stream_for_session(
     s,
     *,
@@ -16631,8 +16721,7 @@ def _start_brand_privacy_safe_stream_for_session(
     diag.stage("brand_privacy_stream") if diag else None
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
+        current_active = current_stream_id in _active_stream_id_set()
         if current_active:
             return {
                 "error": "session already has an active stream",
@@ -16644,36 +16733,67 @@ def _start_brand_privacy_safe_stream_for_session(
     stream_id = uuid.uuid4().hex
     now = time.time()
     reply = brand_safe_reply(msg)
-    with _get_session_agent_lock(s.session_id):
-        turn_started_at = getattr(s, "pending_started_at", None) or now
-        was_hidden_empty_session = _is_hidden_empty_session(s)
-        s.workspace = workspace
-        s.model = model
-        s.model_provider = model_provider
-        s.brand_privacy_tainted = True
-        s.active_stream_id = None
-        s.pending_user_message = None
-        s.pending_attachments = []
-        s.pending_started_at = None
-        user_msg = {"role": "user", "content": msg, "timestamp": int(now)}
-        assistant_msg = {"role": "assistant", "content": reply, "timestamp": int(now)}
-        s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
-        stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
-        s.context_messages = list(getattr(s, "context_messages", None) or []) + [
-            {"role": "user", "content": msg},
-            {"role": "assistant", "content": reply},
-        ]
-        s.messages = scrub_messages(s.messages)
-        s.context_messages = scrub_messages(s.context_messages)
-        if s.title in ("Untitled", "New Chat", "") or not s.title:
-            s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
-        s.save()
-    if was_hidden_empty_session:
-        publish_session_list_changed("session_new")
-    else:
-        publish_session_list_changed("session_update")
-
+    # Allocate the public stream before accepting the turn. Allocation failure
+    # must leave the one-turn privacy budget untouched.
     stream = create_stream_channel()
+    session_lock = _get_session_agent_lock(s.session_id)
+    snapshot = None
+    with session_lock:
+        current_stream_id = str(getattr(s, "active_stream_id", None) or "")
+        if current_stream_id and current_stream_id in _active_stream_id_set():
+            return {
+                "error": "session already has an active stream",
+                "active_stream_id": current_stream_id,
+                "_status": 409,
+            }
+        decision = _classify_session_brand_privacy(s, msg)
+        if decision.action != "safe_reply":
+            return {
+                "error": "session privacy context changed; retry the turn",
+                "_status": 409,
+            }
+        snapshot = {
+            field: copy.deepcopy(getattr(s, field, None))
+            for field in (
+                "workspace",
+                "model",
+                "model_provider",
+                "active_stream_id",
+                "pending_user_message",
+                "pending_attachments",
+                "pending_started_at",
+                "messages",
+                "context_messages",
+                "title",
+                "privacy_context",
+            )
+        }
+        try:
+            turn_started_at = getattr(s, "pending_started_at", None) or now
+            was_hidden_empty_session = _is_hidden_empty_session(s)
+            s.workspace = workspace
+            s.model = model
+            s.model_provider = model_provider
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            user_msg = {"role": "user", "content": msg, "timestamp": int(now)}
+            assistant_msg = {"role": "assistant", "content": reply, "timestamp": int(now)}
+            s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
+            stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
+            s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+                {"role": "user", "content": msg},
+                {"role": "assistant", "content": reply},
+            ]
+            if s.title in ("Untitled", "New Chat", "") or not s.title:
+                s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
+            _commit_session_brand_privacy_decision(s, decision)
+            s.save()
+        except BaseException:
+            for field, value in snapshot.items():
+                setattr(s, field, value)
+            raise
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
 
@@ -16700,11 +16820,26 @@ def _start_brand_privacy_safe_stream_for_session(
                     STREAMS.pop(stream_id, None)
                     STREAM_LAST_EVENT_ID.pop(stream_id, None)
 
-    threading.Thread(
+    emitter = threading.Thread(
         target=_emit_safe_reply,
         name=f"brand-privacy-{s.session_id[:8]}",
         daemon=True,
-    ).start()
+    )
+    try:
+        emitter.start()
+    except BaseException:
+        with STREAMS_LOCK:
+            if STREAMS.get(stream_id) is stream:
+                STREAMS.pop(stream_id, None)
+        with session_lock:
+            for field, value in snapshot.items():
+                setattr(s, field, copy.deepcopy(value))
+            s.save()
+        raise
+    if was_hidden_empty_session:
+        publish_session_list_changed("session_new")
+    else:
+        publish_session_list_changed("session_update")
 
     response = {
         "stream_id": stream_id,
@@ -16777,10 +16912,9 @@ def _record_license_blocked_turn_for_session(
             {"role": "user", "content": msg},
             {"role": "assistant", "content": reply},
         ]
-        s.messages = scrub_messages(s.messages)
-        s.context_messages = scrub_messages(s.context_messages)
         if s.title in ("Untitled", "New Chat", "") or not s.title:
             s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
+        _reset_session_privacy_context(s, "license_blocked_turn")
         s.save()
     if was_hidden_empty_session:
         publish_session_list_changed("session_new")
@@ -16832,6 +16966,7 @@ def _start_chat_stream_for_session(
     stream_id = deterministic_stream_id or uuid.uuid4().hex
     persisted_msg = display_msg if display_msg is not None else msg
     session_lock = _get_session_agent_lock(s.session_id)
+    privacy_decision = None
     diag.stage("session_lock_wait") if diag else None
     stale_stream_id = ""
     while True:
@@ -16854,6 +16989,13 @@ def _start_chat_stream_for_session(
                     }
                 stale_stream_id = current_stream_id
             else:
+                privacy_decision = _classify_session_brand_privacy(s, persisted_msg)
+                if privacy_decision.action == "safe_reply":
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session privacy context changed; retry the turn",
+                        "_status": 409,
+                    }
                 # #1932: consume continuation ownership only for the caller
                 # that can actually claim this session.
                 if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
@@ -16976,6 +17118,12 @@ def _start_chat_stream_for_session(
             daemon=True,
         )
         thr.start()
+        # Only an accepted, successfully-started turn may consume or reset the
+        # adjacent privacy budget. Keep that lifecycle write under the same
+        # per-session lock used for ownership claims.
+        with session_lock:
+            _commit_session_brand_privacy_decision(s, privacy_decision)
+            s.save()
     except BaseException:
         _rollback_unstarted_stream_claim()
         raise
@@ -17274,10 +17422,7 @@ def _handle_chat_start(handler, body, diag=None):
             status = int(response.pop("_status", 200) or 200)
             diag.stage("response_write") if diag else None
             return j(handler, response, status=status)
-        if classify_brand_safety_prompt(
-            display_msg,
-            session_tainted=bool(getattr(s, "brand_privacy_tainted", False)),
-        ).action == "safe_reply":
+        if _classify_session_brand_privacy(s, display_msg).action == "safe_reply":
             response = _start_brand_privacy_safe_stream_for_session(
                 s,
                 msg=display_msg,
@@ -17393,8 +17538,13 @@ def _normalize_chat_attachments(raw_attachments):
         if isinstance(item, dict):
             name = str(item.get("name") or item.get("filename") or "").strip()
             path = str(item.get("path") or "").strip()
+            ref = str(item.get("ref") or "").strip()
             mime = str(item.get("mime") or "").strip()
-            att = {"name": name or path, "path": path, "mime": mime}
+            att = {"name": name or ref or path, "mime": mime}
+            if ref:
+                att["ref"] = ref
+            elif path:
+                att["path"] = path
             size = item.get("size")
             if isinstance(size, int):
                 att["size"] = size
@@ -17427,14 +17577,11 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
-        if classify_brand_safety_prompt(
-            msg,
-            session_tainted=bool(getattr(s, "brand_privacy_tainted", False)),
-        ).action == "safe_reply":
+        privacy_decision = _classify_session_brand_privacy(s, msg)
+        if privacy_decision.action == "safe_reply":
             reply = brand_safe_reply(msg)
             now = int(time.time())
             turn_started_at = getattr(s, "pending_started_at", None) or now
-            s.brand_privacy_tainted = True
             s.messages = list(getattr(s, "messages", None) or []) + [
                 {"role": "user", "content": msg, "timestamp": now},
                 {"role": "assistant", "content": reply, "timestamp": now},
@@ -17444,23 +17591,21 @@ def _handle_chat_sync(handler, body):
                 {"role": "user", "content": msg},
                 {"role": "assistant", "content": reply},
             ]
-            s.messages = scrub_messages(s.messages)
-            s.context_messages = scrub_messages(s.context_messages)
             if s.title == "Untitled" or not s.title:
                 s.title = scrub_brand_leaks(title_from(s.messages, s.title))
+            _commit_session_brand_privacy_decision(s, privacy_decision)
             s.save()
-            safe_session = public_egress_scrub(
-                scrub_public_session_payload(s.compact() | {"messages": s.messages}),
-                surface="chat_sync_brand_privacy",
+            safe_session = public_session_projection(
+                s.compact() | {"messages": s.messages}
             )
             return j(
                 handler,
-                {
+                public_response_projection({
                     "answer": public_egress_scrub(reply, surface="chat_sync_brand_privacy"),
                     "status": "done",
                     "session": safe_session,
                     "result": {"brand_privacy": True},
-                },
+                }, surface="chat_sync"),
             )
     from api.streaming import _ENV_LOCK
 
@@ -17588,16 +17733,17 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _next_context_messages,
         )
-        s.context_messages = scrub_messages(_next_context_messages)
-        s.messages = scrub_messages(_merge_display_messages_after_agent_result(
+        s.context_messages = _next_context_messages
+        s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
             _restore_display_reasoning_metadata(_previous_messages, _result_messages),
             msg,
-        ))
+        )
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
             s.title = scrub_brand_leaks(title_from(s.messages, s.title))
+        _commit_session_brand_privacy_decision(s, privacy_decision)
         s.save()
     # Sync to state.db for /insights (opt-in setting)
     try:
@@ -17623,18 +17769,12 @@ def _handle_chat_sync(handler, body):
         logger.debug("Failed to update session cost tracking")
     return j(
         handler,
-        {
+        public_response_projection({
             "answer": public_egress_scrub(result.get("final_response") or "", surface="chat_sync_answer"),
             "status": "done" if result.get("completed", True) else "partial",
-            "session": public_egress_scrub(
-                scrub_public_session_payload(s.compact() | {"messages": s.messages}),
-                surface="chat_sync_session",
-            ),
-            "result": public_egress_scrub(
-                scrub_brand_leaks({k: v for k, v in result.items() if k != "messages"}),
-                surface="chat_sync_result",
-            ),
-        },
+            "session": s.compact() | {"messages": s.messages},
+            "result": {k: v for k, v in result.items() if k != "messages"},
+        }, surface="chat_sync"),
     )
 
 
@@ -19698,7 +19838,7 @@ def _handle_session_compress(handler, body):
             )
             s.save()
 
-        session_payload = redact_session_data(
+        session_payload = public_session_projection(redact_session_data(
             s.compact() | {
                 "messages": s.messages,
                 "tool_calls": s.tool_calls,
@@ -19709,7 +19849,7 @@ def _handle_session_compress(handler, body):
                 "compression_anchor_visible_idx": getattr(s, "compression_anchor_visible_idx", None),
                 "compression_anchor_message_key": getattr(s, "compression_anchor_message_key", None),
             }
-        )
+        ))
         return j(
             handler,
             {
@@ -20721,18 +20861,18 @@ def _handle_session_import_cli(handler, body):
         if changed:
             existing.save(touch_updated_at=False)
             publish_session_list_changed("session_import_cli")
-        return j(
-            handler,
-            {
-                "session": existing.compact()
-                | {
-                    "messages": existing.messages,
-                    "is_cli_session": True,
-                    "read_only": bool((cli_meta or {}).get("read_only")),
-                },
-                "imported": False,
+        response_payload = {
+            "session": existing.compact()
+            | {
+                "messages": existing.messages,
+                "is_cli_session": True,
+                "read_only": bool((cli_meta or {}).get("read_only")),
             },
-        )
+            "imported": False,
+        }
+        return j(handler, public_response_projection(
+            redact_session_data(response_payload), surface="session_cli_import"
+        ))
 
     # Fetch messages from CLI store
     msgs = get_cli_session_messages(sid)
@@ -20810,7 +20950,10 @@ def _handle_session_import_cli(handler, body):
             "messages": msgs,
             "tool_calls": [],
         }
-        return j(handler, {"session": session_payload, "imported": False})
+        return j(handler, public_response_projection(
+            redact_session_data({"session": session_payload, "imported": False}),
+            surface="session_cli_import",
+        ))
 
     s = import_cli_session(
         sid,
@@ -20838,17 +20981,17 @@ def _handle_session_import_cli(handler, body):
     s._cli_origin = sid
     s.save(touch_updated_at=False)
     publish_session_list_changed("session_import_cli")
-    return j(
-        handler,
-        {
-            "session": s.compact()
-            | {
-                "messages": msgs,
-                "is_cli_session": True,
-            },
-            "imported": True,
+    response_payload = {
+        "session": s.compact()
+        | {
+            "messages": msgs,
+            "is_cli_session": True,
         },
-    )
+        "imported": True,
+    }
+    return j(handler, public_response_projection(
+        redact_session_data(response_payload), surface="session_cli_import"
+    ))
 
 
 def _handle_session_import(handler, body):
@@ -20879,7 +21022,12 @@ def _handle_session_import(handler, body):
             SESSIONS.popitem(last=False)
     s.save()
     publish_session_list_changed("session_import")
-    return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+    public_session = public_session_projection(
+        redact_session_data(s.compact() | {"messages": s.messages, "tool_calls": s.tool_calls})
+    )
+    return j(handler, public_response_projection(
+        {"ok": True, "session": public_session}, surface="session_json_import"
+    ))
 
 
 # ── MCP Server helpers ──

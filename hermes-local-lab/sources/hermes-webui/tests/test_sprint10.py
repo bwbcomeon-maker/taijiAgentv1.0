@@ -189,15 +189,21 @@ def test_tool_card_running_dot_in_css(cleanup_test_sessions):
     src, _ = get_text("/static/style.css")
     assert "tool-card-running-dot" in src
 
-def test_tool_card_show_more_in_ui_js(cleanup_test_sessions):
+def test_tool_card_uses_safe_summary_status_contract(cleanup_test_sessions):
     src, _ = get_text("/static/ui.js")
-    assert "Show more" in src
-    assert "tool-card-more" in src
+    preview = src[src.index("function _toolCardPreviewText"):src.index("function buildToolCard")]
+    assert "const status=" in preview
+    assert "const summary=" in preview
+    assert preview.index("return 'Failed'") < preview.index("const summary=")
+    assert "Show more" not in src
+    assert "tool-card-more" not in src
 
-def test_tool_card_smart_truncation_in_ui_js(cleanup_test_sessions):
+def test_tool_card_has_no_raw_detail_or_legacy_truncation_path(cleanup_test_sessions):
     src, _ = get_text("/static/ui.js")
-    assert "displaySnippet" in src
-    assert "lastBreak" in src
+    card = src[src.index("function buildToolCard"):src.index("function _syncToolCallGroupSummary")]
+    assert "tool-card-preview" in card
+    for legacy_detail in ("displaySnippet", "lastBreak", "tc.args", "tc.snippet", "tool-card-detail"):
+        assert legacy_detail not in card
 
 def test_cancel_sse_event_handler_in_messages_js(cleanup_test_sessions):
     src, _ = get_text("/static/messages.js")
