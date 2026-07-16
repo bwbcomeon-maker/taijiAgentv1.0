@@ -13,6 +13,7 @@ Tests cover:
 """
 
 import asyncio
+import base64
 import json
 import os
 import stat
@@ -1360,6 +1361,87 @@ class TestChatCompletionsEndpoint:
             assert len(pairs) == 2, f"expected 2 events (running+completed), got {pairs}"
             assert pairs[0] == ("running", "call_terminal_1"), pairs
             assert pairs[1] == ("completed", "call_terminal_1"), pairs
+
+    @pytest.mark.asyncio
+    async def test_stream_image_completion_carries_only_opaque_verified_image_ref(
+        self, adapter, tmp_path, monkeypatch
+    ):
+        """Image generation may cross the trusted Gateway bridge structurally.
+
+        Other tool results and raw arguments must not be added to the progress
+        event.  The WebUI consumes this private candidate before applying its
+        public SSE/journal projection.
+        """
+        import asyncio
+        import json as _json
+
+        cache = tmp_path / "home" / "cache" / "images"
+        cache.mkdir(parents=True)
+        image_path = cache / "generated.png"
+        image_path.write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                start = kwargs.get("tool_start_callback")
+                complete = kwargs.get("tool_complete_callback")
+                delta = kwargs.get("stream_delta_callback")
+                if start:
+                    start("call_img_1", "image_generate", {"prompt": "secret prompt"})
+                if complete:
+                    complete(
+                        "call_img_1",
+                        "image_generate",
+                        {"prompt": "secret prompt"},
+                        _json.dumps({
+                            "success": True,
+                            "image": str(image_path),
+                            "provider": "test-provider",
+                            "prompt": "secret prompt",
+                        }),
+                    )
+                if delta:
+                    await asyncio.sleep(0.01)
+                    delta("done")
+                return (
+                    {"final_response": "done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "generate"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        completed = []
+        lines = body.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip() != "event: hermes.tool.progress":
+                continue
+            payload = _json.loads(lines[index + 1][len("data: "):])
+            if payload.get("status") == "completed":
+                completed.append(payload)
+        assert len(completed) == 1
+        assert completed[0]["structured_result"] == {
+            "success": True,
+            "image_ref": "generated.png",
+            "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        }
+        encoded = _json.dumps(completed[0])
+        assert str(image_path) not in encoded
+        assert "data:image" not in encoded
+        assert "https://" not in encoded
+        assert "arguments" not in completed[0]
+        assert "secret prompt" not in encoded
+        assert "test-provider" not in encoded
 
     @pytest.mark.asyncio
     async def test_stream_tool_lifecycle_skips_internal_and_orphan_completes(self, adapter):

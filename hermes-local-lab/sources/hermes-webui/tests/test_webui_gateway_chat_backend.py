@@ -180,6 +180,237 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
     assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
 
 
+def test_gateway_image_candidate_is_private_and_requires_completed_correlated_envelope():
+    payload = {
+        "tool": "image_generate",
+        "toolCallId": "call-image-1",
+        "status": "completed",
+        "structured_result": {
+            "success": True,
+            "image_ref": "generated.png",
+            "sha256": "a" * 64,
+        },
+    }
+    assert gateway_chat._gateway_image_artifact_candidate(payload) == {
+        "tool_name": "image_generate",
+        "tool_call_id": "call-image-1",
+        "structured_result": {
+            "success": True,
+            "image_ref": "generated.png",
+            "sha256": "a" * 64,
+        },
+    }
+    public = _gateway_tool_progress_event(payload)
+    assert public[0] == "tool_complete"
+    assert "structured_result" not in public[1]
+    assert "/runtime/cache" not in json.dumps(public)
+    assert gateway_chat._gateway_image_artifact_candidate({**payload, "toolCallId": ""}) is None
+    assert gateway_chat._gateway_image_artifact_candidate({**payload, "tool": "terminal"}) is None
+    missing_hash = json.loads(json.dumps(payload))
+    missing_hash["structured_result"].pop("sha256")
+    assert gateway_chat._gateway_image_artifact_candidate(missing_hash) is None
+
+
+def test_gateway_chat_completion_promotes_image_to_current_assistant_without_media_text(
+    tmp_path, monkeypatch,
+):
+    session_dir = tmp_path / "sessions"
+    state_dir = tmp_path / "web"
+    runtime_home = tmp_path / "runtime"
+    cache = runtime_home / "cache" / "images"
+    session_dir.mkdir()
+    cache.mkdir(parents=True)
+    image = cache / "生成 图片.png"
+    image.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(config, "STATE_DIR", state_dir)
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "chat_completions")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda *_args: [])
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            progress = {
+                "tool": "image_generate",
+                "toolCallId": "call-image-1",
+                "status": "completed",
+                "structured_result": {
+                    "success": True,
+                    "image_ref": image.name,
+                    "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                },
+            }
+            yield b"event: hermes.tool.progress\n"
+            yield f"data: {json.dumps(progress)}\n\n".encode()
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    public_events = []
+
+    class CapturingRunJournal:
+        def __init__(self, *_args, **_kwargs): pass
+        def append_sse_event(self, event, data):
+            public_events.append((event, json.loads(json.dumps(data))))
+            return {}
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(gateway_chat, "RunJournalWriter", CapturingRunJournal)
+    session = new_session()
+    stream_id = "stream-image-artifact"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "generate"
+    session.pending_started_at = time.time()
+    session.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "generate",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        turn_id="turn-image-1",
+    )
+
+    saved = models.Session.load(session.session_id)
+    assistant = saved.messages[-1]
+    assert assistant["content"] == "done"
+    assert "MEDIA:" not in assistant["content"]
+    assert len(assistant["artifacts"]) == 1
+    assert set(assistant["artifacts"][0]) == {
+        "artifact_id", "kind", "mime", "name", "size", "sha256", "status"
+    }
+    reloaded = models.Session.load(session.session_id)
+    assert reloaded.messages[-1]["artifacts"] == assistant["artifacts"]
+    while not subscriber.empty():
+        public_events.append(subscriber.get_nowait())
+    public_text = json.dumps(public_events, ensure_ascii=False)
+    assert str(image) not in public_text
+    assert "structured_result" not in public_text
+
+
+@pytest.mark.parametrize("failure_mode", ["stale", "commit", "save", "crash"])
+def test_gateway_artifact_commit_and_session_save_have_safe_failure_order(
+    failure_mode, tmp_path, monkeypatch,
+):
+    session_dir = tmp_path / "sessions"
+    state_dir = tmp_path / "web"
+    runtime_home = tmp_path / "runtime"
+    cache = runtime_home / "cache" / "images"
+    session_dir.mkdir()
+    cache.mkdir(parents=True)
+    image = cache / "generated.png"
+    image.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(config, "STATE_DIR", state_dir)
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "chat_completions")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda *_args: [])
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            progress = {
+                "tool": "image_generate",
+                "toolCallId": "call-image-cleanup",
+                "status": "completed",
+                "structured_result": {
+                    "success": True,
+                    "image_ref": image.name,
+                    "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                },
+            }
+            yield b"event: hermes.tool.progress\n"
+            yield f"data: {json.dumps(progress)}\n\n".encode()
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(
+        gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse()
+    )
+    session = new_session()
+    stream_id = f"stream-image-cleanup-{failure_mode}"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "generate"
+    session.pending_started_at = time.time()
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    if failure_mode == "stale":
+        original_ingest = gateway_chat._ingest_gateway_artifact_candidates
+
+        def ingest_then_stale(*args, **kwargs):
+            result = original_ingest(*args, **kwargs)
+            session.active_stream_id = "replacement-stream"
+            return result
+
+        monkeypatch.setattr(
+            gateway_chat, "_ingest_gateway_artifact_candidates", ingest_then_stale
+        )
+    elif failure_mode == "commit":
+        from api.artifacts import ArtifactRegistry
+
+        monkeypatch.setattr(
+            ArtifactRegistry,
+            "commit_artifacts",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("commit failed")),
+        )
+    else:
+        original_save = models.Session.save
+
+        def fail_artifact_save(self, *args, **kwargs):
+            if any(message.get("artifacts") for message in self.messages):
+                if failure_mode == "crash":
+                    raise SystemExit("simulated process crash after artifact commit")
+                raise OSError("session save failed")
+            return original_save(self, *args, **kwargs)
+
+        monkeypatch.setattr(models.Session, "save", fail_artifact_save)
+
+    run = lambda: gateway_chat._run_gateway_chat_streaming(
+        session.session_id, "generate", "test-model", str(tmp_path),
+        stream_id, [], turn_id=f"turn-image-cleanup-{failure_mode}",
+    )
+    if failure_mode == "crash":
+        with pytest.raises(SystemExit, match="simulated process crash"):
+            run()
+    else:
+        run()
+
+    manifest = json.loads(
+        (state_dir / "artifacts" / session.session_id / "manifest.json").read_text("utf-8")
+    )
+    reloaded = models.Session.load(session.session_id)
+    cached = models.SESSIONS.get(session.session_id)
+    assert all(not message.get("artifacts") for message in reloaded.messages)
+    assert cached is None or all(not message.get("artifacts") for message in cached.messages)
+    if failure_mode in {"save", "crash"}:
+        assert len(manifest["artifacts"]) == 1
+        assert manifest["artifacts"][0]["commit_state"] == "committed"
+        assert len(list((state_dir / "artifacts" / session.session_id).glob("*.png"))) == 1
+    else:
+        assert manifest["artifacts"] == []
+        assert not list((state_dir / "artifacts" / session.session_id).glob("*.png"))
+
+
 def test_gateway_http_401_reports_gateway_auth_not_provider_key():
     exc = urllib.error.HTTPError(
         "http://gateway.local/v1/chat/completions",
@@ -707,6 +938,121 @@ def test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text(mo
     public_serialized = json.dumps(events, ensure_ascii=False)
     assert "HERMES_WEBUI_PORT" not in public_serialized
     assert "sk-runs-internal-canary" not in public_serialized
+
+
+def test_gateway_runs_collects_private_image_candidate_without_public_path(monkeypatch):
+    class StartResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return b'{"run_id":"remote-image"}'
+
+    image_ref = "generated.png"
+
+    class EventResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            completed = {
+                "event": "tool.completed",
+                "tool": "image_generate",
+                "toolCallId": "call-image-runs",
+                "structured_result": {
+                    "success": True, "image_ref": image_ref, "sha256": "b" * 64,
+                },
+            }
+            yield f"data: {json.dumps(completed)}\n\n".encode()
+            yield b'data: {"event":"run.completed","output":"done"}\n\n'
+
+    responses = iter([StartResponse(), EventResponse()])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(gateway_chat, "_clear_gateway_run_approvals_from_webui", lambda *_args, **_kwargs: None)
+    public_events = []
+
+    result = gateway_chat._stream_gateway_run_events(
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
+        session_id="sid-image",
+        stream_id="stream-image",
+        cancel_event=gateway_chat.threading.Event(),
+        brand_token_tail=[""],
+        put_gateway_event=lambda name, data: public_events.append((name, data)),
+    )
+
+    assert result["artifact_candidates"] == [{
+        "tool_name": "image_generate",
+        "tool_call_id": "call-image-runs",
+        "structured_result": {
+            "success": True, "image_ref": image_ref, "sha256": "b" * 64,
+        },
+    }]
+    serialized = json.dumps(public_events)
+    assert "/runtime/cache/images" not in serialized
+    assert "structured_result" not in serialized
+
+
+def test_failed_runs_turn_never_promotes_collected_image_candidate(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda *_args: [])
+
+    class StartResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return b'{"run_id":"remote-failed-image"}'
+
+    class EventResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            completed = {
+                "event": "tool.completed",
+                "tool": "image_generate",
+                "toolCallId": "call-image-failed",
+                "structured_result": {
+                    "success": True,
+                    "image": "/runtime/cache/images/should-not-register.png",
+                },
+            }
+            yield f"data: {json.dumps(completed)}\n\n".encode()
+            yield b'data: {"event":"run.failed","error":"model failed"}\n\n'
+
+    responses = iter([StartResponse(), EventResponse()])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(gateway_chat, "_clear_gateway_run_approvals_from_webui", lambda *_args, **_kwargs: None)
+    promoted = []
+    monkeypatch.setattr(
+        gateway_chat,
+        "_ingest_gateway_artifact_candidates",
+        lambda *_args, **_kwargs: promoted.append((_args, _kwargs)),
+    )
+    session = new_session()
+    stream_id = "stream-failed-image"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "generate"
+    session.pending_started_at = time.time()
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "generate",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        turn_id="turn-failed-image",
+    )
+
+    assert promoted == []
+    reloaded = models.Session.load(session.session_id)
+    assert not any(message.get("artifacts") for message in reloaded.messages)
 
 
 def test_gateway_chat_worker_maps_sse_error_to_taiji_message(tmp_path, monkeypatch):

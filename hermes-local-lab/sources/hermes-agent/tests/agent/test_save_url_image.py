@@ -13,16 +13,22 @@ and the gateway 404'd at ``send_photo`` time.
 from __future__ import annotations
 
 import http.server
+import base64
 import socketserver
 import threading
 
 import pytest
 
 
-PNG_1PX = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
-    "53de00000010494441547801635c0e000000feff03000006000557bfabd400"
-    "00000049454e44ae426082"
+PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+JPEG_2PX = base64.b64decode(
+    "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMQD/2wBDAAgEBAQEBAUFBQUF"
+    "BQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/"
+    "xABMAAEBAAAAAAAAAAAAAAAAAAAABgEBAQAAAAAAAAAAAAAAAAAABgcQAQAAAAAAAAAAAAAAAA"
+    "AAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAACAAIDASIAAhEAAxEA/9oADAMBAAIRAxEAPwCL"
+    "AE1/f//Z"
 )
 
 
@@ -40,7 +46,7 @@ class _TinyImageHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.end_headers()
-            self.wfile.write(PNG_1PX)  # bytes don't have to be a real jpeg
+            self.wfile.write(JPEG_2PX)
         elif self.path == "/oversize":
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
@@ -77,6 +83,9 @@ class _TinyImageHandler(http.server.BaseHTTPRequestHandler):
 def http_server(tmp_path, monkeypatch):
     """Spin up a localhost HTTP server and isolate HERMES_HOME under tmp_path."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    # Production blocks private-address image downloads. This fixture owns an
+    # explicit loopback server, so opt in only for these transport-level tests.
+    monkeypatch.setenv("HERMES_IMAGE_ALLOW_PRIVATE_NETWORK", "1")
     (tmp_path / ".hermes").mkdir()
 
     # Force the constants/image cache helpers to re-read HERMES_HOME.
@@ -114,13 +123,13 @@ class TestSaveUrlImage:
         path = save_url_image(f"{base}/image.jpg", prefix="xai_test")
         assert path.suffix == ".jpg", "image/jpeg → .jpg"
 
-    def test_extension_falls_back_to_url_suffix(self, http_server):
-        """Some CDNs send ``application/octet-stream`` — the URL suffix wins then."""
+    def test_extension_uses_verified_magic_when_mime_is_generic(self, http_server):
+        """A misleading URL suffix cannot override verified image bytes."""
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
 
         path = save_url_image(f"{base}/no-type-with-url-ext.jpg", prefix="xai_test")
-        assert path.suffix == ".jpg"
+        assert path.suffix == ".png"
 
     def test_extension_defaults_to_png_when_unknowable(self, http_server):
         base, _ = http_server
@@ -133,9 +142,7 @@ class TestSaveUrlImage:
         """HTTP errors must propagate — caller decides whether to fall back."""
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
-        import requests as req_lib
-
-        with pytest.raises(req_lib.HTTPError):
+        with pytest.raises(ValueError, match="HTTP 404"):
             save_url_image(f"{base}/404")
 
     def test_empty_body_raises_without_writing_file(self, http_server):
@@ -166,3 +173,59 @@ class TestSaveUrlImage:
         path1 = save_url_image(f"{base}/image.png", prefix="xai_collision")
         path2 = save_url_image(f"{base}/image.png", prefix="xai_collision")
         assert path1 != path2, "filename collision — uuid suffix isn't doing its job"
+
+    def test_default_transport_ignores_environment_proxy(self, http_server, monkeypatch):
+        """Pinned transport must not inherit ambient proxy configuration."""
+        base, _ = http_server
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("NO_PROXY", "")
+        from agent.image_gen_provider import save_url_image
+
+        path = save_url_image(f"{base}/image.png", prefix="no_proxy")
+
+        assert path.read_bytes() == PNG_1PX
+
+    def test_default_transport_resolves_each_url_hop_exactly_once(self, http_server):
+        base, _ = http_server
+        from agent.image_gen_provider import save_url_image
+        import socket
+
+        calls = []
+
+        def resolver(host, port, *args, **kwargs):
+            calls.append((host, port))
+            return socket.getaddrinfo(host, port, *args, **kwargs)
+
+        path = save_url_image(
+            f"{base}/image.png", prefix="single_dns", resolver=resolver
+        )
+
+        assert path.read_bytes() == PNG_1PX
+        assert len(calls) == 1
+
+
+def test_pinned_transport_rejects_dns_rebind_peer_mismatch():
+    from agent.image_gen_provider import _validate_connected_peer
+
+    with pytest.raises(ValueError, match="peer"):
+        _validate_connected_peer("93.184.216.34", "127.0.0.1")
+
+
+def test_pinned_https_keeps_original_hostname_for_sni_and_certificate_check():
+    from agent.image_gen_provider import _wrap_pinned_tls_socket
+
+    calls = []
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            calls.append((sock, server_hostname))
+            return "wrapped"
+
+    raw_socket = object()
+    assert _wrap_pinned_tls_socket(
+        raw_socket,
+        "images.example.test",
+        context_factory=_Context,
+    ) == "wrapped"
+    assert calls == [(raw_socket, "images.example.test")]

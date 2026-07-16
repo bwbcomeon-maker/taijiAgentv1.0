@@ -11872,6 +11872,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
+        registry = _artifact_registry()
+        try:
+            registry.retire_session(sid)
+        except Exception:
+            logger.exception("failed to retire artifacts before deleting session %s", sid)
+            return bad(handler, "Failed to retire session artifacts", 500)
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
@@ -11930,6 +11936,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
+            registry = _artifact_registry()
+            try:
+                retired_artifacts = registry.retire_session(sid)
+            except Exception:
+                logger.exception("failed to retire artifacts before clearing session %s", sid)
+                return bad(handler, "Failed to retire session artifacts", 500)
             try:
                 def _clear_session():
                     s.messages = []
@@ -11945,6 +11957,15 @@ def handle_post(handler, parsed) -> bool:
                 )
             except Exception:
                 logger.exception("failed to clear session truth for %s", sid)
+                if retired_artifacts is not None:
+                    try:
+                        registry.restore_session(retired_artifacts)
+                    except Exception:
+                        logger.critical(
+                            "failed to restore artifacts after clear rollback for %s",
+                            sid,
+                            exc_info=True,
+                        )
                 return bad(handler, "Failed to clear session state", 500)
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
@@ -14498,6 +14519,42 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     return True
 
 
+def _serve_verified_artifact_bytes(
+    handler,
+    data: bytes,
+    mime: str,
+    name: str,
+    cache_control: str,
+):
+    """Serve the exact payload authorized from one already-verified descriptor."""
+    file_size = len(data)
+    range_header = handler.headers.get("Range", "")
+    byte_range = _parse_range_header(range_header, file_size)
+    if range_header and byte_range is None:
+        handler.send_response(416)
+        handler.send_header("Content-Range", f"bytes */{file_size}")
+        handler.send_header("Accept-Ranges", "bytes")
+        handler.send_header("Content-Length", "0")
+        _security_headers(handler)
+        handler.end_headers()
+        return True
+    start, end = byte_range if byte_range else (0, max(0, file_size - 1))
+    content_length = end - start + 1 if file_size else 0
+    handler.send_response(206 if byte_range else 200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(content_length))
+    handler.send_header("Accept-Ranges", "bytes")
+    if byte_range:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+    handler.send_header("Cache-Control", cache_control)
+    handler.send_header("Content-Disposition", _content_disposition_value("inline", name))
+    _security_headers(handler)
+    handler.end_headers()
+    if content_length and getattr(handler, "command", "GET") != "HEAD":
+        handler.wfile.write(data[start:end + 1])
+    return True
+
+
 
 def _handle_tts(handler, parsed):
     """Generate TTS audio via Edge TTS. POST JSON body only.
@@ -14711,9 +14768,13 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
         session = get_session(sid)
     except Exception:
         return False
+    if getattr(session, "legacy_import", False):
+        return False
 
     for message in getattr(session, "messages", []) or []:
         if not isinstance(message, dict):
+            continue
+        if message.get("imported") or message.get("_legacy_imported"):
             continue
         # Only honor MEDIA: tokens that the assistant/tool emitted. User-authored
         # content cannot mint allow-list entries even if it contains a MEDIA:
@@ -14734,6 +14795,17 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
             except Exception:
                 continue
     return False
+
+
+def _artifact_registry():
+    from api.artifacts import ArtifactRegistry
+
+    registry = ArtifactRegistry(STATE_DIR / "artifacts")
+    try:
+        registry.cleanup_retired()
+    except Exception:
+        logger.debug("Failed to clean retired artifacts", exc_info=True)
+    return registry
 
 
 def _path_is_within_root(child: Path, root: Path) -> bool:
@@ -14778,6 +14850,29 @@ def _handle_media(handler, parsed):
             return
 
     qs = parse_qs(parsed.query)
+    artifact_id = qs.get("artifact_id", [""])[0].strip()
+    if artifact_id:
+        session_id = qs.get("session_id", [""])[0].strip()
+        if not session_id:
+            return bad(handler, "session_id parameter required", 400)
+        try:
+            authorized = _artifact_registry().authorize(session_id, artifact_id)
+        except PermissionError:
+            return bad(handler, "Artifact not available", 403)
+        except FileNotFoundError:
+            return j(handler, {"error": "not found"}, status=404)
+        except ValueError:
+            return bad(handler, "Invalid artifact request", 400)
+        mime = authorized.mime
+        if not mime.startswith("image/") or mime == "image/svg+xml":
+            return bad(handler, "Artifact not available", 403)
+        return _serve_verified_artifact_bytes(
+            handler,
+            authorized.data,
+            mime,
+            authorized.name,
+            "private, max-age=3600",
+        )
     raw_path = qs.get("path", [""])[0].strip()
     if not raw_path:
         return bad(handler, "path parameter required", 400)
@@ -21210,15 +21305,26 @@ def _handle_session_import(handler, body):
     model = body.get("model", DEFAULT_MODEL)
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name() or "default"
+    imported_messages = []
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        imported = copy.deepcopy(raw_message)
+        # Text-only compatibility import: an old path string is not an
+        # ownership proof and structured artifacts require a portable bundle.
+        imported.pop("artifacts", None)
+        imported["_legacy_imported"] = True
+        imported_messages.append(imported)
     s = Session(
         title=title,
         workspace=workspace,
         model=model,
         profile=active_profile,
-        messages=copy.deepcopy(messages),
+        messages=imported_messages,
         tool_calls=body.get("tool_calls", []),
-        context_messages=_completed_semantic_messages(messages),
+        context_messages=_completed_semantic_messages(imported_messages),
     )
+    s.legacy_import = True
     s.pinned = body.get("pinned", False)
     try:
         _persist_new_session_truth(s)

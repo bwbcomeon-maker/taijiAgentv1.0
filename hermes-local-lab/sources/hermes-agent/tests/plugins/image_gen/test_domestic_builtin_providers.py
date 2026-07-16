@@ -56,6 +56,57 @@ def _download_response(*, status=200, headers=None, chunks=()):
 
 
 class TestDashScopeQwenImageProvider:
+    def test_safe_image_download_delegates_to_pinned_agent_transport(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+        from plugins.image_gen import dashscope
+
+        with (
+            patch.object(
+                dashscope, "save_url_image", return_value=Path("/tmp/safe.png")
+            ) as safe_saver,
+            patch.object(dashscope.requests, "get") as legacy_get,
+        ):
+            saved = dashscope._save_safe_image_url(
+                "https://cdn.example/image.png"
+            )
+
+        assert saved == Path("/tmp/safe.png")
+        legacy_get.assert_not_called()
+        kwargs = safe_saver.call_args.kwargs
+        assert kwargs["max_bytes"] == dashscope.MAX_IMAGE_BYTES
+        assert kwargs["max_pixels"] == dashscope.MAX_IMAGE_PIXELS
+        assert kwargs["max_redirects"] == dashscope.MAX_IMAGE_REDIRECTS
+        assert kwargs["url_validator"] is dashscope._dashscope_url_shape_allowed
+        assert kwargs["address_validator"] is dashscope._dashscope_address_allowed
+
+    def test_dashscope_transport_policy_allows_public_and_only_scoped_fake_ip(self):
+        from plugins.image_gen import dashscope
+
+        assert dashscope._dashscope_url_shape_allowed(
+            "https://cdn.example/image.png"
+        )
+        assert not dashscope._dashscope_url_shape_allowed(
+            "http://cdn.example/image.png"
+        )
+        assert not dashscope._dashscope_url_shape_allowed(
+            "https://user@cdn.example/image.png"
+        )
+        assert dashscope._dashscope_address_allowed(
+            "cdn.example", "93.184.216.34"
+        )
+        assert dashscope._dashscope_address_allowed(
+            "dashscope-7c2c.oss-accelerate.aliyuncs.com", "198.18.2.13"
+        )
+        assert not dashscope._dashscope_address_allowed(
+            "evil.example", "198.18.2.13"
+        )
+        assert not dashscope._dashscope_address_allowed(
+            "dashscope-7c2c.oss-accelerate.aliyuncs.com", "127.0.0.1"
+        )
+
     def test_surface_and_setup_schema(self):
         from plugins.image_gen.dashscope import DashScopeQwenImageProvider
 
@@ -482,132 +533,58 @@ class TestDashScopeQwenImageProvider:
         assert DashScopeQwenImageProvider().is_available() is False
 
     def test_safe_image_download_rejects_direct_private_url(self, monkeypatch):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))
-            ],
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen import dashscope
 
-        with (
-            patch("plugins.image_gen.dashscope.requests.get") as mock_get,
-            pytest.raises(ValueError, match="safety"),
-        ):
-            _save_safe_image_url("https://private.example/image.png")
-        mock_get.assert_not_called()
+        with patch.object(
+            dashscope, "save_url_image", side_effect=ValueError("unsafe image URL")
+        ) as safe_saver, pytest.raises(ValueError, match="safety"):
+            dashscope._save_safe_image_url("https://private.example/image.png")
+        safe_saver.assert_called_once()
 
     def test_safe_image_download_rejects_public_redirect_to_private(self, monkeypatch):
-        def resolve(hostname, *args, **kwargs):
-            ip = "8.8.8.8" if hostname == "public.example" else "127.0.0.1"
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+        from plugins.image_gen import dashscope
 
-        monkeypatch.setattr(socket, "getaddrinfo", resolve)
-        redirect = _download_response(
-            status=302, headers={"Location": "https://private.example/image.png"}
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
-
-        with (
-            patch("plugins.image_gen.dashscope.requests.get", return_value=redirect) as mock_get,
-            pytest.raises(ValueError, match="safety"),
-        ):
-            _save_safe_image_url("https://public.example/image.png")
-        assert mock_get.call_count == 1
-        assert mock_get.call_args.kwargs["allow_redirects"] is False
+        with patch.object(
+            dashscope, "save_url_image", side_effect=ValueError("unsafe image URL")
+        ) as safe_saver, pytest.raises(ValueError, match="safety"):
+            dashscope._save_safe_image_url("https://public.example/image.png")
+        assert safe_saver.call_args.kwargs["max_redirects"] == 3
 
     def test_safe_image_download_follows_public_redirect_and_saves_image(self, monkeypatch):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))
-            ],
-        )
-        redirect = _download_response(
-            status=302, headers={"Location": "https://cdn.example/image.png"}
-        )
-        image = _download_response(
-            headers={"Content-Type": "image/png", "Content-Length": "4"},
-            chunks=(b"safe",),
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen import dashscope
 
-        with (
-            patch(
-                "plugins.image_gen.dashscope.requests.get",
-                side_effect=[redirect, image],
-            ) as mock_get,
-            patch(
-                "plugins.image_gen.dashscope.save_b64_image",
-                return_value=Path("/tmp/safe.png"),
-            ) as mock_save,
-        ):
-            saved = _save_safe_image_url("https://public.example/image.png")
-
+        with patch.object(
+            dashscope, "save_url_image", return_value=Path("/tmp/safe.png")
+        ) as safe_saver:
+            saved = dashscope._save_safe_image_url(
+                "https://public.example/image.png"
+            )
         assert saved == Path("/tmp/safe.png")
-        assert mock_get.call_count == 2
-        assert all(call.kwargs["allow_redirects"] is False for call in mock_get.call_args_list)
-        assert base64.b64decode(mock_save.call_args.args[0]) == b"safe"
-        assert mock_save.call_args.kwargs["extension"] == "png"
+        assert safe_saver.call_args.kwargs["url_validator"](
+            "https://cdn.example/image.png"
+        )
 
     def test_safe_image_download_allows_dashscope_oss_fake_ip(self, monkeypatch):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
-            ],
-        )
-        image = _download_response(
-            headers={"Content-Type": "image/png", "Content-Length": "4"},
-            chunks=(b"safe",),
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen import dashscope
 
-        with (
-            patch(
-                "plugins.image_gen.dashscope.requests.get", return_value=image
-            ) as mock_get,
-            patch(
-                "plugins.image_gen.dashscope.save_b64_image",
-                return_value=Path("/tmp/safe.png"),
-            ),
-        ):
-            saved = _save_safe_image_url(
-                "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
-            )
-
-        assert saved == Path("/tmp/safe.png")
-        assert mock_get.call_args.kwargs["allow_redirects"] is False
+        assert dashscope._dashscope_address_allowed(
+            "dashscope-7c2c.oss-accelerate.aliyuncs.com", "198.18.2.13"
+        )
 
     def test_safe_image_download_redacts_signed_url_on_connection_error(
         self, monkeypatch
     ):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
-            ],
-        )
         signed_url = (
             "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
             "?Signature=must-not-leak&AccessKeyId=must-not-leak"
         )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen import dashscope
 
-        with (
-            patch(
-                "plugins.image_gen.dashscope.requests.get",
-                side_effect=requests.ConnectionError(
-                    f"connection failed for {signed_url}"
-                ),
-            ),
-            pytest.raises(ValueError) as exc_info,
-        ):
-            _save_safe_image_url(signed_url)
+        with patch.object(
+            dashscope, "save_url_image",
+            side_effect=RuntimeError(f"connection failed for {signed_url}"),
+        ), pytest.raises(ValueError) as exc_info:
+            dashscope._save_safe_image_url(signed_url)
 
         assert str(exc_info.value) == "DashScope image download request failed"
         assert "Signature" not in str(exc_info.value)
@@ -615,92 +592,48 @@ class TestDashScopeQwenImageProvider:
     def test_safe_image_download_redacts_signed_url_on_http_error(
         self, monkeypatch
     ):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
-            ],
-        )
         signed_url = (
             "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
             "?Signature=must-not-leak"
         )
-        response = _download_response(
-            status=403, headers={"Content-Type": "application/xml"}
-        )
-        response.raise_for_status.side_effect = requests.HTTPError(
-            f"403 Client Error for url: {signed_url}"
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen import dashscope
 
-        with (
-            patch(
-                "plugins.image_gen.dashscope.requests.get", return_value=response
-            ),
-            pytest.raises(ValueError) as exc_info,
-        ):
-            _save_safe_image_url(signed_url)
+        with patch.object(
+            dashscope, "save_url_image",
+            side_effect=RuntimeError(f"403 Client Error for url: {signed_url}"),
+        ), pytest.raises(ValueError) as exc_info:
+            dashscope._save_safe_image_url(signed_url)
 
         assert str(exc_info.value) == "DashScope image download request failed"
         assert "Signature" not in str(exc_info.value)
-        response.close.assert_called_once()
 
     def test_safe_image_download_redacts_signed_url_on_stream_error(
         self, monkeypatch
     ):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
-            ],
-        )
         signed_url = (
             "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
             "?Signature=must-not-leak"
         )
-        response = _download_response(
-            headers={"Content-Type": "image/png"}, chunks=()
-        )
-        response.iter_content.side_effect = requests.ConnectionError(
-            f"stream failed for {signed_url}"
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen import dashscope
 
-        with (
-            patch(
-                "plugins.image_gen.dashscope.requests.get", return_value=response
-            ),
-            pytest.raises(ValueError) as exc_info,
-        ):
-            _save_safe_image_url(signed_url)
+        with patch.object(
+            dashscope, "save_url_image",
+            side_effect=RuntimeError(f"stream failed for {signed_url}"),
+        ), pytest.raises(ValueError) as exc_info:
+            dashscope._save_safe_image_url(signed_url)
 
         assert str(exc_info.value) == "DashScope image download request failed"
         assert "Signature" not in str(exc_info.value)
-        response.close.assert_called_once()
 
     @pytest.mark.parametrize("private_ip", ["127.0.0.1", "10.0.0.8", "192.168.1.9"])
     def test_dashscope_oss_exception_only_allows_proxy_benchmark_range(
         self, monkeypatch, private_ip
     ):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (private_ip, 0))
-            ],
-        )
-        from plugins.image_gen.dashscope import _save_safe_image_url
+        from plugins.image_gen.dashscope import _dashscope_address_allowed
 
-        with (
-            patch("plugins.image_gen.dashscope.requests.get") as mock_get,
-            pytest.raises(ValueError, match="safety"),
-        ):
-            _save_safe_image_url(
-                "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/output.png"
-            )
-        mock_get.assert_not_called()
+        assert not _dashscope_address_allowed(
+            "dashscope-7c2c.oss-accelerate.aliyuncs.com", private_ip
+        )
 
     @pytest.mark.parametrize(
         "url",
@@ -715,21 +648,18 @@ class TestDashScopeQwenImageProvider:
     def test_safe_image_download_never_weakens_url_safety_floor(
         self, monkeypatch, url
     ):
-        monkeypatch.setattr(
-            socket,
-            "getaddrinfo",
-            lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.13", 0))
-            ],
+        from urllib.parse import urlparse
+        from plugins.image_gen.dashscope import (
+            _dashscope_address_allowed,
+            _dashscope_url_shape_allowed,
         )
-        from plugins.image_gen.dashscope import _save_safe_image_url
 
-        with (
-            patch("plugins.image_gen.dashscope.requests.get") as mock_get,
-            pytest.raises(ValueError, match="safety"),
-        ):
-            _save_safe_image_url(url)
-        mock_get.assert_not_called()
+        assert (
+            not _dashscope_url_shape_allowed(url)
+            or not _dashscope_address_allowed(
+                str(urlparse(url).hostname or ""), "198.18.2.13"
+            )
+        )
 
     @pytest.mark.parametrize(
         "base_url",

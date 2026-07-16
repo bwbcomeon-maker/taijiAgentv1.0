@@ -299,6 +299,28 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     return ("tool_complete" if is_complete else "tool"), event_payload
 
 
+def _gateway_image_artifact_candidate(payload: dict) -> dict | None:
+    """Extract the private image candidate before public tool projection."""
+    if not isinstance(payload, dict):
+        return None
+    from api.artifacts import image_artifact_candidate_from_tool_completion
+
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in {"completed", "complete", "success"}:
+        return None
+    return image_artifact_candidate_from_tool_completion(
+        tool_name=str(payload.get("tool") or payload.get("name") or ""),
+        tool_call_id=str(
+            payload.get("toolCallId")
+            or payload.get("tool_call_id")
+            or payload.get("id")
+            or ""
+        ),
+        structured_result=payload.get("structured_result"),
+        is_error=False,
+    )
+
+
 def _gateway_run_approval_payload(session_id: str, event: dict, *, run_id: str = "") -> dict:
     """Convert a Gateway run approval event into the WebUI pending shape."""
     payload = dict(event or {})
@@ -555,6 +577,7 @@ def _stream_gateway_run_events(
     error_event = None
     saw_run_completed = False
     reasoning_buffer: list[str] = []
+    artifact_candidates: list[dict] = []
 
     def emit_reasoning() -> None:
         safe_text = _finalize_public_reasoning("".join(reasoning_buffer))
@@ -618,6 +641,12 @@ def _stream_gateway_run_events(
                 continue
             if event_name == "tool.completed":
                 tool_name = str(payload.get("tool") or "").strip()
+                artifact_candidate = _gateway_image_artifact_candidate({
+                    **payload,
+                    "status": "failed" if payload.get("error") else "completed",
+                })
+                if artifact_candidate is not None:
+                    artifact_candidates.append(artifact_candidate)
                 for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS.get(stream_id, [])):
                     if not shared_tc.get("done") and shared_tc.get("name") == tool_name:
                         shared_tc["done"] = True
@@ -686,6 +715,7 @@ def _stream_gateway_run_events(
         "usage": usage,
         "error_event": error_event,
         "terminal_outcome": "failed" if error_event is not None else "completed",
+        "artifact_candidates": artifact_candidates,
     }
 
 
@@ -701,6 +731,62 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_attachments = None
     session.pending_started_at = None
     session.save()
+
+
+def _ingest_gateway_artifact_candidates(
+    session_id: str,
+    turn_id: str,
+    candidates: list[dict],
+    owner_run_id: str,
+) -> tuple[list[dict], list[str], set[str]]:
+    """Promote validated image candidates without exposing their source path."""
+    if not candidates:
+        return [], [], set()
+    from api.artifacts import (
+        ArtifactRegistry,
+        ingest_image_artifact_candidates,
+    )
+    from api.config import STATE_DIR
+
+    registry = ArtifactRegistry(STATE_DIR / "artifacts")
+    try:
+        registry.cleanup_retired()
+    except Exception:
+        logger.debug("Failed to clean retired artifacts", exc_info=True)
+    return ingest_image_artifact_candidates(
+        registry,
+        session_id=session_id,
+        turn_id=turn_id,
+        candidates=candidates,
+        owner_run_id=owner_run_id,
+        return_created_ids=True,
+    )
+
+
+def _remove_uncommitted_gateway_artifacts(
+    session_id: str, artifact_ids: set[str], owner_run_id: str
+) -> None:
+    if not artifact_ids:
+        return
+    from api.artifacts import ArtifactRegistry
+    from api.config import STATE_DIR
+
+    ArtifactRegistry(STATE_DIR / "artifacts").discard_pending_artifacts(
+        session_id, artifact_ids, owner_run_id=owner_run_id
+    )
+
+
+def _commit_gateway_artifacts(
+    session_id: str, artifact_ids: set[str], owner_run_id: str
+) -> None:
+    if not artifact_ids:
+        return
+    from api.artifacts import ArtifactRegistry
+    from api.config import STATE_DIR
+
+    ArtifactRegistry(STATE_DIR / "artifacts").commit_artifacts(
+        session_id, artifact_ids, owner_run_id=owner_run_id
+    )
 
 
 def _run_gateway_chat_streaming(
@@ -797,6 +883,9 @@ def _run_gateway_chat_streaming(
     public_final_text = ""
     public_reasoning_text = ""
     raw_reasoning_buffer: list[str] = []
+    artifact_candidates: list[dict] = []
+    uncommitted_artifact_ids: set[str] = set()
+    artifacts_committed = False
     chat_stream_completed = False
     brand_token_tail = [""]
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
@@ -913,6 +1002,7 @@ def _run_gateway_chat_streaming(
             )
             usage.update({k: v for k, v in (run_result.get("usage") or {}).items() if v})
             gateway_error_event = run_result.get("error_event")
+            artifact_candidates.extend(run_result.get("artifact_candidates") or [])
             if str(run_result.get("terminal_outcome") or "") == "cancelled":
                 record_turn_interrupted("cancelled")
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -948,6 +1038,9 @@ def _run_gateway_chat_streaming(
                     except json.JSONDecodeError:
                         continue
                     if sse_event == "hermes.tool.progress":
+                        artifact_candidate = _gateway_image_artifact_candidate(payload)
+                        if artifact_candidate is not None:
+                            artifact_candidates.append(artifact_candidate)
                         translated = _gateway_tool_progress_event(payload)
                         if translated:
                             event_name, event_payload = translated
@@ -1026,10 +1119,25 @@ def _run_gateway_chat_streaming(
                 "hint": "请检查模型配置、网络或账号余额状态，必要时导出诊断报告。",
             })
             return
+        artifacts, artifact_errors, uncommitted_artifact_ids = _ingest_gateway_artifact_candidates(
+            session_id,
+            str(turn_id or turn_envelope.turn_id),
+            artifact_candidates,
+            stream_id,
+        )
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
                 return
+            writeback_snapshot = {
+                field: copy.deepcopy(getattr(s, field, None))
+                for field in (
+                    "messages", "context_messages", "active_stream_id",
+                    "pending_user_message", "pending_attachments",
+                    "pending_started_at", "workspace", "model",
+                    "model_provider", "updated_at",
+                )
+            }
             turn_started_at = getattr(s, "pending_started_at", None)
             now = time.time()
             # Preserve subsecond ordering for gateway-backed turns. Using an
@@ -1050,10 +1158,16 @@ def _run_gateway_chat_streaming(
                 "content": internal_assistant_text,
                 "timestamp": assistant_ts,
             }
+            if artifacts:
+                internal_assistant_msg["artifacts"] = copy.deepcopy(artifacts)
             assistant_msg = sanitize_persisted_assistant_message({
                 **internal_assistant_msg,
                 "content": public_assistant_text,
             })
+            if artifacts:
+                assistant_msg["artifacts"] = copy.deepcopy(artifacts)
+            if artifact_errors:
+                assistant_msg["artifact_errors"] = list(artifact_errors)
             assistant_text = str(assistant_msg.get("content") or "")
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = list(previous_context + [user_msg, internal_assistant_msg])
@@ -1112,7 +1226,19 @@ def _run_gateway_chat_streaming(
                 )
             except Exception:
                 logger.warning("Failed to append Gateway assistant_started turn journal event", exc_info=True)
-            s.save()
+            try:
+                _commit_gateway_artifacts(
+                    session_id, uncommitted_artifact_ids, stream_id
+                )
+                artifacts_committed = True
+                s.save()
+            except BaseException:
+                # A failed commit must never persist a dangling reference.  A
+                # failed save after commit leaves a durable orphan for later
+                # reconciliation, but the live Session projection is restored.
+                for field, value in writeback_snapshot.items():
+                    setattr(s, field, value)
+                raise
             try:
                 append_turn_journal_event_for_stream(
                     s.session_id,
@@ -1149,6 +1275,17 @@ def _run_gateway_chat_streaming(
             "hint": "请检查太极智能体是否已启动，或导出诊断报告。",
         })
     finally:
+        if uncommitted_artifact_ids and not artifacts_committed:
+            try:
+                _remove_uncommitted_gateway_artifacts(
+                    session_id, uncommitted_artifact_ids, stream_id
+                )
+            except Exception:
+                logger.critical(
+                    "Failed to remove uncommitted Gateway artifacts for %s",
+                    session_id,
+                    exc_info=True,
+                )
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):

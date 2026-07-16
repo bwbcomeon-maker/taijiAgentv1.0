@@ -9,6 +9,7 @@ Covers:
 """
 
 import asyncio
+import base64
 import json
 import threading
 import time as _time
@@ -479,6 +480,64 @@ class TestRunStatus:
 
 
 class TestRunEvents:
+    @pytest.mark.asyncio
+    async def test_image_tool_completed_event_carries_opaque_verified_ref(
+        self, adapter, tmp_path, monkeypatch
+    ):
+        cache = tmp_path / "home" / "cache" / "images"
+        cache.mkdir(parents=True)
+        image_path = cache / "generated.png"
+        image_path.write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        run_id = "run-image-1"
+        adapter._run_streams[run_id] = asyncio.Queue()
+        adapter._run_statuses[run_id] = {"status": "running"}
+        callback = adapter._make_run_event_callback(run_id, asyncio.get_running_loop())
+
+        callback(
+            "tool.completed",
+            "image_generate",
+            None,
+            None,
+            duration=1.2,
+            is_error=False,
+            tool_call_id="call-image-1",
+            result=json.dumps({
+                "success": True,
+                "image": str(image_path),
+                "provider": "secret-provider",
+                "prompt": "secret prompt",
+            }),
+        )
+        event = await asyncio.wait_for(adapter._run_streams[run_id].get(), timeout=1)
+
+        assert event["structured_result"] == {
+            "success": True,
+            "image_ref": "generated.png",
+            "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        }
+        assert event["toolCallId"] == "call-image-1"
+        encoded = json.dumps(event)
+        assert str(image_path) not in encoded
+        assert "data:image" not in encoded
+        assert "https://" not in encoded
+        assert "secret prompt" not in encoded
+        assert "secret-provider" not in encoded
+
+        callback(
+            "tool.completed",
+            "terminal",
+            None,
+            None,
+            duration=0.1,
+            result="CANARY-RAW-TOOL-RESULT",
+        )
+        terminal_event = await asyncio.wait_for(adapter._run_streams[run_id].get(), timeout=1)
+        assert "structured_result" not in terminal_event
+        assert "CANARY-RAW-TOOL-RESULT" not in json.dumps(terminal_event)
+
     @pytest.mark.asyncio
     async def test_events_stream_returns_completed(self, adapter):
         """Events stream should receive run.completed when agent finishes."""

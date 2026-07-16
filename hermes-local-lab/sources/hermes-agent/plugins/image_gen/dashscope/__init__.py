@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import base64
 import ipaddress
 import os
 import re
-import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import requests
 import yaml
@@ -22,8 +20,9 @@ from agent.alibaba_endpoints import (
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
+    _is_public_ip,
     error_response,
-    save_b64_image,
+    save_url_image,
 )
 from agent.provider_credentials import resolve_api_key
 from plugins.image_gen.domestic_common import (
@@ -37,21 +36,19 @@ from plugins.image_gen.domestic_common import (
     post_json,
     validate_prompt,
 )
-from tools.url_safety import is_always_blocked_url, is_safe_url
+from tools.url_safety import is_safe_url
 
 DEFAULT_MODEL = "qwen-image-2.0-pro"
 TIMEOUT_SECONDS = 180
 DOWNLOAD_TIMEOUT_SECONDS = 60
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_IMAGE_PIXELS = 40_000_000
 MAX_IMAGE_REDIRECTS = 3
 _IMAGE_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
     "image/jpg": "jpg",
-    "image/webp": "webp",
-    "image/gif": "gif",
 }
-_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _DASHSCOPE_OSS_ACCELERATE_HOST_RE = re.compile(
     r"^dashscope-[a-z0-9]+\.oss-accelerate\.aliyuncs\.com$"
 )
@@ -66,8 +63,8 @@ def _post_without_redirects(url: str, **kwargs: Any):
     return requests.post(url, allow_redirects=False, **kwargs)
 
 
-def _is_safe_dashscope_image_url(url: str) -> bool:
-    """Validate a result URL, including the provider's proxy Fake-IP host."""
+def _dashscope_url_shape_allowed(url: str) -> bool:
+    """Pure per-hop URL policy; DNS is resolved once by the pinned transport."""
     try:
         parsed = urlparse(str(url or "").strip())
         hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
@@ -82,23 +79,26 @@ def _is_safe_dashscope_image_url(url: str) -> bool:
         or port not in {None, 443}
     ):
         return False
-    if is_always_blocked_url(url):
+    if hostname in {"metadata.google.internal", "metadata.goog"}:
         return False
-    if is_safe_url(url):
+    return True
+
+
+def _dashscope_address_allowed(hostname: str, value: str) -> bool:
+    """Permit public peers plus DashScope's narrowly scoped Fake-IP range."""
+    hostname = str(hostname or "").strip().lower().rstrip(".")
+    value = str(value or "").split("%", 1)[0]
+    if _is_public_ip(value):
         return True
     if not _DASHSCOPE_OSS_ACCELERATE_HOST_RE.fullmatch(hostname):
         return False
     try:
-        answers = socket.getaddrinfo(
-            hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
-        )
-        resolved = [ipaddress.ip_address(answer[4][0]) for answer in answers]
-    except (OSError, ValueError):
+        address = ipaddress.ip_address(value)
+    except ValueError:
         return False
-    return bool(resolved) and all(
+    return (
         isinstance(address, ipaddress.IPv4Address)
         and address in _PROXY_BENCHMARK_NETWORK
-        for address in resolved
     )
 
 
@@ -107,65 +107,24 @@ def _save_safe_image_url(
     *,
     prefix: str = "dashscope_qwen_image",
 ) -> Any:
-    """Download a DashScope image with per-hop SSRF checks."""
-    current_url = str(url or "").strip()
-    for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
-        # Standard DNS preflight cannot pin the request's DNS result; a
-        # rebinding TOCTOU window remains between this check and connect.
-        if not _is_safe_dashscope_image_url(current_url):
-            raise ValueError("DashScope image URL failed safety validation")
-        try:
-            response = requests.get(
-                current_url,
-                timeout=DOWNLOAD_TIMEOUT_SECONDS,
-                stream=True,
-                allow_redirects=False,
-            )
-        except requests.RequestException:
-            raise ValueError("DashScope image download request failed") from None
-        try:
-            if response.status_code in _REDIRECT_STATUSES:
-                if redirect_count >= MAX_IMAGE_REDIRECTS:
-                    raise ValueError("DashScope image URL exceeded redirect limit")
-                location = str(response.headers.get("Location") or "").strip()
-                if not location:
-                    raise ValueError("DashScope image redirect omitted Location")
-                current_url = urljoin(current_url, location)
-                continue
-
-            response.raise_for_status()
-            content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-            extension = _IMAGE_EXTENSIONS.get(content_type)
-            if extension is None:
-                raise ValueError("DashScope image response has an unsupported content type")
-            content_length = str(response.headers.get("Content-Length") or "").strip()
-            if content_length:
-                try:
-                    declared_size = int(content_length)
-                except ValueError:
-                    declared_size = None
-                if declared_size is not None and declared_size > MAX_IMAGE_BYTES:
-                    raise ValueError("DashScope image response exceeds 25MB limit")
-
-            image_bytes = bytearray()
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if not chunk:
-                    continue
-                image_bytes.extend(chunk)
-                if len(image_bytes) > MAX_IMAGE_BYTES:
-                    raise ValueError("DashScope image response exceeds 25MB limit")
-            if not image_bytes:
-                raise ValueError("DashScope image response was empty")
-            return save_b64_image(
-                base64.b64encode(bytes(image_bytes)).decode("ascii"),
-                prefix=prefix,
-                extension=extension,
-            )
-        except requests.RequestException:
-            raise ValueError("DashScope image download request failed") from None
-        finally:
-            response.close()
-    raise ValueError("DashScope image URL exceeded redirect limit")
+    """Delegate to the Agent's proxy-free, DNS-pinned image transport."""
+    try:
+        return save_url_image(
+            str(url or "").strip(),
+            prefix=prefix,
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            max_bytes=MAX_IMAGE_BYTES,
+            max_pixels=MAX_IMAGE_PIXELS,
+            max_redirects=MAX_IMAGE_REDIRECTS,
+            url_validator=_dashscope_url_shape_allowed,
+            address_validator=_dashscope_address_allowed,
+        )
+    except ValueError as exc:
+        if "unsafe image URL" in str(exc):
+            raise ValueError("DashScope image URL failed safety validation") from None
+        raise
+    except Exception:
+        raise ValueError("DashScope image download request failed") from None
 
 
 def _load_config_data() -> dict[str, Any]:

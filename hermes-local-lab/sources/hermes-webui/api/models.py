@@ -654,6 +654,7 @@ class Session:
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
+        self.legacy_import = bool(kwargs.get('legacy_import', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         # Legacy brand_privacy_tainted values are intentionally ignored. They

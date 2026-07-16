@@ -1522,6 +1522,24 @@ def public_message_projection(
                 for raw in message["attachments"]
             ) if item
         ]
+    if isinstance(message.get("artifacts"), list):
+        try:
+            from api.artifacts import public_artifact_projection
+
+            projected["artifacts"] = [
+                public
+                for public in (
+                    public_artifact_projection(raw) for raw in message["artifacts"]
+                )
+                if public
+            ]
+        except Exception:
+            projected["artifacts"] = []
+    if isinstance(message.get("artifact_errors"), list):
+        projected["artifact_errors"] = [
+            "generated image could not be persisted"
+            for _item in message["artifact_errors"][:10]
+        ]
     if "_statusCard" in message:
         projected["_statusCard"] = _public_status_card_projection(
             message.get("_statusCard"), workspace=workspace

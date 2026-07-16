@@ -4757,6 +4757,7 @@ def _run_agent_streaming(
             _reasoning_buffer = []  # raw trace; never public before whole-output validation
             _reasoning_finalized = [False]
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
+            _artifact_candidates = []  # private image results; never emitted directly
             _brand_token_tail = ['']
 
             # Throttle: emit metering events at most every 100 ms so the per-message
@@ -4872,6 +4873,22 @@ def _run_agent_streaming(
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
 
+            def _capture_image_artifact_candidate(
+                name, tool_call_id, function_result, *, is_error=False
+            ):
+                from api.artifacts import image_artifact_candidate_from_tool_completion
+
+                candidate = image_artifact_candidate_from_tool_completion(
+                    tool_name=str(name or ''),
+                    tool_call_id=str(tool_call_id or ''),
+                    structured_result=function_result,
+                    is_error=bool(is_error),
+                    allow_internal_image=True,
+                )
+                if candidate:
+                    _artifact_candidates.append(candidate)
+                return candidate
+
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
                     return False
@@ -4969,11 +4986,23 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
+                    _capture_image_artifact_candidate(
+                        name,
+                        cb_kwargs.get('tool_call_id'),
+                        cb_kwargs.get('result'),
+                        is_error=cb_kwargs.get('is_error', False),
+                    )
                     return
 
                 if event_type == 'tool.completed':
                     result_metadata = _tool_result_metadata(preview)
                     result_is_error = bool(cb_kwargs.get('is_error', False)) or result_metadata.get("status") == "capability_blocked"
+                    _capture_image_artifact_candidate(
+                        name,
+                        cb_kwargs.get('tool_call_id'),
+                        cb_kwargs.get('result'),
+                        is_error=result_is_error,
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -5043,6 +5072,9 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
+                    _capture_image_artifact_candidate(
+                        name, tool_call_id, function_result
+                    )
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
@@ -6542,6 +6574,45 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', {'message': 'Cancelled by user'})
                     return
+                _artifact_writeback_snapshot = (
+                    copy.deepcopy(s.messages),
+                    copy.deepcopy(s.context_messages),
+                )
+                _new_artifact_ids = set()
+                _artifact_registry = None
+                if _artifact_candidates:
+                    from api.artifacts import (
+                        ArtifactRegistry,
+                        ingest_image_artifact_candidates,
+                    )
+                    from api.config import STATE_DIR as _ARTIFACT_STATE_DIR
+
+                    _artifact_registry = ArtifactRegistry(
+                        _ARTIFACT_STATE_DIR / "artifacts"
+                    )
+                    try:
+                        _artifact_registry.cleanup_retired()
+                    except Exception:
+                        logger.debug("Failed to clean retired artifacts", exc_info=True)
+                    _artifacts, _artifact_errors, _new_artifact_ids = ingest_image_artifact_candidates(
+                        _artifact_registry,
+                        session_id=s.session_id,
+                        turn_id=str(turn_envelope.turn_id),
+                        candidates=_artifact_candidates,
+                        owner_run_id=stream_id,
+                        return_created_ids=True,
+                    )
+                    for _messages in (s.context_messages, s.messages):
+                        for _artifact_message in reversed(_messages):
+                            if (
+                                isinstance(_artifact_message, dict)
+                                and _artifact_message.get('role') == 'assistant'
+                            ):
+                                if _artifacts:
+                                    _artifact_message['artifacts'] = copy.deepcopy(_artifacts)
+                                if _artifact_errors and _messages is s.messages:
+                                    _artifact_message['artifact_errors'] = list(_artifact_errors)
+                                break
                 s.messages = [
                     sanitize_persisted_assistant_message(_display_message)
                     if isinstance(_display_message, dict)
@@ -6549,7 +6620,29 @@ def _run_agent_streaming(
                     else _display_message
                     for _display_message in s.messages
                 ]
-                s.save()
+                _artifacts_committed = False
+                try:
+                    if _artifact_registry is not None and _new_artifact_ids:
+                        _artifact_registry.commit_artifacts(
+                            s.session_id,
+                            _new_artifact_ids,
+                            owner_run_id=stream_id,
+                        )
+                        _artifacts_committed = True
+                    s.save()
+                except BaseException:
+                    s.messages, s.context_messages = _artifact_writeback_snapshot
+                    if (
+                        _artifact_registry is not None
+                        and _new_artifact_ids
+                        and not _artifacts_committed
+                    ):
+                        _artifact_registry.discard_pending_artifacts(
+                            s.session_id,
+                            _new_artifact_ids,
+                            owner_run_id=stream_id,
+                        )
+                    raise
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:

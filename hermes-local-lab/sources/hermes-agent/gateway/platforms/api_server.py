@@ -73,6 +73,35 @@ MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 PUBLIC_SESSION_STREAM_ERROR_MESSAGE = "太极 Agent 处理本次会话时出现错误，请稍后重试或导出诊断报告。"
 
 
+def _structured_tool_result_for_gateway(tool_name: str, result: Any) -> Dict[str, Any] | None:
+    """Allowlist the one tool result the WebUI artifact bridge consumes.
+
+    Tool arguments, prompts, provider diagnostics and arbitrary results remain
+    private.  The image location is an internal candidate consumed by the
+    WebUI before its public SSE/journal projection.
+    """
+    if str(tool_name or "") != "image_generate":
+        return None
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(result, dict):
+        parsed = result
+    else:
+        return None
+    if parsed.get("success") is not True:
+        return None
+    from agent.image_gen_provider import validated_cache_image_ref
+
+    verified_ref = validated_cache_image_ref(parsed.get("image"))
+    if verified_ref is None:
+        return None
+    image_ref, digest = verified_ref
+    return {"success": True, "image_ref": image_ref, "sha256": digest}
+
+
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
     try:
@@ -1988,11 +2017,17 @@ class APIServerAdapter(BasePlatformAdapter):
                 if not tool_call_id or tool_call_id not in _started_tool_call_ids:
                     return
                 _started_tool_call_ids.discard(tool_call_id)
-                _stream_q.put(("__tool_progress__", {
+                event = {
                     "tool": function_name,
                     "toolCallId": tool_call_id,
                     "status": "completed",
-                }))
+                }
+                structured_result = _structured_tool_result_for_gateway(
+                    function_name, function_result
+                )
+                if structured_result is not None:
+                    event["structured_result"] = structured_result
+                _stream_q.put(("__tool_progress__", event))
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -3673,14 +3708,22 @@ class APIServerAdapter(BasePlatformAdapter):
                     "preview": preview,
                 })
             elif event_type == "tool.completed":
-                _push({
+                event = {
                     "event": "tool.completed",
                     "run_id": run_id,
                     "timestamp": ts,
                     "tool": tool_name,
                     "duration": round(kwargs.get("duration", 0), 3),
                     "error": kwargs.get("is_error", False),
-                })
+                }
+                if kwargs.get("tool_call_id"):
+                    event["toolCallId"] = str(kwargs.get("tool_call_id"))
+                structured_result = _structured_tool_result_for_gateway(
+                    tool_name, kwargs.get("result")
+                )
+                if structured_result is not None:
+                    event["structured_result"] = structured_result
+                _push(event)
             elif event_type == "reasoning.available":
                 _push({
                     "event": "reasoning.available",
