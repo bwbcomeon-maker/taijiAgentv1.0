@@ -1107,6 +1107,75 @@ class TestStartRun:
             db.close()
 
     @pytest.mark.asyncio
+    async def test_pending_bare_future_rolls_back_managed_run_start(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-bare-future-executor", "api_server")
+        adapter._session_db = db
+        adapter._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.01
+        request = _direct_run_request({
+            "input": "hello",
+            "session_id": "session-bare-future-executor",
+        })
+        pending_future = asyncio.get_running_loop().create_future()
+        captured = {}
+        observed = {}
+
+        def _return_bare_future(coroutine):
+            captured["coroutine"] = coroutine
+            return pending_future
+
+        try:
+            with (
+                patch(
+                    "gateway.platforms.api_server.asyncio.create_task",
+                    side_effect=_return_bare_future,
+                ),
+                patch.object(adapter, "_create_agent") as create_agent,
+            ):
+                response = await adapter._handle_runs(request)
+
+            observed = {
+                "payload": json.loads(response.text),
+                "status": response.status,
+                "coroutine_state": inspect.getcoroutinestate(captured["coroutine"]),
+                "lease": db.get_managed_run_lease("session-bare-future-executor"),
+                "managed_session_runs": dict(adapter._managed_session_runs),
+                "run_streams": dict(adapter._run_streams),
+                "run_statuses": dict(adapter._run_statuses),
+                "reservations": set(adapter._run_admission_reservations),
+            }
+        finally:
+            if not pending_future.done():
+                pending_future.cancel()
+                await asyncio.sleep(0)
+            coroutine = captured.get("coroutine")
+            if (
+                coroutine is not None
+                and inspect.getcoroutinestate(coroutine) != "CORO_CLOSED"
+            ):
+                coroutine.close()
+            lease = db.get_managed_run_lease("session-bare-future-executor")
+            if lease is not None:
+                db.release_managed_run_lease(
+                    "session-bare-future-executor",
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        assert observed["status"] == 503
+        assert observed["payload"]["error"]["code"] == "run_executor_unavailable"
+        create_agent.assert_not_called()
+        assert observed["coroutine_state"] == "CORO_CLOSED"
+        assert observed["lease"] is None
+        assert observed["managed_session_runs"] == {}
+        assert observed["run_streams"] == {}
+        assert observed["run_statuses"] == {}
+        assert observed["reservations"] == set()
+
+    @pytest.mark.asyncio
     async def test_real_credential_pool_route_is_admitted_for_managed_run(
         self, adapter, tmp_path, monkeypatch
     ):

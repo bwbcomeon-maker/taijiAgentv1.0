@@ -720,6 +720,14 @@ def init_agent(
         if not agent.quiet_mode:
             _gr_label = " + Guardrails" if agent._bedrock_guardrail_config else ""
             print(f"🤖 AI Agent initialized with model: {agent.model} (AWS Bedrock, {agent._bedrock_region}{_gr_label})")
+    elif agent.api_mode == "codex_app_server":
+        # Codex app-server is a local subprocess transport.  Its session is
+        # created lazily on the first turn, so agent construction must not
+        # resolve or retain HTTP provider credentials.
+        agent.api_key = ""
+        agent.base_url = ""
+        agent.client = None
+        agent._client_kwargs = {}
     else:
         if api_key and base_url:
             # Explicit credentials from CLI/gateway — construct directly.

@@ -1,7 +1,10 @@
 """Production-seam tests for managed-run runtime route admission."""
 
 from agent import agent_init
+from gateway.config import PlatformConfig
+from gateway.platforms.api_server import APIServerAdapter
 from hermes_cli import runtime_provider
+from run_agent import AIAgent
 
 
 def test_resolved_runtime_constructibility_matches_agent_transport_semantics():
@@ -127,3 +130,39 @@ def test_bedrock_target_claude_overrides_non_claude_config_default(monkeypatch):
 
     assert runtime["api_mode"] == "anthropic_messages"
     assert runtime["bedrock_anthropic"] is True
+
+
+def test_codex_app_server_route_constructs_real_agent_without_http_credentials(
+    monkeypatch,
+    tmp_path,
+):
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
+    resolved_route = {
+        "model": "gpt-5.4",
+        "provider": "openai-codex",
+        "runtime_kwargs": {
+            "provider": "openai-codex",
+            "api_mode": "codex_app_server",
+            "base_url": "",
+            "api_key": "",
+        },
+        "fallback_model": None,
+    }
+
+    agent = adapter._create_agent(
+        session_id="session-codex-app-server-construction",
+        resolved_route=resolved_route,
+    )
+
+    assert isinstance(agent, AIAgent)
+    assert agent.provider == "openai-codex"
+    assert agent.api_mode == "codex_app_server"
+    assert agent.base_url == ""
+    assert agent.api_key == ""
+    assert agent.client is None
+    assert agent._client_kwargs == {}
+    assert not hasattr(agent, "_codex_session")

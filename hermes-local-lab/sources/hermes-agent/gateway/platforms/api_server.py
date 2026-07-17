@@ -5035,12 +5035,12 @@ class APIServerAdapter(BasePlatformAdapter):
         run_coroutine = _run_and_close()
         try:
             task = asyncio.create_task(run_coroutine)
-            # ``asyncio.create_task`` returns a Task (an asyncio.Future
-            # subclass).  Requiring that lifecycle rejects ad-hoc lookalikes
-            # that cannot provide cancellation and terminal callbacks while
-            # preserving event-loop-specific Task/Future implementations.
-            if not isinstance(task, asyncio.Future):
-                raise TypeError("asyncio.create_task returned a non-Future object")
+            # Only a real Task owns and advances ``run_coroutine``.  A bare
+            # Future has cancellation/callback methods but never executes the
+            # coroutine, so accepting one would leak the run reservation,
+            # stream/status entries, and managed-session lease indefinitely.
+            if not isinstance(task, asyncio.Task):
+                raise TypeError("asyncio.create_task returned a non-Task object")
         except Exception as exc:
             run_coroutine.close()
             logger.error(
