@@ -42,6 +42,45 @@ def test_append_turn_journal_event_fsyncs_jsonl_and_preserves_payload(tmp_path):
     assert json.loads(lines[0])["content"] == "hello"
 
 
+def test_append_turn_journal_event_projects_credentials_paths_and_private_fields(tmp_path):
+    canary = "Authorization: Bearer sk-turn-journal-canary-12345678901234567890"
+    private_path = "/Users/private/runtime-home/cache/images/source.png"
+
+    event = append_turn_journal_event(
+        "sid-public",
+        {
+            "event": "submitted",
+            "turn_id": "turn-public",
+            "stream_id": "stream-public",
+            "role": "user",
+            "content": f"{canary} from {private_path}",
+            "attachments": [{
+                "name": "source.png",
+                "path": private_path,
+                "token": canary,
+            }],
+            "workspace": "/Users/private/customer-project",
+            "model": "fixture-model",
+            "model_provider": "fixture",
+            "private_payload": {"result": canary},
+        },
+        session_dir=tmp_path,
+    )
+
+    journal_path = tmp_path / "_turn_journal" / "sid-public.jsonl"
+    serialized = json.dumps(
+        [event, json.loads(journal_path.read_text(encoding="utf-8"))],
+        ensure_ascii=False,
+    )
+    assert "sk-turn-journal-canary" not in serialized
+    assert private_path not in serialized
+    assert "/Users/private/customer-project" not in serialized
+    assert "private_payload" not in event
+    assert "workspace" not in event
+    assert event["content"] == "[REDACTED] from 内部路径"
+    assert event["attachments"] == [{"name": "source.png"}]
+
+
 def test_read_turn_journal_tolerates_malformed_lines(tmp_path):
     journal_dir = tmp_path / "_turn_journal"
     journal_dir.mkdir()

@@ -117,7 +117,7 @@ class TestLoadPdfInlineFunction:
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 1500]
-        assert 'api/media?path=' in body, 'Must fetch PDF via api/media endpoint'
+        assert '_sessionMediaPathUrl' in body, 'Must fetch PDF via session-bound api/media URL'
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
@@ -164,7 +164,7 @@ class TestLoadHtmlInlineFunction:
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 1000]
-        assert 'api/media?path=' in body, 'Must fetch HTML via api/media endpoint'
+        assert '_sessionMediaPathUrl' in body, 'Must fetch HTML via session-bound api/media URL'
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')

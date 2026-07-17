@@ -109,6 +109,9 @@ function recordClientSSEError(source, details={}){
 
 // Persist/restore expanded directory state per workspace in localStorage
 function _wsExpandKey(){
+  if(S.session&&S.session.is_worktree&&S.session.session_id){
+    return 'hermes-webui-expanded:session:'+S.session.session_id;
+  }
   const ws=S.session&&S.session.workspace;
   return ws?'hermes-webui-expanded:'+ws:null;
 }

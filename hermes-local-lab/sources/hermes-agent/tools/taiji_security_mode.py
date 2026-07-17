@@ -21,8 +21,25 @@ def env_flag_enabled(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in _TRUTHY
 
 
+def _taiji_product_runtime_configured() -> bool:
+    """Return whether this process is running under the Taiji product shell.
+
+    The reusable Agent package keeps its upstream capabilities unless a Taiji
+    launcher/runtime explicitly identifies the process.  Desktop and packaged
+    launchers set both markers and also export ``TAIJI_SECURITY_MODE``; checking
+    the markers here keeps a fail-closed fallback if that final export is ever
+    omitted.
+    """
+    return env_flag_enabled("TAIJI_DESKTOP_ONLY") or bool(
+        str(os.environ.get("TAIJI_RUNTIME_HOME", "")).strip()
+    )
+
+
 def security_mode() -> str:
-    mode = str(os.environ.get("TAIJI_SECURITY_MODE", "restricted")).strip().lower()
+    configured = os.environ.get("TAIJI_SECURITY_MODE")
+    if configured is None or not str(configured).strip():
+        return "restricted" if _taiji_product_runtime_configured() else "full"
+    mode = str(configured).strip().lower()
     if mode not in {"restricted", "full"}:
         return "restricted"
     return mode

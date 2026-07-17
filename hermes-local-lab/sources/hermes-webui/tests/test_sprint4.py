@@ -1,7 +1,7 @@
 """Sprint 4 tests: relocation, session rename, search, file ops, validation."""
 import json, pathlib, uuid, urllib.request, urllib.error
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE, TEST_STATE_DIR
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -23,12 +23,13 @@ def post(path, body=None):
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
-    body = {}
-    if ws: body["workspace"] = str(ws)
+    workspace = (_pathlib.Path(ws) if ws else TEST_STATE_DIR / "test-workspace" / f"sprint4-{uuid.uuid4().hex}").resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
-    return sid, _pathlib.Path(d["session"]["workspace"])
+    return sid, workspace
 
 
 def test_server_running_from_new_location():
@@ -153,6 +154,13 @@ def test_new_session_inherits_workspace(cleanup_test_sessions):
     child = ws / f"workspace-inherit-{uuid.uuid4().hex[:6]}"
     child.mkdir(parents=True, exist_ok=True)
     post("/api/session/update", {"session_id": sid, "workspace": str(child), "model": "openai/gpt-5.4-mini"})
-    sid2, _ = make_session_tracked(cleanup_test_sessions)
-    data, _ = get(f"/api/session?session_id={sid2}")
-    assert data["session"]["workspace"] == str(child)
+    created, status = post("/api/session/new", {})
+    assert status == 200, created
+    sid2 = created["session"]["session_id"]
+    cleanup_test_sessions.append(sid2)
+    inherited_name = f"inherited-{uuid.uuid4().hex[:6]}.txt"
+    result, status = post("/api/file/create", {
+        "session_id": sid2, "path": inherited_name, "content": "inherited",
+    })
+    assert status == 200, result
+    assert (child / inherited_name).read_text(encoding="utf-8") == "inherited"

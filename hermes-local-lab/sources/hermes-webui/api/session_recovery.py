@@ -100,6 +100,30 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     }
 
 
+def _has_live_truth_rewrite_intent(session_path: Path) -> bool:
+    """Fail closed when coordinated transcript recovery owns this session.
+
+    Message-count backups are heuristic; a durable truth intent is explicit
+    transaction evidence.  The heuristic must never replace the sidecar while
+    that evidence exists, including through the manual recovery endpoint or a
+    caller that invokes backup recovery outside the normal server boot order.
+    """
+    marker = (
+        session_path.parent
+        / ".truth-rewrite-intents"
+        / f"{session_path.stem}.json"
+    )
+    try:
+        marker.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # An unreadable marker location is not proof that no transaction is in
+        # flight.  Defer rather than risk restoring stale history.
+        return True
+
+
 def recover_session(session_path: Path) -> dict:
     """Restore session_path from its .bak when the bak has more messages.
 
@@ -109,6 +133,12 @@ def recover_session(session_path: Path) -> dict:
     status = inspect_session_recovery_status(session_path)
     if status["recommend"] != "restore":
         return {**status, "restored": False}
+    if _has_live_truth_rewrite_intent(session_path):
+        return {
+            **status,
+            "restored": False,
+            "deferred_to_truth_rewrite": True,
+        }
     bak_path = session_path.with_suffix('.json.bak')
     # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
     # cannot leave a half-written session.json.
@@ -621,9 +651,15 @@ def recover_all_sessions_on_startup(
         )
     if rebuild_index:
         try:
-            from api.models import SESSION_INDEX_FILE, _write_session_index
-            if restored or not SESSION_INDEX_FILE.exists():
-                _write_session_index(updates=None)
+            from api.models import _write_session_index
+            # The sidebar index is a rebuildable projection, not a truth store.
+            # Reconcile it on every explicitly requested startup pass, including
+            # when an existing index is stale.  A process can die after a
+            # sidecar/state.db recovery clears its durable marker but before the
+            # index update lands; gating this rebuild on ``restored`` or file
+            # absence would make that recovered conversation permanently
+            # invisible on all later starts.
+            _write_session_index(updates=None)
         except Exception as exc:
             logger.warning("recover_all_sessions_on_startup: index rebuild failed: %s", exc)
     return {

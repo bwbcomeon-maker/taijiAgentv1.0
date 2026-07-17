@@ -246,3 +246,36 @@ def test_gateway_after_clear_sees_only_the_new_turn():
 
     assert messages == [{"role": "user", "content": "brand new question"}]
     assert "first question" not in str(messages)
+
+
+def test_gateway_replays_fifty_completed_turns_once_after_restart():
+    durable_history = []
+    for index in range(50):
+        durable_history.extend([
+            {
+                "role": "user",
+                "content": f"question {index}",
+                "platform_message_id": f"webui-turn:turn-{index}",
+            },
+            {"role": "assistant", "content": f"answer {index}"},
+        ])
+    restarted = _history_session()
+    restarted.messages = []
+    restarted.context_messages = []
+
+    messages = gateway_chat._gateway_messages_for_new_turn(
+        restarted,
+        "question 50",
+        [],
+        "question 50",
+        cfg={},
+        state_messages=durable_history,
+    )
+
+    assert len(messages) == 101
+    assert [message["role"] for message in messages[:-1]].count("user") == 50
+    assert [message["role"] for message in messages[:-1]].count("assistant") == 50
+    for index in range(50):
+        assert sum(message.get("content") == f"question {index}" for message in messages) == 1
+        assert sum(message.get("content") == f"answer {index}" for message in messages) == 1
+    assert messages[-1] == {"role": "user", "content": "question 50"}

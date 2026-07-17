@@ -34,10 +34,10 @@ def test_workspace_heading_affordance_requires_workspace():
     assert "heading.setAttribute('tabindex','0')" in UI_JS
     assert "heading.removeAttribute('role')" in UI_JS
     assert "heading.removeAttribute('tabindex')" in UI_JS
-    assert "if(!(S.session&&S.session.workspace)) return;" in UI_JS
+    assert "if(!sessionHasWorkspace()) return;" in UI_JS
     assert "typeof _syncWorkspaceHeadingState==='function'" in UI_JS
 
     context_idx = UI_JS.find("heading.oncontextmenu")
-    guard_idx = UI_JS.find("if(!(S.session&&S.session.workspace)) return;", context_idx)
+    guard_idx = UI_JS.find("if(!sessionHasWorkspace()) return;", context_idx)
     prevent_idx = UI_JS.find("e.preventDefault()", context_idx)
     assert context_idx < guard_idx < prevent_idx

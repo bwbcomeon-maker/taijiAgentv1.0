@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import copy
 import sqlite3
+import subprocess
+import sys
 from collections import OrderedDict
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -99,6 +102,312 @@ def _seed_session(models, sessions, tmp_path, *, session_id="phase2-lifecycle"):
     session.save(skip_index=True)
     sessions[session.session_id] = session
     return session
+
+
+@pytest.mark.parametrize("operation", ["retry_last", "undo_last"])
+def test_intentional_rewrite_is_not_resurrected_by_startup_backup_recovery(
+    monkeypatch,
+    isolated_sessions,
+    operation,
+):
+    import api.session_ops as session_ops
+    import api.session_recovery as recovery
+
+    _routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"bak-{operation}",
+    )
+    before = copy.deepcopy(session.messages)
+    monkeypatch.setattr(
+        "api.state_sync.replace_webui_session_messages",
+        lambda **_kwargs: True,
+    )
+
+    getattr(session_ops, operation)(session.session_id)
+
+    live = json.loads(session.path.read_text(encoding="utf-8"))
+    assert live["messages"] == before[:2]
+    assert session.path.with_suffix(".json.bak").exists() is False
+    result = recovery.recover_all_sessions_on_startup(
+        models.SESSION_DIR,
+        rebuild_index=False,
+    )
+    after = json.loads(session.path.read_text(encoding="utf-8"))
+    assert result["restored"] == 0
+    assert after["messages"] == before[:2]
+
+
+def test_truth_rewrite_and_full_index_rebuild_do_not_deadlock(tmp_path):
+    script = r'''
+import sys, threading
+from collections import OrderedDict
+from pathlib import Path
+import api.config as config, api.models as models, api.routes as routes
+import api.session_ops as session_ops, api.truth_rewrite as truth
+
+d = Path(sys.argv[1]); d.mkdir(exist_ok=True)
+sessions = OrderedDict()
+for mod in (config, models, routes):
+    if hasattr(mod, "SESSION_DIR"): mod.SESSION_DIR = d
+    if hasattr(mod, "SESSION_INDEX_FILE"): mod.SESSION_INDEX_FILE = d / "_index.json"
+    if hasattr(mod, "SESSIONS"): mod.SESSIONS = sessions
+session_ops.SESSIONS = sessions; session_ops.LOCK = config.LOCK
+s = models.Session(session_id="lock-cycle", workspace=str(d), profile="default",
+    messages=[{"role":"user","content":"u1"},{"role":"assistant","content":"a1"},
+              {"role":"user","content":"u2"},{"role":"assistant","content":"a2"}])
+s.save(skip_index=True); sessions[s.session_id] = s
+entered = threading.Event(); release = threading.Event()
+def fake_replace(*_args, **_kwargs):
+    entered.set(); release.wait(5); return True
+routes._replace_state_db_truth = fake_replace
+truth._default_read_state_messages = lambda _s: list(s.messages)
+truth._default_replace_state_messages = lambda _s, _m: True
+
+def writer():
+    routes._rewrite_existing_session_truth(
+        s, lambda: setattr(s, "messages", s.messages[:2]),
+        privacy_reason="retry", preserve_context_messages=True)
+writer_thread = threading.Thread(target=writer, daemon=True); writer_thread.start()
+assert entered.wait(2)
+index_thread = threading.Thread(
+    target=lambda: models._write_session_index(updates=None), daemon=True)
+index_thread.start()
+threading.Event().wait(.2)
+release.set(); writer_thread.join(2); index_thread.join(2)
+if writer_thread.is_alive() or index_thread.is_alive(): raise SystemExit(77)
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "sessions")],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_expert_team_append_uses_session_writer_lock_and_preserves_concurrent_message(
+    monkeypatch,
+    tmp_path,
+):
+    import api.routes as routes
+
+    session = SimpleNamespace(
+        session_id="expert-lock-session",
+        title="Existing",
+        messages=[{"role": "user", "content": "initial"}],
+        context_messages=[{"role": "user", "content": "initial"}],
+        profile=None,
+        model="test-model",
+        path=tmp_path / "expert-lock-session.json",
+    )
+    lock_state = {"active": False, "requested": False}
+
+    class InjectingWriterLock:
+        def __enter__(self):
+            lock_state["requested"] = True
+            lock_state["active"] = True
+            session.messages.append(
+                {"role": "assistant", "content": "concurrent-stream"}
+            )
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        routes,
+        "_get_session_agent_lock",
+        lambda _sid: InjectingWriterLock(),
+    )
+
+    def rewrite(_session, mutate, **_kwargs):
+        assert lock_state["active"] is True
+        mutate()
+
+    monkeypatch.setattr(routes, "_rewrite_existing_session_truth", rewrite)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args: None)
+    run = {
+        "session_id": session.session_id,
+        "run_id": "expert-run-lock",
+        "title": "并发安全任务",
+        "team_title": "内容创作专家团",
+        "view": {"business_context": {"visible_title": "并发安全任务"}},
+    }
+
+    appended = routes._append_expert_team_session_entry(run)
+
+    assert lock_state["requested"] is True
+    assert len(appended) == 2
+    assert [message["content"] for message in session.messages[:2]] == [
+        "initial",
+        "concurrent-stream",
+    ]
+
+
+def test_delete_tombstones_stale_worker_and_cancels_live_stream(
+    monkeypatch,
+    isolated_sessions,
+):
+    import threading
+
+    import api.config as config
+
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-live-session",
+    )
+    session.active_stream_id = "delete-live-stream"
+    session.pending_user_message = "running"
+    session.save(skip_index=True)
+    stale_worker_session = session
+    cancel_flag = threading.Event()
+    monkeypatch.setattr(routes, "STREAMS", {"delete-live-stream": object()})
+    monkeypatch.setattr(routes, "CANCEL_FLAGS", {"delete-live-stream": cancel_flag})
+    monkeypatch.setattr(config, "AGENT_INSTANCES", {})
+    deleted_state_rows = []
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: deleted_state_rows.append(sid) or True,
+    )
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(retire_session=lambda _sid: []),
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert response["status"] == 200
+    assert session.path.exists() is False
+    assert getattr(stale_worker_session, "_deleted", False) is True
+    assert stale_worker_session.active_stream_id is None
+    assert cancel_flag.is_set()
+    assert "delete-live-stream" not in routes.STREAMS
+    assert deleted_state_rows == [session.session_id]
+
+    stale_worker_session.messages.append(
+        {"role": "assistant", "content": "late completion"}
+    )
+    with pytest.raises(RuntimeError, match="deleted session"):
+        stale_worker_session.save(skip_index=True)
+    assert session.path.exists() is False
+
+
+@pytest.mark.parametrize("path", ["/api/session/clear", "/api/session/truncate"])
+def test_destructive_rewrite_rebinds_canonical_session_inside_writer_lock(
+    monkeypatch,
+    isolated_sessions,
+    path,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    stale = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"canonical-{path.rsplit('/', 1)[-1]}",
+    )
+    canonical = copy.deepcopy(stale)
+    canonical.messages.append({"role": "assistant", "content": "concurrent"})
+    canonical.context_messages.append(
+        {"role": "assistant", "content": "concurrent"}
+    )
+    sessions[stale.session_id] = canonical
+    lookups = iter([stale, canonical])
+    monkeypatch.setattr(routes, "get_session", lambda _sid: next(lookups))
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda _sid: [],
+            restore_session=lambda _items: None,
+        ),
+    )
+    rewritten = []
+
+    def rewrite(session, mutate, **_kwargs):
+        rewritten.append(session)
+        mutate()
+
+    monkeypatch.setattr(routes, "_rewrite_existing_session_truth", rewrite)
+    body = {"session_id": stale.session_id}
+    if path.endswith("truncate"):
+        body["keep_count"] = 2
+
+    response = _call_post(monkeypatch, routes, path, body)
+
+    assert response["status"] == 200
+    assert rewritten == [canonical]
+
+
+@pytest.mark.parametrize("path", ["/api/session/clear", "/api/session/truncate"])
+def test_destructive_rewrite_rejects_live_stream_without_mutation(
+    monkeypatch,
+    isolated_sessions,
+    path,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"live-{path.rsplit('/', 1)[-1]}",
+    )
+    before_sidecar = session.path.read_bytes()
+    before_runtime = {
+        "messages": copy.deepcopy(session.messages),
+        "context_messages": copy.deepcopy(session.context_messages),
+        "active_stream_id": session.active_stream_id,
+        "pending_user_message": session.pending_user_message,
+        "pending_attachments": copy.deepcopy(session.pending_attachments),
+        "pending_started_at": session.pending_started_at,
+    }
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: {"stream-running"})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("live stream must be rejected before artifact retirement")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_rewrite_existing_session_truth",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live stream must not rewrite semantic truth")
+        ),
+    )
+    body = {"session_id": session.session_id}
+    if path.endswith("truncate"):
+        body["keep_count"] = 2
+
+    response = _call_post(monkeypatch, routes, path, body)
+
+    assert response["status"] == 409
+    assert response["payload"]["error"] == "session has an active stream; cancel it before rewriting"
+    assert {
+        "messages": session.messages,
+        "context_messages": session.context_messages,
+        "active_stream_id": session.active_stream_id,
+        "pending_user_message": session.pending_user_message,
+        "pending_attachments": session.pending_attachments,
+        "pending_started_at": session.pending_started_at,
+    } == before_runtime
+    assert session.path.read_bytes() == before_sidecar
 
 
 def test_strict_state_rewrite_surfaces_existing_database_failure(monkeypatch):
@@ -476,6 +785,57 @@ def test_retry_and_undo_replace_state_db_with_retained_prefix(
         "reply first",
     ]
     assert calls[0]["messages"] == loaded.context_messages
+
+
+@pytest.mark.parametrize("operation", ["retry_last", "undo_last"])
+def test_retry_and_undo_process_death_leave_recoverable_truth_intent(
+    monkeypatch,
+    isolated_sessions,
+    operation,
+):
+    import api.routes as routes
+    import api.session_ops as session_ops
+    import api.truth_rewrite as truth_rewrite
+
+    _routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"phase2-{operation}-crash",
+    )
+    before = copy.deepcopy(session.messages)
+    monkeypatch.setattr(
+        routes,
+        "_replace_state_db_truth",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit("crash between sidecar and state.db")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="between sidecar and state.db"):
+        getattr(session_ops, operation)(session.session_id)
+
+    marker = truth_rewrite.truth_rewrite_intent_path(session)
+    assert marker.exists()
+    disk = json.loads(session.path.read_text(encoding="utf-8"))
+    assert disk["messages"] == before[:2]
+
+    replaced = []
+    monkeypatch.setattr(
+        truth_rewrite,
+        "_default_read_state_messages",
+        lambda _session: copy.deepcopy(before),
+    )
+    monkeypatch.setattr(
+        truth_rewrite,
+        "_default_replace_state_messages",
+        lambda _session, messages: replaced.append(copy.deepcopy(messages)) or True,
+    )
+    loaded = models.Session.load(session.session_id)
+    assert loaded.messages == before[:2]
+    assert replaced == [before[:2]]
+    assert marker.exists() is False
 
 
 def test_retry_state_db_failure_restores_sidecar_and_surfaces_error(

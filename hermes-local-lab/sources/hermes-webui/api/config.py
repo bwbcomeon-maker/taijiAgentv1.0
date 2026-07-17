@@ -4821,8 +4821,11 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
     Lock lifecycle invariant:
       - A Lock is created lazily on first access and lives in SESSION_AGENT_LOCKS
         for the lifetime of the session.
-      - The entry is pruned in /api/session/delete (under SESSION_AGENT_LOCKS_LOCK)
-        so deleted sessions don't leak a Lock forever.
+      - Deleted session entries remain until process restart.  Queued writers
+        can already hold the Lock object, so pruning at delete would create an
+        ABA window where a new writer receives a different Lock and runs in
+        parallel with the stale waiter.  Session.save's delete tombstone is the
+        second no-resurrection barrier.
       - During context compression the agent may rotate session_id.  The
         streaming thread migrates the lock entry atomically under
         SESSION_AGENT_LOCKS_LOCK: it aliases the new session_id to the *same*

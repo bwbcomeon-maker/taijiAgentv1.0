@@ -1023,13 +1023,28 @@ def _path_is_within_root(path: Path, root: Path) -> bool:
         return False
 
 
-def _setup_worktree(repo_root: str = None) -> Optional[Dict[str, str]]:
+def _setup_worktree(
+    repo_root: str = None,
+    *,
+    name_prefix: str = "hermes",
+    branch_prefix: str = "hermes",
+) -> Optional[Dict[str, str]]:
     """Create an isolated git worktree for this CLI session.
 
     Returns a dict with worktree metadata on success, None on failure.
     The dict contains: path, branch, repo_root.
+
+    ``name_prefix`` and ``branch_prefix`` let product integrations choose
+    their public identity while the Hermes CLI keeps its legacy defaults.
     """
     import subprocess
+
+    for field, value in (
+        ("name_prefix", name_prefix),
+        ("branch_prefix", branch_prefix),
+    ):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+            raise ValueError(f"{field} must contain only letters, digits, '-' or '_'")
 
     repo_root = repo_root or _git_repo_root()
     if not repo_root:
@@ -1038,8 +1053,8 @@ def _setup_worktree(repo_root: str = None) -> Optional[Dict[str, str]]:
         return None
 
     short_id = uuid.uuid4().hex[:8]
-    wt_name = f"hermes-{short_id}"
-    branch_name = f"hermes/{wt_name}"
+    wt_name = f"{name_prefix}-{short_id}"
+    branch_name = f"{branch_prefix}/{wt_name}"
 
     worktrees_dir = Path(repo_root) / ".worktrees"
     worktrees_dir.mkdir(parents=True, exist_ok=True)

@@ -163,6 +163,33 @@ def test_migration_routes_require_confirmation_and_hide_backup_path(monkeypatch,
     assert "/Users/private" not in applied.wfile.getvalue().decode()
 
 
+def test_migration_apply_busy_returns_stable_retryable_public_error(monkeypatch):
+    import api.routes as routes
+    import api.legacy_session_migration as migration
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"confirm": True})
+    monkeypatch.setattr(
+        migration,
+        "migrate_legacy_sessions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            migration.MigrationStateBusyError()
+        ),
+    )
+
+    handler = Handler()
+    routes.handle_post(handler, urlparse("/api/session/migration/apply"))
+    payload = json.loads(handler.wfile.getvalue())
+
+    assert handler.status == 409
+    assert payload == {
+        "error": "当前仍有会话任务正在收尾，请稍后重试。",
+        "code": "migration_state_busy",
+        "retryable": True,
+    }
+    assert "path" not in json.dumps(payload).lower()
+
+
 def test_bundle_import_rollback_incomplete_returns_only_safe_public_code(monkeypatch):
     import api.routes as routes
     import api.session_bundle as session_bundle

@@ -184,9 +184,12 @@ def test_rightpanel_mobile_slide_over_css():
         "mobile rightpanel width variable should be used in compact mode rules"
     assert "calc(-1 * var(--mobile-rightpanel-width))" in CSS, \
         "closed mobile rightpanel should be off-canvas using a width-based negative offset"
-    mobile_640 = re.search(r'@media\(max-width:640px\)\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', CSS, re.DOTALL)
-    assert mobile_640, "@media(max-width:640px) block missing from style.css"
-    rightpanel_block = mobile_640.group(1)
+    rightpanel_blocks = [
+        block for block in _max_width_media_blocks(640)
+        if ".rightpanel" in block
+    ]
+    assert rightpanel_blocks, "@media(max-width:640px) rightpanel block missing from style.css"
+    rightpanel_block = "\n".join(rightpanel_blocks)
     assert re.search(r'\.rightpanel\{[^}]*width:\s*var\(--mobile-rightpanel-width\)\s*!important',
                      rightpanel_block, re.DOTALL), \
         ".rightpanel width must use var(--mobile-rightpanel-width) with !important in mobile block"
@@ -226,7 +229,7 @@ def test_workspace_panel_boot_restore_is_desktop_only():
     """Persisted workspace panels should not auto-cover compact/mobile launch."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     assert "if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';" in boot_js
-    assert "if(S.session&&S.session.workspace&&panelPref&&!_isCompactWorkspaceViewport()){" in boot_js
+    assert "sessionHasWorkspace()&&panelPref&&!_isCompactWorkspaceViewport()){" in boot_js
     assert "if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';" in boot_js
 
 

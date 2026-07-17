@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import io
 import os
 import pathlib
 import tempfile
@@ -28,6 +29,43 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+TEST_WORKSPACE = pathlib.Path(TEST_STATE_DIR) / "test-workspace"
+
+
+def test_artifact_retention_warning_exists_in_every_locale():
+    assert I18N_JS.count("clear_conversation_artifact_retention:") == 12
+
+
+class _RecordingMediaHandler:
+    def __init__(self, request_headers=None):
+        self.status = None
+        self.headers = dict(request_headers or {})
+        self.response_headers = {}
+        self.wfile = io.BytesIO()
+        self.command = "GET"
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.response_headers.setdefault(key, []).append(value)
+
+    def end_headers(self):
+        return None
+
+
+def _request_media_path(routes, target, *, session_id="", inline=False):
+    query = {"path": str(pathlib.Path(target).resolve())}
+    if session_id:
+        query["session_id"] = session_id
+    if inline:
+        query["inline"] = "1"
+    handler = _RecordingMediaHandler()
+    routes._handle_media(
+        handler,
+        SimpleNamespace(path="/api/media", query=urllib.parse.urlencode(query)),
+    )
+    return handler
 
 
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
@@ -82,8 +120,16 @@ class TestMediaRenderMdStash(unittest.TestCase):
                       "renderMd must build api/media?path=... URL for local files")
 
     def test_local_media_api_url_carries_session_id_when_available(self):
-        self.assertIn("session_id='+encodeURIComponent(mediaSessionId)", UI_JS,
-                      "local MEDIA: image URLs must include session_id so the server can authorize session-referenced artifacts")
+        self.assertIn("function _sessionMediaPathUrl", UI_JS)
+        self.assertIn("'&session_id='+encodeURIComponent(sid)", UI_JS,
+                      "all legacy local media URLs must include the active session_id")
+
+    def test_all_ui_path_media_calls_use_the_session_bound_url_builder(self):
+        self.assertEqual(
+            UI_JS.count("api/media?path="),
+            1,
+            "ui.js must not construct unscoped path media URLs outside the shared builder",
+        )
 
     def test_local_audio_video_media_tokens_request_inline_streaming(self):
         self.assertIn("apiUrl+'&inline=1'", UI_JS,
@@ -266,11 +312,213 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn('"/api/media"', routes_src,
                       '/api/media must be registered in the GET route dispatch')
 
-    def test_allowed_roots_include_tmp(self):
-        """Handler must allow /tmp so screenshot paths work."""
-        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn('/tmp', routes_src,
-                      '/tmp must be in the allowed roots list for /api/media')
+    def test_path_mode_requires_session_id_even_for_tmp_media(self):
+        """A globally readable /tmp path must never be its own authorization."""
+        from api import routes
+
+        with tempfile.NamedTemporaryFile(suffix=".png", dir="/tmp", delete=False) as f:
+            f.write(b"unowned-image")
+            target = pathlib.Path(f.name)
+        try:
+            with mock.patch("api.auth.is_auth_enabled", return_value=False):
+                handler = _request_media_path(routes, target)
+            self.assertEqual(handler.status, 400)
+        finally:
+            target.unlink(missing_ok=True)
+
+    def test_path_mode_rejects_cross_session_workspace_and_media_token(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = pathlib.Path(root)
+            workspace_a = base / "workspace-a"
+            workspace_b = base / "workspace-b"
+            workspace_a.mkdir()
+            workspace_b.mkdir()
+            target = workspace_a / "owned.png"
+            target.write_bytes(b"session-a-image")
+            sessions = {
+                "session-a": SimpleNamespace(
+                    workspace=str(workspace_a),
+                    messages=[{"role": "assistant", "content": f"MEDIA:{target}"}],
+                    legacy_import=False,
+                ),
+                "session-b": SimpleNamespace(
+                    workspace=str(workspace_b),
+                    messages=[],
+                    legacy_import=False,
+                ),
+            }
+            with mock.patch("api.auth.is_auth_enabled", return_value=False), \
+                 mock.patch.object(routes, "get_session", side_effect=lambda sid: sessions[sid]):
+                handler = _request_media_path(
+                    routes, target, session_id="session-b"
+                )
+            self.assertEqual(handler.status, 403)
+
+    def test_path_mode_ignores_global_workspace_and_media_allowed_roots(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = pathlib.Path(root)
+            global_workspace = base / "last-workspace"
+            session_workspace = base / "session-workspace"
+            global_workspace.mkdir()
+            session_workspace.mkdir()
+            target = global_workspace / "global.png"
+            target.write_bytes(b"global-image")
+            session = SimpleNamespace(
+                workspace=str(session_workspace), messages=[], legacy_import=False
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"MEDIA_ALLOWED_ROOTS": str(global_workspace)},
+                clear=False,
+            ), mock.patch("api.workspace.get_last_workspace", return_value=str(global_workspace)), \
+                 mock.patch("api.auth.is_auth_enabled", return_value=False), \
+                 mock.patch.object(routes, "get_session", return_value=session):
+                handler = _request_media_path(
+                    routes, target, session_id="session-b"
+                )
+            self.assertEqual(handler.status, 403)
+
+    def test_path_mode_rejects_unowned_runtime_home_media(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = pathlib.Path(root)
+            runtime_home = base / "runtime-home"
+            session_workspace = base / "session-workspace"
+            runtime_home.mkdir()
+            session_workspace.mkdir()
+            target = runtime_home / "cache.png"
+            target.write_bytes(b"runtime-cache-image")
+            session = SimpleNamespace(
+                workspace=str(session_workspace), messages=[], legacy_import=False
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"TAIJI_RUNTIME_HOME": str(runtime_home)},
+                clear=False,
+            ), mock.patch("api.auth.is_auth_enabled", return_value=False), \
+                 mock.patch.object(routes, "get_session", return_value=session):
+                handler = _request_media_path(
+                    routes, target, session_id="session-b"
+                )
+            self.assertEqual(handler.status, 403)
+
+    def test_path_mode_rejects_imported_or_user_forged_media_tokens(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = pathlib.Path(root)
+            workspace = base / "workspace"
+            outside = base / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            target = outside / "forged.png"
+            target.write_bytes(b"forged-image")
+            sessions = [
+                SimpleNamespace(
+                    workspace=str(workspace),
+                    messages=[{"role": "assistant", "content": f"MEDIA:{target}"}],
+                    legacy_import=True,
+                ),
+                SimpleNamespace(
+                    workspace=str(workspace),
+                    messages=[
+                        {
+                            "role": "assistant",
+                            "content": f"MEDIA:{target}",
+                            "imported": True,
+                        }
+                    ],
+                    legacy_import=False,
+                ),
+                SimpleNamespace(
+                    workspace=str(workspace),
+                    messages=[{"role": "user", "content": f"MEDIA:{target}"}],
+                    legacy_import=False,
+                ),
+            ]
+            for index, session in enumerate(sessions):
+                with self.subTest(index=index), \
+                     mock.patch("api.auth.is_auth_enabled", return_value=False), \
+                     mock.patch.object(routes, "get_session", return_value=session):
+                    handler = _request_media_path(
+                        routes, target, session_id=f"session-{index}"
+                    )
+                self.assertEqual(handler.status, 403)
+
+    def test_path_mode_allows_own_workspace_and_exact_safe_media_tokens(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = pathlib.Path(root)
+            workspace = base / "workspace"
+            outside = base / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            workspace_image = workspace / "workspace.png"
+            token_audio = outside / "history.wav"
+            token_pdf = outside / "history.pdf"
+            quoted_image = outside / "history 中文.png"
+            workspace_image.write_bytes(b"workspace-image")
+            token_audio.write_bytes(b"RIFF" + b"\0" * 32)
+            token_pdf.write_bytes(b"%PDF-1.4\n%%EOF")
+            quoted_image.write_bytes(b"quoted-image")
+            session = SimpleNamespace(
+                workspace=str(workspace),
+                messages=[
+                    {"role": "assistant", "content": f"MEDIA:{token_audio}"},
+                    {"role": "tool", "content": f"MEDIA:{token_pdf}"},
+                    {"role": "assistant", "content": f'MEDIA:"{quoted_image}"'},
+                ],
+                legacy_import=False,
+            )
+            with mock.patch("api.auth.is_auth_enabled", return_value=False), \
+                 mock.patch.object(routes, "get_session", return_value=session):
+                workspace_handler = _request_media_path(
+                    routes, workspace_image, session_id="session-a"
+                )
+                audio_handler = _request_media_path(
+                    routes, token_audio, session_id="session-a", inline=True
+                )
+                pdf_handler = _request_media_path(
+                    routes, token_pdf, session_id="session-a", inline=True
+                )
+                quoted_handler = _request_media_path(
+                    routes, quoted_image, session_id="session-a"
+                )
+            self.assertEqual(workspace_handler.status, 200)
+            self.assertEqual(audio_handler.status, 200)
+            self.assertEqual(pdf_handler.status, 200)
+            self.assertEqual(quoted_handler.status, 200)
+            self.assertIn("inline", audio_handler.response_headers["Content-Disposition"][0])
+            self.assertIn("inline", pdf_handler.response_headers["Content-Disposition"][0])
+
+    def test_path_mode_preserves_session_workspace_text_preview_contract(self):
+        """Session-owned diff/CSV/JSON previews remain available as attachments."""
+        from api import routes
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            workspace = pathlib.Path(root) / "workspace"
+            workspace.mkdir()
+            target = workspace / "changes.diff"
+            target.write_text("+safe workspace content\n", encoding="utf-8")
+            session = SimpleNamespace(
+                workspace=str(workspace), messages=[], legacy_import=False
+            )
+            with mock.patch("api.auth.is_auth_enabled", return_value=False), \
+                 mock.patch.object(routes, "get_session", return_value=session):
+                handler = _request_media_path(
+                    routes, target, session_id="session-owned"
+                )
+            self.assertEqual(handler.status, 200)
+            self.assertIn(
+                "attachment",
+                handler.response_headers["Content-Disposition"][0],
+            )
 
     def test_svg_forces_download(self):
         """.svg must not be served inline (XSS risk)."""
@@ -285,19 +533,18 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
 
-    def test_media_allowed_roots_env_var_referenced(self):
-        """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
+    def test_media_allowed_roots_env_var_is_not_path_authorization(self):
+        """Operator-global roots must not bypass per-session path ownership."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn("MEDIA_ALLOWED_ROOTS", routes_src,
-                      "MEDIA_ALLOWED_ROOTS env var must be parsed in _handle_media")
+        media_handler = routes_src[routes_src.index("def _handle_media"):]
+        self.assertNotIn("MEDIA_ALLOWED_ROOTS", media_handler)
 
-    def test_media_allowed_roots_uses_os_pathsep(self):
-        """MEDIA_ALLOWED_ROOTS must use the platform path separator."""
+    def test_path_handler_does_not_use_process_global_last_workspace(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        start = routes_src.index("extra_roots =")
-        block = routes_src[start:start + 900]
-        self.assertIn(".split(_os.pathsep)", block)
-        self.assertNotIn('.split(":")', block)
+        media_handler = routes_src[
+            routes_src.index("def _handle_media"):routes_src.index("def _file_raw_target")
+        ]
+        self.assertNotIn("get_last_workspace", media_handler)
 
     def test_path_is_within_root_treats_commonpath_valueerror_as_not_within(self):
         """Windows cross-drive commonpath() errors must not crash /api/media."""
@@ -357,10 +604,17 @@ class TestMediaEndpointUnit(unittest.TestCase):
 
             handler = _Handler()
             parsed = SimpleNamespace(
-                query=f"path={urllib.parse.quote(str(target))}", path="/api/media"
+                query=(
+                    f"path={urllib.parse.quote(str(target))}&session_id=unsafe-workspace"
+                ),
+                path="/api/media",
+            )
+            session = SimpleNamespace(
+                workspace=str(hermes_home), messages=[], legacy_import=False
             )
             with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}), \
                  mock.patch.object(routes, "get_last_workspace", lambda: str(hermes_home)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
                  mock.patch("api.auth.is_auth_enabled", lambda: False):
                 routes._handle_media(handler, parsed)
 
@@ -419,12 +673,22 @@ class TestMediaEndpointUnit(unittest.TestCase):
             }
             with mock.patch.dict(os.environ, env), \
                  mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(
+                     routes,
+                     "get_session",
+                     return_value=SimpleNamespace(
+                         workspace=str(ws), messages=[], legacy_import=False
+                     ),
+                 ), \
                  mock.patch("api.auth.is_auth_enabled", lambda: False), \
                  mock.patch("api.config.STATE_DIR", state_dir):
                 # workspace media → not blocked by the #3234 deny
                 h1 = _Handler()
                 routes._handle_media(h1, SimpleNamespace(
-                    query=f"path={urllib.parse.quote(str(shot.resolve()))}&inline=1",
+                    query=(
+                        f"path={urllib.parse.quote(str(shot.resolve()))}"
+                        "&inline=1&session_id=state-workspace"
+                    ),
                     path="/api/media"))
                 self.assertNotEqual(
                     h1.status, 403,
@@ -432,7 +696,10 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 # sessions state → still denied
                 h2 = _Handler()
                 routes._handle_media(h2, SimpleNamespace(
-                    query=f"path={urllib.parse.quote(str(sess_file.resolve()))}",
+                    query=(
+                        f"path={urllib.parse.quote(str(sess_file.resolve()))}"
+                        "&session_id=state-workspace"
+                    ),
                     path="/api/media"))
                 self.assertEqual(
                     h2.status, 403,
@@ -476,7 +743,10 @@ class TestMediaEndpointUnit(unittest.TestCase):
 
             handler = _Handler()
             parsed = SimpleNamespace(
-                query=f"path={urllib.parse.quote(str(old_media.resolve()))}&inline=1",
+                query=(
+                    f"path={urllib.parse.quote(str(old_media.resolve()))}"
+                    "&inline=1&session_id=runtime-session"
+                ),
                 path="/api/media",
             )
             env = {
@@ -486,6 +756,13 @@ class TestMediaEndpointUnit(unittest.TestCase):
             }
             with mock.patch.dict(os.environ, env), \
                  mock.patch.object(routes, "get_last_workspace", lambda: str(workspace)), \
+                 mock.patch.object(
+                     routes,
+                     "get_session",
+                     return_value=SimpleNamespace(
+                         workspace=str(workspace), messages=[], legacy_import=False
+                     ),
+                 ), \
                  mock.patch("api.auth.is_auth_enabled", lambda: False):
                 routes._handle_media(handler, parsed)
 
@@ -538,14 +815,21 @@ class TestMediaEndpointUnit(unittest.TestCase):
             other_secret.write_text("{}", encoding="utf-8")
 
             active = base / "profiles" / "p1"  # active profile HERMES_HOME
+            session = SimpleNamespace(
+                workspace=str(p1_ws), messages=[], legacy_import=False
+            )
             with mock.patch.dict(os.environ, {"HERMES_HOME": str(active)}), \
                  mock.patch.object(routes, "get_last_workspace", lambda: str(p1_ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
                  mock.patch("api.auth.is_auth_enabled", lambda: False), \
                  mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
                 # named-profile workspace media → served
                 h1 = _Handler()
                 routes._handle_media(h1, SimpleNamespace(
-                    query=f"path={urllib.parse.quote(str((p1_ws / 'shot.png').resolve()))}&inline=1",
+                    query=(
+                        f"path={urllib.parse.quote(str((p1_ws / 'shot.png').resolve()))}"
+                        "&inline=1&session_id=profile-session"
+                    ),
                     path="/api/media"))
                 self.assertNotEqual(
                     h1.status, 403,
@@ -553,13 +837,19 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 # this profile's own secret → denied
                 h2 = _Handler()
                 routes._handle_media(h2, SimpleNamespace(
-                    query=f"path={urllib.parse.quote(str(p1_secret.resolve()))}",
+                    query=(
+                        f"path={urllib.parse.quote(str(p1_secret.resolve()))}"
+                        "&session_id=profile-session"
+                    ),
                     path="/api/media"))
                 self.assertEqual(h2.status, 403, "profile auth.json must be denied")
                 # sibling profile's secret → denied
                 h3 = _Handler()
                 routes._handle_media(h3, SimpleNamespace(
-                    query=f"path={urllib.parse.quote(str(other_secret.resolve()))}",
+                    query=(
+                        f"path={urllib.parse.quote(str(other_secret.resolve()))}"
+                        "&session_id=profile-session"
+                    ),
                     path="/api/media"))
                 self.assertEqual(h3.status, 403, "sibling profile auth.json must be denied")
                 # per-profile webui_state/sessions → denied (not a direct child of root)
@@ -569,7 +859,10 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 ws_sess_file.write_text('{"messages":[]}', encoding="utf-8")
                 h4 = _Handler()
                 routes._handle_media(h4, SimpleNamespace(
-                    query=f"path={urllib.parse.quote(str(ws_sess_file.resolve()))}",
+                    query=(
+                        f"path={urllib.parse.quote(str(ws_sess_file.resolve()))}"
+                        "&session_id=profile-session"
+                    ),
                     path="/api/media"))
                 self.assertEqual(
                     h4.status, 403,
@@ -638,6 +931,16 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             urllib.request.urlopen(BASE + "/health", timeout=5)
         except Exception as exc:
             self.fail(f"Test server at {BASE} is not reachable: {exc}")
+        TEST_WORKSPACE.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(
+            BASE + "/api/session/new",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            payload = json.loads(response.read())
+        self.session_id = payload["session"]["session_id"]
 
     def _get(self, path, headers=None):
         req = urllib.request.Request(BASE + path, headers=headers or {})
@@ -652,12 +955,21 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         self.assertEqual(status, 400)
 
     def test_nonexistent_file_returns_404(self):
-        _, status, _ = self._get("/api/media?path=/tmp/__hermes_nonexistent_12345.png")
+        missing = TEST_WORKSPACE / "__hermes_nonexistent_12345.png"
+        _, status, _ = self._get(
+            "/api/media?" + urllib.parse.urlencode(
+                {"path": str(missing), "session_id": self.session_id}
+            )
+        )
         self.assertEqual(status, 404)
 
     def test_path_outside_allowed_root_rejected(self):
         # /etc/passwd is outside allowed roots
-        _, status, _ = self._get("/api/media?path=/etc/passwd")
+        _, status, _ = self._get(
+            "/api/media?" + urllib.parse.urlencode(
+                {"path": "/etc/passwd", "session_id": self.session_id}
+            )
+        )
         self.assertIn(status, {403, 404})
 
     def test_valid_png_served_with_image_mime(self):
@@ -669,13 +981,15 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
         )
         with tempfile.NamedTemporaryFile(
-            suffix=".png", prefix="hermes_test_", dir="/tmp", delete=False
+            suffix=".png", prefix="hermes_test_", dir=TEST_WORKSPACE, delete=False
         ) as f:
             f.write(png_bytes)
             tmp_path = f.name
         try:
             body, status, headers = self._get(
-                f"/api/media?path={urllib.request.quote(tmp_path)}"
+                "/api/media?" + urllib.parse.urlencode(
+                    {"path": tmp_path, "session_id": self.session_id}
+                )
             )
             self.assertEqual(status, 200, f"Expected 200, got {status}")
             ct = headers.get("Content-Type", "")
@@ -688,13 +1002,17 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         """MEDIA: audio paths stream inline and support byte ranges for playback."""
         audio_bytes = b"RIFF" + (b"\x00" * 256)
         with tempfile.NamedTemporaryFile(
-            suffix=".wav", prefix="hermes_test_", dir="/tmp", delete=False
+            suffix=".wav", prefix="hermes_test_", dir=TEST_WORKSPACE, delete=False
         ) as f:
             f.write(audio_bytes)
             tmp_path = f.name
         try:
-            encoded = urllib.request.quote(tmp_path)
-            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            query = urllib.parse.urlencode({
+                "path": tmp_path,
+                "session_id": self.session_id,
+                "inline": "1",
+            })
+            body, status, headers = self._get(f"/api/media?{query}")
             self.assertEqual(status, 200)
             self.assertIn("audio/wav", headers.get("Content-Type", ""))
             self.assertIn("inline", headers.get("Content-Disposition", ""))
@@ -702,7 +1020,7 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             self.assertEqual(body, audio_bytes)
 
             body, status, headers = self._get(
-                f"/api/media?path={encoded}&inline=1",
+                f"/api/media?{query}",
                 headers={"Range": "bytes=0-3"},
             )
             self.assertEqual(status, 206)
@@ -711,18 +1029,20 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
-    def test_html_media_endpoint_inline_requires_csp_sandbox(self):
-        """HTML opens inline only when requested and always carries CSP sandbox."""
+    def test_session_workspace_html_inline_requires_csp_sandbox(self):
+        """Verified workspace HTML keeps the existing sandboxed preview."""
         html_bytes = b"<!doctype html><title>Hermes</title><script>window.ok=1</script>"
         with tempfile.NamedTemporaryFile(
-            suffix=".html", prefix="hermes_test_", dir="/tmp", delete=False
+            suffix=".html", prefix="hermes_test_", dir=TEST_WORKSPACE, delete=False
         ) as f:
             f.write(html_bytes)
             tmp_path = f.name
         try:
-            encoded = urllib.request.quote(tmp_path)
-
-            body, status, headers = self._get(f"/api/media?path={encoded}")
+            query = urllib.parse.urlencode({
+                "path": tmp_path,
+                "session_id": self.session_id,
+            })
+            body, status, headers = self._get(f"/api/media?{query}")
             self.assertEqual(status, 200)
             self.assertIn("text/html", headers.get("Content-Type", ""))
             self.assertIn("attachment", headers.get("Content-Disposition", ""))
@@ -732,7 +1052,12 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             )
             self.assertEqual(body, html_bytes)
 
-            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            inline_query = urllib.parse.urlencode({
+                "path": tmp_path,
+                "session_id": self.session_id,
+                "inline": "1",
+            })
+            body, status, headers = self._get(f"/api/media?{inline_query}")
             self.assertEqual(status, 200)
             self.assertIn("text/html", headers.get("Content-Type", ""))
             self.assertIn("inline", headers.get("Content-Disposition", ""))
@@ -746,7 +1071,12 @@ class TestMediaEndpointIntegration(unittest.TestCase):
 
     def test_path_traversal_rejected(self):
         _, status, _ = self._get(
-            "/api/media?path=" + urllib.request.quote("/tmp/../../etc/passwd")
+            "/api/media?" + urllib.parse.urlencode(
+                {
+                    "path": "/tmp/../../etc/passwd",
+                    "session_id": self.session_id,
+                }
+            )
         )
         self.assertIn(status, {403, 404})
 
@@ -765,7 +1095,12 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         settings.write_text('{"secret":"value"}', encoding="utf-8")
         try:
             _, status, _ = self._get(
-                "/api/media?path=" + urllib.request.quote(str(settings.resolve()))
+                "/api/media?" + urllib.parse.urlencode(
+                    {
+                        "path": str(settings.resolve()),
+                        "session_id": self.session_id,
+                    }
+                )
             )
             self.assertEqual(
                 status, 403,
@@ -781,7 +1116,12 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         sess_file.write_text('{"messages":[]}', encoding="utf-8")
         try:
             _, status, _ = self._get(
-                "/api/media?path=" + urllib.request.quote(str(sess_file.resolve()))
+                "/api/media?" + urllib.parse.urlencode(
+                    {
+                        "path": str(sess_file.resolve()),
+                        "session_id": self.session_id,
+                    }
+                )
             )
             self.assertEqual(
                 status, 403,
@@ -804,20 +1144,22 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
             b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
         )
-        # A /tmp artifact whose stem collides with a denied basename — must serve
-        # because /tmp is not a Hermes state root.
+        # A current-session workspace artifact whose stem collides with a denied
+        # basename remains legitimate user media.
         with tempfile.NamedTemporaryFile(
-            suffix=".png", prefix="settings_artifact_", dir="/tmp", delete=False
+            suffix=".png", prefix="settings_artifact_", dir=TEST_WORKSPACE, delete=False
         ) as f:
             f.write(png_bytes)
             tmp_path = f.name
         try:
             body, status, headers = self._get(
-                f"/api/media?path={urllib.request.quote(tmp_path)}"
+                "/api/media?" + urllib.parse.urlencode(
+                    {"path": tmp_path, "session_id": self.session_id}
+                )
             )
             self.assertEqual(
                 status, 200,
-                f"a /tmp PNG outside any Hermes root must serve, got {status}",
+                f"a current-session workspace PNG must serve, got {status}",
             )
             self.assertIn("image/png", headers.get("Content-Type", ""))
         finally:

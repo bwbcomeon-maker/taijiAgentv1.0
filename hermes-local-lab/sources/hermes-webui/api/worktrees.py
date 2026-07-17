@@ -330,15 +330,21 @@ def _setup_agent_worktree(repo_root: str) -> dict:
         import api.config  # noqa: F401  # ensure Hermes Agent dir is on sys.path
         from cli import _setup_worktree
     except Exception as exc:
-        raise RuntimeError("Hermes Agent worktree helper is unavailable") from exc
+        raise RuntimeError("Agent worktree helper is unavailable") from exc
     output = StringIO()
     with redirect_stdout(output), redirect_stderr(output):
-        info = _setup_worktree(repo_root)
+        # The actual directory basename is terminal-visible through the shell
+        # prompt, so choose the product identity at creation time.
+        info = _setup_worktree(
+            repo_root,
+            name_prefix="taiji",
+            branch_prefix="taiji",
+        )
     emitted = output.getvalue().strip()
     if emitted:
-        logger.debug("Hermes Agent worktree helper output: %s", emitted)
+        logger.debug("Agent worktree helper output: %s", emitted)
     if not info:
-        raise RuntimeError("Hermes Agent failed to create a git worktree")
+        raise RuntimeError("Agent failed to create a git worktree")
     return info
 
 
@@ -348,7 +354,7 @@ def create_worktree_for_workspace(workspace: str | Path) -> dict:
     path = info.get("path")
     branch = info.get("branch")
     if not path or not branch:
-        raise RuntimeError("Hermes Agent returned incomplete worktree metadata")
+        raise RuntimeError("Agent returned incomplete worktree metadata")
     return {
         "path": str(Path(path).expanduser().resolve()),
         "branch": str(branch),

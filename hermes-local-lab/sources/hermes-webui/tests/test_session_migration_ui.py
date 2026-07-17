@@ -169,6 +169,15 @@ def test_apply_awaits_a_fresh_authoritative_audit_before_rendering_success():
     assert "items:" not in projection
 
 
+def test_busy_apply_has_bounded_request_and_retryable_safe_prompt():
+    start = BOOT.index("$('btnApplyLegacyMigration').onclick=async()=>")
+    block = BOOT[start:BOOT.index("$('btnImportJSON').onclick", start)]
+
+    assert "timeoutMs:35000" in block
+    assert "migration_state_busy" in block
+    assert "当前仍有会话任务正在收尾，请稍后重试。" in block
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_apply_outcome_rejects_failed_rollback_and_dirty_fresh_audit():
     cases = [

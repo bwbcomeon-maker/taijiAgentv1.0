@@ -1,7 +1,7 @@
 """Sprint 2 tests: image preview, file types, markdown. Uses cleanup_test_sessions fixture."""
 import io, json, uuid, urllib.request, urllib.error, pathlib
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE, TEST_STATE_DIR
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -23,12 +23,13 @@ def post(path, body=None):
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
-    body = {}
-    if ws: body["workspace"] = str(ws)
+    workspace = (_pathlib.Path(ws) if ws else TEST_STATE_DIR / "test-workspace" / f"sprint2-{uuid.uuid4().hex}").resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
-    return sid, _pathlib.Path(d["session"]["workspace"])
+    return sid, workspace
 
 
 

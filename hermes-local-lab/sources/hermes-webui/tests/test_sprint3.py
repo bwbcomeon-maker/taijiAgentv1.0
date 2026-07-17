@@ -1,7 +1,19 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
 import json, uuid, urllib.request, urllib.error
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE, TEST_STATE_DIR
+
+
+def test_server_python_discovery_prefers_agent_dot_venv(monkeypatch, tmp_path):
+    from tests import conftest
+
+    agent_dir = tmp_path / "hermes-agent"
+    expected = agent_dir / ".venv" / "bin" / "python"
+    expected.parent.mkdir(parents=True)
+    expected.touch()
+    monkeypatch.delenv("HERMES_WEBUI_PYTHON", raising=False)
+
+    assert conftest._discover_python(agent_dir) == str(expected)
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -19,12 +31,13 @@ def post(path, body=None):
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
-    body = {}
-    if ws: body["workspace"] = str(ws)
+    workspace = (_pathlib.Path(ws) if ws else TEST_STATE_DIR / "test-workspace" / f"sprint3-{uuid.uuid4().hex}").resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
-    return sid, _pathlib.Path(d["session"]["workspace"])
+    return sid, workspace
 
 
 def test_crons_list():

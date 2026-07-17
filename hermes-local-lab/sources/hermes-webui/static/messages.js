@@ -1510,6 +1510,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
   const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.|api|session\/)/i;
   const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  function _smdSessionMediaHref(path){
+    const sid=(S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    return 'api/media?path='+encodeURIComponent(String(path||''))+
+      '&session_id='+encodeURIComponent(sid)+'&inline=1';
+  }
   function _smdLinkHref(raw){
     const href=String(raw||'');
     if(/^session:\/\//i.test(href)){
@@ -1533,9 +1538,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!/^file:\/\//i.test(href)) return href;
     try{
       const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
-      return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+      return _smdSessionMediaHref(path);
     }catch(_){
-      return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+      return _smdSessionMediaHref(href.replace(/^file:\/\//i,''));
     }
   }
   function _smdFileHref(raw){

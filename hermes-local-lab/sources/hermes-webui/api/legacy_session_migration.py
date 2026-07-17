@@ -36,6 +36,16 @@ _SEMANTIC_MESSAGE_FIELDS = (
     "codex_reasoning_items", "codex_message_items", "platform_message_id",
     "message_id", "observed",
 )
+MIGRATION_EXCLUSIVE_WAIT_SECONDS = 30.0
+
+
+class MigrationStateBusyError(RuntimeError):
+    """Exclusive migration could not start before its bounded wait elapsed."""
+
+    code = "migration_state_busy"
+
+    def __init__(self) -> None:
+        super().__init__("migration state is busy; retry later")
 
 
 class _MigrationStateBarrier:
@@ -122,8 +132,12 @@ class _MigrationStateBarrier:
                             self._condition.notify_all()
 
     @contextmanager
-    def write(self):
+    def write(self, timeout: float | None = None):
         ident = threading.get_ident()
+        wait_seconds = None if timeout is None else max(0.0, float(timeout))
+        deadline = (
+            None if wait_seconds is None else time.monotonic() + wait_seconds
+        )
         with self._condition:
             if self._writer_owner == ident:
                 self._writer_depth += 1
@@ -135,11 +149,22 @@ class _MigrationStateBarrier:
                 self._waiting_writers += 1
                 try:
                     while self._writer_owner is not None or self._readers:
-                        self._condition.wait()
+                        if deadline is None:
+                            self._condition.wait()
+                            continue
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise MigrationStateBusyError()
+                        self._condition.wait(timeout=remaining)
                     self._writer_owner = ident
                     self._writer_depth = 1
                 finally:
                     self._waiting_writers -= 1
+                    if self._writer_owner != ident:
+                        # A timed-out writer must not leave fresh readers
+                        # stranded behind a writer-preference predicate that no
+                        # longer exists.
+                        self._condition.notify_all()
         try:
             yield
         finally:
@@ -206,8 +231,13 @@ def install_state_db_migration_guard():
 
 
 @contextmanager
-def _legacy_migration_exclusive_guard():
-    with _MIGRATION_STATE_BARRIER.write():
+def _legacy_migration_exclusive_guard(wait_seconds: float | None = None):
+    timeout = (
+        MIGRATION_EXCLUSIVE_WAIT_SECONDS
+        if wait_seconds is None
+        else wait_seconds
+    )
+    with _MIGRATION_STATE_BARRIER.write(timeout=timeout):
         yield
 
 

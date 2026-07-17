@@ -28,10 +28,14 @@ def _persistence_block():
     src = STREAMING.read_text(encoding="utf-8")
     start = src.find("if _reasoning_text and s.messages:")
     assert start != -1, "Reasoning trace marker not found in streaming.py"
-    end = src.find("\n                s.save()", start)
-    assert end != -1, "s.save() not found after the reasoning trace marker"
-    # Include the s.save() line so we can verify ordering
-    end = src.find("\n", end + 1)
+    commit_start = src.find("_artifact_writeback_snapshot =", start)
+    assert commit_start != -1, "Normal artifact/session commit block not found"
+    commit_end = src.find("\n                if cancel_event.is_set():", commit_start)
+    assert commit_end != -1, "Normal commit block end not found"
+    commit_block = src[commit_start:commit_end]
+    save_matches = list(re.finditer(r"\n\s+s\.save\(\)", commit_block))
+    assert len(save_matches) == 1, "Normal commit block must contain exactly one s.save()"
+    end = commit_start + save_matches[0].end()
     return src[start:end]
 
 

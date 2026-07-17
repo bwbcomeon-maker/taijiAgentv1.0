@@ -16,39 +16,39 @@ from api.models import get_session, SESSIONS
 logger = logging.getLogger(__name__)
 
 
-def _persist_rewritten_session_truth(session, snapshot: dict) -> None:
-    """Save a retry/undo rewrite and keep state.db in the same prefix."""
-    from api.state_sync import (
-        replace_webui_session_messages,
-        semantic_messages_for_state,
-    )
+def _persist_rewritten_session_truth(
+    session,
+    snapshot: dict,
+    *,
+    privacy_reason: str,
+) -> None:
+    """Route retry/undo through the canonical crash-recoverable rewrite."""
+    from api.routes import _rewrite_existing_session_truth
 
-    semantic_messages = semantic_messages_for_state(session.messages)
-    session.save()
-    try:
-        replaced = replace_webui_session_messages(
-            session_id=session.session_id,
-            messages=semantic_messages,
-            model=getattr(session, "model", None),
-            profile=getattr(session, "profile", None),
-        )
-        if replaced is not True:
-            raise RuntimeError(
-                f"state.db transcript rewrite was not confirmed for {session.session_id}"
-            )
-    except Exception:
-        session.messages = snapshot["messages"]
-        session.context_messages = snapshot["context_messages"]
-        session.truncation_watermark = snapshot["truncation_watermark"]
-        try:
-            session.save()
-        except Exception:
-            logger.critical(
-                "failed to restore session %s after retry/undo state.db failure",
-                session.session_id,
-                exc_info=True,
-            )
-        raise
+    target = {
+        "messages": copy.deepcopy(session.messages),
+        "context_messages": copy.deepcopy(
+            getattr(session, "context_messages", None) or []
+        ),
+        "truncation_watermark": getattr(session, "truncation_watermark", None),
+    }
+    # The canonical coordinator must snapshot the *before* state so a regular
+    # failure can restore it and a process death can leave a durable intent.
+    session.messages = copy.deepcopy(snapshot["messages"])
+    session.context_messages = copy.deepcopy(snapshot["context_messages"])
+    session.truncation_watermark = snapshot["truncation_watermark"]
+
+    def _apply_target() -> None:
+        session.messages = copy.deepcopy(target["messages"])
+        session.context_messages = copy.deepcopy(target["context_messages"])
+        session.truncation_watermark = target["truncation_watermark"]
+
+    _rewrite_existing_session_truth(
+        session,
+        _apply_target,
+        privacy_reason=privacy_reason,
+        preserve_context_messages=True,
+    )
 
 
 def _truncate_at_last_user(messages):
@@ -131,7 +131,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
-        _persist_rewritten_session_truth(s, snapshot)
+        _persist_rewritten_session_truth(s, snapshot, privacy_reason="retry")
     from api.config import _evict_session_agent
     _evict_session_agent(session_id)
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
@@ -178,7 +178,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
-        _persist_rewritten_session_truth(s, snapshot)
+        _persist_rewritten_session_truth(s, snapshot, privacy_reason="undo")
     from api.config import _evict_session_agent
     _evict_session_agent(session_id)
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
@@ -221,6 +221,15 @@ def session_status(session_id: str) -> dict[str, Any]:
         'output_tokens': out,
         'total_tokens': inp + out,
         'estimated_cost': s.estimated_cost,
+        'is_worktree': bool(
+            getattr(s, 'is_worktree', False)
+            or getattr(s, 'worktree_path', None)
+        ),
+        'worktree_label': (
+            getattr(s, 'worktree_branch', None)
+            if getattr(s, 'worktree_path', None)
+            else None
+        ),
     }
 
 

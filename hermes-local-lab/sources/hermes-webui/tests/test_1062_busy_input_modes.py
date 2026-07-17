@@ -260,8 +260,12 @@ class TestSendBusyBranchDispatch:
         # The send() function should read window._busyInputMode in the busy block
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0
-        # Look in the first ~3000 chars of send() for the busy mode read
-        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        # Bound the assertion to send() itself. A fixed character window became
+        # stale as guarded pre-send behavior grew even though the busy-mode
+        # branch remained present and unchanged.
+        send_end = MESSAGES_JS.find("function closeLiveStream(", send_idx)
+        assert send_end > send_idx
+        send_body = MESSAGES_JS[send_idx:send_end]
         assert "_busyInputMode" in send_body, (
             "send() must read window._busyInputMode in the S.busy branch"
         )

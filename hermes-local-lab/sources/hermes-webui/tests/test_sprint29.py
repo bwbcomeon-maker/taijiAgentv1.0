@@ -21,6 +21,7 @@ import pathlib
 import pytest
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -581,11 +582,12 @@ class TestContentDisposition:
 
     def test_unicode_filename_download_header_is_latin1_safe(self, cleanup_test_sessions):
         """Unicode filenames must not crash download responses."""
-        body, status = post("/api/session/new", {})
+        ws = (TEST_STATE_DIR / "test-workspace" / f"sprint29-download-{uuid.uuid4().hex}").resolve()
+        ws.mkdir(parents=True, exist_ok=True)
+        body, status = post("/api/session/new", {"workspace": str(ws)})
         assert status == 200, body
         sid = body["session"]["session_id"]
         cleanup_test_sessions.append(sid)
-        ws = pathlib.Path(body["session"]["workspace"])
         filename = "中文对照表.pdf"
         pdf_bytes = b"%PDF-1.3\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
         (ws / filename).write_bytes(pdf_bytes)
@@ -604,11 +606,12 @@ class TestContentDisposition:
 
     def test_unicode_filename_inline_header_is_latin1_safe(self, cleanup_test_sessions):
         """Inline responses must also work for unicode filenames."""
-        body, status = post("/api/session/new", {})
+        ws = (TEST_STATE_DIR / "test-workspace" / f"sprint29-inline-{uuid.uuid4().hex}").resolve()
+        ws.mkdir(parents=True, exist_ok=True)
+        body, status = post("/api/session/new", {"workspace": str(ws)})
         assert status == 200, body
         sid = body["session"]["session_id"]
         cleanup_test_sessions.append(sid)
-        ws = pathlib.Path(body["session"]["workspace"])
         filename = "预览.pdf"
         pdf_bytes = b"%PDF-1.3\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
         (ws / filename).write_bytes(pdf_bytes)

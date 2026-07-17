@@ -12,7 +12,8 @@ def test_delete_confirmation_mentions_retained_worktree():
     src = read("static/sessions.js")
     i18n = read("static/i18n.js")
     assert "function _sessionSnapshotById(sid)" in src
-    assert "session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path)" in src
+    assert "session.is_worktree?t('session_delete_worktree_confirm',_sessionWorktreeLabel(session))" in src
+    assert "worktree_path" not in src
     assert "session_delete_worktree_confirm" in i18n
     assert "will remain on disk" in i18n
     assert "session_delete_worktree_confirm: (path) => `Delete this conversation? The worktree at ${path} will remain on disk.`" in i18n
@@ -36,8 +37,8 @@ def test_archive_and_delete_action_descriptions_are_worktree_specific():
     i18n = read("static/i18n.js")
     assert "function _sessionArchiveDescription(session)" in src
     assert "function _sessionDeleteDescription(session)" in src
-    assert "session&&session.worktree_path?t('session_archive_worktree_desc')" in src
-    assert "session&&session.worktree_path?t('session_delete_worktree_desc')" in src
+    assert "session&&session.is_worktree?t('session_archive_worktree_desc')" in src
+    assert "session&&session.is_worktree?t('session_delete_worktree_desc')" in src
     assert "session_archive_worktree_desc" in i18n
     assert "session_delete_worktree_desc" in i18n
     assert "session_archive_worktree_desc: 'Hide this conversation; keep its worktree on disk'" in i18n
@@ -49,9 +50,9 @@ def test_archive_delete_success_copy_prefers_response_worktree_retained():
     assert "function _sessionResponseRetainsWorktree(response, session)" in src
     assert "typeof response.worktree_retained==='boolean'" in src
     assert "return response.worktree_retained;" in src
-    assert "return !!(session&&session.worktree_path);" in src
+    assert "return !!(session&&session.is_worktree);" in src
     assert src.index("return response.worktree_retained;") < src.index(
-        "return !!(session&&session.worktree_path);"
+        "return !!(session&&session.is_worktree);"
     )
     assert "function _sessionArchiveToast(response, session)" in src
     assert "session.archived?_sessionArchiveToast(response,session):t('session_restored')" in src

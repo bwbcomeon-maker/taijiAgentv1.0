@@ -205,11 +205,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("cap.approval_required", ui)
         self.assertNotIn("可用/需审批", ui)
 
-    def test_agent_security_mode_fails_closed_without_runtime_env(self):
+    def test_agent_security_mode_fails_closed_for_taiji_product_runtime(self):
         security_mode = read_text("hermes-local-lab/sources/hermes-agent/tools/taiji_security_mode.py")
 
-        self.assertIn('os.environ.get("TAIJI_SECURITY_MODE", "restricted")', security_mode)
-        self.assertNotIn('os.environ.get("TAIJI_SECURITY_MODE", "full")', security_mode)
+        self.assertIn("def _taiji_product_runtime_configured()", security_mode)
+        self.assertIn('env_flag_enabled("TAIJI_DESKTOP_ONLY")', security_mode)
+        self.assertIn('os.environ.get("TAIJI_RUNTIME_HOME", "")', security_mode)
+        self.assertIn(
+            'return "restricted" if _taiji_product_runtime_configured() else "full"',
+            security_mode,
+        )
         self.assertIn('return "restricted"', security_mode)
 
     def test_agent_test_runner_skips_incomplete_stale_virtualenvs(self):
@@ -502,9 +507,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             gateway_chat.index("def _gateway_http_error_event"):
             gateway_chat.index("def _gateway_sse_delta")
         ]
+        empty_response_start = gateway_chat.index("if not internal_assistant_text:")
         empty_response = gateway_chat[
-            gateway_chat.index("if not assistant_text:"):
-            gateway_chat.index("with _get_session_agent_lock", gateway_chat.index("if not assistant_text:"))
+            empty_response_start:
+            gateway_chat.index(
+                "artifacts, artifact_errors, uncommitted_artifact_ids",
+                empty_response_start,
+            )
         ]
 
         for text in (http_error, empty_response):

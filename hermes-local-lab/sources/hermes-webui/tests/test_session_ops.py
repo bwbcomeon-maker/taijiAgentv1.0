@@ -55,7 +55,9 @@ def test_retry_returns_last_user_text(cleanup_test_sessions):
     r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
     assert r.get('ok') is True, r
     assert r.get('last_user_text') == 'second user msg'
-    assert r.get('removed_count') == 3
+    # Legacy JSON imports are text-only, so the trailing tool record is
+    # intentionally discarded before retry computes the removed suffix.
+    assert r.get('removed_count') == 2
 
 
 def test_retry_truncates_transcript(cleanup_test_sessions):
@@ -171,7 +173,7 @@ def test_undo_returns_removed_preview(cleanup_test_sessions):
     ])
     r = _post(TEST_BASE, '/api/session/undo', {'session_id': sid})
     assert r.get('ok') is True
-    assert r.get('removed_count') == 3
+    assert r.get('removed_count') == 2
     assert 'second user msg' in r.get('removed_preview', '')
 
 

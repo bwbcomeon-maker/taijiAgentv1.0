@@ -542,8 +542,8 @@ def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
     assert persisted[0]["sid"] == "session-length-fallback"
 
 
-def test_handoff_summary_persistence_targets_both_backends_for_messaging_session(tmp_path, monkeypatch):
-    """Messaging sessions should persist handoff summary markers into both local JSON and state.db."""
+def test_handoff_summary_with_local_session_uses_sidecar_only(tmp_path, monkeypatch):
+    """A display-only local handoff card must not create a second DB truth."""
     import api.routes as routes
     import api.models as models
     import api.profiles as profiles
@@ -597,12 +597,7 @@ def test_handoff_summary_persistence_targets_both_backends_for_messaging_session
             "SELECT role, content FROM messages WHERE session_id = ? ORDER BY rowid ASC",
             (sid,),
         ).fetchall()
-        assert len(rows) == 1
-        assert rows[0][0] == "tool"
-        db_payload = _extract_handoff_marker_payload({"content": rows[0][1]})
-        assert db_payload is not None
-        assert db_payload.get("session_id") == sid
-        assert db_payload.get("summary") == "Please handoff after context"
+        assert rows == []
     finally:
         conn.close()
 

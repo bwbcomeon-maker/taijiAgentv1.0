@@ -95,6 +95,47 @@ def is_safe_session_id(sid) -> bool:
     return all(c in _SAFE_SID_CHARS for c in sid)
 
 
+def _recover_truth_rewrite_on_full_read(session) -> None:
+    """Resolve a provable two-store crash intent before exposing a transcript."""
+    from api.truth_rewrite import (
+        TruthRewriteRecoveryError,
+        recover_truth_rewrite_intent,
+    )
+
+    recovery = recover_truth_rewrite_intent(session)
+    if recovery.get('status') == 'diverged':
+        logger.error(
+            "truth rewrite recovery blocked divergent session %s: %s",
+            session.session_id,
+            recovery.get('reason'),
+        )
+        raise TruthRewriteRecoveryError(
+            f"truth rewrite recovery blocked divergent session {session.session_id}"
+        )
+    if recovery.get('status') in {'rolled_forward', 'completed', 'aborted'}:
+        logger.warning(
+            "truth rewrite crash recovery %s for session %s",
+            recovery.get('status'),
+            session.session_id,
+        )
+    if recovery.get('status') in {'rolled_forward', 'completed'}:
+        # A new-session crash can publish the sidecar before state.db and the
+        # rebuildable sidebar index.  Full Session.load() proves/reconciles the
+        # two semantic stores; once the marker is clear, repair an existing
+        # index so the recovered conversation cannot remain permanently hidden.
+        # If no index exists, its caller/startup full rebuild will discover the
+        # sidecar normally, avoiding recursive full-index construction here.
+        try:
+            if SESSION_INDEX_FILE.exists():
+                _write_session_index(updates=[session])
+        except Exception:
+            logger.warning(
+                "failed to refresh session index after truth recovery for %s",
+                session.session_id,
+                exc_info=True,
+            )
+
+
 def _cleanup_stale_tmp_files() -> None:
     """Best-effort removal of stale ``*.tmp.*`` files from SESSION_DIR.
 
@@ -193,6 +234,22 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     return p.exists()
 
 
+def _load_sidecar_for_index(path: Path):
+    """Build index metadata without entering transcript crash recovery.
+
+    Full index rebuilds run under ``_INDEX_WRITE_LOCK``.  Calling
+    ``Session.load`` there can acquire a per-session truth-rewrite lock, while
+    a concurrent truth writer holds that lock and waits for the index lock: a
+    deterministic lock-order deadlock.  The index is only a rebuildable
+    projection, so it must parse the atomically published sidecar directly and
+    leave all truth reconciliation to the startup/full-read recovery paths.
+    """
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict):
+        return None
+    return Session(**data)
+
+
 def _write_session_index(updates=None):
     """Update the session index file.
 
@@ -215,7 +272,7 @@ def _write_session_index(updates=None):
                 if p.name.startswith('_'):
                     continue
                 try:
-                    s = Session.load(p.stem)
+                    s = _load_sidecar_for_index(p)
                     if s:
                         c = s.compact()
                         sid = c.get('session_id')
@@ -687,6 +744,10 @@ class Session:
 
     @_migration_guarded_session_write
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        if getattr(self, '_deleted', False):
+            raise RuntimeError(
+                f"Refusing to save deleted session {self.session_id!r}; reload or create a new session"
+            )
         if getattr(self, '_invalidated_by_legacy_migration', False):
             raise RuntimeError(
                 f"Session {self.session_id!r} was invalidated by legacy migration; "
@@ -825,6 +886,12 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # A coordinated sidecar/state.db transcript rewrite may be interrupted
+        # by process death after only one store commits.  This is transaction
+        # crash recovery (not legacy-history migration): the durable marker
+        # contains only before/target hashes, and recovery proceeds solely when
+        # the two stores prove an unambiguous roll-forward/complete/abort state.
+        _recover_truth_rewrite_on_full_read(session)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -1440,7 +1507,10 @@ def _append_journaled_partial_output(
             if anchor_idx is None:
                 anchor_idx = ensure_assistant_anchor(created_at)
             name = str(payload.get('name') or 'tool')
-            preview = str(payload.get('preview') or '')
+            # Run journals persist only the producer-owned public summary.
+            # Raw preview/snippet/args fields are intentionally unavailable at
+            # recovery time because they can contain commands, paths or tokens.
+            preview = str(payload.get('summary') or '')
             if dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
             ):
@@ -1467,9 +1537,9 @@ def _append_journaled_partial_output(
                     continue
                 if not name or tool_call.get('name') == name:
                     tool_call['done'] = True
-                    if payload.get('preview'):
-                        tool_call['preview'] = str(payload.get('preview') or '')
-                        tool_call['snippet'] = str(payload.get('preview') or '')
+                    if payload.get('summary'):
+                        tool_call['preview'] = str(payload.get('summary') or '')
+                        tool_call['snippet'] = str(payload.get('summary') or '')
                     if payload.get('duration') is not None:
                         tool_call['duration'] = payload.get('duration')
                     tool_call['is_error'] = bool(payload.get('is_error', False))
@@ -2264,6 +2334,8 @@ def get_session(sid, metadata_only=False):
                     SESSIONS.pop(sid, None)
             cached = None
     if cached is not None:
+        if not metadata_only:
+            _recover_truth_rewrite_on_full_read(cached)
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
                 disk_session = Session.load(sid)

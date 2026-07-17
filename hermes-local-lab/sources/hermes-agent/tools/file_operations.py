@@ -674,15 +674,16 @@ class ShellFileOperations(FileOperations):
 
         target = Path(path)
         ext = target.suffix.lower()
-        pre_content: Optional[str] = None
         want_pre = ext in LINTERS_INPROC or self._lsp_handles_extension(ext)
-        if want_pre and target.exists():
+        existing_content: Optional[str] = None
+        if target.exists():
             try:
-                pre_content = target.read_text(encoding="utf-8", errors="replace")
+                existing_content = target.read_bytes().decode("utf-8", errors="replace")
             except OSError:
-                pre_content = None
+                existing_content = None
+        pre_content = existing_content if want_pre else None
 
-        original_ending = _detect_line_ending(pre_content or "")
+        original_ending = _detect_line_ending(existing_content or "")
         if original_ending == "\r\n":
             content = _normalize_line_endings(content, "\r\n")
 

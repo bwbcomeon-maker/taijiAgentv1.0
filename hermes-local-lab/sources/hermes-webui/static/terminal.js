@@ -43,10 +43,7 @@ function _terminalSessionId(){
 }
 
 function _terminalWorkspaceName(){
-  const ws=S.session&&S.session.workspace;
-  if(!ws)return '';
-  const parts=String(ws).split(/[\\/]+/).filter(Boolean);
-  return parts[parts.length-1]||ws;
+  return typeof sessionWorkspaceDisplayLabel==='function'?sessionWorkspaceDisplayLabel():'';
 }
 
 function _isTerminalCloseCommand(value){
@@ -349,12 +346,12 @@ function _setTerminalChromeState(state){
 function syncTerminalButton(){
   const {toggle}= _terminalEls();
   const currentSid=_terminalSessionId();
-  const currentWorkspace=S.session&&S.session.workspace;
+  const currentWorkspace=_terminalWorkspaceName();
   if(TERMINAL_UI.open&&TERMINAL_UI.sessionId&&(currentSid!==TERMINAL_UI.sessionId||currentWorkspace!==TERMINAL_UI.workspace)){
     closeComposerTerminal(TERMINAL_UI.sessionId);
   }
   if(!toggle)return;
-  const hasWorkspace=!!(S.session&&S.session.workspace);
+  const hasWorkspace=typeof sessionHasWorkspace==='function'&&sessionHasWorkspace();
   toggle.disabled=!hasWorkspace;
   toggle.classList.toggle('active',TERMINAL_UI.open);
   toggle.setAttribute('aria-pressed',TERMINAL_UI.open?'true':'false');
@@ -403,7 +400,7 @@ function _connectTerminalOutput(){
 
 async function _startComposerTerminal(restart=false){
   const sid=_terminalSessionId();
-  if(!sid||!(S.session&&S.session.workspace)){
+  if(!sid||!(typeof sessionHasWorkspace==='function'&&sessionHasWorkspace())){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
     syncTerminalButton();
     return;
@@ -419,7 +416,7 @@ async function _startComposerTerminal(restart=false){
     restart:!!restart,
   })});
   TERMINAL_UI.sessionId=sid;
-  TERMINAL_UI.workspace=S.session&&S.session.workspace||null;
+  TERMINAL_UI.workspace=_terminalWorkspaceName()||null;
   TERMINAL_UI.typedLine='';
   _connectTerminalOutput();
   _resizeComposerTerminal();

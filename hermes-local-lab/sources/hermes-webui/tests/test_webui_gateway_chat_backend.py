@@ -940,6 +940,42 @@ def test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text(mo
     assert "sk-runs-internal-canary" not in public_serialized
 
 
+def test_gateway_runs_short_buffered_delta_is_not_duplicated_by_completed_output(monkeypatch):
+    short_reply = "Worktree 会话已通过本地确定性模型完成并持久化。"
+
+    class StartResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return b'{"run_id":"remote-short-buffered"}'
+
+    class EventResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def __iter__(self):
+            yield f'data: {json.dumps({"event": "message.delta", "delta": short_reply})}\n\n'.encode()
+            yield f'data: {json.dumps({"event": "run.completed", "output": short_reply})}\n\n'.encode()
+
+    responses = iter([StartResponse(), EventResponse()])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(gateway_chat, "_clear_gateway_run_approvals_from_webui", lambda *_args, **_kwargs: None)
+    events = []
+
+    result = gateway_chat._stream_gateway_run_events(
+        base_url="http://gateway.local",
+        headers={},
+        body={"model": "m", "messages": [{"role": "user", "content": "q"}]},
+        session_id="sid-runs-short-buffered",
+        stream_id="stream-runs-short-buffered",
+        cancel_event=gateway_chat.threading.Event(),
+        brand_token_tail=[""],
+        put_gateway_event=lambda name, data: events.append((name, data)),
+    )
+
+    assert result["raw_final_text"] == short_reply
+    assert result["public_final_text"] == short_reply
+    assert "".join(data["text"] for name, data in events if name == "token") == short_reply
+
+
 def test_gateway_runs_collects_private_image_candidate_without_public_path(monkeypatch):
     class StartResponse:
         def __enter__(self): return self

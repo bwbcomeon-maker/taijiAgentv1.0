@@ -189,8 +189,11 @@ def test_worktree_status_endpoint_returns_session_owned_status(git_worktree, mon
 
     assert handled is True
     assert captured["status"] == 200
-    assert captured["payload"]["status"]["path"] == str(worktree.resolve())
-    assert captured["payload"]["status"]["exists"] is True
+    public_status = captured["payload"]["status"]
+    assert public_status["label"] == "status"
+    assert public_status["exists"] is True
+    assert "path" not in public_status
+    assert "upstream" not in public_status["ahead_behind"]
 
 
 def test_worktree_status_endpoint_rejects_non_worktree_session(tmp_path, monkeypatch):

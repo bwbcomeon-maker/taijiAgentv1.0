@@ -134,10 +134,20 @@ def append_run_event(
 ) -> dict:
     """Append one durable run event and fsync it according to the journal policy."""
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    payload = payload if payload is not None else {}
     event_name = str(event_name or "").strip()
     if not event_name:
         raise ValueError("event_name is required")
+    # The journal is both durable recovery state and a replayable diagnostic
+    # surface. Enforce the public event contract at the write boundary so a
+    # direct caller can never persist raw tool arguments, results, credentials,
+    # or local paths. Import lazily to keep this low-level helper independent
+    # from brand_privacy's module initialization.
+    from api.brand_privacy import public_event_projection
+
+    payload = public_event_projection(
+        payload if payload is not None else {},
+        event_name=event_name,
+    )
     with _lock_for(path):
         assigned_seq = int(seq) if seq is not None else _next_seq(path)
         terminal_state = _terminal_state_for_event(event_name, payload)

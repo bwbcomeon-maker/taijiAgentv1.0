@@ -351,7 +351,7 @@ def test_docx_template_source_path_from_text_accepts_relative_path_in_sentence()
     assert routes._docx_template_source_path_from_text("源文件在 docs/方案正文.docx") == "docs/方案正文.docx"
 
 
-def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
+def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch, tmp_path):
     from api import routes
 
     saved = []
@@ -367,10 +367,12 @@ def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
         pending_started_at=None,
         model="",
         model_provider=None,
-        save=lambda: saved.append("saved"),
+        path=tmp_path / "sid-docx.json",
+        save=lambda **_kwargs: saved.append("saved"),
     )
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason: published.append(reason))
     monkeypatch.setattr(routes, "stamp_turn_duration_on_latest_assistant", lambda *args, **kwargs: None)
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
 
     result = routes._docx_template_invocation_result("套用模板")
     routes._record_docx_non_streaming_turn_for_session(session, "套用通用方案模板", result)
@@ -385,6 +387,210 @@ def test_docx_template_non_streaming_turn_is_persisted_for_reload(monkeypatch):
     assert session.messages[1]["docx_template_selection"]["code"] == "template_selection_required"
     assert session.context_messages[-1]["content"] == "请选择要套用的模板；在选择前不会生成 JSON 或渲染 DOCX。"
     assert session.title != "Untitled"
+
+
+def test_docx_non_streaming_append_uses_session_writer_lock_and_preserves_concurrent_message(
+    monkeypatch,
+    tmp_path,
+):
+    from api import routes
+
+    session = SimpleNamespace(
+        session_id="sid-docx-lock",
+        title="Existing",
+        messages=[{"role": "user", "content": "initial"}],
+        context_messages=[{"role": "user", "content": "initial"}],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        model="",
+        model_provider=None,
+        profile=None,
+        path=tmp_path / "sid-docx-lock.json",
+    )
+    lock_state = {"active": False, "requested": False}
+
+    class InjectingWriterLock:
+        def __enter__(self):
+            lock_state["requested"] = True
+            lock_state["active"] = True
+            session.messages.append(
+                {"role": "assistant", "content": "concurrent-stream"}
+            )
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+
+    monkeypatch.setattr(
+        routes,
+        "_get_session_agent_lock",
+        lambda session_id: InjectingWriterLock(),
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+
+    def rewrite(_session, mutate, **_kwargs):
+        assert lock_state["active"] is True
+        mutate()
+
+    monkeypatch.setattr(routes, "_rewrite_existing_session_truth", rewrite)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args: None)
+    monkeypatch.setattr(routes, "stamp_turn_duration_on_latest_assistant", lambda *_args: None)
+    result = routes._docx_template_invocation_result("套用模板")
+
+    routes._record_docx_non_streaming_turn_for_session(
+        session,
+        "套用通用方案模板",
+        result,
+    )
+
+    assert lock_state["requested"] is True
+    assert [message["content"] for message in session.messages[:2]] == [
+        "initial",
+        "concurrent-stream",
+    ]
+    assert session.messages[-2]["content"] == "套用通用方案模板"
+    assert session.messages[-1]["docx_template_selection"]["code"] == "template_selection_required"
+
+
+def test_docx_non_streaming_turn_rejects_live_stream_without_mutation(monkeypatch, tmp_path):
+    from api import routes
+
+    original_messages = [{"role": "user", "content": "running"}]
+    original_context = [{"role": "user", "content": "running"}]
+    session = SimpleNamespace(
+        session_id="sid-docx-live",
+        title="Running",
+        messages=list(original_messages),
+        context_messages=list(original_context),
+        active_stream_id="stream-live",
+        pending_user_message="running",
+        pending_attachments=[{"name": "active.txt"}],
+        pending_started_at=123.0,
+        model="test-model",
+        model_provider=None,
+        profile=None,
+        path=tmp_path / "sid-docx-live.json",
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: {"stream-live"})
+    monkeypatch.setattr(
+        routes,
+        "_rewrite_existing_session_truth",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live stream must not be rewritten")
+        ),
+    )
+    result = routes._docx_template_invocation_result("套用模板")
+
+    record = routes._record_docx_non_streaming_turn_for_session(
+        session,
+        "套用通用方案模板",
+        result,
+    )
+
+    assert record["_status"] == 409
+    assert session.messages == original_messages
+    assert session.context_messages == original_context
+    assert session.active_stream_id == "stream-live"
+    assert session.pending_user_message == "running"
+    assert session.pending_attachments == [{"name": "active.txt"}]
+    assert session.pending_started_at == 123.0
+
+
+def test_chat_start_returns_http_409_when_docx_turn_races_live_stream(
+    monkeypatch,
+    tmp_path,
+):
+    from api import routes
+
+    session = SimpleNamespace(
+        session_id="sid-docx-http-live",
+        title="Running",
+        messages=[{"role": "user", "content": "running"}],
+        context_messages=[{"role": "user", "content": "running"}],
+        active_stream_id="stream-live",
+        pending_user_message="running",
+        pending_attachments=[],
+        pending_started_at=123.0,
+        model="test-model",
+        model_provider=None,
+        profile=None,
+        workspace=str(tmp_path),
+        path=tmp_path / "sid-docx-http-live.json",
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    monkeypatch.setattr(routes, "_active_stream_id_set", lambda: {"stream-live"})
+    monkeypatch.setattr(
+        routes,
+        "_docx_template_pending_source_result_for_session",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        routes,
+        "_docx_template_invocation_result_for_session",
+        lambda *_args, **_kwargs: {"message": "请选择模板"},
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: {
+            "status": status,
+            "payload": payload,
+        },
+    )
+
+    response = routes._handle_chat_start(
+        object(),
+        {"session_id": session.session_id, "message": "套用通用方案模板"},
+    )
+
+    assert response == {
+        "status": 409,
+        "payload": {
+            "error": "session already has an active stream",
+            "active_stream_id": "stream-live",
+        },
+    }
+    assert session.messages == [{"role": "user", "content": "running"}]
+
+
+def test_docx_non_streaming_turn_does_not_revive_deleted_session(monkeypatch, tmp_path):
+    from api import routes
+
+    stale = SimpleNamespace(
+        session_id="sid-docx-deleted",
+        title="Deleted",
+        messages=[{"role": "user", "content": "stale"}],
+        context_messages=[{"role": "user", "content": "stale"}],
+        active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
+        pending_started_at=None,
+        path=tmp_path / "sid-docx-deleted.json",
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _session_id: (_ for _ in ()).throw(KeyError("deleted")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_rewrite_existing_session_truth",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("deleted session must not be rewritten")
+        ),
+    )
+    result = routes._docx_template_invocation_result("套用模板")
+
+    record = routes._record_docx_non_streaming_turn_for_session(
+        stale,
+        "套用通用方案模板",
+        result,
+    )
+
+    assert record["_status"] == 404
+    assert stale.path.exists() is False
 
 
 def test_docx_engine_v2_lists_templates(monkeypatch, tmp_path):

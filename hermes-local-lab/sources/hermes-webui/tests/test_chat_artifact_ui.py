@@ -56,6 +56,7 @@ global.li=()=>'<svg aria-hidden="true"></svg>';
 def test_structured_artifact_renderer_uses_session_authorized_url_and_no_path():
     script = EXTRACTOR + r"""
 eval(extractFunc('_artifactMediaUrl'));
+eval(extractFunc('_imageRetryCta'));
 eval(extractFunc('_messageArtifactsHtml'));
 const payload=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const html=_messageArtifactsHtml(payload.message,payload.sessionId,payload.messageIndex);
@@ -104,6 +105,7 @@ process.stdout.write(JSON.stringify({url:_artifactMediaUrl('session-a','artifact
 def test_artifact_failure_and_unavailable_states_are_actionable_without_broken_img():
     script = EXTRACTOR + r"""
 eval(extractFunc('_artifactMediaUrl'));
+eval(extractFunc('_imageRetryCta'));
 eval(extractFunc('_messageArtifactsHtml'));
 const payload=JSON.parse(require('fs').readFileSync(0,'utf8'));
 process.stdout.write(JSON.stringify({html:_messageArtifactsHtml(payload.message,'session-a',5)}));
@@ -142,6 +144,252 @@ process.stdout.write(JSON.stringify({html:_messageArtifactsHtml(payload.message,
     assert "<img" not in unavailable
 
 
+def test_historical_artifact_retry_appends_original_prompt_without_truncating_messages():
+    script = EXTRACTOR + r"""
+eval(extractFunc('msgContent'));
+eval('async '+extractFunc('regenerateResponse'));
+eval(extractFunc('_imageRetryDraftBlocker'));
+eval('async '+extractFunc('retryImageArtifact'));
+const original=[
+  {role:'user',content:'请生成一张蓝色科技风图片。'},
+  {role:'assistant',content:'图片已生成',artifacts:[{artifact_id:'image-1',kind:'image',status:'ready'}]},
+  {role:'user',content:'把构图收紧一些。'},
+  {role:'assistant',content:'已经完成后续细化。'},
+];
+global.S={busy:false,session:{session_id:'session-a'},messages:JSON.parse(JSON.stringify(original))};
+const composer={value:'',focus(){this.focused=true;}};
+const apiCalls=[];
+const toasts=[];
+global.$=id=>id==='msg'?composer:null;
+global.api=async(url,options)=>{apiCalls.push({url,options});return {ok:true};};
+global.renderMessages=()=>{};
+global.autoResize=()=>{};
+global.setStatus=()=>{};
+global.showToast=(message)=>toasts.push(message);
+global.send=async()=>{
+  const text=composer.value;
+  composer.value='';
+  S.messages.push({role:'user',content:text});
+  return true;
+};
+const row={dataset:{msgIdx:'1'}};
+const button={closest:selector=>selector==='[data-msg-idx]'?row:null};
+(async()=>{
+  await retryImageArtifact(button);
+  process.stdout.write(JSON.stringify({original,messages:S.messages,apiCalls,toasts,composer}));
+})().catch(error=>{console.error(error);process.exit(1);});
+"""
+    result = _run_node(script)
+    assert result["apiCalls"] == []
+    assert result["messages"][:4] == result["original"]
+    assert result["messages"][4] == {
+        "role": "user",
+        "content": "请生成一张蓝色科技风图片。",
+    }
+    assert any("新消息" in message for message in result["toasts"])
+
+    label_script = EXTRACTOR + r"""
+global.S={messages:[
+  {role:'user',content:'图片要求'},
+  {role:'assistant',content:'图片结果'},
+  {role:'user',content:'后续要求'},
+  {role:'assistant',content:'后续结果'},
+]};
+eval(extractFunc('_artifactMediaUrl'));
+eval(extractFunc('_imageRetryCta'));
+eval(extractFunc('_messageArtifactsHtml'));
+const html=_messageArtifactsHtml({
+  role:'assistant',
+  artifacts:[{artifact_id:'image-1',kind:'image',name:'历史图片.png',status:'unavailable'}]
+},'session-a',1);
+process.stdout.write(JSON.stringify({html}));
+"""
+    rendered = _run_node(label_script)["html"]
+    assert "作为新消息重新生成" in rendered
+    assert 'aria-label="作为新消息重新生成图片"' in rendered
+
+
+def test_historical_artifact_retry_guards_busy_missing_prompt_and_send_failure():
+    script = EXTRACTOR + r"""
+eval(extractFunc('msgContent'));
+eval('async '+extractFunc('regenerateResponse'));
+eval(extractFunc('_imageRetryDraftBlocker'));
+eval('async '+extractFunc('retryImageArtifact'));
+const composer={value:'',focus(){this.focused=true;}};
+const toasts=[];
+let sendCalls=0;
+global.$=id=>id==='msg'?composer:null;
+global.api=async()=>{throw new Error('truncate must not be called');};
+global.renderMessages=()=>{};
+global.autoResize=()=>{};
+global.setStatus=()=>{};
+global.showToast=(message)=>toasts.push(message);
+const row={dataset:{msgIdx:'1'}};
+const button={closest:selector=>selector==='[data-msg-idx]'?row:null};
+(async()=>{
+  global.S={
+    busy:true,
+    session:{session_id:'session-a'},
+    messages:[
+      {role:'user',content:'图片要求'},
+      {role:'assistant',content:'图片结果'},
+      {role:'user',content:'后续要求'},
+    ],
+  };
+  global.send=async()=>{sendCalls++;return true;};
+  await retryImageArtifact(button);
+  const busy={messages:JSON.parse(JSON.stringify(S.messages)),toasts:[...toasts],sendCalls};
+
+  toasts.length=0;
+  S={
+    busy:false,
+    session:{session_id:'session-a'},
+    messages:[
+      {role:'assistant',content:'没有对应用户提示词'},
+      {role:'user',content:'后续要求'},
+    ],
+  };
+  const missingRow={dataset:{msgIdx:'0'}};
+  await retryImageArtifact({closest:selector=>selector==='[data-msg-idx]'?missingRow:null});
+  const missing={messages:JSON.parse(JSON.stringify(S.messages)),toasts:[...toasts],sendCalls};
+
+  toasts.length=0;
+  S={
+    busy:false,
+    session:{session_id:'session-a'},
+    messages:[
+      {role:'user',content:'图片要求'},
+      {role:'assistant',content:'图片结果'},
+      {role:'user',content:'后续要求'},
+      {role:'assistant',content:'后续结果'},
+    ],
+  };
+  global.send=async()=>{
+    sendCalls++;
+    const text=composer.value;
+    composer.value='';
+    S.messages.push({role:'user',content:text});
+    return false;
+  };
+  const beforeFailure=JSON.parse(JSON.stringify(S.messages));
+  await retryImageArtifact(button);
+  const failure={
+    before:beforeFailure,
+    messages:JSON.parse(JSON.stringify(S.messages)),
+    toasts:[...toasts],
+    sendCalls,
+  };
+  process.stdout.write(JSON.stringify({busy,missing,failure}));
+})().catch(error=>{console.error(error);process.exit(1);});
+"""
+    result = _run_node(script)
+    assert result["busy"]["sendCalls"] == 0
+    assert any("等待" in message for message in result["busy"]["toasts"])
+    assert result["missing"]["sendCalls"] == 0
+    assert any("原始" in message for message in result["missing"]["toasts"])
+    assert result["failure"]["messages"][:4] == result["failure"]["before"]
+    assert result["failure"]["messages"][4] == {
+        "role": "user",
+        "content": "图片要求",
+    }
+    assert any("未启动" in message for message in result["failure"]["toasts"])
+
+
+def test_historical_artifact_retry_preserves_attachment_draft_and_requires_proven_send_start():
+    script = EXTRACTOR + r"""
+eval(extractFunc('msgContent'));
+eval('async '+extractFunc('regenerateResponse'));
+eval(extractFunc('_imageRetryDraftBlocker'));
+eval('async '+extractFunc('retryImageArtifact'));
+const composer={value:'',focus(){this.focused=true;}};
+const toasts=[];
+let sendCalls=0;
+global.$=id=>id==='msg'?composer:null;
+global.api=async()=>{throw new Error('truncate must not be called');};
+global.renderMessages=()=>{};
+global.autoResize=()=>{};
+global.setStatus=()=>{};
+global.showToast=(message)=>toasts.push(message);
+const row={dataset:{msgIdx:'1'}};
+const button={closest:selector=>selector==='[data-msg-idx]'?row:null};
+const messages=[
+  {role:'user',content:'图片要求'},
+  {role:'assistant',content:'图片结果'},
+  {role:'user',content:'后续要求'},
+  {role:'assistant',content:'后续结果'},
+];
+(async()=>{
+  global.S={
+    busy:false,
+    session:{session_id:'session-a'},
+    messages:JSON.parse(JSON.stringify(messages)),
+    pendingFiles:[{name:'草稿附件.png',token:'attachment-draft'}],
+  };
+  global.send=async()=>{sendCalls++;return true;};
+  const attachmentsBefore=JSON.parse(JSON.stringify(S.pendingFiles));
+  const pendingAccepted=await retryImageArtifact(button);
+  const pending={
+    accepted:pendingAccepted,
+    sendCalls,
+    composerValue:composer.value,
+    attachmentsBefore,
+    attachmentsAfter:JSON.parse(JSON.stringify(S.pendingFiles)),
+    toasts:[...toasts],
+  };
+
+  toasts.length=0;
+  composer.value='';
+  S={
+    busy:false,
+    session:{session_id:'session-a'},
+    messages:JSON.parse(JSON.stringify(messages)),
+    pendingFiles:[],
+  };
+  global.send=async()=>{sendCalls++;return undefined;};
+  const undefinedAccepted=await retryImageArtifact(button);
+  const undefinedResult={
+    accepted:undefinedAccepted,
+    sendCalls,
+    composerValue:composer.value,
+    toasts:[...toasts],
+  };
+  process.stdout.write(JSON.stringify({pending,undefinedResult}));
+})().catch(error=>{console.error(error);process.exit(1);});
+"""
+    result = _run_node(script)
+    assert result["pending"]["accepted"] is False
+    assert result["pending"]["sendCalls"] == 0
+    assert result["pending"]["composerValue"] == ""
+    assert result["pending"]["attachmentsAfter"] == result["pending"]["attachmentsBefore"]
+    assert any("附件" in message for message in result["pending"]["toasts"])
+
+    assert result["undefinedResult"]["accepted"] is False
+    assert result["undefinedResult"]["sendCalls"] == 1
+    assert result["undefinedResult"]["composerValue"] == "图片要求"
+    assert not any("已将" in message for message in result["undefinedResult"]["toasts"])
+    assert any("未启动" in message for message in result["undefinedResult"]["toasts"])
+
+
+def test_historical_image_generation_failure_labels_retry_as_a_new_message():
+    script = EXTRACTOR + r"""
+eval(extractFunc('_imageRetryCta'));
+eval(extractFunc('_imageGenerationStatusHtml'));
+eval(extractFunc('_historyImageGenerationStatusHtml'));
+const html=_historyImageGenerationStatusHtml({},[{
+  name:'image_generate',
+  status:'failed',
+  done:true,
+  is_error:true,
+  summary:'图片未能安全保存',
+  tid:'historical-image-failure'
+}],{historical:true});
+process.stdout.write(JSON.stringify({html}));
+"""
+    rendered = _run_node(script)["html"]
+    assert "作为新消息重新生成" in rendered
+    assert 'aria-label="作为新消息重新生成图片"' in rendered
+
+
 def test_artifacts_make_assistant_message_visible_and_part_of_render_cache_signature():
     script = EXTRACTOR + r"""
 global._isRecoveryControlMessage=()=>false;
@@ -168,6 +416,7 @@ process.stdout.write(JSON.stringify({visible:_assistantMessageHasVisibleContent(
 
 def test_image_generation_status_renderer_covers_loading_success_failure_cancel_timeout():
     script = EXTRACTOR + r"""
+eval(extractFunc('_imageRetryCta'));
 eval(extractFunc('_imageGenerationStatusHtml'));
 const payload=JSON.parse(require('fs').readFileSync(0,'utf8'));
 process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(payload).map(([key,value])=>[key,_imageGenerationStatusHtml(value)]))));
@@ -240,6 +489,7 @@ def test_terminal_image_state_is_promoted_to_safe_message_state_before_live_clea
 
 def test_promoted_terminal_image_event_is_whitelisted_and_renderable_without_tool_payload():
     script = EXTRACTOR + r"""
+eval(extractFunc('_imageRetryCta'));
 eval(extractFunc('_imageGenerationStatusHtml'));
 eval(extractFunc('_historyImageGenerationStatusHtml'));
 eval(extractFunc('_attachImageGenerationTerminalEvents'));
@@ -340,6 +590,7 @@ def test_transient_terminal_image_message_is_dropped_before_the_next_user_turn()
 
 def test_replayed_image_tool_state_survives_refresh_without_overriding_ready_artifact():
     script = EXTRACTOR + r"""
+eval(extractFunc('_imageRetryCta'));
 eval(extractFunc('_imageGenerationStatusHtml'));
 eval(extractFunc('_historyImageGenerationStatusHtml'));
 const payload=JSON.parse(require('fs').readFileSync(0,'utf8'));
@@ -423,6 +674,61 @@ def test_image_load_error_scroll_and_responsive_contracts():
     assert ".chat-artifact-card" in css
     assert "min-height:44px" in css
     assert "prefers-reduced-motion" in css
+
+
+def test_dynamic_historical_image_load_error_uses_new_message_retry_action():
+    script = EXTRACTOR + r"""
+class ClassList{
+  constructor(values=[]){this.values=new Set(values);}
+  contains(value){return this.values.has(value);}
+  add(value){this.values.add(value);}
+}
+class El{
+  constructor(tag){
+    this.tagName=String(tag||'div').toUpperCase();
+    this.children=[];
+    this.attributes={};
+    this.className='';
+    this.classList=new ClassList();
+    this.textContent='';
+    this.dataset={};
+  }
+  setAttribute(key,value){this.attributes[key]=String(value);}
+  replaceChildren(...children){this.children=children;}
+  closest(selector){
+    if(selector==='[data-msg-idx]')return this.row||null;
+    return null;
+  }
+}
+global.S={messages:[
+  {role:'user',content:'请生成一张历史蓝色科技图。'},
+  {role:'assistant',content:'历史图片'},
+  {role:'user',content:'后续要求一'},
+  {role:'assistant',content:'后续回复一'},
+  {role:'user',content:'后续要求二'},
+  {role:'assistant',content:'后续回复二'},
+]};
+global.document={createElement:tag=>new El(tag)};
+global.retryImageArtifact=()=>{};
+eval(extractFunc('_imageRetryCta'));
+eval(extractFunc('_handleChatArtifactImageError'));
+const row={dataset:{msgIdx:'1'}};
+const card=new El('section');card.row=row;
+const img=new El('img');
+img.classList=new ClassList(['chat-artifact-image']);
+img.closest=selector=>selector==='.chat-artifact-card'?card:null;
+_handleChatArtifactImageError({target:img});
+const retry=card.children[2];
+process.stdout.write(JSON.stringify({
+  text:retry&&retry.textContent,
+  ariaLabel:retry&&retry.attributes['aria-label'],
+}));
+"""
+    result = _run_node(script)
+    assert result == {
+        "text": "作为新消息重新生成",
+        "ariaLabel": "作为新消息重新生成图片",
+    }
 
 
 def test_clear_confirmation_mentions_seven_day_artifact_recovery():

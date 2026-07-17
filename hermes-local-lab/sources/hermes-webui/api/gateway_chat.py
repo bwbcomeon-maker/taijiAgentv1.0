@@ -673,7 +673,6 @@ def _stream_gateway_run_events(
                 raw_output = str(payload.get("output") or "").strip()
                 if raw_output and not raw_final_text:
                     raw_final_text = raw_output
-                if raw_output and not public_final_text:
                     public_final_text = str(
                         public_egress_scrub(raw_output, surface="gateway_done_output")
                     ).strip()

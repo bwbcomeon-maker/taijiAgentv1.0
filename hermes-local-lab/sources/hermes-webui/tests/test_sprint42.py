@@ -226,6 +226,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         fake_hermes_cli.runtime_provider = fake_runtime_module
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=fake_session_db)
+        fake_hermes_state.install_state_write_guard = mock.Mock(return_value=None)
 
         with mock.patch.object(streaming, "get_session", return_value=fake_session), \
              mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
@@ -368,6 +369,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         fake_hermes_cli.runtime_provider = fake_rt_module
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+        fake_hermes_state.install_state_write_guard = mock.Mock(return_value=None)
 
         fake_session = FakeSession()
         fake_session.active_stream_id = fake_stream_id
@@ -519,6 +521,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         fake_hermes_cli.runtime_provider = fake_rt_module
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+        fake_hermes_state.install_state_write_guard = mock.Mock(return_value=None)
 
         fake_session = FakeSession()
         fake_session.active_stream_id = fake_stream_id
@@ -774,12 +777,31 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
 def test_routes_restores_prior_reasoning_metadata_after_followup():
     """The non-streaming route path must preserve prior reasoning metadata too."""
     src = (REPO / 'api' / 'routes.py').read_text()
-    assert "_restore_reasoning_metadata" in src, \
-        "routes.py must import reasoning metadata restoration helper"
-    assert "_next_context_messages" in src and "s.context_messages" in src, \
-        "routes.py must restore prior reasoning metadata into model context"
-    assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
-        "routes.py must merge restored result messages into the visible transcript"
+    handler_start = src.index("def _handle_chat_sync(")
+    handler_end = src.index("\ndef _handle_cron_create", handler_start)
+    handler = src[handler_start:handler_end]
+
+    context_restore = handler.index(
+        "_next_context_messages = _restore_reasoning_metadata("
+    )
+    display_merge = handler.index(
+        "_next_display_messages = _merge_display_messages_after_agent_result("
+    )
+    display_reasoning_restore = handler.index(
+        "_restore_display_reasoning_metadata(",
+        display_merge,
+    )
+    mutation_start = handler.index("def _append_sync_completed_turn():", display_merge)
+    mutation_end = handler.index("_rewrite_existing_session_truth(", mutation_start)
+    mutation = handler[mutation_start:mutation_end]
+
+    assert context_restore < display_merge < display_reasoning_restore < mutation_start
+    assert "s.context_messages = _next_context_messages" in mutation
+    assert "s.messages = _next_display_messages" in mutation
+    assert "_merge_display_messages_after_agent_result(" not in mutation
+    rewrite = handler[mutation_end:]
+    assert "_append_sync_completed_turn," in rewrite
+    assert "rollback_snapshot=sync_snapshot" in rewrite
 
 
 class TestCredentialPoolBackwardCompat(unittest.TestCase):
@@ -862,6 +884,7 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
         fake_hermes_cli.runtime_provider = fake_rt_module
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=None)
+        fake_hermes_state.install_state_write_guard = mock.Mock(return_value=None)
 
         fake_session = FakeSession()
         fake_session.active_stream_id = fake_stream_id

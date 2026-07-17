@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from api.run_journal import (
     RunJournalWriter,
     append_run_event,
@@ -8,6 +10,116 @@ from api.run_journal import (
     read_run_events,
     stale_interrupted_event,
 )
+
+
+@pytest.mark.parametrize(
+    ("event_name", "use_writer"),
+    [
+        ("tool_complete", False),
+        ("tool.started", True),
+    ],
+)
+def test_run_journal_write_boundary_projects_tool_payloads(
+    tmp_path,
+    event_name,
+    use_writer,
+):
+    canary = "sk-run-journal-canary-1234567890"
+    absolute_path = "/Users/probe/private/input.txt"
+    payload = {
+        "name": "image_generate",
+        "status": "completed",
+        "summary": "图片生成完成",
+        "args": {"path": absolute_path, "token": canary},
+        "result": {"path": absolute_path, "token": canary},
+        "token": canary,
+        "path": absolute_path,
+    }
+
+    if use_writer:
+        event = RunJournalWriter(
+            "session_projection",
+            "run_projection",
+            session_dir=tmp_path,
+        ).append_sse_event(event_name, payload)
+    else:
+        event = append_run_event(
+            "session_projection",
+            "run_projection",
+            event_name,
+            payload,
+            session_dir=tmp_path,
+        )
+
+    raw = (
+        tmp_path
+        / "_run_journal"
+        / "session_projection"
+        / "run_projection.jsonl"
+    ).read_text("utf-8")
+    for forbidden in ("args", "result", "token", canary, absolute_path):
+        assert forbidden not in raw
+    assert event["payload"] == {
+        "event_type": (
+            "tool.completed" if event_name == "tool_complete" else "tool.started"
+        ),
+        "name": "image_generate",
+        "status": "completed",
+        "summary": "图片生成完成",
+    }
+
+
+def test_run_journal_submitted_projection_preserves_recovery_identity_only(tmp_path):
+    canary = "sk-run-journal-canary-1234567890"
+    absolute_path = "/Users/probe/private/input.txt"
+
+    event = append_run_event(
+        "session_submitted",
+        "run_submitted",
+        "submitted",
+        {
+            "source": "expert-team",
+            "turn_id": "turn-submitted",
+            "idempotency_key": "expert-team:start:submitted",
+            "expert_team_run_id": "expert-run-1",
+            "stage_id": "stage-1",
+            "attempt": 2,
+            "execution_start_id": "execution-start-1",
+            "message": f"恢复 {absolute_path}",
+            "args": {"path": absolute_path, "token": canary},
+            "result": canary,
+            "token": canary,
+            "path": absolute_path,
+        },
+        session_dir=tmp_path,
+    )
+
+    expected = {
+        "source": "expert-team",
+        "turn_id": "turn-submitted",
+        "idempotency_key": "expert-team:start:submitted",
+        "expert_team_run_id": "expert-run-1",
+        "stage_id": "stage-1",
+        "attempt": 2,
+        "execution_start_id": "execution-start-1",
+    }
+    assert event["payload"] == expected
+    stored = read_run_events(
+        "session_submitted",
+        "run_submitted",
+        session_dir=tmp_path,
+    )["events"][0]
+    assert stored["payload"] == expected
+    raw = json.dumps(stored, ensure_ascii=False)
+    for forbidden in (
+        "args",
+        "result",
+        "token",
+        "message",
+        canary,
+        absolute_path,
+    ):
+        assert forbidden not in raw
 
 
 def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):

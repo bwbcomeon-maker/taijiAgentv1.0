@@ -76,14 +76,14 @@ class TestStreamingAuthErrorDetection:
             "'unauthorized' not in auth error detection block"
         )
 
-    def test_auth_error_hint_mentions_hermes_model(self):
-        """The auth_mismatch hint must mention 'hermes model' command."""
+    def test_auth_error_hint_mentions_taiji_agent_model(self):
+        """The auth_mismatch hint must mention the product CLI command."""
         src = _read("api/streaming.py")
         # Find the auth_mismatch apperror block
         idx = src.find("auth_mismatch")
         block = src[idx:idx + 500]
-        assert "hermes model" in block, (
-            "auth_mismatch hint must mention 'hermes model' command "
+        assert "taiji Agent model" in block, (
+            "auth_mismatch hint must mention 'taiji Agent model' command "
             "so users know how to fix provider mismatch"
         )
 
@@ -884,6 +884,7 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     import contextlib
     import io
     import json
+    import api.legacy_session_migration as migration
     import api.routes as routes
 
     monkeypatch.setattr(
@@ -926,16 +927,19 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
                 }
             )
 
-    captured_thread = {}
+    captured_worker = {}
 
-    class FakeThread:
-        def __init__(self, target, args=(), kwargs=None, daemon=None):
-            captured_thread.update(
-                {"target": target, "args": args, "kwargs": kwargs or {}, "daemon": daemon}
-            )
-
-        def start(self):
-            captured_thread["started"] = True
+    def fake_start_worker(target, args=(), kwargs=None, daemon=True, name=None):
+        captured_worker.update(
+            {
+                "target": target,
+                "args": args,
+                "kwargs": kwargs or {},
+                "daemon": daemon,
+                "name": name,
+            }
+        )
+        return object()
 
     class FakeHandler:
         def __init__(self):
@@ -958,7 +962,11 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
-    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        migration,
+        "start_legacy_migration_guarded_worker",
+        fake_start_worker,
+    )
 
     handler = FakeHandler()
     routes._handle_chat_start(
@@ -972,8 +980,8 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     assert payload["effective_model_provider"] == "openai-codex"
     assert session.model == "gpt-5.5"
     assert session.model_provider == "openai-codex"
-    assert captured_thread["args"][2] == "gpt-5.5"
-    assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
+    assert captured_worker["args"][2] == "gpt-5.5"
+    assert captured_worker["kwargs"]["model_provider"] == "openai-codex"
     assert save_calls[-1]["model_provider"] == "openai-codex"
 
 

@@ -162,9 +162,10 @@ def _discover_python(agent_dir) -> str:
     if os.getenv('HERMES_WEBUI_PYTHON'):
         return os.getenv('HERMES_WEBUI_PYTHON')
     if agent_dir:
-        venv_py = agent_dir / 'venv' / 'bin' / 'python'
-        if venv_py.exists():
-            return str(venv_py)
+        for venv_name in ('.venv', 'venv'):
+            venv_py = agent_dir / venv_name / 'bin' / 'python'
+            if venv_py.exists():
+                return str(venv_py)
     local_venv = REPO_ROOT / '.venv' / 'bin' / 'python'
     if local_venv.exists():
         return str(local_venv)

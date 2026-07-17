@@ -4980,18 +4980,22 @@ function getWorkspaceFriendlyName(path){
 }
 
 function syncWorkspaceDisplays(){
-  const hasSession=!!(S.session&&S.session.workspace);
+  const hasSession=typeof sessionHasWorkspace==='function'&&sessionHasWorkspace();
+  const isWorktree=!!(S.session&&S.session.is_worktree);
   // Fall back to the profile default workspace when no session is active yet.
   // S._profileDefaultWorkspace is set during boot and profile switches from /api/settings.
   const defaultWs=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
-  const ws=hasSession?S.session.workspace:(defaultWs||'');
-  const hasWorkspace=!!(ws);
-  const label=hasWorkspace?getWorkspaceFriendlyName(ws):t('no_workspace');
+  const ws=hasSession&&!isWorktree?S.session.workspace:(hasSession?'':(defaultWs||''));
+  const hasWorkspace=hasSession||!!ws;
+  const label=isWorktree&&typeof sessionWorkspaceDisplayLabel==='function'
+    ?sessionWorkspaceDisplayLabel()
+    :(hasWorkspace?getWorkspaceFriendlyName(ws):t('no_workspace'));
+  const publicWorkspaceHint=isWorktree?label:ws;
 
   const sidebarName=$('sidebarWsName');
   const sidebarPath=$('sidebarWsPath');
   if(sidebarName) sidebarName.textContent=label;
-  if(sidebarPath) sidebarPath.textContent=ws;
+  if(sidebarPath) sidebarPath.textContent=isWorktree?'':ws;
 
   const composerChip=$('composerWorkspaceChip');
   const composerLabel=$('composerWorkspaceLabel');
@@ -5004,13 +5008,14 @@ function syncWorkspaceDisplays(){
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
   if(composerChip){
-    composerChip.disabled=!hasWorkspace;
-    composerChip.title=hasWorkspace?ws:t('no_workspace');
+    composerChip.disabled=isWorktree||!hasWorkspace;
+    composerChip.title=hasWorkspace?publicWorkspaceHint:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
     composerChip.setAttribute('aria-expanded',composerDropdown&&composerDropdown.classList.contains('open')?'true':'false');
   }
   if(mobileAction){
-    mobileAction.title=hasWorkspace?ws:t('no_workspace');
+    mobileAction.title=hasWorkspace?publicWorkspaceHint:t('no_workspace');
+    mobileAction.setAttribute('aria-disabled',isWorktree?'true':'false');
     mobileAction.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
   }
 }
@@ -5177,6 +5182,7 @@ function toggleComposerWsDropdown(){
     closeWsDropdown();
     return;
   }
+  if(S.session&&S.session.is_worktree)return;
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');

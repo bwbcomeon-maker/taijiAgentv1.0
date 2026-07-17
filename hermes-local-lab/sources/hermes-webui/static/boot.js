@@ -1347,7 +1347,7 @@ $('btnApplyLegacyMigration').onclick=async()=>{
   if(status)status.textContent='正在备份并修复…';
   try{
     const applied=await api('/api/session/migration/apply',{
-      method:'POST',body:JSON.stringify({confirm:true})
+      method:'POST',body:JSON.stringify({confirm:true}),timeoutMs:35000
     });
     await renderSessionList();
     const fresh=await loadLegacyMigrationAudit();
@@ -1357,7 +1357,10 @@ $('btnApplyLegacyMigration').onclick=async()=>{
     const outcome=report.apply_outcome;
     showToast(outcome.toast,outcome.kind==='error'?20000:5000,outcome.toast_type);
   }catch(error){
-    const message=`修复失败：${error.message||error}`;
+    const busy=error&&error.payload&&error.payload.code==='migration_state_busy';
+    const message=busy
+      ?'修复暂时无法开始：当前仍有会话任务正在收尾，请稍后重试。'
+      :`修复失败：${error.message||error}`;
     if(status)status.textContent=message;
     showToast(message,20000,'error');
   }finally{
@@ -2238,7 +2241,7 @@ function applyBotName(){
       // the panel via toolbar X doesn't suppress the "keep open" setting.
       const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
         || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-      if(S.session&&S.session.workspace&&panelPref&&!_isCompactWorkspaceViewport()){
+      if(typeof sessionHasWorkspace==='function'&&sessionHasWorkspace()&&panelPref&&!_isCompactWorkspaceViewport()){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;

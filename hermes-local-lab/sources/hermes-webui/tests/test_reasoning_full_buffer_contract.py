@@ -164,6 +164,7 @@ def test_standard_stream_buffers_reasoning_and_tool_reasoning_until_completion(
     setattr(hermes_cli, "runtime_provider", runtime_module)
     hermes_state = types.ModuleType("hermes_state")
     setattr(hermes_state, "SessionDB", mock.Mock(return_value=None))
+    setattr(hermes_state, "install_state_write_guard", mock.Mock(return_value=None))
     injected = {
         "hermes_cli": hermes_cli,
         "hermes_cli.runtime_provider": runtime_module,

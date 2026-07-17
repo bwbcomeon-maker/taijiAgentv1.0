@@ -108,7 +108,8 @@ def test_duplicate_creates_independent_session():
     # corrected deepcopy form added May 2 2026).
     assert 'messages=session.messages' in endpoint_code or \
            'messages=copy.deepcopy(session.messages)' in endpoint_code or \
-           'messages=copied_session.messages' in endpoint_code, \
+           'messages=copied_session.messages' in endpoint_code or \
+           'messages=copied_messages' in endpoint_code, \
         "Messages should be copied to duplicate"
 
     # Verify that title includes (copy)
@@ -156,7 +157,8 @@ def test_duplicate_session_copies_messages_logic():
     # plain assignment (insufficient — see test_duplicate_runtime_messages_independence)
     # or the proper deepcopy form (the May 2 2026 fix).
     assert 'messages=session.messages' in endpoint_code or \
-           'messages=copy.deepcopy(session.messages)' in endpoint_code, \
+           'messages=copy.deepcopy(session.messages)' in endpoint_code or \
+           'messages=copied_messages' in endpoint_code, \
         f"Messages should be copied from original. Got: {endpoint_code}"
 
 
@@ -214,7 +216,7 @@ def test_duplicate_session_copies_all_session_properties():
     assert session_construction_start != -1, "Should construct copied_session"
 
     # Get the construction block
-    construction_block = endpoint_code[session_construction_start:session_construction_start+1600]
+    construction_block = endpoint_code[session_construction_start:session_construction_start+4000]
 
     # Verify all key properties are copied
     # `title` accepts either the original `title=session.title` or the
@@ -236,7 +238,8 @@ def test_duplicate_session_copies_all_session_properties():
 
     # `messages` accepts either the plain assignment or the deepcopy form (May 2 2026 fix).
     assert 'messages=session.messages' in construction_block or \
-           'messages=copy.deepcopy(session.messages)' in construction_block, \
+           'messages=copy.deepcopy(session.messages)' in construction_block or \
+           'messages=copied_messages' in construction_block, \
         f"messages must be copied (plain or deepcopy form). Got: {construction_block[:300]}"
 
 
@@ -265,7 +268,7 @@ def test_duplicate_uses_deepcopy_for_messages():
 
 
 def test_duplicate_explicitly_persists_to_disk():
-    """The duplicate must call .save() — otherwise it vanishes on refresh.
+    """The duplicate must use the coordinated persistence helper.
 
     Static-grep regression test: pre-fix, the new endpoint never persisted
     the duplicate to disk. The session sat in SESSIONS only until the user
@@ -278,8 +281,8 @@ def test_duplicate_explicitly_persists_to_disk():
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
     endpoint_code = '\n'.join(lines[:80])
-    assert 'copied_session.save()' in endpoint_code, \
-        "duplicate must call .save() explicitly — without it the copy vanishes on refresh"
+    assert '_persist_new_session_truth(copied_session)' in endpoint_code, \
+        "duplicate must persist both sidecar and state.db truth before publishing"
 
 
 def test_duplicate_resets_pinned_and_archived():

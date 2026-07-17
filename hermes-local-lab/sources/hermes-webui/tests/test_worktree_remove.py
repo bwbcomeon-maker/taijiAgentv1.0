@@ -303,8 +303,7 @@ def test_remove_worktree_route_succeeds(tmp_path, monkeypatch):
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/worktree/remove")) is True
     assert captured["status"] == 200
-    assert captured["payload"]["ok"] is True
-    assert captured["payload"]["removed_path"] == str(wt_path.resolve())
+    assert captured["payload"] == {"ok": True, "removed": True, "warnings": []}
     assert not wt_path.exists()
 
 

@@ -147,6 +147,7 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
     fake_hermes_cli.runtime_provider = fake_runtime_module
     fake_hermes_state = types.ModuleType("hermes_state")
     fake_hermes_state.SessionDB = lambda: None
+    fake_hermes_state.install_state_write_guard = lambda _guard: None
 
     def home_for_profile(profile_name):
         return {"alpha": profile_a_home, "beta": profile_b_home}[profile_name]

@@ -354,7 +354,10 @@ def test_clear_session_evicts_outside_session_lock():
     outside_section = route_block[lock_end:]
 
     assert "_evict_session_agent" not in locked_section
-    assert "s.save()" in locked_section
+    assert "_rewrite_existing_session_truth" in locked_section
+    helper_start = src.index("def _rewrite_existing_session_truth")
+    helper_end = src.index("\ndef _persist_new_session_truth", helper_start)
+    assert "session.save(skip_index=True)" in src[helper_start:helper_end]
     assert "_evict_session_agent(sid)" in outside_section
     assert "provider" in outside_section and "I/O" in outside_section
 

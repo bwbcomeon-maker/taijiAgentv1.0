@@ -455,6 +455,7 @@ def test_get_config_reloads_when_request_profile_changes(tmp_path, monkeypatch):
 
 def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
     """An empty session created under profile A can be sent under profile B after a switch."""
+    import api.legacy_session_migration as migration
     import api.routes as routes
 
     class FakeSession:
@@ -489,14 +490,15 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
 
     started_threads = []
 
-    class FakeThread:
-        def __init__(self, *args, **kwargs):
-            started_threads.append((args, kwargs))
+    def fake_start_worker(*args, **kwargs):
+        started_threads.append((args, kwargs))
+        return object()
 
-        def start(self):
-            pass
-
-    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        migration,
+        "start_legacy_migration_guarded_worker",
+        fake_start_worker,
+    )
 
     payloads = []
 
@@ -527,6 +529,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
 
 def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
     """Profile retagging is limited to empty placeholder sessions."""
+    import api.legacy_session_migration as migration
     import api.routes as routes
 
     class FakeSession:
@@ -559,14 +562,11 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
 
-    class FakeThread:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        migration,
+        "start_legacy_migration_guarded_worker",
+        lambda *args, **kwargs: object(),
+    )
     monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: payload)
 
     routes._handle_chat_start(

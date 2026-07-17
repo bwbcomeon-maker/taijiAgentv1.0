@@ -192,8 +192,10 @@ class TestRevealFailedTostIncludesPath:
         assert m, "_handle_file_reveal not found"
         body = m.group(0)
         # The bad() call for not-exists must include the path.
-        assert 'f"File not found: {target}"' in body, (
-            "Reveal handler must include the resolved path in the 404 message."
+        assert 'missing = body["path"] if _is_worktree_backed_session(s) else target' in body
+        assert 'f"File not found: {missing}"' in body, (
+            "Reveal handler must include the resolved path for ordinary sessions "
+            "without exposing generated Worktree paths."
         )
         # And NOT the bare unhelpful message.
         # (We allow the substring 'File not found' because the new f-string

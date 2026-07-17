@@ -4,6 +4,8 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from api.models import Session, reconciled_state_db_messages_for_session, state_db_delta_after_context
 
 from api.streaming import (
@@ -639,6 +641,90 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
         {"role": "assistant", "content": "short answer"},
     ]
     assert reloaded.context_messages.count(previous_context[0]) == 1
+
+
+@pytest.mark.parametrize("failure_stage", ["provider", "state_db"])
+def test_handle_chat_sync_normal_failure_restores_exact_session_truth(
+    failure_stage,
+    tmp_path,
+    monkeypatch,
+):
+    """Neither provider nor second-store failure may leave a half-applied turn."""
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "get_session", models.get_session)
+    monkeypatch.setattr(routes, "title_from", models.title_from)
+    monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "load_settings", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+
+    original_messages = [
+        {"role": "user", "content": "original question"},
+        {"role": "assistant", "content": "original answer"},
+    ]
+    session = Session(
+        session_id=f"sync_chat_failure_{failure_stage}",
+        title="Existing title",
+        workspace=str(tmp_path),
+        messages=list(original_messages),
+        context_messages=list(original_messages),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    session.save(touch_updated_at=False)
+    before = routes._snapshot_session_truth(session)
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, **_kwargs):
+            if failure_stage == "provider":
+                raise RuntimeError("injected provider failure")
+            return {
+                "messages": original_messages + [
+                    {"role": "user", "content": "follow-up"},
+                    {"role": "assistant", "content": "new answer"},
+                ],
+                "final_response": "new answer",
+                "completed": True,
+            }
+
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=FakeAgent))
+    if failure_stage == "state_db":
+        monkeypatch.setattr(
+            routes,
+            "_replace_state_db_truth",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("injected state.db failure")
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="injected"):
+        routes._handle_chat_sync(
+            _FakePostHandler(),
+            {
+                "session_id": session.session_id,
+                "message": "follow-up",
+                "workspace": str(tmp_path),
+            },
+        )
+
+    assert routes._snapshot_session_truth(session) == before
+    reloaded = Session.load(session.session_id)
+    assert reloaded.messages == original_messages
+    assert reloaded.context_messages == original_messages
+    assert reloaded.title == "Existing title"
 
 
 def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_path):

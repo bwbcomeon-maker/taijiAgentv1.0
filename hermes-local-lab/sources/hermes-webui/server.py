@@ -643,6 +643,40 @@ def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
     )
 
 
+def _recover_orphan_truth_rewrites_on_startup() -> None:
+    """Resolve only provably uncommitted markers before serving requests.
+
+    This is a fail-closed startup gate.  The HTTP server must not be created
+    while any durable truth-rewrite intent remains unresolved, or when the scan
+    itself cannot prove that the durable state is safe.  Only stable reason
+    codes and aggregate counts are emitted so recovery errors cannot disclose
+    session ids, paths, message text, or database details.
+    """
+    from api.truth_rewrite import recover_orphan_truth_rewrite_intents
+
+    try:
+        truth_recovery = recover_orphan_truth_rewrite_intents(SESSION_DIR)
+    except Exception:
+        print("[recovery] truth_rewrite_recovery_failed", flush=True)
+        raise RuntimeError("truth_rewrite_recovery_failed") from None
+    recovered_statuses = {"orphan_aborted", "existing_recovered"}
+    recovered = sum(
+        item.get("status") in recovered_statuses for item in truth_recovery
+    )
+    blocked = len(truth_recovery) - recovered
+    if recovered:
+        print(
+            f"[recovery] Resolved {recovered} session rewrite intents.",
+            flush=True,
+        )
+    if blocked:
+        print(
+            f"[recovery] truth_rewrite_recovery_blocked count={blocked}",
+            flush=True,
+        )
+        raise RuntimeError("truth_rewrite_recovery_blocked")
+
+
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
@@ -663,6 +697,16 @@ def main() -> None:
 
     # Fix sensitive file permissions before doing anything else
     fix_credential_permissions()
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+    # A durable truth-rewrite intent outranks the generic message-count backup
+    # heuristic.  Recover it first: if state.db already committed an authorized
+    # retry/undo/truncate, restoring the longer .bak beforehand would replace
+    # the target sidecar and turn a provable recovery into divergence.
+    _recover_orphan_truth_rewrites_on_startup()
 
     # ── #1558 startup self-heal ─────────────────────────────────────────
     # If a previous process wrote a session JSON with fewer messages than
@@ -743,10 +787,6 @@ def main() -> None:
             print('     Agent features may not work correctly.', flush=True)
         else:
             print('[ok] Agent dependencies installed successfully.', flush=True)
-
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     # Start the gateway session watcher for real-time SSE updates
     try:

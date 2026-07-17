@@ -30,11 +30,11 @@ def _make_cli_stub():
 
 
 class TestCliSkinPromptIntegration:
-    def test_default_prompt_fragments_use_default_symbol(self):
+    def test_default_prompt_fragments_use_taiji_product_symbol(self):
         cli = _make_cli_stub()
 
         set_active_skin("default")
-        assert cli._get_tui_prompt_fragments() == [("class:prompt", "❯ ")]
+        assert cli._get_tui_prompt_fragments() == [("class:prompt", "taiji-agent> ")]
 
     def test_ares_prompt_fragments_use_skin_symbol(self):
         cli = _make_cli_stub()

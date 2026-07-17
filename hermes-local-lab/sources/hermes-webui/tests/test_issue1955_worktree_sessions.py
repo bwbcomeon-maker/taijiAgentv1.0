@@ -182,9 +182,14 @@ def test_session_new_route_creates_worktree_backed_session(tmp_path, monkeypatch
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/new")) is True
     assert captured["status"] == 200
     session = captured["payload"]["session"]
-    assert session["workspace"] == str(worktree.resolve())
-    assert session["worktree_path"] == str(worktree.resolve())
-    assert session["worktree_branch"] == "hermes/hermes-route"
+    assert "workspace" not in session
+    assert session["is_worktree"] is True
+    assert session["worktree_branch"] == "route"
+    assert session["worktree_label"] == "route"
+    assert "worktree_path" not in session
+    stored = routes.get_session(session["session_id"])
+    assert stored.worktree_path == str(worktree.resolve())
+    assert stored.worktree_branch == "hermes/hermes-route"
 
 
 def test_session_new_worktree_fallback_workspace_is_resolved(tmp_path, monkeypatch):
@@ -238,4 +243,8 @@ def test_session_new_worktree_fallback_workspace_is_resolved(tmp_path, monkeypat
     assert seen["resolved"] == [str(repo)]
     assert captured["status"] == 200
     session = captured["payload"]["session"]
-    assert session["workspace"] == str(worktree.resolve())
+    assert "workspace" not in session
+    assert session["is_worktree"] is True
+    assert session["worktree_branch"] == "route"
+    assert session["worktree_label"] == "route"
+    assert "worktree_path" not in session

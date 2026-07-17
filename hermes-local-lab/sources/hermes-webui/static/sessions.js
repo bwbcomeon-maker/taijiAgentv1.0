@@ -1960,12 +1960,16 @@ function _pinnedSessionsLimitMessage(){
 function _worktreeSessionCount(ids){
   return (ids||[]).reduce((count,sid)=>{
     const session=_sessionSnapshotById(sid);
-    return count+(session&&session.worktree_path?1:0);
+    return count+(session&&session.is_worktree?1:0);
   },0);
+}
+function _sessionWorktreeLabel(session){
+  if(!session)return t('session_worktree_badge');
+  return session.worktree_label||session.worktree_branch||t('session_worktree_badge');
 }
 function _sessionResponseRetainsWorktree(response, session){
   if(response&&typeof response.worktree_retained==='boolean') return response.worktree_retained;
-  return !!(session&&session.worktree_path);
+  return !!(session&&session.is_worktree);
 }
 function _worktreeResponseCount(results){
   return (results||[]).reduce((count,result)=>{
@@ -1973,13 +1977,13 @@ function _worktreeResponseCount(results){
   },0);
 }
 function _sessionArchiveDescription(session){
-  return session&&session.worktree_path?t('session_archive_worktree_desc'):t('session_archive_desc');
+  return session&&session.is_worktree?t('session_archive_worktree_desc'):t('session_archive_desc');
 }
 function _sessionArchiveToast(response, session){
   return _sessionResponseRetainsWorktree(response,session)?t('session_archived_worktree'):t('session_archived');
 }
 function _sessionDeleteDescription(session){
-  return session&&session.worktree_path?t('session_delete_worktree_desc'):t('session_delete_desc');
+  return session&&session.is_worktree?t('session_delete_worktree_desc'):t('session_delete_desc');
 }
 function _optimisticallyArchiveSessionInList(sid, archived){
   if(!sid||!Array.isArray(_allSessions)) return;
@@ -2535,10 +2539,10 @@ function _openSessionActionMenu(session, anchorEl){
     ));
   }
   if(!isExternalSession){
-    if(session.worktree_path){
+    if(session.is_worktree){
       menu.appendChild(_buildSessionAction(
         t('session_worktree_remove'),
-        t('session_worktree_remove_desc', session.worktree_path),
+        t('session_worktree_remove_desc', _sessionWorktreeLabel(session)),
         ICONS.trash,
         async()=>{
           closeSessionActionMenu();
@@ -4396,12 +4400,12 @@ function renderSessionListFromCache(){
       pinInd.innerHTML=ICONS.pin;
       titleRow.appendChild(pinInd);
     }
-    if(s.worktree_path){
+    if(s.is_worktree){
       const wtInd=document.createElement('span');
       wtInd.className='session-worktree-indicator';
       wtInd.innerHTML=li('git-branch',12);
       const wtLabel=(typeof t==='function'?t('session_worktree_badge'):'Worktree');
-      wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
+      wtInd.title=`${wtLabel}: ${_sessionWorktreeLabel(s)}`;
       titleRow.appendChild(wtInd);
     }
     // Parent session indicator for forked/branched sessions (#465)
@@ -5079,10 +5083,11 @@ async function removeWorktree(session){
   }
   // Build confirm message
   let details='';
+  const worktreeLabel=status.label||_sessionWorktreeLabel(session);
   if(!status.exists){
-    details=t('session_worktree_remove_not_exists',status.path);
+    details=t('session_worktree_remove_not_exists',worktreeLabel);
   }else{
-    details=t('session_worktree_remove_confirm',status.path);
+    details=t('session_worktree_remove_confirm',worktreeLabel);
     if(status.locked_by_stream){
       showToast(t('session_worktree_remove_locked_by_stream'),0,'error');
       return;
@@ -5114,7 +5119,8 @@ async function removeWorktree(session){
   const ok=await showConfirmDialog({
     message:details,
     confirmLabel:t('session_worktree_remove_confirm_label'),
-    danger:true
+    danger:true,
+    focusCancel:true
   });
   if(!ok)return;
   try{
@@ -5124,13 +5130,17 @@ async function removeWorktree(session){
     });
     const warn=result.warnings&&result.warnings.length?(' '+result.warnings.join(' ')):'';
     showToast(t('session_worktree_removed')+warn);
-    // Clear the worktree_path from cached session so menu doesn't show stale remove action
-    if(session.worktree_path){
-      session.worktree_path=null;
+    // Clear public worktree state so menu and badge do not remain stale.
+    if(session.is_worktree){
+      session.is_worktree=false;
+      session.worktree_label=null;
+      session.worktree_branch=null;
     }
     // Re-render the list if this is the active session
-    if(S.session&&S.session.session_id===session.session_id&&S.session.worktree_path){
-      S.session.worktree_path=null;
+    if(S.session&&S.session.session_id===session.session_id&&S.session.is_worktree){
+      S.session.is_worktree=false;
+      S.session.worktree_label=null;
+      S.session.worktree_branch=null;
     }
     await renderSessionList();
   }catch(e){
@@ -5141,7 +5151,7 @@ async function removeWorktree(session){
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
-    message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
+    message:session&&session.is_worktree?t('session_delete_worktree_confirm',_sessionWorktreeLabel(session)):t('session_delete_confirm'),
     confirmLabel:t('delete_title'),
     danger:true
   });

@@ -198,12 +198,15 @@ def test_self_heal_retry_success_checks_stream_ownership_before_writeback():
 
 def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
-    outer_error_payload = src.index("_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)")
+    outer_error_payload = src.index("_error_payload = public_egress_scrub(")
     start = src.index("# Persist the error so it survives page reload.", outer_error_payload)
     end = src.index("put('apperror', _error_payload)", start)
+    payload_block = src[outer_error_payload:start]
     block = src[start:end]
     guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
 
+    assert "_provider_error_payload(" in payload_block
+    assert 'surface="stream_error_payload"' in payload_block
     assert guard in block
     assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(s)")
     assert block.index(guard) < block.index("s.active_stream_id = None")

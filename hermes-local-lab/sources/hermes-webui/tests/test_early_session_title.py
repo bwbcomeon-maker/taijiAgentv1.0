@@ -91,21 +91,17 @@ def test_prepare_chat_start_does_not_overwrite_manual_title(tmp_path, monkeypatc
 def test_start_chat_stream_response_includes_provisional_title(tmp_path, monkeypatch):
     from api.models import Session
     import api.routes as routes
+    import api.legacy_session_migration as migration
 
     monkeypatch.setattr(Session, "save", lambda self, *a, **k: None)
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: None)
-
-    class ImmediateThread:
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-
-        def start(self):
-            return None
-
-    monkeypatch.setattr(routes.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        migration,
+        "start_legacy_migration_guarded_worker",
+        lambda *args, **kwargs: object(),
+    )
 
     s = Session(session_id="test-start-response-title", title="Untitled")
     response = routes._start_chat_stream_for_session(

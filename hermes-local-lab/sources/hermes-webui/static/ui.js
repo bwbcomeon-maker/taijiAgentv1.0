@@ -1,5 +1,16 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 
+// Bind every legacy absolute-path media request to the active session. The
+// server treats a missing/foreign session as unauthorized; keeping URL
+// construction here prevents individual previewers from silently omitting it.
+function _sessionMediaPathUrl(path,{inline=false,download=false}={}){
+  const sid=(S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+  let url='api/media?path='+encodeURIComponent(String(path||''))+'&session_id='+encodeURIComponent(sid);
+  if(inline) url+='&inline=1';
+  if(download) url+='&download=1';
+  return url;
+}
+
 function productDisplayName(name){
   const value=String(name||'').trim();
   return /^(hermes|hermes agent|hermes webui)$/i.test(value)?'taiji Agent':(value||'taiji Agent');
@@ -22,6 +33,17 @@ function isValidRuntimeWorkspacePath(value){
   return text.startsWith('/')||text.startsWith('~/')||/^[A-Za-z]:[\\/]/.test(text);
 }
 
+function sessionHasWorkspace(session=S.session){
+  return !!(session&&(session.workspace||session.is_worktree));
+}
+
+function sessionWorkspaceDisplayLabel(session=S.session){
+  if(!session)return '';
+  if(session.is_worktree)return session.worktree_label||session.worktree_branch||'Worktree';
+  const ws=String(session.workspace||'');
+  return ws.split(/[\\/]+/).filter(Boolean).pop()||ws;
+}
+
 function lastValidRuntimeWorkspace(){
   const current=S.session&&S.session.workspace;
   if(isValidRuntimeWorkspacePath(current))return current;
@@ -36,6 +58,10 @@ function lastValidRuntimeWorkspace(){
 function sanitizeSessionRuntimeFields(session, fallbackWorkspace){
   if(!session||typeof session!=='object')return session;
   const next={...session};
+  if(next.is_worktree){
+    delete next.workspace;
+    return next;
+  }
   const fallback=isValidRuntimeWorkspacePath(fallbackWorkspace)?fallbackWorkspace:lastValidRuntimeWorkspace();
   if(!isValidRuntimeWorkspacePath(next.workspace)){
     if(fallback)next.workspace=fallback;
@@ -47,12 +73,15 @@ function sanitizeSessionRuntimeFields(session, fallbackWorkspace){
 }
 
 function chatRequestWorkspace(){
+  if(S.session&&S.session.is_worktree)return undefined;
   const ws=S.session&&S.session.workspace;
   return isValidRuntimeWorkspacePath(ws)?ws:undefined;
 }
 
 if(typeof window!=='undefined'){
   window.isValidRuntimeWorkspacePath=isValidRuntimeWorkspacePath;
+  window.sessionHasWorkspace=sessionHasWorkspace;
+  window.sessionWorkspaceDisplayLabel=sessionWorkspaceDisplayLabel;
   window.sanitizeSessionRuntimeFields=sanitizeSessionRuntimeFields;
   window.chatRequestWorkspace=chatRequestWorkspace;
 }
@@ -4114,6 +4143,11 @@ function _handleChatArtifactImageLoad(e){
   // is still pinned; a manual upward scroll is never overridden.
   if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollIfPinned==='function')scrollIfPinned();
 }
+function _imageRetryCta(historical){
+  return historical
+    ? {text:'作为新消息重新生成',label:'作为新消息重新生成图片'}
+    : {text:'重新生成',label:'重新生成图片'};
+}
 function _handleChatArtifactImageError(e){
   const img=e&&e.target;
   if(!img||!img.classList||!img.classList.contains('chat-artifact-image'))return;
@@ -4123,7 +4157,11 @@ function _handleChatArtifactImageError(e){
   card.setAttribute('role','status');
   const title=document.createElement('strong');title.textContent='资源已不可用';
   const detail=document.createElement('span');detail.textContent='图片文件缺失或已损坏，可以重新生成。';
-  const retry=document.createElement('button');retry.type='button';retry.className='chat-artifact-retry';retry.textContent='重新生成';retry.setAttribute('aria-label','重新生成图片');retry.onclick=()=>retryImageArtifact(retry);
+  const row=card.closest&&card.closest('[data-msg-idx]');
+  const messageIndex=Number.parseInt(row&&row.dataset&&row.dataset.msgIdx,10);
+  const historical=Number.isInteger(messageIndex)&&Array.isArray(S.messages)&&messageIndex<S.messages.length-1;
+  const retryCta=_imageRetryCta(historical);
+  const retry=document.createElement('button');retry.type='button';retry.className='chat-artifact-retry';retry.textContent=retryCta.text;retry.setAttribute('aria-label',retryCta.label);retry.onclick=()=>retryImageArtifact(retry);
   card.replaceChildren(title,detail,retry);
 }
 document.addEventListener('load',_handleChatArtifactImageLoad,true);
@@ -6688,6 +6726,21 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
 }
 
 function renderMd(raw){
+  // Kept inside renderMd as well as the page-level builder so isolated renderer
+  // tests and embedded consumers remain fail-closed when the page bootstrap is
+  // not present. Production calls delegate to the single shared URL builder.
+  function _renderSessionMediaPathUrl(path,options={}){
+    if(typeof _sessionMediaPathUrl==='function'){
+      return _sessionMediaPathUrl(path,options);
+    }
+    const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)
+      ?String(S.session.session_id):'';
+    let url='api/media?'+'path='+encodeURIComponent(String(path||''))+
+      '&session_id='+encodeURIComponent(sid);
+    if(options.inline) url+='&inline=1';
+    if(options.download) url+='&download=1';
+    return url;
+  }
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
@@ -7063,9 +7116,9 @@ function renderMd(raw){
     if(/^file:\/\//i.test(href)){
       try{
         const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
-        return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+        return _renderSessionMediaPathUrl(path,{inline:true});
       }catch(_){
-        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+        return _renderSessionMediaPathUrl(href.replace(/^file:\/\//i,''),{inline:true});
       }
     }
     return href;
@@ -7282,8 +7335,7 @@ function renderMd(raw){
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
-    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const apiUrl=_renderSessionMediaPathUrl(ref);
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
       return localArtifactCard(apiUrl,ref.split('/').pop()||'image');
@@ -9358,6 +9410,12 @@ function _messageArtifactsHtml(message,sessionId,messageIndex){
   const artifacts=Array.isArray(m.artifacts)?m.artifacts:[];
   const errors=Array.isArray(m.artifact_errors)?m.artifact_errors:[];
   const cards=[];
+  const numericMessageIndex=Number(messageIndex);
+  const isHistorical=Number.isInteger(numericMessageIndex)
+    &&typeof S!=='undefined'&&Array.isArray(S.messages)
+    &&numericMessageIndex<S.messages.length-1;
+  const retryCta=_imageRetryCta(isHistorical);
+  const retryButton=`<button type="button" class="chat-artifact-retry" aria-label="${retryCta.label}" onclick="retryImageArtifact(this)">${retryCta.text}</button>`;
   for(const artifact of artifacts){
     if(!artifact||String(artifact.kind||'')!=='image')continue;
     const id=String(artifact.artifact_id||'').trim();
@@ -9366,7 +9424,7 @@ function _messageArtifactsHtml(message,sessionId,messageIndex){
     const cacheVersion=String(artifact.sha256||'').trim();
     const src=_artifactMediaUrl(sessionId,id,false,cacheVersion);
     if(status!=='ready'||!src){
-      cards.push(`<section class="chat-artifact-card chat-artifact-unavailable" role="status" data-artifact-id="${esc(id)}"><strong>资源已不可用</strong><span>该图片无法继续读取，可以重新生成。</span><button type="button" class="chat-artifact-retry" aria-label="重新生成图片" onclick="retryImageArtifact(this)">重新生成</button></section>`);
+      cards.push(`<section class="chat-artifact-card chat-artifact-unavailable" role="status" data-artifact-id="${esc(id)}"><strong>资源已不可用</strong><span>该图片无法继续读取，可以重新生成。</span>${retryButton}</section>`);
       continue;
     }
     const download=_artifactMediaUrl(sessionId,id,true,cacheVersion);
@@ -9381,7 +9439,7 @@ function _messageArtifactsHtml(message,sessionId,messageIndex){
     </section>`);
   }
   if(errors.length){
-    cards.push(`<section class="chat-artifact-card chat-artifact-error" role="alert"><strong>图片未能保存</strong><span>生成结果未通过安全校验或资源已丢失，请重新生成。</span><button type="button" class="chat-artifact-retry" aria-label="重新生成图片" onclick="retryImageArtifact(this)">重新生成</button></section>`);
+    cards.push(`<section class="chat-artifact-card chat-artifact-error" role="alert"><strong>图片未能保存</strong><span>生成结果未通过安全校验或资源已丢失，请重新生成。</span>${retryButton}</section>`);
   }
   return cards.length?`<div class="message-artifacts" aria-label="生成的图片">${cards.join('')}</div>`:'';
 }
@@ -11995,7 +12053,9 @@ function renderMessages(options){
       }).join('')}</div>`;
     }
     const artifactsHtml=!isUser?_messageArtifactsHtml(m,(S.session&&S.session.session_id)||'',rawIdx):'';
-    const imageGenerationHtml=!isUser&&Array.isArray(m.image_generation_events)?_historyImageGenerationStatusHtml(m,m.image_generation_events):'';
+    const imageGenerationHtml=!isUser&&Array.isArray(m.image_generation_events)
+      ?_historyImageGenerationStatusHtml(m,m.image_generation_events,{historical:rawIdx<S.messages.length-1})
+      :'';
     const expertTeamDelivery=null;
     let bodyHtml = expertTeamDelivery ? _expertTeamDeliveryCardHtml(expertTeamDelivery) : _getCachedRender(displayContent, isUser);
     if(!isUser&&m.provider_details){
@@ -12487,8 +12547,9 @@ function buildToolCard(tc,options){
   return row;
 }
 
-function _imageGenerationStatusHtml(tc){
+function _imageGenerationStatusHtml(tc,options){
   const event=tc&&typeof tc==='object'?tc:{};
+  const historical=!!(options&&options.historical);
   if(String(event.name||'')!=='image_generate')return '';
   const status=String(event.status||'').trim().toLowerCase();
   const tid=String(event.tid||'image-generate').trim();
@@ -12505,10 +12566,11 @@ function _imageGenerationStatusHtml(tc){
   }else if(event.done===true||['completed','complete','done','success'].includes(status)){
     state='saving';title='图片已生成，正在保存';detail='正在安全校验并绑定到当前会话。';
   }
-  const action=retry?'<button type="button" class="chat-artifact-retry" aria-label="重新生成图片" onclick="retryImageArtifact(this)">重新生成</button>':'';
+  const retryCta=_imageRetryCta(historical);
+  const action=retry?`<button type="button" class="chat-artifact-retry" aria-label="${retryCta.label}" onclick="retryImageArtifact(this)">${retryCta.text}</button>`:'';
   return `<section class="image-generation-state is-${esc(state)}" data-live-image-tid="${esc(tid)}" data-state="${esc(state)}" role="status" aria-live="polite"><span class="image-generation-state-icon" aria-hidden="true"></span><span class="image-generation-state-copy"><strong>${esc(title)}</strong><small>${esc(detail)}</small></span>${action}</section>`;
 }
-function _historyImageGenerationStatusHtml(message,toolCalls){
+function _historyImageGenerationStatusHtml(message,toolCalls,options){
   const m=message&&typeof message==='object'?message:{};
   const hasReadyArtifact=Array.isArray(m.artifacts)&&m.artifacts.some(item=>item&&item.kind==='image'&&String(item.status||'').toLowerCase()==='ready');
   if(hasReadyArtifact)return '';
@@ -12518,7 +12580,7 @@ function _historyImageGenerationStatusHtml(message,toolCalls){
   const status=String(event.status||'').trim().toLowerCase();
   const settledSuccess=event.done===true&&!event.is_error&&['completed','complete','done','success'].includes(status);
   if(settledSuccess)return '';
-  return _imageGenerationStatusHtml(event);
+  return _imageGenerationStatusHtml(event,options);
 }
 function _attachImageGenerationTerminalEvents(message,events){
   if(!message||message.role!=='assistant')return message;
@@ -12574,7 +12636,11 @@ function _discardTransientImageTerminalMessages(messages){
 function _renderHistoryImageGenerationState(parent,anchor,message,toolCalls){
   if(!parent||!anchor)return null;
   if(Array.isArray(message&&message.image_generation_events)&&message.image_generation_events.length)return null;
-  const html=_historyImageGenerationStatusHtml(message,toolCalls);
+  const rawIndex=Number(anchor.dataset&&anchor.dataset.msgIdx);
+  const historical=Number.isInteger(rawIndex)
+    &&typeof S!=='undefined'&&Array.isArray(S.messages)
+    &&rawIndex<S.messages.length-1;
+  const html=_historyImageGenerationStatusHtml(message,toolCalls,{historical});
   if(!html)return null;
   const holder=document.createElement('div');
   holder.innerHTML=html;
@@ -12854,17 +12920,89 @@ async function submitEdit(msgIdx, newText) {
   } catch(e) { setStatus(t('edit_failed') + e.message); }
 }
 
+function _imageRetryDraftBlocker(composer){
+  if(String(composer&&composer.value||'').trim())return 'text';
+  if(Array.isArray(S.pendingFiles)&&S.pendingFiles.length)return 'attachments';
+  return '';
+}
+
 async function retryImageArtifact(btn){
   if(S.busy){
     if(typeof showToast==='function')showToast('请等待当前回复结束后重试。',2400);
-    return;
+    return false;
   }
   const row=btn&&btn.closest?btn.closest('[data-msg-idx]'):null;
   if(!row){
     if(typeof showToast==='function')showToast('当前图片无法原位重试，请再次发送生成要求。',3200);
-    return;
+    return false;
   }
-  await regenerateResponse(btn);
+  const assistantIdx=Number.parseInt(row.dataset&&row.dataset.msgIdx,10);
+  if(!Number.isInteger(assistantIdx)||assistantIdx<0){
+    if(typeof showToast==='function')showToast('无法定位这张图片对应的消息，请再次发送生成要求。',3200);
+    return false;
+  }
+  const isHistorical=Array.isArray(S.messages)&&assistantIdx<S.messages.length-1;
+  if(!isHistorical){
+    await regenerateResponse(btn);
+    return true;
+  }
+  let originalPrompt='';
+  for(let index=assistantIdx-1;index>=0;index--){
+    const message=S.messages[index];
+    if(message&&message.role==='user'){
+      originalPrompt=msgContent(message);
+      break;
+    }
+  }
+  if(!originalPrompt){
+    if(typeof showToast==='function')showToast('找不到这张图片对应的原始生成要求，请重新输入。',3200);
+    return false;
+  }
+  const composer=$('msg');
+  if(!composer){
+    if(typeof showToast==='function')showToast('输入框暂不可用，请稍后重试。',3200);
+    return false;
+  }
+  const draftBlocker=_imageRetryDraftBlocker(composer);
+  if(draftBlocker){
+    const message=draftBlocker==='attachments'
+      ?'输入框已有待发送附件，请先发送或移除附件后再重新生成图片。'
+      :'输入框已有内容，请先发送或清空后再重新生成图片。';
+    if(typeof showToast==='function')showToast(message,3200);
+    if(typeof composer.focus==='function')composer.focus();
+    return false;
+  }
+  composer.value=originalPrompt;
+  if(typeof autoResize==='function')autoResize();
+  if(btn){
+    btn.disabled=true;
+    btn.setAttribute&&btn.setAttribute('aria-busy','true');
+  }
+  try{
+    const accepted=await send();
+    if(accepted!==true){
+      if(!String(composer.value||'').trim()){
+        composer.value=originalPrompt;
+        if(typeof autoResize==='function')autoResize();
+      }
+      if(typeof showToast==='function')showToast('图片重新生成请求未启动，原会话内容已保留。',3600);
+      return false;
+    }
+    if(typeof showToast==='function')showToast('已将原图片要求作为新消息重新提交。',2400);
+    return true;
+  }catch(error){
+    if(!String(composer.value||'').trim()){
+      composer.value=originalPrompt;
+      if(typeof autoResize==='function')autoResize();
+    }
+    if(typeof showToast==='function')showToast(`图片重新生成请求发送失败：${error&&error.message||error}`,3600);
+    return false;
+  }finally{
+    if(btn){
+      btn.disabled=false;
+      btn.removeAttribute&&btn.removeAttribute('aria-busy');
+    }
+  }
 }
 
 async function regenerateResponse(btn) {
@@ -13115,7 +13253,7 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    fetch(_sessionMediaPathUrl(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -13143,7 +13281,7 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    fetch(_sessionMediaPathUrl(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>CSV_MAX_SIZE){
@@ -13179,7 +13317,7 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    fetch(_sessionMediaPathUrl(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -13197,7 +13335,7 @@ function loadExcalidrawInline(container){
           return;
         }
         const fname=esc(path.split('/').pop());
-        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const downloadUrl=_sessionMediaPathUrl(path,{download:true});
         el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
   <div class="msg-artifact-header">
     <span class="msg-media-label">${t('excalidraw_label')}</span>
@@ -13308,11 +13446,12 @@ function loadPdfInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const loadPdf=(pdfjsLib)=>{
-      fetch('api/media?path='+encodeURIComponent(path))
+      fetch(_sessionMediaPathUrl(path))
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            const dlUrl=_sessionMediaPathUrl(path,{download:true});
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
           return pdfjsLib.getDocument({data:buf}).promise;
@@ -13330,7 +13469,7 @@ function loadPdfInline(container){
               // Canvas bitmap is runtime state, not part of HTML serialization.
               // Attach the canvas as a DOM node — interpolating its serialized
               // form into a template string parses back as an empty canvas.
-              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+              const dlUrl=_sessionMediaPathUrl(path,{download:true});
               const wrap=document.createElement('div');
               wrap.className='pdf-preview-wrap';
               wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
@@ -13340,7 +13479,7 @@ function loadPdfInline(container){
           });
         })
         .catch(()=>{
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=_sessionMediaPathUrl(path,{download:true});
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -13361,7 +13500,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=_sessionMediaPathUrl(path,{download:true});
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -13381,20 +13520,20 @@ function loadHtmlInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    fetch(_sessionMediaPathUrl(path))
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          const openUrl=_sessionMediaPathUrl(path,{inline:true});
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+        const openUrl=_sessionMediaPathUrl(path,{inline:true});
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const dlUrl=_sessionMediaPathUrl(path,{download:true});
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
@@ -13903,18 +14042,18 @@ function bindWorkspaceHeadingActions(){
   if(!heading||heading.dataset.bound==='1')return;
   heading.dataset.bound='1';
   const goRoot=()=>{
-    if(S.session&&S.session.workspace) loadDir('.');
+    if(sessionHasWorkspace()) loadDir('.');
   };
   heading.onclick=goRoot;
   heading.onkeydown=(e)=>{
-    if(!(S.session&&S.session.workspace)) return;
+    if(!sessionHasWorkspace()) return;
     if(e.key==='Enter'||e.key===' '){
       e.preventDefault();
       goRoot();
     }
   };
   heading.oncontextmenu=(e)=>{
-    if(!(S.session&&S.session.workspace)) return;
+    if(!sessionHasWorkspace()) return;
     e.preventDefault();
     e.stopPropagation();
     _showWorkspaceRootContextMenu(e);
@@ -13925,7 +14064,7 @@ function bindWorkspaceHeadingActions(){
 function _syncWorkspaceHeadingState(){
   const heading=$('workspacePanelHeading');
   if(!heading) return;
-  const enabled=!!(S.session&&S.session.workspace);
+  const enabled=sessionHasWorkspace();
   heading.classList.toggle('workspace-panel-heading--enabled',enabled);
   if(enabled){
     heading.setAttribute('role','button');
@@ -14001,13 +14140,15 @@ function _showWorkspaceRootContextMenu(e){
     catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}
   }));
 
-  menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
-    menu.remove();
-    try{
-      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});
-      await _copyTextWithFallback((r&&r.path)||'.',t('path_copied'),t('path_copy_failed'));
-    }catch(err){showToast(t('path_copy_failed')+(err.message||err));}
-  }));
+  if(!(S.session&&S.session.is_worktree)){
+    menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
+      menu.remove();
+      try{
+        const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});
+        await _copyTextWithFallback((r&&r.path)||'.',t('path_copied'),t('path_copy_failed'));
+      }catch(err){showToast(t('path_copy_failed')+(err.message||err));}
+    }));
+  }
 
   document.body.appendChild(menu);
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
@@ -14025,7 +14166,7 @@ function renderFileTree(){
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
-  const hasWorkspace=!!(S.session&&S.session.workspace);
+  const hasWorkspace=sessionHasWorkspace();
   if(!hasWorkspace){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
     box.style.display='none';
@@ -14260,40 +14401,42 @@ function _showFileContextMenu(e, item){
   // path the file tree shows) and writes it to the OS clipboard. Useful for
   // pasting into terminals, editors, or other apps without taking the slower
   // Reveal-in-Finder round trip.
-  const copyPathItem=document.createElement('div');
-  copyPathItem.textContent=t('copy_file_path');
-  copyPathItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  copyPathItem.onmouseenter=()=>copyPathItem.style.background='var(--hover-bg)';
-  copyPathItem.onmouseleave=()=>copyPathItem.style.background='';
-  copyPathItem.onclick=async()=>{
-    menu.remove();
-    try{
-      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});
-      const abs=(r&&r.path)||item.path;
+  if(!(S.session&&S.session.is_worktree)){
+    const copyPathItem=document.createElement('div');
+    copyPathItem.textContent=t('copy_file_path');
+    copyPathItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    copyPathItem.onmouseenter=()=>copyPathItem.style.background='var(--hover-bg)';
+    copyPathItem.onmouseleave=()=>copyPathItem.style.background='';
+    copyPathItem.onclick=async()=>{
+      menu.remove();
       try{
-        await navigator.clipboard.writeText(abs);
-        showToast(t('path_copied'));
-      }catch(clipErr){
-        // Fallback for browsers where Clipboard API is gated (older Safari,
-        // non-secure contexts). Use the legacy execCommand path against a
-        // hidden textarea — this is the same pattern boot.js uses for the
-        // "Copy" buttons on code blocks.
-        const ta=document.createElement('textarea');
-        ta.value=abs;
-        ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
-        document.body.appendChild(ta);
-        ta.select();
-        let copied=false;
-        try{copied=document.execCommand('copy');}catch(_){}
-        ta.remove();
-        if(copied) showToast(t('path_copied'));
-        else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+        const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});
+        const abs=(r&&r.path)||item.path;
+        try{
+          await navigator.clipboard.writeText(abs);
+          showToast(t('path_copied'));
+        }catch(clipErr){
+          // Fallback for browsers where Clipboard API is gated (older Safari,
+          // non-secure contexts). Use the legacy execCommand path against a
+          // hidden textarea — this is the same pattern boot.js uses for the
+          // "Copy" buttons on code blocks.
+          const ta=document.createElement('textarea');
+          ta.value=abs;
+          ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+          document.body.appendChild(ta);
+          ta.select();
+          let copied=false;
+          try{copied=document.execCommand('copy');}catch(_){}
+          ta.remove();
+          if(copied) showToast(t('path_copied'));
+          else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+        }
+      }catch(err){
+        showToast(t('path_copy_failed')+(err.message||err));
       }
-    }catch(err){
-      showToast(t('path_copy_failed')+(err.message||err));
-    }
-  };
-  menu.appendChild(copyPathItem);
+    };
+    menu.appendChild(copyPathItem);
+  }
 
   // Download as zip — only for directories. Streams the folder contents
   // through /api/folder/download which builds the zip on the fly.

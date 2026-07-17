@@ -340,77 +340,81 @@ class TestMaybeScheduleTitleRefresh:
 
     def test_does_nothing_when_disabled(self):
         with patch('api.streaming._get_title_refresh_interval', return_value=0):
-            spawned = []
-            with patch('threading.Thread', side_effect=lambda **kw: spawned.append(kw) or MagicMock()):
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 session = _make_session(messages=[_user_msg('q'), _asst_msg('a')] * 5)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-        assert spawned == []
+        start_worker.assert_not_called()
 
     def test_does_nothing_when_title_is_empty(self):
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            spawned = []
-            with patch('threading.Thread', side_effect=lambda **kw: spawned.append(kw) or MagicMock()):
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 session = _make_session(title='', messages=[_user_msg('q'), _asst_msg('a')] * 5)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-        assert spawned == []
+        start_worker.assert_not_called()
 
     def test_does_nothing_for_untitled(self):
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            spawned = []
-            with patch('threading.Thread', side_effect=lambda **kw: spawned.append(kw) or MagicMock()):
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 session = _make_session(title='Untitled', messages=[_user_msg('q'), _asst_msg('a')] * 5)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-        assert spawned == []
+        start_worker.assert_not_called()
 
     def test_does_nothing_when_title_not_llm_generated(self):
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            spawned = []
-            with patch('threading.Thread', side_effect=lambda **kw: spawned.append(kw) or MagicMock()):
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 session = _make_session(llm_title_generated=False,
                                         messages=[_user_msg('q'), _asst_msg('a')] * 5)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-        assert spawned == []
+        start_worker.assert_not_called()
 
     def test_does_nothing_when_exchange_count_not_at_interval(self):
         """Refresh only fires when exchange_count % interval == 0 (and > 0)."""
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            spawned = []
-            with patch('threading.Thread', side_effect=lambda **kw: spawned.append(kw) or MagicMock()):
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 # 4 exchanges — not a multiple of 5
                 session = _make_session(messages=[_user_msg('q'), _asst_msg('a')] * 4)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-        assert spawned == []
+        start_worker.assert_not_called()
 
     def test_spawns_thread_at_exact_interval(self):
         """Refresh fires when exchange_count == refresh_interval."""
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            spawned = []
-            with patch('threading.Thread') as mock_thread_cls:
-                mock_thread = MagicMock()
-                mock_thread_cls.return_value = mock_thread
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 # 5 user messages = 5 exchanges
                 session = _make_session(messages=[_user_msg('q'), _asst_msg('a')] * 5)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-                assert mock_thread_cls.called
-                assert mock_thread.start.called
+                start_worker.assert_called_once()
 
     def test_spawns_thread_at_multiple_of_interval(self):
         """Refresh fires at 10 exchanges when interval is 5."""
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            with patch('threading.Thread') as mock_thread_cls:
-                mock_thread = MagicMock()
-                mock_thread_cls.return_value = mock_thread
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 # 10 exchanges
                 session = _make_session(messages=[_user_msg('q'), _asst_msg('a')] * 10)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-                assert mock_thread_cls.called
+                start_worker.assert_called_once()
 
     def test_does_nothing_when_no_exchange_content(self):
         """Even at interval, if both snippets are empty, don't spawn."""
         with patch('api.streaming._get_title_refresh_interval', return_value=5), \
              patch('api.streaming._latest_exchange_snippets', return_value=('', '')):
-            spawned = []
-            with patch('threading.Thread', side_effect=lambda **kw: spawned.append(kw) or MagicMock()):
+            with patch(
+                'api.legacy_session_migration.start_legacy_migration_guarded_worker'
+            ) as start_worker:
                 session = _make_session(messages=[_user_msg('q'), _asst_msg('a')] * 5)
                 _maybe_schedule_title_refresh(session, self._noop_put, None)
-        assert spawned == []
+        start_worker.assert_not_called()

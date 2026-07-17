@@ -34,6 +34,7 @@ def temp_session_dir(tmp_path, monkeypatch):
     import api.models as _m
     from collections import OrderedDict
     monkeypatch.setattr(_m, "SESSION_DIR", sd)
+    monkeypatch.setattr(_m, "SESSION_INDEX_FILE", sd / "_index.json")
     monkeypatch.setattr(_m, "SESSIONS", OrderedDict())
     yield sd
 

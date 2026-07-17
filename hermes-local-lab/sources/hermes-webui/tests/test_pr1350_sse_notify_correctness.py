@@ -71,14 +71,16 @@ class TestParallelApprovalsHeadFidelity:
             })
             # First payload should be A (just-appended, also head).
             p1 = q.get(timeout=1)
-            assert p1["pending"]["command"] == "first-A"
+            assert p1["pending"]["summary"] == "A"
+            assert "command" not in p1["pending"]
             assert p1["pending_count"] == 1
             # Second payload's HEAD is still A (we appended B but A is still queued).
             p2 = q.get(timeout=1)
-            assert p2["pending"]["command"] == "first-A", (
+            assert p2["pending"]["summary"] == "A", (
                 "SSE payload must show head-of-queue (A), not tail (B). "
-                f"Got: {p2['pending']['command']}"
+                f"Got: {p2['pending']['summary']}"
             )
+            assert "command" not in p2["pending"]
             assert p2["pending_count"] == 2
         finally:
             r._approval_sse_unsubscribe(sid, q)
@@ -147,8 +149,9 @@ class TestRespondNotifiesTrailingApproval:
             p3 = sub_q.get(timeout=1)
             assert p3["pending"] is not None, \
                 "After responding to A, SSE must emit the new head B (not None)"
-            assert p3["pending"]["command"] == "second-B", \
-                f"New head should be B, got: {p3['pending']['command']}"
+            assert p3["pending"]["summary"] == "B", \
+                f"New head should be B, got: {p3['pending']['summary']}"
+            assert "command" not in p3["pending"]
             assert p3["pending_count"] == 1
         finally:
             r._approval_sse_unsubscribe(sid, sub_q)

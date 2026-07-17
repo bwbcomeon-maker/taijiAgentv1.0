@@ -713,12 +713,33 @@ def test_recursive_leak_scan_covers_messages_tools_and_both_journals_but_not_use
     )
     append_turn_journal_event(
         "legacy-session",
-        {"event": "completed", "role": "assistant", "payload": {"nested": canary}},
+        {"event": "completed", "role": "assistant"},
         session_dir=session_dir,
     )
-    append_run_event(
-        "legacy-session", "run-1", "token", {"nested": {"text": canary}},
-        session_dir=session_dir,
+    # Simulate a pre-public-projection journal line. The current writer must
+    # never create this shape, while migration still has to audit old files.
+    journal_path = session_dir / "_turn_journal" / "legacy-session.jsonl"
+    journal_lines = journal_path.read_text("utf-8").splitlines()
+    legacy_completed = json.loads(journal_lines[-1])
+    legacy_completed["payload"] = {"nested": canary}
+    journal_lines[-1] = json.dumps(legacy_completed, ensure_ascii=False)
+    journal_path.write_text("\n".join(journal_lines) + "\n", "utf-8")
+    # Simulate an unsafe run-journal line written before the mandatory
+    # write-boundary public projection existed.
+    run_journal_path = session_dir / "_run_journal" / "legacy-session" / "run-1.jsonl"
+    run_journal_path.parent.mkdir(parents=True)
+    run_journal_path.write_text(
+        json.dumps({
+            "version": 1,
+            "event_id": "run-1:1",
+            "seq": 1,
+            "run_id": "run-1",
+            "session_id": "legacy-session",
+            "event": "token",
+            "type": "token",
+            "payload": {"nested": {"text": canary}},
+        }, ensure_ascii=False) + "\n",
+        "utf-8",
     )
     state_db_path = tmp_path / "state.db"
     db = _session_db(state_db_path)
@@ -1251,6 +1272,40 @@ def test_guarded_worker_cancel_return_releases_apply_waiter():
     assert writer_acquired.is_set() is True
 
 
+def test_apply_wait_is_bounded_before_backup_or_truth_mutation(tmp_path, monkeypatch):
+    import api.legacy_session_migration as migration
+
+    barrier = migration._MigrationStateBarrier()
+    monkeypatch.setattr(migration, "_MIGRATION_STATE_BARRIER", barrier)
+    monkeypatch.setattr(migration, "MIGRATION_EXCLUSIVE_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        migration,
+        "_backup_before_apply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("busy apply must not create a backup")
+        ),
+    )
+    lease = barrier.reserve_worker_read()
+    started_at = time.monotonic()
+    with pytest.raises(migration.MigrationStateBusyError) as raised:
+        migration.migrate_legacy_sessions(
+            tmp_path / "sessions",
+            tmp_path / "state.db",
+            object(),
+            dry_run=False,
+            backup_root=tmp_path / "backups",
+        )
+    elapsed = time.monotonic() - started_at
+
+    assert raised.value.code == "migration_state_busy"
+    assert elapsed < 0.5
+    assert not (tmp_path / "backups").exists()
+    assert barrier._waiting_writers == 0
+    lease.release()
+    with barrier.read():
+        pass
+
+
 def test_chat_worker_start_path_uses_transferable_migration_lease_for_both_backends():
     import inspect
     import api.routes as routes
@@ -1305,6 +1360,145 @@ def test_transferred_worker_lease_is_reentrant_for_sink_guard_with_waiting_write
     assert sink_finished.is_set() is True
     writer.join(timeout=1)
     assert writer_finished.is_set() is True
+
+
+def test_completed_truth_rewrite_holds_migration_lease_through_both_stores(
+    tmp_path,
+    monkeypatch,
+):
+    """Apply cannot snapshot the sidecar-only midpoint of a coordinated write."""
+    import api.legacy_session_migration as migration
+    import api.routes as routes
+
+    barrier = migration._MigrationStateBarrier()
+    monkeypatch.setattr(migration, "_MIGRATION_STATE_BARRIER", barrier)
+    entered_db = threading.Event()
+    release_db = threading.Event()
+    writer_acquired = threading.Event()
+    worker_finished = threading.Event()
+    persisted = []
+
+    session = SimpleNamespace(
+        session_id="coordinated-truth-session",
+        messages=[],
+        context_messages=[],
+        tool_calls=[],
+        title="Before",
+        path=tmp_path / "coordinated-truth-session.json",
+    )
+
+    def _save(**_kwargs):
+        persisted.append(("sidecar", list(session.messages)))
+
+    session.save = _save
+
+    def _replace(_session, messages):
+        assert persisted and persisted[-1][0] == "sidecar"
+        entered_db.set()
+        assert release_db.wait(timeout=2)
+        persisted.append(("state.db", list(messages)))
+        return True
+
+    monkeypatch.setattr(routes, "_replace_state_db_truth", _replace)
+
+    def _worker():
+        routes._rewrite_existing_session_truth(
+            session,
+            lambda: session.messages.extend([
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ]),
+            privacy_reason=None,
+        )
+        worker_finished.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    assert entered_db.wait(timeout=2)
+
+    def _apply():
+        with migration._legacy_migration_exclusive_guard():
+            writer_acquired.set()
+
+    writer = threading.Thread(target=_apply, daemon=True)
+    writer.start()
+    time.sleep(0.05)
+    assert writer_acquired.is_set() is False
+
+    release_db.set()
+    worker.join(timeout=2)
+    writer.join(timeout=2)
+    assert worker_finished.is_set() is True
+    assert writer_acquired.is_set() is True
+    assert [name for name, _messages in persisted] == ["sidecar", "state.db"]
+
+
+def test_direct_handoff_sqlite_write_waits_for_exclusive_migration(
+    tmp_path,
+    monkeypatch,
+):
+    """The direct compatibility writer must not bypass the migration barrier."""
+    import sqlite3
+
+    import api.legacy_session_migration as migration
+    import api.profiles as profiles
+    import api.routes as routes
+
+    barrier = migration._MigrationStateBarrier()
+    monkeypatch.setattr(migration, "_MIGRATION_STATE_BARRIER", barrier)
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    db_path = hermes_home / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, message_count INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, message_count) VALUES ('handoff-session', 0)"
+        )
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: hermes_home)
+
+    writer_entered = threading.Event()
+    release_writer = threading.Event()
+    handoff_finished = threading.Event()
+    result = []
+
+    def _exclusive_migration():
+        with migration._legacy_migration_exclusive_guard():
+            writer_entered.set()
+            assert release_writer.wait(timeout=2)
+
+    writer = threading.Thread(target=_exclusive_migration, daemon=True)
+    writer.start()
+    assert writer_entered.wait(timeout=2)
+
+    marker = routes._build_handoff_summary_tool_message(
+        "handoff-session", "summary", "telegram", 1, False
+    )
+
+    def _handoff_writer():
+        result.append(routes._persist_handoff_summary_to_state_db(
+            "handoff-session", marker
+        ))
+        handoff_finished.set()
+
+    worker = threading.Thread(target=_handoff_writer, daemon=True)
+    worker.start()
+    time.sleep(0.05)
+    assert handoff_finished.is_set() is False
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+
+    release_writer.set()
+    writer.join(timeout=2)
+    worker.join(timeout=2)
+    assert handoff_finished.is_set() is True
+    assert result == [True]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
 
 
 def test_manual_compression_worker_holds_apply_until_real_worker_returns(monkeypatch):
@@ -1788,7 +1982,7 @@ def test_metering_journal_remains_append_only_during_migration_and_restore(tmp_p
     db.append_message("legacy-session", "assistant", "generated")
     registry = ArtifactRegistry(tmp_path / "artifacts", allowed_source_roots=[cache_dir])
     writer = RunJournalWriter("legacy-session", "metering-run", session_dir=session_dir)
-    writer.append_sse_event("metering", {"tick": 0})
+    writer.append_sse_event("metering", {"input_tokens": 0})
     started = threading.Event()
     stop = threading.Event()
     appended = []
@@ -1797,7 +1991,7 @@ def test_metering_journal_remains_append_only_during_migration_and_restore(tmp_p
         tick = 1
         started.set()
         while not stop.is_set() and tick <= 200:
-            writer.append_sse_event("metering", {"tick": tick})
+            writer.append_sse_event("metering", {"input_tokens": tick})
             appended.append(tick)
             tick += 1
             time.sleep(0.001)
@@ -1824,5 +2018,5 @@ def test_metering_journal_remains_append_only_during_migration_and_restore(tmp_p
     )["events"]
     assert len(events) == 1 + len(appended)
     assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
-    assert [event["payload"]["tick"] for event in events] == [0, *appended]
+    assert [event["payload"]["input_tokens"] for event in events] == [0, *appended]
     db.close()

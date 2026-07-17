@@ -35,21 +35,17 @@ def test_streaming_persists_context_fields_on_session_before_save():
     block_start = src.find("if _reasoning_text and s.messages:")
     assert block_start != -1, "Reasoning-trace marker not found in streaming.py"
 
-    # Save call follows shortly after
-    save_call = src.find("\n                s.save()", block_start)
-    assert save_call != -1, "s.save() not found after the post-merge marker"
-    # Limit bumped to 15000 by the #3256/#3263 default-only context_length guard
-    # plus its dual-gate consistency fixes (recompute persisted stale cap +
-    # rescale threshold_tokens). The pre-save block legitimately grew here. NOTE:
-    # this byte-distance assertion is itself brittle (it must be bumped whenever a
-    # legitimate pre-save mutation block is added) — a structural check (presence
-    # of s.save() shortly after the post-merge marker) would be more durable; left
-    # as a follow-up. Earlier limits: 9000 (cancellation guards) → 13000 (#3263 v1).
-    assert save_call - block_start < 15000, (
-        "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
-        "If you've added a new pre-save mutation block here, bump this limit."
-    )
-
+    # Restrict the assertion to the normal artifact/session commit transaction.
+    # An unbounded search can accidentally match a later self-heal/error-path
+    # save and miss removal of the successful-turn persistence call.
+    commit_start = src.find("_artifact_writeback_snapshot =", block_start)
+    assert commit_start != -1, "Normal artifact/session commit block not found"
+    commit_end = src.find("\n                if cancel_event.is_set():", commit_start)
+    assert commit_end != -1, "Normal commit block end not found"
+    commit_block = src[commit_start:commit_end]
+    save_matches = list(re.finditer(r"\n\s+s\.save\(\)", commit_block))
+    assert len(save_matches) == 1, "Normal commit block must contain exactly one s.save()"
+    save_call = commit_start + save_matches[0].start()
     block = src[block_start:save_call]
 
     # The three fields must all be assigned on s within this block

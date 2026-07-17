@@ -896,8 +896,8 @@ class TestNonEmptyMessagesPendingCleared:
         core_tool_calls = [
             {
                 "name": "terminal",
-                "preview": "gh pr list --repo nesquena/hermes-webui",
-                "snippet": "gh pr list --repo nesquena/hermes-webui",
+                "preview": "列出仓库拉取请求",
+                "snippet": "列出仓库拉取请求",
                 "assistant_msg_idx": 1,
                 "done": True,
             },
@@ -921,7 +921,7 @@ class TestNonEmptyMessagesPendingCleared:
             "tool",
             {
                 "name": "terminal",
-                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "summary": "列出仓库拉取请求",
                 "args": {"command": "gh pr list --repo nesquena/hermes-webui"},
             },
         )
@@ -1540,7 +1540,7 @@ class TestJournalToolDedupeScoping:
         append_run_event(sid, stream_id, "token", {"text": "Listing."})
         append_run_event(
             sid, stream_id, "tool",
-            {"name": "terminal", "preview": "ls", "args": {"cmd": "ls"}},
+            {"name": "terminal", "summary": "ls", "args": {"cmd": "ls"}},
         )
 
         ok = models._retry_journal_recovery_in_place(s)

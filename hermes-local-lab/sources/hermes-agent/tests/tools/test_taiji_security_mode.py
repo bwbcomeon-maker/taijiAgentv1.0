@@ -5,8 +5,20 @@ import time
 from pathlib import Path
 
 
-def test_missing_or_invalid_security_mode_fails_closed(monkeypatch):
+def test_generic_agent_without_taiji_runtime_keeps_upstream_capabilities(monkeypatch):
     monkeypatch.delenv("TAIJI_SECURITY_MODE", raising=False)
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+    monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
+    monkeypatch.delenv("TAIJI_DESKTOP_ONLY", raising=False)
+
+    from tools.taiji_security_mode import is_terminal_allowed, security_mode
+
+    assert security_mode() == "full"
+    assert is_terminal_allowed() is True
+
+
+def test_explicit_invalid_security_mode_fails_closed(monkeypatch):
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "unexpected")
     monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
 
     from tools.taiji_security_mode import is_terminal_allowed, security_mode
@@ -14,7 +26,13 @@ def test_missing_or_invalid_security_mode_fails_closed(monkeypatch):
     assert security_mode() == "restricted"
     assert is_terminal_allowed() is False
 
-    monkeypatch.setenv("TAIJI_SECURITY_MODE", "unexpected")
+
+def test_taiji_runtime_without_explicit_mode_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAIJI_SECURITY_MODE", raising=False)
+    monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(tmp_path / "runtime-home"))
+
+    from tools.taiji_security_mode import is_terminal_allowed, security_mode
 
     assert security_mode() == "restricted"
     assert is_terminal_allowed() is False

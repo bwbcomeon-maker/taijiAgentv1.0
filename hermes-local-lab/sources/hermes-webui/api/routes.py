@@ -22,7 +22,6 @@ import sys
 import threading
 import time
 import uuid
-import re
 from datetime import datetime
 from pathlib import Path
 from contextlib import closing
@@ -1324,45 +1323,61 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
     sid = str(run.get("session_id") or "").strip()
     if not sid:
         return []
-    try:
-        session = get_session(sid)
-    except Exception:
-        return []
     run_id = str(run.get("run_id") or "")
-    messages = list(getattr(session, "messages", None) or [])
-    if any(isinstance(msg, dict) and msg.get("expert_team_run_id") == run_id for msg in messages):
-        return []
     title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
     team_title = str(run.get("team_title") or "专家团").strip()
     visible_title = str(((run.get("view") or {}).get("business_context") or {}).get("visible_title") or title).strip()
-    now = time.time()
-    new_messages = [
-        {
-            "role": "user",
-            "content": f"召唤{team_title}：{title[:120]}",
-            "timestamp": now,
-            "_ts": now,
-            "type": "expert_team_start",
-            "expert_team_run_id": run_id,
-        },
-        {
-            "role": "assistant",
-            "content": f"{team_title}已创建，等待需求确认。\n\n本次任务：{visible_title}。请在右侧专家团工作台补充必填信息。",
-            "timestamp": now + 0.001,
-            "_ts": now + 0.001,
-            "type": "expert_team_lifecycle",
-            "expert_team_run_id": run_id,
-        },
-    ]
-    messages.extend(new_messages)
-    session.messages = messages
-    if _is_default_or_empty_session_title(getattr(session, "title", None)):
-        session.title = title_from(session.messages, getattr(session, "title", None) or "Untitled")
     try:
-        session.save()
+        with _get_session_agent_lock(sid):
+            # Re-read inside the canonical writer boundary.  A streaming turn
+            # may have appended after the API first resolved the session; an
+            # outside snapshot would overwrite that message when this helper
+            # publishes its lifecycle cards.
+            session = get_session(sid)
+            messages = list(getattr(session, "messages", None) or [])
+            if any(
+                isinstance(msg, dict) and msg.get("expert_team_run_id") == run_id
+                for msg in messages
+            ):
+                return []
+            now = time.time()
+            new_messages = [
+                {
+                    "role": "user",
+                    "content": f"召唤{team_title}：{title[:120]}",
+                    "timestamp": now,
+                    "_ts": now,
+                    "type": "expert_team_start",
+                    "expert_team_run_id": run_id,
+                },
+                {
+                    "role": "assistant",
+                    "content": f"{team_title}已创建，等待需求确认。\n\n本次任务：{visible_title}。请在右侧专家团工作台补充必填信息。",
+                    "timestamp": now + 0.001,
+                    "_ts": now + 0.001,
+                    "type": "expert_team_lifecycle",
+                    "expert_team_run_id": run_id,
+                },
+            ]
+
+            def _append_entry():
+                session.messages = messages + new_messages
+                session.context_messages = _completed_semantic_messages(session.messages)
+                if _is_default_or_empty_session_title(getattr(session, "title", None)):
+                    session.title = title_from(
+                        session.messages,
+                        getattr(session, "title", None) or "Untitled",
+                    )
+
+            _rewrite_existing_session_truth(
+                session,
+                _append_entry,
+                privacy_reason=None,
+            )
         publish_session_list_changed("session_update")
     except Exception:
         logger.debug("Failed to persist expert team session entry", exc_info=True)
+        return []
     return new_messages
 
 
@@ -5148,6 +5163,36 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _persist_removed_worktree_state(session) -> None:
+    """Rebind a removed Worktree session without exposing a deleted path.
+
+    Git removal is irreversible.  Keep the pre-save values in memory until the
+    sidecar write succeeds so a transient save failure remains retryable: the
+    next remove request will observe the now-missing directory and can finish
+    the metadata repair.
+    """
+    fields = (
+        "workspace",
+        "worktree_path",
+        "worktree_branch",
+        "worktree_repo_root",
+        "worktree_created_at",
+    )
+    previous = {field: getattr(session, field, None) for field in fields}
+    fallback_workspace = previous["worktree_repo_root"] or get_last_workspace()
+    session.workspace = str(fallback_workspace or "")
+    session.worktree_path = None
+    session.worktree_branch = None
+    session.worktree_repo_root = None
+    session.worktree_created_at = None
+    try:
+        session.save()
+    except Exception:
+        for field, value in previous.items():
+            setattr(session, field, value)
+        raise
+
+
 def _active_profile_config_path() -> Path:
     """Return config.yaml for the request's active WebUI profile.
 
@@ -5978,8 +6023,6 @@ from api.config import (
     MAX_UPLOAD_BYTES,
     CHAT_LOCK,
     _get_session_agent_lock,
-    SESSION_AGENT_LOCKS,
-    SESSION_AGENT_LOCKS_LOCK,
     load_settings,
     save_settings,
     set_hermes_default_model,
@@ -6021,6 +6064,8 @@ from api.brand_privacy import (
     public_session_search_projection,
     public_session_projection,
     public_session_status_projection,
+    public_worktree_remove_projection,
+    public_worktree_status_projection,
     safe_toolsets_for_workspace,
     scrub_brand_leaks,
     scrub_public_export_payload,
@@ -9771,7 +9816,10 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.worktrees import worktree_status_for_session
 
-            return j(handler, {"status": worktree_status_for_session(s)})
+            return j(handler, {"status": public_worktree_status_projection(
+                worktree_status_for_session(s),
+                label=getattr(s, "worktree_branch", None),
+            )})
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except Exception as exc:
@@ -10222,7 +10270,7 @@ def handle_get(handler, parsed) -> bool:
                 if isinstance(item.get("display_title"), str):
                     item["display_title"] = _redact_text(item["display_title"])
                 item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
-                safe_merged.append(item)
+                safe_merged.append(public_session_projection(item))
             diag.stage("response_write")
             return j(handler, {
                 "sessions": safe_merged,
@@ -11108,8 +11156,23 @@ def _snapshot_session_truth(session) -> dict:
         "context_messages",
         "tool_calls",
         "title",
+        "workspace",
+        "model",
+        "model_provider",
         "truncation_watermark",
         "privacy_context",
+        "compression_anchor_visible_idx",
+        "compression_anchor_message_key",
+        "compression_anchor_summary",
+        "compression_anchor_details",
+        "input_tokens",
+        "output_tokens",
+        "estimated_cost",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "context_length",
+        "threshold_tokens",
+        "last_prompt_tokens",
         *_SESSION_RUNTIME_RESET_FIELDS.keys(),
     }
     return {name: copy.deepcopy(getattr(session, name, None)) for name in fields}
@@ -11142,39 +11205,111 @@ def _replace_state_db_truth(session, messages: list[dict]) -> bool:
     return True
 
 
-def _rewrite_existing_session_truth(session, mutate, *, privacy_reason: str) -> list[dict]:
+def _rewrite_existing_session_truth(
+    session,
+    mutate,
+    *,
+    privacy_reason: str | None,
+    rollback_snapshot: dict | None = None,
+    preserve_context_messages: bool = False,
+) -> list[dict]:
     """Coordinate one sidecar rewrite with the transactional state.db rewrite.
 
     The sidecar is written first.  Therefore a sidecar write failure cannot
     leave state.db ahead.  If the later DB transaction fails, the sidecar is
     restored from an in-memory snapshot and saved again before the error is
-    surfaced to the endpoint.
+    surfaced to the endpoint.  The outer migration lease deliberately spans
+    the snapshot, both stores, and rollback so an exclusive legacy migration
+    can never observe or back up the intermediate sidecar-only state.
     """
-    snapshot = _snapshot_session_truth(session)
-    try:
-        mutate()
-        _reset_unfinished_session_state(session, privacy_reason=privacy_reason)
-        semantic_messages = _completed_semantic_messages(session.messages)
-        session.context_messages = copy.deepcopy(semantic_messages)
-        session.save()
-    except Exception:
-        _restore_session_truth(session, snapshot)
-        raise
+    from api.legacy_session_migration import legacy_migration_state_guard
+    from api import truth_rewrite
 
-    try:
-        _replace_state_db_truth(session, semantic_messages)
-    except Exception:
-        _restore_session_truth(session, snapshot)
-        try:
-            session.save()
-        except Exception:
-            logger.critical(
-                "failed to restore session %s after state.db rewrite failure",
-                session.session_id,
-                exc_info=True,
-            )
-        raise
-    return semantic_messages
+    with legacy_migration_state_guard():
+        with truth_rewrite.truth_rewrite_lock(session.session_id):
+            recovery = truth_rewrite.recover_truth_rewrite_intent(session)
+            if recovery.get("status") == "diverged":
+                raise truth_rewrite.TruthRewriteRecoveryError(
+                    "unresolved divergent truth rewrite intent"
+                )
+            snapshot = copy.deepcopy(rollback_snapshot) if rollback_snapshot is not None else _snapshot_session_truth(session)
+            before_messages = _completed_semantic_messages(snapshot.get("messages") or [])
+            try:
+                mutate()
+                if privacy_reason is not None:
+                    _reset_unfinished_session_state(session, privacy_reason=privacy_reason)
+                semantic_messages = _completed_semantic_messages(session.messages)
+                if not preserve_context_messages:
+                    session.context_messages = copy.deepcopy(semantic_messages)
+            except BaseException:
+                _restore_session_truth(session, snapshot)
+                raise
+
+            try:
+                truth_rewrite.write_truth_rewrite_intent(
+                    session,
+                    before_messages,
+                    semantic_messages,
+                )
+            except Exception:
+                _restore_session_truth(session, snapshot)
+                try:
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                except Exception:
+                    logger.critical(
+                        "failed to clear incomplete truth rewrite intent for %s",
+                        session.session_id,
+                        exc_info=True,
+                    )
+                raise
+            try:
+                # Keep the public sidebar index outside the two-store intent.
+                # A first index build loads every sidecar via Session.load(); if
+                # it runs while this marker is live, crash recovery recursively
+                # replays the same state.db replacement before this transaction
+                # has finished.  Publish the index only after the marker clears.
+                session.save(skip_index=True)
+            except Exception:
+                _restore_session_truth(session, snapshot)
+                try:
+                    session.save(skip_index=True)
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                except Exception:
+                    logger.critical(
+                        "failed to restore session %s after sidecar rewrite failure",
+                        session.session_id,
+                        exc_info=True,
+                    )
+                raise
+
+            try:
+                _replace_state_db_truth(session, semantic_messages)
+            except Exception:
+                _restore_session_truth(session, snapshot)
+                try:
+                    session.save(skip_index=True)
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                except Exception:
+                    logger.critical(
+                        "failed to restore session %s after state.db rewrite failure",
+                        session.session_id,
+                        exc_info=True,
+                    )
+                raise
+            truth_rewrite.discard_committed_shrink_backup(session)
+            truth_rewrite.clear_truth_rewrite_intent(session)
+            try:
+                _write_session_index(updates=[session])
+            except Exception:
+                # The sidecar and state.db are already committed.  The index is
+                # a rebuildable projection, so an index I/O failure must not
+                # turn a successful semantic rewrite into an ambiguous retry.
+                logger.warning(
+                    "failed to refresh session index after truth rewrite for %s",
+                    session.session_id,
+                    exc_info=True,
+                )
+            return semantic_messages
 
 
 def _persist_new_session_truth(session) -> list[dict]:
@@ -11184,23 +11319,71 @@ def _persist_new_session_truth(session) -> list[dict]:
     If it fails, that transaction rolls back and the not-yet-published sidecar
     is removed, so neither store exposes a half-created conversation.
     """
+    from api.legacy_session_migration import legacy_migration_state_guard
+    from api import truth_rewrite
+
     semantic_messages = _completed_semantic_messages(session.messages)
-    session.save()
-    try:
-        _replace_state_db_truth(session, semantic_messages)
-    except Exception:
+    with legacy_migration_state_guard(), truth_rewrite.truth_rewrite_lock(session.session_id):
+        recovery = truth_rewrite.recover_truth_rewrite_intent(session)
+        if recovery.get("status") == "diverged":
+            raise truth_rewrite.TruthRewriteRecoveryError(
+                "unresolved divergent truth rewrite intent"
+            )
         try:
-            session.path.unlink(missing_ok=True)
-            session.path.with_suffix(".json.bak").unlink(missing_ok=True)
-            prune_session_from_index(session.session_id)
+            truth_rewrite.write_truth_rewrite_intent(session, [], semantic_messages)
         except Exception:
-            logger.critical(
-                "failed to remove unpublished session %s after state.db failure",
+            try:
+                truth_rewrite.clear_truth_rewrite_intent(session)
+            except Exception:
+                logger.critical(
+                    "failed to clear incomplete new-session truth intent for %s",
+                    session.session_id,
+                    exc_info=True,
+                )
+            raise
+        try:
+            # See _rewrite_existing_session_truth: indexing while the intent is
+            # live can recursively invoke Session.load() and replay the DB write.
+            session.save(skip_index=True)
+        except Exception:
+            try:
+                session.path.unlink(missing_ok=True)
+                session.path.with_suffix(".json.bak").unlink(missing_ok=True)
+                prune_session_from_index(session.session_id)
+                truth_rewrite.clear_truth_rewrite_intent(session)
+            except Exception:
+                logger.critical(
+                    "failed to remove unpublished session %s after sidecar failure",
+                    session.session_id,
+                    exc_info=True,
+                )
+            raise
+        try:
+            _replace_state_db_truth(session, semantic_messages)
+        except Exception:
+            try:
+                session.path.unlink(missing_ok=True)
+                session.path.with_suffix(".json.bak").unlink(missing_ok=True)
+                prune_session_from_index(session.session_id)
+                truth_rewrite.clear_truth_rewrite_intent(session)
+            except Exception:
+                logger.critical(
+                    "failed to remove unpublished session %s after state.db failure",
+                    session.session_id,
+                    exc_info=True,
+                )
+            raise
+        truth_rewrite.discard_committed_shrink_backup(session)
+        truth_rewrite.clear_truth_rewrite_intent(session)
+        try:
+            _write_session_index(updates=[session])
+        except Exception:
+            logger.warning(
+                "failed to refresh session index after new-session truth write for %s",
                 session.session_id,
                 exc_info=True,
             )
-        raise
-    return semantic_messages
+        return semantic_messages
 
 
 @migration_consistent_http_routes("POST")
@@ -11277,15 +11460,25 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/migration/apply":
         if body.get("confirm") is not True:
             return bad(handler, "Explicit migration confirmation is required", 400)
-        from api.legacy_session_migration import migrate_legacy_sessions
-
-        report = migrate_legacy_sessions(
-            SESSION_DIR,
-            _active_state_db_path(),
-            _artifact_registry(),
-            dry_run=False,
-            backup_root=STATE_DIR / "session-migration-backups",
+        from api.legacy_session_migration import (
+            MigrationStateBusyError,
+            migrate_legacy_sessions,
         )
+
+        try:
+            report = migrate_legacy_sessions(
+                SESSION_DIR,
+                _active_state_db_path(),
+                _artifact_registry(),
+                dry_run=False,
+                backup_root=STATE_DIR / "session-migration-backups",
+            )
+        except MigrationStateBusyError:
+            return j(handler, {
+                "error": "当前仍有会话任务正在收尾，请稍后重试。",
+                "code": "migration_state_busy",
+                "retryable": True,
+            }, status=409)
         publish_session_list_changed("legacy_session_migration")
         return j(handler, _public_migration_report(report))
 
@@ -11864,6 +12057,12 @@ def handle_post(handler, parsed) -> bool:
         old_ws = getattr(s, "workspace", "")
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
+        requested_workspace = body.get("workspace")
+        if (
+            _is_worktree_backed_session(s)
+            and requested_workspace not in (None, "", old_ws)
+        ):
+            return bad(handler, "Worktree workspace is fixed for this session", 409)
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -11919,7 +12118,29 @@ def handle_post(handler, parsed) -> bool:
             from api.worktrees import remove_worktree_for_session
 
             result = remove_worktree_for_session(s, force=force)
-            return j(handler, result)
+            if result.get("ok"):
+                try:
+                    # The status/removal probe uses a metadata-only Session.
+                    # Reload the full sidecar before saving so message truth
+                    # cannot be overwritten by an empty metadata projection.
+                    persisted_session = get_session(sid)
+                    _persist_removed_worktree_state(persisted_session)
+                except Exception:
+                    logger.exception(
+                        "worktree removed but session state update failed for %s",
+                        sid,
+                    )
+                    return j(
+                        handler,
+                        {
+                            "error": "Worktree was removed, but conversation state could not be updated. Retry to repair the conversation.",
+                            "code": "worktree_removed_state_update_failed",
+                            "removed": True,
+                        },
+                        status=500,
+                    )
+                publish_session_list_changed("session_update")
+            return j(handler, public_worktree_remove_projection(result))
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except Exception as exc:
@@ -11938,55 +12159,117 @@ def handle_post(handler, parsed) -> bool:
         is_messaging_session = _is_messaging_session_id(sid)
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
         registry = _artifact_registry()
+        # Best-effort normal cancellation first so the active agent/tool stack
+        # receives its standard interrupt signal.  The writer-locked tombstone
+        # below is still authoritative and closes a new-stream race between
+        # this probe and lock acquisition.
         try:
-            registry.retire_session(sid)
+            pre_delete_session = get_session(sid)
         except Exception:
-            logger.exception("failed to retire artifacts before deleting session %s", sid)
-            return bad(handler, "Failed to retire session artifacts", 500)
-        # Delete from WebUI session store
-        with LOCK:
-            SESSIONS.pop(sid, None)
+            pre_delete_session = None
+        pre_delete_stream_id = str(
+            getattr(pre_delete_session, "active_stream_id", None) or ""
+        )
+        if pre_delete_stream_id and pre_delete_stream_id in _active_stream_id_set():
+            try:
+                cancel_stream(pre_delete_stream_id)
+            except Exception:
+                logger.warning(
+                    "failed to cancel active stream before deleting session %s",
+                    sid,
+                    exc_info=True,
+                )
+
+        # Serialize the tombstone and every durable delete with all session
+        # writers.  Keep the lock-map entry after deletion: queued stale writers
+        # may still hold this Lock object, and Session.save's tombstone guard must
+        # remain the final no-resurrection barrier when they wake.
+        with _get_session_agent_lock(sid):
+            try:
+                deleted_session = get_session(sid)
+            except KeyError:
+                deleted_session = pre_delete_session
+            try:
+                registry.retire_session(sid)
+            except Exception:
+                logger.exception("failed to retire artifacts before deleting session %s", sid)
+                return bad(handler, "Failed to retire session artifacts", 500)
+
+            if deleted_session is not None:
+                deleted_session._deleted = True
+                current_stream_id = str(
+                    getattr(deleted_session, "active_stream_id", None) or ""
+                )
+                if current_stream_id:
+                    from api import config as _live_config
+
+                    with STREAMS_LOCK:
+                        cancel_flag = CANCEL_FLAGS.get(current_stream_id)
+                        if cancel_flag is not None:
+                            cancel_flag.set()
+                        agent = _live_config.AGENT_INSTANCES.get(current_stream_id)
+                        if agent is not None:
+                            try:
+                                agent.interrupt("Session deleted")
+                            except Exception:
+                                logger.debug(
+                                    "failed to interrupt deleted session stream %s",
+                                    current_stream_id,
+                                )
+                        STREAMS.pop(current_stream_id, None)
+                        STREAM_LAST_EVENT_ID.pop(current_stream_id, None)
+                        STREAM_GOAL_RELATED.pop(current_stream_id, None)
+                deleted_session.active_stream_id = None
+                deleted_session.pending_user_message = None
+                deleted_session.pending_attachments = []
+                deleted_session.pending_started_at = None
+
+            with LOCK:
+                cached_session = SESSIONS.pop(sid, None)
+                if cached_session is not None and cached_session is not deleted_session:
+                    cached_session._deleted = True
+
+            try:
+                p = (SESSION_DIR / f"{sid}.json").resolve()
+                p.relative_to(SESSION_DIR.resolve())
+            except Exception:
+                return bad(handler, "Invalid session_id", 400)
+            try:
+                p.unlink(missing_ok=True)
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+                (SESSION_DIR / ".truth-rewrite-intents" / f"{sid}.json").unlink(
+                    missing_ok=True
+                )
+            except Exception:
+                logger.debug("Failed to unlink session file %s", p)
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+            try:
+                from api.upload import _session_attachment_dir
+
+                shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
+            except Exception:
+                logger.debug("Failed to clean attachment dir for deleted session %s", sid)
+            # Also delete from CLI state.db for CLI sessions shown in sidebar,
+            # but never erase external messaging channel memory via WebUI delete.
+            if not is_messaging_session:
+                try:
+                    from api.models import delete_cli_session
+
+                    delete_cli_session(sid)
+                except Exception:
+                    logger.debug("Failed to delete CLI session %s", sid)
+
         # Evict cached agent so turn count doesn't leak into a recycled session
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        try:
-            p = (SESSION_DIR / f"{sid}.json").resolve()
-            p.relative_to(SESSION_DIR.resolve())
-        except Exception:
-            return bad(handler, "Invalid session_id", 400)
-        try:
-            p.unlink(missing_ok=True)
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session file %s", p)
-        try:
-            prune_session_from_index(sid)
-        except Exception:
-            logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-        try:
-            from api.upload import _session_attachment_dir
-
-            shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
-        except Exception:
-            logger.debug("Failed to clean attachment dir for deleted session %s", sid)
-        # Prune the per-session agent lock so deleted sessions don't leak
-        # Lock entries in SESSION_AGENT_LOCKS forever.
-        with SESSION_AGENT_LOCKS_LOCK:
-            SESSION_AGENT_LOCKS.pop(sid, None)
         try:
             from api.terminal import close_terminal
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                delete_cli_session(sid)
-            except Exception:
-                logger.debug("Failed to delete CLI session %s", sid)
         publish_session_list_changed("session_delete")
         return j(handler, {"ok": True, **worktree_retained})
 
@@ -12001,6 +12284,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
+            try:
+                # The request may have queued behind a concurrent stream or
+                # cache replacement.  Mutate the canonical live object only.
+                s = get_session(sid)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            current_stream_id = str(getattr(s, "active_stream_id", None) or "")
+            if current_stream_id and current_stream_id in _active_stream_id_set():
+                return bad(
+                    handler,
+                    "session has an active stream; cancel it before rewriting",
+                    409,
+                )
             registry = _artifact_registry()
             try:
                 retired_artifacts = registry.retire_session(sid)
@@ -12052,6 +12348,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         keep = int(body["keep_count"])
         with _get_session_agent_lock(body["session_id"]):
+            try:
+                # Rebind after acquiring the writer lock; the pre-lock object
+                # may be a stale cache entry after delete/reload.
+                s = get_session(body["session_id"])
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            current_stream_id = str(getattr(s, "active_stream_id", None) or "")
+            if current_stream_id and current_stream_id in _active_stream_id_set():
+                return bad(
+                    handler,
+                    "session has an active stream; cancel it before rewriting",
+                    409,
+                )
             old_msg_count = len(s.messages or [])
             old_ctx_count = len(getattr(s, 'context_messages', None) or [])
             try:
@@ -14083,7 +14392,7 @@ def _handle_sessions_search(handler, parsed):
                             public_session_search_projection(redact_session_data(item))
                         )
                         break
-            except (KeyError, Exception):
+            except Exception:
                 pass
     return j(handler, {"sessions": results, "query": q, "count": len(results)})
 
@@ -14384,7 +14693,6 @@ def _handle_terminal_start(handler, body):
             {
                 "ok": True,
                 "session_id": sid,
-                "workspace": term.workspace,
                 "running": term.is_alive(),
             },
         )
@@ -14927,7 +15235,9 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(
+    r'''MEDIA:(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s\)\]]+))'''
+)
 
 
 def _message_content_text(content) -> str:
@@ -14942,22 +15252,29 @@ def _message_content_text(content) -> str:
     return str(content or "")
 
 
-def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
-    """Allow exact MEDIA:image paths already present in the requested session."""
+def _session_media_token_allows_path(
+    sid: str,
+    target: Path,
+    allowed_mimes: set[str],
+    *,
+    session=None,
+) -> bool:
+    """Allow one safe local MEDIA path emitted by the requested session."""
     sid = str(sid or "").strip()
     if not sid:
         return False
     mime = MIME_MAP.get(target.suffix.lower(), "application/octet-stream")
-    if mime not in image_mimes:
+    if mime not in allowed_mimes:
         return False
     try:
         target_resolved = target.resolve()
     except Exception:
         return False
-    try:
-        session = get_session(sid)
-    except Exception:
-        return False
+    if session is None:
+        try:
+            session = get_session(sid)
+        except Exception:
+            return False
     if getattr(session, "legacy_import", False):
         return False
 
@@ -14966,17 +15283,18 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
             continue
         if message.get("imported") or message.get("_legacy_imported"):
             continue
-        # Only honor MEDIA: tokens that the assistant/tool emitted. User-authored
-        # content cannot mint allow-list entries even if it contains a MEDIA:
-        # token — keeps the implicit threat model (assistant-emitted artifacts
-        # only) explicit.
+        # Only assistant/tool output can mint a legacy MEDIA authorization.
+        # User, system, and imported content are never authorization sources.
         role = str(message.get("role") or "").strip().lower()
-        if role == "user":
+        if role not in {"assistant", "tool"}:
             continue
         text = _message_content_text(message.get("content"))
         if "MEDIA:" not in text:
             continue
-        for ref in _MEDIA_TOKEN_RE.findall(text):
+        for match in _MEDIA_TOKEN_RE.finditer(text):
+            ref = next((group for group in match.groups() if group), "")
+            if not ref:
+                continue
             if "://" in ref:
                 continue
             try:
@@ -14985,6 +15303,13 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
             except Exception:
                 continue
     return False
+
+
+def _session_media_token_allows_image_path(
+    sid: str, target: Path, image_mimes: set[str]
+) -> bool:
+    """Backward-compatible helper for callers checking legacy image tokens."""
+    return _session_media_token_allows_path(sid, target, image_mimes)
 
 
 def _artifact_registry():
@@ -15016,13 +15341,13 @@ def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
     Security:
-    - Path must resolve to an allowed root (hermes home, /tmp, common dirs)
+    - ``path=`` requires a real WebUI session id
+    - Path must belong to that session's safe workspace, or match an exact
+      assistant/tool MEDIA token from that non-imported session
     - Auth-gated when auth is enabled
-    - Only image MIME types are served inline; all others force download
+    - Only safe image/audio/video/PDF MIME types are previewed
     - SVG always served as attachment (XSS risk)
-    - No path traversal: resolved path must stay within an allowed root
-    - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
-      (os.pathsep-separated list of absolute paths; ":" on POSIX, ";" on Windows)
+    - Internal state/secret denies run before the serve decision
     """
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -15076,58 +15401,45 @@ def _handle_media(handler, parsed):
     raw_path = qs.get("path", [""])[0].strip()
     if not raw_path:
         return bad(handler, "path parameter required", 400)
+    session_id = qs.get("session_id", [""])[0].strip()
+    if not session_id:
+        return bad(handler, "session_id parameter required", 400)
+    try:
+        requested_session = get_session(session_id)
+    except Exception:
+        return bad(handler, "Media not available", 403)
+    if getattr(requested_session, "legacy_import", False):
+        return bad(handler, "Media not available", 403)
 
-    # Resolve the path and check it is within an allowed root
+    # Resolve before authorization so symlinks cannot escape the session root.
     try:
         target = Path(raw_path).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
 
-    # Allowed roots: hermes home, /tmp, and active workspace.
-    # Intentionally NOT the entire home dir — that would expose ~/.ssh,
-    # ~/.aws, browser profiles, etc. to any authenticated user.
-    allowed_roots = [
-        _HERMES_HOME.resolve(),
-        Path("/tmp").resolve(),
-    ]
-    if not _product_single_runtime:
-        allowed_roots.append((_HOME / ".hermes").resolve())
-    # Also allow the active workspace directory (where screenshots land)
+    _session_workspace = None
     try:
-        from api.workspace import get_last_workspace
-        ws = Path(get_last_workspace()).resolve()
-        if ws.is_dir():
-            allowed_roots.append(ws)
+        workspace = Path(str(getattr(requested_session, "workspace", ""))).resolve()
+        if workspace.is_dir():
+            _session_workspace = workspace
     except Exception:
-        pass
-
-    # Also allow additional roots from MEDIA_ALLOWED_ROOTS env var
-    # (os.pathsep-separated list; ":" on POSIX, ";" on Windows).
-    extra_roots = _os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
-    if extra_roots:
-        for root in extra_roots.split(_os.pathsep):
-            root = root.strip()
-            if root:
-                try:
-                    rp = Path(root).resolve()
-                    if rp.is_dir():
-                        allowed_roots.append(rp)
-                except Exception:
-                    pass
+        _session_workspace = None
 
     _INLINE_IMAGE_TYPES = {
         "image/png", "image/jpeg", "image/gif", "image/webp",
         "image/x-icon", "image/bmp",
     }
-    within_allowed = any(
-        _path_is_within_root(target, root)
-        for root in allowed_roots
-        if root.exists()
-    )
-    session_media_allowed = _session_media_token_allows_image_path(
-        qs.get("session_id", [""])[0],
+    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
+        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
+        "audio/ogg", "audio/opus", "audio/flac",
+        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
+        "application/pdf",
+    }
+    session_media_allowed = _session_media_token_allows_path(
+        session_id,
         target,
-        _INLINE_IMAGE_TYPES,
+        _INLINE_PREVIEW_TYPES,
+        session=requested_session,
     )
 
     # ── #3234: hard-deny Hermes's own state + secret/config files ────────────
@@ -15138,11 +15450,10 @@ def _handle_media(handler, parsed):
     # covers every entry path (bare file:// URLs, markdown anchors, MEDIA:
     # tokens, and session-token grants).
     #
-    # Model: the ACTIVE WORKSPACE is a legitimate-media carve-out — the user is
-    # entitled to their own workspace files (that is also how the workspace file
-    # browser reaches them), even when a workspace happens to live under a
-    # Hermes root. The deny rules target Hermes's OWN internal state, which lives
-    # OUTSIDE any workspace. So: if the target is inside the active workspace, it
+    # Model: the REQUESTED SESSION WORKSPACE is a legitimate-media carve-out —
+    # not the process-global last workspace. The deny rules target Hermes's OWN
+    # internal state, which lives OUTSIDE any workspace. So: if the target is
+    # inside this session's safe workspace, it
     # is never denied here; otherwise we deny known secret/config basenames and
     # the internal state subdirectories across every Hermes root the allowlist
     # accepts (active-profile HERMES_HOME, base ~/.hermes, the api.profiles
@@ -15242,7 +15553,7 @@ def _handle_media(handler, parsed):
             _deny_dirs.append((_ws_state / _sub).resolve())
     _deny_names_ci = {n.casefold() for n in _DENY_FILENAMES}
 
-    # Active-workspace carve-out: a file inside a genuine PROJECT workspace is
+    # Session-workspace carve-out: a file inside a genuine PROJECT workspace is
     # the user's own content, so the secret/config FILENAME denies are relaxed
     # for it. The carve-out is DISABLED when the workspace is a broad/internal
     # location ($HOME, a Hermes root itself, an ANCESTOR of a Hermes root, a
@@ -15250,15 +15561,6 @@ def _handle_media(handler, parsed):
     # would re-open the disclosure. A workspace that is a proper DESCENDANT of a
     # Hermes root (e.g. STATE_DIR/workspace) is still a legit project workspace
     # and keeps the carve-out. The dir-based denies above are NOT relaxed.
-    _active_workspace = None
-    try:
-        from api.workspace import get_last_workspace
-        _aw = Path(get_last_workspace()).resolve()
-        if _aw.is_dir():
-            _active_workspace = _aw
-    except Exception:
-        _active_workspace = None
-
     def _workspace_is_safe_carveout(ws):
         if ws is None:
             return False
@@ -15275,18 +15577,18 @@ def _handle_media(handler, parsed):
             return False
         return True
 
-    _in_active_workspace = (
-        _active_workspace is not None
-        and _workspace_is_safe_carveout(_active_workspace)
-        and _within_ci(target, _active_workspace)
+    _in_session_workspace = (
+        _session_workspace is not None
+        and _workspace_is_safe_carveout(_session_workspace)
+        and _within_ci(target, _session_workspace)
     )
 
-    # Dir-based denies always fire (even inside the active workspace).
+    # Dir-based denies always fire (even inside the requested session workspace).
     if any(_within_ci(target, d) for d in _deny_dirs):
         return bad(handler, "Path not in allowed location", 403)
     # Filename-based denies fire for files under a Hermes root, UNLESS the file
     # is inside a genuine project workspace (carve-out).
-    if not _in_active_workspace:
+    if not _in_session_workspace:
         _under_hermes_root = any(_within_ci(target, _root) for _root in _hermes_roots)
         _name_cf = target.name.casefold()
         # Exact secret/state basenames, plus atomic-write temp files for those
@@ -15302,7 +15604,7 @@ def _handle_media(handler, parsed):
             return bad(handler, "Path not in allowed location", 403)
     # ── end #3234 deny ───────────────────────────────────────────────────────
 
-    if not within_allowed and not session_media_allowed:
+    if not _in_session_workspace and not session_media_allowed:
         return bad(handler, "Path not in allowed location", 403)
 
     if not target.exists() or not target.is_file():
@@ -15311,28 +15613,34 @@ def _handle_media(handler, parsed):
     # Determine MIME type
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
+    # Keep the established workspace preview/download contract for files owned
+    # by this session (diff/CSV/Excalidraw and other attachment types included).
+    # Outside the workspace, the exact legacy MEDIA token check above remains
+    # restricted to the explicitly safe image/audio/video/PDF MIME allowlist.
 
-    # Only serve safe media/PDF types inline when explicitly requested. HTML is
-    # allowed inline only with a CSP sandbox so "open full page" can work without
-    # granting same-origin access to the WebUI. SVG is always a download (XSS risk).
-    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
-        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
-        "audio/ogg", "audio/opus", "audio/flac",
-        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
-        "application/pdf",
-    }
+    # Only safe media/PDF types are inline. Session-workspace HTML preserves the
+    # existing sandboxed preview contract; an exact MEDIA token cannot authorize
+    # HTML outside that workspace. SVG is always a download (XSS risk).
     _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
     inline_preview = qs.get("inline", [""])[0] == "1"
-    html_inline_ok = inline_preview and mime == "text/html"
+    html_inline_ok = (
+        _in_session_workspace and inline_preview and mime == "text/html"
+    )
     disposition = "inline" if (
         mime not in _DOWNLOAD_TYPES and (
             mime in _INLINE_IMAGE_TYPES or (inline_preview and mime in _INLINE_PREVIEW_TYPES)
             or html_inline_ok
         )
     ) else "attachment"
-    # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
-    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
+    return _serve_file_bytes(
+        handler,
+        target,
+        mime,
+        disposition,
+        "private, max-age=3600",
+        csp=csp,
+    )
 
 
 def _file_raw_target(session, sid: str, rel: str) -> Path | None:
@@ -16994,46 +17302,73 @@ def _docx_non_streaming_assistant_message(result: dict, now: float) -> dict:
     return assistant
 
 
-def _record_docx_non_streaming_turn_for_session(s, msg: str, result: dict | None) -> None:
+def _record_docx_non_streaming_turn_for_session(s, msg: str, result: dict | None) -> dict:
     if not s or not result:
-        return
-    now = time.time()
+        return {"error": "invalid non-streaming turn", "_status": 400}
     user_text = str(msg or "").strip()
-    assistant = _docx_non_streaming_assistant_message(result, now)
-    if not user_text or not assistant.get("content"):
-        return
-    existing = list(getattr(s, "messages", None) or [])
-    if len(existing) >= 2:
-        previous_user = existing[-2]
-        previous_assistant = existing[-1]
-        if (
-            isinstance(previous_user, dict)
-            and isinstance(previous_assistant, dict)
-            and previous_user.get("role") == "user"
-            and previous_assistant.get("role") == "assistant"
-            and " ".join(str(previous_user.get("content") or "").split()) == " ".join(user_text.split())
-            and str(previous_assistant.get("content") or "") == str(assistant.get("content") or "")
-        ):
-            return
+    session_id = str(getattr(s, "session_id", None) or "").strip()
+    if not user_text or not session_id:
+        return {"error": "invalid non-streaming turn", "_status": 400}
+    with _get_session_agent_lock(session_id):
+        # The request may have waited behind clear/delete/cache replacement.
+        # Rebind under the canonical writer lock so a stale object can never
+        # recreate a session that disappeared while this request was queued.
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return {"error": "Session not found", "_status": 404}
+        current_stream_id = str(getattr(s, "active_stream_id", None) or "")
+        if current_stream_id and current_stream_id in _active_stream_id_set():
+            return {
+                "error": "session already has an active stream",
+                "active_stream_id": current_stream_id,
+                "_status": 409,
+            }
+        now = time.time()
+        assistant = _docx_non_streaming_assistant_message(result, now)
+        if not assistant.get("content"):
+            return {"error": "invalid non-streaming response", "_status": 400}
+        existing = list(getattr(s, "messages", None) or [])
+        if len(existing) >= 2:
+            previous_user = existing[-2]
+            previous_assistant = existing[-1]
+            if (
+                isinstance(previous_user, dict)
+                and isinstance(previous_assistant, dict)
+                and previous_user.get("role") == "user"
+                and previous_assistant.get("role") == "assistant"
+                and " ".join(str(previous_user.get("content") or "").split()) == " ".join(user_text.split())
+                and str(previous_assistant.get("content") or "") == str(assistant.get("content") or "")
+            ):
+                return {"ok": True, "duplicate": True}
 
-    turn_started_at = getattr(s, "pending_started_at", None) or now
-    was_hidden_empty_session = _is_hidden_empty_session(s)
-    user_msg = {"role": "user", "content": user_text, "timestamp": int(now)}
-    s.active_stream_id = None
-    s.pending_user_message = None
-    s.pending_attachments = []
-    s.pending_started_at = None
-    s.messages = existing + [user_msg, assistant]
-    stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
-    s.context_messages = list(getattr(s, "context_messages", None) or []) + [
-        {"role": "user", "content": user_text},
-        {"role": "assistant", "content": str(assistant.get("content") or "")},
-    ]
-    _reset_session_privacy_context(s, "non_streaming_business_turn")
-    if _is_default_or_empty_session_title(getattr(s, "title", None)):
-        s.title = scrub_brand_leaks(title_from(s.messages, getattr(s, "title", None) or "Untitled"))
-    s.save()
+        turn_started_at = getattr(s, "pending_started_at", None) or now
+        was_hidden_empty_session = _is_hidden_empty_session(s)
+        user_msg = {"role": "user", "content": user_text, "timestamp": int(now)}
+
+        def _append_docx_turn():
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.messages = existing + [user_msg, assistant]
+            stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
+            s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": str(assistant.get("content") or "")},
+            ]
+            if _is_default_or_empty_session_title(getattr(s, "title", None)):
+                s.title = scrub_brand_leaks(
+                    title_from(s.messages, getattr(s, "title", None) or "Untitled")
+                )
+
+        _rewrite_existing_session_truth(
+            s,
+            _append_docx_turn,
+            privacy_reason="non_streaming_business_turn",
+        )
     publish_session_list_changed("session_new" if was_hidden_empty_session else "session_update")
+    return {"ok": True}
 
 
 def _enrich_plan_like_chat_prompt(prompt: str) -> str:
@@ -17202,25 +17537,11 @@ def _start_brand_privacy_safe_stream_for_session(
                 "error": "session privacy context changed; retry the turn",
                 "_status": 409,
             }
-        snapshot = {
-            field: copy.deepcopy(getattr(s, field, None))
-            for field in (
-                "workspace",
-                "model",
-                "model_provider",
-                "active_stream_id",
-                "pending_user_message",
-                "pending_attachments",
-                "pending_started_at",
-                "messages",
-                "context_messages",
-                "title",
-                "privacy_context",
-            )
-        }
-        try:
-            turn_started_at = getattr(s, "pending_started_at", None) or now
-            was_hidden_empty_session = _is_hidden_empty_session(s)
+        snapshot = _snapshot_session_truth(s)
+        turn_started_at = getattr(s, "pending_started_at", None) or now
+        was_hidden_empty_session = _is_hidden_empty_session(s)
+
+        def _append_privacy_safe_turn():
             s.workspace = workspace
             s.model = model
             s.model_provider = model_provider
@@ -17239,11 +17560,13 @@ def _start_brand_privacy_safe_stream_for_session(
             if s.title in ("Untitled", "New Chat", "") or not s.title:
                 s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
             _commit_session_brand_privacy_decision(s, decision)
-            s.save()
-        except BaseException:
-            for field, value in snapshot.items():
-                setattr(s, field, value)
-            raise
+
+        _rewrite_existing_session_truth(
+            s,
+            _append_privacy_safe_turn,
+            privacy_reason=None,
+            rollback_snapshot=snapshot,
+        )
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
 
@@ -17277,15 +17600,28 @@ def _start_brand_privacy_safe_stream_for_session(
     )
     try:
         emitter.start()
-    except BaseException:
+    except BaseException as emitter_error:
         with STREAMS_LOCK:
             if STREAMS.get(stream_id) is stream:
                 STREAMS.pop(stream_id, None)
+                STREAM_LAST_EVENT_ID.pop(stream_id, None)
         with session_lock:
-            for field, value in snapshot.items():
-                setattr(s, field, copy.deepcopy(value))
-            s.save()
-        raise
+            _restore_session_truth(s, snapshot)
+            try:
+                _rewrite_existing_session_truth(
+                    s,
+                    lambda: None,
+                    privacy_reason=None,
+                )
+            except Exception as rollback_error:
+                logger.critical(
+                    "failed to restore state.db after privacy-safe emitter failure",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    "privacy-safe emitter failed and state.db rollback was not confirmed"
+                ) from rollback_error
+        raise emitter_error
     if was_hidden_empty_session:
         publish_session_list_changed("session_new")
     else:
@@ -17320,33 +17656,29 @@ def _record_license_blocked_turn_for_session(
     """Persist a local authorization reply without starting an agent stream."""
     diag.stage("license_blocked_turn") if diag else None
     attachments = attachments or []
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
-        if current_active:
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        _clear_stale_stream_state(s)
+    session_id = str(getattr(s, "session_id", None) or "").strip()
+    if not session_id:
+        return {"error": "Session not found", "_status": 404}
 
     now = time.time()
     reply = (
         (license_status or {}).get("message")
         or "授权不可用，请联系服务方更新授权。"
     )
-    with _get_session_agent_lock(s.session_id):
+    with _get_session_agent_lock(session_id):
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return {"error": "Session not found", "_status": 404}
+        current_stream_id = str(getattr(s, "active_stream_id", None) or "")
+        if current_stream_id and current_stream_id in _active_stream_id_set():
+            return {
+                "error": "session already has an active stream",
+                "active_stream_id": current_stream_id,
+                "_status": 409,
+            }
         turn_started_at = getattr(s, "pending_started_at", None) or now
         was_hidden_empty_session = _is_hidden_empty_session(s)
-        s.workspace = workspace
-        s.model = model
-        s.model_provider = model_provider
-        s.active_stream_id = None
-        s.pending_user_message = None
-        s.pending_attachments = []
-        s.pending_started_at = None
         user_msg = {"role": "user", "content": msg, "timestamp": int(now)}
         if attachments:
             user_msg["attachments"] = list(attachments)
@@ -17356,16 +17688,29 @@ def _record_license_blocked_turn_for_session(
             "timestamp": int(now),
             "license_blocked": True,
         }
-        s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
-        stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
-        s.context_messages = list(getattr(s, "context_messages", None) or []) + [
-            {"role": "user", "content": msg},
-            {"role": "assistant", "content": reply},
-        ]
-        if s.title in ("Untitled", "New Chat", "") or not s.title:
-            s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
-        _reset_session_privacy_context(s, "license_blocked_turn")
-        s.save()
+
+        def _append_license_blocked_turn():
+            s.workspace = workspace
+            s.model = model
+            s.model_provider = model_provider
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.messages = list(getattr(s, "messages", None) or []) + [user_msg, assistant_msg]
+            stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
+            s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+                {"role": "user", "content": msg},
+                {"role": "assistant", "content": reply},
+            ]
+            if s.title in ("Untitled", "New Chat", "") or not s.title:
+                s.title = scrub_brand_leaks(title_from(s.messages, s.title or "Untitled"))
+
+        _rewrite_existing_session_truth(
+            s,
+            _append_license_blocked_turn,
+            privacy_reason="license_blocked_turn",
+        )
     if was_hidden_empty_session:
         publish_session_list_changed("session_new")
     else:
@@ -17868,18 +18213,27 @@ def _handle_chat_start(handler, body, diag=None):
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         docx_pending_source_result = _docx_template_pending_source_result_for_session(msg, s, attachments)
         if docx_pending_source_result is not None:
-            _record_docx_non_streaming_turn_for_session(s, display_msg, docx_pending_source_result)
+            record = _record_docx_non_streaming_turn_for_session(s, display_msg, docx_pending_source_result)
             diag.stage("response_write") if diag else None
+            if record.get("error"):
+                status = int(record.pop("_status", 409) or 409)
+                return j(handler, record, status=status)
             return j(handler, docx_pending_source_result)
         docx_template_result = _docx_template_invocation_result_for_session(msg, s, attachments)
         if docx_template_result is not None:
-            _record_docx_non_streaming_turn_for_session(s, display_msg, docx_template_result)
+            record = _record_docx_non_streaming_turn_for_session(s, display_msg, docx_template_result)
             diag.stage("response_write") if diag else None
+            if record.get("error"):
+                status = int(record.pop("_status", 409) or 409)
+                return j(handler, record, status=status)
             return j(handler, docx_template_result)
         docx_figure_adjustment_result = _docx_figure_adjustment_invocation_result(msg)
         if docx_figure_adjustment_result is not None:
-            _record_docx_non_streaming_turn_for_session(s, display_msg, docx_figure_adjustment_result)
+            record = _record_docx_non_streaming_turn_for_session(s, display_msg, docx_figure_adjustment_result)
             diag.stage("response_write") if diag else None
+            if record.get("error"):
+                status = int(record.pop("_status", 409) or 409)
+                return j(handler, record, status=status)
             return j(handler, docx_figure_adjustment_result)
         msg = _normalize_docx_template_invocation_message(msg)
         runtime_msg = _enrich_plan_like_chat_prompt(msg)
@@ -18064,31 +18418,40 @@ def _handle_chat_sync(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
-        s.workspace = workspace
+        sync_snapshot = _snapshot_session_truth(s)
         model, model_provider = _resolve_compatible_session_model_state(
             body.get("model") or s.model,
             body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None),
         )[:2]
-        s.model = model
-        s.model_provider = model_provider
         privacy_decision = _classify_session_brand_privacy(s, msg)
         if privacy_decision.action == "safe_reply":
             reply = brand_safe_reply(msg)
             now = int(time.time())
             turn_started_at = getattr(s, "pending_started_at", None) or now
-            s.messages = list(getattr(s, "messages", None) or []) + [
-                {"role": "user", "content": msg, "timestamp": now},
-                {"role": "assistant", "content": reply, "timestamp": now},
-            ]
-            stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
-            s.context_messages = list(getattr(s, "context_messages", None) or []) + [
-                {"role": "user", "content": msg},
-                {"role": "assistant", "content": reply},
-            ]
-            if s.title == "Untitled" or not s.title:
-                s.title = scrub_brand_leaks(title_from(s.messages, s.title))
-            _commit_session_brand_privacy_decision(s, privacy_decision)
-            s.save()
+
+            def _append_sync_privacy_turn():
+                s.workspace = workspace
+                s.model = model
+                s.model_provider = model_provider
+                s.messages = list(getattr(s, "messages", None) or []) + [
+                    {"role": "user", "content": msg, "timestamp": now},
+                    {"role": "assistant", "content": reply, "timestamp": now},
+                ]
+                stamp_turn_duration_on_latest_assistant(s, turn_started_at, time.time())
+                s.context_messages = list(getattr(s, "context_messages", None) or []) + [
+                    {"role": "user", "content": msg},
+                    {"role": "assistant", "content": reply},
+                ]
+                if s.title == "Untitled" or not s.title:
+                    s.title = scrub_brand_leaks(title_from(s.messages, s.title))
+                _commit_session_brand_privacy_decision(s, privacy_decision)
+
+            _rewrite_existing_session_truth(
+                s,
+                _append_sync_privacy_turn,
+                privacy_reason=None,
+                rollback_snapshot=sync_snapshot,
+            )
             safe_session = public_session_projection(
                 s.compact() | {"messages": s.messages}
             )
@@ -18120,7 +18483,7 @@ def _handle_chat_sync(handler, body):
             )
 
             _model, _provider, _base_url = resolve_model_provider(
-                model_with_provider_context(s.model, getattr(s, "model_provider", None))
+                model_with_provider_context(model, model_provider)
             )
             # Resolve API key via Hermes runtime provider (matches gateway behaviour)
             _api_key = None
@@ -18172,9 +18535,9 @@ def _handle_chat_sync(handler, body):
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
             )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            workspace_ctx = _workspace_context_prefix(str(workspace))
             workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
+                f"Active workspace at session start: {workspace}\n"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
                 "workspace the user has selected in the web UI at the time they sent that message. "
                 "This tag is the single authoritative source of the active workspace and updates "
@@ -18218,6 +18581,8 @@ def _handle_chat_sync(handler, body):
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
+        if _snapshot_session_truth(s) != sync_snapshot:
+            return bad(handler, "Session was modified during synchronous chat; please retry.", 409)
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,
@@ -18227,18 +18592,30 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _next_context_messages,
         )
-        s.context_messages = _next_context_messages
-        s.messages = _merge_display_messages_after_agent_result(
+        _next_display_messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
             _restore_display_reasoning_metadata(_previous_messages, _result_messages),
             msg,
         )
-        # Only auto-generate title when still default; preserves user renames
-        if s.title == "Untitled":
-            s.title = scrub_brand_leaks(title_from(s.messages, s.title))
-        _commit_session_brand_privacy_decision(s, privacy_decision)
-        s.save()
+
+        def _append_sync_completed_turn():
+            s.workspace = workspace
+            s.model = model
+            s.model_provider = model_provider
+            s.context_messages = _next_context_messages
+            s.messages = _next_display_messages
+            # Only auto-generate title when still default; preserves user renames
+            if s.title == "Untitled":
+                s.title = scrub_brand_leaks(title_from(s.messages, s.title))
+            _commit_session_brand_privacy_decision(s, privacy_decision)
+
+        _rewrite_existing_session_truth(
+            s,
+            _append_sync_completed_turn,
+            privacy_reason=None,
+            rollback_snapshot=sync_snapshot,
+        )
     # Sync to state.db for /insights (opt-in setting)
     try:
         if load_settings().get("sync_to_insights"):
@@ -18908,6 +19285,13 @@ def _handle_git_stash_checkout(handler, body):
         return _git_bad(handler, e)
 
 
+def _is_worktree_backed_session(session) -> bool:
+    return bool(
+        getattr(session, "is_worktree", False)
+        or getattr(session, "worktree_path", None)
+    )
+
+
 def _handle_file_delete(handler, body):
     try:
         require(body, "session_id", "path")
@@ -19084,7 +19468,8 @@ def _handle_file_reveal(handler, body):
             # (#1764 — Cygnus's screenshot showed a "Failed to reveal: not
             # found" toast that dropped the path entirely, leaving no clue
             # what was missing).
-            return bad(handler, f"File not found: {target}", 404)
+            missing = body["path"] if _is_worktree_backed_session(s) else target
+            return bad(handler, f"File not found: {missing}", 404)
 
         system = platform.system()
         if system == "Darwin":
@@ -19112,7 +19497,8 @@ def _handle_file_open(handler, body):
     try:
         target = _resolve_workspace_or_user_file_path(Path(s.workspace), body["path"])
         if not target.exists():
-            return bad(handler, f"File not found: {target}", 404)
+            missing = body["path"] if _is_worktree_backed_session(s) else target
+            return bad(handler, f"File not found: {missing}", 404)
 
         system = platform.system()
         if system == "Darwin":
@@ -19173,6 +19559,12 @@ def _handle_file_path(handler, body):
         s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    if _is_worktree_backed_session(s):
+        return bad(
+            handler,
+            "Absolute paths are unavailable for Worktree sessions",
+            403,
+        )
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
@@ -19545,7 +19937,8 @@ def _handle_file_open_vscode(handler, body):
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():
-            return bad(handler, f"File not found: {target}", 404)
+            missing = body["path"] if _is_worktree_backed_session(s) else target
+            return bad(handler, f"File not found: {missing}", 404)
 
         target_str = str(target)
 
@@ -20326,23 +20719,41 @@ def _handle_session_compress(handler, body):
             if _sanitize_messages_for_api(s.messages) != original_messages:
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
-            s.messages = compressed
-            s.context_messages = compressed
-            s.tool_calls = []
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
-            visible_after = visible_messages_for_anchor(compressed, auto_compression=False)
-            s.compression_anchor_visible_idx = max(0, len(visible_after) - 1) if visible_after else None
-            s.compression_anchor_message_key = _anchor_message_key(visible_after[-1]) if visible_after else None
-            summary_text = None
-            if isinstance(summary, dict):
-                summary_text = summary.get("reference_message") or summary.get("token_line") or summary.get("headline")
-            s.compression_anchor_summary = _compact_summary_text(
-                summary_text or _compression_summary_from_messages(compressed) or ""
+            def _apply_manual_compression():
+                s.messages = compressed
+                s.context_messages = compressed
+                s.tool_calls = []
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
+                visible_after = visible_messages_for_anchor(compressed, auto_compression=False)
+                s.compression_anchor_visible_idx = (
+                    max(0, len(visible_after) - 1) if visible_after else None
+                )
+                s.compression_anchor_message_key = (
+                    _anchor_message_key(visible_after[-1]) if visible_after else None
+                )
+                summary_text = None
+                if isinstance(summary, dict):
+                    summary_text = (
+                        summary.get("reference_message")
+                        or summary.get("token_line")
+                        or summary.get("headline")
+                    )
+                s.compression_anchor_summary = _compact_summary_text(
+                    summary_text or _compression_summary_from_messages(compressed) or ""
+                )
+                _reset_session_privacy_context(s, "manual_compression")
+
+            _rewrite_existing_session_truth(
+                s,
+                _apply_manual_compression,
+                # The mutation above already clears pending run fields and
+                # intentionally establishes fresh compression anchors.  The
+                # generic unfinished-turn reset would erase those anchors.
+                privacy_reason=None,
             )
-            s.save()
 
         session_payload = public_session_projection(redact_session_data(
             s.compact() | {
@@ -20505,8 +20916,20 @@ def _is_matching_handoff_summary_content(content: object, target_payload: dict |
     )
 
 
-def _persist_handoff_summary_locally(sid: str, message: dict) -> bool:
-    """Persist a handoff summary marker into a local WebUI session file."""
+def _persist_handoff_summary_locally(
+    sid: str,
+    message: dict,
+    *,
+    sync_state_db: bool = True,
+) -> bool:
+    """Persist one display-only handoff marker in the local sidecar.
+
+    A handoff card has no provider tool call and is deliberately excluded by
+    ``semantic_messages_for_state``.  When a local Session exists, writing the
+    same display-only row to state.db creates two competing stores for data
+    that is not model truth.  Local sessions therefore use only their sidecar;
+    state.db remains the fallback store for external sessions with no sidecar.
+    """
     try:
         from api.models import get_session
 
@@ -20514,15 +20937,20 @@ def _persist_handoff_summary_locally(sid: str, message: dict) -> bool:
     except KeyError:
         return False
 
-    try:
-        if s.messages and _is_matching_handoff_summary_message(s.messages[-1], message):
+    with _get_session_agent_lock(sid):
+        try:
+            if s.messages and _is_matching_handoff_summary_message(s.messages[-1], message):
+                return True
+            s.messages.append(message)
+            s.save()
             return True
-        s.messages.append(message)
-        s.save()
-        return True
-    except Exception as e:
-        logger.warning("Failed to persist handoff summary marker in local session %s: %s", sid, e)
-        return False
+        except Exception as e:
+            logger.warning(
+                "Failed to persist handoff summary marker in local session %s: %s",
+                sid,
+                e,
+            )
+            return False
 
 
 def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
@@ -20556,35 +20984,41 @@ def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
 
     marker_payload = _extract_handoff_summary_payload(message)
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            try:
-                if marker_payload is not None:
-                    cur = conn.execute(
-                        "SELECT content FROM messages WHERE session_id = ? AND role = 'tool' "
-                        "ORDER BY rowid DESC LIMIT 1",
-                        (sid,),
-                    )
-                    row = cur.fetchone()
-                    if row is not None and _is_matching_handoff_summary_content(row[0], marker_payload):
-                        return True
-            except Exception:
-                # If tail-read fails, continue with a best-effort write.
-                logger.debug("Unable to read tail handoff marker from state.db for %s", sid)
+        from api.legacy_session_migration import legacy_migration_state_guard
 
-            conn.execute(
-                "INSERT INTO messages (session_id, role, content, timestamp) "
-                "VALUES (?, 'tool', ?, ?)",
-                (sid, content, ts),
-            )
-            # Keep session row message_count/last-activity aligned with displayed
-            # transcript length. session rows are optional in some test DBs, so
-            # this update is best-effort.
-            conn.execute(
-                "UPDATE sessions SET message_count = COALESCE(message_count, 0) + 1 "
-                "WHERE id = ?",
-                (sid,),
-            )
-            conn.commit()
+        # This direct SQLite compatibility path bypasses SessionDB's installed
+        # hook, so its complete read/dedupe/write transaction must acquire the
+        # same shared lease explicitly.
+        with legacy_migration_state_guard():
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                try:
+                    if marker_payload is not None:
+                        cur = conn.execute(
+                            "SELECT content FROM messages WHERE session_id = ? AND role = 'tool' "
+                            "ORDER BY rowid DESC LIMIT 1",
+                            (sid,),
+                        )
+                        row = cur.fetchone()
+                        if row is not None and _is_matching_handoff_summary_content(row[0], marker_payload):
+                            return True
+                except Exception:
+                    # If tail-read fails, continue with a best-effort write.
+                    logger.debug("Unable to read tail handoff marker from state.db for %s", sid)
+
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp) "
+                    "VALUES (?, 'tool', ?, ?)",
+                    (sid, content, ts),
+                )
+                # Keep session row message_count/last-activity aligned with displayed
+                # transcript length. session rows are optional in some test DBs, so
+                # this update is best-effort.
+                conn.execute(
+                    "UPDATE sessions SET message_count = COALESCE(message_count, 0) + 1 "
+                    "WHERE id = ?",
+                    (sid,),
+                )
+                conn.commit()
         return True
     except Exception as e:
         logger.warning("Failed to persist handoff summary marker in state.db for %s: %s", sid, e)
@@ -20594,14 +21028,23 @@ def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
 def _persist_handoff_summary(sid: str, summary: str, channel: str | None, rounds: int | None, fallback: bool = False) -> dict:
     """Persist a handoff summary marker across local/session backends."""
     marker = _build_handoff_summary_tool_message(sid, summary, channel, rounds, fallback)
-    is_messaging_session = _is_messaging_session_id(sid)
-    if is_messaging_session:
-        _persist_handoff_summary_to_state_db(sid, marker)
-        _persist_handoff_summary_locally(sid, marker)
+    try:
+        from api.models import get_session
+
+        get_session(sid)
+        has_local_session = True
+    except KeyError:
+        has_local_session = False
+    if has_local_session:
+        _persist_handoff_summary_locally(
+            sid,
+            marker,
+            sync_state_db=False,
+        )
         return marker
-    persisted_local = _persist_handoff_summary_locally(sid, marker)
-    if persisted_local:
-        return marker
+    # External gateway/messaging histories without a WebUI sidecar have only
+    # the platform state database available, so a single-store append remains
+    # the compatibility persistence path.
     return marker if _persist_handoff_summary_to_state_db(sid, marker) else marker
 
 

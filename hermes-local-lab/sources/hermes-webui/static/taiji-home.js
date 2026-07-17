@@ -467,6 +467,10 @@
     return '问答';
   }
 
+  function taijiSessionWorktreeLabel(session){
+    return String(session&&(session.worktree_label||session.worktree_branch)||'Worktree');
+  }
+
   function taijiSessionFullTitle(session){
     if(!session) return '未命名会话';
     const displayTitle=normalizeTaijiSessionTitle(session.display_title||'');
@@ -951,6 +955,26 @@
       closeSessionActionMenu();
       showProjectMenuForSession(sid,anchorEl,event);
     }));
+    if(session.is_worktree){
+      const worktreeLabel=taijiSessionWorktreeLabel(session);
+      menu.appendChild(buildSessionActionMenuItem(`移除 Worktree（${worktreeLabel}）`,{
+        icon:trashIcon,
+        danger:true,
+        attr:'data-taiji-session-worktree-remove',
+        sid:sessionId
+      },async ()=>{
+        closeSessionActionMenu();
+        const removeWorktreeFn=globalFn('removeWorktree');
+        const toastFn=globalFn('showToast');
+        if(!removeWorktreeFn){
+          if(toastFn) toastFn('Worktree 移除功能暂不可用',2500,'error');
+          return;
+        }
+        await removeWorktreeFn(session);
+        await refreshSessions();
+        scheduleSync();
+      }));
+    }
     menu.appendChild(buildSessionActionMenuItem('删除',{icon:trashIcon,danger:true,attr:'data-taiji-session-delete',sid:sessionId},async event=>{
       closeSessionActionMenu();
       await window.taijiHomeDeleteSession(sid,event);
@@ -1120,9 +1144,11 @@
         const kindCode=kind==='专家团'?'expert':'qa';
         const kindLabel=escapeHtml(kind);
         const badge=session.is_streaming||session.active_stream_id?'<span class="taiji-session-live">运行</span>':'';
+        const worktreeLabel=escapeHtml(taijiSessionWorktreeLabel(session));
+        const worktreeBadge=session.is_worktree?`<span class="taiji-session-worktree" aria-label="Worktree：${worktreeLabel}" title="Worktree：${worktreeLabel}">WT</span>`:'';
         const moreLabel=escapeHtml(`更多操作：${taijiSessionFullTitle(session)}`);
         const moreIcon='<span class="taiji-session-more-dots" aria-hidden="true">...</span>';
-        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" title="${fullTitle}" aria-label="${fullTitle}"><span class="taiji-session-kind" data-kind="${kindCode}">${kindLabel}</span>${badge}<span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time></span></button><button class="taiji-session-more" type="button" data-taiji-session-more data-session-id="${sid}" title="${moreLabel}" aria-label="${moreLabel}" aria-haspopup="menu" aria-expanded="false">${moreIcon}</button></div>`;
+        return `<div class="taiji-session-row${activeSid===session.session_id?' is-active':''}" data-session-id="${sid}" title="${fullTitle}"><button class="taiji-session-open" type="button" data-taiji-session-open data-session-id="${sid}" title="${fullTitle}" aria-label="${fullTitle}"><span class="taiji-session-kind" data-kind="${kindCode}">${kindLabel}</span>${worktreeBadge}${badge}<span class="taiji-session-title">${title}</span><span class="taiji-session-meta"><time class="taiji-session-time">${time}</time></span></button><button class="taiji-session-more" type="button" data-taiji-session-more data-session-id="${sid}" title="${moreLabel}" aria-label="${moreLabel}" aria-haspopup="menu" aria-expanded="false">${moreIcon}</button></div>`;
       }).join('');
       return `<section class="taiji-session-group" aria-label="${group}"><header><span>${group}</span><span aria-hidden="true">⌃</span></header><div class="taiji-session-card">${rows}</div></section>`;
     }).join('');

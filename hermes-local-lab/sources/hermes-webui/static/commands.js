@@ -421,7 +421,7 @@ async function cmdTerminal(){
     await newSession();
     if(typeof renderSessionList==='function') await renderSessionList();
   }
-  if(!S.session||!S.session.workspace){
+  if(!S.session||!(typeof sessionHasWorkspace==='function'&&sessionHasWorkspace())){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
     if(typeof syncTerminalButton==='function') syncTerminalButton();
     return;
@@ -1370,7 +1370,9 @@ function _statusCardFromSession(s){
   const model=s.model||(($('modelSelect')&&$('modelSelect').value)||t('usage_default_model'));
   const running=!!(s.active_stream_id||S.activeStreamId||S.busy);
   const profile=s.profile||S.activeProfile||'default';
-  const workspace=s.workspace||S.currentDir||t('status_unknown');
+  const workspace=s.is_worktree
+    ? (s.worktree_label||s.worktree_branch||'Worktree')
+    : (s.workspace||S.currentDir||t('status_unknown'));
   const rows=[
     {label:t('status_session_id'), value:s.session_id||t('status_unknown')},
     {label:t('status_title'), value:s.title||t('untitled')},

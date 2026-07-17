@@ -76,8 +76,9 @@ def append_turn_journal_event(
 ) -> dict:
     """Append one turn journal event and fsync it before returning.
 
-    The returned event is the exact payload written, with default ``version``,
-    ``session_id``, ``turn_id``, and ``created_at`` fields filled in.
+    The returned event is the safe public projection written to disk, with
+    default ``version``, ``session_id``, ``turn_id``, and ``created_at`` fields
+    filled in. Raw paths, credentials, and untyped metadata are never journaled.
     """
     if not isinstance(event, dict):
         raise TypeError("event must be a dict")
@@ -89,6 +90,12 @@ def append_turn_journal_event(
     payload["session_id"] = str(session_id)
     payload.setdefault("turn_id", _make_turn_id())
     payload.setdefault("created_at", time.time())
+    from api.brand_privacy import public_turn_journal_event_projection
+
+    payload = public_turn_journal_event_projection(
+        payload,
+        session_id=str(session_id),
+    )
 
     path = _journal_path(session_id, session_dir=session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,7 @@ def test_chat_start_appends_submitted_turn_journal_before_worker_thread_start():
     src = Path("api/routes.py").read_text(encoding="utf-8")
     save_idx = src.index("_prepare_chat_start_session_for_stream(")
     append_idx = src.index("append_turn_journal_event(", save_idx)
-    thread_idx = src.index("threading.Thread(", append_idx)
+    thread_idx = src.index("start_legacy_migration_guarded_worker(", append_idx)
 
     assert save_idx < append_idx < thread_idx
     assert '"event": "submitted"' in src[append_idx:thread_idx]
@@ -17,7 +17,7 @@ def test_chat_start_writes_turn_journal_after_session_lock_and_handles_failure()
     lock_idx = src.index("with session_lock:")
     stream_registration_idx = src.index("STREAMS[stream_id] = stream", lock_idx)
     append_idx = src.index("append_turn_journal_event(", stream_registration_idx)
-    thread_idx = src.index("threading.Thread(", append_idx)
+    thread_idx = src.index("start_legacy_migration_guarded_worker(", append_idx)
     lock_block = src[lock_idx:stream_registration_idx]
     append_block = src[append_idx:thread_idx]
 

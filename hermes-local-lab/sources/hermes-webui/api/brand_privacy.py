@@ -187,6 +187,24 @@ _RUNTIME_ACCESS_RE = re.compile(
     r")"
 )
 
+_SENSITIVE_INTERNAL_OBJECT_RE = re.compile(
+    r"(?is)(?:"
+    r"内部路径|内部目录|运行路径|运行目录|运行时路径|运行时目录|"
+    r"配置文件(?:路径|目录)?|安装路径|安装目录|部署路径|部署目录|"
+    r"\blog(?:s)?\s+(?:path|directory)\b|"
+    r"\b(?:internal|runtime|configuration|config|installation|deployment)\s+"
+    r"(?:path|directory|file)\b"
+    r")"
+)
+
+_DISCLOSURE_ACCESS_INTENT_RE = re.compile(
+    r"(?is)(?:"
+    r"是什么|在哪里|位置|告诉|说出|给我|发给|披露|公开|提供|交代|"
+    r"列出|展示|查看|读取|扫描|遍历|访问|打开|进入|"
+    r"\b(?:what|where|show|tell|reveal|list|read|scan|browse|access|open)\b"
+    r")"
+)
+
 _LOCAL_SERVICE_ACCESS_RE = re.compile(
     r"(?is)"
     r"(?:"
@@ -288,15 +306,19 @@ _PUBLIC_LOCAL_PATH_RE = re.compile(
 )
 
 _PUBLIC_SESSION_FIELDS = (
-    "session_id", "title", "workspace", "model", "model_provider",
+    "session_id", "title", "display_title", "writeflow_title",
+    "writeflow_team_id", "workspace", "model", "model_provider",
     "message_count", "actual_message_count", "user_message_count",
     "created_at", "updated_at", "last_message_at", "pinned", "archived",
-    "project_id", "profile", "input_tokens", "output_tokens",
+    "project_id", "project_name", "profile", "default_hidden",
+    "input_tokens", "output_tokens",
     "estimated_cost", "cache_read_tokens", "cache_write_tokens",
     "cache_hit_percent", "personality", "context_length", "threshold_tokens",
     "last_prompt_tokens", "compression_anchor_visible_idx",
     "compression_anchor_summary", "pre_compression_snapshot", "context_engine",
     "compression_anchor_engine", "compression_anchor_mode", "parent_session_id",
+    "_lineage_root_id", "_lineage_tip_id", "_parent_lineage_root_id",
+    "_compression_segment_count", "relationship_type",
     "active_stream_id", "pending_user_message", "pending_started_at",
     "has_pending_user_message", "is_cli_session", "source_tag", "raw_source",
     "session_source", "source_label", "read_only", "enabled_toolsets",
@@ -405,6 +427,15 @@ class BrandSafetyPolicy:
         direct_target = self_referential or internal_marker
         has_internal_target = direct_target or context_active or adjacent_target
         contextual_only = context_active and not direct_target
+
+        sensitive_internal_object = bool(_SENSITIVE_INTERNAL_OBJECT_RE.search(value))
+        disclosure_or_access = bool(_DISCLOSURE_ACCESS_INTENT_RE.search(value))
+        if has_internal_target and sensitive_internal_object and disclosure_or_access:
+            return self._safe(
+                "runtime_access",
+                "internal path or configuration disclosure request",
+                contextual=contextual_only,
+            )
 
         if license_probe and has_internal_target:
             return self._safe("license", "license or copyright probe", contextual=contextual_only)
@@ -1658,20 +1689,35 @@ def public_session_projection(payload: Any) -> dict:
     if not isinstance(payload, dict):
         return {}
     cleaned: dict[str, Any] = {}
+    is_worktree = bool(payload.get("is_worktree") or payload.get("worktree_path"))
+    cleaned["is_worktree"] = is_worktree
     for key in _PUBLIC_SESSION_FIELDS:
         if key not in payload:
             continue
         value = payload.get(key)
         if key == "workspace":
-            if value and not is_internal_workspace(value):
+            # A user-selected external workspace remains part of the existing
+            # contract for ordinary sessions.  A worktree session's workspace
+            # is the generated worktree path, so its public identity must come
+            # only from the path-free worktree fields below.
+            if not is_worktree and value and not is_internal_workspace(value):
                 cleaned[key] = str(value)
             continue
-        if key in {"title", "pending_user_message", "compression_anchor_summary"}:
+        if key in {
+            "title", "display_title", "writeflow_title", "project_name",
+            "pending_user_message", "compression_anchor_summary",
+        }:
             cleaned[key] = _mask_public_sensitive_text(_public_visible_text(value))
         elif key == "enabled_toolsets":
             cleaned[key] = [str(item) for item in value] if isinstance(value, list) else []
         else:
             cleaned[key] = copy.deepcopy(value)
+    if is_worktree:
+        label = _public_worktree_label(
+            payload.get("worktree_label") or payload.get("worktree_branch")
+        )
+        cleaned["worktree_branch"] = label
+        cleaned["worktree_label"] = label
     session_id = str(payload.get("session_id") or "")
     workspace = str(payload.get("workspace") or "") or None
     if isinstance(payload.get("messages"), list):
@@ -1710,12 +1756,80 @@ def public_session_projection(payload: Any) -> dict:
         cleaned["gateway_routing_history"] = _public_metadata_projection(
             payload.get("gateway_routing_history")
         )
+    attention = payload.get("attention")
+    if isinstance(attention, dict):
+        public_attention: dict[str, Any] = {}
+        for key in ("kind", "severity"):
+            if isinstance(attention.get(key), str):
+                public_attention[key] = _mask_public_sensitive_text(attention[key])
+        count = attention.get("count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            public_attention["count"] = max(0, count)
+        if public_attention:
+            cleaned["attention"] = public_attention
     return _mask_public_sensitive_text(cleaned)
+
+
+def _public_worktree_label(value: Any) -> str:
+    """Return one short display label, never a filesystem path or internal prefix."""
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return "Worktree"
+    label = raw.rsplit("/", 1)[-1].strip()
+    label = re.sub(r"(?i)^hermes(?:[-_ ]+|$)", "", label).strip("-_ ")
+    if not label or label in {".", ".."} or ":" in label:
+        return "Worktree"
+    label = re.sub(r"[\x00-\x1f\x7f]+", "", label).strip()
+    label = str(_mask_public_sensitive_text(label, hide_local_paths=True))[:80].strip()
+    return label or "Worktree"
+
+
+def public_worktree_status_projection(payload: Any, *, label: Any = None) -> dict:
+    """Project worktree status without paths, repo roots, or upstream names."""
+    source = payload if isinstance(payload, dict) else {}
+    projected: dict[str, Any] = {
+        "label": _public_worktree_label(label or source.get("label")),
+    }
+    for key in ("exists", "dirty", "locked_by_stream", "locked_by_terminal", "listed"):
+        projected[key] = bool(source.get(key))
+    count = source.get("untracked_count")
+    projected["untracked_count"] = (
+        max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
+    )
+    ahead_behind = source.get("ahead_behind") if isinstance(source.get("ahead_behind"), dict) else {}
+    projected["ahead_behind"] = {
+        "ahead": max(0, ahead_behind.get("ahead", 0))
+        if isinstance(ahead_behind.get("ahead", 0), int)
+        and not isinstance(ahead_behind.get("ahead", 0), bool)
+        else 0,
+        "behind": max(0, ahead_behind.get("behind", 0))
+        if isinstance(ahead_behind.get("behind", 0), int)
+        and not isinstance(ahead_behind.get("behind", 0), bool)
+        else 0,
+        "available": bool(ahead_behind.get("available")),
+    }
+    return projected
+
+
+def public_worktree_remove_projection(payload: Any) -> dict:
+    """Project worktree removal onto its path-free browser result contract."""
+    source = payload if isinstance(payload, dict) else {}
+    warnings = source.get("warnings") if isinstance(source.get("warnings"), list) else []
+    return {
+        "ok": bool(source.get("ok")),
+        "removed": bool(source.get("removed", source.get("ok"))),
+        "warnings": [
+            str(_mask_public_sensitive_text(item, hide_local_paths=True))
+            for item in warnings
+            if isinstance(item, str) and item.strip()
+        ],
+    }
 
 
 def public_session_status_projection(payload: Any) -> dict:
     """Return session status without runtime-home or profile-home paths."""
     source = payload if isinstance(payload, dict) else {}
+    is_worktree = bool(source.get("is_worktree") or source.get("worktree_path"))
     projected = {
         key: copy.deepcopy(source.get(key))
         for key in (
@@ -1726,8 +1840,13 @@ def public_session_status_projection(payload: Any) -> dict:
         if key in source
     }
     workspace = source.get("workspace")
-    if workspace and not is_internal_workspace(workspace):
+    if workspace and not is_worktree and not is_internal_workspace(workspace):
         projected["workspace"] = str(workspace)
+    if is_worktree:
+        projected["is_worktree"] = True
+        projected["worktree_label"] = _public_worktree_label(
+            source.get("worktree_label") or source.get("worktree_branch")
+        )
     return _mask_public_sensitive_text(projected)
 
 
@@ -1798,6 +1917,10 @@ def public_event_projection(payload: Any, *, event_name: str | None = None) -> d
         return cleaned
 
     fields_by_event = {
+        "submitted": (
+            "source", "turn_id", "idempotency_key", "expert_team_run_id",
+            "stage_id", "attempt", "execution_start_id",
+        ),
         "token": ("text",),
         "reasoning": ("text",),
         "interim_assistant": ("text", "already_streamed"),
@@ -1845,6 +1968,51 @@ def public_event_projection(payload: Any, *, event_name: str | None = None) -> d
                 if key == "usage"
                 else _public_metadata_projection(source.get(key))
             )
+    return _mask_public_sensitive_text(cleaned, hide_local_paths=True)
+
+
+def public_turn_journal_event_projection(payload: Any, *, session_id: str) -> dict:
+    """Project one durable turn lifecycle event onto its safe journal schema.
+
+    The turn journal participates in recovery and migration, but it is also a
+    replayable diagnostic surface.  Keep only lifecycle identity and typed
+    recovery fields; never persist arbitrary metadata, workspace paths, raw
+    attachment paths, credentials, or provider/tool payloads.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    cleaned: dict[str, Any] = {}
+    text_fields = (
+        "event", "session_id", "turn_id", "stream_id", "role", "reason",
+        "model", "model_provider", "expert_team_run_id", "stage_id",
+        "execution_start_id", "assistant_content_sha256", "user_content_sha256",
+    )
+    scalar_fields = (
+        "version", "created_at", "assistant_message_index", "user_message_index",
+        "attempt", "duration",
+    )
+    for key in text_fields:
+        value = source.get(key)
+        if isinstance(value, str) and value:
+            cleaned[key] = _mask_public_sensitive_text(value, hide_local_paths=True)
+    for key in scalar_fields:
+        value = source.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            cleaned[key] = copy.deepcopy(value)
+    if isinstance(source.get("content"), str):
+        # User input remains the user's wording; this layer masks credentials
+        # and local paths but deliberately does not apply brand replacement.
+        cleaned["content"] = _mask_public_sensitive_text(
+            source["content"], hide_local_paths=True
+        )
+    attachments = source.get("attachments")
+    if isinstance(attachments, list):
+        cleaned["attachments"] = [
+            projected
+            for raw in attachments
+            if isinstance(raw, (dict, str))
+            for projected in [public_attachment_projection(raw, session_id=session_id)]
+            if projected
+        ]
     return _mask_public_sensitive_text(cleaned, hide_local_paths=True)
 
 

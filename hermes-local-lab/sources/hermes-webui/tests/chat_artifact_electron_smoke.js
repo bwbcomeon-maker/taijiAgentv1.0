@@ -11,6 +11,13 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const {
+  assertNavigationParity,
+  captureAuditedScreenshot,
+  collectSourceFingerprint,
+  inspectTaijiNavigation,
+  installDailyEquivalentRuntimeConfig,
+} = require("./electron_acceptance_provenance");
 
 function parseArgs(argv) {
   const result = { outDir: "" };
@@ -56,12 +63,13 @@ async function waitForPidsToExit(pids, timeoutMs = 15000) {
 
 async function terminateOwnedPids(pids) {
   const owned = [...new Set(pids.filter(pid => Number.isFinite(pid) && pid > 0))];
+  const terminated = [];
   for (const pid of owned) {
     if (pidAlive(pid)) {
-      try { process.kill(pid, "SIGTERM"); } catch (_) {}
+      try { process.kill(pid, "SIGTERM"); terminated.push(pid); } catch (_) {}
     }
   }
-  if (await waitForPidsToExit(owned, 5000)) return { term: owned, kill: [] };
+  if (await waitForPidsToExit(owned, 5000)) return { term: terminated, kill: [] };
   const forced = [];
   for (const pid of owned) {
     if (pidAlive(pid)) {
@@ -116,6 +124,14 @@ missing_artifact = registry.register_image_file(
     source_tool_call_id="tool-image-missing",
     source_path=image_source,
     name="已损坏的验收图片.png",
+)
+historical_id = "uiartifacthistoricalretry"
+historical_artifact = registry.register_image_file(
+    session_id=historical_id,
+    source_turn_id="turn-image-historical",
+    source_tool_call_id="tool-image-historical",
+    source_path=image_source,
+    name="历史缺失图片.png",
 )
 scroll_id = "uiartifactscrollanchor"
 scroll_artifact = registry.register_image_file(
@@ -200,6 +216,20 @@ fixtures = {
             },
         ],
     },
+    historical_id: {
+        "title": "历史图片非破坏重试验收",
+        "messages": [
+            {"role": "user", "content": "请生成一张历史蓝色科技图。", "timestamp": now - 20},
+            {
+                "role": "assistant", "content": "历史图片曾成功生成，但文件随后丢失。",
+                "timestamp": now - 19, "artifacts": [historical_artifact],
+            },
+            {"role": "user", "content": "后续第一轮：请记录项目代号为甲。", "timestamp": now - 18},
+            {"role": "assistant", "content": "已记录项目代号为甲。", "timestamp": now - 17},
+            {"role": "user", "content": "后续第二轮：请确认项目代号。", "timestamp": now - 16},
+            {"role": "assistant", "content": "项目代号仍然是甲。", "timestamp": now - 15},
+        ],
+    },
     scroll_id: {
         "title": "图片延迟加载滚动锚点验收",
         "messages": [
@@ -235,10 +265,14 @@ for session_id, fixture in fixtures.items():
 manifest = json.loads((runtime_home / "web" / "artifacts" / missing_id / "manifest.json").read_text("utf-8"))
 missing_record = next(item for item in manifest["artifacts"] if item["artifact_id"] == missing_artifact["artifact_id"])
 Path(missing_record["storage_path"]).unlink()
+historical_manifest = json.loads((runtime_home / "web" / "artifacts" / historical_id / "manifest.json").read_text("utf-8"))
+historical_record = next(item for item in historical_manifest["artifacts"] if item["artifact_id"] == historical_artifact["artifact_id"])
+Path(historical_record["storage_path"]).unlink()
 
 print(json.dumps({
     "artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"],
     "missing_artifact_id": missing_artifact["artifact_id"],
+    "historical_artifact_id": historical_artifact["artifact_id"],
     "scroll_artifact_id": scroll_artifact["artifact_id"],
     "sessions": list(fixtures),
 }))
@@ -327,7 +361,7 @@ async function tabToSelector(page, selector, { reverse = false, maxSteps = 160 }
 }
 
 async function screenshot(page, outDir, name) {
-  await page.screenshot({ path: path.join(outDir, name), animations: "disabled" });
+  return captureAuditedScreenshot(page, outDir, name);
 }
 
 async function main() {
@@ -355,6 +389,8 @@ async function main() {
   assertState(fs.existsSync(electronBin), `Electron binary not found`);
   assertState(fs.existsSync(pythonBin), `Python runtime not found`);
 
+  const runtimeConfig = installDailyEquivalentRuntimeConfig(dirs.runtimeHome);
+  const sourceFingerprint = collectSourceFingerprint({ repoRoot, webuiDir });
   const imageSource = path.join(webuiDir, "static", "assets", "taiji", "background", "background-grid.png");
   const fixture = prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome: dirs.runtimeHome, workspace: dirs.workspace, imageSource });
   const baselineElectronPids = pgrepElectron();
@@ -363,19 +399,28 @@ async function main() {
     web: path.join(dirs.state, "taiji-agent", "logs", "web.pid"),
   };
   const launches = [];
+  const screenshotSanity = {};
+  let navigationParity = null;
   let app = null;
   try {
     app = await launchDesktop({ _electron, electronBin, appDir, labDir, pythonBin, dirs });
     let page = await readyPage(app, "uiartifactdefault");
     launches.push({ electron: app.process().pid, agent: readPid(pidFiles.agent), web: readPid(pidFiles.web) });
 
+    navigationParity = await inspectTaijiNavigation(page);
+    assertNavigationParity(navigationParity);
+    assertState(
+      JSON.stringify(navigationParity.ui_visibility) === JSON.stringify(runtimeConfig.feature_visibility),
+      "runtime feature visibility differs from the sanitized daily-equivalent fixture",
+      { expected: runtimeConfig.feature_visibility, actual: navigationParity.ui_visibility },
+    );
     assertState(await page.locator("#msgInner").innerText().then(text => text.includes("当前回复中处理图片产物")), "default fixture did not render");
-    await screenshot(page, outDir, "01-default.png");
+    screenshotSanity["01-default.png"] = await screenshot(page, outDir, "01-default.png");
 
     await loadFixtureSession(page, "uiartifactgenerating");
     await page.waitForSelector('.image-generation-state[data-state="loading"]', { timeout: 10000 });
     assertState((await page.locator('.image-generation-state[data-state="loading"]').getAttribute("role")) === "status", "generation state lacks status semantics");
-    await screenshot(page, outDir, "02-generating.png");
+    screenshotSanity["02-generating.png"] = await screenshot(page, outDir, "02-generating.png");
 
     await loadFixtureSession(page, "uiartifactsuccess");
     const image = page.locator(".chat-artifact-image").first();
@@ -426,12 +471,12 @@ async function main() {
       visible: node.offsetWidth > 0 && node.offsetHeight > 0,
       naturalWidth: node.naturalWidth,
     }));
-    await screenshot(page, outDir, "03-success.png");
+    screenshotSanity["03-success.png"] = await screenshot(page, outDir, "03-success.png");
 
     await loadFixtureSession(page, "uiartifactmissing");
     await page.waitForSelector(".chat-artifact-unavailable", { timeout: 15000 });
     assertState((await page.locator(".chat-artifact-unavailable img").count()) === 0, "missing artifact left a broken image element");
-    await screenshot(page, outDir, "04-missing.png");
+    screenshotSanity["04-missing.png"] = await screenshot(page, outDir, "04-missing.png");
     await page.route("**/api/chat/start", async route => {
       const payload = JSON.parse(route.request().postData() || "{}");
       if (payload.session_id === "uiartifactmissing") {
@@ -472,10 +517,109 @@ async function main() {
     assertState(!retryFailureState.busy && retryFailureState.errorVisible && retryFailureState.loadingStates === 0, "controlled retry failure left a busy/loading UI", retryFailureState);
     await page.unroute("**/api/chat/start");
 
+    await loadFixtureSession(page, "uiartifacthistoricalretry");
+    const historicalRetryButton = page.locator(".chat-artifact-unavailable .chat-artifact-retry").first();
+    await historicalRetryButton.waitFor({ state: "visible", timeout: 15000 });
+    const historicalRetryButtonState = {
+      text: (await historicalRetryButton.innerText()).trim(),
+      aria_label: await historicalRetryButton.getAttribute("aria-label"),
+    };
+    assertState(
+      historicalRetryButtonState.text === "作为新消息重新生成"
+        && historicalRetryButtonState.aria_label === "作为新消息重新生成图片",
+      "historical artifact retry is not presented as a new-message action",
+      historicalRetryButtonState,
+    );
+    const historicalSnapshot = () => page.evaluate(() => S.messages.map(message => ({
+      role: String(message && message.role || ""),
+      content: typeof msgContent === "function" ? msgContent(message) : String(message && message.content || ""),
+      artifact_ids: Array.isArray(message && message.artifacts)
+        ? message.artifacts.map(artifact => String(artifact && artifact.artifact_id || ""))
+        : [],
+    })));
+    const historicalRetryBefore = await historicalSnapshot();
+    assertState(
+      historicalRetryBefore.length === 6
+        && historicalRetryBefore[4].content.includes("后续第二轮")
+        && historicalRetryBefore[5].content.includes("项目代号仍然是甲"),
+      "historical retry fixture does not contain two complete later turns",
+      historicalRetryBefore,
+    );
+    const historicalRetryTruncateRequests = [];
+    let historicalRetryStartPayload = null;
+    await page.route("**/api/session/truncate", async route => {
+      let payload = {};
+      try { payload = JSON.parse(route.request().postData() || "{}"); } catch (_) {}
+      if (payload.session_id === "uiartifacthistoricalretry") {
+        historicalRetryTruncateRequests.push(payload);
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "historical retry must not truncate" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/api/chat/start", async route => {
+      const payload = JSON.parse(route.request().postData() || "{}");
+      if (payload.session_id === "uiartifacthistoricalretry") {
+        historicalRetryStartPayload = payload;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "controlled historical retry smoke stop" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    const historicalRetryStartPromise = page.waitForRequest(request => {
+      if (!request.url().includes("/api/chat/start") || request.method() !== "POST") return false;
+      try { return JSON.parse(request.postData() || "{}").session_id === "uiartifacthistoricalretry"; } catch (_) { return false; }
+    });
+    await historicalRetryButton.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(150);
+    screenshotSanity["06-historical-retry-as-new-message.png"] = await screenshot(
+      page,
+      outDir,
+      "06-historical-retry-as-new-message.png",
+    );
+    await historicalRetryButton.click();
+    await historicalRetryStartPromise;
+    await page.waitForFunction(() => {
+      const text = document.getElementById("msgInner")?.innerText || "";
+      return S.busy === false && text.includes("controlled historical retry smoke stop");
+    });
+    await page.waitForTimeout(250);
+    const historicalRetryAfter = await historicalSnapshot();
+    const historicalPrefixPreserved = JSON.stringify(
+      historicalRetryAfter.slice(0, historicalRetryBefore.length),
+    ) === JSON.stringify(historicalRetryBefore);
+    assertState(
+      historicalRetryTruncateRequests.length === 0,
+      "historical image retry called the destructive truncate endpoint",
+      historicalRetryTruncateRequests,
+    );
+    assertState(
+      historicalRetryStartPayload
+        && historicalRetryStartPayload.message === "请生成一张历史蓝色科技图。",
+      "historical image retry did not submit the original prompt as a new turn",
+      historicalRetryStartPayload,
+    );
+    assertState(
+      historicalPrefixPreserved
+        && historicalRetryAfter.length >= historicalRetryBefore.length,
+      "historical image retry changed existing messages",
+      { before: historicalRetryBefore, after: historicalRetryAfter },
+    );
+    await page.unroute("**/api/session/truncate");
+    await page.unroute("**/api/chat/start");
+
     await loadFixtureSession(page, "uiartifactfailure");
     await page.waitForSelector('.image-generation-state[data-state="failed"]', { timeout: 10000 });
     assertState((await page.locator('.image-generation-state[data-state="failed"] button').getAttribute("aria-label")) === "重新生成图片", "failure retry lacks accessible name");
-    await screenshot(page, outDir, "05-failure.png");
+    screenshotSanity["05-failure.png"] = await screenshot(page, outDir, "05-failure.png");
 
     await loadFixtureSession(page, "uiartifactcancelboundary");
     const cancelBoundary = await page.evaluate(() => {
@@ -504,7 +648,7 @@ async function main() {
     assertState(!cancelBoundary.previousPolluted && cancelBoundary.targetIndex === 3 && cancelBoundary.transient, "live cancel terminal state crossed the current user boundary", cancelBoundary);
     assertState(cancelBoundary.cancelledCards === 1 && cancelBoundary.rawToolCards === 0, "live cancel did not settle as one safe image status card", cancelBoundary);
     assertState(!cancelBoundary.eventKeys.some(key => ["args", "result", "path", "token"].includes(key)), "live cancel retained a raw tool payload", cancelBoundary);
-    await screenshot(page, outDir, "06-cancel-boundary.png");
+    screenshotSanity["06-cancel-boundary.png"] = await screenshot(page, outDir, "06-cancel-boundary.png");
     const cancelTransientAfterDiscard = await page.evaluate(() => {
       S.messages = _discardTransientImageTerminalMessages(S.messages);
       renderMessages({ preserveScroll: true });
@@ -533,7 +677,12 @@ async function main() {
       await route.continue();
     });
     await loadFixtureSession(page, "uiartifactscrollanchor");
-    await page.locator("#messages").evaluate(node => { node.scrollTop = 0; });
+    // Do not rely on Chromium's native `loading=lazy` distance heuristic to
+    // decide whether the delayed request starts.  Explicitly expose the target
+    // image once, then move it above the viewport for the scroll-anchor check.
+    // This still exercises the real network/image/render path while removing a
+    // platform-timing race that intermittently skipped the request entirely.
+    await page.locator(".msg-artifact-image").first().scrollIntoViewIfNeeded();
     await Promise.race([
       delayedMediaStarted,
       new Promise((_, reject) => setTimeout(() => reject(new Error("lazy artifact request did not start")), 10000)),
@@ -590,7 +739,7 @@ async function main() {
     await page.unroute("**/api/media?**");
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await page.waitForTimeout(500);
-    await screenshot(page, outDir, "07-scroll-anchor.png");
+    screenshotSanity["07-scroll-anchor.png"] = await screenshot(page, outDir, "07-scroll-anchor.png");
 
     await loadFixtureSession(page, "uiartifactsuccess");
     await page.evaluate(() => { void clearConversation(); });
@@ -603,7 +752,9 @@ async function main() {
     await app.close();
     app = null;
     const firstCleanup = await terminateOwnedPids(Object.values(firstOwnedPids));
-    assertState(baselineElectronPids.every(pidAlive), "pre-existing Electron process was terminated");
+    const baselineSignaledByCleanup = [...firstCleanup.term, ...firstCleanup.kill]
+      .filter(pid => baselineElectronPids.includes(pid));
+    assertState(baselineSignaledByCleanup.length === 0, "cleanup targeted a pre-existing Electron process", { baselineSignaledByCleanup });
 
     app = await launchDesktop({ _electron, electronBin, appDir, labDir, pythonBin, dirs });
     page = await readyPage(app, "uiartifactsuccess");
@@ -619,7 +770,7 @@ async function main() {
       naturalWidth: node.naturalWidth,
     }));
     assertState(beforeRestartArtifact.src === afterRestartArtifact.src && beforeRestartArtifact.visible && afterRestartArtifact.visible, "artifact URL or visibility changed across restart", { beforeRestartArtifact, afterRestartArtifact });
-    await screenshot(page, outDir, "08-restart-recovery.png");
+    screenshotSanity["08-restart-recovery.png"] = await screenshot(page, outDir, "08-restart-recovery.png");
 
     await app.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
@@ -636,13 +787,14 @@ async function main() {
       imageBottom: document.querySelector(".chat-artifact-card")?.getBoundingClientRect().bottom || 0,
     }));
     assertState(narrow.imageRight <= narrow.viewport + 1, "artifact overflows narrow viewport", narrow);
-    await screenshot(page, outDir, "09-narrow.png");
+    screenshotSanity["09-narrow.png"] = await screenshot(page, outDir, "09-narrow.png");
 
     const result = {
       status: "passed_with_provider_fixture",
       screenshots: [
         "01-default.png", "02-generating.png", "03-success.png",
-        "04-missing.png", "05-failure.png", "06-cancel-boundary.png",
+        "04-missing.png", "05-failure.png", "06-historical-retry-as-new-message.png",
+        "06-cancel-boundary.png",
         "07-scroll-anchor.png", "08-restart-recovery.png", "09-narrow.png",
       ],
       screenshot_states: {
@@ -651,6 +803,7 @@ async function main() {
         "03-success.png": "authorized inline artifact success",
         "04-missing.png": "missing artifact replaced by an actionable error card",
         "05-failure.png": "persisted image generation failure with retry",
+        "06-historical-retry-as-new-message.png": "historical missing artifact offers a non-destructive new-turn retry",
         "06-cancel-boundary.png": "live image cancel stays on the current user turn",
         "07-scroll-anchor.png": "late image load preserves an unpinned reading anchor",
         "08-restart-recovery.png": "same artifact recovered after Electron restart",
@@ -660,7 +813,18 @@ async function main() {
       provider_realtime_verified: false,
       persistence: "production Session + Artifact Registry + HTTP media authorization",
       artifact_id: fixture.artifact_id,
+      acceptance_provenance: {
+        source: sourceFingerprint,
+        desktop_app_source: "isolated_worktree",
+        runtime_config: runtimeConfig,
+        user_data: { type: "isolated_temporary" },
+        navigation: navigationParity,
+      },
+      screenshot_sanity: screenshotSanity,
       checks: {
+        daily_configuration_navigation_parity: true,
+        auditable_source_fingerprint: true,
+        screenshot_sanity: true,
         lightbox_keyboard_and_focus: true,
         download_keyboard_and_accessible_name: true,
         natural_focus_order: { imageTabSteps, downloadTabSteps, retryTabSteps },
@@ -670,6 +834,17 @@ async function main() {
           truncate: retryTruncatePayload,
           start: { session_id: retryPayload.session_id, message: retryPayload.message },
           settled_failure: retryFailureState,
+        },
+        historical_retry_as_new_message: {
+          button: historicalRetryButtonState,
+          truncate_requests: historicalRetryTruncateRequests.length,
+          start: {
+            session_id: historicalRetryStartPayload && historicalRetryStartPayload.session_id,
+            message: historicalRetryStartPayload && historicalRetryStartPayload.message,
+          },
+          history_before_count: historicalRetryBefore.length,
+          history_after_count: historicalRetryAfter.length,
+          history_prefix_preserved: historicalPrefixPreserved,
         },
         late_load_scroll_anchor: {
           requestStartedBeforeWheel: delayedMediaRequestStartedAt <= scrollWheelAt,
@@ -694,6 +869,7 @@ async function main() {
       pid_ownership: {
         baseline_electron_pids: baselineElectronPids,
         baseline_alive: Object.fromEntries(baselineElectronPids.map(pid => [pid, pidAlive(pid)])),
+        baseline_signaled_by_cleanup: baselineSignaledByCleanup,
         launches,
       },
       cleanup: {

@@ -96,7 +96,7 @@ def test_rollback_validate_checkpoint_id_runtime_behavior():
 
 def test_redact_session_data_reads_settings_once():
     """`redact_session_data()` must read `api_redact_enabled` ONCE per call
-    and thread it through the recursive walk via the `_enabled` keyword.
+    and thread it through one recursive `_redact_value` walk.
     Calling load_settings per string was a hot-path perf regression."""
     src = (REPO / "api" / "helpers.py").read_text(encoding="utf-8")
 
@@ -107,10 +107,7 @@ def test_redact_session_data_reads_settings_once():
     assert "load_settings()" in body, (
         "redact_session_data must read load_settings() once at the top"
     )
-    assert body.count("_enabled=_enabled") >= 3, (
-        "redact_session_data must thread _enabled through to title, "
-        "messages, and tool_calls (3 call sites)"
-    )
+    assert "return _redact_value(dict(session_dict), _enabled=_enabled)" in body
 
     # _redact_text and _redact_value accept _enabled kwarg.
     assert "def _redact_text(text: str, *, _enabled" in src
