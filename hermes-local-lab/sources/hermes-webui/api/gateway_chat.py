@@ -612,13 +612,20 @@ def _gateway_run_request_body(
             "Ephemeral WebUI prefill context "
             f"(role={role}; treat as context, not conversation history):\n{rendered}"
         )
+    model = str(body.get("model") or "").strip()
+    provider = str(body.get("provider") or "").strip()
     run_body = {
-        "model": body.get("model") or "default",
         "input": user_message,
         "session_id": session_id,
     }
-    if body.get("provider"):
-        run_body["provider"] = body.get("provider")
+    if (
+        model
+        and provider
+        and model.casefold() != "default"
+        and provider.casefold() != "default"
+    ):
+        run_body["model"] = model
+        run_body["provider"] = provider
     if body.get("platform_message_id"):
         run_body["platform_message_id"] = body.get("platform_message_id")
     if "checkpoint_content" in body:

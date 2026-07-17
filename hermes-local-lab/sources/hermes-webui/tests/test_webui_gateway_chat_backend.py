@@ -132,6 +132,45 @@ def test_gateway_run_request_body_uses_current_user_content_without_history_repl
     )
 
     assert result["input"] == "prepared visual context"
+    assert result["model"] == "deepseek-chat"
+    assert result["provider"] == "deepseek"
+
+
+@pytest.mark.parametrize(
+    "route_fields",
+    [
+        {"model": "default"},
+        {"model": "concrete-model"},
+        {"provider": "deepseek"},
+        {"model": " default ", "provider": " deepseek "},
+        {"model": "concrete-model", "provider": " default "},
+    ],
+)
+def test_gateway_run_request_body_omits_incomplete_model_routes(route_fields):
+    result = _gateway_run_request_body(
+        {
+            **route_fields,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        session_id="session-a",
+    )
+
+    assert "model" not in result
+    assert "provider" not in result
+
+
+def test_gateway_run_request_body_trims_complete_model_route():
+    result = _gateway_run_request_body(
+        {
+            "model": "  deepseek-chat  ",
+            "provider": "  deepseek  ",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        session_id="session-a",
+    )
+
+    assert result["model"] == "deepseek-chat"
+    assert result["provider"] == "deepseek"
 
 
 def test_gateway_stream_usage_normalizes_token_names():
@@ -2016,8 +2055,19 @@ def test_gateway_runs_compatibility_fallback_sends_full_webui_history(
     ]
 
 
+@pytest.mark.parametrize(
+    ("model", "model_provider", "expected_route"),
+    [
+        ("test-model", None, {}),
+        (
+            "deepseek-chat",
+            "deepseek",
+            {"model": "deepseek-chat", "provider": "deepseek"},
+        ),
+    ],
+)
 def test_gateway_runs_transport_creates_managed_session_and_matches_visible_events(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, model, model_provider, expected_route
 ):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -2102,15 +2152,21 @@ def test_gateway_runs_transport_creates_managed_session_and_matches_visible_even
     gateway_chat._run_gateway_chat_streaming(
         session.session_id,
         "Say hello",
-        "test-model",
+        model,
         str(tmp_path),
         stream_id,
         [],
+        model_provider=model_provider,
     )
 
     run_body = captured["bodies"]["http://gateway.local/v1/runs"]
     assert run_body["session_id"] == session.session_id
     assert run_body["input"] == "Say hello"
+    assert {
+        key: run_body[key]
+        for key in ("model", "provider")
+        if key in run_body
+    } == expected_route
     assert "conversation_history" not in run_body
     assert "messages" not in run_body
     assert captured["urls"][:2] == [
