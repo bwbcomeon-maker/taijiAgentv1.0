@@ -4,93 +4,111 @@
 
 **带限制完成（实现分支），不等于生产发布通过。**
 
-隔离分支的日常导航等价 Electron 主路径已完成真实截图、键盘、窄屏、刷新恢复和 exact-once 验收。当前未发现阻断该分支主流程的 P0/P1。
+当前分支三条真实 Electron 主路径均在可审计源码和隔离数据上通过；分支主流程未发现 P0/P1。
 
-限制是：用户日常启动的主检出应用仍是旧源码，本分支尚未合并/部署；外部图片 Provider、VoiceOver、axe/Lighthouse 和 200% 缩放未验证。
+限制包括：用户日常启动的主检出仍是旧源码；仓库全量测试仍红；外部图片 Provider、VoiceOver、axe/Lighthouse 和 200% 缩放未验证。
 
 ## 为什么此前两个界面不一致
 
-用户日常应用读取真实配置，只显示聊天、任务、专家团和设置。此前验收使用临时空白配置，默认功能全部可见，所以出现看板、技能、记忆、工作区、待办、统计和日志等额外导航。
+用户日常应用读取真实运行配置，只显示聊天、任务、专家团和设置。此前个别验收脚本使用临时空白配置，默认能力全部可见，因此出现看板、技能、记忆、工作区、待办、统计和日志等额外导航。
 
-当前验收夹具已改为：
+当前三条 Electron 验收已统一为：
 
-- 使用隔离 worktree 的当前源码。
+- 明确从隔离 worktree 启动当前源码。
 - 使用脱敏的日常 `feature_visibility` 等价配置。
-- 不复制真实密钥、会话、附件或运行时文件。
-- 在结果中记录分支、commit、dirty、关键静态文件 SHA-256、Electron 来源、运行时来源和 userData 类型。
+- 不复制真实密钥、会话、附件或 runtime 数据。
+- 结果文件记录分支、commit、dirty、关键静态文件 SHA-256、导航投影和 userData 类型。
+- 只清理本次验收记录的 PID，不向日常 Electron/WebUI 进程发信号。
 
-因此，源码差异与数据隔离仍存在，但已经显式、可审计，不再把临时默认界面误认为用户日常界面。
+这解决了“验收来源不可见”的问题，但不把隔离界面冒充为已部署的日常应用：真实日常入口仍需在合并后单独复验。
 
 ## 已实时验证
 
-### Electron 主路径
+证据根目录：
 
-证据目录：
+`~/.local/share/taiji-agent/backups/chat-state-artifact-hardening-20260716-145503/qa-evidence/phase6-final/`
 
-`~/.local/share/taiji-agent/backups/chat-state-artifact-hardening-20260716-145503/qa-evidence/phase6-final/electron-worktree-exact-once-20260717-1405/`
+### Worktree、公共投影与 exact-once
+
+结果：
+
+- 目录：`electron-final-f807804d-worktree/`
+- 状态：`passed`
+- 源码：`f807804d`，`dirty=false`
 
 | 场景 | 结果 |
 |---|---|
 | 日常导航等价性 | 聊天、任务、专家团、设置可见；其它导航隐藏 |
 | Worktree 创建 | 可见 `WT` 标识，名称使用 `taiji-<8hex>` |
-| 真实聊天链 | 本地确定性 Provider 经真实 Gateway 主链完成并持久化 |
+| 聊天链 | 本地确定性 Provider 经真实 Gateway 主链完成并持久化 |
 | 回复 exact-once | Provider POST、API、实时 DOM、重载 DOM 均精确一次 |
-| 终端/文件 | 终端显示 Taiji 标识，文件区能读取会话 Worktree |
-| 公共路径 | DOM/API 中 Worktree 绝对路径匹配数均为 0 |
+| 公共路径 | DOM/API 中内部绝对路径匹配数为 0 |
 | 删除取消 | Escape 关闭，目录和会话状态保持 |
-| 键盘删除 | Enter/Tab 可完成危险确认 |
-| 删除后恢复 | Worktree 目录删除，会话及 2 条消息仍保留并可重新打开 |
+| 键盘删除 | Tab/Enter 可完成危险确认 |
+| 删除后恢复 | Worktree 删除后会话及消息仍可重新打开 |
 | 窄屏 | 640×900 下确认内容和操作按钮不遮挡 |
 
-人工查看截图确认：重复回复已经消失；实时画面与移除后重载画面都只显示一份助手文本。
+### 图片与会话
 
-### 图片与会话 UX
+结果：
 
-已有当前分支 Electron 证据覆盖：
+- 目录：`electron-final-f807804d-artifacts/`
+- 状态：`passed_with_provider_fixture`
+- 源码：`f807804d`，`dirty=false`
+- Provider：安全本地夹具，外部图片 Provider 未调用
 
-- 结构化 Artifact 当前消息内联显示。
+已验证：
+
+- 工具开始后在当前助手轮次显示生成状态。
+- 结构化 Artifact 自动进入当前助手消息，不依赖新消息中的 `MEDIA:`。
 - 图片灯箱、下载、重试和关闭具有 accessible name。
-- Tab、Enter、Space、Escape 可完成灯箱与操作。
-- 图片缺失显示错误卡，不暴露绝对路径。
-- 历史图片“重新生成”作为新消息发起，不截断既有 6 条历史；成功后变为 8 条且前缀完全保留。
-- 图片晚到时，用户手动滚动的锚点漂移约 `0.023px`，未被强制拉到底部。
-- 刷新/重启后 Artifact URL 和图片自然宽度保持。
+- Tab、Enter、Space、Escape 可完成灯箱与相关操作。
+- 图片缺失显示错误卡，不显示绝对路径或破图图标。
+- 历史图片“作为新消息重新生成”不会截断旧历史：`6 → 8` 条，旧前缀完全保留。
+- 取消只清除当前临时轮次，不污染上一轮。
+- 图片晚到时阅读锚点漂移约 `0.023px`，低于 `2px` 容差。
+- Electron 重启后 Artifact URL 与 `naturalWidth=1672` 均保持。
 - 640px 窄屏下图片与输入框不遮挡。
 - 清空会话明确提示图片进入 7 天回收期。
+- 10 个状态截图均通过近黑像素、透明度、尺寸和文件大小审计。
 
-### 自动化
+### 资源包与历史迁移
 
-| 检查 | 结果 |
-|---|---:|
-| 最新核心选择集 | `471 passed, 1 warning, 3 subtests passed` |
-| Gateway runs/chat-completions | `46 passed, 1 warning` |
-| Linux 桌面静态门禁 | `60 passed` |
-| PublicProjection/Journal canary | `21 passed` |
-| 禁止实现模式扫描 | `10/10` |
+结果：
 
-## 重复回复根因与验证
+- 目录：`electron-final-14273895-migration/`
+- 状态：`passed`
+- 源码：`14273895`，`dirty=false`
 
-问题不是 CSS 或重复 DOM 节点，也不是 Provider 重试。
+已验证：
 
-短回复小于跨块安全过滤器保留窗口时，`message.delta` 已进入 raw 累计，但公共累计仍为空。`run.completed.output` 错把“公共累计暂时为空”理解成“没有收到 delta”，先写入一次全文；随后安全 tail flush 再写一次。
+- 资源包 ZIP 在新 session/artifact ID 下恢复文本和图片。
+- 旧 JSON 仅恢复文本，不从 `MEDIA:` 路径继承资源权限。
+- Apply 前确认明确说明先备份和不可追回风险；Escape 取消不修改数据。
+- 成功迁移显示“已创建本地备份”；二次 Apply 修改数为 0。
+- 失败迁移显示失败并回滚，不出现矛盾的成功提示。
+- 失败回滚后 Session、缓存图片和 `state.db` 校验和恢复。
+- Worker/cron 在 Apply 前后均为空闲，迁移屏障 API 契约有效。
+- DOM 内部路径匹配数为 0。
+- 760px 窄屏下操作区完整可见。
+- 6 张截图 near-black 和透明像素比例均为 0，并生成独立 JPG 人工预览。
 
-修复后只有“raw delta 从未出现”才允许 completed output 兜底。测试和 Electron 均验证：
+### 本轮额外发现并修正的验收问题
 
-- Provider `/chat/completions` POST：1 次
-- 会话总消息：2 条（1 user + 1 assistant）
-- assistant API content：1 份
-- 实时助手气泡：1 份
-- Worktree 删除并重载后的助手气泡：1 份
+第一次迁移验收出现“后端已成功、脚本却读不到备份回执”。根因不是产品丢字段，而是脚本只等待离开“正在备份并修复”，把中间态“正在只读检测”误判为完成。等待条件现已收紧为：复检结束且备份回执已进入结果区。
+
+人工查看旧失败态截图时还发现 Electron 合成黑块。旧迁移脚本直接保存截图，没有质量门禁；现在统一使用审计截图函数，必要时重试，并拒绝 near-black 比例超过 20%、透明比例超过 1%、尺寸或文件大小异常的证据。最终干净提交的失败态截图已人工确认正常。
 
 ## 可访问性
 
 ### 已验证
 
-- 图片、下载、重试、关闭和 Worktree 操作有可发现文字或 accessible name。
-- 危险操作默认焦点落在取消。
-- Escape 可退出确认；Tab/Enter 可移动并执行确认。
-- 错误、加载、完成和回收期不只依赖颜色表达。
-- 640px 窄屏下确认框、图片和输入框没有遮挡。
+- 图片、下载、重试、关闭、Worktree 和迁移动作有可见文字或 accessible name。
+- 危险确认默认焦点落在取消。
+- Escape 可退出确认；Tab/Enter/Space 可移动并执行主路径操作。
+- 加载、成功、失败、回收期与迁移状态均有文字，不只依赖颜色。
+- Toast 和迁移状态使用 `role=status` 与 polite live region。
+- 640px/760px 窄屏主路径没有操作区遮挡。
 
 ### 未验证
 
@@ -98,18 +116,34 @@
 - axe/Lighthouse 自动化。
 - 200% 缩放、高对比度和减少动态效果。
 - Windows/Linux 安装态的真实屏幕阅读器。
+- 真实外部图片 Provider 的加载耗时、取消和错误文案。
+
+## 自动化与发布边界
+
+| 检查 | 结果 |
+|---|---:|
+| WebUI 当前全量 | `8609 passed / 168 failed` |
+| WebUI 相对基线新增失败 | `0` |
+| Agent 当前全量 | `26830 passed / 49 failed / 1 文件超时` |
+| Agent 已归因文件相对基线新增失败 | `0` |
+| Electron Worktree 主路径 | `passed` |
+| Electron 图片主路径 | `passed_with_provider_fixture` |
+| Electron 迁移主路径 | `passed` |
+| Electron 来源指纹和截图审计 | 3 条主路径均有 |
+
+这些结果支持“本实现分支没有新增已识别回归”，不支持“仓库全量已经通过”或“生产已经升级”。
 
 ## 问题分级
 
 | 级别 | 数量 | 说明 |
 |---|---:|---|
-| P0 | 0 | 未发现 |
-| P1 | 0 | 分支主流程已关闭来源不明和重复回复问题 |
-| P2 | 3 | 主检出日常应用尚未升级；外部图片 Provider 未在线验证；专项无障碍未执行 |
-| P3 | 1 | 未配置像素级视觉基线 |
+| P0 | 0 | 分支主路径未发现 |
+| P1 | 0 | 来源不明、重复回复、历史重试截断和迁移取证竞争已关闭 |
+| P2 | 4 | 日常主检出尚未升级；外部图片 Provider 未在线验收；专项无障碍未执行；仓库全量门禁仍红 |
+| P3 | 1 | 未建立跨版本像素级视觉基线 |
 
 ## 结论
 
-实现分支的前端 UX QA 为**带限制完成**：会话、图片、Worktree、安全摘要、键盘和窄屏主路径均有真实 Electron 证据，P0/P1 为 0。
+前端 UX QA 状态为**带限制完成**：会话上下文、结构化图片、Worktree、资源包、迁移、错误恢复、键盘、窄屏、来源指纹和截图可信度都有真实 Electron 证据，分支主流程 P0/P1 为 0。
 
-这不代表生产发布通过。合并/部署后仍需从用户日常启动入口复验，并且仓库全量测试红色状态必须按发布门禁报告继续处理。
+这仍不等于生产发布通过。必须先处理或批准全量红色基线、完成真实 Provider 验收并合并到用户日常启动入口，再进行一次真实用户配置下的升级后复验。

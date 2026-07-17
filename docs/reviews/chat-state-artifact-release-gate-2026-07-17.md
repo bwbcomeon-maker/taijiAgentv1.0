@@ -2,162 +2,176 @@
 
 ## 结论
 
-实现分支的六阶段范围已经落地并完成聚焦验证，但当前仓库**仍不允许直接发布**。
+六阶段约定范围及本轮发现的连带问题已经在隔离分支落地；分支自身没有发现新增的 WebUI/Agent 失败节点，三条真实 Electron 主路径也已在可审计源码上通过。
 
-原因不是本次主链仍有已知 P0，而是两项发布条件尚未满足：
+但当前状态仍是：**实现分支带限制完成，生产发布未放行。**
 
-1. WebUI 全量快照仍有 `246 failed`；其中只逐项确认了与本分支改动测试文件重叠的 3 项，其余 243 项不得笼统称为历史基线。
-2. 用户日常启动的主检出 Electron 仍运行旧源码。本次只在隔离 worktree 中使用脱敏的“日常导航等价配置”验证当前实现，没有覆盖或迁移真实用户数据。
+阻断发布的不是本次主链仍有已知 P0/P1，而是仓库全量基线仍红、Agent 仍有文件级超时、真实外部图片 Provider 未在线验收，以及用户日常启动入口尚未合并/部署本分支。
 
-因此，本报告区分：
-
-- **实现完成**：本次约定的安全投影、上下文真值、幂等持久化、结构化图片、前端恢复、迁移/资源包及连带修复均已有代码与聚焦证据。
-- **发布未放行**：全量失败尚未清零或逐项获准豁免，隔离分支也尚未合并/部署到用户日常入口。
-
-## 分支与提交
+## 分支、提交和运行边界
 
 隔离分支：`codex/chat-state-artifact-hardening`
 
-| 阶段 | Commit | 状态 |
+| 范围 | Commit | 状态 |
 |---|---|---|
-| 1 安全公共投影 | `ac4b2972` | 已提交 |
-| 2 上下文与幂等持久化 | `4b99ae66` | 已提交 |
-| 3 结构化图片产物 | `d79beb4c` | 已提交 |
-| 4 前端产物恢复体验 | `c1223b71` | 已提交 |
-| 5 安全迁移与资源包 | `b5f3b320` | 已提交 |
-| 6 发布验证与连带修复 | 本报告所在的最终本地提交 | 待最终提交后由交付回复记录 hash |
+| 安全公共投影 | `ac4b2972` | 已提交 |
+| 上下文与幂等持久化 | `4b99ae66` | 已提交 |
+| 结构化图片产物 | `d79beb4c` | 已提交 |
+| 前端产物恢复体验 | `c1223b71` | 已提交 |
+| 安全迁移与资源包 | `b5f3b320` | 已提交 |
+| 阶段 6 门禁与连带修复 | `c21521a4` | 已提交 |
+| 配置运行目录公共投影修复 | `f807804d` | 已提交 |
+| 迁移 Electron 来源与截图审计 | `14273895` | 已提交 |
 
-## 已实时验证
-
-### WebUI 聚焦门禁
-
-| 检查 | 结果 |
-|---|---:|
-| 最新核心选择集（25 个文件） | `471 passed, 1 warning, 3 subtests passed` |
-| Gateway runs/chat-completions 完整文件 | `46 passed, 1 warning` |
-| Agent 图片/Provider/Gateway/SessionDB | `716 passed` |
-| Agent 安全、品牌、Anthropic 回归 | `936 passed, 1 skipped` |
-| Agent 换行与文件操作 | `238 passed` |
-| `run_agent` 600 秒诊断 | `345 passed`，耗时 `410.4s` |
-| Linux 桌面静态门禁 | `60 passed` |
-| PublicProjection/Journal canary | `21 passed`，精确 canary 均未出现 |
-| Journal/恢复/迁移相关选择集 | `165 passed` |
-| 禁止实现模式扫描 | `10/10` |
-
-### 本轮最后发现并修复的重复回复
-
-真实 Electron 验收发现短回复在同一助手气泡内重复两次。逐层证据显示：
-
-- 本地确定性 Provider 只收到 1 次 `/chat/completions` POST。
-- Provider 返回标准 role/content/finish 三段 SSE。
-- 数据库只有 1 条 user 和 1 条 assistant。
-- 重复首先出现在 WebUI Gateway 的 `/v1/runs` 公共文本累计结果。
-
-根因是短文本被跨块安全过滤器暂存在 tail 中，`run.completed` 又因 `public_final_text` 暂时为空而提前写入完整 output；随后 tail flush 再追加一次全文。
-
-修复采用单一真值条件：只有在**没有收到任何 raw delta** 时，才使用 `run.completed.output` 作为公共输出兜底。回归测试先稳定复现双份文本，修复后：
-
-- 精确回归：`2 passed`
-- `test_webui_gateway_chat_backend.py`：`46 passed`
-- Electron：Provider POST、API assistant、实时 DOM、移除 Worktree 后重载 DOM 均精确出现 1 次
-
-### Electron 与日常界面来源
-
-用户日常进程实时证据：
+用户日常应用全程未被本次验收重启、终止或写入：
 
 - Electron PID `71910`
 - WebUI PID `71989`
-- 来源：主检出 `/Users/bwb/Documents/工作/taiji-agentv1.0`
-- 运行时配置：真实 `runtime-home/config.yaml`
+- 来源为主检出 `/Users/bwb/Documents/工作/taiji-agentv1.0`
 
-本次验收进程：
+所有 Electron 验收均使用临时 runtime、workspace、userData 和脱敏的日常能力配置；结果文件记录分支、commit、dirty 状态、关键静态文件哈希、导航投影和测试进程清理结果。
 
-- 来源：隔离 worktree
-- 运行时：临时目录
-- 配置：只复制 `feature_visibility` 语义的脱敏等价配置，不复制密钥、会话或附件
-- 可见导航：聊天、任务、专家团、设置，与用户截图的日常产品形态一致
-- 证据记录：分支、commit、dirty 状态、6 个关键静态文件 SHA-256、Electron 来源、运行时来源和 userData 类型
+## WebUI 全量与基线 A/B
 
-这解释了此前“验收界面比日常界面菜单更多”的原因：此前测试使用空白配置，导致默认功能全部可见。当前测试夹具已固定日常导航等价配置，并明确声明来源；真实日常进程全程未被终止、重启或写入。
+当前分支最终隔离全量：
 
-当前实现分支 Electron 证据：
+- `8609 passed`
+- `168 failed`
+- `14 skipped`
+- `1 xfailed`
+- `2 xpassed`
+- `19 subtests passed`
+- 耗时 `320.34s`
 
-`~/.local/share/taiji-agent/backups/chat-state-artifact-hardening-20260716-145503/qa-evidence/phase6-final/electron-worktree-exact-once-20260717-1405/`
+基线 `d4e06dab` 在同类隔离条件下：
 
-其中已验证：
+- `8162 passed`
+- `218 failed`
+- `18 skipped`
+- `1 xfailed`
+- `2 xpassed`
+- `16 subtests passed`
+- 耗时 `185.11s`
 
-- Worktree 公共 API/DOM 不含绝对路径。
-- 新 Worktree 使用 `taiji-<8hex>`，终端可见标识不再暴露 Hermes。
-- 会话内真实聊天经过本地确定性模型主链并持久化。
-- Worktree 删除后会话和消息仍保留。
-- 危险确认在窄屏可读，默认焦点停在取消，键盘可完成确认。
-- 回复在实时和重载后均只显示一次。
+按失败 node id 精确比较：
 
-## 全量测试现状
+- 当前分支新增失败：`0`
+- 仅基线失败、当前已通过：`50`
+- 当前与基线共同失败：`168`
 
-WebUI 全量最终快照：
+因此可以确认“本分支未新增 WebUI 全量失败”，但不能把共同的 168 项失败写成通过或自动豁免。
 
-`8529 passed / 246 failed / 14 skipped / 3 xpassed / 1 warning / 19 subtests passed`
+证据：
 
-耗时 `190.79s`，没有迁移屏障 hang，也没有 60 秒逐测试超时。
+- 当前日志：`qa-evidence/phase6-final/logs/webui-full-final-isolated.log`
+  - SHA-256：`046ea1049035dfea5469ce95e453312775cabb574a0b330271d169cd738df831`
+- 基线日志：`qa-evidence/phase6-final/logs/webui-full-base-d4e06dab.log`
+  - SHA-256：`b7aeb7fef44bc4716c94279eefc407ef57ba1893bb390021dbf808a9e57a22de`
 
-与本分支改动测试文件重叠的失败只有 3 项：
+## Agent 全量与基线 A/B
 
-1. DOCX 富草稿：隔离 worktree 缺 `docx-engine-v2/node_modules`，无法解析 `@resvg/resvg-js`；指定主检出已有依赖路径后该完整测试文件通过。
-2. Provider mismatch：测试仍断言旧 `hermes model`；主分支产品源码早已是 `taiji Agent model`，现只更新测试契约，完整测试文件通过。
-3. `server.py < 750`：merge-base 已有 784 行，当前 845 行；保留为公开架构债，没有抬阈值掩盖。
+Agent 使用主检出完整 venv 和仓库正式并行 runner；正式文件级默认超时是 `600s`，不是旧报告中的 `300s`。
 
-三文件复跑结果：`128 passed / 1 failed`，唯一剩余为行数门禁。
+最终全量结果：
 
-机器可审计分类：
+- `1260` 个测试文件
+- `26830 passed`
+- `49 failed`
+- `13` 个失败文件
+- `1` 个未完成文件：`tests/run_agent/test_run_agent.py` 超过 `600s`
+- 耗时 `1079.8s`，4 workers
 
-`qa-evidence/phase6-final/logs/webui-full-failure-classification.json`
+完整 venv 消除了先前因缺少 `acp`、`ptyprocess`、`lxml` 造成的 collection 假红；补齐忽略的 Kanban 构建产物后对应插件文件为 `94 passed`。
 
-其 SHA-256 为：
+A/B 归因结果：
 
-`f7bda9db2de9f04705dda47e8e2761b755b4c4f5a768bdfbdd55c961169bf979`
+- 先前 27 个失败文件：当前 `1026 passed / 59 failed`，基线 `1025 passed / 60 failed`；当前新增失败 `0`，并修复 1 个 CRLF 回归。
+- 全量新增出现的 5 个文件复跑：当前与基线均为 `276 passed / 6 failed`，失败节点完全相同。
+- 全量中的两个 browser 依赖安装超时在缓存建立后未复现；仍保留原始全量红色证据，不把复跑通过倒推成全量通过。
+- `test_run_agent.py` 的测试源文件相对基线未改动，但尚未完成同条件基线时长 A/B；该 600 秒超时保持“未关闭发布门禁”。
 
-注意：其余 243 项没有逐项分类，不能据此推算“本次分支只剩 1 项失败”。
+证据：
 
-Agent 全量在 CRLF 修复前的快照为：
+- 全量日志：`qa-evidence/phase6-final/logs/agent-full-final-complete-venv.log`
+  - SHA-256：`7b7c7b74786767bbbde415973762fea9b688656e9b8f46d27a05409d49acf258`
+- 旧失败文件当前日志：
+  `qa-evidence/phase6-final/logs/agent-prior-failure-files-current-complete-venv.log`
+  - SHA-256：`ff1c54eef56c7a9978f59f929522206252a699ae5c7d73f6265b4e225bc5cfab`
+- 旧失败文件基线日志：
+  `qa-evidence/phase6-final/logs/agent-prior-failure-files-base-d4e06-complete-venv.log`
+  - SHA-256：`811bd47aa8c34ebd7933dc6323a283116e584f0cc6ee3a642e2bf9ee56eca56a`
+- 新失败文件 A/B：`agent-new-failure-files-current.log` 与
+  `agent-new-failure-files-base.log`
 
-- `26,580 passed`
-- `70 failed`
-- `126 skipped`
-- 9 个 ACP collection error
-- 官方 300 秒门禁中的 `test_run_agent.py` 超时
+## 真实 Electron 验收
 
-随后已修复其中唯一确认由本分支引入的 CRLF 回归，并对相关 238 项测试全部复跑通过。`test_run_agent.py` 在 600 秒诊断窗口内 `345/345` 通过，但这不能替代官方 300 秒门禁。
+证据根目录：
 
-## 迁移与安全边界
+`~/.local/share/taiji-agent/backups/chat-state-artifact-hardening-20260716-145503/qa-evidence/phase6-final/`
 
-- Run Journal 在落盘边界统一经过公共投影。
-- `CANARY/RAW_ARGS/ABS_PATH/RESULT` 不进入公共 API、SSE、Journal 或导出投影。
-- 迁移独占锁默认最多等待 30 秒；超时发生在备份和真值修改前，API 返回 `migration_state_busy` 可重试错误。
-- 测试不再全局替换 `threading.Thread`，避免 guarded worker 的 reader lease 永久泄漏。
-- Artifact 按 `session_id + artifact_id` 授权；公共 URL 不含绝对路径。
-- 历史图片重试以新消息发起，不截断既有会话。
-- 真实外部图片 Provider 在线调用未执行，仍以确定性夹具验证协议与 UI。
+| 主路径 | 源码证据 | 结果 |
+|---|---|---|
+| Worktree、公共投影与 exact-once | `f807804d`，`dirty=false` | `passed` |
+| 结构化图片、错误/取消/重试/重启 | `f807804d`，`dirty=false` | `passed_with_provider_fixture` |
+| 资源包、旧 JSON、迁移、回滚 | `14273895`，`dirty=false` | `passed` |
+
+对应结果文件：
+
+- `electron-final-f807804d-worktree/electron-worktree-public-contract-result.json`
+  - SHA-256：`08320be7bfb65197d5bb52531c1d71edf55e91a88df9b0db59927e8107a20b01`
+- `electron-final-f807804d-artifacts/electron-chat-artifact-result.json`
+  - SHA-256：`6a3cca60849eb36d661c1b73824151415ee5604d8d22172b8f94b0f4eb50e578`
+- `electron-final-14273895-migration/electron-session-bundle-migration-result.json`
+  - SHA-256：`5f00534062fd6e2cdbc634fd3c73ac9bf4d81cdcea4774581f5fedf2f787a521`
+
+已验证：
+
+- 日常能力投影仅显示聊天、任务、专家团和设置，其它导航隐藏。
+- 公共 API、DOM 和资源包不暴露内部绝对路径。
+- Provider POST、API、实时 DOM 和重载 DOM 的助手回复保持 exact-once。
+- 结构化 Artifact 自动进入当前助手消息，图片刷新/重启后恢复。
+- 缺失、失败、取消和历史重试均有确定状态；历史重试不截断旧消息。
+- 晚到图片的阅读锚点漂移约 `0.023px`，低于 `2px` 容差。
+- 资源包恢复文本与图片；旧 JSON 只恢复文本。
+- 迁移取消不修改数据；成功先备份；二次 Apply 修改数为 0。
+- 失败迁移完整回滚，Session、缓存图片和 `state.db` 校验和恢复。
+- 迁移测试进程、服务 PID 和临时目录均完成清理。
+
+迁移验收最初暴露了两个测试可信度问题，均已收口：
+
+1. 成功回执等待条件把“正在只读检测”误判为完成，现改为等待复检结束且备份回执已渲染。
+2. 旧脚本直接截图，无法拒绝 Electron 合成黑块；现与其它主路径统一记录源码指纹、导航投影和截图审计。最终 6 张迁移截图的 near-black 与透明像素比例均为 0。
+
+## 安全与数据边界
+
+- Run Journal、GET、SSE、replay、search、export 和 Gateway 完成事件统一经过公共投影。
+- 工具卡只含脱敏摘要；原始参数、结果、token 和内部路径不进入浏览器或导出。
+- 用户原文在语义真值层保留，展示层只做凭据遮罩。
+- SessionDB 通过平台消息 ID 幂等保存，完成轮次不重复写 user。
+- Artifact 通过 `session_id + artifact_id` 授权；导入文本中的 `MEDIA:` 不建立权限。
+- 注册产物不再受 24 小时缓存清理影响；清空/删除进入 7 天回收期。
+- 迁移默认 dry-run，Apply 前备份，失败按批次回滚。
+- 真实外部图片 Provider 未调用；当前 Electron 图片验收使用安全本地夹具。
 
 ## 发布门禁
 
 | 门禁 | 状态 |
 |---|---|
-| 本次核心上下文、幂等消息和 Artifact 契约 | 已验证 |
-| 公共 canary 为 0 | 已验证 |
-| 迁移 reader lease 与 busy 超时 | 已验证 |
-| Electron 分支主路径与日常导航等价性 | 已验证 |
-| 回复 exact-once | 已验证 |
-| WebUI 全量零失败或完整豁免 | **未通过** |
-| Agent 官方 300 秒全量门禁 | **未通过/环境超时** |
-| 主检出日常 Electron 已升级为本分支 | **未执行** |
-| 外部图片 Provider 在线端到端 | 未验证 |
-| axe/Lighthouse/VoiceOver 专项 | 未验证 |
+| 本次上下文、幂等消息、Artifact 和公共投影契约 | 已验证 |
+| WebUI 分支新增失败为 0 | 已验证 |
+| Agent 已归因文件的分支新增失败为 0 | 已验证 |
+| 三条 Electron 主路径及来源/截图审计 | 已验证 |
+| P0/P1 分支主路径 | `0 / 0` |
+| WebUI 全量零失败或逐项批准豁免 | **未通过：168 个共同失败** |
+| Agent 全量零失败 | **未通过：49 failed + 1 文件超时** |
+| 用户日常主检出已合并/部署本分支 | **未执行** |
+| 真实外部图片 Provider 在线端到端 | 未验证 |
+| VoiceOver、axe/Lighthouse、200% 缩放 | 未验证 |
 
-## 发布前下一步
+## 下一步
 
-1. 逐项分类或修复 WebUI 剩余 243 个未判定失败，并处理 `server.py` 行数架构债。
-2. 决定 Agent 官方 300 秒门禁是优化运行时间、拆分进程还是批准新的时限。
-3. 审核并合并本隔离分支，再从用户日常启动入口执行一次不带临时 userData 的升级后复验。
-4. 使用真实已配置图片 Provider 运行在线生成、刷新、重启和 25 小时清理模拟。
-5. 完成后再标记“可发布”；本报告当前只允许本地提交，不允许发布或默认 push。
+1. 对 WebUI 168 个共同失败和 Agent 49 个共同/环境失败建立仓库级基线处置清单，修复或逐项审批豁免。
+2. 拆分或优化 `tests/run_agent/test_run_agent.py`，让正式 600 秒文件级门禁能够完成。
+3. 审核并合并隔离分支，再从用户日常启动入口执行升级后复验；当前不自动合并、不 push。
+4. 使用真实已配置图片 Provider 完成在线生成、刷新、重启和 25 小时清理模拟。
+5. 补做 VoiceOver、axe/Lighthouse 与 200% 缩放专项后，才能把“带限制完成”提升为“可发布”。
