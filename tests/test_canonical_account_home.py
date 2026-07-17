@@ -23,6 +23,10 @@ EXPORTED_FUNCTION_ERROR = (
     "Taiji Agent refuses to run with exported shell functions "
     "in the environment."
 )
+READONLY_BOUNDARY_ERROR = (
+    "Taiji Agent could not establish the canonical license path "
+    "readonly boundary."
+)
 
 
 def _system_account_home() -> Path:
@@ -575,6 +579,226 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                     self.assertIn("declare -rx TAIJI_ACCOUNT_HOME=", result.stdout)
                     self.assertIn("readonly variable", result.stderr)
 
+    def test_runtime_env_bypasses_unexported_readonly_function_when_sourced(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            canary = tmp_path / "post-canonical-mkdir-ran"
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                    "TAIJI_AGENT_USE_USER_DIRS": "0",
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                    "TAIJI_TEST_EXPECTED_ACCOUNT_HOME": str(_system_account_home()),
+                    "TAIJI_TEST_POISONED_HOME": str(tmp_path / "poisoned"),
+                    "TAIJI_TEST_CANARY": str(canary),
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    textwrap.dedent(
+                        """\
+                        readonly() { :; }
+                        mkdir() {
+                          if [ "${TAIJI_ACCOUNT_HOME:-}" = "$TAIJI_TEST_EXPECTED_ACCOUNT_HOME" ]; then
+                            TAIJI_ACCOUNT_HOME="$TAIJI_TEST_POISONED_HOME"
+                            TAIJI_LICENSE_FILE="$TAIJI_TEST_POISONED_HOME/license.jwt"
+                            TAIJI_LICENSE_STATE_FILE="$TAIJI_TEST_POISONED_HOME/state.json"
+                            /usr/bin/touch "$TAIJI_TEST_CANARY"
+                          fi
+                          /bin/mkdir "$@"
+                        }
+                        source "$1"
+                        declare -p TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE
+                        """
+                    ),
+                    "bash",
+                    str(RUNTIME_ENV),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(canary.exists())
+            self.assertIn("declare -rx TAIJI_ACCOUNT_HOME=", result.stdout)
+            self.assertIn("declare -rx TAIJI_LICENSE_FILE=", result.stdout)
+            self.assertIn("declare -rx TAIJI_LICENSE_STATE_FILE=", result.stdout)
+            self.assertIn(str(_system_account_home()), result.stdout)
+
+    def test_runtime_env_fails_closed_when_unexported_builtin_hides_readonly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            canary = tmp_path / "post-canonical-mkdir-ran"
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                    "TAIJI_AGENT_USE_USER_DIRS": "0",
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                    "TAIJI_TEST_EXPECTED_ACCOUNT_HOME": str(_system_account_home()),
+                    "TAIJI_TEST_CANARY": str(canary),
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    textwrap.dedent(
+                        """\
+                        readonly() { :; }
+                        builtin() { :; }
+                        mkdir() {
+                          if [ "${TAIJI_ACCOUNT_HOME:-}" = "$TAIJI_TEST_EXPECTED_ACCOUNT_HOME" ]; then
+                            /usr/bin/touch "$TAIJI_TEST_CANARY"
+                          fi
+                          /bin/mkdir "$@"
+                        }
+                        source "$1"
+                        """
+                    ),
+                    "bash",
+                    str(RUNTIME_ENV),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(READONLY_BOUNDARY_ERROR, result.stderr)
+            self.assertFalse(canary.exists())
+
+    def test_runtime_env_fails_closed_when_readonly_paths_are_not_exported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env = _poisoned_env(tmp_path)
+            for name in (
+                "TAIJI_ACCOUNT_HOME",
+                "TAIJI_LICENSE_FILE",
+                "TAIJI_LICENSE_STATE_FILE",
+            ):
+                env.pop(name, None)
+            env.update(
+                {
+                    "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                    "TAIJI_AGENT_USE_USER_DIRS": "0",
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    textwrap.dedent(
+                        """\
+                        builtin() {
+                          case "$1" in
+                            export) return 0 ;;
+                            readonly)
+                              shift
+                              readonly "$@"
+                              ;;
+                          esac
+                        }
+                        source "$1"
+                        """
+                    ),
+                    "bash",
+                    str(RUNTIME_ENV),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(READONLY_BOUNDARY_ERROR, result.stderr)
+
+    def test_runtime_env_handles_unexported_readonly_from_bash_env(self):
+        for shadow_builtin, expected_returncode in ((False, 0), (True, None)):
+            with self.subTest(shadow_builtin=shadow_builtin):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    tmp_path = Path(temp_dir)
+                    canary = tmp_path / "post-canonical-mkdir-ran"
+                    bash_env = tmp_path / "bash-env.sh"
+                    bash_env.write_text(
+                        textwrap.dedent(
+                            f"""\
+                            readonly() {{ :; }}
+                            {"builtin() { :; }" if shadow_builtin else ""}
+                            mkdir() {{
+                              if [ "${{TAIJI_ACCOUNT_HOME:-}}" = "$TAIJI_TEST_EXPECTED_ACCOUNT_HOME" ]; then
+                                /usr/bin/touch "$TAIJI_TEST_CANARY"
+                              fi
+                              /bin/mkdir "$@"
+                            }}
+                            """
+                        ),
+                        encoding="utf-8",
+                    )
+                    env = _poisoned_env(tmp_path)
+                    env.update(
+                        {
+                            "BASH_ENV": str(bash_env),
+                            "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                            "TAIJI_AGENT_USE_USER_DIRS": "0",
+                            "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                            "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                            "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                            "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                            "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                            "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                            "TAIJI_TEST_EXPECTED_ACCOUNT_HOME": str(
+                                _system_account_home()
+                            ),
+                            "TAIJI_TEST_CANARY": str(canary),
+                        }
+                    )
+                    result = subprocess.run(
+                        ["/bin/bash", str(RUNTIME_ENV)],
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    if expected_returncode is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(READONLY_BOUNDARY_ERROR, result.stderr)
+                    else:
+                        self.assertEqual(
+                            result.returncode,
+                            expected_returncode,
+                            result.stdout + result.stderr,
+                        )
+                    self.assertFalse(canary.exists())
+
     def test_runtime_env_fails_closed_when_system_account_home_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -706,6 +930,58 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(EXPORTED_FUNCTION_ERROR, result.stderr)
+
+    def test_health_check_readonly_boundary_blocks_later_local_function_rewrite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            canary = tmp_path / "health-printf-rewrite-ran"
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_AGENT_USE_USER_DIRS": "1",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                    "TAIJI_TEST_EXPECTED_ACCOUNT_HOME": str(_system_account_home()),
+                    "TAIJI_TEST_POISONED_HOME": str(tmp_path / "poisoned"),
+                    "TAIJI_TEST_CANARY": str(canary),
+                    "AGENT_API_PORT": "9",
+                    "WEBUI_PORT": "10",
+                    "RUN_MODEL_TEST": "0",
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    textwrap.dedent(
+                        """\
+                        readonly() { :; }
+                        printf() {
+                          if [ "${TAIJI_ACCOUNT_HOME:-}" = "$TAIJI_TEST_EXPECTED_ACCOUNT_HOME" ]; then
+                            TAIJI_ACCOUNT_HOME="$TAIJI_TEST_POISONED_HOME"
+                            /usr/bin/touch "$TAIJI_TEST_CANARY"
+                          fi
+                          builtin printf "$@"
+                        }
+                        source "$1"
+                        """
+                    ),
+                    "bash",
+                    str(HEALTH_CHECK),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+
+            self.assertIn("readonly variable", result.stderr)
+            self.assertFalse(canary.exists())
 
     def test_health_check_fails_closed_when_system_account_home_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp_dir:

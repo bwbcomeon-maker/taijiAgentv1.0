@@ -57,7 +57,7 @@ if [ -z "${API_SERVER_KEY:-}" ] || [ "$API_SERVER_KEY" = "replace-with-a-random-
   printf 'API_SERVER_KEY=%s\n' "$API_SERVER_KEY" > "$RUNTIME_ENV"
 fi
 
-mkdir -p "$TAIJI_RUNTIME_HOME/logs" "$TAIJI_RUNTIME_HOME/cron" "$TAIJI_RUNTIME_HOME/sessions" "$TAIJI_RUNTIME_HOME/memories" "$TAIJI_RUNTIME_HOME/skills" "$TAIJI_WORKSPACE"
+/bin/mkdir -p "$TAIJI_RUNTIME_HOME/logs" "$TAIJI_RUNTIME_HOME/cron" "$TAIJI_RUNTIME_HOME/sessions" "$TAIJI_RUNTIME_HOME/memories" "$TAIJI_RUNTIME_HOME/skills" "$TAIJI_WORKSPACE"
 
 if [ -f "$PID_FILE" ]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"

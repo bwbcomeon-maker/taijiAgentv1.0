@@ -56,7 +56,7 @@ if [ -z "${API_SERVER_KEY:-}" ] || [ "$API_SERVER_KEY" = "replace-with-a-random-
 fi
 TAIJI_WEBUI_GATEWAY_API_KEY="${TAIJI_WEBUI_GATEWAY_API_KEY:-$API_SERVER_KEY}"
 
-mkdir -p "$TAIJI_RUNTIME_HOME/logs" "$TAIJI_WEBUI_STATE_DIR" "$TAIJI_WORKSPACE"
+/bin/mkdir -p "$TAIJI_RUNTIME_HOME/logs" "$TAIJI_WEBUI_STATE_DIR" "$TAIJI_WORKSPACE"
 
 if [ -f "$PID_FILE" ]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"

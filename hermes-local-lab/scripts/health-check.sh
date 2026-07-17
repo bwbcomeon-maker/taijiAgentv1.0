@@ -250,10 +250,47 @@ fi
 TAIJI_ACCOUNT_HOME="$_TAIJI_CANONICAL_ACCOUNT_HOME"
 TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"
 TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"
-readonly TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE
-export TAIJI_ACCOUNT_HOME
-export TAIJI_LICENSE_FILE
-export TAIJI_LICENSE_STATE_FILE
+_taiji_readonly_command_status=0
+builtin export \
+  TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE ||
+  _taiji_readonly_command_status=$?
+builtin readonly \
+  TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE ||
+  _taiji_readonly_command_status=$?
+
+# A same-shell function may hide either "readonly" or "builtin". Do not trust
+# the command status alone: assignment-only subshells are language-level probes
+# of the postcondition promised by this script. Successful return means all
+# three canonical paths are exported and cannot be reassigned.
+_taiji_readonly_boundary_violation=0
+if (TAIJI_ACCOUNT_HOME=__taiji_readonly_probe__) 2>/dev/null; then
+  _taiji_readonly_boundary_violation=1
+fi
+if (TAIJI_LICENSE_FILE=__taiji_readonly_probe__) 2>/dev/null; then
+  _taiji_readonly_boundary_violation=1
+fi
+if (TAIJI_LICENSE_STATE_FILE=__taiji_readonly_probe__) 2>/dev/null; then
+  _taiji_readonly_boundary_violation=1
+fi
+if ! /usr/bin/env /bin/sh -c '
+  case "${TAIJI_ACCOUNT_HOME-}" in "$1") ;; *) exit 1 ;; esac
+  case "${TAIJI_LICENSE_FILE-}" in "$2") ;; *) exit 1 ;; esac
+  case "${TAIJI_LICENSE_STATE_FILE-}" in "$3") ;; *) exit 1 ;; esac
+' taiji-readonly-export-probe \
+  "$TAIJI_ACCOUNT_HOME" "$TAIJI_LICENSE_FILE" "$TAIJI_LICENSE_STATE_FILE"; then
+  _taiji_readonly_boundary_violation=1
+fi
+case "$_taiji_readonly_boundary_violation" in
+  0) ;;
+  *)
+    /usr/bin/printf '%s\n' \
+      "Taiji Agent could not establish the canonical license path readonly boundary." \
+      >&2
+    _taiji_readonly_boundary_abort=
+    : "${_taiji_readonly_boundary_abort:?canonical license path readonly boundary unavailable}"
+    ;;
+esac
+unset _taiji_readonly_command_status _taiji_readonly_boundary_violation
 unset _TAIJI_CANONICAL_ACCOUNT_HOME
 
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
