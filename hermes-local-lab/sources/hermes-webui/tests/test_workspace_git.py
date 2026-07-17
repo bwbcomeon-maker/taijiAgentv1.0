@@ -10,6 +10,7 @@ from io import BytesIO
 
 import pytest
 
+from tests.conftest import TEST_CUSTOMER_WORKSPACE_ROOT
 from tests._pytest_port import BASE
 
 
@@ -89,9 +90,11 @@ def _post(path, body=None):
 
 
 def _make_session(created_list, ws=None):
-    body = {}
-    if ws:
-        body["workspace"] = str(ws)
+    workspace = pathlib.Path(ws) if ws else (
+        TEST_CUSTOMER_WORKSPACE_ROOT / uuid.uuid4().hex
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
     data, status = _post("/api/session/new", body)
     assert status == 200
     sid = data["session"]["session_id"]

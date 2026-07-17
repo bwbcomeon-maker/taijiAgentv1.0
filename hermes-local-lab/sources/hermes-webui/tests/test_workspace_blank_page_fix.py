@@ -34,9 +34,12 @@ class TestSyncWorkspaceDisplaysFallback:
         m = re.search(r'function syncWorkspaceDisplays\(\)\{.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        # composerChip.disabled must use hasWorkspace, not hasSession
-        assert 'composerChip.disabled=!hasWorkspace' in fn or \
-               'composerChip.disabled = !hasWorkspace' in fn, (
+        # Worktree sessions deliberately keep the switcher disabled, while a
+        # profile default workspace on the blank page remains enabled.
+        assert (
+            'composerChip.disabled=isWorktree||!hasWorkspace' in fn
+            or 'composerChip.disabled = isWorktree || !hasWorkspace' in fn
+        ), (
             "composerChip.disabled must use !hasWorkspace (not !hasSession) so the chip "
             "is enabled on the blank new-chat page when a default workspace is configured"
         )

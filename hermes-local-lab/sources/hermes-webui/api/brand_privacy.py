@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -2179,6 +2180,29 @@ def is_internal_workspace(path: str | Path | None) -> bool:
         candidate = Path(str(path)).expanduser().resolve(strict=False)
     except Exception:
         candidate = Path(str(path)).expanduser()
+    internal_roots: list[Path] = []
+    for env_name in ("TAIJI_RUNTIME_HOME", "HERMES_WEBUI_STATE_DIR", "HERMES_HOME"):
+        configured_root = os.environ.get(env_name)
+        if not configured_root:
+            continue
+        try:
+            internal_root = Path(configured_root).expanduser().resolve(strict=False)
+        except Exception:
+            internal_root = Path(configured_root).expanduser()
+        internal_roots.append(internal_root)
+        if candidate == internal_root:
+            return True
+    configured_workspace = os.environ.get("HERMES_WEBUI_DEFAULT_WORKSPACE")
+    if configured_workspace:
+        try:
+            default_workspace = Path(configured_workspace).expanduser().resolve(strict=False)
+        except Exception:
+            default_workspace = Path(configured_workspace).expanduser()
+        if candidate == default_workspace and any(
+            default_workspace == root or root in default_workspace.parents
+            for root in internal_roots
+        ):
+            return True
     parts = {part.lower() for part in candidate.parts}
     if parts & _INTERNAL_PATH_PARTS:
         return True

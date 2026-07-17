@@ -2,6 +2,7 @@
 import json, uuid, pathlib, urllib.parse, urllib.request, urllib.error
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
+from tests.conftest import TEST_CUSTOMER_WORKSPACE_ROOT
 from tests._pytest_port import BASE
 
 def get(path):
@@ -22,9 +23,13 @@ def post(path, body=None):
         return json.loads(e.read()), e.code
 
 def make_session_tracked(created_list, ws=None):
-    body = {}
-    if ws: body["workspace"] = str(ws)
-    d, _ = post("/api/session/new", body)
+    workspace = pathlib.Path(ws) if ws else (
+        TEST_CUSTOMER_WORKSPACE_ROOT / uuid.uuid4().hex
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
+    d, status = post("/api/session/new", body)
+    assert status == 200, d
     sid = d["session"]["session_id"]
     created_list.append(sid)
     return sid, pathlib.Path(d["session"]["workspace"])

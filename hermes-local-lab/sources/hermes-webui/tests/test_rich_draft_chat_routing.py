@@ -2,12 +2,16 @@ from types import SimpleNamespace
 
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, tmp_path):
         self.session_id = "sid-rich-chat"
+        self.path = tmp_path / "sessions" / f"{self.session_id}.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.model = "deepseek/deepseek-chat"
         self.model_provider = "deepseek"
+        self.profile = None
         self.brand_privacy_tainted = False
         self.messages = []
+        self.tool_calls = []
         self.context_messages = []
         self.title = "Untitled"
         self.active_stream_id = None
@@ -16,7 +20,7 @@ class FakeSession:
         self.pending_started_at = None
         self.saved = False
 
-    def save(self):
+    def save(self, **_kwargs):
         self.saved = True
 
 
@@ -28,7 +32,7 @@ def _patch_chat_start_happy_path(monkeypatch, tmp_path, started):
         started.append(kwargs)
         return {"stream_id": "stream-rich", "session_id": session.session_id, "pending_started_at": 123.0}
 
-    monkeypatch.setattr(routes, "get_session", lambda session_id: FakeSession())
+    monkeypatch.setattr(routes, "get_session", lambda session_id: FakeSession(tmp_path))
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda session, workspace: str(tmp_path))
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", lambda model, provider: (model, provider, False))
     monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)

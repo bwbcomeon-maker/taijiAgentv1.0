@@ -21,6 +21,7 @@ import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 
+from tests.conftest import TEST_CUSTOMER_WORKSPACE_ROOT
 from tests._pytest_port import BASE
 
 
@@ -69,10 +70,13 @@ def post_multipart(path, fields, files):
 
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
-    body = {}
-    if ws:
-        body["workspace"] = str(ws)
-    d, _ = post("/api/session/new", body)
+    workspace = pathlib.Path(ws) if ws else (
+        TEST_CUSTOMER_WORKSPACE_ROOT / uuid.uuid4().hex
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+    body = {"workspace": str(workspace)}
+    d, status = post("/api/session/new", body)
+    assert status == 200, d
     sid = d["session"]["session_id"]
     created_list.append(sid)
     return sid, pathlib.Path(d["session"]["workspace"])

@@ -103,10 +103,13 @@ def test_user_bubble_selection_is_scoped_to_user_message_body():
 
 def test_576_panel_restore_gated_on_workspace():
     """boot.js: localStorage panel restore must be gated on session.workspace."""
-    # The guard must appear: session.workspace check before _workspacePanelMode='browse'
+    # The canonical helper covers normal workspaces and worktree-backed sessions.
     # Panel pref key takes priority over runtime key (toolbar close must not clear preference)
-    assert "S.session&&S.session.workspace&&panelPref" in BOOT_JS, (
-        "Workspace panel localStorage restore must be gated on S.session.workspace "
+    restore_pos = BOOT_JS.find("const panelPref=")
+    assert restore_pos != -1, "Workspace panel preference restore block not found"
+    restore_block = BOOT_JS[restore_pos:restore_pos + 700]
+    assert "sessionHasWorkspace()&&panelPref" in restore_block, (
+        "Workspace panel localStorage restore must use the canonical workspace predicate "
         "to prevent snap-open-then-closed on sessions without a workspace (#576)"
     )
     assert "'hermes-webui-workspace-panel-pref'" in BOOT_JS, (

@@ -59,7 +59,7 @@ def test_html_chat_attachment_opens_sandboxed_inline_raw_file():
 def test_html_media_open_full_uses_inline_new_tab_not_download():
     """MEDIA: HTML preview's Open full page link should open a browser view."""
     body = _slice_after(UI_JS, "function loadHtmlInline", 1800)
-    assert "'&inline=1'" in body
+    assert "_sessionMediaPathUrl(path,{inline:true})" in body
     assert "target=\"_blank\"" in body
     assert "rel=\"noopener\"" in body
     normal_open = next(line for line in body.splitlines() if "html-open-link" in line)
@@ -75,7 +75,11 @@ def test_media_html_inline_keeps_csp_sandbox():
     # for PR #2044's MEDIA_ALLOWED_ROOTS parsing.) The assertion is structural,
     # not positional — generous headroom avoids re-breaking on small future edits.
     body = _slice_after(ROUTES_PY, "def _handle_media", 16000)
-    assert 'html_inline_ok = inline_preview and mime == "text/html"' in body
+    normalized = re.sub(r"\s+", " ", body)
+    assert (
+        'html_inline_ok = ( _in_session_workspace and inline_preview and mime == "text/html" )'
+        in normalized
+    )
     assert 'csp = "sandbox allow-scripts" if html_inline_ok else None' in body
     assert "csp=csp" in body
     assert "allow-same-origin" not in body

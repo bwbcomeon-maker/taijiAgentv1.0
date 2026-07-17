@@ -158,6 +158,32 @@ def test_session_projection_hides_only_internal_workspace_not_customer_workspace
     assert customer["workspace"] == "/Users/customer/taiji-project"
 
 
+def test_session_projection_hides_configured_runtime_roots(monkeypatch, tmp_path):
+    from api.brand_privacy import public_session_projection
+
+    for env_name in ("TAIJI_RUNTIME_HOME", "HERMES_WEBUI_STATE_DIR", "HERMES_HOME"):
+        runtime_root = tmp_path / f"opaque-{env_name.lower()}-root"
+        default_workspace = runtime_root / "default-workspace"
+        monkeypatch.setenv(env_name, str(runtime_root))
+        monkeypatch.setenv("HERMES_WEBUI_DEFAULT_WORKSPACE", str(default_workspace))
+
+        root_projected = public_session_projection(
+            _hostile_session_payload(workspace=str(runtime_root))
+        )
+        default_projected = public_session_projection(
+            _hostile_session_payload(workspace=str(default_workspace))
+        )
+        customer_projected = public_session_projection(
+            _hostile_session_payload(workspace=str(runtime_root / "customer-project"))
+        )
+
+        assert "workspace" not in root_projected
+        assert "workspace" not in default_projected
+        assert customer_projected["workspace"] == str(runtime_root / "customer-project")
+        monkeypatch.delenv(env_name)
+        monkeypatch.delenv("HERMES_WEBUI_DEFAULT_WORKSPACE")
+
+
 def test_session_status_projection_drops_runtime_paths_but_keeps_business_fields():
     from api.brand_privacy import public_session_status_projection
 

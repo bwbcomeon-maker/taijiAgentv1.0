@@ -104,24 +104,22 @@ def test_inline_html_response_sets_csp_sandbox():
     the document to a unique opaque origin server-side.
     """
     content = _get_routes_content()
-    # Find the html_inline_ok block in _handle_file_raw
-    idx = content.find("html_inline_ok")
-    assert idx != -1, "html_inline_ok block not found"
-    block = content[idx:idx + 2500]
-    assert "Content-Security-Policy" in block, (
-        "_handle_file_raw must set Content-Security-Policy header on inline HTML responses"
+    file_raw_idx = content.find("def _handle_file_raw")
+    assert file_raw_idx != -1, "_handle_file_raw not found"
+    file_raw_block = content[file_raw_idx:file_raw_idx + 3500]
+    assert "_serve_inline_html_preview" in file_raw_block
+    assert "csp=sandbox_csp" in file_raw_block
+    sandbox_assignment = next(
+        line for line in file_raw_block.splitlines() if "sandbox_csp =" in line
     )
-    assert "sandbox" in block, (
-        "CSP must include the sandbox directive"
+    assert "allow-same-origin" not in sandbox_assignment
+
+    serve_idx = content.find("def _serve_inline_html_preview")
+    assert serve_idx != -1, "_serve_inline_html_preview not found"
+    serve_block = content[serve_idx:serve_idx + 1800]
+    assert 'send_header("Content-Security-Policy", csp)' in serve_block, (
+        "The inline HTML response helper must emit the caller-provided sandbox CSP"
     )
-    # Must NOT have allow-same-origin in the sandbox directive
-    csp_sections = [line for line in block.splitlines() if "sandbox" in line and "Policy" in line]
-    for line in csp_sections:
-        # The line setting the CSP header — make sure it doesn't grant same-origin
-        if "send_header" in line:
-            assert "allow-same-origin" not in line, (
-                "CSP sandbox must NOT include allow-same-origin — that would defeat the isolation"
-            )
 
 
 def test_file_raw_inline_responses_use_sandbox_csp():
@@ -129,7 +127,7 @@ def test_file_raw_inline_responses_use_sandbox_csp():
     content = _get_routes_content()
     idx = content.find("def _handle_file_raw")
     assert idx != -1, "_handle_file_raw not found"
-    block = content[idx:idx + 2200]
+    block = content[idx:idx + 3500]
     assert "sandbox_csp" in block
     assert "inline_preview" in block
     assert "disposition == \"inline\"" in block

@@ -323,9 +323,14 @@ def test_get_hermes_home_for_profile_rejects_path_traversal():
     assert p.get_hermes_home_for_profile('UPPERCASE') == base
     # Valid names now route to the profile-scoped path (created on first use).
     # Previously these returned `base` because no profile dir existed on disk.
-    assert p.get_hermes_home_for_profile('alice') == base / 'profiles' / 'alice'
-    assert p.get_hermes_home_for_profile('my-profile') == base / 'profiles' / 'my-profile'
-    assert p.get_hermes_home_for_profile('profile_1') == base / 'profiles' / 'profile_1'
+    # Compare resolved paths because ~/.hermes may itself be a symlink in a
+    # local Taiji checkout while named-profile containment is canonicalized.
+    def expected_profile(name):
+        return (base / 'profiles' / name).resolve()
+
+    assert p.get_hermes_home_for_profile('alice') == expected_profile('alice')
+    assert p.get_hermes_home_for_profile('my-profile') == expected_profile('my-profile')
+    assert p.get_hermes_home_for_profile('profile_1') == expected_profile('profile_1')
     # R19j coverage gaps closed in v0.50.251 per Opus pre-release review:
     # - Trailing-newline names must be rejected (re.match would let them through;
     #   re.fullmatch correctly anchors $). Catches the match-vs-fullmatch footgun.
@@ -333,10 +338,10 @@ def test_get_hermes_home_for_profile_rejects_path_traversal():
     assert p.get_hermes_home_for_profile('a\n') == base
     # - Length boundaries: 64 chars (max valid: 1 + 63 suffix) routes to profile path,
     #   65 chars rejected.
-    assert p.get_hermes_home_for_profile('a' * 64) == base / 'profiles' / ('a' * 64)
+    assert p.get_hermes_home_for_profile('a' * 64) == expected_profile('a' * 64)
     assert p.get_hermes_home_for_profile('a' * 65) == base
     # - Single-char name is the minimum valid form.
-    assert p.get_hermes_home_for_profile('a') == base / 'profiles' / 'a'
+    assert p.get_hermes_home_for_profile('a') == expected_profile('a')
     # - Non-ASCII / Unicode-trick names are rejected by the ASCII-only charset.
     assert p.get_hermes_home_for_profile('voilà') == base
     assert p.get_hermes_home_for_profile('名前') == base

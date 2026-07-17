@@ -92,7 +92,6 @@ def test_session_preserves_unlisted_model():
         post("/api/session/update", {
             'session_id': sid,
             'model': custom_model,
-            'workspace': d['session']['workspace']
         })
         # Reload and verify model persisted
         d2, _ = get(f"/api/session?session_id={sid}")

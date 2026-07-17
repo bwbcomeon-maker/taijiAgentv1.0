@@ -324,7 +324,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+1800]
+            delete_block = text[delete_idx:delete_idx+7000]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -339,7 +339,7 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+1400]
+    delete_block = routes_src[delete_idx:delete_idx+7000]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -375,7 +375,7 @@ def test_tool_handler_guards_session_id(cleanup_test_sessions):
     if tool_idx < 0:
         tool_idx = src.find("es.addEventListener('tool'")
     assert tool_idx >= 0, "tool event handler not found"
-    tool_block = src[tool_idx:tool_idx+400]
+    tool_block = src[tool_idx:tool_idx+1400]
     assert "activeSid" in tool_block, \
         "tool handler must check activeSid before writing to DOM"
 

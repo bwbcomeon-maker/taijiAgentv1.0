@@ -1,8 +1,9 @@
 """
 Sprint 13 Tests: cron recent endpoint, session duplicate, background alerts.
 """
-import json, pathlib, urllib.error, urllib.request
+import json, pathlib, uuid, urllib.error, urllib.request
 
+from tests.conftest import TEST_CUSTOMER_WORKSPACE_ROOT
 from tests._pytest_port import BASE
 
 
@@ -23,7 +24,10 @@ def post(path, body=None):
 
 
 def make_session(created_list):
-    d, _ = post("/api/session/new", {})
+    workspace = TEST_CUSTOMER_WORKSPACE_ROOT / uuid.uuid4().hex
+    workspace.mkdir(parents=True, exist_ok=True)
+    d, status = post("/api/session/new", {"workspace": str(workspace)})
+    assert status == 200, d
     sid = d["session"]["session_id"]
     created_list.append(sid)
     return sid, d["session"]
@@ -108,7 +112,11 @@ def test_workspace_add_rejects_nonexistent():
 
 def test_workspace_add_accepts_real_dir():
     """Adding a real directory under the trusted workspace root succeeds."""
-    d, _ = post("/api/session/new", {})
+    workspace = TEST_CUSTOMER_WORKSPACE_ROOT / uuid.uuid4().hex
+    workspace.mkdir(parents=True, exist_ok=True)
+    d, status = post("/api/session/new", {"workspace": str(workspace)})
+    assert status == 200, d
+    sid = d["session"]["session_id"]
     root = pathlib.Path(d["session"]["workspace"])
     tmp = root / "trusted-add-test"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -117,6 +125,7 @@ def test_workspace_add_accepts_real_dir():
         assert status == 200
         assert d["ok"] is True
     finally:
+        post("/api/session/delete", {"session_id": sid})
         post("/api/workspaces/remove", {"path": str(tmp)})
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

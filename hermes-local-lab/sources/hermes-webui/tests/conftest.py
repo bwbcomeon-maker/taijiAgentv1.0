@@ -57,6 +57,11 @@ TEST_STATE_DIR = pathlib.Path(os.getenv(
     str(HERMES_HOME / _auto_state_dir_name(REPO_ROOT))
 ))
 TEST_WORKSPACE = TEST_STATE_DIR / 'test-workspace'
+TEST_CUSTOMER_WORKSPACE_ROOT = (
+    HOME
+    / ".cache"
+    / f"taiji-webui-customer-{_auto_state_dir_name(REPO_ROOT)}"
+)
 
 # Publish at module level so api.config, _pytest_port.py, and any test module
 # importing stateful API code during collection see the isolated test paths.
@@ -535,8 +540,11 @@ def test_server():
     # Clean slate
     if TEST_STATE_DIR.exists():
         shutil.rmtree(TEST_STATE_DIR)
+    if TEST_CUSTOMER_WORKSPACE_ROOT.exists():
+        shutil.rmtree(TEST_CUSTOMER_WORKSPACE_ROOT)
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
+    TEST_CUSTOMER_WORKSPACE_ROOT.mkdir(parents=True)
 
     # Symlink real skills into test home so skill-related tests work,
     # but all write-heavy state stays isolated.
@@ -676,6 +684,10 @@ def test_server():
 
         try:
             shutil.rmtree(TEST_STATE_DIR)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(TEST_CUSTOMER_WORKSPACE_ROOT)
         except Exception:
             pass
 
