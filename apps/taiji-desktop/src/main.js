@@ -101,13 +101,28 @@ function resolveLabDir() {
   return repoRoot;
 }
 
+function systemAccountHome() {
+  let accountHome = "";
+  try {
+    accountHome = String(os.userInfo().homedir || "").trim();
+  } catch (_) {
+    accountHome = "";
+  }
+  if (!accountHome || !path.isAbsolute(accountHome)) {
+    throw new Error(
+      "Taiji Agent could not resolve the current account home from the system account database."
+    );
+  }
+  return path.normalize(accountHome);
+}
+
 function userStateDir() {
-  const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+  const base = process.env.XDG_STATE_HOME || path.join(systemAccountHome(), ".local", "state");
   return path.join(base, "taiji-agent");
 }
 
 function userDataDir() {
-  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  const base = process.env.XDG_DATA_HOME || path.join(systemAccountHome(), ".local", "share");
   return path.join(base, "taiji-agent");
 }
 
@@ -372,6 +387,7 @@ function runScript(scriptName, env, logFile) {
 function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  const accountHome = systemAccountHome();
   const desktopAccessToken = crypto.randomBytes(32).toString("hex");
   env.TAIJI_AGENT_ROOT = labDir;
   env.TAIJI_AGENT_USE_USER_DIRS = "1";
@@ -393,13 +409,14 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TAIJI_WEBUI_GATEWAY_BASE_URL = `http://127.0.0.1:${agentPort}`;
   const stateDir = process.env.TAIJI_STATE_DIR || userStateDir();
   const tmpDir = process.env.TAIJI_AGENT_TMP_DIR || path.join(stateDir, "tmp");
-  env.TAIJI_LICENSE_FILE = path.join(os.homedir(), ".config", "taiji-agent", "licenses", "active-license.jwt");
+  env.TAIJI_ACCOUNT_HOME = accountHome;
+  env.TAIJI_LICENSE_FILE = path.join(accountHome, ".config", "taiji-agent", "licenses", "active-license.jwt");
   env.TAIJI_STATE_DIR = stateDir;
   env.TAIJI_AGENT_TMP_DIR = tmpDir;
   env.TMPDIR = tmpDir;
   env.TMP = tmpDir;
   env.TEMP = tmpDir;
-  env.TAIJI_LICENSE_STATE_FILE = path.join(os.homedir(), ".local", "state", "taiji-agent", "license-state.json");
+  env.TAIJI_LICENSE_STATE_FILE = path.join(accountHome, ".local", "state", "taiji-agent", "license-state.json");
   try {
     fs.mkdirSync(tmpDir, { recursive: true });
   } catch (error) {

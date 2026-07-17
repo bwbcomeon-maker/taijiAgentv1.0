@@ -382,8 +382,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             'TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"',
             runtime_env,
         )
-        self.assertIn('path.join(os.homedir(), ".config", "taiji-agent", "licenses", "active-license.jwt")', main_js)
-        self.assertIn('path.join(os.homedir(), ".local", "state", "taiji-agent", "license-state.json")', main_js)
+        self.assertIn('accountHome = String(os.userInfo().homedir || "").trim()', main_js)
+        self.assertIn("env.TAIJI_ACCOUNT_HOME = accountHome", main_js)
+        self.assertIn('path.join(accountHome, ".config", "taiji-agent", "licenses", "active-license.jwt")', main_js)
+        self.assertIn('path.join(accountHome, ".local", "state", "taiji-agent", "license-state.json")', main_js)
+        self.assertNotIn("os.homedir()", main_js)
 
     def test_packaging_never_embeds_customer_license_or_private_key_inputs(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
