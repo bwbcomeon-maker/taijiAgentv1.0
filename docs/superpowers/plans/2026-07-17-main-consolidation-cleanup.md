@@ -732,15 +732,22 @@ node --test \
 | L1 路由 | 原生视觉、辅助视觉、生图、模糊意图 | 路由事件与实际调用一致，单轮单任务 | `qa-evidence/.../routing/` | 未执行 |
 | L1 Artifact | pending/commit/discard、授权、恢复、迁移 | 只有 ArtifactRegistry；目标 pytest 全通过 | `qa-evidence/.../artifacts/` | 未执行 |
 | L1 UI | 图片能力、诊断、键盘、响应式 | 静态契约和 UI 自动化全通过 | `qa-evidence/.../frontend/` | 未执行 |
-| L1 DOCX | runtime 隔离、锁、单 DOCX | Node 测试通过，WPS/Word 真开 | `qa-evidence/.../docx/` | 未执行 |
+| L1 DOCX | runtime 隔离、锁、单 DOCX | Node 测试和隔离确定性渲染通过 | `qa-evidence/.../docx/` | 未执行 |
 | L2 WebUI 全量 | 全部 WebUI pytest | 0 新失败；遗留失败必须与冻结基线 node id 完全一致且逐项有批准记录 | `qa-evidence/.../webui-full/` | 未执行 |
 | L2 Agent 全量 | 正式并行 runner | 0 新失败；`test_run_agent.py` 必须在正式时限内完成 | `qa-evidence/.../agent-full/` | 未执行 |
 | L3 Electron | 设置、聊天、产物、迁移、恢复、诊断 | clean commit；三条真实主路径通过 | `qa-evidence/.../electron/` | 未执行 |
 | L3 UX | 1440/1120/900、键盘、焦点、200% | 无 P0/P1；未做项写“未验证” | `docs/reviews/main-consolidation-frontend-ux-qa-2026-07-17.md` | 未执行 |
 | L4 真实 Provider | 阿里识图、生图 | 两次真实调用、聊天产物、控制台一致 | `qa-evidence/.../providers-live/` | 未执行 |
 | L4 Office | 最终 DOCX | WPS/Word 打开、结构和图片正确 | `qa-evidence/.../office/` | 未执行 |
-| L5 Linux | 构建、离线、安装、升级、卸载 | 最终 commit 制包，真实目标机 gate 通过 | `qa-evidence/.../linux-release/` | 未执行 |
+| L5 Linux 自动化 | 构建、manifest、依赖闭包、隔离演练 | 最终 commit 制包，自动化演练通过 | `qa-evidence/.../linux-release/automated/` | 未执行 |
+| L5 Linux 目标机 | 安装、升级、卸载、断网启动 | 真实 Kylin/UOS gate 通过 | `qa-evidence/.../linux-release/target/` | 未执行 |
 | L6 日常不受扰动 | 18642/18787 和 Electron | QA 前后 PID/CWD/health 未被替换 | `qa-evidence/.../daily-runtime/` | 未执行 |
+
+门禁分层：
+
+- 本地 `main` 收敛门禁：L0、全部 L1、L2、L3、L5 Linux 自动化、L6。
+- 生产发布门禁：在本地 `main` 收敛门禁之上，再要求 L4 真实 Provider、L4 Office、L5 Linux 目标机以及最终安装包签名/校验。
+- 真实外部 Key、WPS/Word 或 Kylin/UOS 目标机暂不可用时，必须在 release gate 中记录为 blocker；它们阻断“可生产发布”声明，但不阻断已经满足本地门禁的 `main` 收敛。
 
 全量 A/B 规则：
 
@@ -751,22 +758,23 @@ node --test \
 5. collection error、文件级 timeout、浏览器依赖缺失不能当成普通已知失败。
 6. fixture Provider 通过不能替代真实阿里端到端。
 
-## 8. `main` 更新条件
+## 8. 本地 `main` 收敛与生产发布条件
 
-只有同时满足以下条件，才允许建立临时 main release worktree：
+### 8.1 本地 `main` 收敛门禁
+
+只有同时满足以下条件，才允许建立临时 main release worktree 并 fast-forward 本地 `main`：
 
 1. 整合分支 `git status --short` 为空。
 2. 第 A 至 G 组都有独立提交和来源映射。
 3. `api/image_artifacts.py`、`/api/image-artifacts`、`message.image_artifacts` 不存在。
 4. 所有 L0/L1 测试通过。
 5. WebUI/Agent 全量无新增失败，遗留失败全部有明确处置；Agent 文件级 timeout 已关闭。
-6. 真实 Electron 来源为最终整合 commit 且 `dirty=false`。
-7. 阿里百炼识图、生图都完成真实聊天端到端。
-8. WPS/Word 真实打开最终 DOCX。
-9. Linux 构建和离线演练通过；若本轮要宣称可发布，真实 Kylin/UOS 目标机也必须通过。
-10. 日常三进程在整个 QA 周期未被测试替换。
-11. 冻结备份 SHA256 再次验证通过。
-12. 用户明确批准更新 `main`。
+6. 隔离 Electron 来源为最终整合 commit、`dirty=false`，图片配置、聊天、Artifact、迁移、恢复和诊断功能契约通过。
+7. Linux 构建、manifest、依赖闭包和隔离离线演练通过。
+8. 中文《前端 UX QA 报告》已输出，当前已测范围无 P0/P1；未执行项明确标记为“未验证”。
+9. 日常三进程在整个 QA 周期未被测试替换。
+10. 冻结备份 SHA256 再次验证通过。
+11. 所有尚缺的真实外部 Provider、WPS/Word 和 Kylin/UOS 目标机证据已明确登记为 production release blocker。
 
 更新方式只允许 fast-forward：
 
@@ -786,7 +794,24 @@ git merge --no-ff codex/main-consolidation-20260717
 git rebase --onto main
 ```
 
-更新 `main` 不等于切换用户日常应用。日常根目录何时切到 `main`、何时重启三进程，是独立的用户批准操作。
+本轮用户已经授权：门禁满足后更新本地 `main`、切换日常入口、定向清理并重启验证，不需要重复询问。只有出现计划外破坏性动作、remote push、数据恢复或新风险时才暂停请求方向。
+
+### 8.2 生产发布门禁
+
+本地 `main` 收敛后，只有再满足以下条件，才能写“可生产发布”或生成正式 release：
+
+1. 使用未泄露的新阿里百炼 Key，真实识图和真实生图均在聊天中端到端成功。
+2. 其它宣称正式支持的平台有真实服务证据；无 Key 的平台明确记录“适配已实现、真实服务未验证”。
+3. 最终 DOCX 已在 WPS 或 Word 真实打开并完成内容、图片和版式检查。
+4. 最终 commit 的安装包、SHA256、manifest、签名和离线依赖闭包一致。
+5. 真实 Kylin/UOS x86_64 目标机完成安装、升级、卸载、断网启动和授权验收。
+6. release 文档没有复用旧 commit、旧包、旧截图或旧目标机结果。
+
+任一项缺失时，允许状态只能是：
+
+```text
+本地 main 已收敛；生产发布未放行。
+```
 
 ## 9. 垃圾、未跟踪文件和脏 worktree 裁决
 
@@ -831,7 +856,7 @@ git rebase --onto main
 
 ### 9.3 清理顺序
 
-清理必须在 `main` 更新、日常切换和最终复验之后，且再次取得用户批准：
+本轮已经授权在 `main` 更新、日常切换和最终复验之后执行下列定向清理；无需重复询问。若实际状态超出冻结清单、需要删除未归档数据或出现新的风险，则立即停止并请求方向：
 
 1. 验证冻结备份 SHA256。
 2. 确认整合分支和 `main` 包含所有保留能力。
@@ -861,8 +886,9 @@ git rebase --onto main
 10. targeted test 新失败、collection error 或 timeout。
 11. 配置卡“已验证”但聊天实际没有走对应模型。
 12. Electron 证据无法证明 worktree、commit 和 dirty 状态。
-13. DOCX 自动化通过但 WPS/Word 无法打开。
+13. DOCX 自动化或隔离确定性渲染失败。
 14. 打包证据引用旧 commit、旧 manifest 或旧目标机结果。
+15. 任何人试图在缺少真实 Provider、WPS/Word 或 Kylin/UOS 目标机证据时声明“可生产发布”。
 
 停止后必须记录：
 
@@ -891,18 +917,30 @@ git merge-base --is-ancestor origin/main main
 
 ## 12. 完成定义
 
-只有同时具备以下证据，才能写“主干整合完成”：
+### 12.1 本地 `main` 收敛完成
+
+只有同时具备以下证据，才能写“本地 main 已收敛”：
 
 - 最终 commit 和来源提交映射。
 - 整合 worktree clean。
-- 根目录 tracked 仍为 0，或已按用户批准完成正式切换。
+- 根目录 tracked 仍为 0，并已按本轮授权完成正式切换和重启复验。
 - 唯一 ArtifactRegistry 静态扫描通过。
-- 分层测试矩阵逐项有当前证据。
+- L0、L1、L2、L3、L5 Linux 自动化和 L6 均有当前证据并满足门禁。
 - 中文《前端 UX QA 报告》。
-- 真实 Electron 截图和来源审计。
-- 阿里真实识图、生图聊天端到端。
-- WPS/Word 最终 DOCX。
-- 最终 commit 重新制成的 Linux 包和目标机结果。
+- 隔离 Electron 截图、功能契约和来源审计。
+- 最终 commit 重新生成的 Linux 自动化演练产物。
 - 冻结备份最终 SHA256 复验。
 - `main` 只通过 `--ff-only` 更新。
-- 未经批准没有任何 remote push、worktree 清理、分支删除或 GC。
+- 没有任何 remote push 或 GC；清理只覆盖已冻结、已裁决的路径。
+
+### 12.2 生产发布完成
+
+只有在“本地 main 已收敛”基础上，再具备以下证据，才能写“生产发布已放行”：
+
+- 阿里真实识图、生图聊天端到端及厂商控制台一致性。
+- 所有宣称正式支持的其它 Provider 真实调用证据，或明确收窄正式支持范围。
+- WPS/Word 最终 DOCX 验收。
+- 最终 commit 重新制成的 Linux 包、签名、manifest 和完整离线依赖闭包。
+- 真实 Kylin/UOS 目标机安装、升级、卸载、断网启动和授权验收。
+
+缺少任一真实外部证据时，不回退已经通过门禁的本地 `main`；只保持对应 release blocker，禁止发布声明和正式交付。
