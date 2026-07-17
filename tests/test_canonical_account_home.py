@@ -12,10 +12,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ENV = ROOT / "hermes-local-lab" / "scripts" / "runtime-env.sh"
 HEALTH_CHECK = ROOT / "hermes-local-lab" / "scripts" / "health-check.sh"
+START_AGENT = ROOT / "hermes-local-lab" / "scripts" / "start-agent.sh"
+START_WEBUI = ROOT / "hermes-local-lab" / "scripts" / "start-webui.sh"
 DESKTOP_MAIN = ROOT / "apps" / "taiji-desktop" / "src" / "main.js"
 RESOLUTION_ERROR = (
     "Taiji Agent could not resolve the current account home "
     "from the system account database."
+)
+EXPORTED_FUNCTION_ERROR = (
+    "Taiji Agent refuses to run with exported shell functions "
+    "in the environment."
 )
 
 
@@ -35,6 +41,8 @@ def _poisoned_env(tmp_path: Path) -> dict[str, str]:
         "TAIJI_AGENT_TMP_DIR",
         "TAIJI_LICENSE_FILE",
         "TAIJI_LICENSE_STATE_FILE",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
     ):
         env.pop(name, None)
     env.update(
@@ -67,15 +75,37 @@ def _write_poisoned_env_files(runtime_home: Path, runtime_env: Path, tmp_path: P
                 f"TAIJI_LICENSE_FILE={tmp_path / 'poisoned-dotenv-license.jwt'}",
                 f"TAIJI_LICENSE_STATE_FILE={tmp_path / 'poisoned-dotenv-state.json'}",
                 f"PATH={poisoned_dotenv_path}",
+                'TAIJI_TEST_DOTENV_QUOTED="dot env value with spaces"',
+                "TAIJI_TEST_API_KEY='sk-test.key value'",
+                f"TAIJI_TEST_LITERAL_COMMAND=$(/usr/bin/touch {tmp_path / 'command-expanded'})",
+                f"TAIJI_TEST_LITERAL_BACKTICK=`/usr/bin/touch {tmp_path / 'backtick-expanded'}`",
+                "TAIJI_TEST_LITERAL_PARAMETER=${HOME}/not-expanded",
+                f"LD_PRELOAD={tmp_path / 'untrusted-preload.so'}",
+                f"DYLD_INSERT_LIBRARIES={tmp_path / 'untrusted-dyld.dylib'}",
                 (
                     "_taiji_resolve_system_account_home() "
                     f"{{ printf '%s\\n' '{tmp_path / 'poisoned-dotenv-function'}'; }}"
                 ),
                 (
-                    "printf() "
-                    f"{{ /bin/echo '{tmp_path / 'poisoned-dotenv-printf'}'; }}"
+                    "mkdir() { "
+                    f"TAIJI_ACCOUNT_HOME='{tmp_path / 'poisoned-dotenv-mkdir'}'; "
+                    f"TAIJI_LICENSE_FILE='{tmp_path / 'poisoned-dotenv-mkdir.jwt'}'; "
+                    f"TAIJI_LICENSE_STATE_FILE='{tmp_path / 'poisoned-dotenv-mkdir.json'}'; "
+                    '/bin/mkdir "$@"; }'
                 ),
-                "export -f printf",
+                (
+                    "printf() { "
+                    f"TAIJI_ACCOUNT_HOME='{tmp_path / 'poisoned-dotenv-printf'}'; "
+                    f"TAIJI_LICENSE_FILE='{tmp_path / 'poisoned-dotenv-printf.jwt'}'; "
+                    f"TAIJI_LICENSE_STATE_FILE='{tmp_path / 'poisoned-dotenv-printf.json'}'; "
+                    'builtin printf "$@"; }'
+                ),
+                (
+                    "taiji_unlisted_env_hook() { "
+                    f"TAIJI_ACCOUNT_HOME='{tmp_path / 'poisoned-dotenv-unlisted'}'; "
+                    "}"
+                ),
+                "export -f mkdir printf taiji_unlisted_env_hook",
             )
         )
         + "\n",
@@ -89,15 +119,31 @@ def _write_poisoned_env_files(runtime_home: Path, runtime_env: Path, tmp_path: P
                 f"TAIJI_LICENSE_FILE={tmp_path / 'poisoned-runtime-license.jwt'}",
                 f"TAIJI_LICENSE_STATE_FILE={tmp_path / 'poisoned-runtime-state.json'}",
                 f"PATH={poisoned_runtime_path}",
+                "TAIJI_TEST_RUNTIME_QUOTED='runtime env value with spaces'",
                 (
                     "_taiji_resolve_system_account_home() "
                     f"{{ printf '%s\\n' '{tmp_path / 'poisoned-runtime-function'}'; }}"
                 ),
                 (
-                    "printf() "
-                    f"{{ /bin/echo '{tmp_path / 'poisoned-runtime-printf'}'; }}"
+                    "mkdir() { "
+                    f"TAIJI_ACCOUNT_HOME='{tmp_path / 'poisoned-runtime-mkdir'}'; "
+                    f"TAIJI_LICENSE_FILE='{tmp_path / 'poisoned-runtime-mkdir.jwt'}'; "
+                    f"TAIJI_LICENSE_STATE_FILE='{tmp_path / 'poisoned-runtime-mkdir.json'}'; "
+                    '/bin/mkdir "$@"; }'
                 ),
-                "export -f printf",
+                (
+                    "printf() { "
+                    f"TAIJI_ACCOUNT_HOME='{tmp_path / 'poisoned-runtime-printf'}'; "
+                    f"TAIJI_LICENSE_FILE='{tmp_path / 'poisoned-runtime-printf.jwt'}'; "
+                    f"TAIJI_LICENSE_STATE_FILE='{tmp_path / 'poisoned-runtime-printf.json'}'; "
+                    'builtin printf "$@"; }'
+                ),
+                (
+                    "taiji_unlisted_env_hook() { "
+                    f"TAIJI_ACCOUNT_HOME='{tmp_path / 'poisoned-runtime-unlisted'}'; "
+                    "}"
+                ),
+                "export -f mkdir printf taiji_unlisted_env_hook",
             )
         )
         + "\n",
@@ -138,6 +184,28 @@ def _script_without_account_resolvers(script: Path, tmp_path: Path) -> Path:
     return isolated_script
 
 
+def _script_with_failed_function_scan(
+    script: Path, tmp_path: Path, failure_mode: str
+) -> Path:
+    scan_command = "/usr/bin/env | /usr/bin/grep -q '^BASH_FUNC_'"
+    source = script.read_text(encoding="utf-8")
+    if source.count(scan_command) != 1:
+        raise AssertionError(f"exported function scan contract missing from {script}")
+    if failure_mode == "env":
+        replacement = "/bin/sh -c 'exit 2' | /usr/bin/grep -q '^BASH_FUNC_'"
+    elif failure_mode == "grep":
+        replacement = "/usr/bin/env | /bin/sh -c 'exit 2'"
+    else:
+        raise AssertionError(f"unsupported failure mode: {failure_mode}")
+    isolated_script = tmp_path / f"{failure_mode}-{script.name}"
+    isolated_script.write_text(
+        source.replace(scan_command, replacement, 1),
+        encoding="utf-8",
+    )
+    isolated_script.chmod(0o755)
+    return isolated_script
+
+
 class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
     def test_runtime_env_overrides_poisoned_parent_dotenv_and_runtime_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -165,9 +233,11 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                     "/bin/bash",
                     "-c",
                     (
-                        "printf() { /bin/echo poisoned-parent-printf; }; "
-                        "export -f printf; "
-                        'set -e; source "$1"; /usr/bin/env'
+                        'set -e; source "$1"; '
+                        "/usr/bin/printf 'TAIJI_TEST_LD_PRELOAD_SET=%s\\n"
+                        "TAIJI_TEST_DYLD_SET=%s\\n' "
+                        '"${LD_PRELOAD+x}" "${DYLD_INSERT_LIBRARIES+x}"; '
+                        "/usr/bin/env"
                     ),
                     "bash",
                     str(RUNTIME_ENV),
@@ -184,6 +254,18 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 "TAIJI_ACCOUNT_HOME",
                 "TAIJI_LICENSE_FILE",
                 "TAIJI_LICENSE_STATE_FILE",
+                "TAIJI_TEST_DOTENV_QUOTED",
+                "TAIJI_TEST_API_KEY",
+                "TAIJI_TEST_RUNTIME_QUOTED",
+                "TAIJI_TEST_LITERAL_COMMAND",
+                "TAIJI_TEST_LITERAL_BACKTICK",
+                "TAIJI_TEST_LITERAL_PARAMETER",
+                "LD_PRELOAD",
+                "DYLD_INSERT_LIBRARIES",
+                "HOME",
+                "PATH",
+                "TAIJI_TEST_LD_PRELOAD_SET",
+                "TAIJI_TEST_DYLD_SET",
             }
             values = {
                 name: value
@@ -193,6 +275,305 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 if name in expected_names
             }
             _assert_canonical_license_environment(self, values)
+            self.assertEqual(
+                values["TAIJI_TEST_DOTENV_QUOTED"],
+                "dot env value with spaces",
+            )
+            self.assertEqual(values["TAIJI_TEST_API_KEY"], "sk-test.key value")
+            self.assertEqual(
+                values["TAIJI_TEST_RUNTIME_QUOTED"],
+                "runtime env value with spaces",
+            )
+            self.assertEqual(
+                values["TAIJI_TEST_LITERAL_COMMAND"],
+                f"$(/usr/bin/touch {tmp_path / 'command-expanded'})",
+            )
+            self.assertEqual(
+                values["TAIJI_TEST_LITERAL_BACKTICK"],
+                f"`/usr/bin/touch {tmp_path / 'backtick-expanded'}`",
+            )
+            self.assertEqual(
+                values["TAIJI_TEST_LITERAL_PARAMETER"],
+                "${HOME}/not-expanded",
+            )
+            self.assertFalse((tmp_path / "command-expanded").exists())
+            self.assertFalse((tmp_path / "backtick-expanded").exists())
+            self.assertNotIn("LD_PRELOAD", values)
+            self.assertNotIn("DYLD_INSERT_LIBRARIES", values)
+            self.assertEqual(values["TAIJI_TEST_LD_PRELOAD_SET"], "")
+            self.assertEqual(values["TAIJI_TEST_DYLD_SET"], "")
+            self.assertEqual(values["HOME"], str(tmp_path / "poisoned-parent-home"))
+            self.assertNotEqual(values["PATH"], str(tmp_path / "poisoned-runtime-path"))
+
+    def test_runtime_env_rejects_any_inherited_exported_function(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                    "TAIJI_AGENT_USE_USER_DIRS": "0",
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    (
+                        "taiji_never_listed_canary() { /bin/echo should-not-run; }; "
+                        "export -f taiji_never_listed_canary; "
+                        'source "$1"'
+                    ),
+                    "bash",
+                    str(RUNTIME_ENV),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(EXPORTED_FUNCTION_ERROR, result.stderr)
+
+    def test_exported_control_builtins_cannot_bypass_function_rejection(self):
+        for function_name in ("return", "exit", "command", "builtin"):
+            with self.subTest(function_name=function_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    tmp_path = Path(temp_dir)
+                    env = _poisoned_env(tmp_path)
+                    result = subprocess.run(
+                        [
+                            "/bin/bash",
+                            "-c",
+                            (
+                                f"function {function_name} "
+                                "{ /bin/echo should-not-run; }; "
+                                f"export -f {function_name}; "
+                                'source "$1"'
+                            ),
+                            "bash",
+                            str(RUNTIME_ENV),
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(EXPORTED_FUNCTION_ERROR, result.stderr)
+
+    def test_start_agent_rejects_inherited_exported_function_before_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_AGENT_USE_USER_DIRS": "0",
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    (
+                        "taiji_never_listed_canary() { /bin/echo should-not-run; }; "
+                        "export -f taiji_never_listed_canary; "
+                        'exec /bin/bash "$1"'
+                    ),
+                    "bash",
+                    str(START_AGENT),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(EXPORTED_FUNCTION_ERROR, result.stderr)
+
+    def test_start_scripts_accept_readonly_canonical_paths(self):
+        scenarios = (
+            (
+                START_AGENT,
+                {
+                    "TAIJI_AGENT_AGENT_DIR": "missing-agent",
+                },
+                "Taiji Agent Python runtime not found",
+            ),
+            (
+                START_WEBUI,
+                {
+                    "TAIJI_AGENT_AGENT_DIR": "missing-agent",
+                    "TAIJI_AGENT_WEBUI_DIR": "missing-webui",
+                    "API_SERVER_KEY": "unit-test-api-key",
+                },
+                "Taiji web service entrypoint not found",
+            ),
+        )
+        for script, extra_env, expected_error in scenarios:
+            with self.subTest(script=script.name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    tmp_path = Path(temp_dir)
+                    env = _poisoned_env(tmp_path)
+                    env.update(
+                        {
+                            "TAIJI_AGENT_USE_USER_DIRS": "0",
+                            "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                            "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                            "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                            "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                            "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                            "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                        }
+                    )
+                    env.update(
+                        {
+                            name: str(tmp_path / value)
+                            if value.startswith("missing-")
+                            else value
+                            for name, value in extra_env.items()
+                        }
+                    )
+                    result = subprocess.run(
+                        ["/bin/bash", str(script)],
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=30,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertNotIn("readonly variable", result.stderr)
+
+    def test_runtime_env_fails_closed_when_function_scan_is_unavailable(self):
+        for failure_mode in ("env", "grep"):
+            with self.subTest(failure_mode=failure_mode):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    tmp_path = Path(temp_dir)
+                    env = _poisoned_env(tmp_path)
+                    env.update(
+                        {
+                            "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                            "TAIJI_AGENT_USE_USER_DIRS": "0",
+                            "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                            "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                            "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                            "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                            "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                            "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                        }
+                    )
+                    isolated_runtime_env = _script_with_failed_function_scan(
+                        RUNTIME_ENV, tmp_path, failure_mode
+                    )
+                    result = subprocess.run(
+                        [
+                            "/bin/bash",
+                            "-c",
+                            'source "$1"',
+                            "bash",
+                            str(isolated_runtime_env),
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        "could not verify the exported shell function boundary",
+                        result.stderr,
+                    )
+
+    def test_runtime_env_makes_canonical_paths_readonly_against_local_functions(self):
+        for function_name in ("mkdir", "printf"):
+            with self.subTest(function_name=function_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    tmp_path = Path(temp_dir)
+                    env = _poisoned_env(tmp_path)
+                    env.update(
+                        {
+                            "TAIJI_AGENT_ROOT": str(tmp_path / "lab"),
+                            "TAIJI_AGENT_USE_USER_DIRS": "0",
+                            "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                            "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                            "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                            "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                            "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                            "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                            "TAIJI_TEST_FUNCTION_NAME": function_name,
+                            "TAIJI_TEST_POISONED_HOME": str(tmp_path / "local-function"),
+                        }
+                    )
+                    result = subprocess.run(
+                        [
+                            "/bin/bash",
+                            "-c",
+                            textwrap.dedent(
+                                """\
+                                set -e
+                                TAIJI_TEST_ARM_LOCAL_FUNCTION=0
+                                if [ "$TAIJI_TEST_FUNCTION_NAME" = "mkdir" ]; then
+                                  mkdir() {
+                                    if [ "$TAIJI_TEST_ARM_LOCAL_FUNCTION" = "1" ]; then
+                                      TAIJI_ACCOUNT_HOME="$TAIJI_TEST_POISONED_HOME"
+                                    fi
+                                    /bin/mkdir "$@"
+                                  }
+                                else
+                                  printf() {
+                                    if [ "$TAIJI_TEST_ARM_LOCAL_FUNCTION" = "1" ]; then
+                                      TAIJI_ACCOUNT_HOME="$TAIJI_TEST_POISONED_HOME"
+                                    fi
+                                    builtin printf "$@"
+                                  }
+                                fi
+                                source "$1"
+                                declare -p TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE
+                                TAIJI_TEST_ARM_LOCAL_FUNCTION=1
+                                if [ "$TAIJI_TEST_FUNCTION_NAME" = "mkdir" ]; then
+                                  mkdir -p "$TAIJI_TEST_POISONED_HOME/after-resolution"
+                                else
+                                  printf '%s\\n' after-resolution
+                                fi
+                                """
+                            ),
+                            "bash",
+                            str(RUNTIME_ENV),
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("declare -rx TAIJI_ACCOUNT_HOME=", result.stdout)
+                    self.assertIn("readonly variable", result.stderr)
 
     def test_runtime_env_fails_closed_when_system_account_home_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,13 +653,44 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                     "RUN_MODEL_TEST": "0",
                 }
             )
-            subprocess.run(
+            result = subprocess.run(
+                ["/bin/bash", str(HEALTH_CHECK)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+
+            self.assertTrue(capture_file.is_file())
+            self.assertNotIn("readonly variable", result.stderr)
+            _assert_canonical_license_environment(
+                self,
+                json.loads(capture_file.read_text(encoding="utf-8")),
+            )
+
+    def test_health_check_rejects_any_inherited_exported_function(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_AGENT_USE_USER_DIRS": "1",
+                    "TAIJI_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                    "TAIJI_WORKSPACE": str(tmp_path / "workspace"),
+                    "TAIJI_AGENT_LOG_DIR": str(tmp_path / "logs"),
+                    "TAIJI_AGENT_TMP_DIR": str(tmp_path / "tmp"),
+                    "TAIJI_AGENT_RUNTIME_ENV": str(tmp_path / "runtime.env"),
+                }
+            )
+            result = subprocess.run(
                 [
                     "/bin/bash",
                     "-c",
                     (
-                        "printf() { /bin/echo poisoned-parent-printf; }; "
-                        "export -f printf; "
+                        "taiji_never_listed_canary() { /bin/echo should-not-run; }; "
+                        "export -f taiji_never_listed_canary; "
                         'exec /bin/bash "$1"'
                     ),
                     "bash",
@@ -292,11 +704,8 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 timeout=30,
             )
 
-            self.assertTrue(capture_file.is_file())
-            _assert_canonical_license_environment(
-                self,
-                json.loads(capture_file.read_text(encoding="utf-8")),
-            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(EXPORTED_FUNCTION_ERROR, result.stderr)
 
     def test_health_check_fails_closed_when_system_account_home_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp_dir:

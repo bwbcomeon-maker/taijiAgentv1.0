@@ -1,5 +1,32 @@
 #!/usr/bin/env bash
 # Check the Taiji Agent local runtime, processes, ports, and HTTP endpoints.
+
+if /usr/bin/env | /usr/bin/grep -q '^BASH_FUNC_'; then
+  _taiji_exported_function_scan_status=("${PIPESTATUS[@]}")
+else
+  _taiji_exported_function_scan_status=("${PIPESTATUS[@]}")
+fi
+case "${_taiji_exported_function_scan_status[0]}:${_taiji_exported_function_scan_status[1]}" in
+  *:0)
+    /usr/bin/printf '%s\n' \
+      "Taiji Agent refuses to run with exported shell functions in the environment." \
+      >&2
+    # Parameter-expansion failure is language-level: exported functions named
+    # return, exit, command, or builtin cannot intercept this fail-closed path.
+    _taiji_exported_function_boundary_abort=
+    : "${_taiji_exported_function_boundary_abort:?exported shell function boundary violation}"
+    ;;
+  0:1) ;;
+  *)
+    /usr/bin/printf '%s\n' \
+      "Taiji Agent could not verify the exported shell function boundary." \
+      >&2
+    _taiji_exported_function_boundary_abort=
+    : "${_taiji_exported_function_boundary_abort:?exported shell function boundary unavailable}"
+    ;;
+esac
+unset _taiji_exported_function_scan_status
+
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,18 +69,84 @@ mkdir -p "$TMP_DIR"
 _TAIJI_CANONICAL_RUNTIME_HOME="$TAIJI_RUNTIME_HOME"
 _TAIJI_CANONICAL_ENV_FILE="$TAIJI_ENV_FILE"
 
+# Treat dotenv files as data only. No line is sourced or evaluated, so command
+# substitutions, parameter expansions, backticks, and function bodies stay literal.
+_taiji_load_dotenv_file() {
+  local _taiji_dotenv_file="$1"
+  local _taiji_dotenv_line=""
+  local _taiji_dotenv_key=""
+  local _taiji_dotenv_value=""
+  local _taiji_dotenv_single_quote_regex="^'(.*)'[[:space:]]*(#.*)?$"
+  local _taiji_dotenv_double_quote_regex='^"(.*)"[[:space:]]*(#.*)?$'
+  local _taiji_dotenv_inline_comment_regex='^(.*[^[:space:]])[[:space:]]+#.*$'
+
+  while IFS= read -r _taiji_dotenv_line || [ -n "$_taiji_dotenv_line" ]; do
+    _taiji_dotenv_line="${_taiji_dotenv_line#"${_taiji_dotenv_line%%[![:space:]]*}"}"
+    case "$_taiji_dotenv_line" in
+      ""|\#*) continue ;;
+    esac
+    if [[ "$_taiji_dotenv_line" == export[[:space:]]* ]]; then
+      _taiji_dotenv_line="${_taiji_dotenv_line#export}"
+      _taiji_dotenv_line="${_taiji_dotenv_line#"${_taiji_dotenv_line%%[![:space:]]*}"}"
+    fi
+    case "$_taiji_dotenv_line" in
+      *=*) ;;
+      *) continue ;;
+    esac
+
+    _taiji_dotenv_key="${_taiji_dotenv_line%%=*}"
+    _taiji_dotenv_key="${_taiji_dotenv_key#"${_taiji_dotenv_key%%[![:space:]]*}"}"
+    _taiji_dotenv_key="${_taiji_dotenv_key%"${_taiji_dotenv_key##*[![:space:]]}"}"
+    [[ "$_taiji_dotenv_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # These names can alter the current shell or the next executable before
+    # application code starts. Provider and ordinary application keys remain allowed.
+    case "$_taiji_dotenv_key" in
+      _TAIJI_* | \
+      HOME | PATH | IFS | BASH_* | ENV | SHELLOPTS | BASHOPTS | CDPATH | \
+      GLOBIGNORE | PROMPT_COMMAND | PS[0-4] | LD_* | DYLD_* | \
+      UID | EUID | PPID | PWD | OLDPWD | SHLVL | RANDOM | SECONDS | LINENO | \
+      OPTARG | OPTIND | FUNCNAME | GROUPS | DIRSTACK | PIPESTATUS | _ | \
+      HOSTNAME | HOSTTYPE | MACHTYPE | OSTYPE | \
+      PYTHONPATH | PYTHONHOME | PYTHONSTARTUP | PYTHONINSPECT | \
+      NODE_OPTIONS | RUBYOPT | RUBYLIB | PERL5OPT | PERL5LIB | \
+      JAVA_TOOL_OPTIONS | CLASSPATH | LUA_PATH | LUA_CPATH | \
+      TAIJI_ACCOUNT_HOME | TAIJI_LICENSE_FILE | TAIJI_LICENSE_STATE_FILE | \
+      AGENT_DIR | WEBUI_DIR | LOG_DIR | TMP_DIR | SCRIPT_DIR | LAB_DIR | RUNTIME_ENV)
+        continue
+        ;;
+    esac
+
+    _taiji_dotenv_value="${_taiji_dotenv_line#*=}"
+    _taiji_dotenv_value="${_taiji_dotenv_value#"${_taiji_dotenv_value%%[![:space:]]*}"}"
+    case "$_taiji_dotenv_value" in
+      \'*)
+        [[ "$_taiji_dotenv_value" =~ $_taiji_dotenv_single_quote_regex ]] ||
+          continue
+        _taiji_dotenv_value="${BASH_REMATCH[1]}"
+        ;;
+      \"*)
+        [[ "$_taiji_dotenv_value" =~ $_taiji_dotenv_double_quote_regex ]] ||
+          continue
+        _taiji_dotenv_value="${BASH_REMATCH[1]}"
+        ;;
+      *)
+        if [[ "$_taiji_dotenv_value" =~ $_taiji_dotenv_inline_comment_regex ]]; then
+          _taiji_dotenv_value="${BASH_REMATCH[1]}"
+        fi
+        _taiji_dotenv_value="${_taiji_dotenv_value%"${_taiji_dotenv_value##*[![:space:]]}"}"
+        ;;
+    esac
+    export "$_taiji_dotenv_key=$_taiji_dotenv_value"
+  done < "$_taiji_dotenv_file"
+}
+
 if [ -f "$TAIJI_ENV_FILE" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "$TAIJI_ENV_FILE"
-  set +a
+  _taiji_load_dotenv_file "$TAIJI_ENV_FILE"
 fi
 if [ -f "$RUNTIME_ENV" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "$RUNTIME_ENV"
-  set +a
+  _taiji_load_dotenv_file "$RUNTIME_ENV"
 fi
+unset -f _taiji_load_dotenv_file
 
 TAIJI_IGNORED_RUNTIME_SELECTOR_COUNT=0
 for _taiji_legacy_runtime_selector in TAIJI_AGENT_HOME TAIJI_AGENT_RUNTIME_HOME TAIJI_AGENT_ENV_FILE HER""MES_HOME HER""MES_CONFIG_PATH HER""MES_CONFIG HER""MES_ENV; do
@@ -157,6 +250,7 @@ fi
 TAIJI_ACCOUNT_HOME="$_TAIJI_CANONICAL_ACCOUNT_HOME"
 TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"
 TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"
+readonly TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE
 export TAIJI_ACCOUNT_HOME
 export TAIJI_LICENSE_FILE
 export TAIJI_LICENSE_STATE_FILE

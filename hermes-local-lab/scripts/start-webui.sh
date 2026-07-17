@@ -48,7 +48,6 @@ TAIJI_WEBUI_PYTHON="${TAIJI_WEBUI_PYTHON:-$AGENT_DIR/venv/bin/python}"
 TAIJI_WEBUI_CHAT_BACKEND="${TAIJI_WEBUI_CHAT_BACKEND:-gateway}"
 TAIJI_WEBUI_GATEWAY_BASE_URL="${TAIJI_WEBUI_GATEWAY_BASE_URL:-http://$AGENT_API_HOST:$AGENT_API_PORT}"
 TERMINAL_CWD="${TAIJI_TERMINAL_CWD:-${TERMINAL_CWD:-$TAIJI_WORKSPACE}}"
-TAIJI_LICENSE_FILE="${TAIJI_LICENSE_FILE:-$TAIJI_CONFIG_DIR/licenses/active-license.jwt}"
 
 if [ -z "${API_SERVER_KEY:-}" ] || [ "$API_SERVER_KEY" = "replace-with-a-random-local-dev-token" ]; then
   API_SERVER_KEY="$(openssl rand -hex 32 2>/dev/null || "$TAIJI_WEBUI_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
