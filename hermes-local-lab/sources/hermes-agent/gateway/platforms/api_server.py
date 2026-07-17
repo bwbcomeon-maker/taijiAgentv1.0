@@ -3748,14 +3748,16 @@ class APIServerAdapter(BasePlatformAdapter):
         stored_history: List[Dict[str, Any]],
         *,
         platform_message_id: Optional[str],
-        user_message: Any,
+        checkpoint_content: Any,
     ) -> tuple[List[Dict[str, Any]], bool]:
         """Remove only the exact current checkpoint from provider history.
 
         WebUI durably writes the accepted user turn before starting a managed
         run.  state.db remains authoritative and unchanged; this boundary only
         prevents that checkpoint from being sent once as restored history and
-        again as the run's current ``user_message``.
+        again as the run's current input.  ``checkpoint_content`` is the
+        display-layer content used only for this comparison; prepared provider
+        input remains separate.
         """
         history = list(stored_history)
         if not platform_message_id:
@@ -3783,7 +3785,7 @@ class APIServerAdapter(BasePlatformAdapter):
             return history, True
 
         checkpoint_digest = cls._managed_content_digest(checkpoint.get("content"))
-        input_digest = cls._managed_content_digest(user_message)
+        input_digest = cls._managed_content_digest(checkpoint_content)
         if (
             checkpoint_digest is None
             or input_digest is None
@@ -4004,6 +4006,11 @@ class APIServerAdapter(BasePlatformAdapter):
 
         instructions = body.get("instructions")
         platform_message_id = _normalized_platform_message_id(body.get("platform_message_id"))
+        checkpoint_content = (
+            body.get("checkpoint_content")
+            if "checkpoint_content" in body
+            else user_message
+        )
         previous_response_id = body.get("previous_response_id")
 
         # Accept explicit conversation_history from the request body.
@@ -4253,7 +4260,7 @@ class APIServerAdapter(BasePlatformAdapter):
             provider_history, checkpoint_conflict = self._managed_provider_history(
                 stored_history,
                 platform_message_id=platform_message_id,
-                user_message=user_message,
+                checkpoint_content=checkpoint_content,
             )
             if checkpoint_conflict:
                 await asyncio.to_thread(_release_managed_lease)

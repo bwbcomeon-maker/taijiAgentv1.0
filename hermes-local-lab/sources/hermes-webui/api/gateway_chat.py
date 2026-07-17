@@ -621,6 +621,8 @@ def _gateway_run_request_body(
         run_body["provider"] = body.get("provider")
     if body.get("platform_message_id"):
         run_body["platform_message_id"] = body.get("platform_message_id")
+    if "checkpoint_content" in body:
+        run_body["checkpoint_content"] = body.get("checkpoint_content")
     if system_parts:
         run_body["instructions"] = "\n\n".join(system_parts)
     return run_body
@@ -1253,7 +1255,10 @@ def _run_gateway_chat_streaming(
                 run_result = _stream_gateway_run_events(
                     base_url=base_url,
                     headers=headers,
-                    body=body,
+                    body={
+                        **body,
+                        "checkpoint_content": turn_envelope.display_user_message,
+                    },
                     session_id=session_id,
                     stream_id=stream_id,
                     cancel_event=cancel_event,

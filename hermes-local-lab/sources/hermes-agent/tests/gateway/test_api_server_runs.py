@@ -633,6 +633,158 @@ class TestStartRun:
             db.close()
 
     @pytest.mark.asyncio
+    async def test_managed_display_checkpoint_allows_distinct_prepared_image_input_once(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = "session-display-checkpoint-image-input"
+        platform_message_id = "webui-turn:turn-image"
+        display_checkpoint = "visible display checkpoint canary"
+        prepared_canary = "prepared provider image canary"
+        prepared_input = [
+            {"type": "input_text", "text": prepared_canary},
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,AA==",
+            },
+        ]
+        db.create_session(session_id, "webui")
+        db.append_message(session_id, "user", "earlier question")
+        db.append_message(session_id, "assistant", "earlier answer")
+        db.append_message(
+            session_id,
+            "user",
+            display_checkpoint,
+            platform_message_id=platform_message_id,
+        )
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+        provider_payloads = []
+        finished = threading.Event()
+
+        class RecordingAgent:
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+            def run_conversation(
+                self,
+                *,
+                user_message,
+                conversation_history,
+                task_id,
+                persist_user_platform_message_id=None,
+            ):
+                provider_payloads.append([
+                    *conversation_history,
+                    {"role": "user", "content": user_message},
+                ])
+                db.append_message(
+                    task_id,
+                    "user",
+                    user_message,
+                    platform_message_id=persist_user_platform_message_id,
+                )
+                db.append_message(task_id, "assistant", "provider answer")
+                finished.set()
+                return {"final_response": "provider answer"}
+
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_create_agent", return_value=RecordingAgent()):
+                    resp = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": prepared_input,
+                            "checkpoint_content": display_checkpoint,
+                            "session_id": session_id,
+                            "platform_message_id": platform_message_id,
+                        },
+                    )
+                    response_payload = await resp.json()
+                    assert await asyncio.to_thread(finished.wait, 3.0)
+
+            assert resp.status == 202, response_payload
+            assert len(provider_payloads) == 1
+            provider_serialized = json.dumps(provider_payloads[0], ensure_ascii=False)
+            assert provider_serialized.count(prepared_canary) == 1
+            assert display_checkpoint not in provider_serialized
+            assert "checkpoint_content" not in provider_serialized
+            assert provider_payloads[0][:-1] == [
+                {"role": "user", "content": "earlier question"},
+                {"role": "assistant", "content": "earlier answer"},
+            ]
+            assert provider_payloads[0][-1]["content"] == [
+                {"type": "text", "text": prepared_canary},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AA=="},
+                },
+            ]
+            assert display_checkpoint not in json.dumps(
+                response_payload, ensure_ascii=False
+            )
+            rows = db.get_messages(session_id)
+            assert sum(
+                row.get("platform_message_id") == platform_message_id
+                for row in rows
+            ) == 1
+            assert [
+                (row["role"], row["content"])
+                for row in rows
+            ] == [
+                ("user", "earlier question"),
+                ("assistant", "earlier answer"),
+                ("user", display_checkpoint),
+                ("assistant", "provider answer"),
+            ]
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_managed_forged_checkpoint_content_fails_closed(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = "session-forged-checkpoint-content"
+        platform_message_id = "webui-turn:turn-forged"
+        accepted_content = "accepted display checkpoint"
+        db.create_session(session_id, "webui")
+        db.append_message(
+            session_id,
+            "user",
+            accepted_content,
+            platform_message_id=platform_message_id,
+        )
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_create_agent") as mock_create:
+                    resp = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": accepted_content,
+                            "checkpoint_content": "forged display checkpoint",
+                            "session_id": session_id,
+                            "platform_message_id": platform_message_id,
+                        },
+                    )
+                    payload = await resp.json()
+
+            assert resp.status == 409
+            assert payload["error"]["code"] == "platform_message_conflict"
+            mock_create.assert_not_called()
+            assert adapter._run_streams == {}
+            assert [
+                (row["role"], row["content"], row["platform_message_id"])
+                for row in db.get_messages(session_id)
+            ] == [("user", accepted_content, platform_message_id)]
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
     async def test_managed_platform_id_without_checkpoint_match_keeps_full_history(
         self, adapter, tmp_path
     ):

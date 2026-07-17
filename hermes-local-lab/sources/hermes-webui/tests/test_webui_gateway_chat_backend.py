@@ -2001,6 +2001,7 @@ def test_gateway_runs_compatibility_fallback_sends_full_webui_history(
         for message in captured["chat_body"]["messages"]
         if message["role"] != "system"
     ]
+    assert "checkpoint_content" not in captured["chat_body"]
     assert visible_messages == [
         {"role": "user", "content": "old question"},
         {"role": "assistant", "content": "old answer"},
@@ -2360,6 +2361,7 @@ def test_gateway_runs_transport_keeps_current_image_attachment_in_input(
     assert current_input[0] == {"type": "text", "text": "What is in this image?"}
     assert current_input[1]["type"] == "image_url"
     assert current_input[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert captured["run_body"]["checkpoint_content"] == "What is in this image?"
     assert "conversation_history" not in captured["run_body"]
 
 
