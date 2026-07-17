@@ -26,15 +26,29 @@ from cryptography.hazmat.primitives import serialization
 import taiji_runtime_profile
 
 
-def _system_account_home() -> Path:
-    if os.name == "posix":
-        try:
-            import pwd
+SYSTEM_ACCOUNT_HOME_ERROR = (
+    "Taiji Agent could not resolve the current account home "
+    "from the system account database."
+)
 
-            return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
-        except (KeyError, OSError):
-            pass
-    return Path.home().resolve()
+
+def _system_account_home() -> Path:
+    if os.name != "posix":
+        # The POSIX account database is unavailable on non-POSIX platforms.
+        # This compatibility path is intentionally not used on Linux or macOS.
+        return Path.home().resolve()
+
+    try:
+        import pwd
+
+        raw_home = str(pwd.getpwuid(os.getuid()).pw_dir or "").strip()
+    except (ImportError, KeyError, OSError) as exc:
+        raise RuntimeError(SYSTEM_ACCOUNT_HOME_ERROR) from exc
+
+    account_home = Path(raw_home)
+    if not raw_home or not account_home.is_absolute() or not account_home.is_dir():
+        raise RuntimeError(SYSTEM_ACCOUNT_HOME_ERROR)
+    return account_home.resolve()
 
 
 PRODUCT = "taiji-agent"

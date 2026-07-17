@@ -1,5 +1,6 @@
 import json
 import inspect
+import os
 import stat
 import types
 import time
@@ -111,6 +112,25 @@ def _write_token(path, private_pem, **overrides):
     token = jwt.encode(payload, private_pem, algorithm="RS256")
     path.write_text(token, encoding="utf-8")
     return token
+
+
+def test_system_account_home_fails_closed_when_pwd_lookup_fails(
+    monkeypatch, tmp_path
+):
+    if os.name != "posix":
+        pytest.skip("POSIX account database is unavailable")
+    pwd_module = pytest.importorskip("pwd")
+    poisoned_home = tmp_path / "poisoned-home"
+    poisoned_home.mkdir()
+    monkeypatch.setenv("HOME", str(poisoned_home))
+
+    def fail_pwd_lookup(_uid):
+        raise KeyError("missing account")
+
+    monkeypatch.setattr(pwd_module, "getpwuid", fail_pwd_lookup)
+
+    with pytest.raises(RuntimeError, match="system account database"):
+        taiji_license._system_account_home()
 
 
 def test_valid_license_returns_public_status(tmp_path, signing_keys):

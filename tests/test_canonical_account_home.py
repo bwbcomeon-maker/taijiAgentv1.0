@@ -71,6 +71,11 @@ def _write_poisoned_env_files(runtime_home: Path, runtime_env: Path, tmp_path: P
                     "_taiji_resolve_system_account_home() "
                     f"{{ printf '%s\\n' '{tmp_path / 'poisoned-dotenv-function'}'; }}"
                 ),
+                (
+                    "printf() "
+                    f"{{ /bin/echo '{tmp_path / 'poisoned-dotenv-printf'}'; }}"
+                ),
+                "export -f printf",
             )
         )
         + "\n",
@@ -88,6 +93,11 @@ def _write_poisoned_env_files(runtime_home: Path, runtime_env: Path, tmp_path: P
                     "_taiji_resolve_system_account_home() "
                     f"{{ printf '%s\\n' '{tmp_path / 'poisoned-runtime-function'}'; }}"
                 ),
+                (
+                    "printf() "
+                    f"{{ /bin/echo '{tmp_path / 'poisoned-runtime-printf'}'; }}"
+                ),
+                "export -f printf",
             )
         )
         + "\n",
@@ -109,7 +119,7 @@ def _assert_canonical_license_environment(test: unittest.TestCase, values: dict[
 
 
 def _script_without_account_resolvers(script: Path, tmp_path: Path) -> Path:
-    controlled_path = 'local PATH="/usr/bin:/bin:/usr/sbin:/sbin"'
+    controlled_path = "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
     source = script.read_text(encoding="utf-8")
     if source.count(controlled_path) != 1:
         raise AssertionError(f"account resolver path contract missing from {script}")
@@ -119,7 +129,7 @@ def _script_without_account_resolvers(script: Path, tmp_path: Path) -> Path:
     isolated_script.write_text(
         source.replace(
             controlled_path,
-            f'local PATH="{resolverless_path}"',
+            f"PATH={resolverless_path}",
             1,
         ),
         encoding="utf-8",
@@ -155,12 +165,9 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                     "/bin/bash",
                     "-c",
                     (
-                        'set -e; source "$1"; '
-                        "printf 'TAIJI_ACCOUNT_HOME=%s\\n"
-                        "TAIJI_LICENSE_FILE=%s\\n"
-                        "TAIJI_LICENSE_STATE_FILE=%s\\n' "
-                        '"$TAIJI_ACCOUNT_HOME" "$TAIJI_LICENSE_FILE" '
-                        '"$TAIJI_LICENSE_STATE_FILE"'
+                        "printf() { /bin/echo poisoned-parent-printf; }; "
+                        "export -f printf; "
+                        'set -e; source "$1"; /usr/bin/env'
                     ),
                     "bash",
                     str(RUNTIME_ENV),
@@ -173,7 +180,18 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+            expected_names = {
+                "TAIJI_ACCOUNT_HOME",
+                "TAIJI_LICENSE_FILE",
+                "TAIJI_LICENSE_STATE_FILE",
+            }
+            values = {
+                name: value
+                for line in result.stdout.splitlines()
+                if "=" in line
+                for name, value in (line.split("=", 1),)
+                if name in expected_names
+            }
             _assert_canonical_license_environment(self, values)
 
     def test_runtime_env_fails_closed_when_system_account_home_is_unavailable(self):
@@ -223,13 +241,13 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/bin/bash
-                    printf '{"TAIJI_ACCOUNT_HOME":"%s","TAIJI_LICENSE_FILE":"%s","TAIJI_LICENSE_STATE_FILE":"%s"}\\n' \
+                    /usr/bin/printf '{"TAIJI_ACCOUNT_HOME":"%s","TAIJI_LICENSE_FILE":"%s","TAIJI_LICENSE_STATE_FILE":"%s"}\\n' \
                       "$TAIJI_ACCOUNT_HOME" "$TAIJI_LICENSE_FILE" "$TAIJI_LICENSE_STATE_FILE" \
                       > "$TAIJI_TEST_CAPTURE_FILE"
                     if [ "${1:-}" = "-" ]; then
-                      printf 'missing|license_missing|-|-\\n'
+                      /usr/bin/printf 'missing|license_missing|-|-\\n'
                     elif [ "${*: -1}" = "--version" ]; then
-                      printf 'Taiji Agent test\\n'
+                      /usr/bin/printf 'Taiji Agent test\\n'
                     fi
                     exit 0
                     """
@@ -255,7 +273,17 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 }
             )
             subprocess.run(
-                ["/bin/bash", str(HEALTH_CHECK)],
+                [
+                    "/bin/bash",
+                    "-c",
+                    (
+                        "printf() { /bin/echo poisoned-parent-printf; }; "
+                        "export -f printf; "
+                        'exec /bin/bash "$1"'
+                    ),
+                    "bash",
+                    str(HEALTH_CHECK),
+                ],
                 cwd=ROOT,
                 env=env,
                 text=True,

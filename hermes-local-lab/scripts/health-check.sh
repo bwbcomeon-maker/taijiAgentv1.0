@@ -69,87 +69,89 @@ TAIJI_ENV_FILE="$_TAIJI_CANONICAL_ENV_FILE"
 unset TAIJI_AGENT_HOME TAIJI_AGENT_RUNTIME_HOME TAIJI_AGENT_ENV_FILE
 unset HER""MES_HOME HER""MES_CONFIG_PATH HER""MES_CONFIG HER""MES_ENV
 
-_taiji_valid_account_home() {
-  case "${1:-}" in
-    /*)
-      if [ -d "$1" ]; then
-        printf '%s\n' "$1"
-        return 0
-      fi
-      ;;
-  esac
-  return 1
-}
+if ! _TAIJI_CANONICAL_ACCOUNT_HOME="$(
+  /usr/bin/env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    /bin/bash --noprofile --norc -c '
+      set -u
 
-_taiji_resolve_system_account_home() (
-  local PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-  local _taiji_uid=""
-  local _taiji_username=""
-  local _taiji_candidate=""
-  local _taiji_entry=""
-  local _taiji_line=""
-  local _taiji_command=""
-  export PATH
-
-  _taiji_command="$(type -P id 2>/dev/null || true)"
-  if [ -n "$_taiji_command" ]; then
-    _taiji_uid="$("$_taiji_command" -u 2>/dev/null || true)"
-  fi
-
-  _taiji_command="$(type -P getent 2>/dev/null || true)"
-  if [ -n "$_taiji_uid" ] && [ -n "$_taiji_command" ]; then
-    _taiji_entry="$("$_taiji_command" passwd "$_taiji_uid" 2>/dev/null || true)"
-    IFS=: read -r _ _ _ _ _ _taiji_candidate _ <<< "$_taiji_entry"
-    if _taiji_valid_account_home "$_taiji_candidate"; then
-      return 0
-    fi
-  fi
-
-  _taiji_command="$(type -P uname 2>/dev/null || true)"
-  if [ -n "$_taiji_command" ] && [ "$("$_taiji_command" -s 2>/dev/null || true)" = "Darwin" ]; then
-    _taiji_command="$(type -P id 2>/dev/null || true)"
-    if [ -n "$_taiji_command" ]; then
-      _taiji_username="$("$_taiji_command" -un 2>/dev/null || true)"
-    fi
-    _taiji_command="$(type -P dscl 2>/dev/null || true)"
-    if [ -n "$_taiji_username" ] && [ -n "$_taiji_command" ]; then
-      while IFS= read -r _taiji_line; do
-        case "$_taiji_line" in
-          NFSHomeDirectory:*)
-            _taiji_candidate="${_taiji_line#NFSHomeDirectory:}"
-            _taiji_candidate="${_taiji_candidate#"${_taiji_candidate%%[![:space:]]*}"}"
-            break
+      emit_account_home() {
+        case "${1:-}" in
+          /*)
+            if [ -d "$1" ]; then
+              builtin printf "%s\n" "$1"
+              return 0
+            fi
             ;;
         esac
-      done <<< "$("$_taiji_command" . -read "/Users/$_taiji_username" NFSHomeDirectory 2>/dev/null || true)"
-      if _taiji_valid_account_home "$_taiji_candidate"; then
-        return 0
+        return 1
+      }
+
+      uid=""
+      username=""
+      candidate=""
+      entry=""
+      line=""
+      executable=""
+
+      executable="$(command -v id 2>/dev/null || true)"
+      if [ -n "$executable" ]; then
+        uid="$("$executable" -u 2>/dev/null || true)"
       fi
-    fi
-  fi
 
-  for _taiji_command_name in python3 python; do
-    _taiji_command="$(type -P "$_taiji_command_name" 2>/dev/null || true)"
-    if [ -z "$_taiji_command" ]; then
-      continue
-    fi
-    _taiji_candidate="$(
-      "$_taiji_command" -c \
-        'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)' \
-        2>/dev/null || true
-    )"
-    if _taiji_valid_account_home "$_taiji_candidate"; then
-      return 0
-    fi
-  done
-  return 1
-)
+      executable="$(command -v getent 2>/dev/null || true)"
+      if [ -n "$uid" ] && [ -n "$executable" ]; then
+        entry="$("$executable" passwd "$uid" 2>/dev/null || true)"
+        IFS=: read -r _ _ _ _ _ candidate _ <<< "$entry"
+        if emit_account_home "$candidate"; then
+          exit 0
+        fi
+      fi
 
-if ! _TAIJI_CANONICAL_ACCOUNT_HOME="$(_taiji_resolve_system_account_home)"; then
-  printf '%s\n' \
+      executable="$(command -v uname 2>/dev/null || true)"
+      if [ -n "$executable" ] &&
+        [ "$("$executable" -s 2>/dev/null || true)" = "Darwin" ]; then
+        executable="$(command -v id 2>/dev/null || true)"
+        if [ -n "$executable" ]; then
+          username="$("$executable" -un 2>/dev/null || true)"
+        fi
+        executable="$(command -v dscl 2>/dev/null || true)"
+        if [ -n "$username" ] && [ -n "$executable" ]; then
+          while IFS= read -r line; do
+            case "$line" in
+              NFSHomeDirectory:*)
+                candidate="${line#NFSHomeDirectory:}"
+                candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+                break
+                ;;
+            esac
+          done <<< "$("$executable" . -read "/Users/$username" NFSHomeDirectory 2>/dev/null || true)"
+          if emit_account_home "$candidate"; then
+            exit 0
+          fi
+        fi
+      fi
+
+      for command_name in python3 python; do
+        executable="$(command -v "$command_name" 2>/dev/null || true)"
+        if [ -z "$executable" ]; then
+          continue
+        fi
+        candidate="$(
+          "$executable" -c \
+            "import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)" \
+            2>/dev/null || true
+        )"
+        if emit_account_home "$candidate"; then
+          exit 0
+        fi
+      done
+      exit 1
+    '
+)"; then
+  /usr/bin/printf '%s\n' \
     "Taiji Agent could not resolve the current account home from the system account database." \
     >&2
-  unset -f _taiji_valid_account_home _taiji_resolve_system_account_home
   return 1 2>/dev/null || exit 1
 fi
 TAIJI_ACCOUNT_HOME="$_TAIJI_CANONICAL_ACCOUNT_HOME"
@@ -159,7 +161,6 @@ export TAIJI_ACCOUNT_HOME
 export TAIJI_LICENSE_FILE
 export TAIJI_LICENSE_STATE_FILE
 unset _TAIJI_CANONICAL_ACCOUNT_HOME
-unset -f _taiji_valid_account_home _taiji_resolve_system_account_home
 
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
