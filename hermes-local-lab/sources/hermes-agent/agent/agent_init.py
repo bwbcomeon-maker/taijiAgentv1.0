@@ -62,6 +62,36 @@ from utils import base_url_host_matches
 logger = logging.getLogger("run_agent")
 
 
+def resolved_runtime_is_constructible(
+    *,
+    provider: Any,
+    api_mode: Any,
+    base_url: Any,
+    api_key: Any,
+) -> bool:
+    """Return whether ``init_agent`` can construct the resolved transport.
+
+    Managed-run admission uses this after the centralized runtime resolver.
+    It intentionally mirrors the constructor branches below: Bedrock uses
+    the AWS SDK credential chain, and the opt-in Codex app-server runtime
+    launches a local subprocess.  All OpenAI/Anthropic wire transports need
+    both a concrete endpoint and a non-empty credential (which may be a
+    callable token provider).
+    """
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_mode = str(api_mode or "chat_completions").strip().lower()
+    has_base_url = bool(str(base_url or "").strip())
+
+    if normalized_mode == "codex_app_server":
+        return normalized_provider in {"openai", "openai-codex"}
+    if normalized_provider == "bedrock" and normalized_mode in {
+        "anthropic_messages",
+        "bedrock_converse",
+    }:
+        return has_base_url
+    return has_base_url and bool(api_key)
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
     ``run_agent.OpenAI`` / ``run_agent.cleanup_vm`` / ... and have those

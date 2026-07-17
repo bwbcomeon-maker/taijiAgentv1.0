@@ -41,6 +41,17 @@ def _make_adapter(api_key: str = "") -> APIServerAdapter:
         extra["key"] = api_key
     config = PlatformConfig(enabled=True, extra=extra)
     adapter = APIServerAdapter(config)
+    production_resolver = adapter._resolve_agent_route
+
+    def resolve_route(*, requested_model=None, requested_provider=None):
+        if requested_model is None and requested_provider is None:
+            return _test_default_route()
+        return production_resolver(
+            requested_model=requested_model,
+            requested_provider=requested_provider,
+        )
+
+    adapter._resolve_agent_route = resolve_route
     return adapter
 
 
@@ -88,14 +99,37 @@ def _make_slow_agent(**kwargs):
     return mock_agent, ready, interrupted
 
 
+def _test_default_route():
+    return {
+        "model": "configured/model",
+        "provider": "configured-provider",
+        "runtime_kwargs": {
+            "provider": "configured-provider",
+            "api_mode": "chat_completions",
+            "base_url": "https://configured.example/v1",
+            "api_key": "configured-key",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        },
+        "fallback_model": None,
+    }
+
+
 @pytest.fixture
 def adapter():
     return _make_adapter()
 
 
 @pytest.fixture
-def auth_adapter():
-    return _make_adapter(api_key="sk-secret")
+def auth_adapter(monkeypatch):
+    adapter = _make_adapter(api_key="sk-secret")
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_agent_route",
+        lambda **_kwargs: _test_default_route(),
+    )
+    return adapter
 
 
 @pytest.fixture(autouse=True)
@@ -538,6 +572,365 @@ class TestStartRun:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        "route_fields",
+        [
+            {"model": "requested/model"},
+            {"provider": "openrouter"},
+            {"model": "default", "provider": "openrouter"},
+        ],
+    )
+    async def test_start_requires_a_complete_explicit_route_before_resolution(
+        self, adapter, route_fields
+    ):
+        with patch.object(adapter, "_resolve_agent_route") as resolve_route:
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "hello", **route_fields},
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"]["code"] == "incomplete_model_route"
+        resolve_route.assert_not_called()
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
+    async def test_start_normalizes_qualified_selector_before_runtime_resolution(
+        self, adapter, monkeypatch
+    ):
+        resolver_calls = []
+        finished = threading.Event()
+
+        def fake_runtime_resolver(
+            *,
+            requested=None,
+            explicit_api_key=None,
+            explicit_base_url=None,
+            target_model=None,
+        ):
+            resolver_calls.append((requested, target_model))
+            return {
+                "provider": "anthropic",
+                "api_mode": "anthropic_messages",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "anthropic-key",
+            }
+
+        class RecordingAgent:
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+            def __init__(self, **kwargs):
+                assert kwargs["model"] == "claude-sonnet-4-6"
+
+            def run_conversation(self, **kwargs):
+                finished.set()
+                return {"final_response": "done"}
+
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_runtime_resolver,
+        )
+        monkeypatch.setattr("run_agent.AIAgent", RecordingAgent)
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: {}),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools",
+            lambda *_: set(),
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(
+            adapter,
+            "_resolve_agent_route",
+            APIServerAdapter._resolve_agent_route.__get__(adapter),
+        )
+        app = _create_runs_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/runs",
+                json={
+                    "input": "hello",
+                    "model": "@AnThRoPiC:anthropic/claude-sonnet-4.6",
+                    "provider": "ANTHROPIC",
+                },
+            )
+            payload = await resp.json()
+            assert await asyncio.to_thread(finished.wait, 3.0)
+
+        assert resp.status == 202, payload
+        assert resolver_calls == [("anthropic", "claude-sonnet-4-6")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model", "provider"),
+        [
+            ("@openrouter:anthropic/claude-sonnet-4.6", "anthropic"),
+            ("@anthropic:", "anthropic"),
+        ],
+    )
+    async def test_start_rejects_mismatched_or_empty_qualified_selector(
+        self, adapter, model, provider
+    ):
+        with patch.object(adapter, "_resolve_agent_route") as resolve_route:
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": "hello",
+                        "model": model,
+                        "provider": provider,
+                    },
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"]["code"] == "invalid_model_selector"
+        resolve_route.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_start_preserves_custom_selector_remainder_including_suffix(
+        self, adapter
+    ):
+        route = _test_default_route()
+        route["model"] = "org/model:free"
+        route["provider"] = "custom:my-relay"
+        route["runtime_kwargs"] = {
+            **route["runtime_kwargs"],
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "api_key": "no-key-required",
+        }
+        finished = threading.Event()
+
+        def resolve_route(*, requested_model=None, requested_provider=None):
+            assert requested_model == "org/model:free"
+            assert requested_provider == "custom:my-relay"
+            return route
+
+        agent = MagicMock()
+        agent.run_conversation.side_effect = lambda **_kwargs: (
+            finished.set() or {"final_response": "done"}
+        )
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+
+        with (
+            patch.object(adapter, "_resolve_agent_route", side_effect=resolve_route),
+            patch.object(adapter, "_create_agent", return_value=agent),
+        ):
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": "hello",
+                        "model": "@custom:my-relay:org/model:free",
+                        "provider": "custom:my-relay",
+                    },
+                )
+                payload = await resp.json()
+                assert await asyncio.to_thread(finished.wait, 3.0)
+
+        assert resp.status == 202, payload
+
+    @pytest.mark.asyncio
+    async def test_default_route_is_resolved_once_and_status_uses_actual_route(
+        self, adapter
+    ):
+        route = _test_default_route()
+        finished = threading.Event()
+        agent = MagicMock()
+        agent.run_conversation.side_effect = lambda **_kwargs: (
+            finished.set() or {"final_response": "done"}
+        )
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+
+        with (
+            patch.object(
+                adapter,
+                "_resolve_agent_route",
+                return_value=route,
+            ) as resolve_route,
+            patch.object(
+                adapter,
+                "_create_agent",
+                return_value=agent,
+            ) as create_agent,
+        ):
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                payload = await resp.json()
+                assert await asyncio.to_thread(finished.wait, 3.0)
+                status_resp = await cli.get(f"/v1/runs/{payload['run_id']}")
+                status_payload = await status_resp.json()
+
+        assert resp.status == 202, payload
+        resolve_route.assert_called_once_with(
+            requested_model=None,
+            requested_provider=None,
+        )
+        assert create_agent.call_args.kwargs["resolved_route"] is route
+        assert status_payload["model"] == "configured/model"
+        assert status_payload["provider"] == "configured-provider"
+
+    @pytest.mark.asyncio
+    async def test_invalid_platform_message_id_never_calls_route_resolver(
+        self, adapter
+    ):
+        with patch.object(adapter, "_resolve_agent_route") as resolve_route:
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": "hello",
+                        "platform_message_id": "bad\nid",
+                    },
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"]["code"] == "invalid_platform_message_id"
+        resolve_route.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_resolved_credentials_fail_before_run_allocation(
+        self, adapter
+    ):
+        invalid_route = {
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
+            "runtime_kwargs": {
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "",
+                "command": None,
+                "args": [],
+                "credential_pool": None,
+            },
+            "fallback_model": None,
+        }
+        with (
+            patch.object(
+                adapter,
+                "_resolve_agent_route",
+                return_value=invalid_route,
+            ),
+            patch.object(adapter, "_create_agent") as create_agent,
+        ):
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": "hello",
+                        "model": "anthropic/claude-sonnet-4.6",
+                        "provider": "openrouter",
+                    },
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"]["code"] == "model_configuration_error"
+        create_agent.assert_not_called()
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+        assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_admission_reserves_at_most_ten_before_resolution(
+        self, adapter
+    ):
+        entered = 0
+        entered_lock = threading.Lock()
+        release_resolvers = threading.Event()
+
+        def delayed_resolver(**_kwargs):
+            nonlocal entered
+            with entered_lock:
+                entered += 1
+            release_resolvers.wait(timeout=5)
+            return _test_default_route()
+
+        agent = MagicMock()
+        agent.run_conversation.return_value = {"final_response": "done"}
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+
+        with (
+            patch.object(
+                adapter,
+                "_resolve_agent_route",
+                side_effect=delayed_resolver,
+            ),
+            patch.object(adapter, "_create_agent", return_value=agent),
+        ):
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                requests = [
+                    asyncio.create_task(
+                        cli.post(
+                            "/v1/runs",
+                            json={
+                                "input": f"run {i}",
+                                "model": "requested/model",
+                                "provider": "requested-provider",
+                            },
+                        )
+                    )
+                    for i in range(15)
+                ]
+                deadline = asyncio.get_running_loop().time() + 3
+                while entered < 10 and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                observed_during_resolution = entered
+                release_resolvers.set()
+                responses = await asyncio.gather(*requests)
+
+        statuses = [response.status for response in responses]
+        assert observed_during_resolution == 10
+        assert statuses.count(202) == 10
+        assert statuses.count(429) == 5
+        assert entered == 10
+        await asyncio.sleep(0)
+        assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_unconsumed_stream_capacity_is_bounded_independently(
+        self, adapter
+    ):
+        adapter._MAX_RETAINED_RUN_STREAMS = 1
+        adapter._run_streams["unconsumed-run"] = asyncio.Queue()
+
+        with patch.object(adapter, "_create_agent") as create_agent:
+            app = _create_runs_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                payload = await resp.json()
+
+        assert resp.status == 429
+        assert payload["error"]["code"] == "run_stream_capacity_exceeded"
+        create_agent.assert_not_called()
+        await asyncio.sleep(0)
+        assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("field", "value", "expected_code"),
         [
             ("model", 7, "invalid_model"),
@@ -566,6 +959,7 @@ class TestStartRun:
         create_agent.assert_not_called()
         assert adapter._run_streams == {}
         assert adapter._run_statuses == {}
+        assert adapter._run_admission_reservations == set()
 
     @pytest.mark.asyncio
     async def test_start_rejects_unresolvable_explicit_route_before_run_allocation(
@@ -601,6 +995,7 @@ class TestStartRun:
         create_agent.assert_not_called()
         assert adapter._run_streams == {}
         assert adapter._run_statuses == {}
+        assert adapter._run_admission_reservations == set()
 
     @pytest.mark.asyncio
     async def test_start_invalid_json_returns_400(self, adapter):
@@ -2404,6 +2799,7 @@ class TestStartRun:
         assert adapter._managed_session_runs == {}
         assert adapter._run_streams == {}
         assert adapter._run_statuses == {}
+        assert adapter._run_admission_reservations == set()
 
     @pytest.mark.asyncio
     async def test_managed_lease_heartbeat_failure_interrupts_and_fails_run(

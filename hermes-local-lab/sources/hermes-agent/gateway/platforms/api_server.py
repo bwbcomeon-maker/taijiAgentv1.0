@@ -399,6 +399,60 @@ def _validated_run_route_value(body: Dict[str, Any], field: str) -> Optional[str
     return value.lower() if field == "provider" else value
 
 
+def _normalized_explicit_run_route(
+    body: Dict[str, Any],
+    requested_model: Optional[str],
+    requested_provider: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Validate and normalize an optional explicit managed-run route.
+
+    A route is explicit as soon as either selector field is present.  Such a
+    route must name both a real model and provider; the ``default`` sentinel
+    is only meaningful when both fields are omitted.  Provider-qualified
+    model selectors are unwrapped only when their qualifier matches the
+    selected provider, including named custom providers whose ids contain
+    colons.
+    """
+    has_model = "model" in body
+    has_provider = "provider" in body
+    if not has_model and not has_provider:
+        return None, None
+    if (
+        not has_model
+        or not has_provider
+        or requested_model is None
+        or requested_provider is None
+    ):
+        raise ValueError("incomplete_model_route")
+
+    from hermes_cli.model_normalize import normalize_model_for_provider
+    from hermes_cli.models import normalize_provider
+
+    raw_provider = requested_provider
+    normalized_provider = normalize_provider(raw_provider)
+    model = requested_model
+    if model.startswith("@"):
+        matching_prefix = None
+        prefixes = {
+            f"@{raw_provider}:",
+            f"@{normalized_provider}:",
+        }
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            if model.lower().startswith(prefix.lower()):
+                matching_prefix = prefix
+                break
+        if matching_prefix is None:
+            raise ValueError("invalid_model_selector")
+        model = model[len(matching_prefix) :].strip()
+        if not model:
+            raise ValueError("invalid_model_selector")
+
+    normalized_model = normalize_model_for_provider(model, normalized_provider)
+    if not normalized_model:
+        raise ValueError("invalid_model_selector")
+    return normalized_model, normalized_provider
+
+
 def _content_has_visible_payload(content: Any) -> bool:
     """True when content has any text or image attachment.  Used to reject empty turns."""
     if isinstance(content, str):
@@ -839,6 +893,10 @@ class APIServerAdapter(BasePlatformAdapter):
         self._response_store = ResponseStore()
         # Active run streams: run_id -> asyncio.Queue of SSE event dicts
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
+        # Admission reservations cover route resolution through worker
+        # completion.  They are separate from SSE stream retention so a
+        # completed-but-unconsumed event stream does not consume capacity.
+        self._run_admission_reservations: set[str] = set()
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         # Active run agent/task references for stop support
@@ -1119,6 +1177,17 @@ class APIServerAdapter(BasePlatformAdapter):
         else:
             runtime_kwargs = _resolve_runtime_agent_kwargs()
             fallback_model = GatewayRunner._load_fallback_model()
+
+        runtime_kwargs = dict(runtime_kwargs)
+        runtime_model = runtime_kwargs.pop("model", None)
+        if not explicit_route and runtime_model:
+            model = runtime_model
+        if not model and runtime_kwargs.get("provider"):
+            from hermes_cli.models import get_default_model_for_provider
+
+            model = get_default_model_for_provider(runtime_kwargs["provider"])
+        if not model:
+            raise RuntimeError("No model configured for the resolved provider")
 
         return {
             "model": model,
@@ -3760,10 +3829,23 @@ class APIServerAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
+    _MAX_RETAINED_RUN_STREAMS = 100  # Bound unconsumed SSE result memory
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
     _MANAGED_RUN_LEASE_SECONDS = 30.0
     _MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 5.0
+
+    def _try_reserve_run_admission(self) -> Optional[str]:
+        """Atomically reserve one run slot on the adapter event loop."""
+        if len(self._run_admission_reservations) >= self._MAX_CONCURRENT_RUNS:
+            return None
+        token = uuid.uuid4().hex
+        # There is deliberately no await between the capacity check and add.
+        self._run_admission_reservations.add(token)
+        return token
+
+    def _release_run_admission(self, token: str) -> None:
+        self._run_admission_reservations.discard(token)
 
     @staticmethod
     def _managed_history_projection(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4003,13 +4085,6 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
-        # Enforce concurrency limit
-        if len(self._run_streams) >= self._MAX_CONCURRENT_RUNS:
-            return web.json_response(
-                _openai_error(f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS})", code="rate_limit_exceeded"),
-                status=429,
-            )
-
         try:
             body = await request.json()
         except Exception:
@@ -4031,7 +4106,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=400,
             )
-
         header_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         raw_body_session_id = body.get("session_id")
         body_session_id = str(raw_body_session_id).strip() if raw_body_session_id else ""
@@ -4103,26 +4177,30 @@ class APIServerAdapter(BasePlatformAdapter):
         if not _content_has_visible_payload(user_message):
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
-        resolved_route = None
-        if requested_model or requested_provider:
-            try:
-                resolved_route = await asyncio.to_thread(
-                    self._resolve_agent_route,
-                    requested_model=requested_model,
-                    requested_provider=requested_provider,
+        try:
+            requested_model, requested_provider = _normalized_explicit_run_route(
+                body,
+                requested_model,
+                requested_provider,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code == "invalid_model_selector":
+                message = (
+                    "Qualified model selector must match the selected provider "
+                    "and include a model name"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[api_server] requested run route could not be resolved: %s",
-                    type(exc).__name__,
+                param = "model"
+            else:
+                code = "incomplete_model_route"
+                message = (
+                    "Explicit run routing requires both a concrete model and provider"
                 )
-                return web.json_response(
-                    _openai_error(
-                        "Requested model/provider could not be resolved from configured credentials.",
-                        code="model_configuration_error",
-                    ),
-                    status=400,
-                )
+                param = None
+            return web.json_response(
+                _openai_error(message, code=code, param=param),
+                status=400,
+            )
 
         instructions = body.get("instructions")
         platform_message_id, platform_message_id_err = (
@@ -4178,6 +4256,70 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history.extend(input_history)
             else:
                 conversation_history = input_history
+
+        admission_token = self._try_reserve_run_admission()
+        if admission_token is None:
+            return web.json_response(
+                _openai_error(
+                    f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS})",
+                    code="rate_limit_exceeded",
+                ),
+                status=429,
+            )
+
+        # If validation or state admission returns before a worker owns the
+        # slot, release it when the request task completes.  Once ownership is
+        # transferred, the worker task's done callback becomes authoritative.
+        admission_owner = {"worker": False}
+        request_task = asyncio.current_task()
+        if request_task is not None:
+
+            def _release_untransferred_admission(_task: "asyncio.Task") -> None:
+                if not admission_owner["worker"]:
+                    self._release_run_admission(admission_token)
+
+            request_task.add_done_callback(_release_untransferred_admission)
+
+        try:
+            resolved_route = await asyncio.to_thread(
+                self._resolve_agent_route,
+                requested_model=requested_model,
+                requested_provider=requested_provider,
+            )
+            if not isinstance(resolved_route, dict):
+                raise RuntimeError("resolved route is not a mapping")
+            runtime_kwargs = resolved_route.get("runtime_kwargs")
+            if not isinstance(runtime_kwargs, dict):
+                raise RuntimeError("resolved runtime is not a mapping")
+
+            from agent.agent_init import resolved_runtime_is_constructible
+
+            route_model = str(resolved_route.get("model") or "").strip()
+            route_provider = str(resolved_route.get("provider") or "").strip()
+            if (
+                not route_model
+                or not route_provider
+                or not resolved_runtime_is_constructible(
+                    provider=runtime_kwargs.get("provider"),
+                    api_mode=runtime_kwargs.get("api_mode"),
+                    base_url=runtime_kwargs.get("base_url"),
+                    api_key=runtime_kwargs.get("api_key"),
+                )
+            ):
+                raise RuntimeError("resolved route is not constructible")
+        except Exception as exc:
+            self._release_run_admission(admission_token)
+            logger.warning(
+                "[api_server] run route could not be resolved: %s",
+                type(exc).__name__,
+            )
+            return web.json_response(
+                _openai_error(
+                    "Requested model/provider could not be resolved from configured credentials.",
+                    code="model_configuration_error",
+                ),
+                status=400,
+            )
 
         requested_session_id = header_session_id or body_session_id or stored_session_id or ""
         managed_session = bool(requested_session_id)
@@ -4433,6 +4575,21 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=409,
                 )
             conversation_history = provider_history
+
+        # Keep event-stream retention bounded independently from active-run
+        # admission.  This synchronous check and allocation below have no
+        # intervening await, so concurrent requests cannot overshoot the cap.
+        if len(self._run_streams) >= self._MAX_RETAINED_RUN_STREAMS:
+            if managed_session:
+                worker_abandoned.set()
+                await asyncio.to_thread(_release_managed_lease)
+            return web.json_response(
+                _openai_error(
+                    "Too many unconsumed run event streams",
+                    code="run_stream_capacity_exceeded",
+                ),
+                status=429,
+            )
 
         if managed_session:
             with self._managed_session_runs_lock:
@@ -4859,6 +5016,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                self._release_run_admission(admission_token)
                 if managed_session:
                     # Publish/cleanup the wrapper boundary before releasing.
                     # If cancellation won before the executor claimed the
@@ -4875,6 +5033,7 @@ class APIServerAdapter(BasePlatformAdapter):
             task = asyncio.create_task(run_coroutine)
         except Exception as exc:
             run_coroutine.close()
+            self._release_run_admission(admission_token)
             logger.error(
                 "[api_server] failed to create run task %s: %s",
                 run_id,
@@ -4893,6 +5052,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=503,
             )
+        admission_owner["worker"] = True
         self._active_run_tasks[run_id] = task
         try:
             self._background_tasks.add(task)
@@ -4900,6 +5060,9 @@ class APIServerAdapter(BasePlatformAdapter):
             pass
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(
+                lambda _task: self._release_run_admission(admission_token)
+            )
             if managed_session:
                 def _release_cancelled_before_first_step(_task: "asyncio.Task") -> None:
                     with self._managed_session_runs_lock:
