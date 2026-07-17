@@ -9,7 +9,7 @@ history, and model configuration for CLI and gateway sessions.
 Key design decisions:
 - WAL mode for concurrent readers + one writer (gateway multi-platform)
 - Renewable managed-run leases use atomic SQLite writes for cross-process
-  per-session exclusion; bound message writes re-check the exact lease inside
+  per-session exclusion; bound session/message writes re-check the exact lease inside
   their transaction, so process-local locks are not an admission authority
 - FTS5 virtual table for fast text search across all session messages
 - Compression-triggered session splitting via parent_session_id chains
@@ -91,7 +91,7 @@ def bind_managed_run_write_lease(
     run_id: str,
     lost_event: Optional[threading.Event] = None,
 ):
-    """Fence message writes in the current execution context to one lease."""
+    """Fence session/message writes in the current execution context to one lease."""
     return _managed_run_write_lease.set(
         (session_id, owner_id, run_id, lost_event)
     )
@@ -919,6 +919,12 @@ class SessionDB:
                    JOIN sessions parent ON parent.id = lineage.parent_session_id
                    WHERE parent.end_reason = 'compression'
                      AND lineage.started_at >= parent.ended_at
+                     AND NOT EXISTS (
+                         SELECT 1 FROM sessions sibling
+                         WHERE sibling.parent_session_id = parent.id
+                           AND sibling.id != lineage.id
+                           AND sibling.started_at >= parent.ended_at
+                     )
                      AND lineage.depth < 1000
                )
                SELECT id FROM lineage ORDER BY depth DESC LIMIT 1""",
@@ -1001,6 +1007,117 @@ class SessionDB:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def _require_current_managed_run_write_lease(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        *,
+        parent_session_id: Optional[str] = None,
+        write_at: Optional[float] = None,
+    ) -> None:
+        """Fence one session/message mutation to the bound durable lease.
+
+        This must be called from inside the same ``BEGIN IMMEDIATE``
+        transaction as the protected write. Existing targets derive their
+        lease key only from persisted lineage. A missing target may join the
+        bound lineage only as the sole post-compression continuation child.
+        """
+        write_lease = _managed_run_write_lease.get()
+        if write_lease is None:
+            return
+
+        leased_session_id, owner_id, run_id, lost_event = write_lease
+        checked_at = time.time() if write_at is None else float(write_at)
+        lease_is_current = conn.execute(
+            """SELECT 1 FROM managed_run_leases
+               WHERE session_id = ? AND owner_id = ? AND run_id = ?
+                 AND expires_at > ?""",
+            (leased_session_id, owner_id, run_id, checked_at),
+        ).fetchone() is not None
+
+        target_row = conn.execute(
+            "SELECT id FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if target_row is not None:
+            target_lease_session_id = self._managed_run_lease_key(
+                conn,
+                session_id,
+            )
+            target_is_legal = target_lease_session_id == leased_session_id
+        elif session_id == leased_session_id and parent_session_id is None:
+            # Kept for compatibility with callers that establish a lease and
+            # its root row in one higher-level flow. The FK-backed production
+            # schema normally means the root already exists.
+            target_is_legal = True
+        else:
+            parent = (
+                conn.execute(
+                    """SELECT id, ended_at, end_reason
+                       FROM sessions WHERE id = ?""",
+                    (parent_session_id,),
+                ).fetchone()
+                if parent_session_id
+                else None
+            )
+            parent_is_compression_tip = (
+                parent is not None
+                and parent["end_reason"] == "compression"
+                and parent["ended_at"] is not None
+                and checked_at >= parent["ended_at"]
+                and self._managed_run_lease_key(conn, parent_session_id)
+                == leased_session_id
+            )
+            continuation_exists = False
+            if parent_is_compression_tip:
+                continuation_exists = conn.execute(
+                    """SELECT 1 FROM sessions
+                       WHERE parent_session_id = ?
+                         AND started_at >= ?
+                       LIMIT 1""",
+                    (parent_session_id, parent["ended_at"]),
+                ).fetchone() is not None
+            target_is_legal = (
+                parent_is_compression_tip and not continuation_exists
+            )
+
+        if lease_is_current and target_is_legal:
+            return
+        if lost_event is not None:
+            lost_event.set()
+        raise ManagedRunLeaseLostError(
+            "managed run no longer owns the session write lease"
+        )
+
+    @staticmethod
+    def _insert_session_row_in_transaction(
+        conn: sqlite3.Connection,
+        session_id: str,
+        source: str,
+        *,
+        model: str = None,
+        model_config: Dict[str, Any] = None,
+        system_prompt: str = None,
+        user_id: str = None,
+        parent_session_id: str = None,
+        started_at: Optional[float] = None,
+    ) -> None:
+        conn.execute(
+            """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
+               system_prompt, parent_session_id, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                source,
+                user_id,
+                model,
+                json.dumps(model_config) if model_config else None,
+                system_prompt,
+                parent_session_id,
+                time.time() if started_at is None else started_at,
+            ),
+        )
+
     def _insert_session_row(
         self,
         session_id: str,
@@ -1013,20 +1130,23 @@ class SessionDB:
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
-            conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    source,
-                    user_id,
-                    model,
-                    json.dumps(model_config) if model_config else None,
-                    system_prompt,
-                    parent_session_id,
-                    time.time(),
-                ),
+            write_at = time.time()
+            self._require_current_managed_run_write_lease(
+                conn,
+                session_id,
+                parent_session_id=parent_session_id,
+                write_at=write_at,
+            )
+            self._insert_session_row_in_transaction(
+                conn,
+                session_id,
+                source,
+                model=model,
+                model_config=model_config,
+                system_prompt=system_prompt,
+                user_id=user_id,
+                parent_session_id=parent_session_id,
+                started_at=write_at,
             )
         self._execute_write(_do)
 
@@ -1045,16 +1165,23 @@ class SessionDB:
         intentionally need to re-end a closed session with a new reason.
         """
         def _do(conn):
+            write_at = time.time()
+            self._require_current_managed_run_write_lease(
+                conn,
+                session_id,
+                write_at=write_at,
+            )
             conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = ? "
                 "WHERE id = ? AND ended_at IS NULL",
-                (time.time(), end_reason, session_id),
+                (write_at, end_reason, session_id),
             )
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
         def _do(conn):
+            self._require_current_managed_run_write_lease(conn, session_id)
             conn.execute(
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
                 (session_id,),
@@ -1064,6 +1191,7 @@ class SessionDB:
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
         def _do(conn):
+            self._require_current_managed_run_write_lease(conn, session_id)
             conn.execute(
                 "UPDATE sessions SET system_prompt = ? WHERE id = ?",
                 (system_prompt, session_id),
@@ -1099,11 +1227,6 @@ class SessionDB:
         the caller already holds cumulative totals (gateway path, where the
         cached agent accumulates across messages).
         """
-        # Ensure the session row exists so the UPDATE doesn't silently affect
-        # 0 rows.  Under concurrent load (cron + kanban + delegate_task) the
-        # initial create_session() may have failed due to SQLite locking.
-        # INSERT OR IGNORE is cheap and idempotent.
-        self._insert_session_row(session_id, "unknown", model=model)
         if absolute:
             sql = """UPDATE sessions SET
                    input_tokens = ?,
@@ -1166,6 +1289,21 @@ class SessionDB:
             session_id,
         )
         def _do(conn):
+            write_at = time.time()
+            self._require_current_managed_run_write_lease(
+                conn,
+                session_id,
+                write_at=write_at,
+            )
+            # Keep row creation and counter mutation atomic. A takeover cannot
+            # land between a separate INSERT and UPDATE transaction.
+            self._insert_session_row_in_transaction(
+                conn,
+                session_id,
+                "unknown",
+                model=model,
+                started_at=write_at,
+            )
             conn.execute(sql, params)
         self._execute_write(_do)
 
@@ -1342,6 +1480,7 @@ class SessionDB:
         """
         title = self.sanitize_title(title)
         def _do(conn):
+            self._require_current_managed_run_write_lease(conn, session_id)
             if title:
                 # Check uniqueness (allow the same session to keep its own title)
                 cursor = conn.execute(
@@ -1803,27 +1942,13 @@ class SessionDB:
         if tool_calls is not None:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
-        write_lease = _managed_run_write_lease.get()
-
         def _do(conn):
             write_at = time.time()
-            if write_lease is not None:
-                leased_session_id, owner_id, run_id, lost_event = write_lease
-                lease_is_current = False
-                write_lease_session_id = self._managed_run_lease_key(conn, session_id)
-                if write_lease_session_id == leased_session_id:
-                    lease_is_current = conn.execute(
-                        """SELECT 1 FROM managed_run_leases
-                           WHERE session_id = ? AND owner_id = ? AND run_id = ?
-                             AND expires_at > ?""",
-                        (leased_session_id, owner_id, run_id, write_at),
-                    ).fetchone() is not None
-                if not lease_is_current:
-                    if lost_event is not None:
-                        lost_event.set()
-                    raise ManagedRunLeaseLostError(
-                        "managed run no longer owns the session write lease"
-                    )
+            self._require_current_managed_run_write_lease(
+                conn,
+                session_id,
+                write_at=write_at,
+            )
 
             if platform_message_id:
                 existing = conn.execute(
@@ -1898,12 +2023,19 @@ class SessionDB:
         """
 
         def _do(conn):
+            write_at = time.time()
+            self._require_current_managed_run_write_lease(
+                conn,
+                session_id,
+                write_at=write_at,
+            )
             if ensure_source:
-                conn.execute(
-                    """INSERT OR IGNORE INTO sessions
-                       (id, source, model, started_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (session_id, ensure_source, ensure_model, time.time()),
+                self._insert_session_row_in_transaction(
+                    conn,
+                    session_id,
+                    ensure_source,
+                    model=ensure_model,
+                    started_at=write_at,
                 )
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
@@ -1913,7 +2045,7 @@ class SessionDB:
                 (session_id,),
             )
 
-            now_ts = time.time()
+            now_ts = write_at
             total_messages = 0
             total_tool_calls = 0
             seen_platform_message_keys = set()
@@ -2865,6 +2997,7 @@ class SessionDB:
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
+            self._require_current_managed_run_write_lease(conn, session_id)
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
@@ -2915,6 +3048,7 @@ class SessionDB:
         session. Returns True if the session was found and deleted.
         """
         def _do(conn):
+            self._require_current_managed_run_write_lease(conn, session_id)
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM sessions WHERE id = ?", (session_id,)
             )

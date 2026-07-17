@@ -529,3 +529,525 @@ def test_preexisting_branch_child_does_not_inherit_compression_lease(tmp_path):
     finally:
         reset_managed_run_write_lease(token)
         db.close()
+
+
+def _durable_session_snapshot(db):
+    """Capture the state rows a managed turn is allowed to mutate."""
+    with db._lock:
+        return {
+            "sessions": [
+                tuple(row)
+                for row in db._conn.execute(
+                    "SELECT * FROM sessions ORDER BY id"
+                ).fetchall()
+            ],
+            "messages": [
+                tuple(row)
+                for row in db._conn.execute(
+                    "SELECT * FROM messages ORDER BY id"
+                ).fetchall()
+            ],
+            "leases": [
+                tuple(row)
+                for row in db._conn.execute(
+                    "SELECT * FROM managed_run_leases ORDER BY session_id"
+                ).fetchall()
+            ],
+        }
+
+
+def _invoke_session_write(db, operation, *, root_id, child_id):
+    if operation == "_insert_session_row":
+        return db._insert_session_row(
+            child_id,
+            "api_server",
+            parent_session_id=root_id,
+        )
+    if operation == "create_session":
+        return db.create_session(
+            child_id,
+            "api_server",
+            parent_session_id=root_id,
+        )
+    if operation == "ensure_session":
+        return db.ensure_session(
+            child_id,
+            "api_server",
+            parent_session_id=root_id,
+        )
+    if operation == "end_session":
+        return db.end_session(root_id, "manual")
+    if operation == "reopen_session":
+        return db.reopen_session(root_id)
+    if operation == "update_system_prompt":
+        return db.update_system_prompt(root_id, "stale prompt")
+    if operation == "update_token_counts":
+        return db.update_token_counts(
+            root_id,
+            input_tokens=7,
+            output_tokens=3,
+            api_call_count=1,
+        )
+    if operation == "set_session_title":
+        return db.set_session_title(root_id, "stale title")
+    if operation == "replace_messages":
+        return db.replace_messages(
+            root_id,
+            [{"role": "assistant", "content": "stale replacement"}],
+        )
+    if operation == "clear_messages":
+        return db.clear_messages(root_id)
+    if operation == "delete_session":
+        return db.delete_session(root_id)
+    if operation == "append_message":
+        return db.append_message(root_id, "assistant", "stale append")
+    raise AssertionError(f"unknown operation: {operation}")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "_insert_session_row",
+        "create_session",
+        "ensure_session",
+        "end_session",
+        "reopen_session",
+        "update_system_prompt",
+        "update_token_counts",
+        "set_session_title",
+        "replace_messages",
+        "clear_messages",
+        "delete_session",
+        "append_message",
+    ],
+)
+def test_stale_bound_owner_cannot_mutate_any_session_state_after_takeover(
+    tmp_path,
+    operation,
+):
+    db_a, db_b = _shared_dbs(tmp_path)
+    root_id = f"stale-root-{operation}"
+    child_id = f"stale-child-{operation}"
+    db_a.create_session(
+        root_id,
+        "api_server",
+        system_prompt="original prompt",
+    )
+    db_a.append_message(root_id, "user", "original message")
+    db_a.set_session_title(root_id, f"original title {operation}")
+    db_a.end_session(root_id, "compression")
+    stale_at = time.time() - 10.0
+    lost_event = threading.Event()
+
+    try:
+        assert db_a.acquire_managed_run_lease(
+            root_id,
+            owner_id="owner-a",
+            run_id="run-a",
+            lease_seconds=1.0,
+            now=stale_at,
+        )
+        assert db_b.acquire_managed_run_lease(
+            root_id,
+            owner_id="owner-b",
+            run_id="run-b",
+            lease_seconds=30.0,
+        )
+        before = _durable_session_snapshot(db_a)
+
+        token = bind_managed_run_write_lease(
+            root_id,
+            owner_id="owner-a",
+            run_id="run-a",
+            lost_event=lost_event,
+        )
+        try:
+            with pytest.raises(ManagedRunLeaseLostError):
+                _invoke_session_write(
+                    db_a,
+                    operation,
+                    root_id=root_id,
+                    child_id=child_id,
+                )
+        finally:
+            reset_managed_run_write_lease(token)
+
+        assert lost_event.is_set()
+        assert _durable_session_snapshot(db_a) == before
+    finally:
+        db_a.close()
+        db_b.close()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "_insert_session_row",
+        "create_session",
+        "ensure_session",
+        "end_session",
+        "reopen_session",
+        "update_system_prompt",
+        "update_token_counts",
+        "set_session_title",
+        "replace_messages",
+        "clear_messages",
+        "delete_session",
+        "append_message",
+    ],
+)
+def test_live_bound_owner_can_mutate_session_state(
+    tmp_path,
+    operation,
+):
+    db = SessionDB(db_path=tmp_path / f"live-{operation}.db")
+    root_id = f"live-root-{operation}"
+    child_id = f"live-child-{operation}"
+    db.create_session(root_id, "api_server", system_prompt="original prompt")
+    db.append_message(root_id, "user", "original message")
+    if operation in {"_insert_session_row", "create_session", "ensure_session"}:
+        db.end_session(root_id, "compression")
+    elif operation == "reopen_session":
+        db.end_session(root_id, "manual")
+    lost_event = threading.Event()
+
+    try:
+        assert db.acquire_managed_run_lease(
+            root_id,
+            owner_id="owner-live",
+            run_id="run-live",
+            lease_seconds=30.0,
+        )
+        before = _durable_session_snapshot(db)
+        token = bind_managed_run_write_lease(
+            root_id,
+            owner_id="owner-live",
+            run_id="run-live",
+            lost_event=lost_event,
+        )
+        try:
+            _invoke_session_write(
+                db,
+                operation,
+                root_id=root_id,
+                child_id=child_id,
+            )
+        finally:
+            reset_managed_run_write_lease(token)
+
+        assert not lost_event.is_set()
+        after = _durable_session_snapshot(db)
+        assert after != before
+        if operation in {"_insert_session_row", "create_session", "ensure_session"}:
+            child = db.get_session(child_id)
+            assert child is not None
+            assert child["parent_session_id"] == root_id
+            assert db.get_managed_run_lease_key(child_id) == root_id
+    finally:
+        db.close()
+
+
+def test_live_compression_continuation_keeps_root_lease_for_all_writes(tmp_path):
+    db = SessionDB(db_path=tmp_path / "live-compression.db")
+    root_id = "live-compression-root"
+    child_id = "live-compression-child"
+    db.create_session(root_id, "api_server")
+    db.set_session_title(root_id, "compression title")
+    assert db.acquire_managed_run_lease(
+        root_id,
+        owner_id="owner-live",
+        run_id="run-live",
+        lease_seconds=30.0,
+    )
+
+    token = bind_managed_run_write_lease(
+        root_id,
+        owner_id="owner-live",
+        run_id="run-live",
+    )
+    try:
+        db.end_session(root_id, "compression")
+        db.create_session(
+            child_id,
+            "api_server",
+            parent_session_id=root_id,
+        )
+        db.set_session_title(child_id, "compression title #2")
+        db.update_system_prompt(child_id, "continued prompt")
+        db.update_token_counts(
+            child_id,
+            input_tokens=11,
+            output_tokens=5,
+            api_call_count=1,
+        )
+        db.append_message(child_id, "assistant", "first continuation")
+        db.replace_messages(
+            child_id,
+            [{"role": "assistant", "content": "final continuation"}],
+        )
+    finally:
+        reset_managed_run_write_lease(token)
+
+    try:
+        child = db.get_session(child_id)
+        assert child is not None
+        assert child["parent_session_id"] == root_id
+        assert child["title"] == "compression title #2"
+        assert child["system_prompt"] == "continued prompt"
+        assert child["input_tokens"] == 11
+        assert child["output_tokens"] == 5
+        assert child["api_call_count"] == 1
+        assert child["message_count"] == 1
+        assert db.get_messages_as_conversation(child_id) == [
+            {"role": "assistant", "content": "final continuation"}
+        ]
+        assert db.get_managed_run_lease_key(child_id) == root_id
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    "target_kind",
+    [
+        "missing-parent",
+        "unrelated-parent",
+        "existing-branch-with-forged-parent",
+        "existing-ambiguous-compression-branch",
+        "future-ended-compression-parent",
+        "second-compression-child",
+    ],
+)
+def test_bound_lease_rejects_forged_or_ambiguous_compression_children(
+    tmp_path,
+    target_kind,
+):
+    db = SessionDB(db_path=tmp_path / f"forged-{target_kind}.db")
+    root_id = "leased-root"
+    db.create_session(root_id, "api_server")
+    if target_kind == "existing-branch-with-forged-parent":
+        db.create_session(
+            "existing-branch",
+            "api_server",
+            parent_session_id=root_id,
+        )
+    db.end_session(root_id, "compression")
+    if target_kind == "unrelated-parent":
+        db.create_session("unrelated-parent", "api_server")
+        db.end_session("unrelated-parent", "compression")
+    if target_kind == "existing-ambiguous-compression-branch":
+        db.create_session(
+            "ambiguous-child-a",
+            "api_server",
+            parent_session_id=root_id,
+        )
+        db.create_session(
+            "ambiguous-child-b",
+            "api_server",
+            parent_session_id=root_id,
+        )
+    if target_kind == "future-ended-compression-parent":
+        db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE sessions SET ended_at = ? WHERE id = ?",
+                (time.time() + 60.0, root_id),
+            )
+        )
+    if target_kind == "second-compression-child":
+        db.create_session(
+            "first-compression-child",
+            "api_server",
+            parent_session_id=root_id,
+        )
+
+    assert db.acquire_managed_run_lease(
+        root_id,
+        owner_id="owner-live",
+        run_id="run-live",
+        lease_seconds=30.0,
+    )
+    lost_event = threading.Event()
+    before = _durable_session_snapshot(db)
+    token = bind_managed_run_write_lease(
+        root_id,
+        owner_id="owner-live",
+        run_id="run-live",
+        lost_event=lost_event,
+    )
+    try:
+        with pytest.raises(ManagedRunLeaseLostError):
+            if target_kind == "missing-parent":
+                db.create_session(
+                    "forged-child",
+                    "api_server",
+                    parent_session_id="missing-parent",
+                )
+            elif target_kind == "unrelated-parent":
+                db.create_session(
+                    "forged-child",
+                    "api_server",
+                    parent_session_id="unrelated-parent",
+                )
+            elif target_kind == "existing-branch-with-forged-parent":
+                db.create_session(
+                    "existing-branch",
+                    "api_server",
+                    parent_session_id=root_id,
+                )
+            elif target_kind == "existing-ambiguous-compression-branch":
+                db.create_session(
+                    "ambiguous-child-a",
+                    "api_server",
+                    parent_session_id=root_id,
+                )
+            elif target_kind == "future-ended-compression-parent":
+                db.create_session(
+                    "future-child",
+                    "api_server",
+                    parent_session_id=root_id,
+                )
+            else:
+                db.create_session(
+                    "second-compression-child",
+                    "api_server",
+                    parent_session_id=root_id,
+                )
+    finally:
+        reset_managed_run_write_lease(token)
+
+    try:
+        assert lost_event.is_set()
+        assert _durable_session_snapshot(db) == before
+    finally:
+        db.close()
+
+
+def test_token_ensure_and_counter_update_share_one_fenced_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    db_a, db_b = _shared_dbs(tmp_path)
+    root_id = "token-atomic-root"
+    db_a.create_session(root_id, "api_server")
+    assert db_a.acquire_managed_run_lease(
+        root_id,
+        owner_id="owner-a",
+        run_id="run-a",
+        lease_seconds=10.0,
+        now=100.0,
+    )
+    monkeypatch.setattr(hermes_state.time, "time", lambda: 105.0)
+    original_execute_write = db_a._execute_write
+    calls = {"count": 0}
+
+    def _count_and_take_over_after_transaction(fn):
+        result = original_execute_write(fn)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            assert db_b.acquire_managed_run_lease(
+                root_id,
+                owner_id="owner-b",
+                run_id="run-b",
+                lease_seconds=30.0,
+                now=110.0,
+            )
+        return result
+
+    monkeypatch.setattr(db_a, "_execute_write", _count_and_take_over_after_transaction)
+    token = bind_managed_run_write_lease(
+        root_id,
+        owner_id="owner-a",
+        run_id="run-a",
+    )
+    try:
+        db_a.update_token_counts(
+            root_id,
+            input_tokens=5,
+            output_tokens=2,
+            api_call_count=1,
+        )
+    finally:
+        reset_managed_run_write_lease(token)
+
+    try:
+        assert calls["count"] == 1
+        session = db_a.get_session(root_id)
+        assert session["input_tokens"] == 5
+        assert session["output_tokens"] == 2
+        assert session["api_call_count"] == 1
+        assert db_a.get_managed_run_lease(root_id)["owner_id"] == "owner-b"
+    finally:
+        db_a.close()
+        db_b.close()
+
+
+def test_bound_write_fails_closed_at_exact_lease_expiry(
+    tmp_path,
+    monkeypatch,
+):
+    db = SessionDB(db_path=tmp_path / "exact-expiry.db")
+    root_id = "exact-expiry-root"
+    db.create_session(root_id, "api_server", system_prompt="original")
+    assert db.acquire_managed_run_lease(
+        root_id,
+        owner_id="owner-a",
+        run_id="run-a",
+        lease_seconds=10.0,
+        now=100.0,
+    )
+    monkeypatch.setattr(hermes_state.time, "time", lambda: 110.0)
+    lost_event = threading.Event()
+    before = _durable_session_snapshot(db)
+    token = bind_managed_run_write_lease(
+        root_id,
+        owner_id="owner-a",
+        run_id="run-a",
+        lost_event=lost_event,
+    )
+    try:
+        with pytest.raises(ManagedRunLeaseLostError):
+            db.update_system_prompt(root_id, "expired")
+    finally:
+        reset_managed_run_write_lease(token)
+
+    try:
+        assert lost_event.is_set()
+        assert _durable_session_snapshot(db) == before
+    finally:
+        db.close()
+
+
+def test_unbound_session_db_writes_remain_compatible(tmp_path):
+    db = SessionDB(db_path=tmp_path / "unbound.db")
+    root_id = "unbound-root"
+    try:
+        db.create_session(root_id, "cli")
+        db.ensure_session(root_id, "cli")
+        db.update_system_prompt(root_id, "plain prompt")
+        db.update_token_counts(
+            root_id,
+            input_tokens=3,
+            output_tokens=2,
+            api_call_count=1,
+        )
+        assert db.set_session_title(root_id, "plain title")
+        db.append_message(root_id, "user", "plain message")
+        db.replace_messages(
+            root_id,
+            [{"role": "assistant", "content": "plain replacement"}],
+        )
+        db.clear_messages(root_id)
+        db.end_session(root_id, "completed")
+        db.reopen_session(root_id)
+
+        session = db.get_session(root_id)
+        assert session["system_prompt"] == "plain prompt"
+        assert session["input_tokens"] == 3
+        assert session["output_tokens"] == 2
+        assert session["api_call_count"] == 1
+        assert session["title"] == "plain title"
+        assert session["ended_at"] is None
+        assert session["message_count"] == 0
+        assert db.delete_session(root_id)
+        assert db.get_session(root_id) is None
+    finally:
+        db.close()
