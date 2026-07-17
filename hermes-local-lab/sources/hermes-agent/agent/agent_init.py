@@ -726,6 +726,7 @@ def init_agent(
         # resolve or retain HTTP provider credentials.
         agent.api_key = ""
         agent.base_url = ""
+        agent._credential_pool = None
         agent.client = None
         agent._client_kwargs = {}
     else:

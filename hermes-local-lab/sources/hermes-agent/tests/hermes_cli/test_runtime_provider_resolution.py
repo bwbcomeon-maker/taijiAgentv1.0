@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import pytest
 
 from hermes_cli import runtime_provider as rp
@@ -148,6 +150,122 @@ def test_resolve_runtime_provider_codex(monkeypatch):
     assert resolved["base_url"] == "https://chatgpt.com/backend-api/codex"
     assert resolved["api_key"] == "codex-token"
     assert resolved["requested_provider"] == "openai-codex"
+
+
+@pytest.mark.parametrize("requested", ["openai", "openai-codex"])
+def test_codex_app_server_short_circuits_all_http_credential_resolution(
+    monkeypatch,
+    requested,
+):
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": requested,
+            "default": "gpt-5.4",
+            "openai_runtime": "codex_app_server",
+        },
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("local Codex runtime must not resolve HTTP credentials")
+
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", forbidden)
+    monkeypatch.setattr(rp, "resolve_provider", forbidden)
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", forbidden)
+    monkeypatch.setattr(rp, "load_pool", forbidden)
+    monkeypatch.setattr(rp, "resolve_codex_runtime_credentials", forbidden)
+
+    resolved = rp.resolve_runtime_provider(
+        requested=requested,
+        explicit_api_key="must-not-be-retained",
+        explicit_base_url="https://must-not-be-used.invalid/v1",
+        target_model="gpt-5.4",
+    )
+
+    assert resolved == {
+        "provider": "openai-codex",
+        "api_mode": "codex_app_server",
+        "base_url": "",
+        "api_key": "",
+        "source": "local-codex-app-server",
+        "credential_pool": None,
+        "requested_provider": requested,
+    }
+
+
+def test_codex_app_server_without_hermes_http_token_uses_local_runtime(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "openai-codex",
+            "default": "gpt-5.4",
+            "openai_runtime": "codex_app_server",
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Codex app login is owned by the local app-server")
+        ),
+    )
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda _provider: (_ for _ in ()).throw(
+            AssertionError("HTTP credential pools are inapplicable")
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="openai-codex",
+        target_model="gpt-5.4",
+    )
+
+    assert resolved["provider"] == "openai-codex"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["api_key"] == ""
+    assert resolved["base_url"] == ""
+    assert resolved["credential_pool"] is None
+
+
+def test_codex_app_server_flag_never_short_circuits_non_openai_provider(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "default": "claude-sonnet-4-6",
+            "openai_runtime": "codex_app_server",
+        },
+    )
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *_args, **_kwargs: "anthropic")
+    expected = {
+        "provider": "anthropic",
+        "api_mode": "anthropic_messages",
+        "base_url": "https://api.anthropic.com",
+        "api_key": "anthropic-token",
+        "source": "explicit",
+        "requested_provider": "anthropic",
+    }
+    explicit = MagicMock(return_value=expected)
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", explicit)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="anthropic",
+        explicit_api_key="anthropic-token",
+        target_model="claude-sonnet-4-6",
+    )
+
+    assert resolved == expected
+    explicit.assert_called_once()
 
 
 def test_resolve_runtime_provider_qwen_oauth(monkeypatch):

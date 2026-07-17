@@ -4076,12 +4076,17 @@ class APIServerAdapter(BasePlatformAdapter):
         admission_state: Dict[str, Any] = {
             "token": None,
             "worker_owned": False,
+            "resolver_owned": False,
         }
         try:
             return await self._handle_runs_impl(request, admission_state)
         finally:
             admission_token = admission_state["token"]
-            if admission_token and not admission_state["worker_owned"]:
+            if (
+                admission_token
+                and not admission_state["worker_owned"]
+                and not admission_state["resolver_owned"]
+            ):
                 self._release_run_admission(admission_token)
 
     async def _handle_runs_impl(
@@ -4286,11 +4291,42 @@ class APIServerAdapter(BasePlatformAdapter):
         admission_state["token"] = admission_token
 
         try:
-            resolved_route = await asyncio.to_thread(
+            resolver_coroutine = asyncio.to_thread(
                 self._resolve_agent_route,
                 requested_model=requested_model,
                 requested_provider=requested_provider,
             )
+            try:
+                resolver_task = asyncio.get_running_loop().create_task(
+                    resolver_coroutine,
+                    name=f"managed-run-resolver-{admission_token[-8:]}",
+                )
+            except BaseException:
+                resolver_coroutine.close()
+                raise
+            try:
+                resolved_route = await asyncio.shield(resolver_task)
+            except asyncio.CancelledError:
+                # ``to_thread`` keeps running after its awaiter is cancelled.
+                # Transfer the capacity reservation to the real resolver Task;
+                # releasing it in the request wrapper would admit an
+                # unbounded cancellation storm while those threads still run.
+                admission_state["resolver_owned"] = True
+
+                def _release_after_resolver(
+                    finished_task: "asyncio.Task",
+                ) -> None:
+                    try:
+                        finished_task.result()
+                    except BaseException:
+                        # Consume resolver failures after the HTTP request that
+                        # would have reported them no longer exists.
+                        pass
+                    finally:
+                        self._release_run_admission(admission_token)
+
+                resolver_task.add_done_callback(_release_after_resolver)
+                raise
             if not isinstance(resolved_route, dict):
                 raise RuntimeError("resolved route is not a mapping")
             runtime_kwargs = resolved_route.get("runtime_kwargs")

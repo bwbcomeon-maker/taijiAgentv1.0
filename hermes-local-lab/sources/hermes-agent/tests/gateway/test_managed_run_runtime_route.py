@@ -1,5 +1,8 @@
 """Production-seam tests for managed-run runtime route admission."""
 
+import subprocess
+from unittest.mock import patch
+
 from agent import agent_init
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
@@ -166,3 +169,72 @@ def test_codex_app_server_route_constructs_real_agent_without_http_credentials(
     assert agent.client is None
     assert agent._client_kwargs == {}
     assert not hasattr(agent, "_codex_session")
+
+
+def test_codex_app_server_real_resolver_route_and_agent_chain_is_local_only(
+    monkeypatch,
+    tmp_path,
+):
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "\n".join(
+            (
+                "model:",
+                "  provider: openai-codex",
+                "  default: gpt-5.4",
+                "  openai_runtime: codex_app_server",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("local Codex route must not resolve HTTP credentials")
+
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
+    with (
+        patch.object(
+            runtime_provider,
+            "resolve_codex_runtime_credentials",
+            side_effect=forbidden,
+        ),
+        patch.object(runtime_provider, "load_pool", side_effect=forbidden),
+        patch.object(
+            runtime_provider,
+            "_resolve_named_custom_runtime",
+            side_effect=forbidden,
+        ),
+        patch.object(subprocess, "Popen", side_effect=forbidden) as popen,
+    ):
+        runtime = runtime_provider.resolve_runtime_provider(
+            requested="openai-codex",
+            target_model="gpt-5.4",
+        )
+        route = adapter._resolve_agent_route(
+            requested_model="gpt-5.4",
+            requested_provider="openai-codex",
+        )
+        agent = adapter._create_agent(
+            session_id="session-codex-real-route-chain",
+            resolved_route=route,
+        )
+
+    assert runtime["provider"] == route["provider"] == agent.provider == "openai-codex"
+    assert (
+        runtime["api_mode"]
+        == route["runtime_kwargs"]["api_mode"]
+        == agent.api_mode
+        == "codex_app_server"
+    )
+    assert route["model"] == agent.model == "gpt-5.4"
+    assert runtime["api_key"] == route["runtime_kwargs"]["api_key"] == agent.api_key == ""
+    assert runtime["base_url"] == route["runtime_kwargs"]["base_url"] == agent.base_url == ""
+    assert runtime["credential_pool"] is None
+    assert route["runtime_kwargs"]["credential_pool"] is None
+    assert agent._credential_pool is None
+    assert agent.client is None
+    assert not hasattr(agent, "_codex_session")
+    popen.assert_not_called()

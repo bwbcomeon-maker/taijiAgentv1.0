@@ -920,6 +920,106 @@ class TestStartRun:
         assert adapter._run_admission_reservations == set()
 
     @pytest.mark.asyncio
+    async def test_cancelled_resolver_storm_keeps_slots_until_threads_exit(
+        self, adapter
+    ):
+        loop = asyncio.get_running_loop()
+        previous_exception_handler = loop.get_exception_handler()
+        unhandled_contexts = []
+        loop.set_exception_handler(
+            lambda _loop, context: unhandled_contexts.append(context)
+        )
+        entered = 0
+        entered_lock = threading.Lock()
+        ten_entered = threading.Event()
+        release_resolvers = threading.Event()
+
+        def delayed_resolver(**_kwargs):
+            nonlocal entered
+            with entered_lock:
+                entered += 1
+                if entered == adapter._MAX_CONCURRENT_RUNS:
+                    ten_entered.set()
+            release_resolvers.wait()
+            raise RuntimeError("resolver completed after its request was cancelled")
+
+        request_tasks = []
+        agent = MagicMock()
+        agent.run_conversation.return_value = {"final_response": "done"}
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        try:
+            with (
+                patch.object(
+                    adapter,
+                    "_resolve_agent_route",
+                    side_effect=delayed_resolver,
+                ),
+                patch.object(adapter, "_create_agent", return_value=agent),
+            ):
+                for i in range(adapter._MAX_CONCURRENT_RUNS):
+                    request_tasks.append(
+                        asyncio.create_task(
+                            adapter._handle_runs(
+                                _direct_run_request({
+                                    "input": f"cancelled resolver {i}",
+                                    "model": "requested/model",
+                                    "provider": "requested-provider",
+                                })
+                            )
+                        )
+                    )
+
+                assert await asyncio.to_thread(ten_entered.wait, 3.0)
+                for task in request_tasks:
+                    task.cancel()
+                cancelled = await asyncio.gather(
+                    *request_tasks,
+                    return_exceptions=True,
+                )
+                assert all(
+                    isinstance(item, asyncio.CancelledError) for item in cancelled
+                )
+
+                overflow_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "must remain rejected while resolver threads run",
+                            "model": "requested/model",
+                            "provider": "requested-provider",
+                        })
+                    )
+                )
+                await asyncio.sleep(0.05)
+                overflow_was_immediate = overflow_task.done()
+                observed_entered = entered
+                observed_reservations = len(adapter._run_admission_reservations)
+
+                release_resolvers.set()
+                overflow = await overflow_task
+                overflow_payload = json.loads(overflow.text)
+                deadline = asyncio.get_running_loop().time() + 3
+                while (
+                    adapter._run_admission_reservations
+                    and asyncio.get_running_loop().time() < deadline
+                ):
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0)
+        finally:
+            release_resolvers.set()
+            loop.set_exception_handler(previous_exception_handler)
+
+        assert overflow_was_immediate
+        assert overflow.status == 429
+        assert overflow_payload["error"]["code"] == "rate_limit_exceeded"
+        assert observed_entered == adapter._MAX_CONCURRENT_RUNS
+        assert observed_reservations == adapter._MAX_CONCURRENT_RUNS
+        assert entered == adapter._MAX_CONCURRENT_RUNS
+        assert adapter._run_admission_reservations == set()
+        assert unhandled_contexts == []
+
+    @pytest.mark.asyncio
     async def test_unconsumed_stream_capacity_is_bounded_independently(
         self, adapter
     ):

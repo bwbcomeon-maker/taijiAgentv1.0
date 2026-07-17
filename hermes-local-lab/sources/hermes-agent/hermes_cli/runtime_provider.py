@@ -1217,6 +1217,29 @@ def resolve_runtime_provider(
     behavior (api_mode derived from config).
     """
     requested_provider = resolve_requested_provider(requested)
+    model_cfg = _get_model_config()
+
+    # ``codex app-server`` is a local subprocess transport whose authentication
+    # is owned by Codex itself. Resolve it before custom endpoints, explicit
+    # HTTP credentials, credential pools, or Hermes OAuth state so a valid
+    # local Codex login never depends on (or retains) an unrelated bearer.
+    normalized_requested_provider = _normalize_custom_provider_name(
+        requested_provider
+    )
+    if (
+        normalized_requested_provider in {"openai", "openai-codex"}
+        and str(model_cfg.get("openai_runtime") or "").strip().lower()
+        == "codex_app_server"
+    ):
+        return {
+            "provider": "openai-codex",
+            "api_mode": "codex_app_server",
+            "base_url": "",
+            "api_key": "",
+            "source": "local-codex-app-server",
+            "credential_pool": None,
+            "requested_provider": normalized_requested_provider,
+        }
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
@@ -1246,7 +1269,7 @@ def resolve_runtime_provider(
     if requested_provider == "azure-foundry":
         azure_runtime = _resolve_azure_foundry_runtime(
             requested_provider=requested_provider,
-            model_cfg=_get_model_config(),
+            model_cfg=model_cfg,
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
             target_model=target_model,
@@ -1267,7 +1290,6 @@ def resolve_runtime_provider(
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
     )
-    model_cfg = _get_model_config()
     explicit_runtime = _resolve_explicit_runtime(
         provider=provider,
         requested_provider=requested_provider,
