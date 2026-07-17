@@ -34,7 +34,7 @@ def _history_session():
     )
 
 
-def test_gateway_turn_uses_standard_reconciliation_and_sanitization(monkeypatch):
+def test_chat_completions_turn_uses_standard_reconciliation_and_sanitization(monkeypatch):
     session = _history_session()
     calls = []
 
@@ -81,9 +81,13 @@ def test_gateway_turn_uses_standard_reconciliation_and_sanitization(monkeypatch)
     assert sum("Current Session Context" in str(m.get("content")) for m in messages if m["role"] == "user") == 0
 
 
-def test_runs_and_chat_completions_receive_the_same_canonical_history():
-    messages = [
+def test_managed_runs_send_only_current_input_and_ephemeral_instructions():
+    ephemeral_messages = [
         {"role": "system", "content": "temporary instructions"},
+        {"role": "user", "content": "temporary recall context"},
+    ]
+    messages = [
+        *ephemeral_messages,
         {"role": "user", "content": "first"},
         {
             "role": "assistant",
@@ -100,14 +104,22 @@ def test_runs_and_chat_completions_receive_the_same_canonical_history():
             "model": "test",
             "messages": messages,
             "platform_message_id": "webui-turn:turn-123",
+            "checkpoint_content": "visible follow up",
         },
         session_id="session-phase2",
+        ephemeral_messages=ephemeral_messages,
     )
 
-    assert run_body["instructions"] == "temporary instructions"
-    assert run_body["input"] == [{"role": "user", "content": "follow up"}]
-    assert run_body["conversation_history"] == messages[1:-1]
+    assert run_body["input"] == "follow up"
+    assert run_body["checkpoint_content"] == "visible follow up"
     assert run_body["platform_message_id"] == "webui-turn:turn-123"
+    assert "temporary instructions" in run_body["instructions"]
+    assert "role=user" in run_body["instructions"]
+    assert "temporary recall context" in run_body["instructions"]
+    assert "conversation_history" not in run_body
+    assert "messages" not in run_body
+    assert "first" not in repr(run_body)
+    assert "done" not in repr(run_body)
 
 
 def test_turn_envelope_has_stable_webui_platform_message_id():
