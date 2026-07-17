@@ -109,9 +109,12 @@ WebUI emits a typed image error and does not call the main model.
 
 Gateway `/v1/runs` accepts a plain string, an OpenAI-style `role`/`content`
 message array, or a bare array of multimodal content parts. WebUI sends the
-canonical message-array form. Image-only turns are valid; `file`, `input_file`,
-non-image data URLs, and unsupported URL schemes are rejected before a run is
-created.
+current turn only: either a string or the bare multimodal content parts prepared
+for the selected model. For managed runs, Agent reconstructs prior history from
+the authoritative `state.db` session after acquiring its lease; WebUI does not
+duplicate that history in the request. Image-only turns are valid; `file`,
+`input_file`, non-image data URLs, and unsupported URL schemes are rejected
+before a run is created.
 
 ## Image understanding verification and privacy
 

@@ -380,6 +380,25 @@ def _parse_request_platform_message_id(
     return platform_message_id, None
 
 
+def _validated_run_route_value(body: Dict[str, Any], field: str) -> Optional[str]:
+    """Return one explicit run route selector, or ``None`` for the default."""
+    if field not in body:
+        return None
+    raw = body.get(field)
+    if not isinstance(raw, str):
+        raise ValueError(field)
+    value = raw.strip()
+    if (
+        not value
+        or len(value) > 512
+        or re.search(r"[\x00-\x1f\x7f]", value)
+    ):
+        raise ValueError(field)
+    if value.lower() == "default":
+        return None
+    return value.lower() if field == "provider" else value
+
+
 def _content_has_visible_payload(content: Any) -> bool:
     """True when content has any text or image attachment.  Used to reject empty turns."""
     if isinstance(content, str):
@@ -1073,6 +1092,41 @@ class APIServerAdapter(BasePlatformAdapter):
     # Agent creation helper
     # ------------------------------------------------------------------
 
+    def _resolve_agent_route(
+        self,
+        *,
+        requested_model: Optional[str] = None,
+        requested_provider: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve one internally consistent model/provider route for a run."""
+        from gateway.run import (
+            GatewayRunner,
+            _resolve_gateway_model,
+            _resolve_runtime_agent_kwargs,
+        )
+
+        explicit_route = bool(requested_model or requested_provider)
+        model = requested_model or _resolve_gateway_model()
+        if explicit_route:
+            if not model:
+                raise RuntimeError("No model configured for the requested provider")
+            runtime_kwargs = _resolve_runtime_agent_kwargs(
+                requested=requested_provider,
+                target_model=model,
+                allow_configured_fallback=False,
+            )
+            fallback_model = None
+        else:
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
+            fallback_model = GatewayRunner._load_fallback_model()
+
+        return {
+            "model": model,
+            "runtime_kwargs": runtime_kwargs,
+            "fallback_model": fallback_model,
+            "provider": runtime_kwargs.get("provider"),
+        }
+
     def _create_agent(
         self,
         ephemeral_system_prompt: Optional[str] = None,
@@ -1082,6 +1136,9 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        requested_model: Optional[str] = None,
+        requested_provider: Optional[str] = None,
+        resolved_route: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1099,21 +1156,21 @@ class APIServerAdapter(BasePlatformAdapter):
         — matching the semantics of the native gateway's ``session_key``.
         """
         from run_agent import AIAgent
-        from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config, GatewayRunner
+        from gateway.run import GatewayRunner, _load_gateway_config
         from hermes_cli.tools_config import _get_platform_tools
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        route = resolved_route or self._resolve_agent_route(
+            requested_model=requested_model,
+            requested_provider=requested_provider,
+        )
+        runtime_kwargs = route["runtime_kwargs"]
         reasoning_config = GatewayRunner._load_reasoning_config()
-        model = _resolve_gateway_model()
+        model = route["model"]
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
-
-        # Load fallback provider chain so the API server platform has the
-        # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
-        fallback_model = GatewayRunner._load_fallback_model()
 
         agent = AIAgent(
             model=model,
@@ -1130,7 +1187,7 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
             session_db=self._ensure_session_db(),
-            fallback_model=fallback_model,
+            fallback_model=route["fallback_model"],
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
         )
@@ -3960,6 +4017,21 @@ class APIServerAdapter(BasePlatformAdapter):
         if not isinstance(body, dict):
             return web.json_response(_openai_error("Request body must be a JSON object"), status=400)
 
+        try:
+            requested_model = _validated_run_route_value(body, "model")
+            requested_provider = _validated_run_route_value(body, "provider")
+        except ValueError as exc:
+            field = str(exc)
+            return web.json_response(
+                _openai_error(
+                    f"{field} must be a non-empty string of at most 512 "
+                    "characters without control characters",
+                    param=field,
+                    code=f"invalid_{field}",
+                ),
+                status=400,
+            )
+
         header_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         raw_body_session_id = body.get("session_id")
         body_session_id = str(raw_body_session_id).strip() if raw_body_session_id else ""
@@ -4030,6 +4102,27 @@ class APIServerAdapter(BasePlatformAdapter):
             return _multimodal_validation_error(exc, param="input")
         if not _content_has_visible_payload(user_message):
             return web.json_response(_openai_error("No user message found in input"), status=400)
+
+        resolved_route = None
+        if requested_model or requested_provider:
+            try:
+                resolved_route = await asyncio.to_thread(
+                    self._resolve_agent_route,
+                    requested_model=requested_model,
+                    requested_provider=requested_provider,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[api_server] requested run route could not be resolved: %s",
+                    type(exc).__name__,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Requested model/provider could not be resolved from configured credentials.",
+                        code="model_configuration_error",
+                    ),
+                    status=400,
+                )
 
         instructions = body.get("instructions")
         platform_message_id, platform_message_id_err = (
@@ -4370,13 +4463,18 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
-        self._set_run_status(
-            run_id,
-            "queued",
-            created_at=created_at,
-            session_id=session_id,
-            model=body.get("model", self._model_name),
-        )
+        status_fields = {
+            "created_at": created_at,
+            "session_id": session_id,
+            "model": (
+                resolved_route["model"]
+                if resolved_route is not None
+                else body.get("model", self._model_name)
+            ),
+        }
+        if resolved_route is not None and resolved_route.get("provider"):
+            status_fields["provider"] = resolved_route["provider"]
+        self._set_run_status(run_id, "queued", **status_fields)
 
         def _publish_worker_outcome(result: Any, usage: Dict[str, Any]) -> None:
             if isinstance(result, dict) and result.get("failed"):
@@ -4488,6 +4586,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_cb,
                     tool_complete_callback=tool_complete_cb,
                     gateway_session_key=gateway_session_key,
+                    requested_model=requested_model,
+                    requested_provider=requested_provider,
+                    resolved_route=resolved_route,
                 )
                 self._active_run_agents[run_id] = agent
                 run_agent_ref[0] = agent

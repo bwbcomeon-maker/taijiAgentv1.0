@@ -1066,18 +1066,24 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(
+    *,
+    requested: str | None = None,
+    target_model: str | None = None,
+    allow_configured_fallback: bool = True,
+) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
-    Provider is read from ``config.yaml`` ``model.provider`` (the single
-    source of truth). ``resolve_runtime_provider()`` falls through to env
-    var lookups internally for legacy compatibility, but the gateway does
-    not consult environment variables for behavioral config — config.yaml
-    is authoritative.
+    By default, provider is read from ``config.yaml`` ``model.provider`` (the
+    single source of truth). A caller may instead supply a validated
+    ``requested`` provider and ``target_model`` for one explicit run.
+    ``resolve_runtime_provider()`` falls through to env var lookups internally
+    for legacy compatibility, but the gateway does not consult environment
+    variables for behavioral config — config.yaml is authoritative.
 
     If the primary provider fails with an authentication error, attempt to
     resolve credentials using the fallback provider chain from config.yaml
-    before giving up.
+    before giving up, unless ``allow_configured_fallback`` is false.
     """
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider,
@@ -1086,8 +1092,16 @@ def _resolve_runtime_agent_kwargs() -> dict:
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
     try:
-        runtime = resolve_runtime_provider()
+        if requested is None and target_model is None:
+            runtime = resolve_runtime_provider()
+        else:
+            runtime = resolve_runtime_provider(
+                requested=requested,
+                target_model=target_model,
+            )
     except AuthError as auth_exc:
+        if not allow_configured_fallback:
+            raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked
         # token). Both fall through to the fallback chain, but the log message

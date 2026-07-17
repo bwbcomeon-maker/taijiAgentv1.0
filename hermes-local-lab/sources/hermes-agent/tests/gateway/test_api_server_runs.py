@@ -434,6 +434,175 @@ class TestStartRun:
                 assert status["object"] == "hermes.run"
 
     @pytest.mark.asyncio
+    async def test_start_routes_requested_model_and_provider_into_agent_runtime(
+        self, adapter, monkeypatch
+    ):
+        """The public run selection must reach the real agent construction seam."""
+        resolver_calls = []
+        constructed = {}
+        finished = threading.Event()
+
+        def fake_resolve_runtime_provider(
+            *,
+            requested=None,
+            explicit_api_key=None,
+            explicit_base_url=None,
+            target_model=None,
+        ):
+            resolver_calls.append(
+                {
+                    "requested": requested,
+                    "target_model": target_model,
+                }
+            )
+            if requested == "requested-provider" and target_model == "requested/model":
+                return {
+                    "provider": "requested-provider",
+                    "api_mode": "chat_completions",
+                    "base_url": "https://requested.example/v1",
+                    "api_key": "requested-key",
+                }
+            return {
+                "provider": "configured-provider",
+                "api_mode": "chat_completions",
+                "base_url": "https://configured.example/v1",
+                "api_key": "configured-key",
+            }
+
+        class RecordingAgent:
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+            def __init__(self, **kwargs):
+                constructed.update(kwargs)
+
+            def run_conversation(self, **kwargs):
+                finished.set()
+                return {"final_response": "done"}
+
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        monkeypatch.setattr("run_agent.AIAgent", RecordingAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_gateway_model",
+            lambda: "configured/model",
+        )
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: {}),
+        )
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_fallback_model",
+            staticmethod(lambda: [{"provider": "must-not-be-used"}]),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.tools_config._get_platform_tools",
+            lambda *_: set(),
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        app = _create_runs_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/runs",
+                json={
+                    "input": "route this turn",
+                    "model": "requested/model",
+                    "provider": "requested-provider",
+                },
+            )
+            payload = await resp.json()
+            assert await asyncio.to_thread(finished.wait, 3.0)
+
+            status_resp = await cli.get(f"/v1/runs/{payload['run_id']}")
+            status_payload = await status_resp.json()
+
+        assert resp.status == 202, payload
+        assert resolver_calls == [
+            {
+                "requested": "requested-provider",
+                "target_model": "requested/model",
+            }
+        ]
+        assert constructed["model"] == "requested/model"
+        assert constructed["provider"] == "requested-provider"
+        assert constructed["base_url"] == "https://requested.example/v1"
+        assert constructed["api_key"] == "requested-key"
+        assert constructed["fallback_model"] is None
+        assert status_payload["model"] == "requested/model"
+        assert status_payload["provider"] == "requested-provider"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("field", "value", "expected_code"),
+        [
+            ("model", 7, "invalid_model"),
+            ("model", "   ", "invalid_model"),
+            ("model", "bad\nmodel", "invalid_model"),
+            ("provider", ["openrouter"], "invalid_provider"),
+            ("provider", "   ", "invalid_provider"),
+            ("provider", "bad\x00provider", "invalid_provider"),
+        ],
+    )
+    async def test_start_rejects_invalid_route_selection_before_side_effects(
+        self, adapter, field, value, expected_code
+    ):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as create_agent:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "hello", field: value},
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"]["code"] == expected_code
+        assert payload["error"]["param"] == field
+        create_agent.assert_not_called()
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_unresolvable_explicit_route_before_run_allocation(
+        self, adapter, monkeypatch
+    ):
+        def fail_resolution(**kwargs):
+            raise RuntimeError("credential details must stay private")
+
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            fail_resolution,
+        )
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as create_agent:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": "hello",
+                        "model": "requested/model",
+                        "provider": "requested-provider",
+                    },
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"] == {
+            "message": "Requested model/provider could not be resolved from configured credentials.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "model_configuration_error",
+        }
+        create_agent.assert_not_called()
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
     async def test_start_invalid_json_returns_400(self, adapter):
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:
