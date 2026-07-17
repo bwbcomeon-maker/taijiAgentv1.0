@@ -3727,6 +3727,71 @@ class APIServerAdapter(BasePlatformAdapter):
             hashlib.sha256(stored_bytes).digest(),
         )
 
+    @staticmethod
+    def _managed_content_digest(content: Any) -> Optional[bytes]:
+        """Return a provider-shape digest for one managed user message."""
+        try:
+            normalized = _normalize_multimodal_content(content)
+            encoded = json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(encoded).digest()
+
+    @classmethod
+    def _managed_provider_history(
+        cls,
+        stored_history: List[Dict[str, Any]],
+        *,
+        platform_message_id: Optional[str],
+        user_message: Any,
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """Remove only the exact current checkpoint from provider history.
+
+        WebUI durably writes the accepted user turn before starting a managed
+        run.  state.db remains authoritative and unchanged; this boundary only
+        prevents that checkpoint from being sent once as restored history and
+        again as the run's current ``user_message``.
+        """
+        history = list(stored_history)
+        if not platform_message_id:
+            return history, False
+
+        matches = [
+            (index, message)
+            for index, message in enumerate(history)
+            if isinstance(message, dict)
+            and _normalized_platform_message_id(
+                message.get("message_id") or message.get("platform_message_id")
+            )
+            == platform_message_id
+        ]
+        if not matches:
+            return history, False
+        if len(matches) != 1:
+            return history, True
+
+        checkpoint_index, checkpoint = matches[0]
+        if (
+            str(checkpoint.get("role") or "") != "user"
+            or checkpoint_index != len(history) - 1
+        ):
+            return history, True
+
+        checkpoint_digest = cls._managed_content_digest(checkpoint.get("content"))
+        input_digest = cls._managed_content_digest(user_message)
+        if (
+            checkpoint_digest is None
+            or input_digest is None
+            or not hmac.compare_digest(checkpoint_digest, input_digest)
+        ):
+            return history, True
+        return history[:checkpoint_index], False
+
     def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
         """Update pollable run status without exposing private agent objects."""
         now = time.time()
@@ -4185,6 +4250,21 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=409,
                 )
 
+            provider_history, checkpoint_conflict = self._managed_provider_history(
+                stored_history,
+                platform_message_id=platform_message_id,
+                user_message=user_message,
+            )
+            if checkpoint_conflict:
+                await asyncio.to_thread(_release_managed_lease)
+                return web.json_response(
+                    _openai_error(
+                        "Submitted platform message conflicts with managed session checkpoint",
+                        code="platform_message_conflict",
+                    ),
+                    status=409,
+                )
+
             try:
                 admission_lease_renewed = await asyncio.to_thread(
                     db.heartbeat_managed_run_lease,
@@ -4221,7 +4301,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     ),
                     status=409,
                 )
-            conversation_history = stored_history
+            conversation_history = provider_history
 
         if managed_session:
             with self._managed_session_runs_lock:
