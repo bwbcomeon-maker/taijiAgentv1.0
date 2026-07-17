@@ -5,6 +5,13 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
+const {
+  assertNavigationParity,
+  captureAuditedScreenshot,
+  collectSourceFingerprint,
+  inspectTaijiNavigation,
+  installDailyEquivalentRuntimeConfig,
+} = require("./electron_acceptance_provenance");
 
 function assertState(condition, message, detail) {
   if (!condition) throw new Error(`${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
@@ -129,6 +136,8 @@ async function main() {
     data: path.join(root, "data"), state: path.join(root, "state"),
   };
   Object.values(dirs).forEach(directory => fs.mkdirSync(directory, { recursive: true }));
+  const runtimeConfig = installDailyEquivalentRuntimeConfig(dirs.runtimeHome);
+  const sourceFingerprint = collectSourceFingerprint({ repoRoot, webuiDir });
   const fixture = prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome: dirs.runtimeHome, workspace: dirs.workspace });
   const pidFiles = [
     path.join(dirs.state, "taiji-agent", "logs", "agent.pid"),
@@ -138,6 +147,7 @@ async function main() {
   let electronPid = 0;
   let servicePids = [];
   let resultPayload = null;
+  const screenshotSanity = {};
   try {
     app = await _electron.launch({
       executablePath: electronBin,
@@ -177,13 +187,17 @@ async function main() {
     });
     await page.waitForSelector("#btnExportBundle", { state: "visible" });
     await page.waitForFunction(() => !document.getElementById("legacyMigrationCard")?.hidden);
+    const navigation = await inspectTaijiNavigation(page);
+    assertNavigationParity(navigation);
     const preloadedLegacy = await page.evaluate(() => api(
       "/api/session?session_id=legacy-repair&messages=1&resolve_model=0"
     ));
     assertState(preloadedLegacy.session?.session_id === "legacy-repair", "legacy session was not preloaded through the production GET API", preloadedLegacy);
     const actionText = await page.locator("#settingsPaneConversation").innerText();
     assertState(actionText.includes("资源包 ZIP（含图片）") && actionText.includes("兼容 JSON（仅文本）"), "bundle/JSON actions are not distinct", { actionText });
-    await page.screenshot({ path: path.join(outDir, "01-settings-audit.png"), animations: "disabled" });
+    screenshotSanity["01-settings-audit.png"] = await captureAuditedScreenshot(
+      page, outDir, "01-settings-audit.png",
+    );
 
     const roundtrip = await page.evaluate(async sourceId => {
       const exported = await fetch(`api/session/export-bundle?session_id=${encodeURIComponent(sourceId)}`, { credentials: "include" });
@@ -216,7 +230,9 @@ async function main() {
       return { status: response.status, bytes: (await response.arrayBuffer()).byteLength };
     });
     assertState(mediaResponse.status === 200 && mediaResponse.bytes > 0, "imported artifact backend route failed", mediaResponse);
-    await page.screenshot({ path: path.join(outDir, "02-bundle-roundtrip.png"), animations: "disabled" });
+    screenshotSanity["02-bundle-roundtrip.png"] = await captureAuditedScreenshot(
+      page, outDir, "02-bundle-roundtrip.png",
+    );
 
     const legacyJson = await page.evaluate(async () => {
       const exported = await fetch("api/session/export?session_id=bundle-source", { credentials: "include" });
@@ -233,7 +249,9 @@ async function main() {
       text: document.getElementById("messages")?.innerText || "",
     }));
     assertState(legacyView.artifacts === 0 && legacyView.images === 0 && legacyView.text.includes("这是需要跨会话保留的文本和图片。"), "legacy JSON was not text-only", legacyView);
-    await page.screenshot({ path: path.join(outDir, "03-legacy-json-text-only.png"), animations: "disabled" });
+    screenshotSanity["03-legacy-json-text-only.png"] = await captureAuditedScreenshot(
+      page, outDir, "03-legacy-json-text-only.png",
+    );
 
     await page.evaluate(async () => { await switchPanel("settings"); switchSettingsSection("conversation"); await loadLegacyMigrationAudit(); });
     await page.locator("#btnApplyLegacyMigration").click();
@@ -280,7 +298,10 @@ async function main() {
     assertState(successFreshAuditResponse.ok(), "post-apply authoritative audit request failed", successFreshAuditPayload);
     await page.waitForFunction(() => {
       const status = document.getElementById("legacyMigrationStatus")?.innerText || "";
-      return status !== "正在备份并修复…";
+      const result = document.getElementById("legacyMigrationResult")?.innerText || "";
+      return status !== "正在备份并修复…"
+        && status !== "正在只读检测旧会话…"
+        && result.includes("已创建本地备份");
     }, { timeout: 30000 });
     const successReceipt = await page.locator("#legacyMigrationCard").evaluate(card => ({
       hidden: card.hidden,
@@ -355,7 +376,9 @@ async function main() {
     }));
     const secondApplyDurationMs = Date.now() - secondApplyStartedMs;
     assertState(secondApply.modified === 0 && secondApply.backup_created === false && secondApply.failed === 0, "second migration apply is not an idempotent no-op", secondApply);
-    await page.screenshot({ path: path.join(outDir, "04-migration-applied.png"), animations: "disabled" });
+    screenshotSanity["04-migration-applied.png"] = await captureAuditedScreenshot(
+      page, outDir, "04-migration-applied.png",
+    );
     await page.locator("#btnAuditLegacySessions").click();
     await page.waitForFunction(() => document.getElementById("legacyMigrationCard")?.hidden === true);
     assertState(await page.locator("#legacyMigrationCard").isHidden(), "manual fresh audit did not converge the success receipt to current truth");
@@ -452,7 +475,9 @@ async function main() {
       { failureText, failureFeedback },
     );
     assertState(!bodyText.includes("/Users/") && !bodyText.includes("runtime-home") && !bodyText.includes("storage_path") && !bodyText.includes("backup_path"), "internal path leaked into DOM");
-    await page.screenshot({ path: path.join(outDir, "05-migration-failure-report.png"), animations: "disabled" });
+    screenshotSanity["05-migration-failure-report.png"] = await captureAuditedScreenshot(
+      page, outDir, "05-migration-failure-report.png",
+    );
 
     await page.setViewportSize({ width: 760, height: 900 });
     const narrow = await page.locator("#settingsPaneConversation").evaluate(node => ({
@@ -461,7 +486,9 @@ async function main() {
       importName: document.getElementById("btnImportBundle")?.getAttribute("aria-label"),
     }));
     assertState(narrow.right <= narrow.viewport + 1 && narrow.exportName && narrow.importName, "narrow/a11y settings state failed", narrow);
-    await page.screenshot({ path: path.join(outDir, "06-narrow.png"), animations: "disabled" });
+    screenshotSanity["06-narrow.png"] = await captureAuditedScreenshot(
+      page, outDir, "06-narrow.png",
+    );
 
     servicePids = pidFiles.map(readPid).filter(Boolean);
     resultPayload = {
@@ -469,6 +496,9 @@ async function main() {
       run_id: path.basename(root),
       started_at: startedAt,
       temp_root: root,
+      source_fingerprint: sourceFingerprint,
+      runtime_config: runtimeConfig,
+      navigation,
       launch_pids: { electron: electronPid, services: servicePids },
       source_artifact_id: fixture.artifact_id,
       imported_artifact_id: importedView.artifactId,
@@ -511,6 +541,13 @@ async function main() {
         "01-settings-audit.png", "02-bundle-roundtrip.png", "03-legacy-json-text-only.png",
         "04-migration-applied.png", "05-migration-failure-report.png", "06-narrow.png",
       ],
+      screenshot_sanity: screenshotSanity,
+      acceptance_provenance: {
+        source_fingerprint: true,
+        runtime_config: true,
+        navigation: true,
+        screenshot_sanity: true,
+      },
     };
   } finally {
     servicePids = [...new Set([...servicePids, ...pidFiles.map(readPid)].filter(Boolean))];

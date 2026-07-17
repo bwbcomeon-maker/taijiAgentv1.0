@@ -12,6 +12,9 @@ HTML = (ROOT / "static" / "index.html").read_text("utf-8")
 BOOT = (ROOT / "static" / "boot.js").read_text("utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text("utf-8")
 UI = (ROOT / "static" / "ui.js").read_text("utf-8")
+MIGRATION_ELECTRON_SMOKE = (
+    ROOT / "tests" / "session_bundle_migration_electron_smoke.js"
+).read_text("utf-8")
 NODE = shutil.which("node")
 
 
@@ -107,6 +110,21 @@ def test_legacy_repair_card_is_discoverable_only_after_audit_and_announces_statu
     assert toast.get("aria-atomic") == "true"
     for element_id in ("btnAuditLegacySessions", "btnApplyLegacyMigration"):
         assert _nodes()[element_id][1].get("aria-label")
+
+
+def test_migration_electron_acceptance_records_source_nav_and_screenshot_provenance():
+    for contract in (
+        "collectSourceFingerprint",
+        "installDailyEquivalentRuntimeConfig",
+        "inspectTaijiNavigation",
+        "assertNavigationParity",
+        "captureAuditedScreenshot",
+        "source_fingerprint",
+        "runtime_config",
+        "navigation",
+        "screenshot_sanity",
+    ):
+        assert contract in MIGRATION_ELECTRON_SMOKE
 
 
 def test_bundle_upload_uses_raw_blob_fetch_and_never_generic_json_api_helper():
