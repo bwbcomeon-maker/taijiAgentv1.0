@@ -360,7 +360,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             start_webui,
         )
 
-    def test_runtime_start_scripts_enable_product_license_gate(self):
+    def test_runtime_start_scripts_defer_license_policy_to_build_profile(self):
         runtime_env = read_text("hermes-local-lab/scripts/runtime-env.sh")
         start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
         start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
@@ -369,16 +369,21 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         for text in (runtime_env, start_agent, start_webui, main_js):
             self.assertIn("TAIJI_LICENSE_FILE", text)
             self.assertIn("TAIJI_LICENSE_STATE_FILE", text)
-            self.assertIn("TAIJI_LICENSE_REQUIRED", text)
-            self.assertIn("TAIJI_LICENSE_MACHINE_BINDING_REQUIRED", text)
+            self.assertNotIn("TAIJI_LICENSE_REQUIRED", text)
+            self.assertNotIn("TAIJI_LICENSE_MACHINE_BINDING_REQUIRED", text)
             self.assertNotIn("HERMES_LICENSE", text)
             self.assertNotIn("HERMES_LICENSE_FILE", text)
 
-        self.assertIn('$TAIJI_CONFIG_DIR/license.jwt', runtime_env)
-        self.assertIn('$TAIJI_STATE_DIR/license-state.json', runtime_env)
-        self.assertIn('TAIJI_LICENSE_MACHINE_BINDING_REQUIRED="${TAIJI_LICENSE_MACHINE_BINDING_REQUIRED:-1}"', runtime_env)
-        self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_agent)
-        self.assertIn('TAIJI_LICENSE_REQUIRED="${TAIJI_LICENSE_REQUIRED:-1}"', start_webui)
+        self.assertIn(
+            'TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"',
+            runtime_env,
+        )
+        self.assertIn(
+            'TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"',
+            runtime_env,
+        )
+        self.assertIn('path.join(os.homedir(), ".config", "taiji-agent", "licenses", "active-license.jwt")', main_js)
+        self.assertIn('path.join(os.homedir(), ".local", "state", "taiji-agent", "license-state.json")', main_js)
 
     def test_packaging_never_embeds_customer_license_or_private_key_inputs(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
