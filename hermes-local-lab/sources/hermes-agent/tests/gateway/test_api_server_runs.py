@@ -10,6 +10,7 @@ Covers:
 
 import asyncio
 import base64
+import inspect
 import json
 import sqlite3
 import threading
@@ -66,6 +67,14 @@ def _create_runs_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/runs/{run_id}/approval", adapter._handle_run_approval)
     app.router.add_post("/v1/runs/{run_id}/stop", adapter._handle_stop_run)
     return app
+
+
+def _direct_run_request(body, *, headers=None):
+    """Build the minimum request surface needed to await the handler directly."""
+    request = MagicMock()
+    request.headers = headers or {}
+    request.json = AsyncMock(return_value=body)
+    return request
 
 
 def _make_slow_agent(**kwargs):
@@ -928,6 +937,247 @@ class TestStartRun:
         create_agent.assert_not_called()
         await asyncio.sleep(0)
         assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_direct_handler_releases_admission_when_managed_db_is_unavailable(
+        self, adapter
+    ):
+        request = _direct_run_request({
+            "input": "hello",
+            "session_id": "session-db-unavailable-direct",
+        })
+
+        with patch.object(adapter, "_ensure_session_db", return_value=None):
+            response = await adapter._handle_runs(request)
+
+        payload = json.loads(response.text)
+        assert response.status == 503
+        assert payload["error"]["code"] == "session_db_unavailable"
+        assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_direct_handler_releases_admission_when_managed_lease_is_busy(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-busy-direct", "api_server")
+        adapter._session_db = db
+        request = _direct_run_request({
+            "input": "hello",
+            "session_id": "session-busy-direct",
+        })
+
+        try:
+            with patch.object(
+                db,
+                "acquire_managed_run_lease",
+                return_value=False,
+            ):
+                response = await adapter._handle_runs(request)
+
+            payload = json.loads(response.text)
+            assert response.status == 409
+            assert payload["error"]["code"] == "session_busy"
+            assert adapter._run_admission_reservations == set()
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_direct_handler_releases_admission_after_managed_history_failure(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-history-direct", "api_server")
+        adapter._session_db = db
+        request = _direct_run_request({
+            "input": "hello",
+            "session_id": "session-history-direct",
+        })
+
+        try:
+            with patch.object(
+                db,
+                "get_messages_as_conversation",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):
+                response = await adapter._handle_runs(request)
+
+            payload = json.loads(response.text)
+            assert response.status == 503
+            assert payload["error"]["code"] == "session_db_unavailable"
+            assert db.get_managed_run_lease("session-history-direct") is None
+            assert adapter._run_admission_reservations == set()
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_direct_handler_releases_admission_after_managed_stream_cap(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-stream-cap-direct", "api_server")
+        adapter._session_db = db
+        adapter._MAX_RETAINED_RUN_STREAMS = 0
+        request = _direct_run_request({
+            "input": "hello",
+            "session_id": "session-stream-cap-direct",
+        })
+
+        try:
+            response = await adapter._handle_runs(request)
+
+            payload = json.loads(response.text)
+            assert response.status == 429
+            assert payload["error"]["code"] == "run_stream_capacity_exceeded"
+            assert db.get_managed_run_lease("session-stream-cap-direct") is None
+            assert adapter._run_admission_reservations == set()
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_direct_handler_releases_admission_without_a_current_task(
+        self, adapter
+    ):
+        adapter._MAX_RETAINED_RUN_STREAMS = 0
+        request = _direct_run_request({"input": "hello"})
+
+        with patch(
+            "gateway.platforms.api_server.asyncio.current_task",
+            return_value=None,
+        ):
+            response = await adapter._handle_runs(request)
+
+        payload = json.loads(response.text)
+        assert response.status == 429
+        assert payload["error"]["code"] == "run_stream_capacity_exceeded"
+        assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_non_task_executor_result_rolls_back_managed_run_start(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-non-task-executor", "api_server")
+        adapter._session_db = db
+        adapter._MANAGED_RUN_LEASE_HEARTBEAT_SECONDS = 0.01
+        request = _direct_run_request({
+            "input": "hello",
+            "session_id": "session-non-task-executor",
+        })
+        captured = {}
+
+        def _return_non_task(coroutine):
+            captured["coroutine"] = coroutine
+            return object()
+
+        try:
+            with (
+                patch(
+                    "gateway.platforms.api_server.asyncio.create_task",
+                    side_effect=_return_non_task,
+                ),
+                patch.object(adapter, "_create_agent") as create_agent,
+            ):
+                response = await adapter._handle_runs(request)
+
+            payload = json.loads(response.text)
+            assert response.status == 503
+            assert payload["error"]["code"] == "run_executor_unavailable"
+            create_agent.assert_not_called()
+            assert inspect.getcoroutinestate(captured["coroutine"]) == "CORO_CLOSED"
+            assert db.get_managed_run_lease("session-non-task-executor") is None
+            assert adapter._managed_session_runs == {}
+            assert adapter._run_streams == {}
+            assert adapter._run_statuses == {}
+            assert adapter._run_admission_reservations == set()
+        finally:
+            coroutine = captured.get("coroutine")
+            if (
+                coroutine is not None
+                and inspect.getcoroutinestate(coroutine) != "CORO_CLOSED"
+            ):
+                coroutine.close()
+            lease = db.get_managed_run_lease("session-non-task-executor")
+            if lease is not None:
+                db.release_managed_run_lease(
+                    "session-non-task-executor",
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_real_credential_pool_route_is_admitted_for_managed_run(
+        self, adapter, tmp_path, monkeypatch
+    ):
+        from agent.credential_pool import CredentialPool, PooledCredential
+        from hermes_cli import runtime_provider
+
+        pool = CredentialPool(
+            "anthropic",
+            [
+                PooledCredential.from_dict(
+                    "anthropic",
+                    {
+                        "id": "managed-run-pool",
+                        "label": "managed run pool",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "pool-secret",
+                        "base_url": "https://api.anthropic.com",
+                    },
+                )
+            ],
+        )
+        monkeypatch.setattr(runtime_provider, "load_pool", lambda provider: pool)
+        monkeypatch.setattr(
+            runtime_provider,
+            "_get_model_config",
+            lambda: {
+                "provider": "anthropic",
+                "default": "claude-sonnet-4-6",
+            },
+        )
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("session-real-pool", "api_server")
+        adapter._session_db = db
+        finished = threading.Event()
+        agent = MagicMock()
+        agent.run_conversation.side_effect = lambda **_kwargs: (
+            finished.set() or {"final_response": "done"}
+        )
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+
+        try:
+            with patch.object(
+                adapter,
+                "_create_agent",
+                return_value=agent,
+            ) as create_agent:
+                app = _create_runs_app(adapter)
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "session_id": "session-real-pool",
+                            "model": "claude-sonnet-4-6",
+                            "provider": "anthropic",
+                        },
+                    )
+                    payload = await response.json()
+                    assert await asyncio.to_thread(finished.wait, 3.0)
+
+            assert response.status == 202, payload
+            resolved_route = create_agent.call_args.kwargs["resolved_route"]
+            assert resolved_route["runtime_kwargs"]["api_key"] == "pool-secret"
+            assert resolved_route["runtime_kwargs"]["credential_pool"] is pool
+        finally:
+            db.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

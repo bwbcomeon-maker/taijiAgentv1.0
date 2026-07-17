@@ -4072,6 +4072,23 @@ class APIServerAdapter(BasePlatformAdapter):
         return _start, _complete
 
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
+        """POST /v1/runs with request-scoped admission cleanup."""
+        admission_state: Dict[str, Any] = {
+            "token": None,
+            "worker_owned": False,
+        }
+        try:
+            return await self._handle_runs_impl(request, admission_state)
+        finally:
+            admission_token = admission_state["token"]
+            if admission_token and not admission_state["worker_owned"]:
+                self._release_run_admission(admission_token)
+
+    async def _handle_runs_impl(
+        self,
+        request: "web.Request",
+        admission_state: Dict[str, Any],
+    ) -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
         auth_err = self._check_auth(request)
         if auth_err:
@@ -4266,19 +4283,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=429,
             )
-
-        # If validation or state admission returns before a worker owns the
-        # slot, release it when the request task completes.  Once ownership is
-        # transferred, the worker task's done callback becomes authoritative.
-        admission_owner = {"worker": False}
-        request_task = asyncio.current_task()
-        if request_task is not None:
-
-            def _release_untransferred_admission(_task: "asyncio.Task") -> None:
-                if not admission_owner["worker"]:
-                    self._release_run_admission(admission_token)
-
-            request_task.add_done_callback(_release_untransferred_admission)
+        admission_state["token"] = admission_token
 
         try:
             resolved_route = await asyncio.to_thread(
@@ -4308,7 +4313,6 @@ class APIServerAdapter(BasePlatformAdapter):
             ):
                 raise RuntimeError("resolved route is not constructible")
         except Exception as exc:
-            self._release_run_admission(admission_token)
             logger.warning(
                 "[api_server] run route could not be resolved: %s",
                 type(exc).__name__,
@@ -5031,9 +5035,14 @@ class APIServerAdapter(BasePlatformAdapter):
         run_coroutine = _run_and_close()
         try:
             task = asyncio.create_task(run_coroutine)
+            # ``asyncio.create_task`` returns a Task (an asyncio.Future
+            # subclass).  Requiring that lifecycle rejects ad-hoc lookalikes
+            # that cannot provide cancellation and terminal callbacks while
+            # preserving event-loop-specific Task/Future implementations.
+            if not isinstance(task, asyncio.Future):
+                raise TypeError("asyncio.create_task returned a non-Future object")
         except Exception as exc:
             run_coroutine.close()
-            self._release_run_admission(admission_token)
             logger.error(
                 "[api_server] failed to create run task %s: %s",
                 run_id,
@@ -5052,30 +5061,26 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=503,
             )
-        admission_owner["worker"] = True
         self._active_run_tasks[run_id] = task
-        try:
-            self._background_tasks.add(task)
-        except TypeError:
-            pass
-        if hasattr(task, "add_done_callback"):
-            task.add_done_callback(self._background_tasks.discard)
-            task.add_done_callback(
-                lambda _task: self._release_run_admission(admission_token)
-            )
-            if managed_session:
-                def _release_cancelled_before_first_step(_task: "asyncio.Task") -> None:
-                    with self._managed_session_runs_lock:
-                        if not worker_started.is_set():
-                            worker_abandoned.set()
-                    if worker_abandoned.is_set():
-                        threading.Thread(
-                            target=_release_managed_lease,
-                            name=f"managed-run-release-{run_id[-8:]}",
-                            daemon=True,
-                        ).start()
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(
+            lambda _task: self._release_run_admission(admission_token)
+        )
+        if managed_session:
+            def _release_cancelled_before_first_step(_task: "asyncio.Task") -> None:
+                with self._managed_session_runs_lock:
+                    if not worker_started.is_set():
+                        worker_abandoned.set()
+                if worker_abandoned.is_set():
+                    threading.Thread(
+                        target=_release_managed_lease,
+                        name=f"managed-run-release-{run_id[-8:]}",
+                        daemon=True,
+                    ).start()
 
-                task.add_done_callback(_release_cancelled_before_first_step)
+            task.add_done_callback(_release_cancelled_before_first_step)
+        admission_state["worker_owned"] = True
 
         response_headers = {"X-Hermes-Session-Id": session_id}
         if gateway_session_key:
