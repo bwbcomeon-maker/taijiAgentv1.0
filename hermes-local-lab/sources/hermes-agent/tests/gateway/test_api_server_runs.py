@@ -344,6 +344,69 @@ class TestStartRun:
         assert adapter._run_statuses == {}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_platform_message_id",
+        [
+            pytest.param(None, id="null"),
+            pytest.param(123, id="non-string"),
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="whitespace"),
+            pytest.param("x" * 257, id="too-long"),
+            pytest.param("bad\rid", id="carriage-return"),
+            pytest.param("bad\nid", id="line-feed"),
+            pytest.param("bad\x00id", id="nul"),
+        ],
+    )
+    async def test_managed_start_rejects_invalid_platform_message_id_before_side_effects(
+        self, adapter, tmp_path, invalid_platform_message_id
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = "session-invalid-platform-message-id"
+        db.create_session(session_id, "webui")
+        db.append_message(session_id, "user", "existing question")
+        rows_before = db.get_messages(session_id)
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                with (
+                    patch.object(
+                        db,
+                        "acquire_managed_run_lease",
+                        side_effect=AssertionError("lease must not be acquired"),
+                    ) as acquire_lease,
+                    patch.object(adapter, "_create_agent") as create_agent,
+                ):
+                    resp = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "current question",
+                            "session_id": session_id,
+                            "platform_message_id": invalid_platform_message_id,
+                        },
+                    )
+                    payload = await resp.json()
+
+            assert resp.status == 400
+            assert payload["error"] == {
+                "message": (
+                    "platform_message_id must be a non-empty string of at most "
+                    "256 characters without CR, LF, or NUL"
+                ),
+                "type": "invalid_request_error",
+                "param": "platform_message_id",
+                "code": "invalid_platform_message_id",
+            }
+            acquire_lease.assert_not_called()
+            create_agent.assert_not_called()
+            assert adapter._run_streams == {}
+            assert adapter._run_statuses == {}
+            assert db.get_messages(session_id) == rows_before
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
     async def test_start_returns_202(self, adapter):
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:

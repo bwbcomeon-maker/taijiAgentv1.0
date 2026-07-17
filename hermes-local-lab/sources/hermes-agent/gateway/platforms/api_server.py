@@ -357,6 +357,29 @@ def _normalized_platform_message_id(value: Any) -> Optional[str]:
     return value
 
 
+def _parse_request_platform_message_id(
+    body: Dict[str, Any],
+) -> tuple[Optional[str], Optional["web.Response"]]:
+    """Parse an optional request ID without silently disabling turn identity."""
+    if "platform_message_id" not in body:
+        return None, None
+
+    platform_message_id = _normalized_platform_message_id(
+        body.get("platform_message_id")
+    )
+    if platform_message_id is None:
+        return None, web.json_response(
+            _openai_error(
+                "platform_message_id must be a non-empty string of at most "
+                "256 characters without CR, LF, or NUL",
+                code="invalid_platform_message_id",
+                param="platform_message_id",
+            ),
+            status=400,
+        )
+    return platform_message_id, None
+
+
 def _content_has_visible_payload(content: Any) -> bool:
     """True when content has any text or image attachment.  Used to reject empty turns."""
     if isinstance(content, str):
@@ -1909,6 +1932,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
+        platform_message_id, platform_message_id_err = (
+            _parse_request_platform_message_id(body)
+        )
+        if platform_message_id_err is not None:
+            return platform_message_id_err
+
         # Allow caller to scope long-term memory (e.g. Honcho) with a
         # stable per-channel identifier via X-Hermes-Session-Key.  This
         # is independent of X-Hermes-Session-Id: the key persists across
@@ -1970,8 +1999,6 @@ class APIServerAdapter(BasePlatformAdapter):
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
-
-        platform_message_id = _normalized_platform_message_id(body.get("platform_message_id"))
 
         if stream:
             import queue as _q
@@ -4005,7 +4032,11 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
         instructions = body.get("instructions")
-        platform_message_id = _normalized_platform_message_id(body.get("platform_message_id"))
+        platform_message_id, platform_message_id_err = (
+            _parse_request_platform_message_id(body)
+        )
+        if platform_message_id_err is not None:
+            return platform_message_id_err
         checkpoint_content = (
             body.get("checkpoint_content")
             if "checkpoint_content" in body

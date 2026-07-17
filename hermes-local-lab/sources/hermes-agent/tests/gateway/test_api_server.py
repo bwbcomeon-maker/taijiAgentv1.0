@@ -953,6 +953,50 @@ class TestChatCompletionsEndpoint:
                 assert kwargs["persist_user_platform_message_id"] == "webui-turn:turn-123"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_platform_message_id",
+        [
+            pytest.param(None, id="null"),
+            pytest.param(123, id="non-string"),
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="whitespace"),
+            pytest.param("x" * 257, id="too-long"),
+            pytest.param("bad\rid", id="carriage-return"),
+            pytest.param("bad\nid", id="line-feed"),
+            pytest.param("bad\x00id", id="nul"),
+        ],
+    )
+    async def test_rejects_invalid_platform_message_id_before_provider_call(
+        self, adapter, invalid_platform_message_id
+    ):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter, "_run_agent", new_callable=AsyncMock
+            ) as run_agent:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "platform_message_id": invalid_platform_message_id,
+                    },
+                )
+                payload = await resp.json()
+
+        assert resp.status == 400
+        assert payload["error"] == {
+            "message": (
+                "platform_message_id must be a non-empty string of at most "
+                "256 characters without CR, LF, or NUL"
+            ),
+            "type": "invalid_request_error",
+            "param": "platform_message_id",
+            "code": "invalid_platform_message_id",
+        }
+        run_agent.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
