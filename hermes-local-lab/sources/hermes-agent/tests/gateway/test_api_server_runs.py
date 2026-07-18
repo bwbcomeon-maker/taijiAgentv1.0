@@ -1744,6 +1744,256 @@ class TestStartRun:
             assert observed["lease_after_fallback"] is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("bare_stage", "acquire_outcome", "release_outcome"),
+        [
+            ("supervisor", "false", "unused"),
+            ("supervisor", "error", "unused"),
+            ("supervisor", "true", "true"),
+            ("release", "true", "true"),
+            ("release", "true", "false"),
+            ("release", "true", "error"),
+        ],
+    )
+    async def test_non_task_factory_result_uses_exact_cleanup_fallback(
+        self,
+        adapter,
+        tmp_path,
+        bare_stage,
+        acquire_outcome,
+        release_outcome,
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = (
+            f"session-non-task-{bare_stage}-{acquire_outcome}-{release_outcome}"
+        )
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        loop = asyncio.get_running_loop()
+        previous_task_factory = loop.get_task_factory()
+        acquire_entered = threading.Event()
+        acquire_continue = threading.Event()
+        acquire_finished = threading.Event()
+        bare_created = asyncio.Event()
+        release_factory_armed = [False]
+        acquire_call = {}
+        release_calls = []
+        bare_results = []
+        original_acquire = db.acquire_managed_run_lease
+        original_release = db.release_managed_run_lease
+        request_task = None
+        shutdown_task = None
+
+        def _delegate_task(factory_loop, coroutine, context):
+            if previous_task_factory is not None:
+                if context is None:
+                    return previous_task_factory(factory_loop, coroutine)
+                return previous_task_factory(
+                    factory_loop,
+                    coroutine,
+                    context=context,
+                )
+            kwargs = {"loop": factory_loop}
+            if context is not None:
+                kwargs["context"] = context
+            return asyncio.Task(coroutine, **kwargs)
+
+        def _selective_task_factory(factory_loop, coroutine, context=None):
+            coroutine_name = getattr(
+                getattr(coroutine, "cr_code", None),
+                "co_name",
+                "",
+            )
+            use_bare_future = (
+                bare_stage == "supervisor"
+                and coroutine_name
+                == "_supervise_cancelled_managed_lease_acquire"
+            ) or (
+                bare_stage == "release"
+                and release_factory_armed[0]
+                and coroutine_name == "to_thread"
+            )
+            if not use_bare_future:
+                return _delegate_task(factory_loop, coroutine, context)
+            release_factory_armed[0] = False
+            bare_future = factory_loop.create_future()
+            bare_results.append((bare_future, coroutine))
+            bare_created.set()
+            return bare_future
+
+        def _blocked_acquire(
+            lease_session_id,
+            *,
+            owner_id,
+            run_id,
+            lease_seconds,
+        ):
+            acquire_call.update({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            acquire_entered.set()
+            acquire_continue.wait()
+            try:
+                if acquire_outcome == "error":
+                    raise sqlite3.OperationalError(
+                        "acquire failed after non-task result"
+                    )
+                if acquire_outcome == "false":
+                    return False
+                return original_acquire(
+                    lease_session_id,
+                    owner_id=owner_id,
+                    run_id=run_id,
+                    lease_seconds=lease_seconds,
+                )
+            finally:
+                acquire_finished.set()
+
+        def _release_exact(lease_session_id, *, owner_id, run_id):
+            release_calls.append({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            if release_outcome == "error":
+                raise sqlite3.OperationalError(
+                    "release failed after non-task result"
+                )
+            if release_outcome == "false":
+                return False
+            return original_release(
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+            )
+
+        observed = {}
+        loop.set_task_factory(_selective_task_factory)
+        try:
+            with (
+                patch.object(
+                    db,
+                    "acquire_managed_run_lease",
+                    side_effect=_blocked_acquire,
+                ),
+                patch.object(
+                    db,
+                    "release_managed_run_lease",
+                    side_effect=_release_exact,
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "force non-task factory result",
+                            "session_id": session_id,
+                        })
+                    )
+                )
+                assert await asyncio.to_thread(acquire_entered.wait, 3.0)
+
+                request_task.cancel()
+                request_result = (
+                    await asyncio.gather(
+                        request_task,
+                        return_exceptions=True,
+                    )
+                )[0]
+                observed["request_cancelled"] = isinstance(
+                    request_result,
+                    asyncio.CancelledError,
+                )
+                observed["response_status"] = getattr(
+                    request_result,
+                    "status",
+                    None,
+                )
+
+                shutdown_task = asyncio.create_task(
+                    adapter.cancel_background_tasks()
+                )
+                if bare_stage == "release":
+                    release_factory_armed[0] = True
+                acquire_continue.set()
+                await asyncio.wait_for(bare_created.wait(), 3.0)
+
+                deadline = loop.time() + 1.0
+                while not shutdown_task.done() and loop.time() < deadline:
+                    await asyncio.sleep(0.01)
+                observed["shutdown_done"] = shutdown_task.done()
+                observed["release_calls"] = list(release_calls)
+                observed["reservations"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["lifecycle_count"] = len(
+                    adapter._managed_lease_lifecycle_tasks
+                )
+                observed["lease"] = db.get_managed_run_lease(session_id)
+                observed["bare_cancelled"] = all(
+                    future.cancelled()
+                    for future, _coroutine in bare_results
+                )
+                observed["coroutines_closed"] = all(
+                    coroutine.cr_frame is None
+                    for _future, coroutine in bare_results
+                )
+        finally:
+            loop.set_task_factory(previous_task_factory)
+            acquire_continue.set()
+            for future, coroutine in bare_results:
+                future.cancel()
+                coroutine.close()
+            if acquire_entered.is_set() and not acquire_finished.is_set():
+                await asyncio.to_thread(acquire_finished.wait, 3.0)
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+            for lifecycle in tuple(adapter._managed_lease_lifecycle_tasks):
+                acquire_task = lifecycle.acquire_task
+                if acquire_task is not None and acquire_task.done():
+                    try:
+                        acquire_task.result()
+                    except BaseException:
+                        pass
+                adapter._finish_managed_lease_lifecycle(
+                    lifecycle,
+                    release_admission=True,
+                )
+            if shutdown_task is not None:
+                await asyncio.gather(shutdown_task, return_exceptions=True)
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                original_release(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        if bare_stage == "supervisor":
+            assert observed["response_status"] == 503
+        else:
+            assert observed["request_cancelled"]
+        assert observed["shutdown_done"]
+        assert observed["bare_cancelled"]
+        assert observed["coroutines_closed"]
+        assert observed["reservations"] == set()
+        assert observed["lifecycle_count"] == 0
+        if acquire_outcome == "true":
+            assert observed["release_calls"] == [acquire_call]
+            if release_outcome == "true":
+                assert observed["lease"] is None
+            else:
+                assert observed["lease"] is not None
+                assert observed["lease"]["owner_id"] == acquire_call["owner_id"]
+                assert observed["lease"]["run_id"] == acquire_call["run_id"]
+        else:
+            assert observed["release_calls"] == []
+            assert observed["lease"] is None
+
+    @pytest.mark.asyncio
     async def test_unconsumed_stream_capacity_is_bounded_independently(
         self, adapter
     ):
