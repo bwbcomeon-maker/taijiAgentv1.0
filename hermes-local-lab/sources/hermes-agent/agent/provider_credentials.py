@@ -21,6 +21,15 @@ PROVIDER_FAMILY_ALIASES = {
     "zai": "zhipu",
     "zhipu": "zhipu",
     "zhipu-image": "zhipu",
+    "ark": "doubao",
+    "doubao": "doubao",
+    "volcengine": "doubao",
+    "baidu-qianfan": "qianfan",
+    "qianfan": "qianfan",
+    "minimax": "minimax",
+    "minimax-image": "minimax",
+    "custom": "custom",
+    "custom-image": "custom",
 }
 
 LEGACY_API_KEY_ENV = {
@@ -83,6 +92,8 @@ def normalize_credential_id(credential_id: object) -> str:
 def provider_family(provider: object) -> str:
     """Map provider aliases used by capabilities to their credential family."""
     normalized = str(provider or "").strip().lower()
+    if normalized.startswith("custom:"):
+        return "custom"
     return PROVIDER_FAMILY_ALIASES.get(normalized, normalized)
 
 

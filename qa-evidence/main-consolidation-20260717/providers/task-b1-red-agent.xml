@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="5" skipped="0" tests="5" time="0.379" timestamp="2026-07-18T18:01:53.949917+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.agent.test_provider_fail_closed_contract" name="test_provider_family_aliases_are_canonical" time="0.035"><failure message="AssertionError: assert {'alibaba': '...qianfan', ...} == {'alibaba': '...qianfan', ...}&#10;  &#10;  Omitting 9 identical items, use -vv to show&#10;  Differing items:&#10;  {'baidu-qianfan': 'baidu-qianfan'} != {'baidu-qianfan': 'qianfan'}&#10;  {'ark': 'ark'} != {'ark': 'doubao'}&#10;  {'volcengine': 'volcengine'} != {'volcengine': 'doubao'}&#10;  {'minimax-image': 'minimax-image'} != {'minimax-image': 'minimax'}&#10;  Use -v to get more diff">def test_provider_family_aliases_are_canonical() -&gt; None:
+        from agent.provider_credentials import provider_family
+
+        expected = {
+            "alibaba": "alibaba_dashscope",
+            "alibaba_dashscope": "alibaba_dashscope",
+            "dashscope": "alibaba_dashscope",
+            "zai": "zhipu",
+            "zhipu": "zhipu",
+            "zhipu-image": "zhipu",
+            "ark": "doubao",
+            "doubao": "doubao",
+            "volcengine": "doubao",
+            "baidu-qianfan": "qianfan",
+            "qianfan": "qianfan",
+            "minimax": "minimax",
+            "minimax-image": "minimax",
+        }
+
+&gt;       assert {alias: provider_family(alias) for alias in expected} == expected
+E       AssertionError: assert {'alibaba': '...qianfan', ...} == {'alibaba': '...qianfan', ...}
+E
+E         Omitting 9 identical items, use -vv to show
+E         Differing items:
+E         {'baidu-qianfan': 'baidu-qianfan'} != {'baidu-qianfan': 'qianfan'}
+E         {'ark': 'ark'} != {'ark': 'doubao'}
+E         {'volcengine': 'volcengine'} != {'volcengine': 'doubao'}
+E         {'minimax-image': 'minimax-image'} != {'minimax-image': 'minimax'}
+E         Use -v to get more diff
+
+tests/agent/test_provider_fail_closed_contract.py:62: AssertionError</failure></testcase><testcase classname="tests.agent.test_provider_fail_closed_contract" name="test_custom_provider_aliases_are_canonical_without_secret_lookup" time="0.001"><failure message="AssertionError: assert 'custom-image' == 'custom'&#10;  &#10;  - custom&#10;  + custom-image">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10b78fd10&gt;
+
+    def test_custom_provider_aliases_are_canonical_without_secret_lookup(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -&gt; None:
+        from agent import provider_credentials
+
+        secret_calls: list[str] = []
+
+        def record_secret(secret_env: str) -&gt; str:
+            secret_calls.append(secret_env)
+            return ""
+
+        monkeypatch.setattr(
+            provider_credentials,
+            "_credential_secret_value",
+            record_secret,
+        )
+
+        assert provider_credentials.provider_family("custom") == "custom"
+&gt;       assert provider_credentials.provider_family("custom-image") == "custom"
+E       AssertionError: assert 'custom-image' == 'custom'
+E
+E         - custom
+E         + custom-image
+
+tests/agent/test_provider_fail_closed_contract.py:84: AssertionError</failure></testcase><testcase classname="tests.agent.test_provider_fail_closed_contract" name="test_builtin_unknown_image_models_fail_before_credential_lookup" time="0.036"><failure message="assert ['doubao reso...quired'&quot;, ...] == []&#10;  &#10;  Left contains 16 more items, first extra item: 'doubao resolver: expected ValueError, but no exception was raised'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10b78f9d0&gt;
+
+    def test_builtin_unknown_image_models_fail_before_credential_lookup(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -&gt; None:
+        from plugins.image_gen import dashscope, doubao, minimax_image, qianfan
+        from plugins.image_gen import zhipu_image
+
+        failures: list[str] = []
+        unknown_model = "vendor-unknown-image-model"
+
+        cases: tuple[
+            tuple[
+                str,
+                Any,
+                Any,
+                Callable[[Any, str], Any],
+            ],
+            ...,
+        ] = (
+            (
+                "dashscope",
+                dashscope,
+                dashscope.DashScopeQwenImageProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+            (
+                "doubao",
+                doubao,
+                doubao.DoubaoImageGenProvider(),
+                lambda _provider, model: doubao._resolve_model(model),
+            ),
+            (
+                "qianfan",
+                qianfan,
+                qianfan.QianfanImageGenProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+            (
+                "zhipu-image",
+                zhipu_image,
+                zhipu_image.ZhipuImageGenProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+            (
+                "minimax-image",
+                minimax_image,
+                minimax_image.MinimaxImageGenProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+        )
+
+        for label, module, provider, resolver in cases:
+            credential_calls: list[str] = []
+            http_calls: list[str] = []
+
+            def record_http(*args: Any, **kwargs: Any) -&gt; None:
+                del args, kwargs
+                http_calls.append("post")
+                raise AssertionError("unknown model reached HTTP")
+
+            monkeypatch.setattr(module.requests, "post", record_http)
+            if label == "dashscope":
+                monkeypatch.setattr(
+                    module,
+                    "_resolve_api_key",
+                    lambda *args, **kwargs: credential_calls.append("secret") or "",
+                )
+            elif label == "doubao":
+                monkeypatch.setattr(module, "_load_image_gen_config", lambda: {})
+                monkeypatch.setattr(
+                    module,
+                    "os",
+                    SimpleNamespace(environ=_RecordingEnvironment(credential_calls)),
+                )
+            else:
+                monkeypatch.setattr(
+                    module,
+                    "missing_required",
+                    lambda *args, **kwargs: credential_calls.append("required")
+                    or ["forbidden"],
+                )
+                monkeypatch.setattr(
+                    module,
+                    "env_value",
+                    lambda *args, **kwargs: credential_calls.append("secret") or "",
+                )
+
+            failure = _value_error_failure(
+                f"{label} resolver",
+                lambda resolver=resolver, provider=provider: resolver(
+                    provider,
+                    unknown_model,
+                ),
+            )
+            if failure:
+                failures.append(failure)
+
+            try:
+                result = provider.generate("draw a test image", model=unknown_model)
+            except Exception as exc:  # noqa: BLE001 - public seam must be structured
+                failures.append(
+                    f"{label} generate: expected structured error, got "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                if result.get("success") is not False:
+                    failures.append(f"{label} generate: did not fail")
+                if result.get("error_type") != "invalid_argument":
+                    failures.append(
+                        f"{label} generate: expected invalid_argument, got "
+                        f"{result.get('error_type')!r}"
+                    )
+                if result.get("model") != unknown_model:
+                    failures.append(
+                        f"{label} generate: changed model to {result.get('model')!r}"
+                    )
+            if credential_calls:
+                failures.append(
+                    f"{label}: credential/environment seam called {credential_calls!r}"
+                )
+            if http_calls:
+                failures.append(f"{label}: HTTP seam called {http_calls!r}")
+
+&gt;       assert failures == []
+E       assert ['doubao reso...quired'", ...] == []
+E
+E         Left contains 16 more items, first extra item: 'doubao resolver: expected ValueError, but no exception was raised'
+E         Use -v to get more diff
+
+tests/agent/test_provider_fail_closed_contract.py:273: AssertionError</failure></testcase><testcase classname="tests.agent.test_provider_fail_closed_contract" name="test_custom_image_model_requires_explicit_allow_custom_model_id" time="0.002"><failure message="assert ['strict cust...image-model'&quot;] == []&#10;  &#10;  Left contains 2 more items, first extra item: 'strict custom provider: expected ValueError, but no exception was raised'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10ba68910&gt;
+
+    def test_custom_image_model_requires_explicit_allow_custom_model_id(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -&gt; None:
+        from agent import custom_image_providers
+
+        failures: list[str] = []
+        env_calls: list[str] = []
+        http_calls: list[str] = []
+        monkeypatch.setattr(
+            custom_image_providers,
+            "os",
+            SimpleNamespace(
+                getenv=lambda key, default="": env_calls.append(key) or default,
+            ),
+        )
+        monkeypatch.setattr(
+            custom_image_providers.requests,
+            "post",
+            lambda *args, **kwargs: http_calls.append("post"),
+        )
+
+        strict_provider = custom_image_providers.ConfigurableOpenAIImageProvider(
+            _provider_entry(allow_custom_model_id=False)
+        )
+        failure = _value_error_failure(
+            "strict custom provider",
+            lambda: strict_provider._model("unlisted-image-model"),
+        )
+        if failure:
+            failures.append(failure)
+
+        opt_in_provider = custom_image_providers.ConfigurableOpenAIImageProvider(
+            _provider_entry(allow_custom_model_id=True)
+        )
+        selected = opt_in_provider._model("unlisted-image-model")
+        if selected != "unlisted-image-model":
+            failures.append(f"opt-in custom provider changed model to {selected!r}")
+
+        assert env_calls == []
+        assert http_calls == []
+&gt;       assert failures == []
+E       assert ['strict cust...image-model'"] == []
+E
+E         Left contains 2 more items, first extra item: 'strict custom provider: expected ValueError, but no exception was raised'
+E         Use -v to get more diff
+
+tests/agent/test_provider_fail_closed_contract.py:316: AssertionError</failure></testcase><testcase classname="tests.agent.test_provider_fail_closed_contract" name="test_unknown_vision_model_and_capability_fail_closed" time="0.252"><failure message="assert ['unknown mai...', 'custom']&quot;] == []&#10;  &#10;  Left contains 3 more items, first extra item: 'unknown main-model image capability: expected ValueError, but no exception was raised'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10c050850&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-1569/test_unknown_vision_model_and_0')
+
+    def test_unknown_vision_model_and_capability_fail_closed(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+    ) -&gt; None:
+        from agent import image_routing
+        from api import model_config
+
+        failures: list[str] = []
+        monkeypatch.setattr(
+            image_routing,
+            "_lookup_supports_vision",
+            lambda provider, model, cfg=None: None,
+        )
+        failure = _value_error_failure(
+            "unknown main-model image capability",
+            lambda: image_routing.decide_image_input_mode(
+                "unknown-provider",
+                "unknown-main-model",
+                {},
+            ),
+        )
+        if failure:
+            failures.append(failure)
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(model_config, "_get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(model_config, "reload_config", lambda: None)
+        monkeypatch.setattr(model_config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(model_config, "_invalidate_vision_verification", lambda: None)
+        monkeypatch.setattr(model_config, "get_vision_config", lambda: {"ok": True})
+
+        saved_providers: list[str] = []
+        original_save = model_config._save_yaml_config_file
+
+        def record_save(path: Any, data: dict[str, Any]) -&gt; None:
+            vision = (data.get("auxiliary") or {}).get("vision") or {}
+            saved_providers.append(str(vision.get("provider") or ""))
+            original_save(path, data)
+
+        monkeypatch.setattr(model_config, "_save_yaml_config_file", record_save)
+
+        failure = _value_error_failure(
+            "unknown ZAI vision model",
+            lambda: model_config.set_vision_config(
+                {"provider": "zai", "model": "unknown-zai-vision-model"}
+            ),
+        )
+        if failure:
+            failures.append(failure)
+
+        try:
+            model_config.set_vision_config(
+                {
+                    "provider": "custom",
+                    "model": "arbitrary-private-vision-model",
+                    "base_url": "https://vision.example.com/v1",
+                }
+            )
+        except ValueError as exc:
+            failures.append(f"generic custom model was incorrectly rejected: {exc}")
+
+        if saved_providers != ["custom"]:
+            failures.append(
+                f"unexpected save-before-validation providers: {saved_providers!r}"
+            )
+
+&gt;       assert failures == []
+E       assert ['unknown mai...', 'custom']"] == []
+E
+E         Left contains 3 more items, first extra item: 'unknown main-model image capability: expected ValueError, but no exception was raised'
+E         Use -v to get more diff
+
+tests/agent/test_provider_fail_closed_contract.py:387: AssertionError</failure></testcase></testsuite></testsuites>

@@ -96,7 +96,8 @@ class TestDecideImageInputMode:
 
     def test_auto_with_unknown_model(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
-            assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
+            with pytest.raises(ValueError, match="capability is unknown"):
+                decide_image_input_mode("openrouter", "brand-new-slug", {})
 
     def test_auto_respects_aux_vision_override_even_for_vision_model(self):
         """If the user configured a dedicated vision backend, don't bypass it."""
@@ -276,9 +277,10 @@ class TestAutoModeRespectsOverride:
             assert decide_image_input_mode("custom", "some-text-only", cfg) == "text"
 
     def test_auto_text_for_custom_with_no_override(self):
-        # Unchanged baseline: unknown custom model → text.
+        # Unknown custom capability must not be guessed as native or text.
         with patch("agent.models_dev.get_model_capabilities", return_value=None):
-            assert decide_image_input_mode("custom", "unknown", {}) == "text"
+            with pytest.raises(ValueError, match="capability is unknown"):
+                decide_image_input_mode("custom", "unknown", {})
 
     def test_explicit_aux_vision_override_still_wins(self):
         # If the user has configured a dedicated vision aux backend, respect

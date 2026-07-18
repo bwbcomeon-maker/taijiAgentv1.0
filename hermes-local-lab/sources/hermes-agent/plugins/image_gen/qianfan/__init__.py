@@ -70,7 +70,11 @@ class QianfanImageGenProvider(ImageGenProvider):
     def _model(self, requested: Any = "") -> str:
         model = str(requested or "").strip()
         ids = {item["id"] for item in self.list_models()}
-        return model if model in ids else DEFAULT_MODEL
+        if not model:
+            return DEFAULT_MODEL
+        if model not in ids:
+            raise ValueError(f"Unsupported Qianfan image model: {model}")
+        return model
 
     def generate(
         self,
@@ -79,7 +83,18 @@ class QianfanImageGenProvider(ImageGenProvider):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         aspect = normalized_aspect(aspect_ratio)
-        model = self._model(kwargs.get("model"))
+        requested_model = str(kwargs.get("model") or "").strip()
+        try:
+            model = self._model(requested_model)
+        except ValueError:
+            return error_response(
+                error="Unsupported Qianfan image model.",
+                error_type="invalid_argument",
+                provider=self.name,
+                model=requested_model,
+                prompt=str(prompt or "").strip(),
+                aspect_ratio=aspect,
+            )
         prompt, prompt_error = validate_prompt(prompt, provider=self.name, model=model, aspect_ratio=aspect)
         if prompt_error:
             return prompt_error

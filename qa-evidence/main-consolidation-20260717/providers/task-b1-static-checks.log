@@ -1,0 +1,5 @@
+git diff --check
+untracked whitespace check
+no trailing whitespace
+sensitive literal scan
+no credential-shaped secret or private hostname literal

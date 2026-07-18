@@ -67,7 +67,13 @@ def _load_image_gen_config() -> Dict[str, Any]:
 
 def _resolve_model(explicit: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
     """Resolve the Doubao model id from explicit input, env, config, or default."""
-    candidates: list[Any] = [explicit, os.environ.get("DOUBAO_IMAGE_MODEL")]
+    explicit_model = str(explicit or "").strip()
+    if explicit_model:
+        if explicit_model not in _MODELS:
+            raise ValueError(f"Unsupported Doubao image model: {explicit_model}")
+        return explicit_model, _MODELS[explicit_model]
+
+    candidates: list[Any] = [os.environ.get("DOUBAO_IMAGE_MODEL")]
     cfg = _load_image_gen_config()
     doubao_cfg = cfg.get("doubao") if isinstance(cfg.get("doubao"), dict) else {}
     if isinstance(doubao_cfg, dict):
@@ -77,8 +83,11 @@ def _resolve_model(explicit: Optional[str] = None) -> Tuple[str, Dict[str, Any]]
     for candidate in candidates:
         if isinstance(candidate, str):
             model_id = candidate.strip()
+            if not model_id:
+                continue
             if model_id in _MODELS:
                 return model_id, _MODELS[model_id]
+            raise ValueError(f"Unsupported Doubao image model: {model_id}")
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
@@ -149,7 +158,18 @@ class DoubaoImageGenProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
-        model_id, _meta = _resolve_model(kwargs.get("model"))
+        requested_model = str(kwargs.get("model") or "").strip()
+        try:
+            model_id, _meta = _resolve_model(requested_model)
+        except ValueError:
+            return error_response(
+                error="Unsupported Doubao image model.",
+                error_type="invalid_argument",
+                provider=self.name,
+                model=requested_model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
 
         if not prompt:
             return error_response(

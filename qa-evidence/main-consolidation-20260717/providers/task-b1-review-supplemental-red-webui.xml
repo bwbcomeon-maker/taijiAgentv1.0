@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="4" time="2.248" timestamp="2026-07-18T18:32:16.427787+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.test_model_config_api" name="test_unknown_image_model_is_rejected_before_provider_rows_or_environment" time="1.481"><failure message="AssertionError: assert ['dashscope'] == []&#10;  &#10;  Left contains one more item: 'dashscope'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10ddd7710&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-1578/test_unknown_image_model_is_re0')
+
+    def test_unknown_image_model_is_rejected_before_provider_rows_or_environment(
+        monkeypatch, tmp_path
+    ):
+        _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+        provider_row_calls = []
+        environment_calls = []
+        env_write_calls = []
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            lambda active: (
+                provider_row_calls.append(active)
+                or [_dashscope_image_provider_row()]
+            ),
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_key_status_for_env",
+            lambda env_var: (
+                environment_calls.append(env_var)
+                or {"configured": False, "source": "none", "env_var": env_var}
+            ),
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_write_env_file",
+            lambda *args, **kwargs: env_write_calls.append((args, kwargs)),
+        )
+
+        with pytest.raises(ValueError, match="unknown image generation model"):
+            model_config.set_image_gen_config(
+                {
+                    "provider": "dashscope",
+                    "model": "vendor-unknown-image-model",
+                    "api_key": "must-not-be-written",
+                }
+            )
+
+&gt;       assert provider_row_calls == []
+E       AssertionError: assert ['dashscope'] == []
+E
+E         Left contains one more item: 'dashscope'
+E         Use -v to get more diff
+
+tests/test_model_config_api.py:3010: AssertionError</failure></testcase><testcase classname="tests.test_model_config_api" name="test_named_custom_image_and_vision_save_reject_unlisted_models_without_writing" time="0.023"><failure message="Failed: DID NOT RAISE &lt;class 'ValueError'&gt;">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10ddc05d0&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-1578/test_named_custom_image_and_vi0')
+
+    def test_named_custom_image_and_vision_save_reject_unlisted_models_without_writing(
+        monkeypatch, tmp_path
+    ):
+        _use_home(monkeypatch, tmp_path)
+        original = {
+            "custom_image_providers": [
+                {
+                    "id": "router",
+                    "name": "Router Images",
+                    "base_url": "https://images.example.com/v1",
+                    "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                    "models": ["router-image-v1"],
+                    "default_model": "router-image-v1",
+                    "allow_custom_model_id": "false",
+                }
+            ],
+            "custom_vision_providers": [
+                {
+                    "id": "router",
+                    "name": "Router Vision",
+                    "base_url": "https://vision.example.com/v1",
+                    "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                    "models": ["router-vl-v1"],
+                    "default_model": "router-vl-v1",
+                    "transport": "openai_chat_completions",
+                }
+            ],
+        }
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(original, allow_unicode=True),
+            encoding="utf-8",
+        )
+        env_write_calls = []
+        monkeypatch.setattr(
+            model_config,
+            "_write_env_file",
+            lambda *args, **kwargs: env_write_calls.append((args, kwargs)),
+        )
+
+&gt;       with pytest.raises(ValueError, match="unknown custom image"):
+E       Failed: DID NOT RAISE &lt;class 'ValueError'&gt;
+
+tests/test_model_config_api.py:3054: Failed</failure></testcase><testcase classname="tests.test_model_config_api" name="test_named_custom_image_save_revalidates_after_concurrent_delete" time="0.004"><failure message="Failed: DID NOT RAISE &lt;class 'ValueError'&gt;">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10ddd7290&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-1578/test_named_custom_image_save_r0')
+
+    def test_named_custom_image_save_revalidates_after_concurrent_delete(
+        monkeypatch, tmp_path
+    ):
+        _use_home(monkeypatch, tmp_path)
+        original = {
+            "custom_image_providers": [
+                {
+                    "id": "router",
+                    "name": "Router Images",
+                    "base_url": "https://images.example.com/v1",
+                    "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                    "models": ["router-image-v1"],
+                    "default_model": "router-image-v1",
+                    "allow_custom_model_id": False,
+                }
+            ]
+        }
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(original, allow_unicode=True),
+            encoding="utf-8",
+        )
+        stale_validation_complete = threading.Event()
+        continue_save = threading.Event()
+        row_calls = {"count": 0}
+        custom_row = {
+            "id": "custom:router",
+            "name": "Router Images",
+            "custom": True,
+            "domestic": False,
+            "integration_status": "custom",
+            "models": [{"id": "router-image-v1"}],
+            "default_model": "router-image-v1",
+            "allow_custom_model_id": False,
+            "credential_fields": [],
+            "endpoint_fields": [],
+        }
+
+        def pause_after_stale_validation(_active):
+            row_calls["count"] += 1
+            if row_calls["count"] == 1:
+                stale_validation_complete.set()
+                assert continue_save.wait(timeout=3)
+            return [custom_row]
+
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            pause_after_stale_validation,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            save_future = pool.submit(
+                model_config.set_image_gen_config,
+                {"provider": "custom:router", "model": "router-image-v1"},
+            )
+            assert stale_validation_complete.wait(timeout=2)
+            delete_future = pool.submit(
+                model_config.delete_custom_image_provider_config,
+                "router",
+            )
+            delete_future.result(timeout=3)
+            continue_save.set()
+&gt;           with pytest.raises(
+                ValueError,
+                match="unknown image generation provider",
+            ):
+E           Failed: DID NOT RAISE &lt;class 'ValueError'&gt;
+
+tests/test_model_config_api.py:3137: Failed</failure></testcase><testcase classname="tests.test_model_config_api" name="test_named_custom_vision_save_revalidates_after_concurrent_delete" time="0.011"><failure message="Failed: DID NOT RAISE &lt;class 'ValueError'&gt;">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10dd99e90&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-1578/test_named_custom_vision_save_0')
+
+    def test_named_custom_vision_save_revalidates_after_concurrent_delete(
+        monkeypatch, tmp_path
+    ):
+        from agent import custom_vision_providers
+
+        _use_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            model_config,
+            "get_vision_config",
+            lambda: {"ok": True},
+        )
+        original = {
+            "custom_vision_providers": [
+                {
+                    "id": "router",
+                    "name": "Router Vision",
+                    "base_url": "https://vision.example.com/v1",
+                    "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                    "models": ["router-vl-v1"],
+                    "default_model": "router-vl-v1",
+                    "transport": "openai_chat_completions",
+                }
+            ]
+        }
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(original, allow_unicode=True),
+            encoding="utf-8",
+        )
+        stale_validation_complete = threading.Event()
+        continue_save = threading.Event()
+        original_find = custom_vision_providers.find_custom_vision_provider_entry
+        find_calls = {"count": 0}
+
+        def pause_after_stale_validation(provider_id, config_data=None):
+            entry = original_find(provider_id, config_data)
+            find_calls["count"] += 1
+            if config_data is None and find_calls["count"] == 1:
+                stale_validation_complete.set()
+                assert continue_save.wait(timeout=3)
+            return entry
+
+        monkeypatch.setattr(
+            custom_vision_providers,
+            "find_custom_vision_provider_entry",
+            pause_after_stale_validation,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            save_future = pool.submit(
+                model_config.set_vision_config,
+                {"provider": "custom:router", "model": "router-vl-v1"},
+            )
+            assert stale_validation_complete.wait(timeout=2)
+            delete_future = pool.submit(
+                model_config.delete_custom_vision_provider_config,
+                "router",
+            )
+            delete_future.result(timeout=3)
+            continue_save.set()
+&gt;           with pytest.raises(ValueError, match="unknown vision provider"):
+E           Failed: DID NOT RAISE &lt;class 'ValueError'&gt;
+
+tests/test_model_config_api.py:3207: Failed</failure></testcase></testsuite></testsuites>

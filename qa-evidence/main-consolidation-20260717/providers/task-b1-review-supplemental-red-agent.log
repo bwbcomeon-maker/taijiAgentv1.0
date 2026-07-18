@@ -1,0 +1,98 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.15, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-agent
+configfile: pyproject.toml
+plugins: anyio-4.12.1, timeout-2.4.0, asyncio-1.3.0
+timeout: 30.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2 items
+
+tests/agent/test_provider_fail_closed_contract.py .F                     [100%]
+
+=================================== FAILURES ===================================
+_______ test_custom_image_model_requires_explicit_allow_custom_model_id ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107d62690>
+
+    def test_custom_image_model_requires_explicit_allow_custom_model_id(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent import custom_image_providers
+
+        failures: list[str] = []
+        env_calls: list[str] = []
+        http_calls: list[str] = []
+        monkeypatch.setattr(
+            custom_image_providers,
+            "os",
+            SimpleNamespace(
+                getenv=lambda key, default="": env_calls.append(key) or default,
+            ),
+        )
+        monkeypatch.setattr(
+            custom_image_providers.requests,
+            "post",
+            lambda *args, **kwargs: http_calls.append("post"),
+        )
+
+        strict_values = (
+            False,
+            "false",
+            "0",
+            0,
+            1,
+            {},
+            [],
+            ("true",),
+        )
+        for raw_value in strict_values:
+            normalized = custom_image_providers.normalize_custom_image_provider_entry(
+                _provider_entry(allow_custom_model_id=raw_value)
+            )
+            if normalized["allow_custom_model_id"] is not False:
+                failures.append(
+                    f"malformed opt-in {raw_value!r} normalized to "
+                    f"{normalized['allow_custom_model_id']!r}"
+                )
+            strict_provider = custom_image_providers.ConfigurableOpenAIImageProvider(
+                normalized
+            )
+            result = strict_provider.generate(
+                "draw a contract test",
+                model="unlisted-image-model",
+            )
+            if result.get("success") is not False:
+                failures.append(
+                    f"malformed opt-in {raw_value!r} did not fail publicly"
+                )
+            if result.get("error_type") != "invalid_argument":
+                failures.append(
+                    f"malformed opt-in {raw_value!r} returned "
+                    f"{result.get('error_type')!r}"
+                )
+            if result.get("model") != "unlisted-image-model":
+                failures.append(
+                    f"malformed opt-in {raw_value!r} changed model to "
+                    f"{result.get('model')!r}"
+                )
+
+        opt_in_provider = custom_image_providers.ConfigurableOpenAIImageProvider(
+            _provider_entry(allow_custom_model_id=True)
+        )
+        selected = opt_in_provider._model("unlisted-image-model")
+        if selected != "unlisted-image-model":
+            failures.append(f"opt-in custom provider changed model to {selected!r}")
+
+>       assert env_calls == []
+E       AssertionError: assert ['TAIJI_IMAGE...UTER_API_KEY'] == []
+E
+E         Left contains 4 more items, first extra item: 'TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY'
+E         Use -v to get more diff
+
+tests/agent/test_provider_fail_closed_contract.py:364: AssertionError
+- generated xml file: /Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/qa-evidence/main-consolidation-20260717/providers/task-b1-review-supplemental-red-agent.xml -
+=========================== short test summary info ============================
+FAILED tests/agent/test_provider_fail_closed_contract.py::test_custom_image_model_requires_explicit_allow_custom_model_id
+========================= 1 failed, 1 passed in 0.15s ==========================

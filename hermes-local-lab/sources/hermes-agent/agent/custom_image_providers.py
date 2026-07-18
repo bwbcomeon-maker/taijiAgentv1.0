@@ -137,6 +137,7 @@ def normalize_custom_image_provider_entry(entry: dict[str, Any]) -> dict[str, An
         "name": str(entry.get("name") or provider_id).strip()[:80],
         "base_url": _normalize_base_url(entry.get("base_url")),
         "api_key_env": str(entry.get("api_key_env") or custom_image_provider_env_var(provider_id)).strip(),
+        "allow_custom_model_id": entry.get("allow_custom_model_id") is True,
         "models": models,
         "default_model": default_model,
         "size_map": _normalize_size_map(entry.get("size_map")),
@@ -176,6 +177,7 @@ def custom_image_provider_public_row(entry: dict[str, Any], *, active_provider: 
         "base_url_configured": True,
         "response_format": normalized["response_format"],
         "timeout_seconds": normalized["timeout_seconds"],
+        "allow_custom_model_id": normalized["allow_custom_model_id"],
     }
 
 
@@ -248,6 +250,7 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
                     "url": "",
                 }
             ],
+            "allow_custom_model_id": self._entry["allow_custom_model_id"],
         }
 
     def _endpoint(self) -> str:
@@ -258,9 +261,14 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
 
     def _model(self, requested: Any = "") -> str:
         model = str(requested or "").strip()
-        if model and model in self._entry["models"]:
-            return model
-        return self._entry["default_model"]
+        if not model:
+            return self._entry["default_model"]
+        if (
+            model not in self._entry["models"]
+            and not self._entry["allow_custom_model_id"]
+        ):
+            raise ValueError(f"Unsupported custom image model: {model}")
+        return model
 
     def _cache_prefix(self, model: str) -> str:
         token = re.sub(r"[^A-Za-z0-9_.-]+", "_", model).strip("._-")[:80] or "model"
@@ -274,8 +282,19 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
-        model = self._model(kwargs.get("model"))
         provider = self.name
+        requested_model = str(kwargs.get("model") or "").strip()
+        try:
+            model = self._model(requested_model)
+        except ValueError:
+            return error_response(
+                error="Unsupported custom image model.",
+                error_type="invalid_argument",
+                provider=provider,
+                model=requested_model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         if not prompt:
             return error_response(
                 error="Prompt is required and must be a non-empty string",

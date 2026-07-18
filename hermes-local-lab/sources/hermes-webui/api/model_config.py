@@ -153,12 +153,41 @@ _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
         "transport": "openai_chat_completions",
         "default_model": "",
         "models": [],
+        "allow_custom_model_id": True,
         "requires_base_url": True,
         "endpoint_fields": [
             {"name": "base_url", "label": "Base URL", "required": True, "secret": False, "type": "url", "placeholder": "https://api.example.com/v1", "description": "OpenAI 兼容视图端点。"}
         ],
     },
 }
+
+
+def _validate_provider_model_choice(
+    provider_id: str,
+    model_id: str,
+    provider_meta: dict[str, Any],
+    *,
+    capability: str,
+) -> str:
+    """Validate a saved model against the provider's explicit model contract."""
+    allowed_models = {
+        str(row.get("id") or "").strip()
+        for row in (provider_meta.get("models") or [])
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    if model_id in allowed_models or (
+        model_id and provider_meta.get("allow_custom_model_id") is True
+    ):
+        return model_id
+    if capability == "vision" and provider_id == "alibaba":
+        raise ValueError(f"unknown Alibaba vision model: {model_id}")
+    if capability == "vision" and provider_id.startswith("custom:"):
+        raise ValueError(f"unknown custom vision model: {model_id}")
+    if capability == "image generation" and provider_id.startswith("custom:"):
+        raise ValueError(f"unknown custom image model: {model_id}")
+    raise ValueError(f"unknown {capability} model for {provider_id}: {model_id}")
+
+
 def _validate_provider_credential_secret_env(row: dict[str, Any]) -> str:
     expected = credential_secret_env(row.get("id"))
     actual = str(row.get("secret_env") or "").strip()
@@ -661,6 +690,71 @@ def _internal_image_gen_provider_id(provider_id: str) -> str:
     return _IMAGE_GEN_INTERNAL_PROVIDER_IDS.get(provider, provider)
 
 
+def _image_gen_provider_model_contract(
+    requested_provider_id: str,
+    *,
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the save-time model contract without reading secrets or readiness."""
+    public_id = str(requested_provider_id or "").strip().lower()
+    provider_id = _internal_image_gen_provider_id(public_id)
+    if (
+        public_id in _BLOCKED_IMAGE_GEN_PROVIDER_LABELS
+        or provider_id in _BLOCKED_IMAGE_GEN_PROVIDER_LABELS
+    ):
+        raise ValueError(
+            "生成图片主配置只支持中国可用的稳定 Provider，请切换到国产生图服务。"
+        )
+    if provider_id in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS:
+        fallback = _IMAGE_GEN_FALLBACK_META.get(provider_id) or {}
+        return {
+            "id": public_id,
+            "models": list(fallback.get("models") or []),
+            "default_model": str(fallback.get("default_model") or "").strip(),
+            "allow_custom_model_id": False,
+            "custom": False,
+            "domestic": True,
+            "integration_status": "stable",
+        }
+    if public_id.startswith("custom:"):
+        try:
+            from agent.custom_image_providers import (
+                custom_image_provider_name,
+                load_custom_image_provider_entries,
+            )
+        except ImportError as exc:
+            raise ValueError(
+                f"unknown image generation provider: {public_id}"
+            ) from exc
+        data = (
+            config_data
+            if isinstance(config_data, dict)
+            else _load_yaml_config_file(_get_config_path())
+        )
+        entry = next(
+            (
+                item
+                for item in load_custom_image_provider_entries(data)
+                if custom_image_provider_name(item.get("id")) == public_id
+            ),
+            None,
+        )
+        if entry is None:
+            raise ValueError(f"unknown image generation provider: {public_id}")
+        return {
+            "id": public_id,
+            "models": [{"id": item, "label": item} for item in entry["models"]],
+            "default_model": str(entry.get("default_model") or "").strip(),
+            "allow_custom_model_id": (
+                entry.get("allow_custom_model_id") is True
+            ),
+            "custom": True,
+            "domestic": False,
+            "integration_status": "custom",
+        }
+    raise ValueError(f"unknown image generation provider: {public_id}")
+
+
 def _image_gen_credential_fields(
     *,
     schema: dict[str, Any],
@@ -1019,6 +1113,9 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
                 "domestic": domestic,
                 "integration_status": integration_status,
                 "policy_blocked": False,
+                "allow_custom_model_id": (
+                    schema.get("allow_custom_model_id") is True
+                ),
                 **contract,
             }
         )
@@ -2243,7 +2340,8 @@ def get_vision_config() -> dict[str, Any]:
 
 def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     provider_id = str(body.get("provider") or "").strip().lower()
-    model_id = str(body.get("model") or "").strip()
+    requested_model_id = str(body.get("model") or "").strip()
+    model_id = requested_model_id
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = body.get("api_key")
     credential_ref = str(body.get("credential_ref") or "").strip()
@@ -2293,14 +2391,13 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             model_id = str((models[0] or {}).get("id") or "").strip()
     if not model_id:
         raise ValueError("model is required")
+    _validate_provider_model_choice(
+        provider_id,
+        model_id,
+        meta,
+        capability="vision",
+    )
     if provider_id == "alibaba":
-        allowed_models = {
-            str(row.get("id") or "").strip()
-            for row in meta.get("models", [])
-            if isinstance(row, dict)
-        }
-        if model_id not in allowed_models:
-            raise ValueError(f"unknown Alibaba vision model: {model_id}")
         endpoint_mode = str(body.get("endpoint_mode") or "public").strip().lower()
         region = str(body.get("region") or "cn-beijing").strip().lower()
         workspace_id = str(body.get("workspace_id") or "").strip().lower()
@@ -2322,8 +2419,6 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     elif named_custom_entry is not None:
         if api_key is not None and str(api_key).strip():
             raise ValueError("命名式外部识图密钥请在 Provider 管理中更新。")
-        if model_id not in named_custom_entry["models"]:
-            raise ValueError(f"unknown custom vision model: {model_id}")
     if bool(meta.get("requires_base_url")) and not base_url:
         raise ValueError("base_url is required for custom vision provider")
 
@@ -2331,6 +2426,43 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
+            if provider_id.startswith("custom:"):
+                locked_custom_entry = find_custom_vision_provider_entry(
+                    provider_id,
+                    config_data,
+                )
+                if locked_custom_entry is None:
+                    raise ValueError(f"unknown vision provider: {provider_id}")
+                locked_meta = {
+                    "default_model": locked_custom_entry["default_model"],
+                    "models": [
+                        {"id": item}
+                        for item in locked_custom_entry["models"]
+                    ],
+                }
+                locked_model_id = requested_model_id
+                if not locked_model_id:
+                    locked_model_id = str(
+                        locked_meta.get("default_model") or ""
+                    ).strip()
+                    locked_models = (
+                        locked_meta.get("models")
+                        if isinstance(locked_meta.get("models"), list)
+                        else []
+                    )
+                    if not locked_model_id and locked_models:
+                        locked_model_id = str(
+                            (locked_models[0] or {}).get("id") or ""
+                        ).strip()
+                if not locked_model_id:
+                    raise ValueError("model is required")
+                model_id = _validate_provider_model_choice(
+                    provider_id,
+                    locked_model_id,
+                    locked_meta,
+                    capability="vision",
+                )
+                named_custom_entry = locked_custom_entry
             original_config = copy.deepcopy(config_data)
             if provider_id == "alibaba" and not credential_ref and not str(api_key or "").strip():
                 credential_ref = default_credential_ref(provider_id, config_data=config_data)
@@ -3022,7 +3154,8 @@ def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
 def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     requested_provider_id = str(body.get("provider") or "").strip().lower()
     provider_id = _internal_image_gen_provider_id(requested_provider_id)
-    model_id = str(body.get("model") or "").strip()
+    requested_model_id = str(body.get("model") or "").strip()
+    model_id = requested_model_id
     api_key = body.get("api_key")
     credential_ref = str(body.get("credential_ref") or "").strip()
     credentials = body.get("credentials")
@@ -3032,6 +3165,25 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("provider is required")
     if credential_ref and provider_id != "dashscope":
         raise ValueError("credential_ref is only supported for DashScope image generation")
+
+    model_contract = _image_gen_provider_model_contract(requested_provider_id)
+    if not model_id:
+        model_id = str(model_contract.get("default_model") or "").strip()
+        models = (
+            model_contract.get("models")
+            if isinstance(model_contract.get("models"), list)
+            else []
+        )
+        if not model_id and models:
+            model_id = str((models[0] or {}).get("id") or "").strip()
+    if not model_id:
+        raise ValueError("model is required")
+    _validate_provider_model_choice(
+        requested_provider_id,
+        model_id,
+        model_contract,
+        capability="image generation",
+    )
 
     rows = _image_gen_provider_rows(provider_id)
     selected = next((row for row in rows if row.get("id") == requested_provider_id), None)
@@ -3049,11 +3201,6 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
         not selected_custom and (not selected_domestic or selected_status != "stable")
     ):
         raise ValueError("生成图片主配置只支持中国可用的稳定 Provider，请切换到国产生图服务。")
-    if not model_id:
-        model_id = str(selected.get("default_model") or "").strip()
-        models = selected.get("models") if isinstance(selected.get("models"), list) else []
-        if not model_id and models:
-            model_id = str((models[0] or {}).get("id") or "").strip()
 
     credential_fields = selected.get("credential_fields") if isinstance(selected.get("credential_fields"), list) else []
     endpoint_fields = selected.get("endpoint_fields") if isinstance(selected.get("endpoint_fields"), list) else []
@@ -3112,6 +3259,32 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     with credential_transaction():
         with _cfg_lock:
             config_data = _load_yaml_config_file(config_path)
+            locked_model_contract = _image_gen_provider_model_contract(
+                requested_provider_id,
+                config_data=config_data,
+            )
+            locked_model_id = requested_model_id
+            if not locked_model_id:
+                locked_model_id = str(
+                    locked_model_contract.get("default_model") or ""
+                ).strip()
+                locked_models = (
+                    locked_model_contract.get("models")
+                    if isinstance(locked_model_contract.get("models"), list)
+                    else []
+                )
+                if not locked_model_id and locked_models:
+                    locked_model_id = str(
+                        (locked_models[0] or {}).get("id") or ""
+                    ).strip()
+            if not locked_model_id:
+                raise ValueError("model is required")
+            model_id = _validate_provider_model_choice(
+                requested_provider_id,
+                locked_model_id,
+                locked_model_contract,
+                capability="image generation",
+            )
             original_config = copy.deepcopy(config_data)
             if provider_id == "dashscope" and not credential_ref and not inline_secret_supplied:
                 credential_ref = default_credential_ref(provider_id, config_data=config_data)

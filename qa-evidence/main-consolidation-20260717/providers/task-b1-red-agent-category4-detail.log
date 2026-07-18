@@ -1,0 +1,196 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.15, pytest-9.0.2, pluggy-1.6.0 -- /Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-agent
+configfile: pyproject.toml
+plugins: anyio-4.12.1, timeout-2.4.0, asyncio-1.3.0
+timeout: 30.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/agent/test_provider_fail_closed_contract.py::test_builtin_unknown_image_models_fail_before_credential_lookup FAILED [100%]
+
+=================================== FAILURES ===================================
+_______ test_builtin_unknown_image_models_fail_before_credential_lookup ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10930c790>
+
+    def test_builtin_unknown_image_models_fail_before_credential_lookup(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from plugins.image_gen import dashscope, doubao, minimax_image, qianfan
+        from plugins.image_gen import zhipu_image
+
+        failures: list[str] = []
+        unknown_model = "vendor-unknown-image-model"
+
+        cases: tuple[
+            tuple[
+                str,
+                Any,
+                Any,
+                Callable[[Any, str], Any],
+            ],
+            ...,
+        ] = (
+            (
+                "dashscope",
+                dashscope,
+                dashscope.DashScopeQwenImageProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+            (
+                "doubao",
+                doubao,
+                doubao.DoubaoImageGenProvider(),
+                lambda _provider, model: doubao._resolve_model(model),
+            ),
+            (
+                "qianfan",
+                qianfan,
+                qianfan.QianfanImageGenProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+            (
+                "zhipu-image",
+                zhipu_image,
+                zhipu_image.ZhipuImageGenProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+            (
+                "minimax-image",
+                minimax_image,
+                minimax_image.MinimaxImageGenProvider(),
+                lambda provider, model: provider._model(model),
+            ),
+        )
+
+        for label, module, provider, resolver in cases:
+            credential_calls: list[str] = []
+            http_calls: list[str] = []
+
+            def record_http(*args: Any, **kwargs: Any) -> None:
+                del args, kwargs
+                http_calls.append("post")
+                raise AssertionError("unknown model reached HTTP")
+
+            monkeypatch.setattr(module.requests, "post", record_http)
+            if label == "dashscope":
+                monkeypatch.setattr(
+                    module,
+                    "_resolve_api_key",
+                    lambda *args, **kwargs: credential_calls.append("secret") or "",
+                )
+            elif label == "doubao":
+                monkeypatch.setattr(module, "_load_image_gen_config", lambda: {})
+                monkeypatch.setattr(
+                    module,
+                    "os",
+                    SimpleNamespace(environ=_RecordingEnvironment(credential_calls)),
+                )
+            else:
+                monkeypatch.setattr(
+                    module,
+                    "missing_required",
+                    lambda *args, **kwargs: credential_calls.append("required")
+                    or ["forbidden"],
+                )
+                monkeypatch.setattr(
+                    module,
+                    "env_value",
+                    lambda *args, **kwargs: credential_calls.append("secret") or "",
+                )
+
+            failure = _value_error_failure(
+                f"{label} resolver",
+                lambda resolver=resolver, provider=provider: resolver(
+                    provider,
+                    unknown_model,
+                ),
+            )
+            if failure:
+                failures.append(failure)
+
+            try:
+                result = provider.generate("draw a test image", model=unknown_model)
+            except Exception as exc:  # noqa: BLE001 - public seam must be structured
+                failures.append(
+                    f"{label} generate: expected structured error, got "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                if result.get("success") is not False:
+                    failures.append(f"{label} generate: did not fail")
+                if result.get("error_type") != "invalid_argument":
+                    failures.append(
+                        f"{label} generate: expected invalid_argument, got "
+                        f"{result.get('error_type')!r}"
+                    )
+                if result.get("model") != unknown_model:
+                    failures.append(
+                        f"{label} generate: changed model to {result.get('model')!r}"
+                    )
+            if credential_calls:
+                failures.append(
+                    f"{label}: credential/environment seam called {credential_calls!r}"
+                )
+            if http_calls:
+                failures.append(f"{label}: HTTP seam called {http_calls!r}")
+
+>       assert failures == []
+E       assert ['doubao resolver: expected ValueError, but no exception was raised', "doubao generate: expected invalid_argument, got 'auth_required'", "doubao generate: changed model to 'doubao-seedream-5-0-260128'", "doubao: credential/environment seam called ['DOUBAO_IMAGE_MODEL', 'DOUBAO_IMAGE_MODEL', 'ARK_API_KEY']", 'qianfan resolver: expected ValueError, but no exception was raised', "qianfan generate: expected invalid_argument, got 'auth_required'", "qianfan generate: changed model to 'qwen-image'", "qianfan: credential/environment seam called ['required']", 'zhipu-image resolver: expected ValueError, but no exception was raised', "zhipu-image generate: expected invalid_argument, got 'auth_required'", "zhipu-image generate: changed model to 'glm-image'", "zhipu-image: credential/environment seam called ['required']", 'minimax-image resolver: expected ValueError, but no exception was raised', "minimax-image generate: expected invalid_argument, got 'auth_required'", "minimax-image generate: changed model to 'image-01'", "minimax-image: credential/environment seam called ['required']"] == []
+E
+E         Left contains 16 more items, first extra item: 'doubao resolver: expected ValueError, but no exception was raised'
+E
+E         Full diff:
+E         - []
+E         + [
+E         +     'doubao resolver: expected ValueError, but no exception was raised',
+E         +     "doubao generate: expected invalid_argument, got 'auth_required'",
+E         +     "doubao generate: changed model to 'doubao-seedream-5-0-260128'",
+E         +     "doubao: credential/environment seam called ['DOUBAO_IMAGE_MODEL', "
+E         +     "'DOUBAO_IMAGE_MODEL', 'ARK_API_KEY']",
+E         +     'qianfan resolver: expected ValueError, but no exception was raised',
+E         +     "qianfan generate: expected invalid_argument, got 'auth_required'",
+E         +     "qianfan generate: changed model to 'qwen-image'",
+E         +     "qianfan: credential/environment seam called ['required']",
+E         +     'zhipu-image resolver: expected ValueError, but no exception was raised',
+E         +     "zhipu-image generate: expected invalid_argument, got 'auth_required'",
+E         +     "zhipu-image generate: changed model to 'glm-image'",
+E         +     "zhipu-image: credential/environment seam called ['required']",
+E         +     'minimax-image resolver: expected ValueError, but no exception was raised',
+E         +     "minimax-image generate: expected invalid_argument, got 'auth_required'",
+E         +     "minimax-image generate: changed model to 'image-01'",
+E         +     "minimax-image: credential/environment seam called ['required']",
+E         + ]
+
+tests/agent/test_provider_fail_closed_contract.py:273: AssertionError
+=========================== short test summary info ============================
+FAILED tests/agent/test_provider_fail_closed_contract.py::test_builtin_unknown_image_models_fail_before_credential_lookup - assert ['doubao resolver: expected ValueError, but no exception was raised', "doubao generate: expected invalid_argument, got 'auth_required'", "doubao generate: changed model to 'doubao-seedream-5-0-260128'", "doubao: credential/environment seam called ['DOUBAO_IMAGE_MODEL', 'DOUBAO_IMAGE_MODEL', 'ARK_API_KEY']", 'qianfan resolver: expected ValueError, but no exception was raised', "qianfan generate: expected invalid_argument, got 'auth_required'", "qianfan generate: changed model to 'qwen-image'", "qianfan: credential/environment seam called ['required']", 'zhipu-image resolver: expected ValueError, but no exception was raised', "zhipu-image generate: expected invalid_argument, got 'auth_required'", "zhipu-image generate: changed model to 'glm-image'", "zhipu-image: credential/environment seam called ['required']", 'minimax-image resolver: expected ValueError, but no exception was raised', "minimax-image generate: expected invalid_argument, got 'auth_required'", "minimax-image generate: changed model to 'image-01'", "minimax-image: credential/environment seam called ['required']"] == []
+
+  Left contains 16 more items, first extra item: 'doubao resolver: expected ValueError, but no exception was raised'
+
+  Full diff:
+  - []
+  + [
+  +     'doubao resolver: expected ValueError, but no exception was raised',
+  +     "doubao generate: expected invalid_argument, got 'auth_required'",
+  +     "doubao generate: changed model to 'doubao-seedream-5-0-260128'",
+  +     "doubao: credential/environment seam called ['DOUBAO_IMAGE_MODEL', "
+  +     "'DOUBAO_IMAGE_MODEL', 'ARK_API_KEY']",
+  +     'qianfan resolver: expected ValueError, but no exception was raised',
+  +     "qianfan generate: expected invalid_argument, got 'auth_required'",
+  +     "qianfan generate: changed model to 'qwen-image'",
+  +     "qianfan: credential/environment seam called ['required']",
+  +     'zhipu-image resolver: expected ValueError, but no exception was raised',
+  +     "zhipu-image generate: expected invalid_argument, got 'auth_required'",
+  +     "zhipu-image generate: changed model to 'glm-image'",
+  +     "zhipu-image: credential/environment seam called ['required']",
+  +     'minimax-image resolver: expected ValueError, but no exception was raised',
+  +     "minimax-image generate: expected invalid_argument, got 'auth_required'",
+  +     "minimax-image generate: changed model to 'image-01'",
+  +     "minimax-image: credential/environment seam called ['required']",
+  + ]
+============================== 1 failed in 0.15s ===============================

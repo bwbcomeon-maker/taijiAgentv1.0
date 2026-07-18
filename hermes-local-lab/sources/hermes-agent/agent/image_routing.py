@@ -23,13 +23,19 @@ In ``auto`` mode:
     backend for a reason (cost, quality, local-only, etc.).
   - Otherwise, if the active model reports ``supports_vision=True`` in its
     models.dev metadata, we attach natively.
-  - Otherwise (non-vision model, no explicit override), we fall back to text.
+  - If the active model reports ``supports_vision=False``, we use the text
+    pipeline.
+  - If capability resolution returns ``None``, routing fails closed with
+    ``ValueError`` instead of guessing.
 
 This keeps ``vision_analyze`` surfaced as a tool in every session — skills
 and agent flows that chain it (browser screenshots, deeper inspection of
 URL-referenced images, style-gating loops) keep working. The routing only
 affects *how user-attached images on the current turn* are presented to the
 main model.
+
+Real Provider verification remains gated to Task B3, and streaming entry
+points remain gated to Task B4; neither is enabled by this routing contract.
 """
 
 from __future__ import annotations
@@ -314,7 +320,11 @@ def decide_image_input_mode(
     supports = _lookup_supports_vision(provider, model, cfg)
     if supports is True:
         return "native"
-    return "text"
+    if supports is False:
+        return "text"
+    raise ValueError(
+        f"Image input capability is unknown for provider/model: {provider}/{model}"
+    )
 
 
 # Image size handling is REACTIVE rather than proactive: we attempt native

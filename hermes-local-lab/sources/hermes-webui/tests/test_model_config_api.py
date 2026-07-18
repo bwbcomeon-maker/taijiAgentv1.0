@@ -471,7 +471,7 @@ def test_image_endpoint_values_round_trip_unknown_schema_fields(monkeypatch, tmp
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     provider = {
         "id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable",
-        "default_model": "m", "models": [{"id": "m"}], "credential_fields": [],
+        "default_model": "qwen-image-2.0-pro", "models": [{"id": "qwen-image-2.0-pro"}], "credential_fields": [],
         "endpoint_fields": [
             {"name": "tenant", "required": True, "secret": False},
             {"name": "route", "required": False, "secret": False},
@@ -479,7 +479,7 @@ def test_image_endpoint_values_round_trip_unknown_schema_fields(monkeypatch, tmp
         ],
     }
     monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [provider])
-    model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"tenant": "tenant-a", "route": "green", "unsafe_token": "must-not-echo"}})
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "credentials": {"tenant": "tenant-a", "route": "green", "unsafe_token": "must-not-echo"}})
 
     result = model_config.get_image_gen_config()
 
@@ -489,16 +489,16 @@ def test_image_endpoint_values_round_trip_unknown_schema_fields(monkeypatch, tmp
 
 def test_endpoint_ownership_cleans_stale_fields_without_deleting_unowned_options(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
-    base = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "m", "models": [{"id": "m"}], "credential_fields": []}
+    base = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "qwen-image-2.0-pro", "models": [{"id": "qwen-image-2.0-pro"}], "credential_fields": []}
     active = {"row": dict(base, endpoint_fields=[{"name": "tenant", "required": False, "secret": False}, {"name": "route", "required": False, "secret": False}])}
     monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [active["row"]])
-    model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"tenant": "a", "route": "blue"}})
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "credentials": {"tenant": "a", "route": "blue"}})
     saved = _read_config(tmp_path)
     saved["image_gen"]["options"]["temperature"] = "0.3"
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(saved), encoding="utf-8")
     active["row"] = dict(base, endpoint_fields=[{"name": "region", "required": False, "secret": False}])
 
-    model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"region": "cn-beijing"}})
+    model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "credentials": {"region": "cn-beijing"}})
     image = _read_config(tmp_path)["image_gen"]
 
     assert image["options"] == {"temperature": "0.3", "region": "cn-beijing"}
@@ -523,9 +523,9 @@ def test_vision_endpoint_ownership_preserves_unowned_fields(monkeypatch, tmp_pat
 
 def test_endpoint_cleanup_rolls_back_when_yaml_save_fails(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
-    original = {"image_gen": {"provider": "dashscope", "model": "m", "endpoint_field_names": ["tenant"], "options": {"tenant": "old", "temperature": "0.4"}}}
+    original = {"image_gen": {"provider": "dashscope", "model": "qwen-image-2.0-pro", "endpoint_field_names": ["tenant"], "options": {"tenant": "old", "temperature": "0.4"}}}
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(original), encoding="utf-8")
-    provider = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "m", "models": [{"id": "m"}], "credential_fields": [], "endpoint_fields": [{"name": "region", "required": False, "secret": False}]}
+    provider = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "qwen-image-2.0-pro", "models": [{"id": "qwen-image-2.0-pro"}], "credential_fields": [], "endpoint_fields": [{"name": "region", "required": False, "secret": False}]}
     monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [provider])
     original_save = model_config._save_yaml_config_file
     failed = {"value": False}
@@ -539,7 +539,7 @@ def test_endpoint_cleanup_rolls_back_when_yaml_save_fails(monkeypatch, tmp_path)
     monkeypatch.setattr(model_config, "_save_yaml_config_file", partial_save_then_fail)
 
     with pytest.raises(OSError, match="disk full"):
-        model_config.set_image_gen_config({"provider": "dashscope", "model": "m", "credentials": {"region": "cn-beijing"}})
+        model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "credentials": {"region": "cn-beijing"}})
 
     assert _read_config(tmp_path) == original
 
@@ -2536,6 +2536,7 @@ def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypat
             "base_url": "https://images.example.com/v1/",
             "models": ["gpt-image-custom"],
             "default_model": "gpt-image-custom",
+            "allow_custom_model_id": "false",
             "api_key": "router-secret-key-123456",
             "timeout_seconds": 45,
         }
@@ -2549,6 +2550,7 @@ def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypat
             "name": "Router Images",
             "base_url": "https://images.example.com/v1",
             "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+            "allow_custom_model_id": False,
             "models": ["gpt-image-custom"],
             "default_model": "gpt-image-custom",
             "size_map": {
@@ -2569,6 +2571,7 @@ def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypat
     assert result["provider"]["key_status"]["env_var"] == "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY"
     assert result["provider"]["base_url"] == "https://images.example.com/v1"
     assert result["provider"]["size_map"]["square"] == "1024x1024"
+    assert result["provider"]["allow_custom_model_id"] is False
     os.environ.pop("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", None)
 
 
@@ -2965,6 +2968,264 @@ def test_custom_image_provider_delete_removes_inactive_provider(monkeypatch, tmp
 
     assert result["ok"] is True
     assert _read_config(tmp_path)["custom_image_providers"] == []
+
+
+def test_unknown_image_model_is_rejected_before_provider_rows_or_environment(
+    monkeypatch, tmp_path
+):
+    from agent import image_gen_registry
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    readiness_calls = []
+    environment_calls = []
+    env_write_calls = []
+    config_save_calls = []
+    monkeypatch.setattr(
+        model_config,
+        "_ensure_image_gen_plugins_registered",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        image_gen_registry,
+        "list_providers",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "tools.image_generation_tool.get_image_generation_readiness",
+        lambda: readiness_calls.append("readiness") or {},
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_key_status_for_env",
+        lambda env_var: (
+            environment_calls.append(env_var)
+            or {"configured": False, "source": "none", "env_var": env_var}
+        ),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_write_env_file",
+        lambda *args, **kwargs: env_write_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_save_yaml_config_file",
+        lambda *args, **kwargs: config_save_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="unknown image generation model"):
+        model_config.set_image_gen_config(
+            {
+                "provider": "dashscope",
+                "model": "vendor-unknown-image-model",
+                "api_key": "must-not-be-written",
+            }
+        )
+
+    assert readiness_calls == []
+    assert environment_calls == []
+    assert env_write_calls == []
+    assert config_save_calls == []
+
+
+def test_named_custom_image_and_vision_save_reject_unlisted_models_without_writing(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    original = {
+        "custom_image_providers": [
+            {
+                "id": "router",
+                "name": "Router Images",
+                "base_url": "https://images.example.com/v1",
+                "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-image-v1"],
+                "default_model": "router-image-v1",
+                "allow_custom_model_id": "false",
+            }
+        ],
+        "custom_vision_providers": [
+            {
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-vl-v1"],
+                "default_model": "router-vl-v1",
+                "transport": "openai_chat_completions",
+            }
+        ],
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original, allow_unicode=True),
+        encoding="utf-8",
+    )
+    env_write_calls = []
+    monkeypatch.setattr(
+        model_config,
+        "_write_env_file",
+        lambda *args, **kwargs: env_write_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="unknown custom image"):
+        model_config.set_image_gen_config(
+            {
+                "provider": "custom:router",
+                "model": "unlisted-image-model",
+                "api_key": "must-not-write-image",
+            }
+        )
+    with pytest.raises(ValueError, match="unknown custom vision"):
+        model_config.set_vision_config(
+            {
+                "provider": "custom:router",
+                "model": "unlisted-vision-model",
+                "api_key": "must-not-write-vision",
+            }
+        )
+
+    assert _read_config(tmp_path) == original
+    assert env_write_calls == []
+
+
+def test_named_custom_image_save_revalidates_after_concurrent_delete(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    original = {
+        "custom_image_providers": [
+            {
+                "id": "router",
+                "name": "Router Images",
+                "base_url": "https://images.example.com/v1",
+                "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-image-v1"],
+                "default_model": "router-image-v1",
+                "allow_custom_model_id": False,
+            }
+        ]
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original, allow_unicode=True),
+        encoding="utf-8",
+    )
+    stale_validation_complete = threading.Event()
+    continue_save = threading.Event()
+    row_calls = {"count": 0}
+    custom_row = {
+        "id": "custom:router",
+        "name": "Router Images",
+        "custom": True,
+        "domestic": False,
+        "integration_status": "custom",
+        "models": [{"id": "router-image-v1"}],
+        "default_model": "router-image-v1",
+        "allow_custom_model_id": False,
+        "credential_fields": [],
+        "endpoint_fields": [],
+    }
+
+    def pause_after_stale_validation(_active):
+        row_calls["count"] += 1
+        if row_calls["count"] == 1:
+            stale_validation_complete.set()
+            assert continue_save.wait(timeout=3)
+        return [custom_row]
+
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        pause_after_stale_validation,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        save_future = pool.submit(
+            model_config.set_image_gen_config,
+            {"provider": "custom:router", "model": "router-image-v1"},
+        )
+        assert stale_validation_complete.wait(timeout=2)
+        delete_future = pool.submit(
+            model_config.delete_custom_image_provider_config,
+            "router",
+        )
+        delete_future.result(timeout=3)
+        continue_save.set()
+        with pytest.raises(
+            ValueError,
+            match="unknown image generation provider",
+        ):
+            save_future.result(timeout=3)
+
+    saved = _read_config(tmp_path)
+    assert saved.get("custom_image_providers") == []
+    assert "image_gen" not in saved
+
+
+def test_named_custom_vision_save_revalidates_after_concurrent_delete(
+    monkeypatch, tmp_path
+):
+    from agent import custom_vision_providers
+
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "get_vision_config",
+        lambda: {"ok": True},
+    )
+    original = {
+        "custom_vision_providers": [
+            {
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-vl-v1"],
+                "default_model": "router-vl-v1",
+                "transport": "openai_chat_completions",
+            }
+        ]
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original, allow_unicode=True),
+        encoding="utf-8",
+    )
+    stale_validation_complete = threading.Event()
+    continue_save = threading.Event()
+    original_find = custom_vision_providers.find_custom_vision_provider_entry
+    find_calls = {"count": 0}
+
+    def pause_after_stale_validation(provider_id, config_data=None):
+        entry = original_find(provider_id, config_data)
+        find_calls["count"] += 1
+        if config_data is None and find_calls["count"] == 1:
+            stale_validation_complete.set()
+            assert continue_save.wait(timeout=3)
+        return entry
+
+    monkeypatch.setattr(
+        custom_vision_providers,
+        "find_custom_vision_provider_entry",
+        pause_after_stale_validation,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        save_future = pool.submit(
+            model_config.set_vision_config,
+            {"provider": "custom:router", "model": "router-vl-v1"},
+        )
+        assert stale_validation_complete.wait(timeout=2)
+        delete_future = pool.submit(
+            model_config.delete_custom_vision_provider_config,
+            "router",
+        )
+        delete_future.result(timeout=3)
+        continue_save.set()
+        with pytest.raises(ValueError, match="unknown vision provider"):
+            save_future.result(timeout=3)
+
+    saved = _read_config(tmp_path)
+    assert saved.get("custom_vision_providers") == []
+    assert "auxiliary" not in saved
 
 
 def test_model_config_payload_hides_raw_config_path(monkeypatch, tmp_path):
