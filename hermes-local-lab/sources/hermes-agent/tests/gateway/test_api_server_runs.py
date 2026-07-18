@@ -1030,9 +1030,14 @@ class TestStartRun:
         acquire_entered = threading.Event()
         acquire_continue = threading.Event()
         acquire_finished = threading.Event()
+        release_entered = threading.Event()
+        release_continue = threading.Event()
         acquire_call = {}
+        release_calls = []
         original_acquire = db.acquire_managed_run_lease
+        original_release = db.release_managed_run_lease
         request_task = None
+        drain_tasks = []
 
         def _blocked_acquire(
             lease_session_id,
@@ -1058,12 +1063,33 @@ class TestStartRun:
             finally:
                 acquire_finished.set()
 
+        def _blocked_release(lease_session_id, *, owner_id, run_id):
+            release_calls.append({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            release_entered.set()
+            release_continue.wait()
+            return original_release(
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+            )
+
         observed = {}
         try:
-            with patch.object(
-                db,
-                "acquire_managed_run_lease",
-                side_effect=_blocked_acquire,
+            with (
+                patch.object(
+                    db,
+                    "acquire_managed_run_lease",
+                    side_effect=_blocked_acquire,
+                ),
+                patch.object(
+                    db,
+                    "release_managed_run_lease",
+                    side_effect=_blocked_release,
+                ),
             ):
                 request_task = asyncio.create_task(
                     adapter._handle_runs(
@@ -1076,6 +1102,11 @@ class TestStartRun:
                 assert await asyncio.to_thread(acquire_entered.wait, 3.0)
 
                 request_task.cancel()
+                request_task.cancel()
+                drain_tasks = [
+                    asyncio.create_task(adapter.cancel_background_tasks()),
+                    asyncio.create_task(adapter.cancel_background_tasks()),
+                ]
                 cancelled = await asyncio.gather(
                     request_task,
                     return_exceptions=True,
@@ -1086,41 +1117,51 @@ class TestStartRun:
                 observed["reservations_while_acquire_blocked"] = len(
                     adapter._run_admission_reservations
                 )
+                await asyncio.sleep(0)
+                observed["drains_done_while_acquire_blocked"] = [
+                    task.done() for task in drain_tasks
+                ]
 
                 acquire_continue.set()
                 assert await asyncio.to_thread(acquire_finished.wait, 3.0)
-                deadline = asyncio.get_running_loop().time() + 3.0
-                while asyncio.get_running_loop().time() < deadline:
-                    if (
-                        not adapter._run_admission_reservations
-                        and db.get_managed_run_lease(session_id) is None
-                    ):
-                        break
-                    await asyncio.sleep(0.01)
-
-                observed["lease_after_cleanup"] = db.get_managed_run_lease(
-                    session_id
+                assert await asyncio.to_thread(release_entered.wait, 3.0)
+                observed["drains_done_while_release_blocked"] = [
+                    task.done() for task in drain_tasks
+                ]
+                observed["reservations_while_release_blocked"] = len(
+                    adapter._run_admission_reservations
                 )
+                observed["release_call"] = dict(release_calls[0])
+
+                release_continue.set()
+                await asyncio.gather(*drain_tasks)
+                observed["release_call_count"] = len(release_calls)
                 observed["reservations_after_cleanup"] = set(
                     adapter._run_admission_reservations
                 )
-
-                adapter._MAX_RETAINED_RUN_STREAMS = 0
-                next_response = await adapter._handle_runs(
-                    _direct_run_request({
-                        "input": "next run must enter immediately",
-                        "session_id": session_id,
-                    })
+                observed["lease_after_cleanup"] = db.get_managed_run_lease(
+                    session_id
                 )
-                observed["next_status"] = next_response.status
-                observed["next_code"] = json.loads(next_response.text)["error"][
-                    "code"
-                ]
+
+            adapter._MAX_RETAINED_RUN_STREAMS = 0
+            next_response = await adapter._handle_runs(
+                _direct_run_request({
+                    "input": "next run must enter immediately",
+                    "session_id": session_id,
+                })
+            )
+            observed["next_status"] = next_response.status
+            observed["next_code"] = json.loads(next_response.text)["error"][
+                "code"
+            ]
         finally:
             acquire_continue.set()
+            release_continue.set()
             if request_task is not None and not request_task.done():
                 request_task.cancel()
                 await asyncio.gather(request_task, return_exceptions=True)
+            if drain_tasks:
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
             if acquire_entered.is_set() and not acquire_finished.is_set():
                 await asyncio.to_thread(acquire_finished.wait, 3.0)
             lease = db.get_managed_run_lease(session_id)
@@ -1134,13 +1175,265 @@ class TestStartRun:
 
         assert observed["cancelled"]
         assert observed["reservations_while_acquire_blocked"] == 1
+        assert observed["drains_done_while_acquire_blocked"] == [False, False]
         assert acquire_call["session_id"] == session_id
         assert acquire_call["owner_id"] == adapter._managed_run_lease_owner_id
         assert acquire_call["run_id"].startswith("run_")
+        assert observed["drains_done_while_release_blocked"] == [False, False]
+        assert observed["reservations_while_release_blocked"] == 1
+        assert observed["release_call"] == acquire_call
+        assert observed["release_call_count"] == 1
         assert observed["lease_after_cleanup"] is None
         assert observed["reservations_after_cleanup"] == set()
         assert observed["next_status"] == 429
         assert observed["next_code"] == "run_stream_capacity_exceeded"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("acquire_outcome", ["false", "error"])
+    async def test_cancelled_managed_lease_acquire_shutdown_drains_non_acquire(
+        self, adapter, tmp_path, acquire_outcome
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = f"session-cancelled-acquire-{acquire_outcome}"
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        acquire_entered = threading.Event()
+        acquire_continue = threading.Event()
+        release_calls = []
+        request_task = None
+        drain_tasks = []
+
+        def _blocked_acquire(*_args, **_kwargs):
+            acquire_entered.set()
+            acquire_continue.wait()
+            if acquire_outcome == "error":
+                raise sqlite3.OperationalError("acquire failed after cancellation")
+            return False
+
+        def _unexpected_release(*args, **kwargs):
+            release_calls.append((args, kwargs))
+            return False
+
+        observed = {}
+        try:
+            with (
+                patch.object(
+                    db,
+                    "acquire_managed_run_lease",
+                    side_effect=_blocked_acquire,
+                ),
+                patch.object(
+                    db,
+                    "release_managed_run_lease",
+                    side_effect=_unexpected_release,
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "cancel non-acquire outcome",
+                            "session_id": session_id,
+                        })
+                    )
+                )
+                assert await asyncio.to_thread(acquire_entered.wait, 3.0)
+
+                request_task.cancel()
+                request_task.cancel()
+                drain_tasks = [
+                    asyncio.create_task(adapter.cancel_background_tasks()),
+                    asyncio.create_task(adapter.cancel_background_tasks()),
+                ]
+                cancelled = await asyncio.gather(
+                    request_task,
+                    return_exceptions=True,
+                )
+                observed["cancelled"] = isinstance(
+                    cancelled[0], asyncio.CancelledError
+                )
+                await asyncio.sleep(0)
+                observed["drains_while_blocked"] = [
+                    task.done() for task in drain_tasks
+                ]
+                observed["reservations_while_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+
+                acquire_continue.set()
+                await asyncio.gather(*drain_tasks)
+                observed["reservations_after_drain"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["lease_after_drain"] = db.get_managed_run_lease(
+                    session_id
+                )
+        finally:
+            acquire_continue.set()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+            if drain_tasks:
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
+            db.close()
+
+        assert observed["cancelled"]
+        assert observed["drains_while_blocked"] == [False, False]
+        assert observed["reservations_while_blocked"] == 1
+        assert release_calls == []
+        assert observed["reservations_after_drain"] == set()
+        assert observed["lease_after_drain"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("release_outcome", ["false", "error"])
+    async def test_cancelled_managed_lease_acquire_release_failure_is_fail_closed(
+        self, adapter, tmp_path, release_outcome
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = f"session-cancelled-release-{release_outcome}"
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        acquire_entered = threading.Event()
+        acquire_continue = threading.Event()
+        release_entered = threading.Event()
+        release_continue = threading.Event()
+        acquire_call = {}
+        release_calls = []
+        original_acquire = db.acquire_managed_run_lease
+        original_release = db.release_managed_run_lease
+        request_task = None
+        drain_tasks = []
+
+        def _blocked_acquire(
+            lease_session_id,
+            *,
+            owner_id,
+            run_id,
+            lease_seconds,
+        ):
+            acquire_call.update({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            acquire_entered.set()
+            acquire_continue.wait()
+            return original_acquire(
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+                lease_seconds=lease_seconds,
+            )
+
+        def _failed_release(lease_session_id, *, owner_id, run_id):
+            release_calls.append({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            release_entered.set()
+            release_continue.wait()
+            if release_outcome == "error":
+                raise sqlite3.OperationalError("release failed after cancellation")
+            return False
+
+        observed = {}
+        try:
+            with (
+                patch.object(
+                    db,
+                    "acquire_managed_run_lease",
+                    side_effect=_blocked_acquire,
+                ),
+                patch.object(
+                    db,
+                    "release_managed_run_lease",
+                    side_effect=_failed_release,
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "cancel before failed exact release",
+                            "session_id": session_id,
+                        })
+                    )
+                )
+                assert await asyncio.to_thread(acquire_entered.wait, 3.0)
+
+                request_task.cancel()
+                request_task.cancel()
+                drain_tasks = [
+                    asyncio.create_task(adapter.cancel_background_tasks()),
+                    asyncio.create_task(adapter.cancel_background_tasks()),
+                ]
+                cancelled = await asyncio.gather(
+                    request_task,
+                    return_exceptions=True,
+                )
+                observed["cancelled"] = isinstance(
+                    cancelled[0], asyncio.CancelledError
+                )
+                await asyncio.sleep(0)
+                observed["drains_while_acquire_blocked"] = [
+                    task.done() for task in drain_tasks
+                ]
+
+                acquire_continue.set()
+                assert await asyncio.to_thread(release_entered.wait, 3.0)
+                observed["drains_while_release_blocked"] = [
+                    task.done() for task in drain_tasks
+                ]
+                observed["reservations_while_release_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+
+                release_continue.set()
+                await asyncio.gather(*drain_tasks)
+                observed["reservations_after_drain"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["lease_after_drain"] = db.get_managed_run_lease(
+                    session_id
+                )
+
+            next_response = await adapter._handle_runs(
+                _direct_run_request({
+                    "input": "durable lease must remain fail closed",
+                    "session_id": session_id,
+                })
+            )
+            observed["next_status"] = next_response.status
+            observed["next_code"] = json.loads(next_response.text)["error"][
+                "code"
+            ]
+        finally:
+            acquire_continue.set()
+            release_continue.set()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+            if drain_tasks:
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                original_release(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        assert observed["cancelled"]
+        assert observed["drains_while_acquire_blocked"] == [False, False]
+        assert observed["drains_while_release_blocked"] == [False, False]
+        assert observed["reservations_while_release_blocked"] == 1
+        assert release_calls == [acquire_call]
+        assert observed["reservations_after_drain"] == set()
+        assert observed["lease_after_drain"] is not None
+        assert observed["lease_after_drain"]["owner_id"] == acquire_call["owner_id"]
+        assert observed["lease_after_drain"]["run_id"] == acquire_call["run_id"]
+        assert observed["next_status"] == 409
+        assert observed["next_code"] == "session_busy"
 
     @pytest.mark.asyncio
     async def test_unconsumed_stream_capacity_is_bounded_independently(

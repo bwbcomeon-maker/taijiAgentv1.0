@@ -915,6 +915,13 @@ class APIServerAdapter(BasePlatformAdapter):
         self._managed_session_runs: Dict[str, str] = {}
         self._managed_session_runs_lock = threading.Lock()
         self._managed_run_lease_owner_id = f"{os.getpid()}:{uuid.uuid4().hex}"
+        # Request cancellation can outlive aiohttp's handler Task while a
+        # ``to_thread`` lease acquire is still running.  These supervisors are
+        # intentionally separate from ``_background_tasks``: generic gateway
+        # shutdown cancels and eventually clears that set, whereas a lease
+        # supervisor must drain its exact acquire/release pair before the
+        # adapter may finish shutting down.
+        self._managed_lease_lifecycle_tasks: set["asyncio.Task"] = set()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -3848,6 +3855,133 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_admission_reservations.discard(token)
 
     @staticmethod
+    async def _await_managed_lease_lifecycle_task(
+        task: "asyncio.Future",
+    ) -> Any:
+        """Await one lease lifecycle child without forwarding caller cancel."""
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # A shutdown caller may itself be cancelled repeatedly.  The
+                # durable lease child still owns admission and must finish.
+                continue
+        return task.result()
+
+    def _register_managed_lease_lifecycle(
+        self,
+        coroutine: Any,
+        *,
+        name: str,
+    ) -> "asyncio.Task":
+        """Strongly own a lease supervisor outside generic background tasks."""
+        task = asyncio.get_running_loop().create_task(coroutine, name=name)
+        self._managed_lease_lifecycle_tasks.add(task)
+
+        def _discard_and_consume(finished_task: "asyncio.Task") -> None:
+            self._managed_lease_lifecycle_tasks.discard(finished_task)
+            try:
+                finished_task.result()
+            except BaseException as exc:
+                # Supervisors normally consume their own failures.  Keep this
+                # final guard so no lifecycle exception becomes unhandled.
+                logger.error(
+                    "[api_server] managed lease lifecycle task failed: %s",
+                    exc,
+                )
+
+        task.add_done_callback(_discard_and_consume)
+        return task
+
+    async def _supervise_cancelled_managed_lease_acquire(
+        self,
+        *,
+        acquire_task: "asyncio.Task",
+        db: Any,
+        lease_session_id: str,
+        owner_id: str,
+        run_id: str,
+        admission_token: str,
+    ) -> None:
+        """Drain a cancelled request's acquire and any exact lease release."""
+        try:
+            acquired = await self._await_managed_lease_lifecycle_task(
+                acquire_task
+            )
+            if not acquired:
+                return
+
+            release_coroutine = asyncio.to_thread(
+                db.release_managed_run_lease,
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+            )
+            try:
+                release_task = asyncio.get_running_loop().create_task(
+                    release_coroutine,
+                    name=f"managed-run-lease-release-{run_id[-8:]}",
+                )
+            except BaseException:
+                release_coroutine.close()
+                raise
+            released = await self._await_managed_lease_lifecycle_task(
+                release_task
+            )
+            if not released:
+                # Fail closed: the durable row remains until TTL.
+                logger.error(
+                    "[api_server] cancelled managed lease acquire cleanup "
+                    "lost ownership for %s/%s",
+                    lease_session_id,
+                    run_id,
+                )
+        except BaseException as exc:
+            # Acquire/release failures have no HTTP consumer after request
+            # cancellation.  The durable database remains authoritative.
+            logger.error(
+                "[api_server] cancelled managed lease lifecycle failed "
+                "for %s/%s: %s",
+                lease_session_id,
+                run_id,
+                exc,
+            )
+        finally:
+            self._release_run_admission(admission_token)
+
+    async def _drain_managed_lease_lifecycles(self) -> None:
+        """Wait until the dedicated supervisor set is stably empty."""
+        observed_empty = False
+        while True:
+            tasks = tuple(
+                task
+                for task in self._managed_lease_lifecycle_tasks
+                if not task.done()
+            )
+            if tasks:
+                observed_empty = False
+                waiter = asyncio.gather(*tasks, return_exceptions=True)
+                await self._await_managed_lease_lifecycle_task(waiter)
+                continue
+            if observed_empty:
+                return
+            # Recheck after one scheduler turn.  This closes the race where a
+            # request was cancelled immediately before shutdown but has not
+            # yet registered its supervisor.
+            observed_empty = True
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                continue
+
+    async def cancel_background_tasks(self) -> None:
+        """Cancel ordinary work, then drain durable lease lifecycles."""
+        try:
+            await super().cancel_background_tasks()
+        finally:
+            await self._drain_managed_lease_lifecycles()
+
+    @staticmethod
     def _managed_history_projection(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Project history onto fields that participate in managed continuity.
 
@@ -4494,75 +4628,27 @@ class APIServerAdapter(BasePlatformAdapter):
                         lease_acquire_task
                     )
                 except asyncio.CancelledError:
-                    loop = asyncio.get_running_loop()
-
-                    def _release_cancelled_acquire() -> bool:
-                        return db.release_managed_run_lease(
-                            managed_lease_session_id,
+                    supervisor_coroutine = (
+                        self._supervise_cancelled_managed_lease_acquire(
+                            acquire_task=lease_acquire_task,
+                            db=db,
+                            lease_session_id=managed_lease_session_id,
                             owner_id=self._managed_run_lease_owner_id,
                             run_id=run_id,
+                            admission_token=admission_token,
                         )
-
-                    def _finish_cancelled_acquire_cleanup(
-                        release_future: "asyncio.Future",
-                    ) -> None:
-                        try:
-                            released = release_future.result()
-                            if not released:
-                                logger.error(
-                                    "[api_server] cancelled managed lease acquire "
-                                    "cleanup lost ownership for %s/%s",
-                                    managed_lease_session_id,
-                                    run_id,
-                                )
-                        except BaseException as exc:
-                            logger.error(
-                                "[api_server] cancelled managed lease acquire "
-                                "cleanup failed for %s/%s: %s",
-                                managed_lease_session_id,
-                                run_id,
-                                exc,
-                            )
-                        finally:
-                            self._release_run_admission(admission_token)
-
-                    def _finish_cancelled_lease_acquire(
-                        finished_task: "asyncio.Task",
-                    ) -> None:
-                        try:
-                            acquired_after_cancel = finished_task.result()
-                        except BaseException:
-                            # Consume executor failures after the request that
-                            # would have reported them no longer exists.
-                            self._release_run_admission(admission_token)
-                            return
-                        if not acquired_after_cancel:
-                            self._release_run_admission(admission_token)
-                            return
-                        try:
-                            release_future = loop.run_in_executor(
-                                None,
-                                _release_cancelled_acquire,
-                            )
-                        except BaseException as exc:
-                            # Fail closed: the exact durable lease remains
-                            # until TTL, but the in-memory slot must not leak.
-                            logger.error(
-                                "[api_server] cancelled managed lease acquire "
-                                "cleanup could not start for %s/%s: %s",
-                                managed_lease_session_id,
-                                run_id,
-                                exc,
-                            )
-                            self._release_run_admission(admission_token)
-                            return
-                        release_future.add_done_callback(
-                            _finish_cancelled_acquire_cleanup
-                        )
-
-                    lease_acquire_task.add_done_callback(
-                        _finish_cancelled_lease_acquire
                     )
+                    try:
+                        self._register_managed_lease_lifecycle(
+                            supervisor_coroutine,
+                            name=(
+                                "managed-run-lease-supervisor-"
+                                f"{run_id[-8:]}"
+                            ),
+                        )
+                    except BaseException:
+                        supervisor_coroutine.close()
+                        raise
                     admission_state["lease_acquire_owned"] = True
                     raise
             except Exception as exc:
@@ -5565,13 +5651,16 @@ class APIServerAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Stop the aiohttp web server."""
         self._mark_disconnected()
-        if self._site:
-            await self._site.stop()
-            self._site = None
-        if self._runner:
-            await self._runner.cleanup()
-            self._runner = None
-        self._app = None
+        try:
+            if self._site:
+                await self._site.stop()
+                self._site = None
+            if self._runner:
+                await self._runner.cleanup()
+                self._runner = None
+        finally:
+            await self._drain_managed_lease_lifecycles()
+            self._app = None
         logger.info("[%s] API server stopped", self.name)
 
     async def send(
