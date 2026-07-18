@@ -1632,7 +1632,8 @@ class APIServerAdapter(BasePlatformAdapter):
             "output_tokens", "cache_read_tokens", "cache_write_tokens",
             "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
             "api_call_count", "parent_session_id", "last_active", "preview",
-            "_lineage_root_id",
+            "_lineage_root_id", "_lineage_status",
+            "_lineage_conflict_count",
         )
         payload = {key: session.get(key) for key in safe_keys if key in session}
         # Avoid exposing full system prompts/model_config through the client API;
@@ -1749,9 +1750,31 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
-        session, err = self._get_existing_session_or_404(request.match_info["session_id"])
+        session_id = request.match_info["session_id"]
+        session, err = self._get_existing_session_or_404(session_id)
         if err:
             return err
+        db = self._ensure_session_db()
+        try:
+            resolution = db.resolve_compression_lineage(session_id)
+        except Exception as exc:
+            logger.error(
+                "[api_server] session lineage query unavailable for %s: %s",
+                session_id,
+                exc,
+            )
+            return web.json_response(
+                _openai_error(
+                    "Session database unavailable",
+                    code="session_db_unavailable",
+                ),
+                status=503,
+            )
+        if resolution.status != "ok":
+            session = dict(session)
+            session["_lineage_root_id"] = resolution.root_id
+            session["_lineage_status"] = resolution.status
+            session["_lineage_conflict_count"] = resolution.conflict_count
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
 
     async def _handle_patch_session(self, request: "web.Request") -> "web.Response":
@@ -4706,6 +4729,20 @@ class APIServerAdapter(BasePlatformAdapter):
             else:
                 conversation_history = input_history
 
+        requested_session_id = (
+            header_session_id
+            or body_session_id
+            or stored_session_id
+            or ""
+        )
+        managed_session = bool(requested_session_id)
+        preflight_session_db = None
+        if managed_session:
+            from hermes_state import (
+                CompressionLineageAmbiguousError,
+                CompressionLineageMalformedError,
+            )
+
         admission_token = self._try_reserve_run_admission()
         if admission_token is None:
             return web.json_response(
@@ -4716,6 +4753,89 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=429,
             )
         admission_state["token"] = admission_token
+
+        if managed_session:
+            preflight_session_db = self._ensure_session_db()
+            if preflight_session_db is None:
+                return web.json_response(
+                    _openai_error(
+                        "Session database unavailable",
+                        code="session_db_unavailable",
+                    ),
+                    status=503,
+                )
+            try:
+                lineage_coroutine = asyncio.to_thread(
+                    preflight_session_db.resolve_compression_lineage,
+                    requested_session_id,
+                )
+                try:
+                    lineage_task = self._create_owned_task(
+                        lineage_coroutine,
+                        name=(
+                            "managed-run-lineage-query-"
+                            f"{admission_token[-8:]}"
+                        ),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[api_server] failed to create session lineage "
+                        "preflight task: %s",
+                        exc,
+                    )
+                    return web.json_response(
+                        _openai_error(
+                            "Session database unavailable",
+                            code="session_db_unavailable",
+                        ),
+                        status=503,
+                    )
+                lineage = await self._await_preworker_owned_task(
+                    lineage_task,
+                    admission_token=admission_token,
+                    admission_state=admission_state,
+                    operation="managed session lineage query",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[api_server] session lineage preflight unavailable for "
+                    "%s: %s",
+                    requested_session_id,
+                    exc,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Session database unavailable",
+                        code="session_db_unavailable",
+                    ),
+                    status=503,
+                )
+            if lineage.status == "missing":
+                return web.json_response(
+                    _openai_error(
+                        "Session not found",
+                        code="session_not_found",
+                    ),
+                    status=404,
+                )
+            if lineage.status == "ambiguous":
+                return web.json_response(
+                    _openai_error(
+                        "Session compression lineage has multiple continuations",
+                        code="session_lineage_ambiguous",
+                    ),
+                    status=409,
+                )
+            if lineage.status != "ok":
+                return web.json_response(
+                    _openai_error(
+                        "Session compression lineage is malformed",
+                        code="session_lineage_malformed",
+                    ),
+                    status=409,
+                )
 
         try:
             resolver_coroutine = asyncio.to_thread(
@@ -4780,8 +4900,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        requested_session_id = header_session_id or body_session_id or stored_session_id or ""
-        managed_session = bool(requested_session_id)
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = requested_session_id or run_id
         managed_lease_session_id = session_id
@@ -4948,7 +5066,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     return
 
         if managed_session:
-            db = self._ensure_session_db()
+            db = preflight_session_db or self._ensure_session_db()
             if db is None:
                 return web.json_response(
                     _openai_error(
@@ -5014,6 +5132,22 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
             except asyncio.CancelledError:
                 raise
+            except CompressionLineageAmbiguousError:
+                return web.json_response(
+                    _openai_error(
+                        "Session compression lineage has multiple continuations",
+                        code="session_lineage_ambiguous",
+                    ),
+                    status=409,
+                )
+            except CompressionLineageMalformedError:
+                return web.json_response(
+                    _openai_error(
+                        "Session compression lineage is malformed",
+                        code="session_lineage_malformed",
+                    ),
+                    status=409,
+                )
             except Exception as exc:
                 logger.error(
                     "[api_server] managed lease key query unavailable for "
@@ -5088,6 +5222,22 @@ class APIServerAdapter(BasePlatformAdapter):
                         ),
                         status=503,
                     )
+            except CompressionLineageAmbiguousError:
+                return web.json_response(
+                    _openai_error(
+                        "Session compression lineage has multiple continuations",
+                        code="session_lineage_ambiguous",
+                    ),
+                    status=409,
+                )
+            except CompressionLineageMalformedError:
+                return web.json_response(
+                    _openai_error(
+                        "Session compression lineage is malformed",
+                        code="session_lineage_malformed",
+                    ),
+                    status=409,
+                )
             except Exception as exc:
                 logger.error(
                     "[api_server] managed run lease unavailable for session %s: %s",

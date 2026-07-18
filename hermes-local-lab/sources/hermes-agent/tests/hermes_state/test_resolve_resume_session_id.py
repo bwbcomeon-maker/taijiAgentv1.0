@@ -23,13 +23,28 @@ def db(tmp_path):
 
 
 def _make_chain(db: SessionDB, ids_with_parent):
-    """Create sessions in order, forcing started_at so ordering is deterministic."""
+    """Create a deterministic legal compression chain (or fork)."""
     base = int(time.time()) - 10_000
+    started_at = {}
     for i, (sid, parent) in enumerate(ids_with_parent):
         db.create_session(sid, source="cli", parent_session_id=parent)
+        started_at[sid] = base + i * 100
         db._conn.execute(
             "UPDATE sessions SET started_at = ? WHERE id = ?",
-            (base + i * 100, sid),
+            (started_at[sid], sid),
+        )
+    first_child_started_at = {}
+    for sid, parent in ids_with_parent:
+        if parent:
+            first_child_started_at[parent] = min(
+                first_child_started_at.get(parent, started_at[sid]),
+                started_at[sid],
+            )
+    for parent, child_started_at in first_child_started_at.items():
+        db._conn.execute(
+            "UPDATE sessions SET ended_at = ?, end_reason = 'compression' "
+            "WHERE id = ?",
+            (child_started_at - 1, parent),
         )
     db._conn.commit()
 
@@ -83,14 +98,35 @@ def test_walks_from_middle_of_chain(db):
     assert db.resolve_resume_session_id("c") == "d"
 
 
-def test_prefers_most_recent_child_when_fork_exists(db):
-    # If a session was somehow forked (two children), pick the latest one.
-    # In practice, compression only produces single-chain shape, but the helper
-    # should degrade gracefully.
+def test_ambiguous_compression_fork_fails_closed(db):
     _make_chain(db, [
         ("parent", None),
         ("older_fork", "parent"),
         ("newer_fork", "parent"),
     ])
     db.append_message("newer_fork", role="user", content="x")
-    assert db.resolve_resume_session_id("parent") == "newer_fork"
+    assert db.resolve_resume_session_id("parent") == "parent"
+    assert db.resolve_resume_session_id("older_fork") == "older_fork"
+    assert db.resolve_resume_session_id("newer_fork") == "newer_fork"
+
+
+def test_delegate_child_is_not_a_resume_continuation(db):
+    db.create_session("parent", source="cli")
+    db.create_session("delegate", source="cli", parent_session_id="parent")
+    db.append_message("delegate", role="user", content="delegate-only")
+
+    assert db.resolve_resume_session_id("parent") == "parent"
+
+
+def test_nested_ambiguous_compression_fork_fails_closed(db):
+    _make_chain(db, [
+        ("root", None),
+        ("mid", "root"),
+        ("fork_a", "mid"),
+        ("fork_b", "mid"),
+    ])
+    db.append_message("fork_b", role="user", content="branch-only")
+
+    assert db.resolve_resume_session_id("root") == "root"
+    assert db.resolve_resume_session_id("mid") == "mid"
+    assert db.resolve_resume_session_id("fork_a") == "fork_a"

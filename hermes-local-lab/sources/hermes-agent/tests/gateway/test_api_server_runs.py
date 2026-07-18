@@ -1524,9 +1524,28 @@ class TestStartRun:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("query_outcome", ["success", "error"])
+    async def test_cancelled_lineage_queries_keep_all_admission_slots(
+        self,
+        adapter,
+        tmp_path,
+        query_outcome,
+    ):
+        await self._assert_cancelled_preworker_query_holds_admission(
+            adapter,
+            tmp_path,
+            query_name="resolve_compression_lineage",
+            query_outcome=query_outcome,
+        )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("query_name", "owned_task_name"),
         [
+            (
+                "resolve_compression_lineage",
+                "managed-run-lineage-query-",
+            ),
             ("get_session", "managed-run-session-query-"),
             (
                 "get_managed_run_lease_key",
@@ -3798,6 +3817,53 @@ class TestStartRun:
         assert adapter._run_streams == {}
         assert adapter._run_statuses == {}
         assert adapter._run_admission_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_session_lineage_rejected_before_run_side_effects(
+        self,
+        adapter,
+        tmp_path,
+    ):
+        db = SessionDB(db_path=tmp_path / "ambiguous-run.db")
+        db.create_session("ambiguous-run-root", "api_server")
+        db.end_session("ambiguous-run-root", "compression")
+        for child_id in ("ambiguous-run-a", "ambiguous-run-b"):
+            db.create_session(
+                child_id,
+                "api_server",
+                parent_session_id="ambiguous-run-root",
+            )
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+
+        try:
+            with (
+                patch.object(adapter, "_resolve_agent_route") as resolve_route,
+                patch.object(adapter, "_create_agent") as create_agent,
+            ):
+                async with TestClient(TestServer(app)) as cli:
+                    resp = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "must not start",
+                            "session_id": "ambiguous-run-a",
+                        },
+                    )
+                    payload = await resp.json()
+
+            assert resp.status == 409
+            assert payload["error"]["code"] == "session_lineage_ambiguous"
+            resolve_route.assert_not_called()
+            create_agent.assert_not_called()
+            assert db._conn.execute(
+                "SELECT COUNT(*) FROM managed_run_leases"
+            ).fetchone()[0] == 0
+            assert adapter._managed_session_runs == {}
+            assert adapter._run_streams == {}
+            assert adapter._run_statuses == {}
+            assert adapter._run_admission_reservations == set()
+        finally:
+            db.close()
 
     @pytest.mark.asyncio
     async def test_start_invalid_json_returns_400(self, adapter):

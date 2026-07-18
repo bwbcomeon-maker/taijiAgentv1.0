@@ -511,6 +511,187 @@ def test_compression_child_uses_root_lease_and_can_append(tmp_path):
         db.close()
 
 
+def test_unique_compression_lineage_has_one_root_lease_across_connections(
+    tmp_path,
+):
+    db_a, db_b = _shared_dbs(tmp_path)
+    db_a.create_session("lineage-root", "api_server")
+    db_a.end_session("lineage-root", "compression")
+    db_a.create_session(
+        "lineage-mid",
+        "api_server",
+        parent_session_id="lineage-root",
+    )
+    db_a.end_session("lineage-mid", "compression")
+    db_a.create_session(
+        "lineage-tip",
+        "api_server",
+        parent_session_id="lineage-mid",
+    )
+
+    try:
+        resolutions = [
+            db_a.resolve_compression_lineage(session_id)
+            for session_id in ("lineage-root", "lineage-mid", "lineage-tip")
+        ]
+        assert {
+            (result.root_id, result.tip_id, result.status)
+            for result in resolutions
+        } == {("lineage-root", "lineage-tip", "ok")}
+
+        assert db_a.acquire_managed_run_lease(
+            "lineage-root",
+            owner_id="owner-root",
+            run_id="run-root",
+            lease_seconds=30.0,
+        )
+        assert not db_b.acquire_managed_run_lease(
+            "lineage-tip",
+            owner_id="owner-tip",
+            run_id="run-tip",
+            lease_seconds=30.0,
+        )
+        rows = db_a._conn.execute(
+            "SELECT session_id FROM managed_run_leases"
+        ).fetchall()
+        assert [row["session_id"] for row in rows] == ["lineage-root"]
+    finally:
+        db_a.close()
+        db_b.close()
+
+
+def test_ambiguous_compression_lineage_rejects_all_lease_entrypoints(tmp_path):
+    db = SessionDB(db_path=tmp_path / "ambiguous.db")
+    db.create_session("ambiguous-root", "api_server")
+    db.end_session("ambiguous-root", "compression")
+    for child_id in ("ambiguous-a", "ambiguous-b"):
+        db.create_session(
+            child_id,
+            "api_server",
+            parent_session_id="ambiguous-root",
+        )
+
+    try:
+        resolutions = [
+            db.resolve_compression_lineage(session_id)
+            for session_id in ("ambiguous-root", "ambiguous-a", "ambiguous-b")
+        ]
+        assert {
+            (result.root_id, result.tip_id, result.status, result.conflict_count)
+            for result in resolutions
+        } == {("ambiguous-root", None, "ambiguous", 2)}
+
+        for session_id in ("ambiguous-root", "ambiguous-a", "ambiguous-b"):
+            with pytest.raises(hermes_state.CompressionLineageAmbiguousError):
+                db.acquire_managed_run_lease(
+                    session_id,
+                    owner_id=f"owner-{session_id}",
+                    run_id=f"run-{session_id}",
+                    lease_seconds=30.0,
+                )
+        assert db._conn.execute(
+            "SELECT COUNT(*) FROM managed_run_leases"
+        ).fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_lease_acquire_rechecks_lineage_after_preflight(tmp_path):
+    db_a, db_b = _shared_dbs(tmp_path)
+    db_a.create_session("race-root", "api_server")
+    db_a.end_session("race-root", "compression")
+    db_a.create_session(
+        "race-a",
+        "api_server",
+        parent_session_id="race-root",
+    )
+
+    try:
+        preflight = db_a.resolve_compression_lineage("race-a")
+        assert (preflight.root_id, preflight.tip_id, preflight.status) == (
+            "race-root",
+            "race-a",
+            "ok",
+        )
+        db_b.create_session(
+            "race-b",
+            "api_server",
+            parent_session_id="race-root",
+        )
+
+        with pytest.raises(hermes_state.CompressionLineageAmbiguousError):
+            db_a.acquire_managed_run_lease(
+                "race-a",
+                owner_id="owner-a",
+                run_id="run-a",
+                lease_seconds=30.0,
+            )
+        assert db_a._conn.execute(
+            "SELECT COUNT(*) FROM managed_run_leases"
+        ).fetchone()[0] == 0
+    finally:
+        db_a.close()
+        db_b.close()
+
+
+def test_lineage_ambiguity_fences_live_lease_but_exact_release_still_works(
+    tmp_path,
+):
+    db_a, db_b = _shared_dbs(tmp_path)
+    db_a.create_session("live-root", "api_server")
+    assert db_a.acquire_managed_run_lease(
+        "live-root",
+        owner_id="owner-live",
+        run_id="run-live",
+        lease_seconds=30.0,
+    )
+    db_a.end_session("live-root", "compression")
+    db_a.create_session(
+        "live-a",
+        "api_server",
+        parent_session_id="live-root",
+    )
+    db_b.create_session(
+        "live-b",
+        "api_server",
+        parent_session_id="live-root",
+    )
+    lost_event = threading.Event()
+
+    try:
+        assert not db_a.heartbeat_managed_run_lease(
+            "live-a",
+            owner_id="owner-live",
+            run_id="run-live",
+            lease_seconds=30.0,
+        )
+        token = bind_managed_run_write_lease(
+            "live-root",
+            owner_id="owner-live",
+            run_id="run-live",
+            lost_event=lost_event,
+        )
+        try:
+            with pytest.raises(ManagedRunLeaseLostError):
+                db_a.append_message("live-a", "assistant", "must not persist")
+        finally:
+            reset_managed_run_write_lease(token)
+        assert lost_event.is_set()
+        assert db_a.get_messages_as_conversation("live-a") == []
+
+        assert db_a.release_managed_run_lease(
+            "live-a",
+            owner_id="owner-live",
+            run_id="run-live",
+        )
+        assert db_a._conn.execute(
+            "SELECT COUNT(*) FROM managed_run_leases"
+        ).fetchone()[0] == 0
+    finally:
+        db_a.close()
+        db_b.close()
+
+
 def test_preexisting_branch_child_does_not_inherit_compression_lease(tmp_path):
     db = SessionDB(db_path=tmp_path / "branch.db")
     db.create_session("branch-parent", "api_server")
@@ -834,17 +1015,6 @@ def test_bound_lease_rejects_forged_or_ambiguous_compression_children(
     if target_kind == "unrelated-parent":
         db.create_session("unrelated-parent", "api_server")
         db.end_session("unrelated-parent", "compression")
-    if target_kind == "existing-ambiguous-compression-branch":
-        db.create_session(
-            "ambiguous-child-a",
-            "api_server",
-            parent_session_id=root_id,
-        )
-        db.create_session(
-            "ambiguous-child-b",
-            "api_server",
-            parent_session_id=root_id,
-        )
     if target_kind == "future-ended-compression-parent":
         db._execute_write(
             lambda conn: conn.execute(
@@ -865,6 +1035,17 @@ def test_bound_lease_rejects_forged_or_ambiguous_compression_children(
         run_id="run-live",
         lease_seconds=30.0,
     )
+    if target_kind == "existing-ambiguous-compression-branch":
+        db.create_session(
+            "ambiguous-child-a",
+            "api_server",
+            parent_session_id=root_id,
+        )
+        db.create_session(
+            "ambiguous-child-b",
+            "api_server",
+            parent_session_id=root_id,
+        )
     lost_event = threading.Event()
     before = _durable_session_snapshot(db)
     token = bind_managed_run_write_lease(

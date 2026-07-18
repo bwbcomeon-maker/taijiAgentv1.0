@@ -123,6 +123,51 @@ async def test_session_crud_and_message_history(adapter, session_db):
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_compression_lineage_is_reported_without_projection(
+    adapter,
+    session_db,
+):
+    session_db.create_session("lineage-root", "api_server")
+    session_db.end_session("lineage-root", "compression")
+    for child_id in ("lineage-a", "lineage-b"):
+        session_db.create_session(
+            child_id,
+            "api_server",
+            parent_session_id="lineage-root",
+        )
+        session_db.append_message(child_id, "user", f"{child_id} only")
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        list_resp = await cli.get("/api/sessions")
+        get_resp = await cli.get("/api/sessions/lineage-root")
+        raw_resp = await cli.get("/api/sessions?include_children=true")
+
+        assert list_resp.status == 200
+        listed = (await list_resp.json())["data"]
+        assert [row["id"] for row in listed] == ["lineage-root"]
+        assert listed[0]["_lineage_root_id"] == "lineage-root"
+        assert listed[0]["_lineage_status"] == "ambiguous"
+        assert listed[0]["_lineage_conflict_count"] == 2
+
+        assert get_resp.status == 200
+        got = (await get_resp.json())["session"]
+        assert got["id"] == "lineage-root"
+        assert got["_lineage_root_id"] == "lineage-root"
+        assert got["_lineage_status"] == "ambiguous"
+        assert got["_lineage_conflict_count"] == 2
+
+        assert raw_resp.status == 200
+        raw = (await raw_resp.json())["data"]
+        assert {row["id"] for row in raw} == {
+            "lineage-root",
+            "lineage-a",
+            "lineage-b",
+        }
+        assert all("_lineage_status" not in row for row in raw)
+
+
+@pytest.mark.asyncio
 async def test_session_fork_uses_current_sessiondb_branch_primitives(adapter, session_db):
     source_id = session_db.create_session("source-session", "api_server", model="test-model")
     session_db.set_session_title(source_id, "Original")

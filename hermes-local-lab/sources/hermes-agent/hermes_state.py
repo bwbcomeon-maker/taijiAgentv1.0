@@ -26,6 +26,7 @@ import threading
 import time
 from contextlib import nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -76,6 +77,39 @@ def _state_write_guard():
 
 class ManagedRunLeaseLostError(RuntimeError):
     """Raised when a managed run tries to write without its durable lease."""
+
+
+@dataclass(frozen=True)
+class CompressionLineageResolution:
+    """Canonical compression lineage derived from durable session rows."""
+
+    requested_id: str
+    root_id: str
+    tip_id: Optional[str]
+    status: str
+    conflict_count: int = 0
+    path: Tuple[str, ...] = ()
+    detail: Optional[str] = None
+
+
+class CompressionLineageError(RuntimeError):
+    """Base error for a compression lineage that is unsafe to continue."""
+
+    def __init__(self, resolution: CompressionLineageResolution):
+        self.resolution = resolution
+        detail = f": {resolution.detail}" if resolution.detail else ""
+        super().__init__(
+            f"compression lineage {resolution.root_id!r} is "
+            f"{resolution.status}{detail}"
+        )
+
+
+class CompressionLineageAmbiguousError(CompressionLineageError):
+    """Raised when a compression parent has multiple continuation children."""
+
+
+class CompressionLineageMalformedError(CompressionLineageError):
+    """Raised when a compression lineage is missing, cyclic, or too deep."""
 
 
 _managed_run_write_lease: ContextVar[Optional[tuple]] = ContextVar(
@@ -908,29 +942,169 @@ class SessionDB:
         return self._execute_write(_do)
 
     @staticmethod
-    def _managed_run_lease_key(conn, session_id: str) -> str:
-        """Return the root of the legal compression-continuation lineage."""
-        row = conn.execute(
-            """WITH RECURSIVE lineage(id, parent_session_id, started_at, depth) AS (
-                   SELECT id, parent_session_id, started_at, 0 FROM sessions WHERE id = ?
-                   UNION ALL
-                   SELECT parent.id, parent.parent_session_id, parent.started_at, lineage.depth + 1
-                   FROM lineage
-                   JOIN sessions parent ON parent.id = lineage.parent_session_id
-                   WHERE parent.end_reason = 'compression'
-                     AND lineage.started_at >= parent.ended_at
-                     AND NOT EXISTS (
-                         SELECT 1 FROM sessions sibling
-                         WHERE sibling.parent_session_id = parent.id
-                           AND sibling.id != lineage.id
-                           AND sibling.started_at >= parent.ended_at
-                     )
-                     AND lineage.depth < 1000
-               )
-               SELECT id FROM lineage ORDER BY depth DESC LIMIT 1""",
+    def _resolve_compression_lineage(
+        conn: sqlite3.Connection,
+        session_id: str,
+        *,
+        max_depth: int = 1000,
+    ) -> CompressionLineageResolution:
+        """Resolve one canonical compression root and its unique forward path.
+
+        Upward traversal intentionally ignores sibling count: every legal
+        post-compression child belongs to the same ownership domain. Forward
+        traversal then detects whether that domain has a unique continuation.
+        """
+        columns = "id, parent_session_id, started_at, ended_at, end_reason"
+        requested = conn.execute(
+            f"SELECT {columns} FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
-        return (row["id"] if row is not None and hasattr(row, "keys") else row[0]) if row else session_id
+        if requested is None:
+            return CompressionLineageResolution(
+                requested_id=session_id,
+                root_id=session_id,
+                tip_id=None,
+                status="missing",
+                detail="requested session does not exist",
+            )
+
+        current = requested
+        upward_seen = set()
+        for _ in range(max_depth + 1):
+            current_id = current["id"]
+            if current_id in upward_seen:
+                return CompressionLineageResolution(
+                    requested_id=session_id,
+                    root_id=current_id,
+                    tip_id=None,
+                    status="malformed",
+                    detail="cycle detected while finding lineage root",
+                )
+            upward_seen.add(current_id)
+
+            parent_id = current["parent_session_id"]
+            if not parent_id:
+                break
+            parent = conn.execute(
+                f"SELECT {columns} FROM sessions WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if parent is None:
+                return CompressionLineageResolution(
+                    requested_id=session_id,
+                    root_id=current_id,
+                    tip_id=None,
+                    status="malformed",
+                    detail=f"missing parent session {parent_id!r}",
+                )
+            legal_edge = (
+                parent["end_reason"] == "compression"
+                and parent["ended_at"] is not None
+                and current["started_at"] is not None
+                and current["started_at"] >= parent["ended_at"]
+            )
+            if not legal_edge:
+                break
+            current = parent
+        else:
+            return CompressionLineageResolution(
+                requested_id=session_id,
+                root_id=current["id"],
+                tip_id=None,
+                status="malformed",
+                detail="lineage exceeds maximum depth",
+            )
+
+        root_id = current["id"]
+        path = []
+        forward_seen = set()
+        for _ in range(max_depth + 1):
+            current_id = current["id"]
+            if current_id in forward_seen:
+                return CompressionLineageResolution(
+                    requested_id=session_id,
+                    root_id=root_id,
+                    tip_id=None,
+                    status="malformed",
+                    path=tuple(path),
+                    detail="cycle detected while finding lineage tip",
+                )
+            forward_seen.add(current_id)
+            path.append(current_id)
+
+            if (
+                current["end_reason"] != "compression"
+                or current["ended_at"] is None
+            ):
+                return CompressionLineageResolution(
+                    requested_id=session_id,
+                    root_id=root_id,
+                    tip_id=current_id,
+                    status="ok",
+                    path=tuple(path),
+                )
+
+            children = conn.execute(
+                f"""SELECT {columns} FROM sessions
+                    WHERE parent_session_id = ?
+                      AND started_at >= ?
+                    ORDER BY started_at ASC, id ASC""",
+                (current_id, current["ended_at"]),
+            ).fetchall()
+            if not children:
+                return CompressionLineageResolution(
+                    requested_id=session_id,
+                    root_id=root_id,
+                    tip_id=current_id,
+                    status="ok",
+                    path=tuple(path),
+                )
+            if len(children) > 1:
+                return CompressionLineageResolution(
+                    requested_id=session_id,
+                    root_id=root_id,
+                    tip_id=None,
+                    status="ambiguous",
+                    conflict_count=len(children),
+                    path=tuple(path),
+                    detail=f"session {current_id!r} has multiple continuations",
+                )
+            current = children[0]
+        else:
+            return CompressionLineageResolution(
+                requested_id=session_id,
+                root_id=root_id,
+                tip_id=None,
+                status="malformed",
+                path=tuple(path),
+                detail="lineage exceeds maximum depth",
+            )
+
+    @staticmethod
+    def _require_usable_compression_lineage(
+        resolution: CompressionLineageResolution,
+    ) -> str:
+        if resolution.status == "ok":
+            return resolution.root_id
+        if resolution.status == "ambiguous":
+            raise CompressionLineageAmbiguousError(resolution)
+        raise CompressionLineageMalformedError(resolution)
+
+    def resolve_compression_lineage(
+        self,
+        session_id: str,
+    ) -> CompressionLineageResolution:
+        """Return the canonical compression ownership domain for a session."""
+        with self._lock:
+            return self._resolve_compression_lineage(self._conn, session_id)
+
+    def _managed_run_lease_key(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+    ) -> str:
+        resolution = self._resolve_compression_lineage(conn, session_id)
+        return self._require_usable_compression_lineage(resolution)
 
     def get_managed_run_lease_key(self, session_id: str) -> str:
         with self._lock:
@@ -952,7 +1126,10 @@ class SessionDB:
         explicit_now = None if now is None else float(now)
 
         def _do(conn):
-            lease_session_id = self._managed_run_lease_key(conn, session_id)
+            resolution = self._resolve_compression_lineage(conn, session_id)
+            if resolution.status != "ok":
+                return False
+            lease_session_id = resolution.root_id
             heartbeat_at = time.time() if explicit_now is None else explicit_now
             expires_at = heartbeat_at + float(lease_seconds)
             cursor = conn.execute(
@@ -985,7 +1162,8 @@ class SessionDB:
             raise ValueError("session_id, owner_id, and run_id are required")
 
         def _do(conn):
-            lease_session_id = self._managed_run_lease_key(conn, session_id)
+            resolution = self._resolve_compression_lineage(conn, session_id)
+            lease_session_id = resolution.root_id
             cursor = conn.execute(
                 """DELETE FROM managed_run_leases
                    WHERE session_id = ? AND owner_id = ? AND run_id = ?""",
@@ -1000,7 +1178,11 @@ class SessionDB:
     ) -> Optional[Dict[str, Any]]:
         """Return the current durable lease row for diagnostics and tests."""
         with self._lock:
-            lease_session_id = self._managed_run_lease_key(self._conn, session_id)
+            resolution = self._resolve_compression_lineage(
+                self._conn,
+                session_id,
+            )
+            lease_session_id = resolution.root_id
             row = self._conn.execute(
                 "SELECT * FROM managed_run_leases WHERE session_id = ?",
                 (lease_session_id,),
@@ -1040,11 +1222,14 @@ class SessionDB:
             (session_id,),
         ).fetchone()
         if target_row is not None:
-            target_lease_session_id = self._managed_run_lease_key(
+            target_resolution = self._resolve_compression_lineage(
                 conn,
                 session_id,
             )
-            target_is_legal = target_lease_session_id == leased_session_id
+            target_is_legal = (
+                target_resolution.status == "ok"
+                and target_resolution.root_id == leased_session_id
+            )
         elif session_id == leased_session_id and parent_session_id is None:
             # Kept for compatibility with callers that establish a lease and
             # its root row in one higher-level flow. The FK-backed production
@@ -1060,26 +1245,22 @@ class SessionDB:
                 if parent_session_id
                 else None
             )
+            parent_resolution = (
+                self._resolve_compression_lineage(conn, parent_session_id)
+                if parent is not None
+                else None
+            )
             parent_is_compression_tip = (
                 parent is not None
                 and parent["end_reason"] == "compression"
                 and parent["ended_at"] is not None
                 and checked_at >= parent["ended_at"]
-                and self._managed_run_lease_key(conn, parent_session_id)
-                == leased_session_id
+                and parent_resolution is not None
+                and parent_resolution.status == "ok"
+                and parent_resolution.root_id == leased_session_id
+                and parent_resolution.tip_id == parent_session_id
             )
-            continuation_exists = False
-            if parent_is_compression_tip:
-                continuation_exists = conn.execute(
-                    """SELECT 1 FROM sessions
-                       WHERE parent_session_id = ?
-                         AND started_at >= ?
-                       LIMIT 1""",
-                    (parent_session_id, parent["ended_at"]),
-                ).fetchone() is not None
-            target_is_legal = (
-                parent_is_compression_tip and not continuation_exists
-            )
+            target_is_legal = parent_is_compression_tip
 
         if lease_is_current and target_is_legal:
             return
@@ -1583,7 +1764,7 @@ class SessionDB:
         return f"{base} #{max_num + 1}"
 
     def get_compression_tip(self, session_id: str) -> Optional[str]:
-        """Walk the compression-continuation chain forward and return the tip.
+        """Return the unique compression tip without choosing among forks.
 
         A compression continuation is a child session where:
         1. The parent's ``end_reason = 'compression'``
@@ -1593,30 +1774,14 @@ class SessionDB:
         delegate subagents or branch children, which can also have a
         ``parent_session_id`` but were created while the parent was still live.
 
-        Returns the session_id of the latest continuation in the chain, or the
-        input ``session_id`` if it isn't part of a compression chain (or if the
-        input itself doesn't exist).
+        Returns the canonical root when the lineage is ambiguous, so projection
+        callers cannot silently select one branch. Missing or malformed rows
+        likewise fail closed to the safest known durable identity.
         """
-        current = session_id
-        # Bound the walk defensively — compression chains this deep are
-        # pathological and shouldn't happen in practice. 100 = plenty.
-        for _ in range(100):
-            with self._lock:
-                cursor = self._conn.execute(
-                    "SELECT id FROM sessions "
-                    "WHERE parent_session_id = ? "
-                    "  AND started_at >= ("
-                    "      SELECT ended_at FROM sessions "
-                    "      WHERE id = ? AND end_reason = 'compression'"
-                    "  ) "
-                    "ORDER BY started_at DESC LIMIT 1",
-                    (current, current),
-                )
-                row = cursor.fetchone()
-            if row is None:
-                return current
-            current = row["id"]
-        return current
+        resolution = self.resolve_compression_lineage(session_id)
+        if resolution.status == "ok" and resolution.tip_id is not None:
+            return resolution.tip_id
+        return resolution.root_id
 
     def list_sessions_rich(
         self,
@@ -1694,15 +1859,22 @@ class SessionDB:
             # get_compression_tip (parent.end_reason='compression' AND
             # child.started_at >= parent.ended_at).
             query = f"""
-                WITH RECURSIVE chain(root_id, cur_id) AS (
-                    SELECT s.id, s.id FROM sessions s {where_sql}
+                WITH RECURSIVE chain(root_id, cur_id, depth) AS (
+                    SELECT s.id, s.id, 0 FROM sessions s {where_sql}
                     UNION ALL
-                    SELECT c.root_id, child.id
+                    SELECT c.root_id, child.id, c.depth + 1
                     FROM chain c
                     JOIN sessions parent ON parent.id = c.cur_id
                     JOIN sessions child ON child.parent_session_id = c.cur_id
                     WHERE parent.end_reason = 'compression'
                       AND child.started_at >= parent.ended_at
+                      AND c.depth < 1000
+                      AND 1 = (
+                          SELECT COUNT(*)
+                          FROM sessions sibling
+                          WHERE sibling.parent_session_id = parent.id
+                            AND sibling.started_at >= parent.ended_at
+                      )
                 ),
                 chain_max AS (
                     SELECT
@@ -1784,7 +1956,17 @@ class SessionDB:
                 if s.get("end_reason") != "compression":
                     projected.append(s)
                     continue
-                tip_id = self.get_compression_tip(s["id"])
+                resolution = self.resolve_compression_lineage(s["id"])
+                if resolution.status != "ok":
+                    marked = dict(s)
+                    marked["_lineage_root_id"] = resolution.root_id
+                    marked["_lineage_status"] = resolution.status
+                    marked["_lineage_conflict_count"] = (
+                        resolution.conflict_count
+                    )
+                    projected.append(marked)
+                    continue
+                tip_id = resolution.tip_id
                 if tip_id == s["id"]:
                     projected.append(s)
                     continue
@@ -1803,6 +1985,8 @@ class SessionDB:
                     if key in tip_row:
                         merged[key] = tip_row[key]
                 merged["_lineage_root_id"] = s["id"]
+                merged["_lineage_status"] = "ok"
+                merged["_lineage_conflict_count"] = 0
                 projected.append(merged)
             sessions = projected
 
@@ -2341,7 +2525,7 @@ class SessionDB:
         }
 
     def resolve_resume_session_id(self, session_id: str) -> str:
-        """Redirect a resume target to the descendant session that holds the messages.
+        """Redirect a resume target only along a unique compression lineage.
 
         Context compression ends the current session and forks a new child session
         (linked via ``parent_session_id``). The flush cursor is reset, so the
@@ -2349,14 +2533,8 @@ class SessionDB:
         ``message_count = 0`` rows unless messages had already been flushed to
         it before compression. See #15000.
 
-        This helper walks ``parent_session_id`` forward from ``session_id`` and
-        returns the first descendant in the chain that has at least one message
-        row. If the original session already has messages, or no descendant
-        has any, the original ``session_id`` is returned unchanged.
-
-        The chain is always walked via the child whose ``started_at`` is
-        latest; that matches the single-chain shape that compression creates.
-        A depth cap (32) guards against accidental loops in malformed data.
+        Ambiguous, malformed, delegate, and ordinary branch relationships fail
+        closed to the requested ID. No branch is selected by recency.
         """
         if not session_id:
             return session_id
@@ -2373,36 +2551,26 @@ class SessionDB:
             if row is not None:
                 return session_id
 
-            # Walk descendants: at each step, pick the most-recently-started
-                # child session; stop once we find one with messages.
-            current = session_id
-            seen = {current}
-            for _ in range(32):
-                try:
-                    child_row = self._conn.execute(
-                        "SELECT id FROM sessions "
-                        "WHERE parent_session_id = ? "
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
-                        (current,),
-                    ).fetchone()
-                except Exception:
-                    return session_id
-                if child_row is None:
-                    return session_id
-                child_id = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
-                if not child_id or child_id in seen:
-                    return session_id
-                seen.add(child_id)
+            resolution = self._resolve_compression_lineage(
+                self._conn,
+                session_id,
+            )
+            if resolution.status != "ok":
+                return session_id
+            try:
+                requested_index = resolution.path.index(session_id)
+            except ValueError:
+                return session_id
+            for descendant_id in resolution.path[requested_index + 1 :]:
                 try:
                     msg_row = self._conn.execute(
                         "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
-                        (child_id,),
+                        (descendant_id,),
                     ).fetchone()
                 except Exception:
                     return session_id
                 if msg_row is not None:
-                    return child_id
-                current = child_id
+                    return descendant_id
         return session_id
 
     def get_messages_as_conversation(

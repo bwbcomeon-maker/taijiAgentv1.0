@@ -2396,6 +2396,81 @@ class TestCompressionChainProjection:
         # root1's tip must be tip1 (via mid1), not delegate1.
         assert db.get_compression_tip("root1") == "tip1"
 
+    def test_ambiguous_compression_projection_keeps_root_and_branch_activity_separate(
+        self,
+        db,
+    ):
+        t0 = 1709500000.0
+        db.create_session("ambiguous-root", "cli")
+        db.append_message("ambiguous-root", "user", "root message")
+        db.create_session("standalone", "cli")
+        db.append_message("standalone", "user", "standalone message")
+        with db._lock:
+            db._conn.execute(
+                "UPDATE sessions SET started_at=?, ended_at=?, end_reason='compression' "
+                "WHERE id=?",
+                (t0, t0 + 10, "ambiguous-root"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?",
+                (t0 + 100, "standalone"),
+            )
+            db._conn.execute(
+                "UPDATE messages SET timestamp=? WHERE session_id=?",
+                (t0 + 1, "ambiguous-root"),
+            )
+            db._conn.execute(
+                "UPDATE messages SET timestamp=? WHERE session_id=?",
+                (t0 + 100, "standalone"),
+            )
+
+        for index, child_id in enumerate(("ambiguous-a", "ambiguous-b"), start=1):
+            db.create_session(
+                child_id,
+                "cli",
+                parent_session_id="ambiguous-root",
+            )
+            db.append_message(child_id, "user", f"{child_id} message")
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=? WHERE id=?",
+                    (t0 + 10 + index, child_id),
+                )
+                db._conn.execute(
+                    "UPDATE messages SET timestamp=? WHERE session_id=?",
+                    (t0 + 1000 + index, child_id),
+                )
+                db._conn.commit()
+
+        assert db.get_compression_tip("ambiguous-root") == "ambiguous-root"
+        sessions = db.list_sessions_rich(
+            source="cli",
+            limit=20,
+            order_by_last_active=True,
+        )
+        root = next(row for row in sessions if row["id"] == "ambiguous-root")
+        assert root["_lineage_root_id"] == "ambiguous-root"
+        assert root["_lineage_status"] == "ambiguous"
+        assert root["_lineage_conflict_count"] == 2
+        assert root["preview"].startswith("root message")
+
+        # Branch-only activity must not promote or overwrite the root slot.
+        assert db.list_sessions_rich(
+            source="cli",
+            limit=1,
+            order_by_last_active=True,
+        )[0]["id"] == "standalone"
+
+        raw = db.list_sessions_rich(
+            source="cli",
+            limit=20,
+            include_children=True,
+        )
+        assert {
+            row["id"] for row in raw
+        } == {"ambiguous-root", "ambiguous-a", "ambiguous-b", "standalone"}
+        assert all("_lineage_status" not in row for row in raw)
+
     def test_list_surfaces_tip_for_compressed_root(self, db):
         """The list must show the tip's id/message_count/preview in place of
         the root row, so users can see and resume the live conversation.
