@@ -497,7 +497,9 @@ registry、sequential executor、`AIAgent._invoke_tool`/
 Provider L1 保持 `blocked_internal`，直到：
 
 - 27 类测试均有真实 RED 原因和 GREEN 通过证据；
-- B1–B4 各自形成可回滚 commit；
+- B1→B2→B3→B4 各自复审并形成独立 commit；最终依赖栈只按
+  B4→B3→B2→B1 回滚连续后缀，并在一次性 worktree 完成
+  `git revert --no-commit` 演练；禁止从依赖栈中间抽离回滚；
 - 每个子任务的规格复审和独立质量复审均关闭 P0/P1；
 - Task B 全量目标测试通过；
 - 敏感信息扫描无 Secret/私有 hostname；
