@@ -44,12 +44,16 @@ Task B 必须拆为四个独立提交：
   `agent/image_gen_provider.py`、
   `agent/image_gen_verification.py`、
   `agent/image_routing.py`、
+  `agent/agent_runtime_helpers.py`、
+  `agent/tool_executor.py`、
   `tools/url_safety.py`、
-  `tools/image_generation_tool.py`。
+  `tools/image_generation_tool.py`、
+  `tools/vision_tools.py`。
 - 当前
   `api/model_config.py`、
   `api/streaming.py`、
   `model_tools.py`、
+  `run_agent.py`、
   `agent/agent_init.py`、
   `gateway/run.py`、
   `tui_gateway/server.py`、
@@ -118,16 +122,23 @@ Provider 特例中，安全边界不可组合、不可审计。
 
 **hand-port 边界：** B2 引入互斥的 `public_direct`、`private_direct`、
 `trusted_proxy`。为保留本地自定义 endpoint，只有显式 `private_direct` 可把
-RFC1918/loopback/ULA 当目标；`public_direct` 和 `trusted_proxy` 的目标不得
-降级到这些地址。metadata、link-local、multicast、unspecified、其它
-reserved/benchmark 等永久禁区在所有 scope 下禁止；`198.18.0.0/15` 地址输入
-或 DNS answer 必须明确失败，direct 模式返回
-`fake_ip_requires_trusted_proxy`，不得作为 connected peer 放行；缺少显式受信
-proxy 返回 `trusted_proxy_unavailable`。不得读取 ambient proxy。
-`trusted_proxy` 不在本地解析 origin；它必须通过显式 proxy `CONNECT` 建立
-隧道，再对 origin 执行 TLS，并校验 origin certificate/hostname 与原
-hostname SNI。proxy 缺失、不可达、CONNECT/TLS 失败时不得回退 direct 或
-`private_direct`。
+RFC1918/loopback/ULA 当目标；`public_direct` 不得降级到这些地址。
+metadata、link-local、multicast、unspecified、其它 reserved/benchmark 和
+`198.18.0.0/15` 在 direct 模式由应用的 DNS/peer pin 明确拒绝。
+
+`trusted_proxy` 必须被定义为外部受控安全策略边界：Provider 配置只能引用
+控制面/运维预先批准的 named proxy profile，不能提交任意 URL，也不能读取
+ambient proxy。profile 必须声明已验证的 `public_egress` 与
+`dns_ip_classification` policy capability；缺失或未批准返回
+`trusted_proxy_unavailable`，请求数为 0。应用校验 proxy 自身地址、origin
+URL/literal/metadata hostname、CONNECT 状态、隧道内 origin TLS
+certificate/hostname/SNI，但标准 CONNECT 不暴露 proxy 实际解析/连接的
+origin IP，因此应用不能声称独立验证 remote resolved peer。
+
+named proxy 的策略必须在远端 DNS 解析到 RFC1918、metadata、link-local、
+其它永久禁区或 Fake-IP 时拒绝并给出结构化 policy denial；应用把它稳定映射为
+`trusted_proxy_origin_blocked`，且不得 fallback direct/private。未来若 proxy
+提供 resolved-peer attestation 可增强证明，但不是当前标准 CONNECT 契约。
 
 ### P1-4：长生命周期 Agent 可持有 stale `image_generate`
 
@@ -135,16 +146,29 @@ hostname SNI。proxy 缺失、不可达、CONNECT/TLS 失败时不得回退 dire
 `agent/agent_init.py` 初始化时一次性执行 `get_tool_definitions` 并把结果放入
 `agent.tools`；memory provider/context engine 之后还会注入非 registry schema。
 配置或验证变化后，`model_tools` 的缓存和 registry check_fn 即使更新，已存在
-Agent 仍可能保留旧工具或缺少新工具。
+Agent 仍可能保留旧工具或缺少新工具。当前顺序执行在
+`agent/tool_executor.py::execute_tool_calls_sequential` 直接调用
+`model_tools.handle_function_call`；并发执行经
+`run_agent.py::AIAgent._invoke_tool` →
+`agent/agent_runtime_helpers.py::invoke_tool` 再到同一 handler。两条路径都没有
+携带“产生这次调用的 Agent/turn fingerprint”。
 
 **根因：** 动态能力状态、tool schema cache 和 Agent 实例生命周期没有共享
-版本化 identity；schema refresh 若直接覆盖 `agent.tools` 又会丢失后注入工具。
+版本化 identity；handler 若只读取最新 verified snapshot，会把旧 Agent 发出的
+调用误当成新配置下的授权。并发 worker 若启动后再从 mutable Agent 读
+fingerprint，也无法证明它使用的是分派时 identity。schema refresh 若直接覆盖
+`agent.tools` 又会丢失后注入工具。
 
 **影响：** 已撤销/失效的生图能力仍可被模型调用，或新验证成功的能力必须重启
 才出现；CLI、Gateway、TUI、WebUI 的表现可能不同。
 
-**hand-port 边界：** B3 增加 next-turn 原子 refresh 和 call-time 最终门禁，
-只替换上一版 registry 工具并保留 non-registry schema；B4 把相同快照接入四个
+**hand-port 边界：** B3 增加 next-turn 原子 refresh 和 caller-vs-current
+call-time 最终门禁，只替换上一版 registry 工具并保留 non-registry schema。
+Agent 初始化/每次成功 refresh 原子暴露 `_image_capability_fingerprint`；
+顺序与并发 executor 都在分派前捕获它。顺序路径显式传给
+`handle_function_call`，并发路径经 `_invoke_tool`/`invoke_tool` 透传同一不可变
+值。handler 比较 caller fingerprint 与 current verified snapshot；不一致返回
+稳定 `capability_caller_stale`，Provider 调用数为 0。B4 再把相同快照接入四个
 入口和 agent cache signature。
 
 ### P1-5：vision fingerprint 使用未展开的 `${ENV}` 配置
@@ -292,8 +316,8 @@ urllib3 downloader 都不得恢复。
 | 子任务 | 允许修改 | 明确不做 |
 |---|---|---|
 | B1 | aliases、family、model allowlist、unknown capability；不读取 Secret | credential binding、网络 transport、verification version、streaming、Artifact、UI |
-| B2 | domestic/custom image+vision 完整 credential binding、WebUI custom CRUD、三类 network scope、pinned sync/async transport、bounded JSON | tool lifecycle、Agent cache、Artifact 协议、全局 private/proxy 降级 |
-| B3 | WebUI/Agent verification state schema/version、effective fingerprint/public projection、cache identity、next-turn refresh、image/vision call-time gate | mutation hook、四入口编排、事件生产、Artifact/下载重写 |
+| B2 | domestic/custom image+vision 完整 credential binding、WebUI custom CRUD、三类 network scope、named trusted-proxy policy boundary、pinned direct sync/async transport、bounded JSON | tool lifecycle、Agent cache、Artifact 协议、任意/ambient proxy、声称应用可由标准 CONNECT attest remote IP |
+| B3 | WebUI/Agent verification state schema/version、effective fingerprint/public projection、cache identity、next-turn refresh、sequential/concurrent caller-vs-current image gate、vision call-time gate | mutation hook、四入口编排、事件生产、Artifact/下载重写 |
 | B4 | post-mutation hook、唯一 `capability_route` producer、WebUI/CLI/Gateway/TUI 相同 snapshot/reason code、agent signature | verification 核心读写/投影、新 UI 信息架构、第二套状态、旧 artifact、Provider transport |
 
 每个子任务只在其前置子任务的已审 commit 上继续；不得把 B2 的安全 transport
@@ -353,18 +377,30 @@ B2 RED 只能调用当前 public seams（`resolve_api_key`、custom Provider/con
 11. **`private_direct`** —
     `test_private_direct_requires_explicit_scope_and_keeps_permanent_blocks`：
     只有显式 scope 允许 RFC1918/loopback/ULA；不允许隐式降级，永久禁区仍拒绝。
+
+类别 12–14 的三个既有 node 共同参数化 trusted-proxy 边界：未批准 profile
+请求数为 0；已批准 profile 模拟 remote-public 时允许；proxy 模拟
+remote-blocked 时返回结构化拒绝；应用映射为稳定
+`trusted_proxy_origin_blocked`，direct/private fallback 调用数为 0。
+
 12. **`trusted_proxy`** —
-    `test_trusted_proxy_uses_connect_origin_tls_and_never_falls_back`：不本地解析
-    origin；只用显式 proxy `CONNECT`；隧道内校验 origin certificate/hostname
-    并发送 origin SNI；忽略 ambient proxy，任何 proxy/CONNECT/TLS 失败不得
-    fallback direct/private。
+    `test_trusted_proxy_uses_connect_origin_tls_and_never_falls_back`：只接受预先
+    批准且声明 `public_egress`/`dns_ip_classification` capability 的 named
+    profile；拒绝任意 URL/ambient proxy；应用校验 proxy 地址、origin
+    URL/literal/metadata hostname、CONNECT 与 origin TLS/SNI/certificate，
+    但不声称标准 CONNECT 可 attest remote resolved IP。
 13. **Permanent network blocks** —
     `test_network_scopes_block_metadata_link_local_and_mapped_variants`：
-    metadata/link-local/unspecified/multicast/其它 reserved/benchmark 及映射
-    变体在三个 scope 下保持拒绝。
+    direct 模式由应用拒绝 metadata/link-local/unspecified/multicast/其它
+    reserved/benchmark 及映射变体；trusted proxy 的 origin literal/metadata
+    hostname 由应用先拒绝，hostname 的远端 DNS 分类由 proxy policy 拒绝并让
+    应用映射稳定 reason。
 14. **Fake-IP** —
     `test_fake_ip_range_is_never_connected`：`198.18.0.0/15` literal、DNS answer、
-    proxy address、connected peer 与 Provider 特例均不得连接。
+    proxy address、connected peer 与 Provider 特例均不得连接；应用拒绝
+    origin literal/不安全 proxy 自身地址，trusted-proxy hostname 的远端
+    Fake-IP answer 由 proxy policy 拒绝并映射
+    `trusted_proxy_origin_blocked`，无 direct fallback。
 15. **Custom vision rebinding** —
     `test_custom_vision_sync_and_async_resist_dns_rebinding`：sync/async 均在发送
     凭据前阻断公开预检/私网连接切换。
@@ -381,9 +417,10 @@ B2 RED 只能调用当前 public seams（`resolve_api_key`、custom Provider/con
 
 ### B3：版本、cache、长生命周期 Agent（19–23）
 
-B3 RED 调用当前 `api.model_config` get/test、`model_tools`、Agent/tool registry
-和 `_handle_vision_analyze` public seams；不得靠导入拟新增
-`image_runtime.py`/helper 产生 ImportError。
+B3 RED 调用当前 `api.model_config` get/test、`model_tools`、Agent/tool
+registry、sequential executor、`AIAgent._invoke_tool`/
+`agent_runtime_helpers.invoke_tool` 和 `_handle_vision_analyze` public seams；
+不得靠导入拟新增 `image_runtime.py`/helper 产生 ImportError。
 
 19. **WebUI verification state version** —
     `test_webui_verification_state_requires_current_schema_version`：
@@ -399,8 +436,11 @@ B3 RED 调用当前 `api.model_config` get/test、`model_tools`、Agent/tool reg
     cache。
 22. **Long-lived Agent + image call gate** —
     `test_long_lived_agent_refresh_and_image_call_gate_preserve_non_registry_tools`：
-    同一 Agent 增删 `image_generate`、stale image 调用前阻断、refresh 原子回滚，
-    并保留 memory/context/MCP 等 non-registry schema。
+    同一 node 参数化 sequential/concurrent；先捕获旧 Agent fingerprint，再让
+    新配置获得当前 verified snapshot，两路均在 Provider 前返回稳定
+    `capability_caller_stale`、调用数为 0。并同时覆盖增删 `image_generate`、
+    refresh 原子回滚和 memory/context/MCP 等 non-registry schema 保留；只读
+    当前 snapshot 不算关闭 stale caller。
 23. **Vision final-handler call-time gate** —
     `test_vision_handle_call_time_gate_blocks_unknown_unverified_and_stale_before_provider`：
     unknown main、unverified aux、旧 version/fingerprint 在任何 Provider 调用前

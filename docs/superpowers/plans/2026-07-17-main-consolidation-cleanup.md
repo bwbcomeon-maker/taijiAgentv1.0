@@ -148,8 +148,12 @@ Task B 改为四个可独立回滚的 TDD hand-port：
   任何显式引用缺失、family 不匹配或未知模型都 fail-closed。
 - `public_direct`、`private_direct`、`trusted_proxy` 是互斥的显式网络范围；
   metadata/link-local 永久禁止，`198.18.0.0/15` Fake-IP 明确失败。
-- 自定义 endpoint 的 DNS 解析、实际连接、TLS hostname 与 peer 必须绑定，
-  不允许预检后由 SDK 二次解析。
+  `trusted_proxy` 是外部受控策略边界，只能引用预先批准且具备远端
+  DNS/IP 分类能力声明的 named proxy profile；标准 CONNECT 下应用不声称能
+  独立证明 proxy 远端解析出的 IP。
+- direct 自定义 endpoint 的 DNS 解析、实际连接、TLS hostname 与 peer 必须
+  绑定，不允许预检后由 SDK 二次解析；trusted-proxy endpoint 按 named
+  profile 的 proxy-side DNS/IP policy 与应用侧 origin TLS 校验分工。
 - 验证状态、fingerprint、tool cache 和 Agent schema 使用同一版本化能力快照；
   配置变更后的下一轮和实际工具调用都不接受 stale `image_generate`。
 - 主模型原生视觉、已验证辅助视觉和生图路径在 WebUI、CLI、Gateway、TUI
@@ -654,9 +658,10 @@ git commit -m "feat(images): hand-port fail-closed provider models"
   (新增 `provider_api_key`)
 - Create:
   `hermes-local-lab/sources/hermes-agent/agent/safe_outbound_http.py`
-  (`NetworkScope`, `normalize_network_scope`, `resolve_pinned_addresses`,
-  `request_pinned_https`, `read_bounded_json`, `build_openai_sync_transport`,
-  `build_openai_async_transport`)
+  (`NetworkScope`, `TrustedProxyProfile`, `normalize_network_scope`,
+  `resolve_trusted_proxy_profile`, `resolve_pinned_addresses`,
+  `request_pinned_https`, `request_via_trusted_proxy`, `read_bounded_json`,
+  `build_openai_sync_transport`, `build_openai_async_transport`)
 - Modify:
   `hermes-local-lab/sources/hermes-agent/agent/custom_image_providers.py`
   (`normalize_custom_image_provider_entry`, 新增 `_entry_api_key`,
@@ -761,22 +766,38 @@ PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sourc
   image+vision 的 `_entry_api_key`/public row/`is_available`/setup schema/
   `generate` 与 WebUI get/set/delete 全链路，并拒绝 caller-controlled
   `api_key_env`。
+- [ ] **trusted proxy matrix（类别 12–14，仍复用三个既有 RED node）：**
+  参数化覆盖未批准 named profile（请求数为 0）、已批准 profile 模拟
+  remote-public（允许）、proxy 模拟 remote-blocked（拒绝），以及应用把 proxy
+  的结构化拒绝映射为稳定 `trusted_proxy_origin_blocked` 且 direct/private
+  fallback 调用数为 0。
 - [ ] **GREEN：** 先实现上述完整 credential binding，再从当前
   `image_gen_provider.py` 抽取单次 DNS、全部 answer
   校验、connected peer equality、原 hostname SNI/Host、每跳重验和 bounded-read
-  语义到 `safe_outbound_http.py`；先用 characterization tests 证明
+  语义作为 direct/redirect transport 到 `safe_outbound_http.py`；先用
+  characterization tests 证明
   `save_url_image` 的现有 public contract、inode/symlink 和 atomic write 行为不变。
 - [ ] `public_direct` 只允许直连公开地址且 `trust_env=False`；
   `private_direct` 仅在配置显式选择时允许 RFC1918/loopback/ULA 目标，保留
-  本地自定义 endpoint；`trusted_proxy` 只接受显式受信 proxy 配置，不做本地
-  origin DNS 解析，使用显式 proxy `CONNECT` 建隧道后对 origin 执行 TLS，
-  校验 origin hostname/certificate 并发送 origin SNI；不得读取 ambient proxy，
-  proxy 缺失、不可达、握手/证书失败均不得回退 direct/private。三种 scope 均永久禁止
+  本地自定义 endpoint。`trusted_proxy` 不接受任意 proxy URL，也不读取
+  ambient proxy；Provider 配置只能引用控制面/运维预先批准的 named proxy
+  profile，且 profile 必须声明已验证的 `public_egress` 与
+  `dns_ip_classification` policy capability，缺失或未批准统一返回
+  `trusted_proxy_unavailable`，请求数为 0。
+- [ ] 标准 CONNECT 不向应用暴露 proxy 实际解析/连接的 origin IP，因此应用
+  只校验 proxy 自身地址、origin URL/literal/metadata hostname、CONNECT 状态，
+  以及隧道内 origin TLS certificate/hostname/SNI；不得声称应用独立验证了
+  remote resolved peer。named proxy profile 必须在远端 DNS 解析到 RFC1918、
+  metadata、link-local、其它永久禁区或 Fake-IP 时拒绝，并返回可映射的结构化
+  policy denial；应用映射为 `trusted_proxy_origin_blocked`，任何 proxy 缺失、
+  不可达、CONNECT/TLS/policy 失败均不得回退 direct/private。未来若 proxy
+  提供 resolved-peer attestation 可增强此证明，但不作为当前标准 CONNECT
+  契约。三种 scope 均永久禁止
   metadata、link-local、unspecified、multicast、其它 reserved/benchmark 和
   显式 `198.18.0.0/15` 地址；direct 模式解析到 Fake-IP 时返回
   `fake_ip_requires_trusted_proxy` 并停止，缺少显式 proxy 返回
-  `trusted_proxy_unavailable`。`trusted_proxy` 不得把 Fake-IP 地址本身当目标或
-  proxy 地址放行。
+  `trusted_proxy_unavailable`。应用必须拒绝 Fake-IP origin literal 和不安全的
+  proxy 自身地址；hostname 的远端解析结果由上述 proxy-side policy 保证。
 - [ ] 自定义生图/识图只从 canonical credential env 取 Secret；先完成路由
   安全决策和连接绑定，再附加 Authorization。API POST 不跟随 redirect；
   图片 GET redirect 每跳重新解析、固定、校验，跨 origin 不转发凭据。
@@ -801,9 +822,12 @@ PYTHONPATH="$WT/hermes-local-lab/sources/hermes-agent" \
   --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b2-green.xml"
 ```
 
-- [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 7–18，逐项核验三个
+- [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 7–18，逐项核验
   credential default/fallback 矩阵、custom image+vision binding、三个 scope、
-  永久禁区、Fake-IP、sync/async peer pin、redirect 和 bounded JSON。
+  named proxy profile/capability、proxy-side remote DNS/IP policy、
+  `trusted_proxy_origin_blocked` 映射与 no-fallback、永久禁区、Fake-IP、
+  sync/async peer pin、redirect 和 bounded JSON；不得把标准 CONNECT 写成应用
+  已独立验证 remote resolved IP。
 - [ ] **质量复审 gate：** 另一 reviewer 做 SSRF/secret-exfiltration 对抗审查，
   并确认 `image_gen_provider` 当前 downloader 与 Artifact 边界没有退化。
 - [ ] **禁止：** 不整段移植 `d1b65c51` 的 urllib3 transport；不允许
@@ -838,14 +862,23 @@ git commit -m "fix(images): bind custom credentials and harden outbound transpor
 - Create:
   `hermes-local-lab/sources/hermes-agent/agent/image_runtime.py`
   (`current_image_runtime_snapshot`, `_tool_name`,
-  `refresh_agent_image_runtime`)
+  `refresh_agent_image_runtime`；初始化/成功 refresh 后原子暴露
+  `agent._image_capability_fingerprint`)
 - Modify:
   `hermes-local-lab/sources/hermes-agent/agent/agent_init.py`
-  (`init_agent` 中 registry schema 基线记录)
+  (`init_agent` 中 registry schema 基线和
+  `agent._image_capability_fingerprint` 记录)
 - Modify:
   `hermes-local-lab/sources/hermes-agent/model_tools.py`
   (`_tool_defs_cache`, `_clear_tool_defs_cache`, `get_tool_definitions`,
-  `handle_function_call`)
+  `handle_function_call` 新增 `caller_capability_fingerprint` 并与当前 verified
+  snapshot 比较)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/agent_runtime_helpers.py`
+  (`invoke_tool` 新增并透传不可变的 `caller_capability_fingerprint`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/run_agent.py`
+  (`AIAgent._invoke_tool` wrapper 透传 caller fingerprint)
 - Modify:
   `hermes-local-lab/sources/hermes-agent/tools/image_generation_tool.py`
   (`get_image_generation_readiness`, `image_generate_tool`,
@@ -855,7 +888,9 @@ git commit -m "fix(images): bind custom credentials and harden outbound transpor
   (`_handle_vision_analyze`)
 - Modify:
   `hermes-local-lab/sources/hermes-agent/agent/tool_executor.py`
-  (调用时能力快照透传)
+  (`execute_tool_calls_sequential` 与 `execute_tool_calls_concurrent` 在开始分派
+  前捕获 Agent 初始化/上次成功 refresh 暴露的 fingerprint；顺序路径直接传给
+  `handle_function_call`，并发路径经 `_invoke_tool`/`invoke_tool` 透传)
 - Test:
   `hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_verification.py`
 - Create:
@@ -872,13 +907,17 @@ git commit -m "fix(images): bind custom credentials and harden outbound transpor
 - [ ] **RED seam 约束：** B3 RED 只调用当前可导入的 public seams：
   `api.model_config` 的 `get_vision_config`/`get_image_gen_config`/
   `test_vision_config`/`test_image_gen_config`，`model_tools.get_tool_definitions`，
-  当前 Agent 下一轮/tool registry 路径，以及
+  当前 Agent 下一轮/tool registry 路径、
+  `agent_runtime_helpers.invoke_tool`/`AIAgent._invoke_tool`，以及
   `tools.vision_tools._handle_vision_analyze`；不得在 RED 阶段导入尚不存在的
   `image_runtime.py` 或新增 helper。新模块只在 GREEN 创建；RED 必须由行为
   断言失败，不得来自 ImportError。
 - [ ] **RED（审计类别 19–23）：** 先增加 WebUI vision/image 状态的版本化
   读写/公开投影、effective fingerprint、cache identity、长生命周期 schema
-  refresh + stale image gate，以及独立 vision 调用时门禁：
+  refresh + stale image gate，以及独立 vision 调用时门禁。类别 22 的同一个
+  node 必须参数化 `sequential`/`concurrent`：构造旧 Agent caller fingerprint，
+  再让新配置获得当前 `verified` 快照；两路都应返回稳定
+  `capability_caller_stale`、Provider 调用数为 0，不新增第 28 个 node：
 
 ```bash
 PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sources/hermes-agent" \
@@ -905,8 +944,17 @@ PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sourc
   engine、MCP/插件等非 registry 注入 schema，成功后同步 `valid_tool_names` 并
   失效 system prompt cache。
 - [ ] 即使 long-lived Agent 仍携带旧 schema，`image_generate_tool` 的实际调用
-  也必须重新读取当前版本化快照；fingerprint/version/status 任一不匹配，在
-  Provider 调用前 fail-closed。schema 可发现性不是最终授权。
+  也必须同时接收 caller/Agent fingerprint 并读取当前版本化快照；初始化或上次
+  成功 refresh 暴露的 caller fingerprint 与 current verified fingerprint、
+  version/status 任一不匹配，都在 Provider 调用前返回
+  `capability_caller_stale`。handler 只读取当前快照会把旧 Agent 误判为新状态，
+  不能视为关闭此门禁；schema 可发现性也不是最终授权。
+- [ ] `execute_tool_calls_sequential` 与 `execute_tool_calls_concurrent` 必须在
+  分派前捕获 caller fingerprint。顺序路径每个
+  `model_tools.handle_function_call` 调用都显式传入；并发路径把同一不可变值经
+  `AIAgent._invoke_tool` → `agent_runtime_helpers.invoke_tool` →
+  `handle_function_call` 透传，不能在线程中重新从 mutable Agent 读取 current
+  fingerprint。
 - [ ] `tools/vision_tools.py::_handle_vision_analyze` 也必须在每次调用时读取同一
   版本化快照：未知 main model、未验证 auxiliary、旧 schema 或 fingerprint
   stale 均在任何 Provider 调用前 fail-closed；只有已知 native 路由或当前
@@ -926,7 +974,8 @@ PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sourc
 ```
 
 - [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 19–23，检查状态机、
-  版本迁移、effective fingerprint、next-turn refresh 与 call-time 最终门禁。
+  版本迁移、effective fingerprint、next-turn refresh，以及顺序/并发两路
+  caller-vs-current call-time 最终门禁。
 - [ ] **质量复审 gate：** 另一 reviewer 对工具去重、异常回滚、并发可见性、
   prompt cache 和 non-registry schema 做破坏性测试审查。
 - [ ] **禁止：** 不接受 unversioned verification；不直接
