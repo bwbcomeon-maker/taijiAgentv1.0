@@ -1020,6 +1020,129 @@ class TestStartRun:
         assert unhandled_contexts == []
 
     @pytest.mark.asyncio
+    async def test_cancelled_managed_lease_acquire_keeps_admission_until_precise_cleanup(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = "session-cancelled-lease-acquire"
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        acquire_entered = threading.Event()
+        acquire_continue = threading.Event()
+        acquire_finished = threading.Event()
+        acquire_call = {}
+        original_acquire = db.acquire_managed_run_lease
+        request_task = None
+
+        def _blocked_acquire(
+            lease_session_id,
+            *,
+            owner_id,
+            run_id,
+            lease_seconds,
+        ):
+            acquire_call.update({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            acquire_entered.set()
+            acquire_continue.wait()
+            try:
+                return original_acquire(
+                    lease_session_id,
+                    owner_id=owner_id,
+                    run_id=run_id,
+                    lease_seconds=lease_seconds,
+                )
+            finally:
+                acquire_finished.set()
+
+        observed = {}
+        try:
+            with patch.object(
+                db,
+                "acquire_managed_run_lease",
+                side_effect=_blocked_acquire,
+            ):
+                request_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "cancel during lease acquire",
+                            "session_id": session_id,
+                        })
+                    )
+                )
+                assert await asyncio.to_thread(acquire_entered.wait, 3.0)
+
+                request_task.cancel()
+                cancelled = await asyncio.gather(
+                    request_task,
+                    return_exceptions=True,
+                )
+                observed["cancelled"] = isinstance(
+                    cancelled[0], asyncio.CancelledError
+                )
+                observed["reservations_while_acquire_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+
+                acquire_continue.set()
+                assert await asyncio.to_thread(acquire_finished.wait, 3.0)
+                deadline = asyncio.get_running_loop().time() + 3.0
+                while asyncio.get_running_loop().time() < deadline:
+                    if (
+                        not adapter._run_admission_reservations
+                        and db.get_managed_run_lease(session_id) is None
+                    ):
+                        break
+                    await asyncio.sleep(0.01)
+
+                observed["lease_after_cleanup"] = db.get_managed_run_lease(
+                    session_id
+                )
+                observed["reservations_after_cleanup"] = set(
+                    adapter._run_admission_reservations
+                )
+
+                adapter._MAX_RETAINED_RUN_STREAMS = 0
+                next_response = await adapter._handle_runs(
+                    _direct_run_request({
+                        "input": "next run must enter immediately",
+                        "session_id": session_id,
+                    })
+                )
+                observed["next_status"] = next_response.status
+                observed["next_code"] = json.loads(next_response.text)["error"][
+                    "code"
+                ]
+        finally:
+            acquire_continue.set()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+            if acquire_entered.is_set() and not acquire_finished.is_set():
+                await asyncio.to_thread(acquire_finished.wait, 3.0)
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                db.release_managed_run_lease(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        assert observed["cancelled"]
+        assert observed["reservations_while_acquire_blocked"] == 1
+        assert acquire_call["session_id"] == session_id
+        assert acquire_call["owner_id"] == adapter._managed_run_lease_owner_id
+        assert acquire_call["run_id"].startswith("run_")
+        assert observed["lease_after_cleanup"] is None
+        assert observed["reservations_after_cleanup"] == set()
+        assert observed["next_status"] == 429
+        assert observed["next_code"] == "run_stream_capacity_exceeded"
+
+    @pytest.mark.asyncio
     async def test_unconsumed_stream_capacity_is_bounded_independently(
         self, adapter
     ):

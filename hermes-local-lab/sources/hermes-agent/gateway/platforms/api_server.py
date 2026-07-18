@@ -4077,6 +4077,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "token": None,
             "worker_owned": False,
             "resolver_owned": False,
+            "lease_acquire_owned": False,
         }
         try:
             return await self._handle_runs_impl(request, admission_state)
@@ -4086,6 +4087,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 admission_token
                 and not admission_state["worker_owned"]
                 and not admission_state["resolver_owned"]
+                and not admission_state["lease_acquire_owned"]
             ):
                 self._release_run_admission(admission_token)
 
@@ -4472,13 +4474,97 @@ class APIServerAdapter(BasePlatformAdapter):
                 db.get_managed_run_lease_key, requested_session_id
             )
             try:
-                managed_lease_acquired = await asyncio.to_thread(
+                lease_acquire_coroutine = asyncio.to_thread(
                     db.acquire_managed_run_lease,
                     managed_lease_session_id,
                     owner_id=self._managed_run_lease_owner_id,
                     run_id=run_id,
                     lease_seconds=self._MANAGED_RUN_LEASE_SECONDS,
                 )
+                try:
+                    lease_acquire_task = asyncio.get_running_loop().create_task(
+                        lease_acquire_coroutine,
+                        name=f"managed-run-lease-acquire-{run_id[-8:]}",
+                    )
+                except BaseException:
+                    lease_acquire_coroutine.close()
+                    raise
+                try:
+                    managed_lease_acquired = await asyncio.shield(
+                        lease_acquire_task
+                    )
+                except asyncio.CancelledError:
+                    loop = asyncio.get_running_loop()
+
+                    def _release_cancelled_acquire() -> bool:
+                        return db.release_managed_run_lease(
+                            managed_lease_session_id,
+                            owner_id=self._managed_run_lease_owner_id,
+                            run_id=run_id,
+                        )
+
+                    def _finish_cancelled_acquire_cleanup(
+                        release_future: "asyncio.Future",
+                    ) -> None:
+                        try:
+                            released = release_future.result()
+                            if not released:
+                                logger.error(
+                                    "[api_server] cancelled managed lease acquire "
+                                    "cleanup lost ownership for %s/%s",
+                                    managed_lease_session_id,
+                                    run_id,
+                                )
+                        except BaseException as exc:
+                            logger.error(
+                                "[api_server] cancelled managed lease acquire "
+                                "cleanup failed for %s/%s: %s",
+                                managed_lease_session_id,
+                                run_id,
+                                exc,
+                            )
+                        finally:
+                            self._release_run_admission(admission_token)
+
+                    def _finish_cancelled_lease_acquire(
+                        finished_task: "asyncio.Task",
+                    ) -> None:
+                        try:
+                            acquired_after_cancel = finished_task.result()
+                        except BaseException:
+                            # Consume executor failures after the request that
+                            # would have reported them no longer exists.
+                            self._release_run_admission(admission_token)
+                            return
+                        if not acquired_after_cancel:
+                            self._release_run_admission(admission_token)
+                            return
+                        try:
+                            release_future = loop.run_in_executor(
+                                None,
+                                _release_cancelled_acquire,
+                            )
+                        except BaseException as exc:
+                            # Fail closed: the exact durable lease remains
+                            # until TTL, but the in-memory slot must not leak.
+                            logger.error(
+                                "[api_server] cancelled managed lease acquire "
+                                "cleanup could not start for %s/%s: %s",
+                                managed_lease_session_id,
+                                run_id,
+                                exc,
+                            )
+                            self._release_run_admission(admission_token)
+                            return
+                        release_future.add_done_callback(
+                            _finish_cancelled_acquire_cleanup
+                        )
+
+                    lease_acquire_task.add_done_callback(
+                        _finish_cancelled_lease_acquire
+                    )
+                    admission_state["lease_acquire_owned"] = True
+                    raise
             except Exception as exc:
                 logger.error(
                     "[api_server] managed run lease unavailable for session %s: %s",
