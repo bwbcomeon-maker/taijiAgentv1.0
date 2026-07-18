@@ -29,6 +29,83 @@ def main_mod(monkeypatch):
     return mod
 
 
+@pytest.fixture
+def resume_lineage_db(tmp_path, monkeypatch):
+    import hermes_state
+    from hermes_state import SessionDB
+
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", db_path)
+
+    db = SessionDB(db_path)
+    try:
+        sessions = [
+            ("ambiguous_root", None, 1_000.0),
+            ("fork_a", "ambiguous_root", 1_100.0),
+            ("fork_b", "ambiguous_root", 1_200.0),
+            ("unique_root", None, 2_000.0),
+            ("unique_empty", "unique_root", 2_100.0),
+            ("unique_messages", "unique_empty", 2_200.0),
+        ]
+        for session_id, parent_session_id, started_at in sessions:
+            db.create_session(
+                session_id,
+                source="cli",
+                parent_session_id=parent_session_id,
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (started_at, session_id),
+            )
+
+        for session_id, ended_at in [
+            ("ambiguous_root", 1_050.0),
+            ("unique_root", 2_050.0),
+            ("unique_empty", 2_150.0),
+        ]:
+            db._conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = 'compression' "
+                "WHERE id = ?",
+                (ended_at, session_id),
+            )
+
+        db.append_message("fork_b", role="user", content="branch-only")
+        db.append_message("unique_messages", role="user", content="continued")
+        db.set_session_title("fork_a", "Fork A title")
+    finally:
+        db.close()
+
+    return db_path
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        pytest.param("ambiguous_root", "ambiguous_root", id="ambiguous-root"),
+        pytest.param("fork_a", "fork_a", id="explicit-fork-a"),
+        pytest.param("fork_b", "fork_b", id="explicit-fork-b-with-messages"),
+        pytest.param(
+            "unique_root",
+            "unique_messages",
+            id="unique-compression-root",
+        ),
+        pytest.param(
+            "Fork A title",
+            "fork_a",
+            id="title-resolves-before-resume-projection",
+        ),
+    ],
+)
+def test_resolve_session_by_name_or_id_uses_resume_contract(
+    main_mod,
+    resume_lineage_db,
+    requested,
+    expected,
+):
+    assert resume_lineage_db.exists()
+    assert main_mod._resolve_session_by_name_or_id(requested) == expected
+
+
 def test_cmd_chat_tui_continue_uses_latest_tui_session(monkeypatch, main_mod):
     calls = []
     captured = {}
