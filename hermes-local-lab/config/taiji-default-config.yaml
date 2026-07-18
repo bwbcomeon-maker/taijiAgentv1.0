@@ -8,6 +8,10 @@ model:
 
 provider_credentials: []
 
+# 仅由运维在运行目录中预批准；Provider 只能引用这里的 name。
+# proxy_url 必须为无内嵌凭据的 HTTPS 地址，默认保持空列表。
+trusted_proxy_profiles: []
+
 image_gen:
   provider: openai-codex
   use_gateway: false
