@@ -2,11 +2,22 @@
 # Double-click launcher for taiji Agent local lab on macOS.
 set -euo pipefail
 
-LAB_DIR="/Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LAB_DIR="$SCRIPT_DIR"
+REPO_DIR="$(cd "$LAB_DIR/.." && pwd -P)"
 LOG_DIR="$LAB_DIR/logs"
 AGENT_URL="http://127.0.0.1:18642/health"
 WEBUI_URL="http://127.0.0.1:18787"
 WEBUI_HEALTH_URL="$WEBUI_URL/health"
+
+TAIJI_SOURCE_ROOT="$REPO_DIR"
+TAIJI_SOURCE_COMMIT="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+if [[ -n "$(/usr/bin/git -C "$REPO_DIR" status --short --untracked-files=normal 2>/dev/null || true)" ]]; then
+  TAIJI_SOURCE_DIRTY=1
+else
+  TAIJI_SOURCE_DIRTY=0
+fi
+export TAIJI_SOURCE_ROOT TAIJI_SOURCE_COMMIT TAIJI_SOURCE_DIRTY
 
 cd "$LAB_DIR"
 mkdir -p "$LOG_DIR"
@@ -15,6 +26,9 @@ echo "========================================"
 echo " taiji Agent local launcher"
 echo "========================================"
 echo "Project: $LAB_DIR"
+echo "Source root: $TAIJI_SOURCE_ROOT"
+echo "Source commit: $TAIJI_SOURCE_COMMIT"
+echo "Source dirty: $TAIJI_SOURCE_DIRTY"
 echo
 
 wait_for_url() {

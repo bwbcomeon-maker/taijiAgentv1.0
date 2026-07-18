@@ -3,9 +3,10 @@ set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-REPO_DIR="/Users/bwb/Documents/工作/taiji-agentv1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LAB_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+REPO_DIR="$(cd "$LAB_DIR/.." && pwd -P)"
 APP_DIR="$REPO_DIR/apps/taiji-desktop"
-LAB_DIR="$REPO_DIR/hermes-local-lab"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG_DIR="$HOME/.local/state/taiji-agent/logs"
 LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
@@ -47,7 +48,28 @@ if [ ! -x "$ELECTRON_BIN" ]; then
   exit 1
 fi
 
+TAIJI_SOURCE_ROOT="$REPO_DIR"
+TAIJI_SOURCE_COMMIT="unknown"
+TAIJI_SOURCE_DIRTY="unknown"
+if [ -x /usr/bin/git ] && /usr/bin/git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  TAIJI_SOURCE_COMMIT="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD)"
+  source_status="$(/usr/bin/git -C "$REPO_DIR" status --porcelain=v1 --untracked-files=normal)"
+  if [ -n "$source_status" ]; then
+    TAIJI_SOURCE_DIRTY="1"
+  else
+    TAIJI_SOURCE_DIRTY="0"
+  fi
+  unset source_status
+fi
+export TAIJI_AGENT_ROOT="$LAB_DIR"
+export TAIJI_SOURCE_ROOT
+export TAIJI_SOURCE_COMMIT
+export TAIJI_SOURCE_DIRTY
+
 echo "Electron: $ELECTRON_BIN"
+echo "Root: $TAIJI_SOURCE_ROOT"
+echo "Commit: $TAIJI_SOURCE_COMMIT"
+echo "Dirty: $TAIJI_SOURCE_DIRTY"
 RUNNER="$LOG_DIR/taiji-desktop-electron-runner.sh"
 cat >"$RUNNER" <<EOF
 #!/usr/bin/env bash
@@ -61,6 +83,9 @@ export TMPDIR="${TMPDIR:-/tmp}"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export TAIJI_AGENT_ROOT="$LAB_DIR"
+export TAIJI_SOURCE_ROOT="$TAIJI_SOURCE_ROOT"
+export TAIJI_SOURCE_COMMIT="$TAIJI_SOURCE_COMMIT"
+export TAIJI_SOURCE_DIRTY="$TAIJI_SOURCE_DIRTY"
 cd "$APP_DIR"
 exec "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1
 EOF

@@ -2,14 +2,33 @@
 # Compatibility launcher for the Taiji Agent Electron desktop shell on macOS.
 set -euo pipefail
 
-REPO_DIR="/Users/bwb/Documents/工作/taiji-agentv1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LAB_DIR="$SCRIPT_DIR"
+REPO_DIR="$(cd "$LAB_DIR/.." && pwd -P)"
 APP_DIR="$REPO_DIR/apps/taiji-desktop"
-LAB_DIR="$REPO_DIR/hermes-local-lab"
-APP_BUNDLE="$LAB_DIR/启动太极Agent桌面端.app"
+ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG_DIR="$HOME/.local/state/taiji-agent/logs"
 LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
 
 mkdir -p "$LOG_DIR"
+
+TAIJI_SOURCE_ROOT="$REPO_DIR"
+TAIJI_SOURCE_COMMIT="unknown"
+TAIJI_SOURCE_DIRTY="unknown"
+if [ -x /usr/bin/git ] && /usr/bin/git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  TAIJI_SOURCE_COMMIT="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD)"
+  source_status="$(/usr/bin/git -C "$REPO_DIR" status --porcelain=v1 --untracked-files=normal)"
+  if [ -n "$source_status" ]; then
+    TAIJI_SOURCE_DIRTY="1"
+  else
+    TAIJI_SOURCE_DIRTY="0"
+  fi
+  unset source_status
+fi
+export TAIJI_AGENT_ROOT="$LAB_DIR"
+export TAIJI_SOURCE_ROOT
+export TAIJI_SOURCE_COMMIT
+export TAIJI_SOURCE_DIRTY
 
 {
   echo "========================================"
@@ -17,13 +36,10 @@ mkdir -p "$LOG_DIR"
   echo "========================================"
   echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "App : $APP_DIR"
+  echo "Root: $TAIJI_SOURCE_ROOT"
+  echo "Commit: $TAIJI_SOURCE_COMMIT"
+  echo "Dirty: $TAIJI_SOURCE_DIRTY"
   echo
-
-  if [ -d "$APP_BUNDLE" ]; then
-    echo "Opening app bundle: $APP_BUNDLE"
-    open "$APP_BUNDLE"
-    exit 0
-  fi
 
   if ! command -v npm >/dev/null 2>&1; then
     echo "未找到 npm。请先安装 Node.js 20+。"
@@ -37,8 +53,12 @@ mkdir -p "$LOG_DIR"
     npm ci
   fi
 
+  if [ ! -x "$ELECTRON_BIN" ]; then
+    echo "Electron 启动文件不存在：$ELECTRON_BIN" >&2
+    exit 1
+  fi
+
   echo "正在打开太极 Agent 桌面端..."
-  export TAIJI_AGENT_ROOT="$LAB_DIR"
-  "$APP_DIR/node_modules/.bin/electron" "$APP_DIR" >/dev/null 2>&1 &
+  "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1 &
   disown
 } >>"$LOG_FILE" 2>&1

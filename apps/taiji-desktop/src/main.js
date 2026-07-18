@@ -79,7 +79,13 @@ function desktopBootLog(message) {
   }
 }
 
-desktopBootLog(`boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"}`);
+desktopBootLog(
+  `boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} ` +
+  `appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"} ` +
+  `sourceRoot=${JSON.stringify(process.env.TAIJI_SOURCE_ROOT || "unknown")} ` +
+  `sourceCommit=${JSON.stringify(process.env.TAIJI_SOURCE_COMMIT || "unknown")} ` +
+  `sourceDirty=${JSON.stringify(process.env.TAIJI_SOURCE_DIRTY || "unknown")}`
+);
 
 function resolveLabDir() {
   if (process.env.TAIJI_AGENT_ROOT) {
@@ -390,6 +396,9 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   const accountHome = systemAccountHome();
   const desktopAccessToken = crypto.randomBytes(32).toString("hex");
   env.TAIJI_AGENT_ROOT = labDir;
+  env.TAIJI_SOURCE_ROOT = process.env.TAIJI_SOURCE_ROOT || path.resolve(labDir, "..");
+  env.TAIJI_SOURCE_COMMIT = process.env.TAIJI_SOURCE_COMMIT || "unknown";
+  env.TAIJI_SOURCE_DIRTY = process.env.TAIJI_SOURCE_DIRTY || "unknown";
   env.TAIJI_AGENT_USE_USER_DIRS = "1";
   env.TAIJI_RUNTIME_HOME = process.env.TAIJI_RUNTIME_HOME || path.join(userDataDir(), "runtime-home");
   env.TAIJI_WORKSPACE = process.env.TAIJI_WORKSPACE || path.join(userDataDir(), "workspace");
@@ -440,6 +449,16 @@ function stopRuntime() {
 async function startRuntime() {
   desktopBootLog("startRuntime");
   const labDir = resolveLabDir();
+  const declaredSourceRoot = String(process.env.TAIJI_SOURCE_ROOT || "").trim();
+  if (declaredSourceRoot) {
+    const expectedLabDir = fs.realpathSync(path.join(declaredSourceRoot, "hermes-local-lab"));
+    const actualLabDir = fs.realpathSync(labDir);
+    if (actualLabDir !== expectedLabDir) {
+      throw new Error(
+        `Launcher source mismatch: declared ${expectedLabDir}, resolved ${actualLabDir}`
+      );
+    }
+  }
   const logDir = path.join(userStateDir(), "logs");
   const desktopLog = path.join(logDir, "taiji-desktop.log");
   const iconPath = resolveIconPath(labDir);
