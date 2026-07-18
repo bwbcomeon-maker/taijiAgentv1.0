@@ -1436,6 +1436,314 @@ class TestStartRun:
         assert observed["next_code"] == "session_busy"
 
     @pytest.mark.asyncio
+    async def test_shutdown_snapshot_before_request_cancel_still_drains_exact_release(
+        self, adapter, tmp_path
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = "session-shutdown-snapshot-before-cancel"
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        acquire_entered = threading.Event()
+        acquire_continue = threading.Event()
+        release_entered = threading.Event()
+        release_continue = threading.Event()
+        first_shutdown_snapshot = asyncio.Event()
+        acquire_call = {}
+        release_calls = []
+        original_acquire = db.acquire_managed_run_lease
+        original_release = db.release_managed_run_lease
+        request_task = None
+        shutdown_task = None
+
+        class _ObservedLifecycleSet(set):
+            def __iter__(self):
+                first_shutdown_snapshot.set()
+                return super().__iter__()
+
+        adapter._managed_lease_lifecycle_tasks = _ObservedLifecycleSet()
+
+        def _blocked_acquire(
+            lease_session_id,
+            *,
+            owner_id,
+            run_id,
+            lease_seconds,
+        ):
+            acquire_call.update({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            acquire_entered.set()
+            acquire_continue.wait()
+            return original_acquire(
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+                lease_seconds=lease_seconds,
+            )
+
+        def _blocked_release(lease_session_id, *, owner_id, run_id):
+            release_calls.append({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            release_entered.set()
+            release_continue.wait()
+            return original_release(
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+            )
+
+        observed = {}
+        try:
+            with (
+                patch.object(
+                    db,
+                    "acquire_managed_run_lease",
+                    side_effect=_blocked_acquire,
+                ),
+                patch.object(
+                    db,
+                    "release_managed_run_lease",
+                    side_effect=_blocked_release,
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "shutdown snapshot before request cancel",
+                            "session_id": session_id,
+                        })
+                    )
+                )
+                assert await asyncio.to_thread(acquire_entered.wait, 3.0)
+
+                shutdown_task = asyncio.create_task(
+                    adapter.cancel_background_tasks()
+                )
+                await asyncio.wait_for(first_shutdown_snapshot.wait(), 3.0)
+                request_task.cancel()
+                cancelled = await asyncio.gather(
+                    request_task,
+                    return_exceptions=True,
+                )
+                observed["cancelled"] = isinstance(
+                    cancelled[0], asyncio.CancelledError
+                )
+                observed["shutdown_done_before_acquire"] = shutdown_task.done()
+                observed["reservations_while_acquire_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+
+                acquire_continue.set()
+                assert await asyncio.to_thread(release_entered.wait, 3.0)
+                observed["shutdown_done_before_release"] = shutdown_task.done()
+                observed["reservations_while_release_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+
+                release_continue.set()
+                await shutdown_task
+                await adapter.cancel_background_tasks()
+                observed["reservations_after_shutdown"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["lease_after_shutdown"] = db.get_managed_run_lease(
+                    session_id
+                )
+        finally:
+            acquire_continue.set()
+            release_continue.set()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+            if shutdown_task is not None:
+                await asyncio.gather(shutdown_task, return_exceptions=True)
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                original_release(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        assert observed["cancelled"]
+        assert not observed["shutdown_done_before_acquire"]
+        assert observed["reservations_while_acquire_blocked"] == 1
+        assert not observed["shutdown_done_before_release"]
+        assert observed["reservations_while_release_blocked"] == 1
+        assert release_calls == [acquire_call]
+        assert observed["reservations_after_shutdown"] == set()
+        assert observed["lease_after_shutdown"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("acquire_outcome", "release_outcome"),
+        [
+            ("false", "unused"),
+            ("error", "unused"),
+            ("true", "true"),
+            ("true", "false"),
+            ("true", "error"),
+        ],
+    )
+    async def test_supervisor_registration_failure_falls_back_to_exact_cleanup(
+        self, adapter, tmp_path, acquire_outcome, release_outcome
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = (
+            f"session-register-fallback-{acquire_outcome}-{release_outcome}"
+        )
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        acquire_entered = threading.Event()
+        acquire_continue = threading.Event()
+        acquire_finished = threading.Event()
+        acquire_call = {}
+        release_calls = []
+        original_acquire = db.acquire_managed_run_lease
+        original_release = db.release_managed_run_lease
+        request_task = None
+        shutdown_task = None
+
+        def _blocked_acquire(
+            lease_session_id,
+            *,
+            owner_id,
+            run_id,
+            lease_seconds,
+        ):
+            acquire_call.update({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            acquire_entered.set()
+            acquire_continue.wait()
+            try:
+                if acquire_outcome == "error":
+                    raise sqlite3.OperationalError(
+                        "acquire failed after registration failure"
+                    )
+                if acquire_outcome == "false":
+                    return False
+                return original_acquire(
+                    lease_session_id,
+                    owner_id=owner_id,
+                    run_id=run_id,
+                    lease_seconds=lease_seconds,
+                )
+            finally:
+                acquire_finished.set()
+
+        def _fallback_release(lease_session_id, *, owner_id, run_id):
+            release_calls.append({
+                "session_id": lease_session_id,
+                "owner_id": owner_id,
+                "run_id": run_id,
+            })
+            if release_outcome == "error":
+                raise sqlite3.OperationalError(
+                    "release failed in registration fallback"
+                )
+            if release_outcome == "false":
+                return False
+            return original_release(
+                lease_session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+            )
+
+        observed = {}
+        try:
+            with (
+                patch.object(
+                    db,
+                    "acquire_managed_run_lease",
+                    side_effect=_blocked_acquire,
+                ),
+                patch.object(
+                    db,
+                    "release_managed_run_lease",
+                    side_effect=_fallback_release,
+                ),
+                patch.object(
+                    adapter,
+                    "_register_managed_lease_lifecycle",
+                    side_effect=RuntimeError("supervisor registration failed"),
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    adapter._handle_runs(
+                        _direct_run_request({
+                            "input": "force supervisor registration failure",
+                            "session_id": session_id,
+                        })
+                    )
+                )
+                assert await asyncio.to_thread(acquire_entered.wait, 3.0)
+
+                request_task.cancel()
+                response = await request_task
+                observed["response_status"] = response.status
+                observed["reservations_while_acquire_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+
+                shutdown_task = asyncio.create_task(
+                    adapter.cancel_background_tasks()
+                )
+                acquire_continue.set()
+                assert await asyncio.to_thread(acquire_finished.wait, 3.0)
+                await asyncio.wait_for(shutdown_task, 3.0)
+                observed["reservations_after_fallback"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["lease_after_fallback"] = db.get_managed_run_lease(
+                    session_id
+                )
+        finally:
+            acquire_continue.set()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
+            if shutdown_task is not None:
+                await asyncio.gather(shutdown_task, return_exceptions=True)
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                original_release(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+        assert observed["response_status"] == 503
+        assert observed["reservations_while_acquire_blocked"] == 1
+        assert observed["reservations_after_fallback"] == set()
+        if acquire_outcome == "true":
+            assert release_calls == [acquire_call]
+            if release_outcome == "true":
+                assert observed["lease_after_fallback"] is None
+            else:
+                assert observed["lease_after_fallback"] is not None
+                assert (
+                    observed["lease_after_fallback"]["owner_id"]
+                    == acquire_call["owner_id"]
+                )
+                assert (
+                    observed["lease_after_fallback"]["run_id"]
+                    == acquire_call["run_id"]
+                )
+        else:
+            assert release_calls == []
+            assert observed["lease_after_fallback"] is None
+
+    @pytest.mark.asyncio
     async def test_unconsumed_stream_capacity_is_bounded_independently(
         self, adapter
     ):
