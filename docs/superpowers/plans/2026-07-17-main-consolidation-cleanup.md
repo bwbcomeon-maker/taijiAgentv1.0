@@ -125,18 +125,35 @@ git prune
 
 ### 2.2 第 B 组：统一 Provider、凭据和能力路由
 
-按以下顺序移植：
+`d1b65c51` 与 `c581bd3f` 只作为审计输入，不再作为可直接
+cherry-pick 的移植单元。两者触及的 Provider、配置、下载、流式会话和
+Agent cache 已被当前整合基线继续演进；直接套用会覆盖当前更强的
+Artifact/session 授权、DNS 固定连接、inode/symlink 校验和原子写入语义。
 
-1. `d1b65c51` — `feat(images): generalize provider credentials and safety`
-2. `c581bd3f` — `fix(images): make capability routing immediately consistent`
+Task B 改为四个可独立回滚的 TDD hand-port：
 
-保留目标：
+1. **B1：凭据别名、family 与模型 fail-closed。**
+2. **B2：自定义生图/识图凭据与网络传输加固。**
+3. **B3：版本化验证、运行时执行门禁与保留扩展工具的 schema refresh。**
+4. **B4：WebUI streaming/routing/cache 与 CLI、Gateway、TUI 的一致性。**
 
-- API Key 本机保存，配置只存 `credential_ref`。
-- 平台元数据驱动模型、鉴权、能力和端点字段。
-- 内置平台只要求平台、模型和 API Key。
-- 主模型原生视觉快路径、辅助视觉路径和生图路径立即跟随配置版本。
-- endpoint 安全校验、下载安全和凭据脱敏。
+四项必须分别先运行并落盘 must-first RED 测试证据，再做最小 GREEN 实现；
+产品 commit 只能在独立规格复审和质量复审通过后形成。详细风险、
+27 类 RED 测试和 hand-port 边界见
+`docs/reviews/main-consolidation-task-b-source-audit-2026-07-18.md`。
+
+最终保留目标：
+
+- Secret 只存本机 canonical credential env，配置只存 `credential_ref`；
+  任何显式引用缺失、family 不匹配或未知模型都 fail-closed。
+- `public_direct`、`private_direct`、`trusted_proxy` 是互斥的显式网络范围；
+  metadata/link-local 永久禁止，`198.18.0.0/15` Fake-IP 明确失败。
+- 自定义 endpoint 的 DNS 解析、实际连接、TLS hostname 与 peer 必须绑定，
+  不允许预检后由 SDK 二次解析。
+- 验证状态、fingerprint、tool cache 和 Agent schema 使用同一版本化能力快照；
+  配置变更后的下一轮和实际工具调用都不接受 stale `image_generate`。
+- 主模型原生视觉、已验证辅助视觉和生图路径在 WebUI、CLI、Gateway、TUI
+  使用相同 reason code 与 fail-closed 裁决。
 
 ### 2.3 第 C 组：生图意图和会话产物
 
@@ -515,43 +532,436 @@ PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sourc
 
 预期：全部通过；任何超时视为失败。
 
-### Task 3：移植 Provider 凭据和即时路由
+### Task 3：按 B1–B4 安全 hand-port Provider 凭据和即时路由
 
-**Files:**
+**来源裁决：**
 
-- Create: `hermes-local-lab/sources/hermes-agent/agent/provider_credentials.py`
-- Modify: `hermes-local-lab/sources/hermes-agent/agent/auxiliary_client.py`
-- Modify: `hermes-local-lab/sources/hermes-agent/agent/image_routing.py`
-- Modify: `hermes-local-lab/sources/hermes-agent/agent/image_runtime.py`
-- Modify: `hermes-local-lab/sources/hermes-webui/api/model_config.py`
-- Test: `hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_credentials.py`
-- Test: `hermes-local-lab/sources/hermes-agent/tests/agent/test_image_routing.py`
-- Test: `hermes-local-lab/sources/hermes-webui/tests/test_model_config_api.py`
+- `d1b65c51` 与 `c581bd3f` 只允许用 `git show`/`git diff` 读取测试意图和
+  小段算法，不允许 `git cherry-pick`、`git checkout <commit> -- <file>` 或
+  整文件复制。
+- 开始 B1 前先阅读
+  `docs/reviews/main-consolidation-task-b-source-audit-2026-07-18.md`，并把其中
+  27 类 must-first RED 测试映射到 B1–B4 的测试 node id。
+- 每个子任务都按“RED 证据 → 最小 GREEN → 目标回归 → 暂存 diff 规格复审
+  → 独立质量复审 → 独立 commit”闭环。任一复审有开放 P0/P1，不得进入下一项。
 
-- [ ] `git cherry-pick -n d1b65c51`，移除该提交携带的旧计划文档，只提交产品代码和测试。
-- [ ] 运行 Provider、SSRF、凭据 family 和内置模型测试。
-- [ ] 提交 `feat(images): consolidate provider credentials`。
-- [ ] `git cherry-pick -n c581bd3f`。
-- [ ] 解决 `streaming.py` 冲突时保留 chat-state turn envelope 和 journal。
-- [ ] 验证配置 fingerprint 变化使旧验证失效，Agent cache 读取新版本。
-- [ ] 运行：
+#### Task B1：凭据别名、family 与模型 fail-closed
+
+**Files and functions:**
+
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/provider_credentials.py`
+  (`PROVIDER_FAMILY_ALIASES`, `provider_family`, `default_credential_ref`,
+  `resolve_api_key`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/custom_image_providers.py`
+  (`normalize_custom_image_provider_entry`,
+  `ConfigurableOpenAIImageProvider._model`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/image_routing.py`
+  (`_supports_vision_override`, `_lookup_supports_vision`,
+  `decide_image_input_mode`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/plugins/image_gen/domestic_common.py`
+  (新增 `provider_api_key`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/plugins/image_gen/{dashscope,doubao,qianfan,zhipu_image,minimax_image}/__init__.py`
+  (各 Provider 的凭据解析与 `_model`)
+- Modify:
+  `hermes-local-lab/sources/hermes-webui/api/model_config.py`
+  (`set_vision_config`, `set_image_gen_config`，新增
+  `_validate_provider_model_choice`)
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_credentials.py`
+- Create:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_configurable_openai_provider.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_domestic_builtin_providers.py`
+- Test:
+  `hermes-local-lab/sources/hermes-webui/tests/test_model_config_api.py`
+
+- [ ] **RED（审计类别 1–6）：** 先新增以下六个测试并运行；必须因为目标行为
+  尚未实现而失败，不得用 import error、fixture error 或放宽断言制造 RED：
+
+```bash
+mkdir -p "$WT/qa-evidence/main-consolidation-20260717/providers"
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py::test_provider_family_aliases_are_canonical" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py::test_new_domestic_explicit_credential_ref_never_falls_back" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py::test_new_domestic_and_custom_family_mismatch_never_falls_back" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py::test_custom_alias_collision_and_duplicate_default_fail_closed" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py::test_builtin_and_custom_unknown_image_model_fail_closed" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py::test_unknown_vision_capability_requires_explicit_metadata" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b1-red.xml"
+```
+
+- [ ] **GREEN：** 只扩充 canonical aliases 和统一的 family/model 校验；显式
+  `credential_ref` 缺失、Secret 缺失、family 不匹配、重复默认、未知内置模型、
+  未显式 opt-in 的未知自定义模型一律返回结构化失败，不读 legacy env、不回退
+  default model、不猜测视觉能力。
+- [ ] 对没有显式 `credential_ref` 的旧配置，legacy env fallback 只能发生在
+  已知 canonical family 内；不得让 family 字符串本身成为任意 env 选择器。
+- [ ] **目标回归：**
 
 ```bash
 PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sources/hermes-agent" \
   "$AGENT_PY" -m pytest -q \
   "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_credentials.py" \
-  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_auxiliary_client.py" \
-  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_verification.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_provider_fail_closed_contract.py" \
   "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_routing.py" \
-  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_credential_pool_routing.py" \
-  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_vision_native_fast_path.py" \
-  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_vision_tools.py" \
-  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_image_generation_readiness.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_configurable_openai_provider.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_domestic_builtin_providers.py" \
   "$WT/hermes-local-lab/sources/hermes-webui/tests/test_model_config_api.py" \
-  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_agent_signature.py"
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b1-green.xml"
 ```
 
-预期：全部通过。
+- [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 1–6、当前 Provider
+  schema 和 staged diff，确认所有 fail-closed 分支及 legacy 兼容边界逐项命中。
+- [ ] **质量复审 gate：** 另一 reviewer 检查 secret redaction、异常类型、
+  重复逻辑、测试反例和未触及文件；两份结论均为 `APPROVED` 且无开放 P0/P1。
+- [ ] **禁止：** 不引入旧 universal-image 计划；不复制旧 Provider 文件；
+  不把未知模型替换成默认模型；不扩张到 endpoint transport、Artifact 或 UI。
+- [ ] 独立提交：
+
+```bash
+git commit -m "feat(images): hand-port fail-closed provider credentials"
+```
+
+#### Task B2：自定义生图/识图凭据与网络传输加固
+
+**Files and functions:**
+
+- Create:
+  `hermes-local-lab/sources/hermes-agent/agent/safe_outbound_http.py`
+  (`NetworkScope`, `normalize_network_scope`, `resolve_pinned_addresses`,
+  `request_pinned_https`, `read_bounded_json`, `build_openai_sync_transport`,
+  `build_openai_async_transport`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/custom_image_providers.py`
+  (`normalize_custom_image_provider_entry`,
+  `ConfigurableOpenAIImageProvider.generate`, `_response_error_message`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/custom_vision_providers.py`
+  (`_normalize_base_url`, `is_custom_vision_base_url_safe`,
+  `normalize_custom_vision_provider_entry`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/auxiliary_client.py`
+  (`_resolve_task_provider_model`, `resolve_provider_client`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/image_gen_provider.py`
+  (`_resolved_image_addresses`, `_validate_image_url`, `_pinned_http_get`,
+  `save_url_image`) only to extract/reuse characterization-protected primitives
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/tools/url_safety.py`
+  (`is_always_blocked_url`, `_is_blocked_ip`, `is_safe_url`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/plugins/image_gen/dashscope/__init__.py`
+  (`_dashscope_address_allowed`, `_save_safe_image_url`)
+- Create:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_auxiliary_client.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_configurable_openai_provider.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_domestic_builtin_providers.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_save_url_image.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_artifact_security.py`
+
+- [ ] **RED（审计类别 7–18）：** 先实现
+  `test_safe_outbound_http.py` 的 12 类反例：任意 `api_key_env`、URL shape、
+  `public_direct` all-answer/peer pin、`private_direct` 显式边界、
+  `trusted_proxy` 显式配置、永久 metadata/link-local、Fake-IP、DNS rebinding
+  sync/async、API redirect/auth forwarding、自定义生图 POST 固定连接、图片下载
+  每跳重验、JSON MIME/有界读取。运行：
+
+```bash
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_custom_image_rejects_noncanonical_api_key_env" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_custom_vision_named_credential_requires_canonical_env" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_endpoint_url_shape_is_fail_closed" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_public_direct_pins_all_answers_peer_sni_and_host" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_private_direct_requires_explicit_scope_and_keeps_permanent_blocks" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_trusted_proxy_is_explicit_and_ignores_ambient_proxy" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_network_scopes_block_metadata_link_local_and_mapped_variants" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_fake_ip_range_is_never_connected" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_custom_vision_sync_and_async_resist_dns_rebinding" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_custom_image_post_is_pinned_and_never_redirects_auth" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_image_download_revalidates_every_redirect_without_regression" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py::test_provider_json_is_mime_checked_and_bounded_before_parse" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b2-red.xml"
+```
+
+- [ ] **GREEN：** 从当前 `image_gen_provider.py` 抽取单次 DNS、全部 answer
+  校验、connected peer equality、原 hostname SNI/Host、每跳重验和 bounded-read
+  语义到 `safe_outbound_http.py`；先用 characterization tests 证明
+  `save_url_image` 的现有 public contract、inode/symlink 和 atomic write 行为不变。
+- [ ] `public_direct` 只允许直连公开地址且 `trust_env=False`；
+  `private_direct` 仅在配置显式选择时允许 RFC1918/loopback/ULA 目标，保留
+  本地自定义 endpoint；`trusted_proxy` 只接受显式受信 proxy 配置且不得读取
+  ambient proxy，其目标策略不得退化为 private direct。三种 scope 均永久禁止
+  metadata、link-local、unspecified、multicast、其它 reserved/benchmark 和
+  显式 `198.18.0.0/15` 地址；direct 模式解析到 Fake-IP 时返回
+  `fake_ip_requires_trusted_proxy` 并停止，缺少显式 proxy 返回
+  `trusted_proxy_unavailable`。`trusted_proxy` 不得把 Fake-IP 地址本身当目标或
+  proxy 地址放行。
+- [ ] 自定义生图/识图只从 canonical credential env 取 Secret；先完成路由
+  安全决策和连接绑定，再附加 Authorization。API POST 不跟随 redirect；
+  图片 GET redirect 每跳重新解析、固定、校验，跨 origin 不转发凭据。
+- [ ] custom vision 的同步和异步 OpenAI-compatible client 都注入固定连接
+  transport，禁止“`is_safe_url` 预检一次、SDK 再按 hostname 解析”的 TOCTOU。
+- [ ] API JSON 只接受 `application/json` 或 `application/*+json`；先检查
+  `Content-Length`，再以流式 1–2 MiB hard limit 读取后解析，超限/未知 MIME
+  返回固定脱敏错误。图片 body 继续使用当前 magic、尺寸、字节上限和原子写入。
+- [ ] **目标回归：**
+
+```bash
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_safe_outbound_http.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_auxiliary_client.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_save_url_image.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_artifact_security.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_url_safety.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_configurable_openai_provider.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/plugins/image_gen/test_domestic_builtin_providers.py" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b2-green.xml"
+```
+
+- [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 7–18，逐项核验三个
+  scope、永久禁区、Fake-IP、sync/async peer pin、redirect 和 bounded JSON。
+- [ ] **质量复审 gate：** 另一 reviewer 做 SSRF/secret-exfiltration 对抗审查，
+  并确认 `image_gen_provider` 当前 downloader 与 Artifact 边界没有退化。
+- [ ] **禁止：** 不整段移植 `d1b65c51` 的 urllib3 transport；不允许
+  ambient proxy/private 全局开关降级；不以预检替代连接时 peer 验证；不覆盖
+  当前 Artifact/session 授权、inode/symlink/atomic write；不恢复旧 downloader。
+- [ ] 独立提交：
+
+```bash
+git commit -m "fix(images): harden custom provider outbound transport"
+```
+
+#### Task B3：版本化验证、运行时执行门禁与 schema refresh
+
+**Files and functions:**
+
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/image_gen_verification.py`
+  (新增 `CAPABILITY_VERIFICATION_SCHEMA_VERSION`,
+  `verification_runtime_snapshot`, `vision_fingerprint`；修改
+  `image_gen_fingerprint`, `verification_status_from_state`)
+- Create:
+  `hermes-local-lab/sources/hermes-agent/agent/image_runtime.py`
+  (`current_image_runtime_snapshot`, `_tool_name`,
+  `refresh_agent_image_runtime`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/agent_init.py`
+  (`init_agent` 中 registry schema 基线记录)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/model_tools.py`
+  (`_tool_defs_cache`, `_clear_tool_defs_cache`, `get_tool_definitions`,
+  `handle_function_call`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/tools/image_generation_tool.py`
+  (`get_image_generation_readiness`, `image_generate_tool`,
+  `_handle_image_generate`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/agent/tool_executor.py`
+  (调用时能力快照透传)
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_verification.py`
+- Create:
+  `hermes-local-lab/sources/hermes-agent/tests/agent/test_image_runtime_refresh.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/tools/test_image_generation_readiness.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/run_agent/test_run_agent.py`
+
+- [ ] **RED（审计类别 19–23）：** 先增加版本缺失/未知版本失效、`${ENV}`
+  effective vision fingerprint、cache/version invalidation、长生命周期 Agent
+  增删 `image_generate`、调用时 stale gate 与 non-registry schema 保留测试：
+
+```bash
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_verification.py::test_verification_state_requires_current_schema_version" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_verification.py::test_vision_fingerprint_uses_effective_env_or_fails_unresolved" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_runtime_refresh.py::test_tool_cache_key_includes_verification_schema_and_fingerprint" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_runtime_refresh.py::test_long_lived_agent_adds_and_removes_image_generate_without_restart" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_runtime_refresh.py::test_stale_call_fails_closed_and_refresh_preserves_non_registry_tools" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b3-red.xml"
+```
+
+- [ ] **GREEN：** 验证状态文件必须写入当前 `schema_version`；缺失、旧版或
+  未知新版均只可投影为 `configured_unverified`，不能继承 `verified`。fingerprint
+  和 cache key 同时包含 schema version、profile、canonical provider/family、
+  model、credential ref、Secret digest、transport 和展开后的 effective endpoint。
+- [ ] `${ENV}` 在 fingerprint 前使用与 runtime 相同的 env 展开器；未解析
+  token 直接 fail-closed 并进入固定 reason code，不允许 raw placeholder 与运行
+  时 effective endpoint 产生相同“已验证”状态。
+- [ ] `refresh_agent_image_runtime` 先构造新 registry schemas，再以工具名原子
+  合并；只替换上一次记录的 registry 工具，保留 memory provider、context
+  engine、MCP/插件等非 registry 注入 schema，成功后同步 `valid_tool_names` 并
+  失效 system prompt cache。
+- [ ] 即使 long-lived Agent 仍携带旧 schema，`image_generate_tool` 的实际调用
+  也必须重新读取当前版本化快照；fingerprint/version/status 任一不匹配，在
+  Provider 调用前 fail-closed。schema 可发现性不是最终授权。
+- [ ] **目标回归：**
+
+```bash
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_gen_verification.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_image_runtime_refresh.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_image_generation_readiness.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/run_agent/test_run_agent.py" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b3-green.xml"
+```
+
+- [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 19–23，检查状态机、
+  版本迁移、effective fingerprint、next-turn refresh 与 call-time 最终门禁。
+- [ ] **质量复审 gate：** 另一 reviewer 对工具去重、异常回滚、并发可见性、
+  prompt cache 和 non-registry schema 做破坏性测试审查。
+- [ ] **禁止：** 不接受 unversioned verification；不直接
+  `agent.tools = get_tool_definitions(...)` 丢弃扩展工具；不以 cache TTL 代替
+  invalidation；不把“configured”当“available”。
+- [ ] 独立提交：
+
+```bash
+git commit -m "fix(images): version capability verification and runtime gates"
+```
+
+#### Task B4：WebUI streaming/routing/cache 与四入口一致性
+
+**Files and functions:**
+
+- Modify:
+  `hermes-local-lab/sources/hermes-webui/api/model_config.py`
+  (`_vision_config_fingerprint`；新增统一
+  `_post_capability_mutation_commit`/`_invalidate_image_runtime_caches`；
+  `upsert_provider_credential`, `delete_provider_credential`,
+  `test_vision_config`, `test_image_gen_config`, `set_vision_config`,
+  `set_alibaba_image_capabilities`, `set_custom_vision_provider_config`,
+  `delete_custom_vision_provider_config`, `set_custom_image_provider_config`,
+  `delete_custom_image_provider_config`, `set_image_gen_config`,
+  `set_main_model_config`)
+- Modify:
+  `hermes-local-lab/sources/hermes-webui/api/streaming.py`
+  (`_resolve_image_input_mode`；新增 `get_vision_runtime_state`,
+  `image_capability_runtime_fingerprint`；修改
+  `_enrich_webui_images_with_vision`, `prepare_webui_chat_input`,
+  `_sanitize_messages_for_api`, `_run_agent_streaming`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/cli.py`
+  (`HermesCLI._resolve_turn_agent_config`,
+  `HermesCLI._preprocess_images_with_vision`, `HermesCLI.chat`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/gateway/run.py`
+  (`GatewayRunner._decide_image_input_mode`,
+  `GatewayRunner._enrich_message_with_vision`,
+  `GatewayRunner._extract_cache_busting_config`,
+  `GatewayRunner._agent_config_signature`)
+- Modify:
+  `hermes-local-lab/sources/hermes-agent/tui_gateway/server.py`
+  (`_enrich_with_attached_images`，新增 `_refresh_image_runtime_agent`，
+  `_run_prompt_submit`)
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/gateway/test_agent_cache.py`
+- Test:
+  `hermes-local-lab/sources/hermes-agent/tests/test_tui_gateway_server.py`
+- Create:
+  `hermes-local-lab/sources/hermes-agent/tests/cli/test_image_capability_consistency.py`
+- Test:
+  `hermes-local-lab/sources/hermes-webui/tests/test_chat_attachment_context.py`
+- Create:
+  `hermes-local-lab/sources/hermes-webui/tests/test_image_capability_agent_signature.py`
+- Test:
+  `hermes-local-lab/sources/hermes-webui/tests/test_native_image_attachments.py`
+- Create:
+  `hermes-local-lab/sources/hermes-webui/tests/test_image_capability_entrypoint_consistency.py`
+
+- [ ] **RED（审计类别 24–27）：** 先增加四入口相同 snapshot/reason code、
+  WebUI agent signature 失效、streaming 实际路由与事件一致、配置事务后的跨入口
+  invalidation 测试：
+
+```bash
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_entrypoint_consistency.py::test_all_entrypoints_share_capability_snapshot_and_reason_codes" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_entrypoint_consistency.py::test_webui_and_gateway_agent_cache_identity_tracks_capability_snapshot" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_entrypoint_consistency.py::test_streaming_route_event_matches_actual_execution_and_history_scope" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_entrypoint_consistency.py::test_config_transaction_propagates_invalidation_without_losing_state" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b4-red.xml"
+```
+
+- [ ] **GREEN：** CLI、Gateway、TUI、WebUI 只消费 B3 的同一版本化能力快照，
+  不各自推断“已配置/可用”；unknown main-model capability、辅助视觉未验证、
+  生图未验证和 stale version 使用相同稳定 reason code，并在主模型/Provider
+  调用前停止。
+- [ ] WebUI session agent signature 和 Gateway cache-busting signature 纳入
+  capability snapshot version+fingerprint；配置保存、验证成功/失败、凭据更新/
+  删除只在当前 config transaction 成功后通过唯一
+  `_post_capability_mutation_commit` 失效 model/tool/agent cache。类别 27 的
+  RED 必须参数化覆盖上述 exact mutation functions 的成功与回滚路径，证明
+  任何入口都不能绕过该 hook，失败事务也不能发布半状态。
+- [ ] `streaming.py` 只在历史确有 native image 时做图片能力清洗；普通文本历史
+  不因未知图片能力失败。`capability_route` 事件必须来自实际执行快照，不得先
+  宣告路由再走另一分支。
+- [ ] 保留 `streaming.py` 当前 turn envelope、journal、pending/commit/discard
+  Artifact、session authorization、取消和 save rollback；B4 不改消息 Artifact
+  协议，也不创建第二套 image artifact 状态。
+- [ ] **目标回归：**
+
+```bash
+PYTHONPATH="$WT/hermes-local-lab/sources/hermes-webui:$WT/hermes-local-lab/sources/hermes-agent" \
+  "$AGENT_PY" -m pytest -q \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/cli/test_image_capability_consistency.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/agent/test_credential_pool_routing.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/gateway/test_agent_cache.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/test_tui_gateway_server.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_vision_native_fast_path.py" \
+  "$WT/hermes-local-lab/sources/hermes-agent/tests/tools/test_vision_tools.py" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_model_config_api.py" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_chat_attachment_context.py" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_agent_signature.py" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_native_image_attachments.py" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_image_capability_entrypoint_consistency.py" \
+  "$WT/hermes-local-lab/sources/hermes-webui/tests/test_webui_gateway_chat_backend.py" \
+  --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b4-green.xml"
+```
+
+- [ ] **规格复审 gate：** 独立 reviewer 对照审计类别 24–27 与 B4 feature
+  contract，核对四入口状态、reason code、缓存和真实调用一致。
+- [ ] **质量/UX 复审 gate：** 另一 reviewer 同时执行 `$frontend-ux-qa`：
+  检查错误可发现性、键盘/焦点、状态文案和浏览器证据；未执行的截图、可访问性
+  自动化和视觉回归必须写“未验证”，不得写通过。
+- [ ] **禁止：** 不恢复旧 URL/base64/absolute-path artifact；不覆盖当前
+  Artifact/session 授权、inode/symlink/atomic write；不丢失 memory/context/MCP
+  非 registry 工具；不把 WebUI cache 命中当运行时授权。
+- [ ] 独立提交：
+
+```bash
+git commit -m "fix(images): align capability routing across entrypoints"
+```
+
+#### Task B 总门禁
+
+- [ ] B1–B4 四个 commit 均可单独 `git revert`，且每个 commit 只包含该子任务
+  的产品代码、测试和对应证据；不得揉成一个大提交。
+- [ ] 重跑 B1–B4 的全部 GREEN 命令和第 3.3 节重复 Artifact 扫描。
+- [ ] 对四个 commit 做一次 source-to-integration 映射复核；只有全部目标测试
+  通过、四组双审关闭、`git status --short` 为空，才可把 source ledger 中
+  `integration_commit=pending` 更新为实际 commit 列表并将 Provider L1 解锁。
+- [ ] 以下禁令贯穿 B1–B4：旧 universal-image 计划、whole-commit cherry-pick、
+  旧 downloader/artifact、ambient proxy/private downgrade、覆盖当前
+  Artifact/session authorization/inode/symlink/atomic write、URL/base64/
+  absolute-path 旧 artifact、unversioned verification，全部禁止。
 
 ### Task 4：接入生图意图但保持唯一 ArtifactRegistry
 
