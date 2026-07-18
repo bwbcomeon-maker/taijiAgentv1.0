@@ -1020,6 +1020,243 @@ class TestStartRun:
         assert unhandled_contexts == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "resolver_outcome",
+        ["success", "error", "cancel"],
+    )
+    async def test_resolver_callback_failure_keeps_exact_admission_owner(
+        self,
+        adapter,
+        resolver_outcome,
+    ):
+        loop = asyncio.get_running_loop()
+        previous_task_factory = loop.get_task_factory()
+        resolver_started = [
+            threading.Event()
+            for _ in range(adapter._MAX_CONCURRENT_RUNS)
+        ]
+        resolver_release = [
+            threading.Event()
+            for _ in range(adapter._MAX_CONCURRENT_RUNS)
+        ]
+        resolver_finished = [
+            threading.Event()
+            for _ in range(adapter._MAX_CONCURRENT_RUNS)
+        ]
+        resolver_calls = 0
+        resolver_lock = threading.Lock()
+        callback_attempts = []
+        resolver_tasks = []
+        request_tasks = []
+        resolver_tokens = []
+        release_calls = []
+        factory_state = {
+            "armed": False,
+            "callback_failed": None,
+        }
+        original_release_admission = adapter._release_run_admission
+
+        class _ResolverCallbackFailingTask(asyncio.Task):
+            def __init__(
+                self,
+                coroutine,
+                *,
+                task_loop,
+                context,
+                callback_failed,
+            ):
+                kwargs = {"loop": task_loop}
+                if context is not None:
+                    kwargs["context"] = context
+                super().__init__(coroutine, **kwargs)
+                self._callback_failed = callback_failed
+
+            def add_done_callback(self, callback, *, context=None):
+                if getattr(callback, "__name__", "") == "_release_after_resolver":
+                    callback_attempts.append(self)
+                    self._callback_failed.set()
+                    raise RuntimeError(
+                        "resolver release callback registration failed"
+                    )
+                if context is None:
+                    return super().add_done_callback(callback)
+                return super().add_done_callback(
+                    callback,
+                    context=context,
+                )
+
+        def _delegate_task(factory_loop, coroutine, context):
+            if previous_task_factory is not None:
+                if context is None:
+                    return previous_task_factory(factory_loop, coroutine)
+                return previous_task_factory(
+                    factory_loop,
+                    coroutine,
+                    context=context,
+                )
+            kwargs = {"loop": factory_loop}
+            if context is not None:
+                kwargs["context"] = context
+            return asyncio.Task(coroutine, **kwargs)
+
+        def _selective_task_factory(factory_loop, coroutine, context=None):
+            coroutine_name = getattr(
+                getattr(coroutine, "cr_code", None),
+                "co_name",
+                "",
+            )
+            if factory_state["armed"] and coroutine_name == "to_thread":
+                factory_state["armed"] = False
+                task = _ResolverCallbackFailingTask(
+                    coroutine,
+                    task_loop=factory_loop,
+                    context=context,
+                    callback_failed=factory_state["callback_failed"],
+                )
+                resolver_tasks.append(task)
+                return task
+            return _delegate_task(factory_loop, coroutine, context)
+
+        def _resolver(**_kwargs):
+            nonlocal resolver_calls
+            with resolver_lock:
+                call_index = resolver_calls
+                resolver_calls += 1
+            if call_index >= adapter._MAX_CONCURRENT_RUNS:
+                return _test_default_route()
+            resolver_started[call_index].set()
+            resolver_release[call_index].wait()
+            try:
+                if resolver_outcome == "error":
+                    raise RuntimeError("resolver failed after callback failure")
+                return _test_default_route()
+            finally:
+                resolver_finished[call_index].set()
+
+        def _record_release(token):
+            release_calls.append(token)
+            original_release_admission(token)
+
+        agent = MagicMock()
+        agent.run_conversation.return_value = {"final_response": "done"}
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        observed = {}
+        loop.set_task_factory(_selective_task_factory)
+        try:
+            with (
+                patch.object(
+                    adapter,
+                    "_resolve_agent_route",
+                    side_effect=_resolver,
+                ),
+                patch.object(adapter, "_create_agent", return_value=agent),
+                patch.object(
+                    adapter,
+                    "_release_run_admission",
+                    side_effect=_record_release,
+                ),
+            ):
+                request_results = []
+                for index in range(adapter._MAX_CONCURRENT_RUNS):
+                    callback_failed = asyncio.Event()
+                    factory_state["callback_failed"] = callback_failed
+                    factory_state["armed"] = True
+                    request_task = asyncio.create_task(
+                        adapter._handle_runs(
+                            _direct_run_request({
+                                "input": f"callback failure {index}",
+                                "model": "requested/model",
+                                "provider": "requested-provider",
+                            })
+                        )
+                    )
+                    request_tasks.append(request_task)
+                    assert await asyncio.to_thread(
+                        resolver_started[index].wait,
+                        3.0,
+                    )
+                    current_tokens = (
+                        set(adapter._run_admission_reservations)
+                        - set(resolver_tokens)
+                    )
+                    assert len(current_tokens) == 1
+                    resolver_tokens.append(current_tokens.pop())
+
+                    request_task.cancel()
+                    await asyncio.wait_for(callback_failed.wait(), 3.0)
+                    # A second request cancellation must not break whichever
+                    # owner takes responsibility after callback failure.
+                    request_task.cancel()
+                    if resolver_outcome == "cancel":
+                        resolver_tasks[index].cancel()
+                    resolver_release[index].set()
+                    request_result = (
+                        await asyncio.gather(
+                            request_task,
+                            return_exceptions=True,
+                        )
+                    )[0]
+                    request_results.append(request_result)
+                    assert await asyncio.to_thread(
+                        resolver_finished[index].wait,
+                        3.0,
+                    )
+                    await asyncio.gather(
+                        resolver_tasks[index],
+                        return_exceptions=True,
+                    )
+                    await asyncio.sleep(0)
+
+                observed["request_results"] = request_results
+                observed["reservations_after_resolvers"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["resolver_release_counts"] = {
+                    token: release_calls.count(token)
+                    for token in resolver_tokens
+                }
+
+                eleventh = await adapter._handle_runs(
+                    _direct_run_request({
+                        "input": "capacity must recover",
+                        "model": "requested/model",
+                        "provider": "requested-provider",
+                    })
+                )
+                observed["eleventh_status"] = eleventh.status
+                deadline = loop.time() + 3.0
+                while (
+                    adapter._active_run_tasks
+                    and loop.time() < deadline
+                ):
+                    await asyncio.sleep(0.01)
+        finally:
+            loop.set_task_factory(previous_task_factory)
+            for release_event in resolver_release:
+                release_event.set()
+            for request_task in request_tasks:
+                if not request_task.done():
+                    request_task.cancel()
+            await asyncio.gather(*request_tasks, return_exceptions=True)
+            await asyncio.gather(*resolver_tasks, return_exceptions=True)
+            await adapter.cancel_background_tasks()
+            for token in tuple(adapter._run_admission_reservations):
+                original_release_admission(token)
+
+        assert (
+            observed["reservations_after_resolvers"],
+            observed["eleventh_status"],
+        ) == (set(), 202)
+        assert len(callback_attempts) == adapter._MAX_CONCURRENT_RUNS
+        assert all(
+            isinstance(result, asyncio.CancelledError)
+            for result in observed["request_results"]
+        )
+        assert set(observed["resolver_release_counts"].values()) == {1}
+
+    @pytest.mark.asyncio
     async def test_cancelled_managed_lease_acquire_keeps_admission_until_precise_cleanup(
         self, adapter, tmp_path
     ):
@@ -2248,6 +2485,193 @@ class TestStartRun:
         assert observed["run_streams"] == {}
         assert observed["run_statuses"] == {}
         assert observed["reservations"] == set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("managed", "failed_callback"),
+        [
+            (False, 1),
+            (False, 2),
+            (True, 1),
+            (True, 2),
+            (True, 3),
+        ],
+    )
+    async def test_worker_callback_failure_rolls_back_real_task_start(
+        self,
+        adapter,
+        tmp_path,
+        managed,
+        failed_callback,
+    ):
+        loop = asyncio.get_running_loop()
+        previous_task_factory = loop.get_task_factory()
+        session_id = (
+            f"session-worker-callback-{failed_callback}"
+            if managed
+            else ""
+        )
+        db = None
+        if managed:
+            db = SessionDB(db_path=tmp_path / "state.db")
+            db.create_session(session_id, "api_server")
+            adapter._session_db = db
+        callback_attempts = []
+        worker_tasks = []
+        agent_started = threading.Event()
+        agent_continue = threading.Event()
+
+        class _WorkerCallbackFailingTask(asyncio.Task):
+            def __init__(self, coroutine, *, task_loop, context):
+                kwargs = {"loop": task_loop}
+                if context is not None:
+                    kwargs["context"] = context
+                super().__init__(coroutine, **kwargs)
+                self._callback_count = 0
+                self._callback_failed = False
+
+            def add_done_callback(self, callback, *, context=None):
+                self._callback_count += 1
+                callback_attempts.append(callback)
+                if (
+                    not self._callback_failed
+                    and self._callback_count == failed_callback
+                ):
+                    self._callback_failed = True
+                    raise RuntimeError(
+                        f"worker callback {failed_callback} failed"
+                    )
+                if context is None:
+                    return super().add_done_callback(callback)
+                return super().add_done_callback(
+                    callback,
+                    context=context,
+                )
+
+        def _delegate_task(factory_loop, coroutine, context):
+            if previous_task_factory is not None:
+                if context is None:
+                    return previous_task_factory(factory_loop, coroutine)
+                return previous_task_factory(
+                    factory_loop,
+                    coroutine,
+                    context=context,
+                )
+            kwargs = {"loop": factory_loop}
+            if context is not None:
+                kwargs["context"] = context
+            return asyncio.Task(coroutine, **kwargs)
+
+        def _selective_task_factory(factory_loop, coroutine, context=None):
+            coroutine_name = getattr(
+                getattr(coroutine, "cr_code", None),
+                "co_name",
+                "",
+            )
+            if coroutine_name == "_run_and_close":
+                task = _WorkerCallbackFailingTask(
+                    coroutine,
+                    task_loop=factory_loop,
+                    context=context,
+                )
+                worker_tasks.append(task)
+                return task
+            return _delegate_task(factory_loop, coroutine, context)
+
+        def _blocking_run(**_kwargs):
+            agent_started.set()
+            agent_continue.wait()
+            return {"final_response": "unexpected worker execution"}
+
+        agent = MagicMock()
+        agent.run_conversation.side_effect = _blocking_run
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        request_body = {"input": "callback registration must be atomic"}
+        if managed:
+            request_body["session_id"] = session_id
+        result = None
+        observed = {}
+        loop.set_task_factory(_selective_task_factory)
+        try:
+            with patch.object(
+                adapter,
+                "_create_agent",
+                return_value=agent,
+            ) as create_agent:
+                result = (
+                    await asyncio.gather(
+                        adapter._handle_runs(
+                            _direct_run_request(request_body)
+                        ),
+                        return_exceptions=True,
+                    )
+                )[0]
+                worker_ran = await asyncio.to_thread(
+                    agent_started.wait,
+                    0.2,
+                )
+                observed = {
+                    "active_tasks": dict(adapter._active_run_tasks),
+                    "background_tasks": set(adapter._background_tasks),
+                    "lease": (
+                        db.get_managed_run_lease(session_id)
+                        if db is not None
+                        else None
+                    ),
+                    "managed_session_runs": dict(
+                        adapter._managed_session_runs
+                    ),
+                    "reservations": set(
+                        adapter._run_admission_reservations
+                    ),
+                    "run_statuses": dict(adapter._run_statuses),
+                    "run_streams": dict(adapter._run_streams),
+                    "worker_ran": worker_ran,
+                }
+        finally:
+            loop.set_task_factory(previous_task_factory)
+            agent_continue.set()
+            for worker_task in worker_tasks:
+                if not worker_task.done():
+                    worker_task.cancel()
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            await adapter.cancel_background_tasks()
+            if db is not None:
+                lease = db.get_managed_run_lease(session_id)
+                if lease is not None:
+                    db.release_managed_run_lease(
+                        session_id,
+                        owner_id=lease["owner_id"],
+                        run_id=lease["run_id"],
+                    )
+                db.close()
+
+        assert getattr(result, "status", None) == 503
+        assert json.loads(result.text)["error"]["code"] == (
+            "run_executor_unavailable"
+        )
+        expected_callbacks = ["discard", "<lambda>"]
+        if managed:
+            expected_callbacks.append(
+                "_release_cancelled_before_first_step"
+            )
+        assert [
+            getattr(callback, "__name__", "")
+            for callback in callback_attempts[:failed_callback]
+        ] == expected_callbacks[:failed_callback]
+        create_agent.assert_not_called()
+        assert observed == {
+            "active_tasks": {},
+            "background_tasks": set(),
+            "lease": None,
+            "managed_session_runs": {},
+            "reservations": set(),
+            "run_statuses": {},
+            "run_streams": {},
+            "worker_ran": False,
+        }
 
     @pytest.mark.asyncio
     async def test_real_credential_pool_route_is_admitted_for_managed_run(

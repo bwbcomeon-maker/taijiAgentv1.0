@@ -3930,10 +3930,10 @@ class APIServerAdapter(BasePlatformAdapter):
         self._managed_lease_shutdown_depth -= 1
 
     @staticmethod
-    async def _await_managed_lease_lifecycle_task(
+    async def _await_task_without_forwarding_cancel(
         task: "asyncio.Future",
     ) -> Any:
-        """Await one lease lifecycle child without forwarding caller cancel."""
+        """Await one owned child without forwarding caller cancellation."""
         while not task.done():
             try:
                 await asyncio.shield(task)
@@ -4149,7 +4149,7 @@ class APIServerAdapter(BasePlatformAdapter):
         """Drain a cancelled request's acquire and any exact lease release."""
         fallback_owns_lifecycle = False
         try:
-            acquired = await self._await_managed_lease_lifecycle_task(
+            acquired = await self._await_task_without_forwarding_cancel(
                 acquire_task
             )
             if not acquired:
@@ -4184,7 +4184,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 fallback_owns_lifecycle = True
                 return
-            released = await self._await_managed_lease_lifecycle_task(
+            released = await self._await_task_without_forwarding_cancel(
                 release_task
             )
             if not released:
@@ -4220,7 +4220,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 *(lifecycle.done for lifecycle in lifecycles),
                 return_exceptions=True,
             )
-            await self._await_managed_lease_lifecycle_task(waiter)
+            await self._await_task_without_forwarding_cancel(waiter)
 
     async def cancel_background_tasks(self) -> None:
         """Cancel ordinary work, then drain durable lease lifecycles."""
@@ -4705,12 +4705,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 raise
             try:
                 resolved_route = await asyncio.shield(resolver_task)
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as request_cancel:
                 # ``to_thread`` keeps running after its awaiter is cancelled.
                 # Transfer the capacity reservation to the real resolver Task;
                 # releasing it in the request wrapper would admit an
                 # unbounded cancellation storm while those threads still run.
-                admission_state["resolver_owned"] = True
 
                 def _release_after_resolver(
                     finished_task: "asyncio.Task",
@@ -4724,7 +4723,25 @@ class APIServerAdapter(BasePlatformAdapter):
                     finally:
                         self._release_run_admission(admission_token)
 
-                resolver_task.add_done_callback(_release_after_resolver)
+                try:
+                    resolver_task.add_done_callback(_release_after_resolver)
+                except BaseException as exc:
+                    # The real Task already owns ``resolver_coroutine`` but
+                    # callback registration did not transfer the reservation.
+                    # Keep the request Task as the owner until the resolver
+                    # reaches a terminal state, even under repeated cancel.
+                    logger.error(
+                        "[api_server] resolver admission handoff failed: %s",
+                        exc,
+                    )
+                    try:
+                        await self._await_task_without_forwarding_cancel(
+                            resolver_task
+                        )
+                    except BaseException:
+                        pass
+                    raise request_cancel
+                admission_state["resolver_owned"] = True
                 raise
             if not isinstance(resolved_route, dict):
                 raise RuntimeError("resolved route is not a mapping")
@@ -5580,23 +5597,75 @@ class APIServerAdapter(BasePlatformAdapter):
             )
         self._active_run_tasks[run_id] = task
         self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-        task.add_done_callback(
-            lambda _task: self._release_run_admission(admission_token)
-        )
-        if managed_session:
-            def _release_cancelled_before_first_step(_task: "asyncio.Task") -> None:
+        try:
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(
+                lambda _task: self._release_run_admission(admission_token)
+            )
+            if managed_session:
+                def _release_cancelled_before_first_step(
+                    _task: "asyncio.Task",
+                ) -> None:
+                    with self._managed_session_runs_lock:
+                        if not worker_started.is_set():
+                            worker_abandoned.set()
+                    if worker_abandoned.is_set():
+                        threading.Thread(
+                            target=_release_managed_lease,
+                            name=f"managed-run-release-{run_id[-8:]}",
+                            daemon=True,
+                        ).start()
+
+                task.add_done_callback(_release_cancelled_before_first_step)
+        except BaseException as exc:
+            # A real Task already owns ``run_coroutine``.  Until every
+            # required callback is registered, startup is not externally
+            # committed: cancel and supervise that Task to a terminal state
+            # before rolling back its public state and durable lease.
+            logger.error(
+                "[api_server] failed to supervise run task %s: %s",
+                run_id,
+                exc,
+            )
+            if managed_session:
                 with self._managed_session_runs_lock:
                     if not worker_started.is_set():
                         worker_abandoned.set()
-                if worker_abandoned.is_set():
-                    threading.Thread(
-                        target=_release_managed_lease,
-                        name=f"managed-run-release-{run_id[-8:]}",
-                        daemon=True,
-                    ).start()
+            task.cancel()
+            try:
+                await self._await_task_without_forwarding_cancel(task)
+            except BaseException:
+                pass
 
-            task.add_done_callback(_release_cancelled_before_first_step)
+            self._background_tasks.discard(task)
+            self._active_run_agents.pop(run_id, None)
+            self._active_run_tasks.pop(run_id, None)
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+            self._run_approval_sessions.pop(run_id, None)
+            self._run_statuses.pop(run_id, None)
+
+            try:
+                release_future = loop.run_in_executor(
+                    None,
+                    _release_managed_lease,
+                )
+            except BaseException:
+                _release_managed_lease()
+            else:
+                try:
+                    await self._await_task_without_forwarding_cancel(
+                        release_future
+                    )
+                except BaseException:
+                    pass
+            return web.json_response(
+                _openai_error(
+                    "Run executor unavailable",
+                    code="run_executor_unavailable",
+                ),
+                status=503,
+            )
         admission_state["worker_owned"] = True
         if managed_lease_lifecycle is not None:
             self._finish_managed_lease_lifecycle(
