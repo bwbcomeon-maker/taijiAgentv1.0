@@ -138,9 +138,10 @@ B1→B2→B3→B4：
 3. **B3：版本化验证、运行时执行门禁与保留扩展工具的 schema refresh。**
 4. **B4：WebUI streaming/routing/cache 与 CLI、Gateway、TUI 的一致性。**
 
-四项必须分别先运行并落盘 must-first RED 测试证据，再做最小 GREEN 实现；
-产品 commit 只能在独立规格复审和质量复审通过后形成。详细风险、
-27 类 RED 测试和 hand-port 边界见
+四项必须分别先运行并落盘 must-first 测试证据，再做最小 GREEN 实现；类别 3
+先固定当前已通过的五个内置 Provider model exactness characterization，其余
+类别必须获得真实 RED。产品 commit 只能在独立规格复审和质量复审通过后形成。
+详细风险、27 类测试和 hand-port 边界见
 `docs/reviews/main-consolidation-task-b-source-audit-2026-07-18.md`。
 
 最终保留目标：
@@ -495,49 +496,164 @@ test "$("$AGENT_PY" -m pytest --version)" = "pytest 9.0.2"
 ### 5.3 每次 Electron 验收前后检查
 
 ```bash
+set -euo pipefail
+
 PHASE=task-b1
-SNAPSHOT=before
 RUNTIME_EVIDENCE="$WT/qa-evidence/main-consolidation-20260717/daily-runtime/$PHASE"
 mkdir -p "$RUNTIME_EVIDENCE"
 
-lsof -c Electron -a -d cwd -Fpcn \
-  > "$RUNTIME_EVIDENCE/$SNAPSHOT-electron.txt" 2>&1 || true
-
-for PORT in 18642 18787; do
-  LISTENER="$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-listener.txt"
-  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -Fpcn > "$LISTENER" 2>&1 \
-      && test -s "$LISTENER"; then
-    PID="$(lsof -t -iTCP:"$PORT" -sTCP:LISTEN | head -n 1)"
-    lsof -p "$PID" -a -d cwd -Fn \
-      > "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-cwd.txt"
-    curl -fsS -D "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-headers.txt" \
-      -o "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-health.json" \
-      "http://127.0.0.1:$PORT/health"
-    rg -i '^(x-.*commit|server-commit|x-source-revision):' \
-      "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-headers.txt" \
-      > "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-commit-header.txt"
-    test -s "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-health.json"
-    test -s "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-commit-header.txt"
-  else
-    : > "$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT-absent"
-  fi
+for REQUIRED_COMMAND in lsof curl rg sort cmp; do
+  command -v "$REQUIRED_COMMAND" >/dev/null
 done
 
-lsof -nP -iTCP:18643 -sTCP:LISTEN -Fpcn \
-  > "$RUNTIME_EVIDENCE/$SNAPSHOT-18643-protected-listener.txt" 2>&1 || true
-PID_18643="$(lsof -t -iTCP:18643 -sTCP:LISTEN | head -n 1 || true)"
-if test -n "$PID_18643"; then
-  lsof -p "$PID_18643" -a -d cwd -Fn \
-    > "$RUNTIME_EVIDENCE/$SNAPSHOT-18643-protected-cwd.txt"
-fi
+capture_electron() {
+  local SNAPSHOT="$1"
+  local PREFIX="$RUNTIME_EVIDENCE/$SNAPSHOT-electron"
+
+  if lsof -t -c Electron -a -d cwd 2>/dev/null \
+      | sort -u > "$PREFIX-pid.txt" && test -s "$PREFIX-pid.txt"; then
+    printf '%s\n' present > "$PREFIX-presence.txt"
+    while IFS= read -r PID; do
+      lsof -p "$PID" -a -d cwd -Fpn | rg '^[pn]'
+    done < "$PREFIX-pid.txt" | sort -u > "$PREFIX-cwd.txt"
+    if ! lsof -nP -c Electron -a -iTCP -sTCP:LISTEN -Fpcn 2>/dev/null \
+        | rg '^[pcn]' | sort -u > "$PREFIX-listener.txt"; then
+      : > "$PREFIX-listener.txt"
+    fi
+  else
+    printf '%s\n' absent > "$PREFIX-presence.txt"
+    : > "$PREFIX-pid.txt"
+    : > "$PREFIX-cwd.txt"
+    : > "$PREFIX-listener.txt"
+  fi
+}
+
+capture_port() {
+  local SNAPSHOT="$1"
+  local PORT="$2"
+  local HEALTH_MODE="$3"
+  local PREFIX="$RUNTIME_EVIDENCE/$SNAPSHOT-$PORT"
+
+  if test "$HEALTH_MODE" = health; then
+    : > "$PREFIX-headers.txt"
+    : > "$PREFIX-health.json"
+    : > "$PREFIX-commit-header.txt"
+  fi
+
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -Fpcn 2>/dev/null \
+      | rg '^[pcn]' | sort -u > "$PREFIX-listener.txt" \
+      && test -s "$PREFIX-listener.txt"; then
+    printf '%s\n' present > "$PREFIX-presence.txt"
+    sed -n 's/^p//p' "$PREFIX-listener.txt" \
+      | sort -u > "$PREFIX-pid.txt"
+    while IFS= read -r PID; do
+      lsof -p "$PID" -a -d cwd -Fpn | rg '^[pn]'
+    done < "$PREFIX-pid.txt" | sort -u > "$PREFIX-cwd.txt"
+
+    if test "$HEALTH_MODE" = health \
+        && { test "$SNAPSHOT" = before \
+          || test "$(< "$RUNTIME_EVIDENCE/before-$PORT-presence.txt")" = present; }; then
+      curl -fsS -D "$PREFIX-headers.txt" \
+        -o "$PREFIX-health.json" "http://127.0.0.1:$PORT/health"
+      rg -i '^(x-.*commit|server-commit|x-source-revision):' \
+        "$PREFIX-headers.txt" > "$PREFIX-commit-header.txt"
+      test -s "$PREFIX-health.json"
+      test -s "$PREFIX-commit-header.txt"
+    fi
+  else
+    printf '%s\n' absent > "$PREFIX-presence.txt"
+    : > "$PREFIX-listener.txt"
+    : > "$PREFIX-pid.txt"
+    : > "$PREFIX-cwd.txt"
+  fi
+}
+
+capture_runtime() {
+  local SNAPSHOT="$1"
+  capture_electron "$SNAPSHOT"
+  capture_port "$SNAPSHOT" 18642 health
+  capture_port "$SNAPSHOT" 18787 health
+  capture_port "$SNAPSHOT" 18643 protected
+}
+
+assert_same_file() {
+  local LABEL="$1"
+  local BEFORE="$2"
+  local AFTER="$3"
+  cmp -s "$BEFORE" "$AFTER" || {
+    printf 'runtime changed: %s\n' "$LABEL" >&2
+    return 1
+  }
+}
+
+assert_component_unchanged() {
+  local COMPONENT="$1"
+  local HEALTH_MODE="$2"
+  local BEFORE_PREFIX="$RUNTIME_EVIDENCE/before-$COMPONENT"
+  local AFTER_PREFIX="$RUNTIME_EVIDENCE/after-$COMPONENT"
+  local BEFORE_PRESENCE
+
+  assert_same_file "$COMPONENT presence" \
+    "$BEFORE_PREFIX-presence.txt" "$AFTER_PREFIX-presence.txt"
+  assert_same_file "$COMPONENT pid" \
+    "$BEFORE_PREFIX-pid.txt" "$AFTER_PREFIX-pid.txt"
+  assert_same_file "$COMPONENT cwd" \
+    "$BEFORE_PREFIX-cwd.txt" "$AFTER_PREFIX-cwd.txt"
+  assert_same_file "$COMPONENT listener" \
+    "$BEFORE_PREFIX-listener.txt" "$AFTER_PREFIX-listener.txt"
+  BEFORE_PRESENCE="$(< "$BEFORE_PREFIX-presence.txt")"
+  if test "$BEFORE_PRESENCE" = present; then
+    if test "$HEALTH_MODE" = health; then
+      assert_same_file "$COMPONENT health" \
+        "$BEFORE_PREFIX-health.json" "$AFTER_PREFIX-health.json"
+      assert_same_file "$COMPONENT commit header" \
+        "$BEFORE_PREFIX-commit-header.txt" \
+        "$AFTER_PREFIX-commit-header.txt"
+    fi
+  else
+    test "$(< "$AFTER_PREFIX-presence.txt")" = absent
+  fi
+}
+
+assert_qa_not_on_protected_ports() {
+  local PORT PID CWD
+  for PORT in 18642 18643 18787; do
+    while IFS= read -r PID; do
+      CWD="$(lsof -p "$PID" -a -d cwd -Fn | sed -n 's/^n//p')"
+      case "$CWD" in
+        "$QA_ROOT"*|"$WT"*)
+          printf 'QA process %s occupies protected port %s (%s)\n' \
+            "$PID" "$PORT" "$CWD" >&2
+          return 1
+          ;;
+      esac
+    done < "$RUNTIME_EVIDENCE/after-$PORT-pid.txt"
+  done
+}
+
+assert_runtime_unchanged() {
+  assert_component_unchanged electron protected
+  assert_component_unchanged 18642 health
+  assert_component_unchanged 18787 health
+  assert_component_unchanged 18643 protected
+  assert_qa_not_on_protected_ports
+}
+
+capture_runtime before
+# 仅在隔离端口 19642/19787 执行本阶段 QA。
+capture_runtime after
+assert_runtime_unchanged
 ```
 
-每个阶段开始时使用 `SNAPSHOT=before`，结束时原样重跑并改为
-`SNAPSHOT=after`。只有 listener 存在才执行对应 `curl`；禁止为生成 health
-证据启动服务。前后必须满足：
+每个阶段必须在同一个 fail-fast shell 中定义函数并先执行
+`capture_runtime before`；本阶段 QA 结束后再执行 `capture_runtime after` 和
+`assert_runtime_unchanged`。示例中的相邻调用只表达顺序，不允许跳过中间的
+隔离 QA。只有 before listener 存在才执行对应 `curl`；禁止为生成 health
+证据启动服务。任何 `curl`、header 提取、`cmp` 或显式断言失败都以非零退出，
+阻断下一阶段。前后必须满足：
 
-- `before` 存在的 Electron/`18642`/`18787` 保持 PID、CWD、listener、health 和
-  commit header 不变。
+- `before` 存在的 Electron 保持 PID、CWD、listener 不变；`before` 存在的
+  `18642`/`18787` 还必须保持 health 和 commit header 不变。
 - `before` 不存在的 Electron/`18642`/`18787` 保持 absent，且 QA 证据证明只
   绑定 `19642/19787`。
 - `18643` 的受保护 listener/PID/CWD 不变；不产生 health 请求。
@@ -640,7 +756,8 @@ package，任何超时视为失败。
   整文件复制。
 - 开始 B1 前先阅读
   `docs/reviews/main-consolidation-task-b-source-audit-2026-07-18.md`，并把其中
-  27 类 must-first RED 测试映射到 B1–B4 的测试 node id。
+  27 类 must-first 测试映射到 B1–B4 的测试 node id；类别 3 标为既有
+  characterization GREEN，其余类别记录真实 RED。
 - 每个子任务都按“RED 证据 → 最小 GREEN → 目标回归 → 暂存 diff 规格复审
   → 独立质量复审 → 独立 commit”闭环。任一复审有开放 P0/P1，不得进入下一项。
 - B1→B2→B3→B4 是严格依赖栈：每个子任务仍单独复审、单独形成 commit，
@@ -692,8 +809,9 @@ package，任何超时视为失败。
 - Test:
   `hermes-local-lab/sources/hermes-webui/tests/test_model_config_api.py`
 
-- [ ] **RED（审计类别 1–6）：** 先新增以下六个测试并运行；必须因为目标行为
-  尚未实现而失败，不得用 import error、fixture error 或放宽断言制造 RED：
+- [ ] **characterization（审计类别 3，预期初始 GREEN）：** 先新增并单独运行
+  已知内置模型精确返回测试，固定五个 Provider 当前真实行为；该 node 不计为
+  行为性 RED，禁止为制造 RED 改坏已通过的模型解析：
 
 ```bash
 mkdir -p "$WT/qa-evidence/main-consolidation-20260717/providers"
@@ -701,9 +819,22 @@ mkdir -p "$WT/qa-evidence/main-consolidation-20260717/providers"
   cd "$AGENT_ROOT"
   PYTHONPATH="$WEBUI_ROOT:$AGENT_ROOT" \
     "$AGENT_PY" -m pytest -q \
+    "tests/agent/test_provider_fail_closed_contract.py::test_builtin_known_image_models_resolve_exactly" \
+    --junitxml="$WT/qa-evidence/main-consolidation-20260717/providers/task-b1-characterization-agent.xml"
+)
+```
+
+- [ ] **RED（审计类别 1–2、4–6）：** 再运行其余五个测试；必须因为目标行为
+  尚未实现而失败，不得用 import error、fixture error、破坏类别 3 既有行为或
+  放宽断言制造 RED：
+
+```bash
+(
+  cd "$AGENT_ROOT"
+  PYTHONPATH="$WEBUI_ROOT:$AGENT_ROOT" \
+    "$AGENT_PY" -m pytest -q \
     "tests/agent/test_provider_fail_closed_contract.py::test_provider_family_aliases_are_canonical" \
     "tests/agent/test_provider_fail_closed_contract.py::test_custom_provider_aliases_are_canonical_without_secret_lookup" \
-    "tests/agent/test_provider_fail_closed_contract.py::test_builtin_known_image_models_resolve_exactly" \
     "tests/agent/test_provider_fail_closed_contract.py::test_builtin_unknown_image_models_fail_before_credential_lookup" \
     "tests/agent/test_provider_fail_closed_contract.py::test_custom_image_model_requires_explicit_allow_custom_model_id" \
     "tests/agent/test_provider_fail_closed_contract.py::test_unknown_vision_model_and_capability_fail_closed" \
@@ -711,8 +842,11 @@ mkdir -p "$WT/qa-evidence/main-consolidation-20260717/providers"
 )
 ```
 
-B1 RED 是单一 Agent-tests 进程；即使 `PYTHONPATH` 可导入 WebUI production
-module，也不得加入 WebUI `tests/`。
+B1 characterization 与 RED 是两个独立 Agent-tests 进程和 JUnit；即使
+`PYTHONPATH` 可导入 WebUI production module，也不得加入 WebUI `tests/`。
+类别 2 验证命名空间隔离：`custom`、`custom-image`、`custom:*` 一律归
+`custom` family，`custom:dashscope` 不得借用内置 DashScope family，且
+Secret seam 调用数为 `0`；不为此临时发明 exception 契约。
 
 - [ ] **GREEN：** 只扩充 canonical aliases、family 和统一 model allowlist；
   已知模型必须原样解析，未知内置模型和未显式 opt-in 的 custom model 在读取
@@ -1297,6 +1431,8 @@ git commit -m "fix(images): align capability routing across entrypoints"
   collection error。演练只作用于临时 worktree：
 
 ```bash
+set -euo pipefail
+
 B1=<task-b1-commit>
 B2=<task-b2-commit>
 B3=<task-b3-commit>
@@ -1307,12 +1443,22 @@ REHEARSAL_WT="$REHEARSAL_TMP/worktree"
 REHEARSAL_EVIDENCE="$WT/qa-evidence/main-consolidation-20260717/providers/revert-rehearsal"
 mkdir -p "$REHEARSAL_EVIDENCE"
 
-git worktree add --detach "$REHEARSAL_WT" "$STACK_HEAD"
 cleanup_rehearsal() {
-  git worktree remove --force "$REHEARSAL_WT"
-  rmdir "$REHEARSAL_TMP"
+  local ORIGINAL_STATUS=$?
+  trap - EXIT
+  set +e
+  if test -d "$REHEARSAL_WT"; then
+    # --no-commit 成功时可能没有 sequencer；abort 仅用于 cleanup，失败可忽略。
+    git -C "$REHEARSAL_WT" revert --abort >/dev/null 2>&1 || true
+    git -C "$REHEARSAL_WT" reset --hard "$STACK_HEAD" \
+      >/dev/null 2>&1 || true
+    git worktree remove --force "$REHEARSAL_WT" >/dev/null 2>&1 || true
+  fi
+  rmdir "$REHEARSAL_TMP" >/dev/null 2>&1 || true
+  exit "$ORIGINAL_STATUS"
 }
 trap cleanup_rehearsal EXIT
+git worktree add --detach "$REHEARSAL_WT" "$STACK_HEAD"
 
 verify_rehearsed_stack() {
   local LABEL="$1"
@@ -1339,19 +1485,47 @@ verify_rehearsed_stack() {
   git -C "$REHEARSAL_WT" diff --cached --check
 }
 
-rehearse_suffix() {
+run_suffix_rehearsal() {
   local LABEL="$1"
+  local LOG="$REHEARSAL_EVIDENCE/$LABEL.log"
+  local STATUS_FILE="$REHEARSAL_EVIDENCE/$LABEL.status"
+  local REHEARSAL_STATUS
   shift
-  git -C "$REHEARSAL_WT" reset --hard "$STACK_HEAD"
-  git -C "$REHEARSAL_WT" revert --no-commit "$@"
-  verify_rehearsed_stack "$LABEL"
+
+  set +e
+  (
+    set -euo pipefail
+    git -C "$REHEARSAL_WT" reset --hard "$STACK_HEAD"
+    git -C "$REHEARSAL_WT" revert --no-commit "$@"
+    verify_rehearsed_stack "$LABEL"
+  ) > "$LOG" 2>&1
+  REHEARSAL_STATUS=$?
+  set -e
+
+  printf '%s\n' "$REHEARSAL_STATUS" > "$STATUS_FILE"
+  if test "$REHEARSAL_STATUS" -ne 0; then
+    cat "$LOG" >&2
+    return "$REHEARSAL_STATUS"
+  fi
 }
 
-rehearse_suffix b4 "$B4"
-rehearse_suffix b4-b3 "$B4" "$B3"
-rehearse_suffix b4-b3-b2 "$B4" "$B3" "$B2"
-rehearse_suffix b4-b3-b2-b1 "$B4" "$B3" "$B2" "$B1"
+run_suffix_rehearsal b4 "$B4"
+run_suffix_rehearsal b4-b3 "$B4" "$B3"
+run_suffix_rehearsal b4-b3-b2 "$B4" "$B3" "$B2"
+run_suffix_rehearsal b4-b3-b2-b1 "$B4" "$B3" "$B2" "$B1"
+
+for LABEL in b4 b4-b3 b4-b3-b2 b4-b3-b2-b1; do
+  test "$(< "$REHEARSAL_EVIDENCE/$LABEL.status")" = 0
+  test -s "$REHEARSAL_EVIDENCE/$LABEL.log"
+  test -s "$REHEARSAL_EVIDENCE/$LABEL-agent.xml"
+  test -s "$REHEARSAL_EVIDENCE/$LABEL-webui.xml"
+done
 ```
+
+任一 suffix 的 revert、import、pytest 或 staged diff-check 失败都会保留独立
+`.log`/`.status` 并以原始非零状态退出；总门禁仅在四个 status 均为 `0` 且
+八个 JUnit 文件均非空时通过。EXIT trap 只清理一次性 worktree 中可能残留的
+revert/sequencer 和 index，不得覆盖原失败状态。
 
 - [ ] 重跑 B1–B4 的全部 GREEN 命令和第 3.3 节重复 Artifact 扫描。
 - [ ] 对四个 commit 做一次 source-to-integration 映射复核；只有全部目标测试
