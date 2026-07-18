@@ -1119,11 +1119,14 @@ class TestStartRun:
                 self._callback_failed = callback_failed
 
             def add_done_callback(self, callback, *, context=None):
-                if getattr(callback, "__name__", "") == "_release_after_resolver":
+                if (
+                    getattr(callback, "__name__", "")
+                    == "_release_after_preworker"
+                ):
                     callback_attempts.append(self)
                     self._callback_failed.set()
                     raise RuntimeError(
-                        "resolver release callback registration failed"
+                        "preworker release callback registration failed"
                     )
                 if context is None:
                     return super().add_done_callback(callback)
@@ -1302,6 +1305,313 @@ class TestStartRun:
             for result in observed["request_results"]
         )
         assert set(observed["resolver_release_counts"].values()) == {1}
+
+    async def _assert_cancelled_preworker_query_holds_admission(
+        self,
+        adapter,
+        tmp_path,
+        *,
+        query_name,
+        query_outcome,
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_ids = [
+            f"session-{query_name}-{index}"
+            for index in range(adapter._MAX_CONCURRENT_RUNS)
+        ]
+        for session_id in session_ids:
+            db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        adapter._MAX_RETAINED_RUN_STREAMS = 0
+
+        original_query = getattr(db, query_name)
+        original_release_admission = adapter._release_run_admission
+        query_continue = threading.Event()
+        ten_queries_entered = threading.Event()
+        all_queries_finished = threading.Event()
+        query_lock = threading.Lock()
+        query_counts = {"entered": 0, "finished": 0}
+        release_calls = []
+        request_tasks = []
+        observed = {}
+        loop = asyncio.get_running_loop()
+        previous_exception_handler = loop.get_exception_handler()
+        unhandled_contexts = []
+
+        def _blocked_query(*args, **kwargs):
+            with query_lock:
+                query_counts["entered"] += 1
+                if (
+                    query_counts["entered"]
+                    == adapter._MAX_CONCURRENT_RUNS
+                ):
+                    ten_queries_entered.set()
+            query_continue.wait()
+            try:
+                if query_outcome == "error":
+                    raise sqlite3.OperationalError(
+                        f"{query_name} blocked query failed"
+                    )
+                return original_query(*args, **kwargs)
+            finally:
+                with query_lock:
+                    query_counts["finished"] += 1
+                    if (
+                        query_counts["finished"]
+                        == adapter._MAX_CONCURRENT_RUNS
+                    ):
+                        all_queries_finished.set()
+
+        def _record_admission_release(token):
+            release_calls.append(token)
+            original_release_admission(token)
+
+        loop.set_exception_handler(
+            lambda _loop, context: unhandled_contexts.append(context)
+        )
+        try:
+            with (
+                patch.object(
+                    db,
+                    query_name,
+                    side_effect=_blocked_query,
+                ),
+                patch.object(
+                    adapter,
+                    "_release_run_admission",
+                    side_effect=_record_admission_release,
+                ),
+            ):
+                request_tasks = [
+                    asyncio.create_task(
+                        adapter._handle_runs(
+                            _direct_run_request({
+                                "input": f"cancel {query_name} {index}",
+                                "session_id": session_id,
+                            })
+                        )
+                    )
+                    for index, session_id in enumerate(session_ids)
+                ]
+                assert await asyncio.to_thread(
+                    ten_queries_entered.wait,
+                    3.0,
+                )
+                reservation_tokens = set(
+                    adapter._run_admission_reservations
+                )
+
+                for request_task in request_tasks:
+                    request_task.cancel()
+                    request_task.cancel()
+                request_results = await asyncio.gather(
+                    *request_tasks,
+                    return_exceptions=True,
+                )
+
+                observed["request_results"] = request_results
+                observed["reservations_while_queries_blocked"] = len(
+                    adapter._run_admission_reservations
+                )
+                observed["queries_finished_while_blocked"] = (
+                    query_counts["finished"]
+                )
+
+                overflow = await adapter._handle_runs(
+                    _direct_run_request({
+                        "input": "must remain rate limited",
+                    })
+                )
+                observed["overflow_status"] = overflow.status
+                observed["overflow_code"] = json.loads(overflow.text)[
+                    "error"
+                ]["code"]
+
+                query_continue.set()
+                assert await asyncio.to_thread(
+                    all_queries_finished.wait,
+                    3.0,
+                )
+                deadline = loop.time() + 3.0
+                while (
+                    adapter._run_admission_reservations
+                    and loop.time() < deadline
+                ):
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0)
+
+                observed["reservation_tokens"] = reservation_tokens
+                observed["release_calls"] = list(release_calls)
+                observed["reservations_after_queries"] = set(
+                    adapter._run_admission_reservations
+                )
+                observed["query_counts"] = dict(query_counts)
+                observed["unhandled_contexts"] = list(unhandled_contexts)
+        finally:
+            query_continue.set()
+            for request_task in request_tasks:
+                if not request_task.done():
+                    request_task.cancel()
+            await asyncio.gather(
+                *request_tasks,
+                return_exceptions=True,
+            )
+            loop.set_exception_handler(previous_exception_handler)
+            for session_id in session_ids:
+                lease = db.get_managed_run_lease(session_id)
+                if lease is not None:
+                    db.release_managed_run_lease(
+                        session_id,
+                        owner_id=lease["owner_id"],
+                        run_id=lease["run_id"],
+                    )
+            db.close()
+
+        assert all(
+            isinstance(result, asyncio.CancelledError)
+            for result in observed["request_results"]
+        )
+        assert observed["reservations_while_queries_blocked"] == (
+            adapter._MAX_CONCURRENT_RUNS
+        )
+        assert observed["queries_finished_while_blocked"] == 0
+        assert (
+            observed["overflow_status"],
+            observed["overflow_code"],
+        ) == (429, "rate_limit_exceeded")
+        assert observed["reservations_after_queries"] == set()
+        assert observed["query_counts"] == {
+            "entered": adapter._MAX_CONCURRENT_RUNS,
+            "finished": adapter._MAX_CONCURRENT_RUNS,
+        }
+        assert set(observed["release_calls"]) == observed[
+            "reservation_tokens"
+        ]
+        assert all(
+            observed["release_calls"].count(token) == 1
+            for token in observed["reservation_tokens"]
+        )
+        assert observed["unhandled_contexts"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query_outcome", ["success", "error"])
+    async def test_cancelled_get_session_queries_keep_all_admission_slots(
+        self,
+        adapter,
+        tmp_path,
+        query_outcome,
+    ):
+        await self._assert_cancelled_preworker_query_holds_admission(
+            adapter,
+            tmp_path,
+            query_name="get_session",
+            query_outcome=query_outcome,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query_outcome", ["success", "error"])
+    async def test_cancelled_lease_key_queries_keep_all_admission_slots(
+        self,
+        adapter,
+        tmp_path,
+        query_outcome,
+    ):
+        await self._assert_cancelled_preworker_query_holds_admission(
+            adapter,
+            tmp_path,
+            query_name="get_managed_run_lease_key",
+            query_outcome=query_outcome,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("query_name", "owned_task_name"),
+        [
+            ("get_session", "managed-run-session-query-"),
+            (
+                "get_managed_run_lease_key",
+                "managed-run-lease-key-query-",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("failure_mode", ["query", "task_creation"])
+    async def test_preworker_db_query_failure_is_stable_503(
+        self,
+        adapter,
+        tmp_path,
+        query_name,
+        owned_task_name,
+        failure_mode,
+    ):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        session_id = f"session-{query_name}-{failure_mode}"
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        adapter._MAX_RETAINED_RUN_STREAMS = 0
+        original_create_owned_task = adapter._create_owned_task
+        created_query_tasks = []
+
+        def _selective_create_owned_task(coroutine, *, name):
+            if name.startswith(owned_task_name):
+                created_query_tasks.append(name)
+                if failure_mode == "task_creation":
+                    coroutine.close()
+                    raise RuntimeError(f"{query_name} task unavailable")
+            return original_create_owned_task(coroutine, name=name)
+
+        query_patch = (
+            patch.object(
+                db,
+                query_name,
+                side_effect=sqlite3.OperationalError(
+                    f"{query_name} unavailable"
+                ),
+            )
+            if failure_mode == "query"
+            else patch.object(db, query_name, wraps=getattr(db, query_name))
+        )
+
+        try:
+            with (
+                query_patch,
+                patch.object(
+                    adapter,
+                    "_create_owned_task",
+                    side_effect=_selective_create_owned_task,
+                ),
+                patch.object(adapter, "_create_agent") as create_agent,
+            ):
+                result = (
+                    await asyncio.gather(
+                        adapter._handle_runs(
+                            _direct_run_request({
+                                "input": "stable DB query failure",
+                                "session_id": session_id,
+                            })
+                        ),
+                        return_exceptions=True,
+                    )
+                )[0]
+
+            assert getattr(result, "status", None) == 503
+            payload = json.loads(result.text)
+            assert payload["error"]["code"] == "session_db_unavailable"
+            create_agent.assert_not_called()
+            assert db.get_managed_run_lease(session_id) is None
+            assert adapter._managed_lease_lifecycle_tasks == set()
+            assert adapter._run_admission_reservations == set()
+            if failure_mode == "task_creation":
+                assert len(created_query_tasks) == 1
+                assert created_query_tasks[0].startswith(owned_task_name)
+        finally:
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                db.release_managed_run_lease(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
 
     @pytest.mark.asyncio
     async def test_cancelled_managed_lease_acquire_keeps_admission_until_precise_cleanup(
@@ -2526,31 +2836,29 @@ class TestStartRun:
         adapter._session_db = db
         loop = asyncio.get_running_loop()
         original_create_task = loop.create_task
-        to_thread_calls = 0
         captured = {}
         bare_future = loop.create_future()
 
         def _create_task(coroutine, *args, **kwargs):
-            nonlocal to_thread_calls
+            coroutine_frame = getattr(coroutine, "cr_frame", None)
+            to_thread_target = (
+                coroutine_frame.f_locals.get("func")
+                if coroutine_frame is not None
+                else None
+            )
             if (
-                getattr(
-                    getattr(coroutine, "cr_code", None),
-                    "co_name",
-                    "",
-                )
-                == "to_thread"
+                getattr(to_thread_target, "__name__", "")
+                == "acquire_managed_run_lease"
             ):
-                to_thread_calls += 1
-                if to_thread_calls == 2:
-                    captured["coroutine"] = coroutine
-                    loop.call_soon(
-                        lambda: (
-                            None
-                            if bare_future.done()
-                            else bare_future.set_result(False)
-                        )
+                captured["coroutine"] = coroutine
+                loop.call_soon(
+                    lambda: (
+                        None
+                        if bare_future.done()
+                        else bare_future.set_result(False)
                     )
-                    return bare_future
+                )
+                return bare_future
             return original_create_task(coroutine, *args, **kwargs)
 
         try:
@@ -2591,7 +2899,6 @@ class TestStartRun:
         adapter._MAX_RETAINED_RUN_STREAMS = 0
         loop = asyncio.get_running_loop()
         previous_task_factory = loop.get_task_factory()
-        to_thread_calls = 0
         lease_tasks = []
         set_name_attempts = []
 
@@ -2615,23 +2922,22 @@ class TestStartRun:
             return asyncio.Task(coroutine, **kwargs)
 
         def _selective_task_factory(factory_loop, coroutine, context=None):
-            nonlocal to_thread_calls
+            coroutine_frame = getattr(coroutine, "cr_frame", None)
+            to_thread_target = (
+                coroutine_frame.f_locals.get("func")
+                if coroutine_frame is not None
+                else None
+            )
             if (
-                getattr(
-                    getattr(coroutine, "cr_code", None),
-                    "co_name",
-                    "",
-                )
-                == "to_thread"
+                getattr(to_thread_target, "__name__", "")
+                == "acquire_managed_run_lease"
             ):
-                to_thread_calls += 1
-                if to_thread_calls == 2:
-                    kwargs = {"loop": factory_loop}
-                    if context is not None:
-                        kwargs["context"] = context
-                    task = _SetNameFailingTask(coroutine, **kwargs)
-                    lease_tasks.append(task)
-                    return task
+                kwargs = {"loop": factory_loop}
+                if context is not None:
+                    kwargs["context"] = context
+                task = _SetNameFailingTask(coroutine, **kwargs)
+                lease_tasks.append(task)
+                return task
             return _delegate_task(factory_loop, coroutine, context)
 
         loop.set_task_factory(_selective_task_factory)

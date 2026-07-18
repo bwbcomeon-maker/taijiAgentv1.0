@@ -3982,6 +3982,52 @@ class APIServerAdapter(BasePlatformAdapter):
             )
         return candidate
 
+    async def _await_preworker_owned_task(
+        self,
+        task: "asyncio.Task",
+        *,
+        admission_token: str,
+        admission_state: Dict[str, Any],
+        operation: str,
+    ) -> Any:
+        """Shield pre-worker work and transfer admission after request cancel."""
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as request_cancel:
+            # ``to_thread`` keeps running after its request is cancelled.
+            # Transfer admission to its real Task so cancellation storms
+            # cannot exceed the global pre-worker capacity.
+            def _release_after_preworker(
+                finished_task: "asyncio.Task",
+            ) -> None:
+                try:
+                    finished_task.result()
+                except BaseException:
+                    # The request that could report this failure no longer
+                    # exists.  Consume it before releasing the exact slot.
+                    pass
+                finally:
+                    self._release_run_admission(admission_token)
+
+            try:
+                task.add_done_callback(_release_after_preworker)
+            except BaseException as exc:
+                # A real Task already owns the thread-backed operation, but
+                # callback registration did not transfer admission.  Retain
+                # the current request as owner through repeated cancellation.
+                logger.error(
+                    "[api_server] %s admission handoff failed: %s",
+                    operation,
+                    exc,
+                )
+                try:
+                    await self._await_task_without_forwarding_cancel(task)
+                except BaseException:
+                    pass
+                raise request_cancel
+            admission_state["preworker_owned"] = True
+            raise
+
     def _register_managed_lease_lifecycle(
         self,
         coroutine: Any,
@@ -4411,7 +4457,7 @@ class APIServerAdapter(BasePlatformAdapter):
         admission_state: Dict[str, Any] = {
             "token": None,
             "worker_owned": False,
-            "resolver_owned": False,
+            "preworker_owned": False,
             "lease_acquire_owned": False,
             "lease_lifecycle": None,
         }
@@ -4432,7 +4478,7 @@ class APIServerAdapter(BasePlatformAdapter):
             if (
                 admission_token
                 and not admission_state["worker_owned"]
-                and not admission_state["resolver_owned"]
+                and not admission_state["preworker_owned"]
                 and not admission_state["lease_acquire_owned"]
             ):
                 self._release_run_admission(admission_token)
@@ -4661,46 +4707,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     ),
                     status=503,
                 )
-            try:
-                resolved_route = await asyncio.shield(resolver_task)
-            except asyncio.CancelledError as request_cancel:
-                # ``to_thread`` keeps running after its awaiter is cancelled.
-                # Transfer the capacity reservation to the real resolver Task;
-                # releasing it in the request wrapper would admit an
-                # unbounded cancellation storm while those threads still run.
-
-                def _release_after_resolver(
-                    finished_task: "asyncio.Task",
-                ) -> None:
-                    try:
-                        finished_task.result()
-                    except BaseException:
-                        # Consume resolver failures after the HTTP request that
-                        # would have reported them no longer exists.
-                        pass
-                    finally:
-                        self._release_run_admission(admission_token)
-
-                try:
-                    resolver_task.add_done_callback(_release_after_resolver)
-                except BaseException as exc:
-                    # The real Task already owns ``resolver_coroutine`` but
-                    # callback registration did not transfer the reservation.
-                    # Keep the request Task as the owner until the resolver
-                    # reaches a terminal state, even under repeated cancel.
-                    logger.error(
-                        "[api_server] resolver admission handoff failed: %s",
-                        exc,
-                    )
-                    try:
-                        await self._await_task_without_forwarding_cancel(
-                            resolver_task
-                        )
-                    except BaseException:
-                        pass
-                    raise request_cancel
-                admission_state["resolver_owned"] = True
-                raise
+            resolved_route = await self._await_preworker_owned_task(
+                resolver_task,
+                admission_token=admission_token,
+                admission_state=admission_state,
+                operation="run resolver",
+            )
             if not isinstance(resolved_route, dict):
                 raise RuntimeError("resolved route is not a mapping")
             runtime_kwargs = resolved_route.get("runtime_kwargs")
@@ -4912,14 +4924,77 @@ class APIServerAdapter(BasePlatformAdapter):
                     ),
                     status=503,
                 )
-            if await asyncio.to_thread(db.get_session, requested_session_id) is None:
+            try:
+                session_query_coroutine = asyncio.to_thread(
+                    db.get_session,
+                    requested_session_id,
+                )
+                session_query_task = self._create_owned_task(
+                    session_query_coroutine,
+                    name=f"managed-run-session-query-{run_id[-8:]}",
+                )
+                managed_session_record = (
+                    await self._await_preworker_owned_task(
+                        session_query_task,
+                        admission_token=admission_token,
+                        admission_state=admission_state,
+                        operation="managed session query",
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[api_server] managed session query unavailable for "
+                    "%s: %s",
+                    requested_session_id,
+                    exc,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Session database unavailable",
+                        code="session_db_unavailable",
+                    ),
+                    status=503,
+                )
+            if managed_session_record is None:
                 return web.json_response(
                     _openai_error("Session not found", code="session_not_found"),
                     status=404,
                 )
-            managed_lease_session_id = await asyncio.to_thread(
-                db.get_managed_run_lease_key, requested_session_id
-            )
+            try:
+                lease_key_query_coroutine = asyncio.to_thread(
+                    db.get_managed_run_lease_key,
+                    requested_session_id,
+                )
+                lease_key_query_task = self._create_owned_task(
+                    lease_key_query_coroutine,
+                    name=f"managed-run-lease-key-query-{run_id[-8:]}",
+                )
+                managed_lease_session_id = (
+                    await self._await_preworker_owned_task(
+                        lease_key_query_task,
+                        admission_token=admission_token,
+                        admission_state=admission_state,
+                        operation="managed lease key query",
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[api_server] managed lease key query unavailable for "
+                    "%s: %s",
+                    requested_session_id,
+                    exc,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Session database unavailable",
+                        code="session_db_unavailable",
+                    ),
+                    status=503,
+                )
             managed_lease_lifecycle = self._begin_managed_lease_lifecycle(
                 admission_token
             )
