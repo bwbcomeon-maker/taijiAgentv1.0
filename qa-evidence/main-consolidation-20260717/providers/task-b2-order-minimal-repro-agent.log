@@ -1,0 +1,45 @@
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+___ test_register_configured_custom_image_providers_refreshes_stale_entries ____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c98a5d0>
+
+    def test_register_configured_custom_image_providers_refreshes_stale_entries(monkeypatch):
+        from agent import image_gen_registry
+        from agent.custom_image_providers import register_configured_custom_image_providers
+
+        image_gen_registry._reset_for_tests()
+>       register_configured_custom_image_providers({"custom_image_providers": [_entry(id="one")]})
+
+tests/plugins/image_gen/test_configurable_openai_provider.py:208:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+agent/custom_image_providers.py:452: in register_configured_custom_image_providers
+    register_provider(provider)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+provider = <agent.custom_image_providers.ConfigurableOpenAIImageProvider object at 0x10cb6e910>
+
+    def register_provider(provider: ImageGenProvider) -> None:
+        """Register an image generation provider.
+
+        Re-registration (same ``name``) overwrites the previous entry and logs
+        a debug message — this makes hot-reload scenarios (tests, dev loops)
+        behave predictably.
+        """
+        if not isinstance(provider, ImageGenProvider):
+>           raise TypeError(
+                f"register_provider() expects an ImageGenProvider instance, "
+                f"got {type(provider).__name__}"
+            )
+E           TypeError: register_provider() expects an ImageGenProvider instance, got ConfigurableOpenAIImageProvider
+
+agent/image_gen_registry.py:44: TypeError
+=============================== warnings summary ===============================
+tests/agent/test_auxiliary_client.py::TestAuxiliaryPoolAwareness::test_call_llm_retries_nous_after_401
+  /Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13
+    import audioop
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/plugins/image_gen/test_configurable_openai_provider.py::test_register_configured_custom_image_providers_refreshes_stale_entries
+1 failed, 2 passed, 1 warning in 0.91s

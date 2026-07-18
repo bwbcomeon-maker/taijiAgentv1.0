@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3" time="0.887" timestamp="2026-07-18T19:10:05.008269+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.agent.test_auxiliary_client.TestAuxiliaryPoolAwareness" name="test_call_llm_retries_nous_after_401" time="0.160" /><testcase classname="tests.agent.test_save_url_image.TestSaveUrlImage" name="test_writes_real_bytes_to_hermes_home_cache" time="0.514" /><testcase classname="tests.plugins.image_gen.test_configurable_openai_provider" name="test_register_configured_custom_image_providers_refreshes_stale_entries" time="0.026"><failure message="TypeError: register_provider() expects an ImageGenProvider instance, got ConfigurableOpenAIImageProvider">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10c98a5d0&gt;
+
+    def test_register_configured_custom_image_providers_refreshes_stale_entries(monkeypatch):
+        from agent import image_gen_registry
+        from agent.custom_image_providers import register_configured_custom_image_providers
+
+        image_gen_registry._reset_for_tests()
+&gt;       register_configured_custom_image_providers({"custom_image_providers": [_entry(id="one")]})
+
+tests/plugins/image_gen/test_configurable_openai_provider.py:208:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+agent/custom_image_providers.py:452: in register_configured_custom_image_providers
+    register_provider(provider)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+provider = &lt;agent.custom_image_providers.ConfigurableOpenAIImageProvider object at 0x10cb6e910&gt;
+
+    def register_provider(provider: ImageGenProvider) -&gt; None:
+        """Register an image generation provider.
+
+        Re-registration (same ``name``) overwrites the previous entry and logs
+        a debug message — this makes hot-reload scenarios (tests, dev loops)
+        behave predictably.
+        """
+        if not isinstance(provider, ImageGenProvider):
+&gt;           raise TypeError(
+                f"register_provider() expects an ImageGenProvider instance, "
+                f"got {type(provider).__name__}"
+            )
+E           TypeError: register_provider() expects an ImageGenProvider instance, got ConfigurableOpenAIImageProvider
+
+agent/image_gen_registry.py:44: TypeError</failure></testcase></testsuite></testsuites>
