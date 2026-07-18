@@ -934,6 +934,13 @@ class APIServerAdapter(BasePlatformAdapter):
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+        # Shared idempotence guard for stop, direct cancellation, and
+        # shutdown paths that can race while one run is unwinding.
+        self._interrupted_run_ids: set[str] = set()
+        # A stop that first denies a live approval can let the executor return
+        # before Task.cancel() is observed.  Preserve the user's cancellation
+        # intent across that narrow wake-to-cancel race.
+        self._approval_cancelled_run_ids: set[str] = set()
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
         # Active approval session key for each run_id.  The approval core
@@ -4222,6 +4229,21 @@ class APIServerAdapter(BasePlatformAdapter):
         self._enter_managed_lease_shutdown()
         try:
             try:
+                try:
+                    from tools.approval import unregister_gateway_notify
+
+                    for run_id, approval_session_key in tuple(
+                        self._run_approval_sessions.items()
+                    ):
+                        if unregister_gateway_notify(approval_session_key):
+                            self._approval_cancelled_run_ids.add(run_id)
+                except Exception:
+                    pass
+                for run_id in tuple(self._active_run_tasks):
+                    self._interrupt_run_agent_once(
+                        run_id,
+                        "API server shutting down",
+                    )
                 await super().cancel_background_tasks()
             finally:
                 await self._drain_managed_lease_lifecycles()
@@ -4355,6 +4377,17 @@ class APIServerAdapter(BasePlatformAdapter):
         current.update(fields)
         self._run_statuses[run_id] = current
         return current
+
+    def _interrupt_run_agent_once(self, run_id: str, reason: str) -> None:
+        """Deliver one best-effort interrupt across racing cancel paths."""
+        agent = self._active_run_agents.get(run_id)
+        if agent is None or run_id in self._interrupted_run_ids:
+            return
+        self._interrupted_run_ids.add(run_id)
+        try:
+            agent.interrupt(reason)
+        except Exception:
+            pass
 
     def _queue_run_event(
         self,
@@ -5419,6 +5452,8 @@ class APIServerAdapter(BasePlatformAdapter):
             if self._active_run_tasks.get(run_id) is finished_task:
                 self._active_run_tasks.pop(run_id, None)
             self._active_run_agents.pop(run_id, None)
+            self._interrupted_run_ids.discard(run_id)
+            self._approval_cancelled_run_ids.discard(run_id)
             self._run_approval_sessions.pop(run_id, None)
 
         async def _release_prestart_and_reconcile(
@@ -5790,18 +5825,44 @@ class APIServerAdapter(BasePlatformAdapter):
                 # Structured client failures (401/400) return ``failed=True``
                 # instead of raising; the shared publisher handles both those
                 # and successful results (issue #15561).
-                _publish_worker_outcome(result, usage)
+                if run_id in self._approval_cancelled_run_ids:
+                    _publish_cancelled_after_worker(
+                        result,
+                        usage,
+                        worker_completed=True,
+                    )
+                else:
+                    _publish_worker_outcome(result, usage)
             except asyncio.CancelledError:
                 # Cancellation can race with an executor turn that has already
                 # returned and persisted its messages.  In that case the
                 # durable turn wins: publish its terminal outcome instead of a
                 # contradictory cancelled event.
                 if worker_exited.is_set() and worker_outcome:
-                    _publish_worker_outcome(*worker_outcome[0])
+                    if run_id in self._approval_cancelled_run_ids:
+                        _publish_cancelled_after_worker(
+                            *worker_outcome[0],
+                            worker_completed=True,
+                        )
+                    else:
+                        _publish_worker_outcome(*worker_outcome[0])
                     return
                 if worker_exited.is_set() and worker_exception:
                     _publish_worker_exception(worker_exception[0])
                     return
+
+                self._set_run_status(
+                    run_id,
+                    "stopping",
+                    last_event="run.stopping",
+                )
+                self._interrupt_run_agent_once(
+                    run_id,
+                    "Run task cancelled",
+                )
+                # Deny and wake approval waits before any drain of the
+                # non-preemptible executor worker.
+                _unregister_run_approval_notify()
 
                 with self._managed_session_runs_lock:
                     if managed_session and not worker_started.is_set():
@@ -5814,14 +5875,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 # wrapper, heartbeat, and durable lease alive until the worker
                 # actually exits; otherwise a terminal cancelled event can be
                 # followed by a late history write from the same run.
-                self._set_run_status(
-                    run_id,
-                    "stopping",
-                    last_event="run.stopping",
-                )
-                # Release any in-thread approval wait before waiting for the
-                # non-preemptible executor worker to report its boundary.
-                _unregister_run_approval_notify()
                 while not worker_exited.is_set():
                     try:
                         await asyncio.sleep(0.025)
@@ -6115,13 +6168,35 @@ class APIServerAdapter(BasePlatformAdapter):
         if agent is None and task is None:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
+        current_status = self._run_statuses.get(run_id, {}).get("status")
+        if current_status in {"completed", "failed", "cancelled"}:
+            return web.json_response({
+                "run_id": run_id,
+                "status": current_status,
+            })
+
         self._set_run_status(run_id, "stopping", last_event="run.stopping")
 
-        if agent is not None:
+        self._interrupt_run_agent_once(
+            run_id,
+            "Stop requested via API",
+        )
+
+        def _deny_pending_approvals() -> None:
+            approval_session_key = self._run_approval_sessions.get(run_id)
+            if not approval_session_key:
+                return
             try:
-                agent.interrupt("Stop requested via API")
+                from tools.approval import unregister_gateway_notify
+
+                if unregister_gateway_notify(approval_session_key):
+                    self._approval_cancelled_run_ids.add(run_id)
             except Exception:
                 pass
+
+        # The executor worker cannot enter its own finally while blocked on
+        # an approval Event.  Deny and wake it before cancelling the wrapper.
+        _deny_pending_approvals()
 
         if task is not None and not task.done():
             task.cancel()
@@ -6137,7 +6212,13 @@ class APIServerAdapter(BasePlatformAdapter):
                     "agent may still be finishing the current step",
                     run_id,
                 )
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
+                self._interrupt_run_agent_once(
+                    run_id,
+                    "Stop request cancelled",
+                )
+                _deny_pending_approvals()
+            except Exception:
                 pass
 
         return web.json_response({"run_id": run_id, "status": "stopping"})
@@ -6166,6 +6247,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_streams_created.pop(run_id, None)
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
+                self._interrupted_run_ids.discard(run_id)
+                self._approval_cancelled_run_ids.discard(run_id)
                 self._run_approval_sessions.pop(run_id, None)
 
             stale_statuses = [
@@ -6304,6 +6387,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self._enter_managed_lease_shutdown()
         try:
             try:
+                await self.cancel_background_tasks()
                 if self._site:
                     await self._site.stop()
                     self._site = None

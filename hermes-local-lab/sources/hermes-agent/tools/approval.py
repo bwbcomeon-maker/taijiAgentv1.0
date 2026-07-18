@@ -520,6 +520,46 @@ _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, 
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
 
 
+def _begin_gateway_approval(
+    session_key: str,
+    approval_data: dict,
+) -> tuple[_ApprovalEntry, object | None]:
+    """Atomically bind one approval entry to a currently registered callback.
+
+    Constructing the entry before taking ``_lock`` keeps user/plugin code out
+    of the critical section.  Callback lookup and queue insertion must share
+    one lock acquisition so ``unregister_gateway_notify()`` is a linearization
+    boundary: once unregister returns, a stale callback cannot append a new
+    orphan entry behind it.
+    """
+    entry = _ApprovalEntry(approval_data)
+    with _lock:
+        notify_cb = _gateway_notify_cbs.get(session_key)
+        if notify_cb is None:
+            entry.result = "deny"
+            entry.event.set()
+            return entry, None
+        _gateway_queues.setdefault(session_key, []).append(entry)
+    return entry, notify_cb
+
+
+def _deny_gateway_approval_entry(
+    session_key: str,
+    entry: _ApprovalEntry,
+) -> None:
+    """Remove and fail-close one exact approval entry."""
+    with _lock:
+        queue = _gateway_queues.get(session_key, [])
+        if entry in queue:
+            queue.remove(entry)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+        # A transport callback that raises never establishes a trustworthy
+        # approval, even if it synchronously attempted to resolve first.
+        entry.result = "deny"
+        entry.event.set()
+
+
 def register_gateway_notify(session_key: str, cb) -> None:
     """Register a per-session callback for sending approval requests to the user.
 
@@ -532,17 +572,21 @@ def register_gateway_notify(session_key: str, cb) -> None:
         _gateway_notify_cbs[session_key] = cb
 
 
-def unregister_gateway_notify(session_key: str) -> None:
+def unregister_gateway_notify(session_key: str) -> int:
     """Unregister the per-session gateway approval callback.
 
     Signals ALL blocked threads for this session so they don't hang forever
     (e.g. when the agent run finishes or is interrupted).
+
+    Returns the number of pending approvals atomically denied and woken.
     """
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
-    for entry in entries:
-        entry.event.set()
+        for entry in entries:
+            entry.result = "deny"
+            entry.event.set()
+        return len(entries)
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
@@ -567,10 +611,9 @@ def resolve_gateway_approval(session_key: str, choice: str,
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
-
-    for entry in targets:
-        entry.result = choice
-        entry.event.set()
+        for entry in targets:
+            entry.result = choice
+            entry.event.set()
     return len(targets)
 
 
@@ -618,11 +661,11 @@ def clear_session(session_key: str) -> None:
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
-    for entry in entries:
-        # Session-boundary cleanup should cancel any blocked approval waits
-        # immediately so the old run can unwind instead of idling until timeout.
-        entry.result = "deny"
-        entry.event.set()
+        for entry in entries:
+            # Session-boundary cleanup should cancel any blocked approval waits
+            # immediately so the old run can unwind instead of idling until timeout.
+            entry.result = "deny"
+            entry.event.set()
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:
@@ -760,20 +803,6 @@ def request_capability_approval(
             ),
         }
 
-    with _lock:
-        notify_cb = _gateway_notify_cbs.get(session_key)
-
-    if notify_cb is None:
-        return {
-            "approved": False,
-            "approval_applicable": False,
-            "outcome": "unavailable",
-            "message": (
-                f"BLOCKED: {capability} is disabled and no approval listener "
-                "is registered for this session."
-            ),
-        }
-
     if timeout_seconds is None:
         timeout_seconds = _get_approval_config().get("gateway_timeout", 300)
     try:
@@ -793,9 +822,17 @@ def request_capability_approval(
         "description": description,
         "title": "能力授权",
     }
-    entry = _ApprovalEntry(approval_data)
-    with _lock:
-        _gateway_queues.setdefault(session_key, []).append(entry)
+    entry, notify_cb = _begin_gateway_approval(session_key, approval_data)
+    if notify_cb is None:
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "unavailable",
+            "message": (
+                f"BLOCKED: {capability} is disabled and no approval listener "
+                "is registered for this session."
+            ),
+        }
 
     _fire_approval_hook(
         "pre_approval_request",
@@ -811,12 +848,7 @@ def request_capability_approval(
         notify_cb(approval_data)
     except Exception as exc:
         logger.warning("Gateway capability approval notify failed: %s", exc)
-        with _lock:
-            queue = _gateway_queues.get(session_key, [])
-            if entry in queue:
-                queue.remove(entry)
-            if not queue:
-                _gateway_queues.pop(session_key, None)
+        _deny_gateway_approval_entry(session_key, entry)
         return {
             "approved": False,
             "approval_applicable": False,
@@ -1398,24 +1430,21 @@ def check_all_command_guards(command: str, env_type: str,
     # input() flow.  The agent never sees "approval_required"; it either
     # gets the command output (approved) or a definitive "BLOCKED" message.
     if is_gateway or is_ask:
-        notify_cb = None
-        with _lock:
-            notify_cb = _gateway_notify_cbs.get(session_key)
+        # --- Blocking gateway approval (queue-based) ---
+        # Each call gets its own _ApprovalEntry so parallel subagents
+        # and execute_code threads can block concurrently.
+        approval_data = {
+            "command": command,
+            "pattern_key": primary_key,
+            "pattern_keys": all_keys,
+            "description": combined_desc,
+        }
+        entry, notify_cb = _begin_gateway_approval(
+            session_key,
+            approval_data,
+        )
 
         if notify_cb is not None:
-            # --- Blocking gateway approval (queue-based) ---
-            # Each call gets its own _ApprovalEntry so parallel subagents
-            # and execute_code threads can block concurrently.
-            approval_data = {
-                "command": command,
-                "pattern_key": primary_key,
-                "pattern_keys": all_keys,
-                "description": combined_desc,
-            }
-            entry = _ApprovalEntry(approval_data)
-            with _lock:
-                _gateway_queues.setdefault(session_key, []).append(entry)
-
             # Notify plugins that an approval is being requested. Fires before
             # the gateway notify callback so observers (e.g. macOS notifier
             # plugins, audit logs, Slack alerts) get the event in real time.
@@ -1434,12 +1463,7 @@ def check_all_command_guards(command: str, env_type: str,
                 notify_cb(approval_data)
             except Exception as exc:
                 logger.warning("Gateway approval notify failed: %s", exc)
-                with _lock:
-                    queue = _gateway_queues.get(session_key, [])
-                    if entry in queue:
-                        queue.remove(entry)
-                    if not queue:
-                        _gateway_queues.pop(session_key, None)
+                _deny_gateway_approval_entry(session_key, entry)
                 return {
                     "approved": False,
                     "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",

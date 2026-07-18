@@ -6058,6 +6058,566 @@ class TestStartRun:
         db.close()
 
 
+class TestRealApprovalCancellation:
+    """Run cancellation must deny real approval waits before draining workers."""
+
+    @staticmethod
+    def _reset_approval_state():
+        from tools import approval as approval_module
+
+        with approval_module._lock:
+            approval_module._gateway_queues.clear()
+            approval_module._gateway_notify_cbs.clear()
+            approval_module._session_approved.clear()
+            approval_module._capability_session_approved.clear()
+            approval_module._pending.clear()
+        return approval_module
+
+    @staticmethod
+    async def _wait_for_pending_approval(
+        approval_module,
+        approval_session_key,
+    ):
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            if approval_module.has_blocking_approval(
+                approval_session_key
+            ):
+                with approval_module._lock:
+                    return list(
+                        approval_module._gateway_queues.get(
+                            approval_session_key,
+                            [],
+                        )
+                    )
+            await asyncio.sleep(0.01)
+        raise AssertionError("real approval entry was not queued")
+
+    @pytest.mark.asyncio
+    async def test_stop_denies_real_command_approval_without_five_second_wait(
+        self,
+        adapter,
+        tmp_path,
+    ):
+        approval_module = self._reset_approval_state()
+        session_id = "session-real-approval-stop"
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+        approval_returned = threading.Event()
+        approval_result = {}
+        agent = MagicMock()
+
+        def _run(**_kwargs):
+            approval_result["value"] = (
+                approval_module.check_all_command_guards(
+                    "rm -rf /important",
+                    "local",
+                )
+            )
+            approval_returned.set()
+            return {"final_response": "approval denied"}
+
+        agent.run_conversation.side_effect = _run
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        task = None
+        approval_session_key = None
+        try:
+            with (
+                patch.object(
+                    approval_module,
+                    "_get_approval_config",
+                    return_value={
+                        "mode": "manual",
+                        "gateway_timeout": 30,
+                        "timeout": 30,
+                    },
+                ),
+                patch.object(adapter, "_create_agent", return_value=agent),
+            ):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={"input": "first", "session_id": session_id},
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    run_id = payload["run_id"]
+                    task = adapter._active_run_tasks[run_id]
+                    approval_session_key = (
+                        adapter._run_approval_sessions[run_id]
+                    )
+                    entries = await self._wait_for_pending_approval(
+                        approval_module,
+                        approval_session_key,
+                    )
+
+                    started = asyncio.get_running_loop().time()
+                    stop_response = await cli.post(
+                        f"/v1/runs/{run_id}/stop"
+                    )
+                    elapsed = asyncio.get_running_loop().time() - started
+                    stop_payload = await stop_response.json()
+
+                    assert stop_response.status == 200, stop_payload
+                    assert elapsed < 1.0
+                    await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=2.0,
+                    )
+                    status_response = await cli.get(
+                        f"/v1/runs/{run_id}"
+                    )
+                    status_payload = await status_response.json()
+
+            assert approval_returned.is_set()
+            assert approval_result["value"]["approved"] is False
+            assert approval_result["value"]["outcome"] == "denied"
+            assert all(entry.result == "deny" for entry in entries)
+            assert all(entry.event.is_set() for entry in entries)
+            assert not approval_module.has_blocking_approval(
+                approval_session_key
+            )
+            assert status_payload["status"] == "cancelled"
+            assert db.get_managed_run_lease(session_id) is None
+        finally:
+            if approval_session_key:
+                approval_module.unregister_gateway_notify(
+                    approval_session_key
+                )
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await adapter.cancel_background_tasks()
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                db.release_managed_run_lease(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel_mode", ["stop", "direct"])
+    async def test_real_approval_cancel_retains_managed_owner_until_worker_exit(
+        self,
+        adapter,
+        tmp_path,
+        cancel_mode,
+    ):
+        approval_module = self._reset_approval_state()
+        session_id = f"session-real-approval-{cancel_mode}"
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+        approval_returned = threading.Event()
+        worker_exit_gate = threading.Event()
+        approval_result = {}
+        agent = MagicMock()
+
+        def _run(user_message=None, **_kwargs):
+            if user_message != "first":
+                return {"final_response": "next run"}
+            approval_result["value"] = (
+                approval_module.check_all_command_guards(
+                    "rm -rf /important",
+                    "local",
+                )
+            )
+            approval_returned.set()
+            worker_exit_gate.wait(timeout=5)
+            return {"final_response": "cancelled worker exited"}
+
+        agent.run_conversation.side_effect = _run
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        first_task = None
+        stop_request = None
+        approval_session_key = None
+        try:
+            with (
+                patch.object(
+                    approval_module,
+                    "_get_approval_config",
+                    return_value={
+                        "mode": "manual",
+                        "gateway_timeout": 30,
+                        "timeout": 30,
+                    },
+                ),
+                patch.object(adapter, "_create_agent", return_value=agent),
+            ):
+                async with TestClient(TestServer(app)) as cli:
+                    first = await cli.post(
+                        "/v1/runs",
+                        json={"input": "first", "session_id": session_id},
+                    )
+                    first_payload = await first.json()
+                    assert first.status == 202, first_payload
+                    run_id = first_payload["run_id"]
+                    first_task = adapter._active_run_tasks[run_id]
+                    approval_session_key = (
+                        adapter._run_approval_sessions[run_id]
+                    )
+                    entries = await self._wait_for_pending_approval(
+                        approval_module,
+                        approval_session_key,
+                    )
+
+                    if cancel_mode == "stop":
+                        stop_request = asyncio.create_task(
+                            cli.post(f"/v1/runs/{run_id}/stop")
+                        )
+                    else:
+                        first_task.cancel()
+
+                    assert await asyncio.to_thread(
+                        approval_returned.wait,
+                        1.0,
+                    )
+                    assert not first_task.done()
+                    assert (
+                        adapter._managed_session_runs.get(session_id)
+                        == run_id
+                    )
+                    lease = db.get_managed_run_lease(session_id)
+                    assert lease is not None
+                    assert lease["run_id"] == run_id
+                    assert all(entry.result == "deny" for entry in entries)
+                    assert not approval_module.has_blocking_approval(
+                        approval_session_key
+                    )
+
+                    blocked = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "must remain blocked",
+                            "session_id": session_id,
+                        },
+                    )
+                    blocked_payload = await blocked.json()
+                    assert blocked.status == 409, blocked_payload
+                    assert (
+                        blocked_payload["error"]["code"]
+                        == "session_busy"
+                    )
+
+                    worker_exit_gate.set()
+                    if stop_request is not None:
+                        stop_response = await asyncio.wait_for(
+                            stop_request,
+                            timeout=2.0,
+                        )
+                        assert stop_response.status == 200
+                    await asyncio.wait_for(
+                        asyncio.shield(first_task),
+                        timeout=2.0,
+                    )
+                    for _ in range(120):
+                        if (
+                            session_id
+                            not in adapter._managed_session_runs
+                            and db.get_managed_run_lease(session_id) is None
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+
+                    assert (
+                        adapter._run_statuses[run_id]["status"]
+                        == "cancelled"
+                    )
+                    assert session_id not in adapter._managed_session_runs
+                    assert db.get_managed_run_lease(session_id) is None
+
+                    next_response = await cli.post(
+                        "/v1/runs",
+                        json={"input": "next", "session_id": session_id},
+                    )
+                    next_payload = await next_response.json()
+                    assert next_response.status == 202, next_payload
+                    next_run_id = next_payload["run_id"]
+                    for _ in range(120):
+                        if (
+                            adapter._run_statuses[next_run_id]["status"]
+                            == "completed"
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+
+            assert approval_result["value"]["approved"] is False
+            assert approval_result["value"]["outcome"] == "denied"
+            agent.interrupt.assert_called_once()
+        finally:
+            worker_exit_gate.set()
+            if approval_session_key:
+                approval_module.unregister_gateway_notify(
+                    approval_session_key
+                )
+            if stop_request is not None and not stop_request.done():
+                stop_request.cancel()
+                await asyncio.gather(
+                    stop_request,
+                    return_exceptions=True,
+                )
+            if first_task is not None and not first_task.done():
+                first_task.cancel()
+                await asyncio.gather(first_task, return_exceptions=True)
+            await adapter.cancel_background_tasks()
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                db.release_managed_run_lease(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_repeated_stop_and_cancel_deny_capability_without_persisting(
+        self,
+        adapter,
+        tmp_path,
+    ):
+        approval_module = self._reset_approval_state()
+        session_id = "session-real-capability-stop"
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        app = _create_runs_app(adapter)
+        approval_returned = threading.Event()
+        worker_exit_gate = threading.Event()
+        approval_result = {}
+        agent = MagicMock()
+
+        def _run(**_kwargs):
+            approval_result["value"] = (
+                approval_module.request_capability_approval(
+                    "terminal",
+                    "TAIJI_ALLOW_TERMINAL",
+                    timeout_seconds=30,
+                )
+            )
+            approval_returned.set()
+            worker_exit_gate.wait(timeout=5)
+            return {"final_response": "capability denied"}
+
+        agent.run_conversation.side_effect = _run
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        task = None
+        stop_requests = []
+        approval_session_key = None
+        try:
+            with (
+                patch.object(adapter, "_create_agent", return_value=agent),
+                patch(
+                    "tools.taiji_security_mode.enable_capability_env"
+                ) as enable_capability,
+            ):
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={"input": "first", "session_id": session_id},
+                    )
+                    payload = await response.json()
+                    assert response.status == 202, payload
+                    run_id = payload["run_id"]
+                    task = adapter._active_run_tasks[run_id]
+                    approval_session_key = (
+                        adapter._run_approval_sessions[run_id]
+                    )
+                    entries = await self._wait_for_pending_approval(
+                        approval_module,
+                        approval_session_key,
+                    )
+
+                    stop_requests = [
+                        asyncio.create_task(
+                            cli.post(f"/v1/runs/{run_id}/stop")
+                        )
+                        for _ in range(2)
+                    ]
+                    task.cancel()
+                    task.cancel()
+                    assert await asyncio.to_thread(
+                        approval_returned.wait,
+                        1.0,
+                    )
+
+                    assert all(entry.result == "deny" for entry in entries)
+                    assert not approval_module.has_blocking_approval(
+                        approval_session_key
+                    )
+                    assert not approval_module.is_capability_session_approved(
+                        approval_session_key,
+                        "terminal",
+                    )
+                    enable_capability.assert_not_called()
+                    assert not task.done()
+
+                    worker_exit_gate.set()
+                    responses = await asyncio.wait_for(
+                        asyncio.gather(*stop_requests),
+                        timeout=2.0,
+                    )
+                    assert all(response.status == 200 for response in responses)
+                    await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=2.0,
+                    )
+
+            assert approval_result["value"]["approved"] is False
+            assert approval_result["value"]["outcome"] == "denied"
+            assert adapter._run_statuses[run_id]["status"] == "cancelled"
+            assert db.get_managed_run_lease(session_id) is None
+            agent.interrupt.assert_called_once()
+            enable_capability.assert_not_called()
+        finally:
+            worker_exit_gate.set()
+            if approval_session_key:
+                approval_module.unregister_gateway_notify(
+                    approval_session_key
+                )
+            for stop_request in stop_requests:
+                if not stop_request.done():
+                    stop_request.cancel()
+            if stop_requests:
+                await asyncio.gather(
+                    *stop_requests,
+                    return_exceptions=True,
+                )
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await adapter.cancel_background_tasks()
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                db.release_managed_run_lease(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "shutdown_mode",
+        ["cancel_background_tasks", "disconnect"],
+    )
+    async def test_shutdown_denies_real_pending_approval_and_drains_run(
+        self,
+        adapter,
+        tmp_path,
+        shutdown_mode,
+    ):
+        approval_module = self._reset_approval_state()
+        session_id = f"session-real-approval-{shutdown_mode}"
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(session_id, "api_server")
+        adapter._session_db = db
+        approval_returned = threading.Event()
+        approval_result = {}
+        agent = MagicMock()
+
+        def _run(**_kwargs):
+            approval_result["value"] = (
+                approval_module.check_all_command_guards(
+                    "rm -rf /important",
+                    "local",
+                )
+            )
+            approval_returned.set()
+            return {"final_response": "shutdown denied approval"}
+
+        agent.run_conversation.side_effect = _run
+        agent.session_prompt_tokens = 0
+        agent.session_completion_tokens = 0
+        agent.session_total_tokens = 0
+        task = None
+        approval_session_key = None
+        try:
+            with (
+                patch.object(
+                    approval_module,
+                    "_get_approval_config",
+                    return_value={
+                        "mode": "manual",
+                        "gateway_timeout": 30,
+                        "timeout": 30,
+                    },
+                ),
+                patch.object(adapter, "_create_agent", return_value=agent),
+            ):
+                response = await adapter._handle_runs(
+                    _direct_run_request({
+                        "input": "first",
+                        "session_id": session_id,
+                    })
+                )
+                payload = json.loads(response.text)
+                assert response.status == 202, payload
+                run_id = payload["run_id"]
+                task = adapter._active_run_tasks[run_id]
+                approval_session_key = (
+                    adapter._run_approval_sessions[run_id]
+                )
+                entries = await self._wait_for_pending_approval(
+                    approval_module,
+                    approval_session_key,
+                )
+
+                started = asyncio.get_running_loop().time()
+                if shutdown_mode == "disconnect":
+                    await asyncio.wait_for(
+                        adapter.disconnect(),
+                        timeout=2.0,
+                    )
+                else:
+                    await asyncio.wait_for(
+                        adapter.cancel_background_tasks(),
+                        timeout=2.0,
+                    )
+                elapsed = asyncio.get_running_loop().time() - started
+
+            assert elapsed < 1.0
+            assert task.done()
+            assert approval_returned.is_set()
+            assert approval_result["value"]["approved"] is False
+            assert approval_result["value"]["outcome"] == "denied"
+            assert all(entry.result == "deny" for entry in entries)
+            assert not approval_module.has_blocking_approval(
+                approval_session_key
+            )
+            assert adapter._run_statuses[run_id]["status"] == "cancelled"
+            assert db.get_managed_run_lease(session_id) is None
+            assert session_id not in adapter._managed_session_runs
+            agent.interrupt.assert_called_once()
+        finally:
+            if approval_session_key:
+                approval_module.unregister_gateway_notify(
+                    approval_session_key
+                )
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await adapter.cancel_background_tasks()
+            lease = db.get_managed_run_lease(session_id)
+            if lease is not None:
+                db.release_managed_run_lease(
+                    session_id,
+                    owner_id=lease["owner_id"],
+                    run_id=lease["run_id"],
+                )
+            db.close()
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/runs/{run_id} — poll run status
 # ---------------------------------------------------------------------------

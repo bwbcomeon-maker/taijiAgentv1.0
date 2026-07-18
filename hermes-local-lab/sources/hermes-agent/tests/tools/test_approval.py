@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch as mock_patch
 
+import pytest
+
 import tools.approval as approval_module
 from tools.approval import (
     _get_approval_mode,
@@ -1470,3 +1472,185 @@ class TestApprovalTimeoutIsNotConsent:
         assert last_post.get("choice") == "timeout", (
             f"hook choice should be 'timeout' on no-response, got {last_post.get('choice')!r}"
         )
+
+
+class TestGatewayApprovalCancellation:
+    """Cancellation must linearize with queue creation and fail closed."""
+
+    SESSION_KEY = "test-gateway-cancellation"
+
+    def teardown_method(self):
+        mod = approval_module
+        with mod._lock:
+            mod._gateway_queues.clear()
+            mod._gateway_notify_cbs.clear()
+            mod._session_approved.clear()
+            mod._capability_session_approved.clear()
+            mod._permanent_approved.clear()
+            mod._pending.clear()
+
+    def _prepare_gateway(self, monkeypatch):
+        mod = approval_module
+        with mod._lock:
+            mod._gateway_queues.clear()
+            mod._gateway_notify_cbs.clear()
+            mod._session_approved.clear()
+            mod._capability_session_approved.clear()
+            mod._permanent_approved.clear()
+            mod._pending.clear()
+        monkeypatch.setattr(mod, "_YOLO_MODE_FROZEN", False)
+        monkeypatch.setattr(
+            mod,
+            "_get_approval_config",
+            lambda: {
+                "mode": "manual",
+                "gateway_timeout": 5,
+                "timeout": 5,
+            },
+        )
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", self.SESSION_KEY)
+        monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+
+    @staticmethod
+    def _invoke_real_approval(kind):
+        if kind == "command":
+            return approval_module.check_all_command_guards(
+                "rm -rf /important",
+                "local",
+            )
+        return approval_module.request_capability_approval(
+            "terminal",
+            "HERMES_ALLOW_TERMINAL",
+            timeout_seconds=5,
+        )
+
+    @pytest.mark.parametrize("kind", ["command", "capability"])
+    def test_unregister_linearizes_before_lookup_enqueue_race(
+        self,
+        monkeypatch,
+        kind,
+    ):
+        """No stale callback may append an orphan after unregister returns."""
+        self._prepare_gateway(monkeypatch)
+        mod = approval_module
+        constructed = threading.Event()
+        continue_construction = threading.Event()
+        original_entry = mod._ApprovalEntry
+
+        class _BarrierEntry(original_entry):
+            def __init__(self, data):
+                super().__init__(data)
+                constructed.set()
+                assert continue_construction.wait(timeout=3)
+
+        monkeypatch.setattr(mod, "_ApprovalEntry", _BarrierEntry)
+        mod.register_gateway_notify(self.SESSION_KEY, lambda _data: None)
+        result_holder = {}
+
+        worker = threading.Thread(
+            target=lambda: result_holder.setdefault(
+                "result",
+                self._invoke_real_approval(kind),
+            )
+        )
+        worker.start()
+        assert constructed.wait(timeout=3)
+
+        assert mod.unregister_gateway_notify(self.SESSION_KEY) == 0
+        continue_construction.set()
+        worker.join(timeout=1)
+        try:
+            assert not worker.is_alive(), (
+                "approval appended after unregister and remained blocked"
+            )
+            assert not mod.has_blocking_approval(self.SESSION_KEY)
+            assert result_holder["result"]["approved"] is False
+        finally:
+            mod.unregister_gateway_notify(self.SESSION_KEY)
+            continue_construction.set()
+            worker.join(timeout=3)
+
+    def test_unregister_denies_and_wakes_every_pending_entry(
+        self,
+        monkeypatch,
+    ):
+        self._prepare_gateway(monkeypatch)
+        mod = approval_module
+        mod.register_gateway_notify(self.SESSION_KEY, lambda _data: None)
+        results = [None, None]
+
+        workers = [
+            threading.Thread(
+                target=lambda index=index: results.__setitem__(
+                    index,
+                    self._invoke_real_approval("command"),
+                )
+            )
+            for index in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+
+        deadline = time.monotonic() + 3
+        entries = []
+        while time.monotonic() < deadline:
+            with mod._lock:
+                entries = list(
+                    mod._gateway_queues.get(self.SESSION_KEY, [])
+                )
+            if len(entries) == 2:
+                break
+            time.sleep(0.01)
+        assert len(entries) == 2
+
+        assert mod.unregister_gateway_notify(self.SESSION_KEY) == 2
+        for worker in workers:
+            worker.join(timeout=1)
+
+        assert all(not worker.is_alive() for worker in workers)
+        assert all(entry.result == "deny" for entry in entries)
+        assert all(entry.event.is_set() for entry in entries)
+        assert all(result["approved"] is False for result in results)
+        assert all(result["outcome"] == "denied" for result in results)
+        assert not mod.has_blocking_approval(self.SESSION_KEY)
+
+    @pytest.mark.parametrize("kind", ["command", "capability"])
+    def test_notify_exception_denies_wakes_and_removes_exact_entry(
+        self,
+        monkeypatch,
+        kind,
+    ):
+        self._prepare_gateway(monkeypatch)
+        mod = approval_module
+        created_entries = []
+        original_entry = mod._ApprovalEntry
+
+        class _CapturedEntry(original_entry):
+            def __init__(self, data):
+                super().__init__(data)
+                created_entries.append(self)
+
+        monkeypatch.setattr(mod, "_ApprovalEntry", _CapturedEntry)
+
+        def _raise_notify(_data):
+            # Even a callback that resolves synchronously before failing must
+            # fail closed; notify failure owns the final transition.
+            assert (
+                mod.resolve_gateway_approval(
+                    self.SESSION_KEY,
+                    "always",
+                )
+                == 1
+            )
+            raise RuntimeError("notify transport failed")
+
+        mod.register_gateway_notify(self.SESSION_KEY, _raise_notify)
+        result = self._invoke_real_approval(kind)
+
+        assert result["approved"] is False
+        assert len(created_entries) == 1
+        assert created_entries[0].result == "deny"
+        assert created_entries[0].event.is_set()
+        assert not mod.has_blocking_approval(self.SESSION_KEY)
