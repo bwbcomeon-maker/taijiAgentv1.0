@@ -8,6 +8,8 @@ build helper assembles a server when the SDK is present.
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -97,6 +99,204 @@ class TestModuleSurface:
             assert orch_tool in EXPOSED_TOOLS, (
                 f"{orch_tool!r} missing from codex callback"
             )
+
+    def test_mcp_image_handler_freezes_private_capability_fingerprint(
+        self,
+        monkeypatch,
+    ):
+        """An MCP handler must keep its creation-generation caller identity."""
+        from agent import image_runtime
+        from agent.transports import hermes_tools_mcp_server as m
+        import mcp.server.fastmcp as fastmcp_module
+        import model_tools
+
+        definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "image_generate",
+                    "description": "Generate an image.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string"},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "q": {"type": "string"},
+                        },
+                        "required": ["q"],
+                    },
+                },
+            },
+        ]
+        calls = []
+
+        class FakeFastMCP:
+            def __init__(self, *_args, **_kwargs):
+                self.handlers = {}
+
+            def add_tool(self, handler, *, name, description):
+                self.handlers[name] = handler
+
+        monkeypatch.setattr(fastmcp_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda **_kwargs: definitions,
+        )
+
+        def fake_handle(name, kwargs, **dispatch_kwargs):
+            calls.append((name, kwargs, dispatch_kwargs))
+            return json.dumps({"success": True})
+
+        monkeypatch.setattr(
+            model_tools,
+            "handle_function_call",
+            fake_handle,
+        )
+        generation = {
+            "value": SimpleNamespace(
+                stable=True,
+                image_generation=(
+                    1,
+                    "mcp-image-generation-a",
+                    "verified",
+                    True,
+                ),
+            )
+        }
+        monkeypatch.setattr(
+            image_runtime,
+            "capture_capability_runtime_generation",
+            lambda: generation["value"],
+        )
+
+        server = m._build_server()
+        generation["value"] = SimpleNamespace(
+            stable=True,
+            image_generation=(
+                1,
+                "mcp-image-generation-b",
+                "verified",
+                True,
+            ),
+        )
+
+        server.handlers["image_generate"](prompt="draw a cat")
+        server.handlers["web_search"](q="cat")
+
+        assert calls == [
+            (
+                "image_generate",
+                {"prompt": "draw a cat"},
+                {
+                    "caller_capability_fingerprint":
+                        "mcp-image-generation-a",
+                },
+            ),
+            ("web_search", {"q": "cat"}, {}),
+        ]
+        assert "caller_capability_fingerprint" not in json.dumps(
+            definitions
+        )
+
+    def test_old_mcp_image_handler_fails_stale_before_provider_boundary(
+        self,
+        monkeypatch,
+    ):
+        """Rotating capability state must make an existing handler inert."""
+        from agent import image_runtime
+        from agent.transports import hermes_tools_mcp_server as m
+        import mcp.server.fastmcp as fastmcp_module
+        import model_tools
+        from tools import image_generation_tool
+
+        class FakeFastMCP:
+            def __init__(self, *_args, **_kwargs):
+                self.handlers = {}
+
+            def add_tool(self, handler, *, name, description):
+                self.handlers[name] = handler
+
+        monkeypatch.setattr(fastmcp_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda **_kwargs: [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "image_generate",
+                        "description": "Generate an image.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {"type": "string"},
+                            },
+                            "required": ["prompt"],
+                        },
+                    },
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            image_runtime,
+            "capture_capability_runtime_generation",
+            lambda: SimpleNamespace(
+                stable=True,
+                image_generation=(
+                    1,
+                    "mcp-image-generation-old",
+                    "verified",
+                    True,
+                ),
+            ),
+        )
+        current = {
+            "schema_version": 1,
+            "fingerprint": "mcp-image-generation-new",
+            "status": "verified",
+            "available": True,
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "reason_code": "ready",
+        }
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(current),
+        )
+        provider_boundary = []
+
+        def must_not_capture_binding():
+            provider_boundary.append("binding")
+            raise AssertionError("stale MCP handler reached Provider boundary")
+
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_capture_image_gen_request_binding",
+            must_not_capture_binding,
+        )
+
+        server = m._build_server()
+        result = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "capability_caller_stale"
+        assert provider_boundary == []
 
 
 class TestMain:

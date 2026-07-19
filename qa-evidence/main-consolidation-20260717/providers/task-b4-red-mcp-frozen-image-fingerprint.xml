@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.751" timestamp="2026-07-19T17:06:21.021806+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.agent.transports.test_hermes_tools_mcp_server.TestModuleSurface" name="test_mcp_image_handler_freezes_private_capability_fingerprint" time="0.668"><failure message="AssertionError: assert [('image_gene...: 'cat'}, {})] == [('image_gene...: 'cat'}, {})]&#10;  &#10;  At index 0 diff: ('image_generate', {'prompt': 'draw a cat'}, {}) != ('image_generate', {'prompt': 'draw a cat'}, {'caller_capability_fingerprint': 'mcp-image-generation-a'})&#10;  Use -v to get more diff">self = &lt;tests.agent.transports.test_hermes_tools_mcp_server.TestModuleSurface object at 0x1079d6250&gt;
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1079d7410&gt;
+
+    def test_mcp_image_handler_freezes_private_capability_fingerprint(
+        self,
+        monkeypatch,
+    ):
+        """An MCP handler must keep its creation-generation caller identity."""
+        from agent import image_runtime
+        from agent.transports import hermes_tools_mcp_server as m
+        import mcp.server.fastmcp as fastmcp_module
+        import model_tools
+
+        definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "image_generate",
+                    "description": "Generate an image.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string"},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "q": {"type": "string"},
+                        },
+                        "required": ["q"],
+                    },
+                },
+            },
+        ]
+        calls = []
+
+        class FakeFastMCP:
+            def __init__(self, *_args, **_kwargs):
+                self.handlers = {}
+
+            def add_tool(self, handler, *, name, description):
+                self.handlers[name] = handler
+
+        monkeypatch.setattr(fastmcp_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda **_kwargs: definitions,
+        )
+
+        def fake_handle(name, kwargs, **dispatch_kwargs):
+            calls.append((name, kwargs, dispatch_kwargs))
+            return json.dumps({"success": True})
+
+        monkeypatch.setattr(
+            model_tools,
+            "handle_function_call",
+            fake_handle,
+        )
+        generation = {
+            "value": SimpleNamespace(
+                stable=True,
+                image_generation=(
+                    1,
+                    "mcp-image-generation-a",
+                    "verified",
+                    True,
+                ),
+            )
+        }
+        monkeypatch.setattr(
+            image_runtime,
+            "capture_capability_runtime_generation",
+            lambda: generation["value"],
+        )
+
+        server = m._build_server()
+        generation["value"] = SimpleNamespace(
+            stable=True,
+            image_generation=(
+                1,
+                "mcp-image-generation-b",
+                "verified",
+                True,
+            ),
+        )
+
+        server.handlers["image_generate"](prompt="draw a cat")
+        server.handlers["web_search"](q="cat")
+
+&gt;       assert calls == [
+            (
+                "image_generate",
+                {"prompt": "draw a cat"},
+                {
+                    "caller_capability_fingerprint":
+                        "mcp-image-generation-a",
+                },
+            ),
+            ("web_search", {"q": "cat"}, {}),
+        ]
+E       AssertionError: assert [('image_gene...: 'cat'}, {})] == [('image_gene...: 'cat'}, {})]
+E
+E         At index 0 diff: ('image_generate', {'prompt': 'draw a cat'}, {}) != ('image_generate', {'prompt': 'draw a cat'}, {'caller_capability_fingerprint': 'mcp-image-generation-a'})
+E         Use -v to get more diff
+
+tests/agent/transports/test_hermes_tools_mcp_server.py:199: AssertionError</failure></testcase></testsuite></testsuites>

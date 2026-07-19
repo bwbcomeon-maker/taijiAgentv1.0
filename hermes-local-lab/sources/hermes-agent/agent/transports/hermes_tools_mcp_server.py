@@ -105,6 +105,21 @@ EXPOSED_TOOLS: tuple[str, ...] = (
 )
 
 
+def _capture_image_handler_fingerprint() -> str:
+    """Freeze one fail-closed image caller identity for an MCP handler."""
+    try:
+        from agent.image_runtime import (
+            capture_capability_runtime_generation,
+        )
+
+        generation = capture_capability_runtime_generation()
+    except Exception:
+        return ""
+    if not generation.stable:
+        return ""
+    return str(generation.image_generation[1] or "")
+
+
 def _build_server() -> Any:
     """Create the FastMCP server with Hermes tools attached. Lazy imports
     so the module can be imported without the mcp package installed
@@ -159,20 +174,38 @@ def _build_server() -> Any:
         # the result string. We use add_tool() for full control over the
         # input schema (FastMCP's @tool() decorator inspects type hints,
         # which we can't get from a JSON schema at runtime).
-        def _make_handler(tool_name: str):
+        def _make_handler(
+            tool_name: str,
+            tool_description: str,
+        ):
+            caller_fingerprint = (
+                _capture_image_handler_fingerprint()
+                if tool_name == "image_generate"
+                else ""
+            )
+
             def _dispatch(**kwargs: Any) -> str:
                 try:
-                    return handle_function_call(tool_name, kwargs or {})
+                    dispatch_kwargs = {}
+                    if tool_name == "image_generate":
+                        dispatch_kwargs[
+                            "caller_capability_fingerprint"
+                        ] = caller_fingerprint
+                    return handle_function_call(
+                        tool_name,
+                        kwargs or {},
+                        **dispatch_kwargs,
+                    )
                 except Exception as exc:
                     logger.exception("tool %s raised", tool_name)
                     return json.dumps({"error": str(exc), "tool": tool_name})
             _dispatch.__name__ = tool_name
-            _dispatch.__doc__ = description
+            _dispatch.__doc__ = tool_description
             return _dispatch
 
         try:
             mcp.add_tool(
-                _make_handler(name),
+                _make_handler(name, description),
                 name=name,
                 description=description,
                 # FastMCP accepts JSON schema directly via the
@@ -181,7 +214,7 @@ def _build_server() -> Any:
             )
         except TypeError:
             # Older mcp SDK signature — fall back to decorator-style.
-            handler = _make_handler(name)
+            handler = _make_handler(name, description)
             handler = mcp.tool(name=name, description=description)(handler)
 
         exposed_count += 1
