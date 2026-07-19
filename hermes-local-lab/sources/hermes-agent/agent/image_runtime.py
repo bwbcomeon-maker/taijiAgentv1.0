@@ -1,4 +1,4 @@
-"""Versioned runtime identity and long-lived Agent refresh for image capabilities."""
+"""Versioned routing identity and atomic Agent refresh for image capabilities."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from agent.image_gen_verification import (
@@ -27,6 +29,70 @@ _VISION_TRANSPORT = {
     "zai": "openai_chat_completions",
     "custom": "openai_chat_completions",
 }
+
+_PUBLIC_CAPABILITY_ROUTE_FIELDS = (
+    "schema_version",
+    "capability",
+    "status",
+    "reason_code",
+    "route",
+    "provider",
+    "model",
+    "tool_call_id",
+)
+
+
+@dataclass(frozen=True)
+class CapabilityRouteDecision:
+    """Immutable routing result with authorization identity kept private."""
+
+    schema_version: int
+    capability: str
+    status: str
+    reason_code: str
+    route: str
+    provider: str
+    model: str
+    tool_call_id: str = ""
+    _authorization_fingerprint: str = field(
+        default="",
+        repr=False,
+        compare=False,
+    )
+    _request_binding: Any = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def authorization_fingerprint(self) -> str:
+        """Private caller identity for internal boundary checks."""
+        return self._authorization_fingerprint
+
+
+@dataclass(frozen=True)
+class CapabilityRuntimeGeneration:
+    """One bracketed observation of both gated capability identities."""
+
+    vision: tuple[int, str, str, bool]
+    image_generation: tuple[int, str, str, bool]
+    stable: bool
+
+    @property
+    def identity(self) -> tuple[
+        tuple[int, str, str, bool],
+        tuple[int, str, str, bool],
+    ]:
+        return (self.vision, self.image_generation)
+
+    @property
+    def cache_identity(self) -> tuple[
+        bool,
+        tuple[int, str, str, bool],
+        tuple[int, str, str, bool],
+    ]:
+        return (self.stable, self.vision, self.image_generation)
 
 
 @dataclass(frozen=True)
@@ -578,6 +644,157 @@ def verification_runtime_snapshot(
     return snapshot
 
 
+def _capability_snapshot_identity(
+    snapshot: dict[str, Any],
+) -> tuple[int, str, str, bool]:
+    raw_schema_version = snapshot.get("schema_version")
+    schema_version = (
+        raw_schema_version if type(raw_schema_version) is int else 0
+    )
+    return (
+        schema_version,
+        str(snapshot.get("fingerprint") or ""),
+        str(snapshot.get("status") or ""),
+        bool(snapshot.get("available")),
+    )
+
+
+def capture_capability_runtime_generation() -> CapabilityRuntimeGeneration:
+    """Bracket vision and generation reads so mixed identities are rejected."""
+    before_vision = _capability_snapshot_identity(
+        verification_runtime_snapshot("vision")
+    )
+    before_image = _capability_snapshot_identity(
+        verification_runtime_snapshot("image_generation")
+    )
+    after_vision = _capability_snapshot_identity(
+        verification_runtime_snapshot("vision")
+    )
+    after_image = _capability_snapshot_identity(
+        verification_runtime_snapshot("image_generation")
+    )
+    return CapabilityRuntimeGeneration(
+        vision=after_vision,
+        image_generation=after_image,
+        stable=bool(
+            before_vision == after_vision
+            and before_image == after_image
+        ),
+    )
+
+
+def _is_deeply_immutable_binding_value(value: Any) -> bool:
+    if value is None or isinstance(
+        value,
+        (str, bytes, int, float, bool, Enum),
+    ):
+        return True
+    if isinstance(value, tuple):
+        return all(
+            _is_deeply_immutable_binding_value(item)
+            for item in value
+        )
+    if isinstance(value, frozenset):
+        return all(
+            _is_deeply_immutable_binding_value(item)
+            for item in value
+        )
+    if type(value) is MappingProxyType:
+        return all(
+            _is_deeply_immutable_binding_value(key)
+            and _is_deeply_immutable_binding_value(item)
+            for key, item in value.items()
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        params = getattr(type(value), "__dataclass_params__", None)
+        return bool(
+            params is not None
+            and params.frozen
+            and all(
+                _is_deeply_immutable_binding_value(
+                    getattr(value, binding_field.name)
+                )
+                for binding_field in fields(value)
+            )
+        )
+    return False
+
+
+def _validate_request_binding(request_binding: Any) -> None:
+    if request_binding is None:
+        return
+    params = getattr(type(request_binding), "__dataclass_params__", None)
+    if (
+        not is_dataclass(request_binding)
+        or isinstance(request_binding, type)
+        or params is None
+        or not params.frozen
+        or not _is_deeply_immutable_binding_value(request_binding)
+    ):
+        raise TypeError(
+            "request_binding must be a deeply immutable frozen dataclass"
+        )
+
+
+def build_capability_route_decision(
+    capability: str,
+    *,
+    snapshot: dict[str, Any] | None = None,
+    route: str | None = None,
+    tool_call_id: str = "",
+    request_binding: Any = None,
+) -> CapabilityRouteDecision:
+    """Freeze one route decision without retaining secrets or endpoints."""
+    _validate_request_binding(request_binding)
+    normalized = str(capability or "image_generation").strip().lower()
+    if normalized in {"image_analysis", "vision"}:
+        normalized = "vision"
+    else:
+        normalized = "image_generation"
+    source = (
+        dict(snapshot)
+        if isinstance(snapshot, dict)
+        else verification_runtime_snapshot(normalized)
+    )
+    raw_schema_version = source.get("schema_version")
+    schema_version = (
+        raw_schema_version if type(raw_schema_version) is int else 0
+    )
+    available = bool(source.get("available"))
+    resolved_route = str(
+        route
+        if route is not None
+        else ("provider" if available else "blocked")
+    ).strip()
+    reason_code = str(source.get("reason_code") or "").strip()
+    if not reason_code:
+        reason_code = "ready" if available else "capability_unavailable"
+    return CapabilityRouteDecision(
+        schema_version=schema_version,
+        capability=normalized,
+        status=str(source.get("status") or ""),
+        reason_code=reason_code,
+        route=resolved_route,
+        provider=str(source.get("provider") or ""),
+        model=str(source.get("model") or ""),
+        tool_call_id=str(tool_call_id or ""),
+        _authorization_fingerprint=str(source.get("fingerprint") or ""),
+        _request_binding=request_binding,
+    )
+
+
+def project_capability_route_decision(
+    decision: CapabilityRouteDecision,
+) -> dict[str, Any]:
+    """Return the explicit public allowlist for SSE, journals, and logs."""
+    if not isinstance(decision, CapabilityRouteDecision):
+        raise TypeError("decision must be CapabilityRouteDecision")
+    return {
+        field_name: getattr(decision, field_name)
+        for field_name in _PUBLIC_CAPABILITY_ROUTE_FIELDS
+    }
+
+
 def _tool_name(tool: Any) -> str:
     if not isinstance(tool, dict):
         return ""
@@ -587,29 +804,33 @@ def _tool_name(tool: Any) -> str:
     return str(function.get("name") or "")
 
 
-def refresh_agent_image_runtime(
+def refresh_agent_capability_runtime(
     agent: Any,
     *,
     definitions_loader: Any = None,
 ) -> bool:
-    """Atomically replace registry schemas while preserving injected tools."""
-    lock = getattr(agent, "_image_runtime_lock", None)
+    """Atomically publish vision and image-generation schemas as one generation."""
+    lock = getattr(agent, "_capability_runtime_lock", None)
+    if lock is None:
+        lock = getattr(agent, "_image_runtime_lock", None)
     if lock is None:
         lock = threading.RLock()
-        agent._image_runtime_lock = lock
+    agent._capability_runtime_lock = lock
+    # Compatibility alias for callers that still synchronize image dispatch
+    # through the original lock name.
+    agent._image_runtime_lock = lock
 
-    snapshot = verification_runtime_snapshot("image_generation")
-    fingerprint = str(snapshot.get("fingerprint") or "")
-    runtime_identity = (
-        snapshot.get("schema_version"),
-        fingerprint,
-        str(snapshot.get("status") or ""),
-        bool(snapshot.get("available")),
-    )
+    try:
+        generation = capture_capability_runtime_generation()
+    except Exception:
+        return False
+    if not generation.stable:
+        return False
+    runtime_identity = generation.identity
     with lock:
         previous_runtime_identity = getattr(
             agent,
-            "_image_runtime_identity",
+            "_capability_runtime_identity",
             None,
         )
         if runtime_identity == previous_runtime_identity:
@@ -631,14 +852,14 @@ def refresh_agent_image_runtime(
     except Exception:
         return False
 
-    final_snapshot = verification_runtime_snapshot("image_generation")
-    final_identity = (
-        final_snapshot.get("schema_version"),
-        str(final_snapshot.get("fingerprint") or ""),
-        str(final_snapshot.get("status") or ""),
-        bool(final_snapshot.get("available")),
-    )
-    if final_identity != runtime_identity:
+    try:
+        final_generation = capture_capability_runtime_generation()
+    except Exception:
+        return False
+    if (
+        not final_generation.stable
+        or final_generation.identity != runtime_identity
+    ):
         return False
 
     registry_names = {_tool_name(item) for item in (definitions or [])}
@@ -658,16 +879,31 @@ def refresh_agent_image_runtime(
         # being built. Discard this candidate instead of publishing a mixed
         # generation.
         if (
-            getattr(agent, "_image_runtime_identity", None)
+            getattr(agent, "_capability_runtime_identity", None)
             != previous_runtime_identity
         ):
             return False
         agent.tools = merged
         agent.valid_tool_names = merged_names
         agent._registry_tool_names = registry_names
-        agent._image_capability_fingerprint = fingerprint
-        agent._image_runtime_identity = runtime_identity
+        agent._vision_capability_fingerprint = generation.vision[1]
+        agent._image_capability_fingerprint = generation.image_generation[1]
+        agent._capability_runtime_identity = runtime_identity
+        # Preserve the legacy image-only identity for external callers/tests.
+        agent._image_runtime_identity = generation.image_generation
         if hasattr(agent, "_cached_system_prompt"):
             agent._cached_system_prompt = None
             agent._force_system_prompt_rebuild = True
     return True
+
+
+def refresh_agent_image_runtime(
+    agent: Any,
+    *,
+    definitions_loader: Any = None,
+) -> bool:
+    """Compatibility wrapper for the combined capability refresh."""
+    return refresh_agent_capability_runtime(
+        agent,
+        definitions_loader=definitions_loader,
+    )

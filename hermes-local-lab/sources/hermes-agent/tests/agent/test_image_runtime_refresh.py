@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import FrozenInstanceError, dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -414,11 +415,19 @@ def test_forced_refresh_rejects_drift_before_publishing_identity(
         "status": "verified",
         "available": True,
     }
-    snapshots = iter((before, after, after, after))
+    vision_reads = {"count": 0}
+
+    def snapshot_reader(capability="image_generation"):
+        if capability == "vision":
+            vision_reads["count"] += 1
+            if vision_reads["count"] == 1:
+                return dict(before)
+        return dict(after)
+
     monkeypatch.setattr(
         image_runtime,
         "verification_runtime_snapshot",
-        lambda *_args, **_kwargs: dict(next(snapshots)),
+        snapshot_reader,
     )
     attempts = []
     monkeypatch.setattr(
@@ -455,7 +464,7 @@ def test_forced_refresh_rejects_drift_before_publishing_identity(
         "verified",
         True,
     )
-    assert attempts == ["build", "build"]
+    assert attempts == ["build"]
 
 
 def test_old_concurrent_tool_schema_read_cannot_restore_revoked_identity(
@@ -775,3 +784,463 @@ def test_vision_runtime_fails_closed_when_secure_secret_resolution_rejects_env(
     assert snapshot["configured"] is False
     assert snapshot["available"] is False
     assert snapshot["reason_code"] == "vision_not_configured"
+
+
+def test_capability_route_decision_is_frozen_and_projects_only_public_identity():
+    """A routing decision is immutable and never projects authorization data."""
+    from agent import image_runtime
+    from agent.image_gen_verification import ImageGenRequestBinding
+
+    @dataclass(frozen=True)
+    class FrozenFakeBinding:
+        endpoint: str
+        secret: str
+        headers: tuple[tuple[str, str], ...] = ()
+
+    @dataclass(frozen=True)
+    class FrozenButNestedMutableBinding:
+        headers: list[str]
+
+    factory = getattr(
+        image_runtime,
+        "build_capability_route_decision",
+        None,
+    )
+    projector = getattr(
+        image_runtime,
+        "project_capability_route_decision",
+        None,
+    )
+    assert callable(factory), "CapabilityRouteDecision factory is missing"
+    assert callable(projector), "safe CapabilityRouteDecision projector is missing"
+
+    mutable_snapshot = {
+        "schema_version": 1,
+        "fingerprint": "private-vision-fingerprint",
+        "status": "verified",
+        "available": True,
+        "reason_code": "ready",
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "base_url": "https://private-endpoint.invalid/v1",
+        "api_key": "secret-canary-value",
+    }
+    for mutable_binding in (
+        {
+            "endpoint": "https://mutable-binding.invalid/v1",
+            "secret": "mutable-binding-secret",
+        },
+        ["https://mutable-binding.invalid/v1", "mutable-binding-secret"],
+        FrozenButNestedMutableBinding(headers=["mutable-header"]),
+    ):
+        with pytest.raises(TypeError, match="deeply immutable frozen dataclass"):
+            factory(
+                "vision",
+                snapshot=mutable_snapshot,
+                request_binding=mutable_binding,
+            )
+
+    binding = FrozenFakeBinding(
+        endpoint="https://private-binding.invalid/v1",
+        secret="binding-secret-canary",
+        headers=(("Authorization", "binding-header-canary"),),
+    )
+    decision = factory(
+        "vision",
+        snapshot=mutable_snapshot,
+        route="auxiliary",
+        tool_call_id="call-b4-frozen",
+        request_binding=binding,
+    )
+
+    mutable_snapshot.update(
+        provider="mutated-provider",
+        model="mutated-model",
+        fingerprint="mutated-fingerprint",
+    )
+    with pytest.raises(FrozenInstanceError):
+        decision.provider = "mutated-after-build"
+    with pytest.raises(FrozenInstanceError):
+        binding.endpoint = "https://mutated-binding.invalid/v1"
+    assert decision._request_binding is binding
+
+    production_binding = ImageGenRequestBinding(
+        provider="dashscope",
+        model="qwen-image-2.0-pro",
+        api_key="production-binding-secret-canary",
+        runtime_identity={
+            "endpoint": "https://production-binding.invalid/v1",
+            "transport": "dashscope-generation",
+        },
+    )
+    production_decision = factory(
+        "image_generation",
+        snapshot={
+            **mutable_snapshot,
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        },
+        request_binding=production_binding,
+    )
+    assert production_decision._request_binding is production_binding
+    with pytest.raises(TypeError):
+        production_binding.runtime_identity["endpoint"] = (
+            "https://mutated-production-binding.invalid/v1"
+        )
+
+    for nested_mutable in (
+        ["mutable-nested-list"],
+        {"nested": "mutable-nested-dict"},
+    ):
+        unsafe_production_binding = ImageGenRequestBinding(
+            provider="dashscope",
+            model="qwen-image-2.0-pro",
+            api_key="unsafe-production-binding-secret",
+            runtime_identity={"unsafe": nested_mutable},
+        )
+        with pytest.raises(TypeError, match="deeply immutable frozen dataclass"):
+            factory(
+                "image_generation",
+                snapshot=mutable_snapshot,
+                request_binding=unsafe_production_binding,
+            )
+
+    projection = projector(decision)
+    assert projection == {
+        "schema_version": 1,
+        "capability": "vision",
+        "status": "verified",
+        "reason_code": "ready",
+        "route": "auxiliary",
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "tool_call_id": "call-b4-frozen",
+    }
+    serialized = json.dumps(projection, ensure_ascii=False)
+    for private_value in (
+        "private-vision-fingerprint",
+        "private-endpoint",
+        "secret-canary-value",
+        "private-binding",
+        "binding-secret-canary",
+        "binding-header-canary",
+        "production-binding-secret-canary",
+        "production-binding.invalid",
+        "mutated-fingerprint",
+    ):
+        assert private_value not in serialized
+        assert private_value not in repr(decision)
+        assert private_value not in json.dumps(
+            projector(production_decision),
+            ensure_ascii=False,
+        )
+        assert private_value not in repr(production_decision)
+
+
+def test_model_tool_cache_identity_tracks_vision_and_image_generation(
+    monkeypatch,
+):
+    """A vision-only transition invalidates the same schema generation."""
+    import model_tools
+    from agent import image_runtime
+
+    runtime = {
+        "vision": {
+            "schema_version": 1,
+            "fingerprint": "vision-unverified",
+            "status": "configured_unverified",
+            "available": False,
+        },
+        "image_generation": {
+            "schema_version": 1,
+            "fingerprint": "image-stable",
+            "status": "verified",
+            "available": True,
+        },
+        "definitions": [_tool("read_file")],
+    }
+
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda capability="image_generation": dict(runtime[capability]),
+    )
+    monkeypatch.setattr(
+        model_tools,
+        "_compute_tool_definitions",
+        lambda *_args, **_kwargs: list(runtime["definitions"]),
+    )
+
+    before = model_tools.get_tool_definitions(quiet_mode=True)
+    assert _tool_names(before) == {"read_file"}
+
+    runtime["vision"].update(
+        fingerprint="vision-verified",
+        status="verified",
+        available=True,
+    )
+    runtime["definitions"] = [_tool("read_file"), _tool("vision_analyze")]
+    after = model_tools.get_tool_definitions(quiet_mode=True)
+
+    assert _tool_names(after) == {"read_file", "vision_analyze"}, (
+        "a vision-only transition reused the previous image-only cache identity"
+    )
+
+
+def test_unstable_combined_cache_identity_fails_closed_for_both_tools(
+    monkeypatch,
+):
+    """A bracketed mixed generation cannot expose either gated schema."""
+    import model_tools
+
+    unstable_identity = (
+        False,
+        (1, "vision-drifted", "verified", True),
+        (1, "image-drifted", "verified", True),
+    )
+    monkeypatch.setattr(
+        model_tools,
+        "_image_capability_cache_identity",
+        lambda: unstable_identity,
+    )
+    monkeypatch.setattr(
+        model_tools,
+        "_compute_tool_definitions",
+        lambda *_args, **_kwargs: [
+            _tool("read_file"),
+            _tool("vision_analyze"),
+            _tool("image_generate"),
+        ],
+    )
+
+    definitions = model_tools.get_tool_definitions(quiet_mode=True)
+
+    assert _tool_names(definitions) == {"read_file"}
+
+
+def test_combined_capability_refresh_is_atomic_and_preserves_non_registry_tools(
+    monkeypatch,
+):
+    """Vision and image schemas/fingerprints publish as one Agent generation."""
+    from agent import image_runtime
+
+    refresh = getattr(
+        image_runtime,
+        "refresh_agent_capability_runtime",
+        None,
+    )
+    assert callable(refresh), "combined capability refresh is missing"
+
+    runtime = {
+        "vision": {
+            "schema_version": 1,
+            "fingerprint": "vision-generation-1",
+            "status": "verified",
+            "available": True,
+        },
+        "image_generation": {
+            "schema_version": 1,
+            "fingerprint": "image-generation-1",
+            "status": "verified",
+            "available": True,
+        },
+        "definitions": [
+            _tool("read_file"),
+            _tool("vision_analyze"),
+            _tool("image_generate"),
+        ],
+        "raise_on_definitions": False,
+    }
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda capability="image_generation": dict(runtime[capability]),
+    )
+
+    def definitions_loader(**_kwargs):
+        if runtime["raise_on_definitions"]:
+            raise RuntimeError("combined schema build failed")
+        return list(runtime["definitions"])
+
+    lock = threading.RLock()
+    agent = SimpleNamespace(
+        _capability_runtime_lock=lock,
+        _image_runtime_lock=lock,
+        _capability_runtime_identity=None,
+        _image_runtime_identity=None,
+        _vision_capability_fingerprint="vision-before",
+        _image_capability_fingerprint="image-before",
+        _registry_tool_names={"read_file"},
+        tools=[
+            _tool("read_file"),
+            _tool("memory_recall"),
+            _tool("mcp_weather"),
+        ],
+        valid_tool_names={"read_file", "memory_recall", "mcp_weather"},
+        enabled_toolsets=None,
+        disabled_toolsets=None,
+        quiet_mode=True,
+        _cached_system_prompt="OLD",
+        _force_system_prompt_rebuild=False,
+    )
+
+    assert refresh(agent, definitions_loader=definitions_loader) is True
+    assert _tool_names(agent.tools) == {
+        "read_file",
+        "vision_analyze",
+        "image_generate",
+        "memory_recall",
+        "mcp_weather",
+    }
+    assert agent._vision_capability_fingerprint == "vision-generation-1"
+    assert agent._image_capability_fingerprint == "image-generation-1"
+    first_generation = agent._capability_runtime_identity
+    assert first_generation is not None
+
+    runtime["vision"].update(
+        fingerprint="vision-generation-2",
+        status="configured_unverified",
+        available=False,
+    )
+    runtime["definitions"] = [_tool("read_file"), _tool("image_generate")]
+    assert refresh(agent, definitions_loader=definitions_loader) is True
+    assert "vision_analyze" not in _tool_names(agent.tools)
+    assert "image_generate" in _tool_names(agent.tools)
+    assert agent._vision_capability_fingerprint == "vision-generation-2"
+    assert agent._image_capability_fingerprint == "image-generation-1"
+    assert agent._capability_runtime_identity != first_generation
+
+    before_failed_refresh = {
+        "tools": list(agent.tools),
+        "valid_tool_names": set(agent.valid_tool_names),
+        "registry_tool_names": set(agent._registry_tool_names),
+        "vision_fingerprint": agent._vision_capability_fingerprint,
+        "image_fingerprint": agent._image_capability_fingerprint,
+        "identity": agent._capability_runtime_identity,
+        "prompt": agent._cached_system_prompt,
+    }
+    runtime["image_generation"].update(
+        fingerprint="image-generation-2",
+        status="configured_unverified",
+        available=False,
+    )
+    runtime["raise_on_definitions"] = True
+
+    assert refresh(agent, definitions_loader=definitions_loader) is False
+    assert agent.tools == before_failed_refresh["tools"]
+    assert set(agent.valid_tool_names) == before_failed_refresh["valid_tool_names"]
+    assert set(agent._registry_tool_names) == before_failed_refresh[
+        "registry_tool_names"
+    ]
+    assert (
+        agent._vision_capability_fingerprint
+        == before_failed_refresh["vision_fingerprint"]
+    )
+    assert (
+        agent._image_capability_fingerprint
+        == before_failed_refresh["image_fingerprint"]
+    )
+    assert agent._capability_runtime_identity == before_failed_refresh["identity"]
+    assert agent._cached_system_prompt == before_failed_refresh["prompt"]
+
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("snapshot read failed")
+        ),
+    )
+    assert refresh(agent, definitions_loader=definitions_loader) is False
+    assert agent.tools == before_failed_refresh["tools"]
+    assert agent._capability_runtime_identity == before_failed_refresh["identity"]
+
+
+def test_combined_capability_refresh_discards_mixed_generation_on_drift(
+    monkeypatch,
+):
+    """A mixed vision/image observation never reaches schema construction."""
+    from agent import image_runtime
+
+    refresh = getattr(
+        image_runtime,
+        "refresh_agent_capability_runtime",
+        None,
+    )
+    assert callable(refresh), "combined capability refresh is missing"
+
+    vision_reads = iter(
+        (
+            {
+                "schema_version": 1,
+                "fingerprint": "vision-before-drift",
+                "status": "verified",
+                "available": True,
+            },
+            {
+                "schema_version": 1,
+                "fingerprint": "vision-after-drift",
+                "status": "configured_unverified",
+                "available": False,
+            },
+        )
+    )
+    image_snapshot = {
+        "schema_version": 1,
+        "fingerprint": "image-stable",
+        "status": "verified",
+        "available": True,
+    }
+
+    def snapshot_reader(capability="image_generation"):
+        if capability == "vision":
+            return dict(next(vision_reads))
+        return dict(image_snapshot)
+
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        snapshot_reader,
+    )
+    definition_calls = []
+    lock = threading.RLock()
+    agent = SimpleNamespace(
+        _capability_runtime_lock=lock,
+        _image_runtime_lock=lock,
+        _capability_runtime_identity=("old-combined-generation",),
+        _image_runtime_identity=(1, "old-image", "verified", True),
+        _vision_capability_fingerprint="old-vision",
+        _image_capability_fingerprint="old-image",
+        _registry_tool_names={"read_file"},
+        tools=[_tool("read_file"), _tool("memory_recall")],
+        valid_tool_names={"read_file", "memory_recall"},
+        enabled_toolsets=None,
+        disabled_toolsets=None,
+        quiet_mode=True,
+        _cached_system_prompt="OLD",
+    )
+    before = dict(vars(agent))
+    before["tools"] = list(agent.tools)
+    before["valid_tool_names"] = set(agent.valid_tool_names)
+    before["_registry_tool_names"] = set(agent._registry_tool_names)
+
+    assert (
+        refresh(
+            agent,
+            definitions_loader=lambda **_kwargs: definition_calls.append(True)
+            or [_tool("read_file")],
+        )
+        is False
+    )
+    assert definition_calls == []
+    assert agent.tools == before["tools"]
+    assert set(agent.valid_tool_names) == before["valid_tool_names"]
+    assert set(agent._registry_tool_names) == before["_registry_tool_names"]
+    assert agent._capability_runtime_identity == before[
+        "_capability_runtime_identity"
+    ]
+    assert agent._vision_capability_fingerprint == before[
+        "_vision_capability_fingerprint"
+    ]
+    assert agent._image_capability_fingerprint == before[
+        "_image_capability_fingerprint"
+    ]

@@ -972,19 +972,30 @@ def init_agent(
     # memory providers, context engines, and MCP. Long-lived capability
     # refreshes replace only this subset.
     agent._registry_tool_names = set(agent.valid_tool_names)
-    agent._image_runtime_lock = threading.RLock()
+    agent._capability_runtime_lock = threading.RLock()
+    agent._image_runtime_lock = agent._capability_runtime_lock
     try:
-        from agent.image_runtime import verification_runtime_snapshot
+        from agent.image_runtime import capture_capability_runtime_generation
 
-        _image_snapshot = verification_runtime_snapshot("image_generation")
-        agent._image_capability_fingerprint = str(
-            _image_snapshot.get("fingerprint") or ""
-        )
+        _capability_generation = capture_capability_runtime_generation()
+        if _capability_generation.stable:
+            agent._vision_capability_fingerprint = (
+                _capability_generation.vision[1]
+            )
+            agent._image_capability_fingerprint = (
+                _capability_generation.image_generation[1]
+            )
+        else:
+            agent._vision_capability_fingerprint = ""
+            agent._image_capability_fingerprint = ""
         # Sentinel until the final, post-injection refresh below publishes
         # definitions and identity from one stable snapshot.
+        agent._capability_runtime_identity = None
         agent._image_runtime_identity = None
     except Exception:
+        agent._vision_capability_fingerprint = ""
         agent._image_capability_fingerprint = ""
+        agent._capability_runtime_identity = None
         agent._image_runtime_identity = None
 
     # Kanban worker/orchestrator lifecycle guidance is session-static:
@@ -1710,9 +1721,9 @@ def init_agent(
     # pass fails, the None sentinel forces the next turn to retry before the
     # model sees a tool surface.
     try:
-        from agent.image_runtime import refresh_agent_image_runtime
+        from agent.image_runtime import refresh_agent_capability_runtime
 
-        refresh_agent_image_runtime(
+        refresh_agent_capability_runtime(
             agent,
             definitions_loader=_ra().get_tool_definitions,
         )

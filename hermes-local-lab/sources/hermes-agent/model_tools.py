@@ -257,38 +257,44 @@ _LEGACY_TOOLSET_MAP = {
 # daemon start/stop, env var changes, etc.) on a 30 s horizon.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 _tool_defs_cache_lock = threading.RLock()
+# Canonical marker for the bracketed vision + image-generation generation.
+_last_capability_runtime_identity: tuple | None = None
+# Compatibility alias retained for existing integrations and tests.
 _last_image_capability_identity: tuple | None = None
 
 
-def _image_capability_cache_identity() -> tuple:
-    """Return every immutable field that can change image tool exposure."""
-    from agent.image_runtime import verification_runtime_snapshot
+def _capability_runtime_cache_identity() -> tuple:
+    """Return one bracketed identity for both gated image capabilities."""
+    from agent.image_runtime import capture_capability_runtime_generation
 
-    snapshot = verification_runtime_snapshot("image_generation")
-    return (
-        snapshot.get("schema_version"),
-        str(snapshot.get("fingerprint") or ""),
-        str(snapshot.get("status") or ""),
-        bool(snapshot.get("available")),
-    )
+    return capture_capability_runtime_generation().cache_identity
+
+
+def _image_capability_cache_identity() -> tuple:
+    """Compatibility injection seam for the combined capability identity."""
+    return _capability_runtime_cache_identity()
 
 
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
     schema dependencies change (e.g. discord capability cache reset,
     execute_code sandbox reconfigured)."""
+    global _last_capability_runtime_identity
     global _last_image_capability_identity
     with _tool_defs_cache_lock:
         _tool_defs_cache.clear()
+        _last_capability_runtime_identity = None
         _last_image_capability_identity = None
 
 
 def _transition_image_capability_identity_locked(identity: tuple) -> tuple:
     """Publish one identity generation and invalidate both schema caches."""
+    global _last_capability_runtime_identity
     global _last_image_capability_identity
-    if identity != _last_image_capability_identity:
+    if identity != _last_capability_runtime_identity:
         _tool_defs_cache.clear()
         invalidate_check_fn_cache()
+        _last_capability_runtime_identity = identity
         _last_image_capability_identity = identity
     return identity
 
@@ -303,6 +309,33 @@ def _synchronize_image_capability_identity(observed_identity: tuple) -> tuple:
             else current_identity
         )
         return _transition_image_capability_identity_locked(identity)
+
+
+def _is_unstable_combined_identity(identity: tuple) -> bool:
+    """Recognize the canonical bracketed cache identity without legacy ambiguity."""
+    return bool(
+        isinstance(identity, tuple)
+        and len(identity) == 3
+        and type(identity[0]) is bool
+        and identity[0] is False
+    )
+
+
+def _without_gated_image_schemas(
+    definitions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Fail closed for vision/generation while preserving unrelated tools."""
+    global _last_resolved_tool_names
+    filtered = [
+        tool
+        for tool in definitions
+        if str(tool.get("function", {}).get("name") or "")
+        not in {"image_generate", "vision_analyze"}
+    ]
+    _last_resolved_tool_names = [
+        tool["function"]["name"] for tool in filtered
+    ]
+    return filtered
 
 
 def get_tool_definitions(
@@ -323,11 +356,20 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
-    global _last_resolved_tool_names, _last_image_capability_identity
+    global _last_resolved_tool_names
 
     initial_capability_identity = _synchronize_image_capability_identity(
         _image_capability_cache_identity()
     )
+
+    if _is_unstable_combined_identity(initial_capability_identity):
+        return _without_gated_image_schemas(
+            _compute_tool_definitions(
+                enabled_toolsets,
+                disabled_toolsets,
+                quiet_mode,
+            )
+        )
 
     if not quiet_mode:
         return _compute_tool_definitions(
@@ -407,23 +449,15 @@ def get_tool_definitions(
                 _tool_defs_cache[cache_key] = result
                 return list(result)
 
-    # An identity that keeps changing cannot authorize image generation.
-    # Preserve all unrelated schemas and fail closed for this capability.
+    # An identity that keeps changing cannot authorize either gated image
+    # capability. Preserve all unrelated schemas and fail closed for both.
     if not result:
         result = _compute_tool_definitions(
             enabled_toolsets,
             disabled_toolsets,
             quiet_mode,
         )
-    filtered = [
-        tool
-        for tool in result
-        if str(tool.get("function", {}).get("name") or "") != "image_generate"
-    ]
-    _last_resolved_tool_names = [
-        tool["function"]["name"] for tool in filtered
-    ]
-    return filtered
+    return _without_gated_image_schemas(result)
 
 
 def _compute_tool_definitions(

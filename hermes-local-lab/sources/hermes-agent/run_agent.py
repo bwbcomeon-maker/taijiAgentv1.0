@@ -4403,9 +4403,9 @@ class AIAgent:
         if blocked is not None:
             raise taiji_license.LicenseExecutionBlocked(blocked)
         try:
-            from agent.image_runtime import refresh_agent_image_runtime
+            from agent.image_runtime import refresh_agent_capability_runtime
 
-            refresh_agent_image_runtime(self)
+            refresh_agent_capability_runtime(self)
         except Exception:
             # Capability refresh is fail-closed inside its builder. A transient
             # refresh error must not abort an unrelated user turn.
