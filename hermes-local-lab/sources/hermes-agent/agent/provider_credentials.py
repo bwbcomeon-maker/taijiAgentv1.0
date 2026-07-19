@@ -472,6 +472,32 @@ def _open_credential_resource_handle(
         raise
 
 
+def _assert_credential_resource_handle_unchanged(
+    handle: _CredentialResourceHandle,
+) -> None:
+    try:
+        path_stat = _os.stat(handle.path, follow_symlinks=False)
+        opened_stat = (
+            _os.fstat(handle.directory_fd)
+            if handle.directory_fd >= 0
+            else path_stat
+        )
+    except OSError as exc:
+        raise CredentialRecoveryError(
+            "credential resource directory changed after lock acquisition"
+        ) from exc
+    expected_identity = (handle.device, handle.inode)
+    if (
+        not stat.S_ISDIR(opened_stat.st_mode)
+        or not stat.S_ISDIR(path_stat.st_mode)
+        or (opened_stat.st_dev, opened_stat.st_ino) != expected_identity
+        or (path_stat.st_dev, path_stat.st_ino) != expected_identity
+    ):
+        raise CredentialRecoveryError(
+            "credential resource directory changed after lock acquisition"
+        )
+
+
 def _assert_active_resource_dirs_unchanged() -> None:
     handles = getattr(
         _CREDENTIAL_TRANSACTION_STATE,
@@ -481,27 +507,49 @@ def _assert_active_resource_dirs_unchanged() -> None:
     if not isinstance(handles, dict):
         return
     for handle in handles.values():
-        try:
-            path_stat = _os.stat(handle.path, follow_symlinks=False)
-            opened_stat = (
-                _os.fstat(handle.directory_fd)
-                if handle.directory_fd >= 0
-                else path_stat
+        _assert_credential_resource_handle_unchanged(handle)
+
+
+def _open_credential_lock_file(
+    resource_root: Path,
+    resource_handle: _CredentialResourceHandle,
+    open_flags: int,
+) -> int:
+    """Open the pinned lock, tolerating one Darwin concurrent-create loser."""
+
+    def open_lock(flags: int) -> int:
+        if resource_handle.directory_fd >= 0:
+            return _os.open(
+                _CREDENTIAL_LOCK_NAME,
+                flags,
+                0o600,
+                dir_fd=resource_handle.directory_fd,
             )
-        except OSError as exc:
-            raise CredentialRecoveryError(
-                "credential resource directory changed after lock acquisition"
-            ) from exc
-        expected_identity = (handle.device, handle.inode)
-        if (
-            not stat.S_ISDIR(opened_stat.st_mode)
-            or not stat.S_ISDIR(path_stat.st_mode)
-            or (opened_stat.st_dev, opened_stat.st_ino) != expected_identity
-            or (path_stat.st_dev, path_stat.st_ino) != expected_identity
-        ):
-            raise CredentialRecoveryError(
-                "credential resource directory changed after lock acquisition"
-            )
+        return _os.open(
+            resource_root / _CREDENTIAL_LOCK_NAME,
+            flags,
+            0o600,
+        )
+
+    try:
+        return open_lock(open_flags)
+    except FileNotFoundError:
+        _assert_credential_resource_handle_unchanged(resource_handle)
+
+    existing_flags = open_flags & ~_os.O_CREAT & ~getattr(_os, "O_EXCL", 0)
+    try:
+        return open_lock(existing_flags)
+    except FileNotFoundError:
+        _assert_credential_resource_handle_unchanged(resource_handle)
+
+    exclusive_create_flags = (
+        open_flags | _os.O_CREAT | getattr(_os, "O_EXCL", 0)
+    )
+    try:
+        return open_lock(exclusive_create_flags)
+    except FileExistsError:
+        _assert_credential_resource_handle_unchanged(resource_handle)
+        return open_lock(existing_flags)
 
 
 def _active_resource_handle_for_target(
@@ -702,19 +750,11 @@ def credential_transaction(config_path: Path | None = None):
             open_flags |= getattr(_os, "O_NOFOLLOW", 0)
             for resource_root in spec.resource_roots:
                 resource_handle = resource_handles[resource_root]
-                if resource_handle.directory_fd >= 0:
-                    lock_fd = _os.open(
-                        _CREDENTIAL_LOCK_NAME,
-                        open_flags,
-                        0o600,
-                        dir_fd=resource_handle.directory_fd,
-                    )
-                else:  # pragma: no cover - Windows path locking.
-                    lock_fd = _os.open(
-                        resource_root / _CREDENTIAL_LOCK_NAME,
-                        open_flags,
-                        0o600,
-                    )
+                lock_fd = _open_credential_lock_file(
+                    resource_root,
+                    resource_handle,
+                    open_flags,
+                )
                 try:
                     lock_stat = _os.fstat(lock_fd)
                     if (

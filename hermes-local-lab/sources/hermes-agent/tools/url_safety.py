@@ -5,12 +5,10 @@ skill could trick the agent into fetching internal resources like cloud
 metadata endpoints (169.254.169.254), localhost services, or private
 network hosts.
 
-The check can be globally disabled via ``security.allow_private_urls: true``
-in config.yaml for environments where DNS resolves external domains to
-private/benchmark-range IPs (OpenWrt routers, corporate proxies, VPNs
-that use 198.18.0.0/15 or 100.64.0.0/10).  Even when disabled, cloud
-metadata hostnames (metadata.google.internal, 169.254.169.254) are
-**always** blocked — those are never legitimate agent targets.
+The ordinary private-address check can be disabled via
+``security.allow_private_urls: true`` for explicit local-network workflows.
+Cloud metadata, link-local, and the benchmark/Fake-IP range
+``198.18.0.0/15`` remain a non-negotiable floor in every mode.
 
 Limitations (documented, not fixable at pre-flight level):
   - DNS rebinding (TOCTOU): an attacker-controlled DNS server with TTL=0
@@ -37,6 +35,7 @@ logger = logging.getLogger(__name__)
 # or any config toggle.  These are cloud metadata endpoints that an
 # attacker could use to steal instance credentials.
 _BLOCKED_HOSTNAMES = frozenset({
+    "instance-data.ec2.internal",
     "metadata.google.internal",
     "metadata.goog",
 })
@@ -55,6 +54,7 @@ _ALWAYS_BLOCKED_IPS = frozenset({
     ipaddress.ip_address("169.254.170.2"),     # AWS ECS task metadata (task IAM creds)
     ipaddress.ip_address("169.254.169.253"),   # Azure IMDS wire server
     ipaddress.ip_address("fd00:ec2::254"),     # AWS metadata (IPv6)
+    ipaddress.ip_address("fd20:ce::254"),       # GCP metadata (IPv6)
     ipaddress.ip_address("100.100.100.200"),   # Alibaba Cloud metadata
     # IPv4-mapped IPv6 variants — same endpoints reachable via ::ffff:x.x.x.x
     ipaddress.ip_address("::ffff:169.254.169.254"),
@@ -65,11 +65,12 @@ _ALWAYS_BLOCKED_IPS = frozenset({
 _ALWAYS_BLOCKED_NETWORKS = (
     ipaddress.ip_network("169.254.0.0/16"),    # Entire link-local range (no legit agent target)
     ipaddress.ip_network("::ffff:169.254.0.0/112"), # IPv4-mapped link-local range
+    ipaddress.ip_network("198.18.0.0/15"),     # Benchmark/Fake-IP must never be an origin peer
+    ipaddress.ip_network("::ffff:198.18.0.0/111"),  # IPv4-mapped Fake-IP range
 )
 
-# Exact HTTPS hostnames allowed to resolve to private/benchmark-space IPs.
-# This is intentionally narrow: QQ media downloads can legitimately resolve
-# to 198.18.0.0/15 behind local proxy/benchmark infrastructure.
+# Exact HTTPS hostnames allowed to resolve to ordinary private-space IPs.
+# This exception never bypasses the permanent metadata/Fake-IP floor above.
 _TRUSTED_PRIVATE_IP_HOSTS = frozenset({
     "multimedia.nt.qq.com.cn",
 })

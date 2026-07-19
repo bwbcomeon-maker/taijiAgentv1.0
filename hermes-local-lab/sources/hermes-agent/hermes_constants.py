@@ -403,11 +403,21 @@ def is_container() -> bool:
 
 
 def get_config_path() -> Path:
-    """Return the path to ``config.yaml`` under HERMES_HOME.
+    """Return the canonical active ``config.yaml`` path.
 
-    Replaces the ``get_hermes_home() / "config.yaml"`` pattern repeated
-    in 7+ files (skill_utils.py, hermes_logging.py, hermes_time.py, etc.).
+    A context-local profile override and the Taiji product runtime home are
+    authoritative. Outside those scopes, ``HERMES_CONFIG_PATH`` is an exact
+    legacy override and must win over the broader ``HERMES_HOME`` directory.
     """
+    context_home = get_hermes_home_override()
+    if context_home:
+        return Path(context_home) / "config.yaml"
+    taiji_runtime_home = get_taiji_runtime_home()
+    if taiji_runtime_home is not None:
+        return taiji_runtime_home / "config.yaml"
+    configured_path = os.environ.get("HERMES_CONFIG_PATH", "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser()
     return get_hermes_home() / "config.yaml"
 
 
@@ -418,8 +428,8 @@ def get_skills_dir() -> Path:
 
 
 def get_env_path() -> Path:
-    """Return the path to the ``.env`` file under HERMES_HOME."""
-    return get_hermes_home() / ".env"
+    """Return the Secret projection paired with the canonical config path."""
+    return get_config_path().parent / ".env"
 
 
 # ─── Network Preferences ─────────────────────────────────────────────────────

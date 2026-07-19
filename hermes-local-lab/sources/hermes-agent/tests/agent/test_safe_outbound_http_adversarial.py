@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import socket
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1525,6 +1526,61 @@ def test_bounded_json_rejects_pathological_content_length_before_body() -> None:
         assert body.consumed == 0
 
     asyncio.run(scenario())
+
+
+def test_bounded_json_sync_does_not_retain_pathological_chunk_objects() -> None:
+    fragment_count = 100_000
+    max_bytes = fragment_count + 2
+
+    class _FragmentedResponse:
+        headers = httpx.Headers({"Content-Type": "application/json"})
+
+        def iter_bytes(self):
+            for _ in range(fragment_count):
+                yield bytes(bytearray(b" "))
+            yield b"{}"
+
+    tracemalloc.start()
+    try:
+        result = safe_http.read_bounded_json(
+            _FragmentedResponse(),
+            max_bytes=max_bytes,
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result == {}
+    assert peak < max_bytes * 16
+
+
+def test_bounded_json_async_does_not_retain_pathological_chunk_objects() -> None:
+    fragment_count = 100_000
+    max_bytes = fragment_count + 2
+
+    class _FragmentedResponse:
+        headers = httpx.Headers({"Content-Type": "application/json"})
+
+        async def aiter_bytes(self):
+            for _ in range(fragment_count):
+                yield bytes(bytearray(b" "))
+            yield b"{}"
+
+    async def scenario() -> tuple[Any, int]:
+        tracemalloc.start()
+        try:
+            result = await safe_http.read_bounded_json_async(
+                _FragmentedResponse(),
+                max_bytes=max_bytes,
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return result, peak
+
+    result, peak = asyncio.run(scenario())
+    assert result == {}
+    assert peak < max_bytes * 16
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,8 @@ import http.server
 import base64
 import socketserver
 import threading
+import tracemalloc
+from contextlib import contextmanager
 
 import pytest
 
@@ -83,9 +85,6 @@ class _TinyImageHandler(http.server.BaseHTTPRequestHandler):
 def http_server(tmp_path, monkeypatch):
     """Spin up a localhost HTTP server and isolate HERMES_HOME under tmp_path."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-    # Production blocks private-address image downloads. This fixture owns an
-    # explicit loopback server, so opt in only for these transport-level tests.
-    monkeypatch.setenv("HERMES_IMAGE_ALLOW_PRIVATE_NETWORK", "1")
     (tmp_path / ".hermes").mkdir()
 
     httpd = socketserver.TCPServer(("127.0.0.1", 0), _TinyImageHandler)
@@ -101,7 +100,11 @@ class TestSaveUrlImage:
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
 
-        path = save_url_image(f"{base}/image.png", prefix="xai_test")
+        path = save_url_image(
+            f"{base}/image.png",
+            prefix="xai_test",
+            network_scope="private_direct",
+        )
 
         assert path.exists()
         assert path.read_bytes() == PNG_1PX
@@ -114,7 +117,11 @@ class TestSaveUrlImage:
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
 
-        path = save_url_image(f"{base}/image.jpg", prefix="xai_test")
+        path = save_url_image(
+            f"{base}/image.jpg",
+            prefix="xai_test",
+            network_scope="private_direct",
+        )
         assert path.suffix == ".jpg", "image/jpeg → .jpg"
 
     def test_extension_uses_verified_magic_when_mime_is_generic(self, http_server):
@@ -122,14 +129,22 @@ class TestSaveUrlImage:
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
 
-        path = save_url_image(f"{base}/no-type-with-url-ext.jpg", prefix="xai_test")
+        path = save_url_image(
+            f"{base}/no-type-with-url-ext.jpg",
+            prefix="xai_test",
+            network_scope="private_direct",
+        )
         assert path.suffix == ".png"
 
     def test_extension_defaults_to_png_when_unknowable(self, http_server):
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
 
-        path = save_url_image(f"{base}/no-type-no-ext", prefix="xai_test")
+        path = save_url_image(
+            f"{base}/no-type-no-ext",
+            prefix="xai_test",
+            network_scope="private_direct",
+        )
         assert path.suffix == ".png"
 
     def test_404_raises(self, http_server):
@@ -137,7 +152,7 @@ class TestSaveUrlImage:
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
         with pytest.raises(ValueError, match="HTTP 404"):
-            save_url_image(f"{base}/404")
+            save_url_image(f"{base}/404", network_scope="private_direct")
 
     def test_empty_body_raises_without_writing_file(self, http_server):
         """0-byte responses are not images — refuse to cache."""
@@ -145,7 +160,7 @@ class TestSaveUrlImage:
         from agent.image_gen_provider import save_url_image
 
         with pytest.raises(ValueError, match="0 bytes"):
-            save_url_image(f"{base}/empty")
+            save_url_image(f"{base}/empty", network_scope="private_direct")
 
     def test_oversize_raises_and_cleans_up(self, http_server, tmp_path):
         """Oversize downloads must NOT leak a partial file into the cache."""
@@ -155,7 +170,11 @@ class TestSaveUrlImage:
         cache_dir = _images_cache_dir()
         before = set(cache_dir.glob("*"))
         with pytest.raises(ValueError, match="exceeds"):
-            save_url_image(f"{base}/oversize", max_bytes=1024 * 1024)
+            save_url_image(
+                f"{base}/oversize",
+                max_bytes=1024 * 1024,
+                network_scope="private_direct",
+            )
         after = set(cache_dir.glob("*"))
         assert after == before, "partial file leaked into cache after oversize cap"
 
@@ -164,8 +183,16 @@ class TestSaveUrlImage:
         base, _ = http_server
         from agent.image_gen_provider import save_url_image
 
-        path1 = save_url_image(f"{base}/image.png", prefix="xai_collision")
-        path2 = save_url_image(f"{base}/image.png", prefix="xai_collision")
+        path1 = save_url_image(
+            f"{base}/image.png",
+            prefix="xai_collision",
+            network_scope="private_direct",
+        )
+        path2 = save_url_image(
+            f"{base}/image.png",
+            prefix="xai_collision",
+            network_scope="private_direct",
+        )
         assert path1 != path2, "filename collision — uuid suffix isn't doing its job"
 
     def test_default_transport_ignores_environment_proxy(self, http_server, monkeypatch):
@@ -176,7 +203,11 @@ class TestSaveUrlImage:
         monkeypatch.setenv("NO_PROXY", "")
         from agent.image_gen_provider import save_url_image
 
-        path = save_url_image(f"{base}/image.png", prefix="no_proxy")
+        path = save_url_image(
+            f"{base}/image.png",
+            prefix="no_proxy",
+            network_scope="private_direct",
+        )
 
         assert path.read_bytes() == PNG_1PX
 
@@ -192,11 +223,41 @@ class TestSaveUrlImage:
             return socket.getaddrinfo(host, port, *args, **kwargs)
 
         path = save_url_image(
-            f"{base}/image.png", prefix="single_dns", resolver=resolver
+            f"{base}/image.png",
+            prefix="single_dns",
+            network_scope="private_direct",
+            resolver=resolver,
         )
 
         assert path.read_bytes() == PNG_1PX
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize("invalid_max_bytes", [-2, 0, True, False, 1.5, "1024"])
+def test_save_url_image_rejects_invalid_max_bytes_before_network(
+    invalid_max_bytes,
+):
+    from agent.image_gen_provider import save_url_image
+
+    calls = []
+
+    def resolver(*args, **kwargs):
+        calls.append(("resolver", args, kwargs))
+        raise AssertionError("resolver must not run for invalid max_bytes")
+
+    def request_get(*args, **kwargs):
+        calls.append(("request_get", args, kwargs))
+        raise AssertionError("request_get must not run for invalid max_bytes")
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        save_url_image(
+            "https://images.example.test/result.png",
+            max_bytes=invalid_max_bytes,
+            resolver=resolver,
+            request_get=request_get,
+        )
+
+    assert calls == []
 
 
 def test_pinned_transport_rejects_dns_rebind_peer_mismatch():
@@ -223,3 +284,50 @@ def test_pinned_https_keeps_original_hostname_for_sni_and_certificate_check():
         context_factory=_Context,
     ) == "wrapped"
     assert calls == [(raw_socket, "images.example.test")]
+
+
+def test_trusted_proxy_download_does_not_retain_pathological_chunk_objects(
+    monkeypatch,
+):
+    from agent import image_gen_provider
+
+    fragment_count = 100_000
+    max_bytes = fragment_count + 2
+
+    class _FragmentedResponse:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+
+        def iter_raw(self):
+            for _ in range(fragment_count):
+                yield bytes(bytearray(b" "))
+            yield b"{}"
+
+    @contextmanager
+    def trusted_proxy_response(*args, **kwargs):
+        del args, kwargs
+        yield _FragmentedResponse()
+
+    monkeypatch.setattr(
+        image_gen_provider,
+        "request_via_trusted_proxy",
+        trusted_proxy_response,
+    )
+    tracemalloc.start()
+    try:
+        status, headers, raw = image_gen_provider._pinned_http_get(
+            "https://cdn.example/image.png",
+            timeout=1,
+            max_bytes=max_bytes,
+            network_scope="trusted_proxy",
+            trusted_proxy_profile="approved",
+            resolver=lambda *args, **kwargs: [],
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert status == 200
+    assert headers["content-type"] == "image/png"
+    assert len(raw) == max_bytes
+    assert peak < max_bytes * 16

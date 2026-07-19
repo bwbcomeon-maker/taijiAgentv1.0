@@ -72,30 +72,50 @@ def active_custom_provider_identity(
         return {}
     try:
         from agent.custom_image_providers import (
-            normalize_custom_image_provider_entry,
+            custom_image_provider_public_row,
+            load_custom_image_provider_entries,
             normalize_custom_image_provider_id,
         )
     except Exception:
         return {}
-    for raw_entry in entries:
-        if not isinstance(raw_entry, dict):
+    try:
+        requested_id = normalize_custom_image_provider_id(requested_id)
+    except ValueError:
+        return {}
+    raw_entry: dict[str, Any] = {}
+    for candidate in entries:
+        if not isinstance(candidate, dict):
             continue
         try:
-            if normalize_custom_image_provider_id(raw_entry.get("id")) != requested_id:
-                continue
-            normalized = normalize_custom_image_provider_entry(raw_entry)
+            if normalize_custom_image_provider_id(candidate.get("id")) == requested_id:
+                raw_entry = candidate
+                break
         except ValueError:
             continue
+    for normalized in load_custom_image_provider_entries(config_data):
+        if normalized.get("id") != requested_id:
+            continue
+        try:
+            public_row = custom_image_provider_public_row(normalized)
+        except ValueError:
+            return {}
+        key_status = public_row.get("key_status")
+        if not isinstance(key_status, dict):
+            key_status = {}
         return {
             "id": normalized["id"],
             "name": normalized["name"],
             "base_url": normalized["base_url"],
-            "api_key_env": normalized["api_key_env"],
+            "credential_ref": normalized["credential_ref"],
+            "secret_env": str(key_status.get("env_var") or ""),
             "models": list(normalized["models"]),
             "default_model": normalized["default_model"],
+            "allow_custom_model_id": normalized["allow_custom_model_id"],
             "size_map": dict(normalized["size_map"]),
             "response_format": normalized["response_format"],
             "timeout_seconds": normalized["timeout_seconds"],
+            "network_scope": normalized["network_scope"],
+            "trusted_proxy_profile": normalized["trusted_proxy_profile"],
             "transport": str(raw_entry.get("transport") or "openai_images").strip(),
         }
     return {}
@@ -121,7 +141,7 @@ def image_gen_secret_env(
             return ""
         return ""
     if provider.startswith("custom:"):
-        return str(active_custom_provider_identity(provider, config_data).get("api_key_env") or "")
+        return str(active_custom_provider_identity(provider, config_data).get("secret_env") or "")
     return IMAGE_GEN_KEY_ENV.get(provider, "")
 
 

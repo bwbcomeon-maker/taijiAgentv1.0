@@ -12,14 +12,17 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
     error_response,
     resolve_aspect_ratio,
-    success_response,
+    save_url_image,
+)
+from plugins.image_gen.domestic_common import (
+    cached_success,
+    post_json,
+    provider_api_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,7 +122,10 @@ class DoubaoImageGenProvider(ImageGenProvider):
         return "Doubao Seedream"
 
     def is_available(self) -> bool:
-        return bool(os.environ.get("ARK_API_KEY"))
+        try:
+            return bool(provider_api_key(self.name))
+        except ValueError:
+            return False
 
     def list_models(self) -> List[Dict[str, Any]]:
         return [
@@ -180,7 +186,17 @@ class DoubaoImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        api_key = str(os.environ.get("ARK_API_KEY") or "").strip()
+        try:
+            api_key = provider_api_key(self.name)
+        except ValueError:
+            return error_response(
+                error="Doubao credential configuration is invalid.",
+                error_type="configuration_error",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         if not api_key:
             return error_response(
                 error="ARK_API_KEY not set. Configure Doubao Seedream in image generation settings.",
@@ -205,49 +221,19 @@ class DoubaoImageGenProvider(ImageGenProvider):
             "Content-Type": "application/json",
         }
 
-        try:
-            response = requests.post(
-                GENERATIONS_ENDPOINT,
-                headers=headers,
-                json=request_payload,
-                timeout=180,
-            )
-            response.raise_for_status()
-            body = response.json()
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else 0
-            detail = ""
-            if exc.response is not None:
-                try:
-                    detail = str(exc.response.json().get("error", exc.response.text[:300]))
-                except Exception:
-                    detail = exc.response.text[:300]
-            return error_response(
-                error=f"Doubao Seedream image generation failed ({status}): {detail or exc}",
-                error_type="api_error",
-                provider="doubao",
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect,
-            )
-        except requests.RequestException as exc:
-            return error_response(
-                error=f"Doubao Seedream image generation request failed: {exc}",
-                error_type=type(exc).__name__,
-                provider="doubao",
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect,
-            )
-        except ValueError as exc:
-            return error_response(
-                error=f"Doubao Seedream returned invalid JSON: {exc}",
-                error_type="invalid_response",
-                provider="doubao",
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect,
-            )
+        body, request_error = post_json(
+            url=GENERATIONS_ENDPOINT,
+            headers=headers,
+            payload=request_payload,
+            timeout=180,
+            provider=self.name,
+            model=model_id,
+            prompt=prompt,
+            aspect_ratio=aspect,
+            secrets=(api_key,),
+        )
+        if request_error:
+            return request_error
 
         image_url = _extract_image_url(body)
         if not image_url:
@@ -260,13 +246,15 @@ class DoubaoImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        return success_response(
-            image=image_url,
+        return cached_success(
+            image_url=image_url,
+            cache_prefix="doubao_image",
             model=model_id,
             prompt=prompt,
             aspect_ratio=aspect,
             provider="doubao",
             extra={"size": size},
+            save_image=save_url_image,
         )
 
 

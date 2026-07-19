@@ -648,6 +648,7 @@ def build_anthropic_client(
     *,
     drop_context_1m_beta: bool = False,
     follow_redirects: Optional[bool] = None,
+    http_client: Any = None,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -691,7 +692,8 @@ def build_anthropic_client(
             drop_context_1m_beta=drop_context_1m_beta,
         )
 
-    normalize_proxy_env_vars()
+    if http_client is None:
+        normalize_proxy_env_vars()
 
     from httpx import Timeout
 
@@ -701,7 +703,9 @@ def build_anthropic_client(
         "timeout": Timeout(timeout=float(_read_timeout), connect=10.0),
     }
     owned_http_client = None
-    if follow_redirects is not None:
+    if http_client is not None:
+        kwargs["http_client"] = http_client
+    elif follow_redirects is not None:
         import httpx
 
         owned_http_client = httpx.Client(follow_redirects=follow_redirects)

@@ -40,11 +40,20 @@ import socket
 import ssl
 import stat
 import struct
+import tempfile
 import uuid
 import zlib
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
+
+from agent.safe_outbound_http import (
+    NetworkScope,
+    SafeOutboundError,
+    _resolve_pinned_addresses,
+    normalize_network_scope,
+    request_via_trusted_proxy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -824,13 +833,15 @@ def _atomic_cache_write(path: Path, data: bytes) -> None:
         temp.unlink(missing_ok=True)
 
 
-def _allow_private_image_downloads() -> bool:
-    return os.getenv("HERMES_IMAGE_ALLOW_PRIVATE_NETWORK", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+def _normalize_image_network_scope(value: object) -> NetworkScope:
+    try:
+        return normalize_network_scope(value)
+    except SafeOutboundError:
+        raise ValueError("unsafe image network scope") from None
 
 
 def _is_public_ip(value: str) -> bool:
+    """Compatibility helper for provider-specific policy without bypass power."""
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
@@ -848,10 +859,11 @@ def _is_public_ip(value: str) -> bool:
 def _resolved_image_addresses(
     url: str,
     *,
+    network_scope: NetworkScope | str = NetworkScope.PUBLIC_DIRECT,
     resolver: Callable[..., Any] = socket.getaddrinfo,
     url_validator: Callable[[str], bool] | None = None,
     address_validator: Callable[[str, str], bool] | None = None,
-) -> Tuple[Any, list[tuple[Any, ...]]]:
+) -> Tuple[Any, tuple[Any, ...]]:
     if url_validator is not None:
         try:
             if not url_validator(url):
@@ -865,42 +877,53 @@ def _resolved_image_addresses(
         raise ValueError("unsafe image URL")
     if parsed.username or parsed.password:
         raise ValueError("unsafe image URL")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        rows = resolver(parsed.hostname, port, type=socket.SOCK_STREAM)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        scope = _normalize_image_network_scope(network_scope)
+        if scope is NetworkScope.TRUSTED_PROXY:
+            raise ValueError("trusted proxy image URLs require the proxy transport")
+        addresses = _resolve_pinned_addresses(
+            str(parsed.hostname),
+            port,
+            network_scope=scope,
+            resolver=resolver,
+        )
+    except ValueError:
+        raise
+    except SafeOutboundError:
+        raise ValueError("unsafe image URL") from None
     except Exception as exc:
         raise ValueError("image URL could not be resolved") from exc
-    usable = [tuple(row) for row in rows if len(row) > 4 and row[4]]
-    addresses = {str(row[4][0]).split("%", 1)[0] for row in usable}
     if not addresses:
         raise ValueError("image URL could not be resolved")
     if address_validator is not None:
         try:
             if any(
-                not address_validator(str(parsed.hostname), value)
-                for value in addresses
+                not address_validator(
+                    str(parsed.hostname),
+                    str(address.canonical_ip),
+                )
+                for address in addresses
             ):
                 raise ValueError("unsafe image URL")
         except ValueError:
             raise
         except Exception as exc:
             raise ValueError("unsafe image URL") from exc
-    elif not _allow_private_image_downloads() and any(
-        not _is_public_ip(value) for value in addresses
-    ):
-        raise ValueError("unsafe image URL")
-    return parsed, usable
+    return parsed, addresses
 
 
 def _validate_image_url(
     url: str,
     *,
+    network_scope: NetworkScope | str = NetworkScope.PUBLIC_DIRECT,
     resolver: Callable[..., Any] = socket.getaddrinfo,
     url_validator: Callable[[str], bool] | None = None,
     address_validator: Callable[[str, str], bool] | None = None,
 ) -> None:
     _resolved_image_addresses(
         url,
+        network_scope=network_scope,
         resolver=resolver,
         url_validator=url_validator,
         address_validator=address_validator,
@@ -940,24 +963,91 @@ def _pinned_http_get(
     *,
     timeout: float,
     max_bytes: int,
+    network_scope: NetworkScope | str = NetworkScope.PUBLIC_DIRECT,
+    trusted_proxy_profile: str | None = None,
     resolver: Callable[..., Any],
     url_validator: Callable[[str], bool] | None = None,
     address_validator: Callable[[str, str], bool] | None = None,
 ) -> Tuple[int, Dict[str, str], bytes]:
     """GET through one pre-validated address, without proxies or a second DNS lookup."""
+    scope = _normalize_image_network_scope(network_scope)
+    if scope is NetworkScope.TRUSTED_PROXY:
+        profile = str(trusted_proxy_profile or "").strip()
+        if not profile or address_validator is not None:
+            raise ValueError("trusted proxy image download is unavailable")
+        if url_validator is not None:
+            try:
+                if not url_validator(url):
+                    raise ValueError("unsafe image URL")
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError("unsafe image URL") from exc
+        with request_via_trusted_proxy(
+            "GET",
+            url,
+            trusted_proxy_profile=profile,
+            headers={
+                "Accept": SUPPORTED_IMAGE_ACCEPT,
+                "Connection": "close",
+            },
+            timeout=timeout,
+            follow_redirects=False,
+        ) as response:
+            headers = {
+                str(key).lower(): str(value)
+                for key, value in response.headers.items()
+            }
+            content_encoding = headers.get("content-encoding", "").strip().lower()
+            if content_encoding not in {"", "identity"}:
+                raise ValueError("compressed image response is not allowed")
+            declared_length = headers.get("content-length")
+            if declared_length:
+                try:
+                    parsed_length = int(declared_length)
+                except ValueError:
+                    raise ValueError("invalid image Content-Length") from None
+                if parsed_length < 0:
+                    raise ValueError("invalid image Content-Length")
+                if parsed_length > max_bytes:
+                    raise ValueError(
+                        f"Image exceeds {max_bytes // (1024 * 1024)}MB cap"
+                    )
+            bytes_read = 0
+            spool_limit = min(max(max_bytes, 1), 1024 * 1024)
+            with tempfile.SpooledTemporaryFile(max_size=spool_limit) as body:
+                for chunk in response.iter_raw():
+                    if not chunk:
+                        continue
+                    bytes_read += len(chunk)
+                    if bytes_read > max_bytes:
+                        raise ValueError(
+                            f"Image exceeds {max_bytes // (1024 * 1024)}MB cap"
+                        )
+                    body.write(chunk)
+                body.seek(0)
+                raw = body.read(max_bytes + 1)
+            return int(response.status_code), headers, raw
+    if trusted_proxy_profile is not None:
+        raise ValueError("trusted proxy profile requires trusted_proxy scope")
     parsed, rows = _resolved_image_addresses(
         url,
+        network_scope=scope,
         resolver=resolver,
         url_validator=url_validator,
         address_validator=address_validator,
     )
-    family, sock_type, proto, _canon, sockaddr = rows[0]
+    address = rows[0]
+    family = address.family
+    sock_type = address.socktype
+    proto = address.protocol
+    sockaddr = address.sockaddr
     raw_socket = socket.socket(family, sock_type, proto)
     connection: http.client.HTTPConnection | None = None
     try:
         raw_socket.settimeout(timeout)
         raw_socket.connect(sockaddr)
-        pinned_ip = str(sockaddr[0]).split("%", 1)[0]
+        pinned_ip = address.canonical_ip
         _validate_connected_peer(pinned_ip, str(raw_socket.getpeername()[0]))
         transport_socket: Any = raw_socket
         if parsed.scheme == "https":
@@ -1048,6 +1138,8 @@ def save_url_image(
     url: str,
     *,
     prefix: str = "image",
+    network_scope: NetworkScope | str = NetworkScope.PUBLIC_DIRECT,
+    trusted_proxy_profile: str | None = None,
     timeout: float = 60.0,
     max_bytes: int = 25 * 1024 * 1024,
     max_pixels: int = 40_000_000,
@@ -1069,7 +1161,25 @@ def save_url_image(
     network / HTTP / oversize / non-image-content-type error so callers can
     fall back to returning the bare URL with a clear error message.
     """
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or max_bytes <= 0
+    ):
+        raise ValueError("max_bytes must be a positive integer")
     current = str(url or "")
+    scope = _normalize_image_network_scope(network_scope)
+    profile = (
+        str(trusted_proxy_profile or "").strip()
+        if scope is NetworkScope.TRUSTED_PROXY
+        else None
+    )
+    if scope is NetworkScope.TRUSTED_PROXY and not profile:
+        raise ValueError("trusted proxy image download is unavailable")
+    if scope is not NetworkScope.TRUSTED_PROXY and trusted_proxy_profile is not None:
+        raise ValueError("trusted proxy profile requires trusted_proxy scope")
+    if request_get is not None and scope is NetworkScope.TRUSTED_PROXY:
+        raise ValueError("injected image transport cannot impersonate trusted proxy")
     if max_redirects < 0:
         raise ValueError("invalid image redirect limit")
     for redirect_count in range(max_redirects + 1):
@@ -1078,6 +1188,8 @@ def save_url_image(
                 current,
                 timeout=timeout,
                 max_bytes=max_bytes,
+                network_scope=scope,
+                trusted_proxy_profile=profile,
                 resolver=resolver,
                 url_validator=url_validator,
                 address_validator=address_validator,
@@ -1085,6 +1197,7 @@ def save_url_image(
         else:
             _validate_image_url(
                 current,
+                network_scope=scope,
                 resolver=resolver,
                 url_validator=url_validator,
                 address_validator=address_validator,

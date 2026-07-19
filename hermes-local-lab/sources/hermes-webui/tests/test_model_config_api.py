@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import threading
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +19,106 @@ import yaml
 import api.providers as providers
 import api.profiles as profiles
 import api.routes as routes
+import api.config as api_config
+import agent.provider_credentials as credential_store
 from api import model_config
+
+
+def _credential_transaction_process_writer(
+    config_path: str,
+    key: str,
+    start_event,
+) -> None:
+    os.environ["HERMES_HOME"] = str(Path(config_path).parent)
+    os.environ["HERMES_CONFIG_PATH"] = config_path
+    from agent.provider_credentials import credential_transaction
+
+    path = Path(config_path)
+    start_event.wait(timeout=5)
+    with credential_transaction(path):
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            current = {}
+        time.sleep(0.15)
+        current[key] = True
+        path.write_text(json.dumps(current, sort_keys=True), encoding="utf-8")
+
+
+def _credential_transaction_process_holder(
+    config_path: str,
+    acquired_event,
+    release_event,
+) -> None:
+    os.environ["HERMES_HOME"] = str(Path(config_path).parent)
+    os.environ["HERMES_CONFIG_PATH"] = config_path
+    from agent.provider_credentials import credential_transaction
+
+    with credential_transaction(Path(config_path)):
+        acquired_event.set()
+        release_event.wait(timeout=10)
+
+
+def _cli_env_process_writer(
+    config_path: str,
+    key: str,
+    value: str,
+    started_event,
+    completed_event,
+) -> None:
+    os.environ["HERMES_HOME"] = str(Path(config_path).parent)
+    os.environ["HERMES_CONFIG_PATH"] = config_path
+    from hermes_cli.config import save_env_value
+
+    started_event.set()
+    save_env_value(key, value)
+    completed_event.set()
+
+
+def _half_commit_process_writer(
+    config_path: str,
+    secret_env: str,
+    half_committed_event,
+    release_event,
+) -> None:
+    home = Path(config_path).parent
+    os.environ["HERMES_HOME"] = str(home)
+    os.environ["HERMES_CONFIG_PATH"] = config_path
+    from agent.provider_credentials import credential_transaction
+
+    with credential_transaction(Path(config_path)):
+        (home / ".env").write_text(f"{secret_env}=new-secret\n", encoding="utf-8")
+        half_committed_event.set()
+        release_event.wait(timeout=10)
+        Path(config_path).write_text(
+            yaml.safe_dump(
+                {
+                    "provider_credentials": [
+                        {
+                            "id": "new-provider",
+                            "provider_family": "custom",
+                            "auth_type": "api_key",
+                            "secret_env": secret_env,
+                        }
+                    ]
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+
+def _credential_config_process_reader(
+    config_path: str,
+    completed_event,
+    result_queue,
+) -> None:
+    os.environ["HERMES_HOME"] = str(Path(config_path).parent)
+    os.environ["HERMES_CONFIG_PATH"] = config_path
+    from agent.provider_credentials import load_credential_config
+
+    result_queue.put(load_credential_config(Path(config_path)))
+    completed_event.set()
 
 
 def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
@@ -61,6 +162,32 @@ def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
 
 def _read_config(tmp_path):
     return yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8")) or {}
+
+
+@pytest.mark.parametrize(
+    ("mutator_name", "args"),
+    (
+        ("set_reasoning_display", (False,)),
+        ("set_reasoning_effort", ("high",)),
+        ("set_hermes_default_model", ("openai/gpt-5.4-mini",)),
+        ("set_auxiliary_model", ("vision", "openai", "gpt-5.4-mini",)),
+    ),
+)
+def test_config_mutators_fail_closed_without_overwriting_malformed_yaml(
+    monkeypatch,
+    tmp_path,
+    mutator_name,
+    args,
+):
+    config_path = tmp_path / "config.yaml"
+    malformed_payload = b"model:\n  provider: [unterminated\n"
+    config_path.write_bytes(malformed_payload)
+    monkeypatch.setattr(api_config, "_get_config_path", lambda: config_path)
+
+    with pytest.raises(ValueError, match="cannot be read safely"):
+        getattr(api_config, mutator_name)(*args)
+
+    assert config_path.read_bytes() == malformed_payload
 
 
 def test_active_profile_name_uses_real_profile_api(monkeypatch):
@@ -277,6 +404,10 @@ def test_first_vision_save_lazily_binds_family_default_and_is_idempotent(monkeyp
         ),
         encoding="utf-8",
     )
+    (tmp_path / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=named-secret\n",
+        encoding="utf-8",
+    )
     body = {
         "provider": "alibaba",
         "model": "qwen3-vl-plus",
@@ -376,8 +507,8 @@ def test_vision_yaml_failure_restores_previous_legacy_secret(monkeypatch, tmp_pa
     (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=old-secret\n", encoding="utf-8")
     monkeypatch.setenv("DASHSCOPE_API_KEY", "old-process-secret")
     monkeypatch.setattr(
-        model_config,
-        "_save_yaml_config_file",
+        credential_store,
+        "_write_credential_journal",
         lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
     )
 
@@ -527,16 +658,13 @@ def test_endpoint_cleanup_rolls_back_when_yaml_save_fails(monkeypatch, tmp_path)
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(original), encoding="utf-8")
     provider = {"id": "dashscope", "custom": False, "domestic": True, "integration_status": "stable", "default_model": "qwen-image-2.0-pro", "models": [{"id": "qwen-image-2.0-pro"}], "credential_fields": [], "endpoint_fields": [{"name": "region", "required": False, "secret": False}]}
     monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda _provider: [provider])
-    original_save = model_config._save_yaml_config_file
-    failed = {"value": False}
-
-    def partial_save_then_fail(path, data):
-        original_save(path, data)
-        if not failed["value"]:
-            failed["value"] = True
-            raise OSError("disk full")
-
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", partial_save_then_fail)
+    monkeypatch.setattr(
+        credential_store,
+        "_atomic_write_credential_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("disk full")
+        ),
+    )
 
     with pytest.raises(OSError, match="disk full"):
         model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "credentials": {"region": "cn-beijing"}})
@@ -549,17 +677,22 @@ def test_concurrent_default_unset_cannot_be_followed_by_stale_lazy_binding(monke
     model_config.upsert_provider_credential({"id": "alibaba-default", "provider": "alibaba", "api_key": "named-secret", "default": True})
     before_unset_save = threading.Event()
     release_unset = threading.Event()
-    original_save = model_config._save_yaml_config_file
+    original_write = credential_store._atomic_write_credential_bytes
 
-    def pause_before_unset_save(path, data):
-        rows = data.get("provider_credentials") if isinstance(data, dict) else None
+    def pause_before_unset_write(path, payload, **kwargs):
+        parsed = yaml.safe_load(payload.decode("utf-8"))
+        rows = parsed.get("provider_credentials") if isinstance(parsed, dict) else None
         row = rows[0] if isinstance(rows, list) and rows else {}
-        if row.get("id") == "alibaba-default" and not row.get("default"):
+        if Path(path).name == "config.yaml" and row.get("id") == "alibaba-default" and not row.get("default"):
             before_unset_save.set()
             assert release_unset.wait(timeout=3)
-        return original_save(path, data)
+        return original_write(path, payload, **kwargs)
 
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", pause_before_unset_save)
+    monkeypatch.setattr(
+        credential_store,
+        "_atomic_write_credential_bytes",
+        pause_before_unset_write,
+    )
     with ThreadPoolExecutor(max_workers=2) as pool:
         unset = pool.submit(model_config.upsert_provider_credential, {"id": "alibaba-default", "provider": "alibaba", "default": False})
         assert before_unset_save.wait(timeout=2)
@@ -589,8 +722,8 @@ def test_lazy_default_binding_rolls_back_when_config_save_fails(monkeypatch, tmp
     }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(original), encoding="utf-8")
     monkeypatch.setattr(
-        model_config,
-        "_save_yaml_config_file",
+        credential_store,
+        "_atomic_write_credential_bytes",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
 
@@ -719,6 +852,38 @@ def test_unknown_provider_credential_delete_fails_safely(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="不存在"):
         model_config.delete_provider_credential("missing")
+
+
+@pytest.mark.parametrize(
+    "unsafe_yaml",
+    [
+        "model: [\n",
+        "model:\n  provider: first\nmodel:\n  provider: second\n",
+    ],
+)
+def test_provider_credential_upsert_rejects_unsafe_yaml_without_touching_files(
+    monkeypatch, tmp_path, unsafe_yaml
+):
+    _use_home(monkeypatch, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(unsafe_yaml, encoding="utf-8")
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_config = config_path.read_bytes()
+    original_env = env_path.read_bytes()
+
+    with pytest.raises(ValueError, match="config"):
+        model_config.upsert_provider_credential(
+            {
+                "id": "new-credential",
+                "provider_family": "custom",
+                "api_key": "must-not-be-written",
+            }
+        )
+
+    assert config_path.read_bytes() == original_config
+    assert env_path.read_bytes() == original_env
+    assert "TAIJI_CREDENTIAL_NEW_CREDENTIAL_API_KEY" not in os.environ
 
 
 @pytest.mark.parametrize("replacement_key", [None, "zhipu-secret"])
@@ -858,22 +1023,128 @@ def test_concurrent_cross_family_upserts_cannot_mismatch_metadata_and_secret(mon
         assert "alibaba-secret" not in env_text
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cross-process flock is POSIX-only")
+def test_credential_transaction_serializes_cross_process_read_modify_write(tmp_path):
+    config_path = tmp_path / "transaction.json"
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    processes = [
+        context.Process(
+            target=_credential_transaction_process_writer,
+            args=(str(config_path), key, start_event),
+        )
+        for key in ("process_a", "process_b")
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "process_a": True,
+        "process_b": True,
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cross-process flock is POSIX-only")
+def test_cli_env_writer_joins_credential_transaction_lock(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+    context = multiprocessing.get_context("spawn")
+    acquired_event = context.Event()
+    release_event = context.Event()
+    started_event = context.Event()
+    completed_event = context.Event()
+    holder = context.Process(
+        target=_credential_transaction_process_holder,
+        args=(str(config_path), acquired_event, release_event),
+    )
+    writer = context.Process(
+        target=_cli_env_process_writer,
+        args=(
+            str(config_path),
+            "CLI_SERIALIZED_KEY",
+            "cli-value",
+            started_event,
+            completed_event,
+        ),
+    )
+    holder.start()
+    assert acquired_event.wait(timeout=5)
+    writer.start()
+    assert started_event.wait(timeout=5)
+    completed_while_locked = completed_event.wait(timeout=0.5)
+    release_event.set()
+    holder.join(timeout=10)
+    writer.join(timeout=10)
+
+    assert holder.exitcode == 0
+    assert writer.exitcode == 0
+    assert completed_while_locked is False
+    assert "CLI_SERIALIZED_KEY=cli-value" in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cross-process flock is POSIX-only")
+def test_runtime_credential_reader_cannot_observe_half_commit(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("provider_credentials: []\n", encoding="utf-8")
+    secret_env = "TAIJI_CREDENTIAL_NEW_PROVIDER_API_KEY"
+    context = multiprocessing.get_context("spawn")
+    half_committed_event = context.Event()
+    release_event = context.Event()
+    completed_event = context.Event()
+    result_queue = context.Queue()
+    writer = context.Process(
+        target=_half_commit_process_writer,
+        args=(
+            str(config_path),
+            secret_env,
+            half_committed_event,
+            release_event,
+        ),
+    )
+    reader = context.Process(
+        target=_credential_config_process_reader,
+        args=(str(config_path), completed_event, result_queue),
+    )
+    writer.start()
+    assert half_committed_event.wait(timeout=5)
+    reader.start()
+    completed_while_half_committed = completed_event.wait(timeout=0.5)
+    release_event.set()
+    writer.join(timeout=10)
+    reader.join(timeout=10)
+
+    assert writer.exitcode == 0
+    assert reader.exitcode == 0
+    assert completed_while_half_committed is False
+    assert result_queue.get(timeout=2)["provider_credentials"][0]["id"] == "new-provider"
+
+
 def test_interleaved_upsert_delete_leaves_complete_or_absent_credential(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     model_config.upsert_provider_credential(
         {"id": "shared", "provider": "alibaba", "api_key": "initial-secret"}
     )
     secret_written = threading.Event()
-    original_write = model_config._write_env_file
+    original_atomic_write = credential_store._atomic_write_credential_bytes
 
-    def delayed_write(env_path, updates):
-        result = original_write(env_path, updates)
-        if updates == {"TAIJI_CREDENTIAL_SHARED_API_KEY": "updated-secret"}:
+    def delayed_env_write(path, payload, **kwargs):
+        result = original_atomic_write(path, payload, **kwargs)
+        if Path(path).name == ".env" and b"updated-secret" in payload:
             secret_written.set()
             time.sleep(0.1)
         return result
 
-    monkeypatch.setattr(model_config, "_write_env_file", delayed_write)
+    monkeypatch.setattr(
+        credential_store,
+        "_atomic_write_credential_bytes",
+        delayed_env_write,
+    )
 
     def upsert():
         model_config.upsert_provider_credential(
@@ -896,28 +1167,22 @@ def test_interleaved_upsert_delete_leaves_complete_or_absent_credential(monkeypa
         assert "TAIJI_CREDENTIAL_SHARED_API_KEY" not in env_text
 
 
-def test_upsert_restores_previous_secret_when_yaml_save_fails(monkeypatch, tmp_path):
+def test_upsert_leaves_previous_pair_when_journal_write_fails(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     model_config.upsert_provider_credential(
         {"id": "shared", "provider": "alibaba", "label": "Before", "api_key": "before-secret"}
     )
-    original_save = model_config._save_yaml_config_file
-    failed = False
-
-    def fail_after_save(*args, **kwargs):
-        nonlocal failed
-        result = original_save(*args, **kwargs)
-        if not failed:
-            failed = True
-            raise OSError("simulated yaml failure")
-        return result
-
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", fail_after_save)
-    with pytest.raises(OSError, match="simulated"):
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated journal failure")
+        ),
+    )
+    with pytest.raises(OSError, match="simulated journal failure"):
         model_config.upsert_provider_credential(
             {"id": "shared", "provider": "alibaba", "label": "After", "api_key": "after-secret"}
         )
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", original_save)
 
     assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "Before"
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
@@ -925,30 +1190,157 @@ def test_upsert_restores_previous_secret_when_yaml_save_fails(monkeypatch, tmp_p
     assert "after-secret" not in env_text
 
 
-def test_delete_restores_metadata_when_secret_delete_fails(monkeypatch, tmp_path):
+def test_upsert_preserves_durable_commit_after_post_commit_failure(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": "shared",
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Before",
+                        "auth_type": "api_key",
+                        "secret_env": "TAIJI_CREDENTIAL_SHARED_API_KEY",
+                    }
+                ],
+                "auxiliary": {
+                    "vision": {
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                        "credential_ref": "shared",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "TAIJI_CREDENTIAL_SHARED_API_KEY=before-secret\n",
+        encoding="utf-8",
+    )
+    api_config.reload_config()
+    assert api_config.get_config()["provider_credentials"][0]["label"] == "Before"
+
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda: (_ for _ in ()).throw(OSError("simulated invalidation failure")),
+    )
+
+    with pytest.raises(OSError, match="simulated invalidation failure"):
+        model_config.upsert_provider_credential(
+            {
+                "id": "shared",
+                "provider": "alibaba",
+                "label": "After",
+                "api_key": "after-secret",
+            }
+        )
+
+    assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "After"
+    assert api_config.get_config()["provider_credentials"][0]["label"] == "After"
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "TAIJI_CREDENTIAL_SHARED_API_KEY=after-secret" in env_text
+    assert "before-secret" not in env_text
+
+
+def test_upsert_preserves_exact_pair_when_env_stage_preparation_fails(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "shared",
+            "provider": "alibaba",
+            "label": "Before",
+            "api_key": "before-secret",
+        }
+    )
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    original_config = config_path.read_bytes()
+    original_env = env_path.read_bytes()
+
+    original_prepare = credential_store._prepare_pair_target
+
+    def fail_env_stage(*, name, **kwargs):
+        if name == "env":
+            raise OSError("env stage failure")
+        return original_prepare(name=name, **kwargs)
+
+    monkeypatch.setattr(credential_store, "_prepare_pair_target", fail_env_stage)
+
+    with pytest.raises(OSError, match="env stage failure"):
+        model_config.upsert_provider_credential(
+            {
+                "id": "shared",
+                "provider": "alibaba",
+                "label": "After",
+                "api_key": "after-secret",
+            }
+        )
+
+    assert config_path.read_bytes() == original_config
+    assert env_path.read_bytes() == original_env
+
+
+def test_delete_preserves_pair_when_journal_write_fails(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     model_config.upsert_provider_credential(
         {"id": "shared", "provider": "alibaba", "label": "Shared", "api_key": "shared-secret"}
     )
-    original_write = model_config._write_env_file
-    failed = False
-
-    def fail_after_delete(env_path, updates):
-        nonlocal failed
-        result = original_write(env_path, updates)
-        if not failed and updates == {"TAIJI_CREDENTIAL_SHARED_API_KEY": None}:
-            failed = True
-            raise OSError("simulated env failure")
-        return result
-
-    monkeypatch.setattr(model_config, "_write_env_file", fail_after_delete)
-    with pytest.raises(OSError, match="simulated"):
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated journal failure")
+        ),
+    )
+    with pytest.raises(OSError, match="simulated journal failure"):
         model_config.delete_provider_credential("shared")
 
     assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "Shared"
     assert "TAIJI_CREDENTIAL_SHARED_API_KEY=shared-secret" in (
         tmp_path / ".env"
     ).read_text(encoding="utf-8")
+
+
+def test_delete_preserves_exact_pair_when_env_stage_preparation_fails(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "shared",
+            "provider": "alibaba",
+            "label": "Shared",
+            "api_key": "shared-secret",
+        }
+    )
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    original_config = config_path.read_bytes()
+    original_env = env_path.read_bytes()
+
+    original_prepare = credential_store._prepare_pair_target
+
+    def fail_env_stage(*, name, **kwargs):
+        if name == "env":
+            raise OSError("env stage failure")
+        return original_prepare(name=name, **kwargs)
+
+    monkeypatch.setattr(credential_store, "_prepare_pair_target", fail_env_stage)
+
+    with pytest.raises(OSError, match="env stage failure"):
+        model_config.delete_provider_credential("shared")
+
+    assert config_path.read_bytes() == original_config
+    assert env_path.read_bytes() == original_env
 
 
 def test_legacy_dashscope_api_key_payload_remains_compatible(monkeypatch, tmp_path):
@@ -1008,6 +1400,52 @@ def test_custom_main_model_uses_key_env_not_inline_secret(monkeypatch, tmp_path)
     ).read_text(encoding="utf-8")
     assert "custom-secret-key-123456" not in json.dumps(result)
     os.environ.pop("HERMES_CUSTOM_MODEL_API_KEY", None)
+
+
+def test_main_model_config_acquires_credential_transaction_before_cfg_lock(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    transaction_depth = 0
+
+    @contextmanager
+    def tracked_transaction(_config_path):
+        nonlocal transaction_depth
+        transaction_depth += 1
+        try:
+            yield
+        finally:
+            transaction_depth -= 1
+
+    def strict_loader(_config_path):
+        assert transaction_depth == 1
+        return {}
+
+    monkeypatch.setattr(
+        model_config,
+        "credential_transaction",
+        tracked_transaction,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "load_credential_config",
+        strict_loader,
+    )
+    monkeypatch.setattr(model_config, "reload_config", lambda: None)
+    monkeypatch.setattr(model_config, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(
+        model_config,
+        "get_model_config",
+        lambda: {"ok": True},
+    )
+
+    assert model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+        }
+    ) == {"ok": True}
 
 
 def test_oauth_main_provider_rejected_from_webui(monkeypatch, tmp_path):
@@ -1314,10 +1752,13 @@ def test_legacy_dashscope_inline_key_rolls_back_when_yaml_save_fails(
         encoding="utf-8",
     )
 
-    def fail_save(*_args, **_kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", fail_save)
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("disk full")
+        ),
+    )
 
     with pytest.raises(OSError, match="disk full"):
         model_config.set_image_gen_config(
@@ -1863,17 +2304,13 @@ def test_alibaba_single_key_rolls_back_env_and_config_on_save_failure(
     (tmp_path / ".env").write_text(
         "DASHSCOPE_API_KEY=old-test-key\n", encoding="utf-8"
     )
-    original_save = model_config._save_yaml_config_file
-    calls = []
-
-    def fail_first_save(path, data):
-        calls.append(True)
-        if len(calls) == 1:
-            path.write_text("partial: true\n", encoding="utf-8")
-            raise OSError("disk full")
-        return original_save(path, data)
-
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", fail_first_save)
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("disk full")
+        ),
+    )
 
     with pytest.raises(OSError, match="disk full"):
         model_config.set_alibaba_image_capabilities(
@@ -2543,36 +2980,214 @@ def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypat
     )
 
     cfg = _read_config(tmp_path)
-    providers = cfg["custom_image_providers"]
-    assert providers == [
-        {
-            "id": "router",
-            "name": "Router Images",
-            "base_url": "https://images.example.com/v1",
-            "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
-            "allow_custom_model_id": False,
-            "models": ["gpt-image-custom"],
-            "default_model": "gpt-image-custom",
-            "size_map": {
-                "landscape": "1536x1024",
-                "square": "1024x1024",
-                "portrait": "1024x1536",
-            },
-            "response_format": "auto",
-            "timeout_seconds": 45,
-        }
-    ]
-    assert "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=router-secret-key-123456" in (
+    provider = cfg["custom_image_providers"][0]
+    credential_ref = provider.pop("credential_ref")
+    assert provider == {
+        "id": "router",
+        "name": "Router Images",
+        "base_url": "https://images.example.com/v1",
+        "allow_custom_model_id": False,
+        "models": ["gpt-image-custom"],
+        "default_model": "gpt-image-custom",
+        "size_map": {
+            "landscape": "1536x1024",
+            "square": "1024x1024",
+            "portrait": "1024x1536",
+        },
+        "response_format": "auto",
+        "timeout_seconds": 45,
+        "network_scope": "public_direct",
+        "trusted_proxy_profile": "",
+    }
+    credential = next(
+        row for row in cfg["provider_credentials"] if row["id"] == credential_ref
+    )
+    canonical_env = model_config.credential_secret_env(credential_ref)
+    assert credential["provider_family"] == "custom"
+    assert credential["auth_type"] == "api_key"
+    assert credential["secret_env"] == canonical_env
+    assert credential["managed_by"] == "hermes-webui"
+    assert credential["source_capability"] == "custom_image_provider"
+    assert credential["source_provider_id"] == "router"
+    assert f"{canonical_env}=router-secret-key-123456" in (
         tmp_path / ".env"
     ).read_text(encoding="utf-8")
     dumped = json.dumps(result, ensure_ascii=False)
     assert "router-secret-key-123456" not in dumped
     assert result["provider"]["id"] == "custom:router"
-    assert result["provider"]["key_status"]["env_var"] == "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY"
+    assert result["provider"]["key_status"]["env_var"] == canonical_env
     assert result["provider"]["base_url"] == "https://images.example.com/v1"
     assert result["provider"]["size_map"]["square"] == "1024x1024"
     assert result["provider"]["allow_custom_model_id"] is False
-    os.environ.pop("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", None)
+    os.environ.pop(canonical_env, None)
+
+
+@pytest.mark.parametrize(
+    "getter_name",
+    (
+        "get_custom_vision_provider_configs",
+        "get_custom_image_provider_configs",
+    ),
+)
+def test_custom_provider_get_captures_active_config_path_once(
+    monkeypatch,
+    tmp_path,
+    getter_name,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "selected" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text("{}\n", encoding="utf-8")
+    lookups = 0
+
+    def one_lookup():
+        nonlocal lookups
+        lookups += 1
+        if lookups > 1:
+            raise AssertionError("active config path was resolved more than once")
+        return config_path
+
+    monkeypatch.setattr(model_config, "_get_config_path", one_lookup)
+
+    result = getattr(model_config, getter_name)()
+
+    assert result == {"ok": True, "providers": []}
+    assert lookups == 1
+
+
+@pytest.mark.parametrize(
+    ("capability", "setter_name", "payload"),
+    (
+        (
+            "image",
+            "set_custom_image_provider_config",
+            {
+                "id": "router",
+                "name": "Router Images",
+                "base_url": "https://images.example.com/v1",
+                "models": ["router-image"],
+                "default_model": "router-image",
+                "api_key": "selected-image-secret",
+            },
+        ),
+        (
+            "vision",
+            "set_custom_vision_provider_config",
+            {
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "models": ["router-vision"],
+                "default_model": "router-vision",
+                "transport": "openai_chat_completions",
+                "api_key": "selected-vision-secret",
+            },
+        ),
+    ),
+)
+def test_custom_provider_set_uses_captured_config_parent_for_env(
+    monkeypatch,
+    tmp_path,
+    capability,
+    setter_name,
+    payload,
+):
+    selected_home = tmp_path / "selected"
+    unrelated_home = tmp_path / "unrelated"
+    selected_home.mkdir()
+    unrelated_home.mkdir()
+    config_path = selected_home / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+    _use_home(monkeypatch, unrelated_home, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    if capability == "vision":
+        monkeypatch.setattr(
+            "agent.custom_vision_providers.is_custom_vision_base_url_safe",
+            lambda _url: True,
+        )
+    monkeypatch.setattr(
+        model_config,
+        "_refresh_custom_provider_commit",
+        lambda *_args, **_kwargs: {
+            "providers": [],
+            "refresh_pending": False,
+            "warnings": [],
+        },
+    )
+
+    getattr(model_config, setter_name)(payload)
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    entry = saved[f"custom_{capability}_providers"][0]
+    secret_env = model_config.credential_secret_env(entry["credential_ref"])
+    env_text = (selected_home / ".env").read_text(encoding="utf-8")
+    assert f"{secret_env}={payload['api_key']}" in env_text
+    assert not (unrelated_home / ".env").exists()
+    os.environ.pop(secret_env, None)
+
+
+@pytest.mark.parametrize(
+    ("capability", "deleter_name", "secret_env"),
+    (
+        (
+            "image",
+            "delete_custom_image_provider_config",
+            "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+        ),
+        (
+            "vision",
+            "delete_custom_vision_provider_config",
+            "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+        ),
+    ),
+)
+def test_custom_provider_delete_uses_captured_config_parent_for_env(
+    monkeypatch,
+    tmp_path,
+    capability,
+    deleter_name,
+    secret_env,
+):
+    selected_home = tmp_path / "selected"
+    unrelated_home = tmp_path / "unrelated"
+    selected_home.mkdir()
+    unrelated_home.mkdir()
+    config_path = selected_home / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                f"custom_{capability}_providers": [
+                    {
+                        "id": "router",
+                        "api_key_env": secret_env,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (selected_home / ".env").write_text(
+        f"{secret_env}=selected-secret\n",
+        encoding="utf-8",
+    )
+    _use_home(monkeypatch, unrelated_home, stub_image_gen=False)
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        model_config,
+        "_refresh_custom_provider_commit",
+        lambda *_args, **_kwargs: {
+            "providers": [],
+            "refresh_pending": False,
+            "warnings": [],
+        },
+    )
+
+    getattr(model_config, deleter_name)("router")
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    assert saved[f"custom_{capability}_providers"] == []
+    assert secret_env not in (selected_home / ".env").read_text(encoding="utf-8")
+    assert not (unrelated_home / ".env").exists()
 
 
 def test_custom_image_provider_rejects_insecure_http_without_persisting(monkeypatch, tmp_path):
@@ -2595,6 +3210,357 @@ def test_custom_image_provider_rejects_insecure_http_without_persisting(monkeypa
     assert not config_path.exists() or _read_config(tmp_path).get("custom_image_providers") in (None, [])
 
 
+@pytest.mark.parametrize(
+    "unsafe_yaml",
+    [
+        "model: [\n",
+        "model:\n  provider: first\nmodel:\n  provider: second\n",
+    ],
+)
+@pytest.mark.parametrize("capability", ["image", "vision"])
+def test_custom_provider_mutation_rejects_unsafe_yaml_without_touching_files(
+    monkeypatch, tmp_path, unsafe_yaml, capability
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(unsafe_yaml, encoding="utf-8")
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_config = config_path.read_bytes()
+    original_env = env_path.read_bytes()
+
+    if capability == "image":
+        setter = model_config.set_custom_image_provider_config
+        payload = {
+            "id": "router",
+            "base_url": "https://images.example.com/v1",
+            "models": ["image-model"],
+            "api_key": "must-not-be-written",
+        }
+    else:
+        setter = model_config.set_custom_vision_provider_config
+        payload = {
+            "id": "router",
+            "base_url": "https://vision.example.com/v1",
+            "models": ["vision-model"],
+            "transport": "openai_chat_completions",
+            "api_key": "must-not-be-written",
+        }
+
+    with pytest.raises(ValueError, match="config"):
+        setter(payload)
+
+    assert config_path.read_bytes() == original_config
+    assert env_path.read_bytes() == original_env
+    assert "must-not-be-written" not in json.dumps(dict(os.environ))
+
+
+@pytest.mark.parametrize("capability", ["image", "vision"])
+def test_builtin_capability_mutation_rejects_unsafe_yaml_without_touching_files(
+    monkeypatch, tmp_path, capability
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text("model: [\n", encoding="utf-8")
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_config = config_path.read_bytes()
+    original_env = env_path.read_bytes()
+
+    if capability == "image":
+        setter = model_config.set_image_gen_config
+        payload = {
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+    else:
+        setter = model_config.set_vision_config
+        payload = {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+
+    with pytest.raises(ValueError, match="config"):
+        setter(payload)
+
+    assert config_path.read_bytes() == original_config
+    assert env_path.read_bytes() == original_env
+
+
+@pytest.mark.parametrize(
+    ("setter_name", "payload", "secret_env"),
+    (
+        (
+            "set_vision_config",
+            {
+                "provider": "zai",
+                "model": "glm-5v-turbo",
+                "api_key": "vision-secret-after",
+            },
+            "GLM_API_KEY",
+        ),
+        (
+            "set_alibaba_image_capabilities",
+            {
+                "vision_model": "qwen3-vl-plus",
+                "image_model": "qwen-image-2.0-pro",
+                "api_key": "alibaba-secret-after",
+            },
+            "TAIJI_CREDENTIAL_TAIJI_ALIBABA_QUICK_API_KEY",
+        ),
+        (
+            "set_image_gen_config",
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "api_key": "image-secret-after",
+            },
+            "DASHSCOPE_API_KEY",
+        ),
+        (
+            "set_main_model_config",
+            {
+                "provider": "custom",
+                "model": "custom-model",
+                "base_url": "https://models.example.com/v1",
+                "api_key": "main-secret-after",
+            },
+            "HERMES_CUSTOM_MODEL_API_KEY",
+        ),
+    ),
+)
+def test_builtin_model_writers_preserve_config_env_pair_when_intent_fails(
+    monkeypatch,
+    tmp_path,
+    setter_name,
+    payload,
+    secret_env,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(
+        "unrelated:\n  owner: before\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_config = config_path.read_bytes()
+    original_env = env_path.read_bytes()
+    monkeypatch.delenv(secret_env, raising=False)
+
+    def fail_journal(*_args, **_kwargs):
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        fail_journal,
+    )
+
+    with pytest.raises(OSError, match="journal unavailable"):
+        getattr(model_config, setter_name)(payload)
+
+    assert config_path.read_bytes() == original_config
+    assert env_path.read_bytes() == original_env
+    assert secret_env not in os.environ
+
+
+def test_custom_provider_failed_intent_does_not_block_later_concurrent_env_write(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(
+        "model:\n  provider: deepseek\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_config = config_path.read_bytes()
+
+    journal_entered = threading.Event()
+    release_failure = threading.Event()
+    original_write_journal = credential_store._write_credential_journal
+    injected = False
+
+    def fail_first_journal(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            # Every durable env mutation now has its own journal. Inject only
+            # into the already-started custom-provider transaction so the
+            # later independent write can prove the failed lock holder did
+            # not leave a blocker or half-applied pair.
+            injected = True
+            journal_entered.set()
+            assert release_failure.wait(timeout=3)
+            raise OSError("journal unavailable")
+        return original_write_journal(*args, **kwargs)
+
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        fail_first_journal,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        provider_write = pool.submit(
+            model_config.set_custom_image_provider_config,
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "api_key": "must-not-be-committed",
+            },
+        )
+        assert journal_entered.wait(timeout=2)
+        unrelated_write = pool.submit(
+            providers._write_env_file,
+            env_path,
+            {"UNRELATED_CONCURRENT": "after"},
+            config_path=config_path,
+        )
+        time.sleep(0.05)
+        assert not unrelated_write.done()
+        release_failure.set()
+        with pytest.raises(OSError, match="journal unavailable"):
+            provider_write.result(timeout=3)
+        unrelated_write.result(timeout=3)
+
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "KEEP_EXISTING=before" in env_text
+    assert "UNRELATED_CONCURRENT=after" in env_text
+    assert "must-not-be-committed" not in env_text
+    assert os.environ["UNRELATED_CONCURRENT"] == "after"
+    assert config_path.read_bytes() == original_config
+    os.environ.pop("UNRELATED_CONCURRENT", None)
+
+
+def test_custom_provider_stage_failure_preserves_existing_env_and_config(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(
+        "model:\n  provider: deepseek\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_config = config_path.read_bytes()
+    original_prepare = credential_store._prepare_pair_target
+
+    def fail_env_stage(*, name, **kwargs):
+        if name == "env":
+            raise OSError("env stage unavailable")
+        return original_prepare(name=name, **kwargs)
+
+    monkeypatch.setattr(credential_store, "_prepare_pair_target", fail_env_stage)
+
+    with pytest.raises(OSError, match="env stage unavailable"):
+        model_config.set_custom_image_provider_config(
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "api_key": "must-not-be-committed",
+            }
+        )
+
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "KEEP_EXISTING=before" in env_text
+    assert "must-not-be-committed" not in env_text
+    assert config_path.read_bytes() == original_config
+
+
+def test_custom_provider_cas_refuses_to_overwrite_out_of_band_newer_config(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("owner: original\n", encoding="utf-8")
+
+    original_replace = credential_store._replace_credential_stage
+    injected = False
+
+    def inject_newer_before_replace(stage_path, **kwargs):
+        nonlocal injected
+        logical_path = Path(kwargs["logical_path"])
+        if logical_path.name == "config.yaml" and not injected:
+            injected = True
+            Path(kwargs["real_target"]).write_text(
+                "owner: newer-writer\n",
+                encoding="utf-8",
+            )
+        return original_replace(stage_path, **kwargs)
+
+    monkeypatch.setattr(
+        credential_store,
+        "_replace_credential_stage",
+        inject_newer_before_replace,
+    )
+
+    with pytest.raises(
+        credential_store.CredentialRecoveryError,
+        match="changed before replace",
+    ):
+        model_config.set_custom_image_provider_config(
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "api_key": "must-not-overwrite-newer-config",
+            }
+        )
+
+    assert config_path.read_text(encoding="utf-8") == "owner: newer-writer\n"
+
+
+def test_custom_provider_failed_intent_allows_newer_same_key_writer(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text("model:\n  provider: deepseek\n", encoding="utf-8")
+    env_path.write_text("KEEP_EXISTING=before\n", encoding="utf-8")
+    original_journal = credential_store._write_credential_journal
+    attempted_env_key: list[str] = []
+
+    def capture_key_then_fail(_lock_root, manifest):
+        attempted_env_key.extend(manifest["env_keys"])
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        capture_key_then_fail,
+    )
+
+    with pytest.raises(OSError, match="journal unavailable"):
+        model_config.set_custom_image_provider_config(
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "api_key": "attempted-secret",
+            }
+        )
+
+    assert len(attempted_env_key) == 1
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        original_journal,
+    )
+    providers._write_env_file(
+        env_path,
+        {attempted_env_key[0]: "newer-writer"},
+        config_path=config_path,
+    )
+    assert "newer-writer" in env_path.read_text(encoding="utf-8")
+    assert "attempted-secret" not in env_path.read_text(encoding="utf-8")
+
+
 def test_custom_vision_provider_config_writes_isolated_secret_and_redacts(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.delenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", raising=False)
@@ -2611,23 +3577,473 @@ def test_custom_vision_provider_config_writes_isolated_secret_and_redacts(monkey
     })
 
     cfg = _read_config(tmp_path)
-    assert cfg["custom_vision_providers"] == [{
+    provider = cfg["custom_vision_providers"][0]
+    credential_ref = provider.pop("credential_ref")
+    assert provider == {
         "id": "router",
         "name": "Router Vision",
         "base_url": "https://vision.example.com/v1",
-        "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
         "models": ["router-vl"],
         "default_model": "router-vl",
         "transport": "openai_chat_completions",
-    }]
-    assert "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=vision-secret-must-not-leak" in (
+        "network_scope": "public_direct",
+        "trusted_proxy_profile": "",
+    }
+    credential = next(
+        row for row in cfg["provider_credentials"] if row["id"] == credential_ref
+    )
+    canonical_env = model_config.credential_secret_env(credential_ref)
+    assert credential["provider_family"] == "custom"
+    assert credential["auth_type"] == "api_key"
+    assert credential["secret_env"] == canonical_env
+    assert credential["managed_by"] == "hermes-webui"
+    assert credential["source_capability"] == "custom_vision_provider"
+    assert credential["source_provider_id"] == "router"
+    assert f"{canonical_env}=vision-secret-must-not-leak" in (
         tmp_path / ".env"
     ).read_text(encoding="utf-8")
     public = json.dumps(result, ensure_ascii=False)
     assert "vision-secret-must-not-leak" not in public
     assert result["provider"]["id"] == "custom:router"
     assert result["provider"]["transport"] == "openai_chat_completions"
-    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
+    os.environ.pop(canonical_env, None)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "network_scope", "trusted_proxy_profile"),
+    (
+        ("https://127.0.0.1:8443/v1", "private_direct", ""),
+        ("https://10.20.30.40:8443/v1", "private_direct", ""),
+        ("https://[fd12:3456:789a::10]:8443/v1", "private_direct", ""),
+        (
+            "https://vision.internal.example/v1",
+            "trusted_proxy",
+            "corp-egress",
+        ),
+    ),
+)
+def test_custom_vision_save_preserves_non_public_runtime_transport_scope(
+    monkeypatch,
+    tmp_path,
+    base_url,
+    network_scope,
+    trusted_proxy_profile,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    public_guard_calls = []
+
+    def reject_public_guard(url):
+        public_guard_calls.append(url)
+        return False
+
+    monkeypatch.setattr(
+        "agent.custom_vision_providers.is_custom_vision_base_url_safe",
+        reject_public_guard,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_refresh_custom_provider_commit",
+        lambda *_args, **_kwargs: {
+            "providers": [],
+            "refresh_pending": False,
+            "warnings": [],
+        },
+    )
+
+    result = model_config.set_custom_vision_provider_config(
+        {
+            "id": "router",
+            "base_url": base_url,
+            "models": ["vision-model"],
+            "transport": "openai_chat_completions",
+            "network_scope": network_scope,
+            "trusted_proxy_profile": trusted_proxy_profile,
+            "api_key": "scope-secret",
+        }
+    )
+
+    saved = _read_config(tmp_path)
+    entry = saved["custom_vision_providers"][0]
+    assert result["ok"] is True
+    assert entry["base_url"] == base_url
+    assert entry["network_scope"] == network_scope
+    assert entry["trusted_proxy_profile"] == trusted_proxy_profile
+    assert public_guard_calls == []
+
+    import hermes_cli.config as cli_config
+    import httpx
+    from agent import auxiliary_client
+    from agent.safe_outbound_http import NetworkScope
+
+    monkeypatch.setattr(cli_config, "load_config", lambda: _read_config(tmp_path))
+    transport = object()
+    transport_calls = []
+    client_calls = []
+
+    def build_transport(**kwargs):
+        transport_calls.append(kwargs)
+        return transport
+
+    def build_client(**kwargs):
+        client_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        auxiliary_client,
+        "build_openai_sync_transport",
+        build_transport,
+    )
+    monkeypatch.setattr(httpx, "Client", build_client)
+
+    runtime_client = auxiliary_client._build_named_openai_vision_http_client(
+        "custom:router",
+        async_mode=False,
+    )
+
+    assert runtime_client is not None
+    assert transport_calls == [
+        {
+            "network_scope": NetworkScope(network_scope),
+            "trusted_proxy_profile": trusted_proxy_profile or None,
+        }
+    ]
+    assert client_calls == [
+        {
+            "transport": transport,
+            "trust_env": False,
+            "follow_redirects": False,
+        }
+    ]
+
+
+def test_custom_vision_public_direct_keeps_dns_aware_save_guard(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    guard_calls = []
+
+    def deny_public_endpoint(url):
+        guard_calls.append(url)
+        return False
+
+    monkeypatch.setattr(
+        "agent.custom_vision_providers.is_custom_vision_base_url_safe",
+        deny_public_endpoint,
+    )
+
+    with pytest.raises(ValueError, match="公网安全校验"):
+        model_config.set_custom_vision_provider_config(
+            {
+                "id": "router",
+                "base_url": "https://vision.example.com/v1",
+                "models": ["vision-model"],
+                "transport": "openai_chat_completions",
+                "network_scope": "public_direct",
+                "api_key": "must-not-be-saved",
+            }
+        )
+
+    assert guard_calls == ["https://vision.example.com/v1"]
+    config_path = tmp_path / "config.yaml"
+    assert (
+        not config_path.exists()
+        or _read_config(tmp_path).get("custom_vision_providers") in (None, [])
+    )
+
+
+def test_custom_image_set_reports_refresh_pending_after_committed_save(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+    )
+
+    result = model_config.set_custom_image_provider_config(
+        {
+            "id": "router",
+            "base_url": "https://images.example.com/v1",
+            "models": ["image-model"],
+            "api_key": "committed-secret",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["refresh_pending"] is True
+    assert "image_gen_verification_refresh_pending" in result["warnings"]
+    saved = _read_config(tmp_path)
+    credential_ref = saved["custom_image_providers"][0]["credential_ref"]
+    secret_env = model_config.credential_secret_env(credential_ref)
+    assert saved["custom_image_providers"][0]["id"] == "router"
+    assert f"{secret_env}=committed-secret" in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_custom_vision_set_reports_refresh_pending_after_committed_save(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+    )
+
+    result = model_config.set_custom_vision_provider_config(
+        {
+            "id": "router",
+            "base_url": "https://vision.example.com/v1",
+            "models": ["vision-model"],
+            "transport": "openai_chat_completions",
+            "api_key": "committed-secret",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["refresh_pending"] is True
+    assert "vision_verification_refresh_pending" in result["warnings"]
+    assert _read_config(tmp_path)["custom_vision_providers"][0]["id"] == "router"
+
+
+@pytest.mark.parametrize("capability", ["image", "vision"])
+def test_custom_provider_delete_reports_refresh_pending_after_committed_delete(
+    monkeypatch, tmp_path, capability
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    if capability == "image":
+        model_config.set_custom_image_provider_config(
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "api_key": "committed-secret",
+            }
+        )
+        config_key = "custom_image_providers"
+        invalidator_name = "_invalidate_image_gen_verification"
+        warning = "image_gen_verification_refresh_pending"
+        delete = model_config.delete_custom_image_provider_config
+    else:
+        model_config.set_custom_vision_provider_config(
+            {
+                "id": "router",
+                "base_url": "https://vision.example.com/v1",
+                "models": ["vision-model"],
+                "transport": "openai_chat_completions",
+                "api_key": "committed-secret",
+            }
+        )
+        config_key = "custom_vision_providers"
+        invalidator_name = "_invalidate_vision_verification"
+        warning = "vision_verification_refresh_pending"
+        delete = model_config.delete_custom_vision_provider_config
+    created = _read_config(tmp_path)
+    credential_ref = created[config_key][0]["credential_ref"]
+    secret_env = model_config.credential_secret_env(credential_ref)
+    monkeypatch.setattr(
+        model_config,
+        invalidator_name,
+        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+    )
+
+    result = delete("router")
+
+    assert result["ok"] is True
+    assert result["refresh_pending"] is True
+    assert warning in result["warnings"]
+    deleted = _read_config(tmp_path)
+    assert deleted[config_key] == []
+    assert secret_env not in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_deleting_custom_provider_removes_its_exclusive_managed_credential(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+
+    model_config.set_custom_image_provider_config(
+        {
+            "id": "router",
+            "base_url": "https://images.example.com/v1",
+            "models": ["image-model"],
+            "api_key": "managed-secret",
+        }
+    )
+    created = _read_config(tmp_path)
+    credential_ref = created["custom_image_providers"][0]["credential_ref"]
+    secret_env = model_config.credential_secret_env(credential_ref)
+
+    model_config.delete_custom_image_provider_config("router")
+
+    deleted = _read_config(tmp_path)
+    assert deleted["custom_image_providers"] == []
+    assert all(
+        row.get("id") != credential_ref
+        for row in deleted.get("provider_credentials", [])
+    )
+    assert secret_env not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert secret_env not in os.environ
+
+
+def test_generic_credential_edit_preserves_custom_managed_lifecycle_metadata(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+
+    model_config.set_custom_image_provider_config(
+        {
+            "id": "router",
+            "base_url": "https://images.example.com/v1",
+            "models": ["image-model"],
+            "api_key": "initial-secret",
+        }
+    )
+    created = _read_config(tmp_path)
+    credential_ref = created["custom_image_providers"][0]["credential_ref"]
+    secret_env = model_config.credential_secret_env(credential_ref)
+
+    model_config.upsert_provider_credential(
+        {
+            "id": credential_ref,
+            "provider_family": "custom",
+            "label": "Rotated managed credential",
+            "api_key": "rotated-secret",
+        }
+    )
+
+    edited = next(
+        row
+        for row in _read_config(tmp_path)["provider_credentials"]
+        if row.get("id") == credential_ref
+    )
+    assert edited["managed_by"] == "hermes-webui"
+    assert edited["source_capability"] == "custom_image_provider"
+    assert edited["source_provider_id"] == "router"
+
+    model_config.delete_custom_image_provider_config("router")
+
+    deleted = _read_config(tmp_path)
+    assert all(
+        row.get("id") != credential_ref
+        for row in deleted.get("provider_credentials", [])
+    )
+    assert secret_env not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert secret_env not in os.environ
+
+
+def test_generic_custom_credential_rotation_invalidates_bound_capabilities(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    credential_ref = "shared-custom"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": credential_ref,
+                        "provider_family": "custom",
+                        "label": "Shared custom",
+                        "auth_type": "api_key",
+                        "secret_env": secret_env,
+                    }
+                ],
+                "custom_image_providers": [
+                    {
+                        "id": "image-router",
+                        "base_url": "https://images.example.com/v1",
+                        "credential_ref": credential_ref,
+                        "models": ["image-model"],
+                    }
+                ],
+                "custom_vision_providers": [
+                    {
+                        "id": "vision-router",
+                        "base_url": "https://vision.example.com/v1",
+                        "credential_ref": credential_ref,
+                        "models": ["vision-model"],
+                        "transport": "openai_chat_completions",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(f"{secret_env}=before\n", encoding="utf-8")
+    invalidated: list[str] = []
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda: invalidated.append("vision"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda: invalidated.append("image"),
+    )
+
+    model_config.upsert_provider_credential(
+        {
+            "id": credential_ref,
+            "provider_family": "custom",
+            "label": "Shared custom",
+            "api_key": "after",
+        }
+    )
+
+    assert invalidated == ["vision", "image"]
+
+
+def test_deleting_custom_providers_preserves_shared_user_owned_credential(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    credential_ref = "shared-custom"
+    secret_env = model_config.credential_secret_env(credential_ref)
+
+    model_config.set_custom_image_provider_config(
+        {
+            "id": "image-router",
+            "base_url": "https://images.example.com/v1",
+            "models": ["image-model"],
+            "credential_ref": credential_ref,
+            "api_key": "shared-secret",
+        }
+    )
+    model_config.set_custom_vision_provider_config(
+        {
+            "id": "vision-router",
+            "base_url": "https://vision.example.com/v1",
+            "models": ["vision-model"],
+            "transport": "openai_chat_completions",
+            "credential_ref": credential_ref,
+        }
+    )
+
+    model_config.delete_custom_image_provider_config("image-router")
+    model_config.delete_custom_vision_provider_config("vision-router")
+
+    deleted = _read_config(tmp_path)
+    shared = next(
+        row
+        for row in deleted["provider_credentials"]
+        if row.get("id") == credential_ref
+    )
+    assert "managed_by" not in shared
+    assert shared["secret_env"] == secret_env
+    assert f"{secret_env}=shared-secret" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    assert os.environ[secret_env] == "shared-secret"
+    os.environ.pop(secret_env, None)
 
 
 def test_custom_vision_provider_delete_rejects_active_provider(monkeypatch, tmp_path):
@@ -2687,7 +4103,7 @@ def test_custom_vision_provider_delete_removes_secret_and_recreate_without_key_i
     assert result["provider"]["key_status"]["configured"] is False
 
 
-def test_custom_vision_provider_delete_restores_secret_when_yaml_save_fails(
+def test_custom_vision_provider_delete_preserves_pair_when_journal_fails(
     monkeypatch, tmp_path
 ):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
@@ -2702,11 +4118,14 @@ def test_custom_vision_provider_delete_restores_secret_when_yaml_save_fails(
     )
     monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "old-secret")
     monkeypatch.setattr(
-        model_config, "_save_yaml_config_file",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        credential_store,
+        "_write_credential_journal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("journal unavailable")
+        ),
     )
 
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(OSError, match="journal unavailable"):
         model_config.delete_custom_vision_provider_config("router")
     assert "old-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
     assert os.environ["TAIJI_VISION_CUSTOM_ROUTER_API_KEY"] == "old-secret"
@@ -2727,7 +4146,7 @@ def test_custom_vision_provider_rejects_unknown_transport(monkeypatch, tmp_path)
         })
 
 
-def test_custom_vision_provider_restores_secret_when_metadata_save_fails(
+def test_custom_vision_provider_preserves_pair_when_journal_fails(
     monkeypatch, tmp_path
 ):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
@@ -2737,12 +4156,14 @@ def test_custom_vision_provider_restores_secret_when_metadata_save_fails(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        model_config,
-        "_save_yaml_config_file",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        credential_store,
+        "_write_credential_journal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("journal unavailable")
+        ),
     )
 
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(OSError, match="journal unavailable"):
         model_config.set_custom_vision_provider_config({
             "id": "router",
             "name": "Router Vision",
@@ -2755,6 +4176,119 @@ def test_custom_vision_provider_restores_secret_when_metadata_save_fails(
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "old-secret" in env_text
     assert "new-secret" not in env_text
+
+
+def test_canonical_named_custom_vision_provider_get_uses_credential_ref(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    credential_ref = "vision-router-key"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": credential_ref,
+                        "provider_family": "custom",
+                        "label": "Router Vision",
+                        "auth_type": "api_key",
+                        "secret_env": secret_env,
+                    }
+                ],
+                "auxiliary": {
+                    "vision": {
+                        "provider": "custom:router",
+                        "model": "router-vl",
+                    }
+                },
+                "custom_vision_providers": [
+                    {
+                        "id": "router",
+                        "name": "Router Vision",
+                        "base_url": "https://vision.example.com/v1",
+                        "credential_ref": credential_ref,
+                        "models": ["router-vl"],
+                        "default_model": "router-vl",
+                        "transport": "openai_chat_completions",
+                        "network_scope": "public_direct",
+                        "trusted_proxy_profile": "",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=canonical-vision-secret\n",
+        encoding="utf-8",
+    )
+
+    result = model_config.get_vision_config()
+
+    assert result["vision"]["key_status"] == {
+        "configured": True,
+        "source": "env_file",
+        "env_var": secret_env,
+    }
+    row = next(item for item in result["providers"] if item["id"] == "custom:router")
+    assert row["available"] is True
+    assert row["key_status"]["env_var"] == secret_env
+    assert "canonical-vision-secret" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_canonical_custom_vision_fingerprint_tracks_secret_and_network_identity(
+    monkeypatch, tmp_path
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    credential_ref = "vision-router-key"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    config = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": "custom",
+                "label": "Router Vision",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ],
+        "auxiliary": {
+            "vision": {
+                "provider": "custom:router",
+                "model": "router-vl",
+            }
+        },
+        "custom_vision_providers": [
+            {
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://vision.example.com/v1",
+                "credential_ref": credential_ref,
+                "models": ["router-vl"],
+                "default_model": "router-vl",
+                "transport": "openai_chat_completions",
+                "network_scope": "public_direct",
+                "trusted_proxy_profile": "",
+            }
+        ],
+    }
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    env_path.write_text(f"{secret_env}=before\n", encoding="utf-8")
+
+    before = model_config._capture_vision_config_snapshot().fingerprint
+    env_path.write_text(f"{secret_env}=after\n", encoding="utf-8")
+    after_secret = model_config._capture_vision_config_snapshot().fingerprint
+    config["custom_vision_providers"][0]["network_scope"] = "private_network"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    after_network = model_config._capture_vision_config_snapshot().fingerprint
+
+    assert before != after_secret
+    assert after_secret != after_network
+    assert "before" not in before + after_secret + after_network
+    assert "after" not in before + after_secret + after_network
 
 
 def test_named_custom_vision_provider_appears_in_vision_config(monkeypatch, tmp_path):
@@ -2978,8 +4512,7 @@ def test_unknown_image_model_is_rejected_before_provider_rows_or_environment(
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     readiness_calls = []
     environment_calls = []
-    env_write_calls = []
-    config_save_calls = []
+    commit_calls = []
     monkeypatch.setattr(
         model_config,
         "_ensure_image_gen_plugins_registered",
@@ -3004,13 +4537,8 @@ def test_unknown_image_model_is_rejected_before_provider_rows_or_environment(
     )
     monkeypatch.setattr(
         model_config,
-        "_write_env_file",
-        lambda *args, **kwargs: env_write_calls.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        model_config,
-        "_save_yaml_config_file",
-        lambda *args, **kwargs: config_save_calls.append((args, kwargs)),
+        "_commit_expected_config_env",
+        lambda *args, **kwargs: commit_calls.append((args, kwargs)),
     )
 
     with pytest.raises(ValueError, match="unknown image generation model"):
@@ -3024,8 +4552,7 @@ def test_unknown_image_model_is_rejected_before_provider_rows_or_environment(
 
     assert readiness_calls == []
     assert environment_calls == []
-    assert env_write_calls == []
-    assert config_save_calls == []
+    assert commit_calls == []
 
 
 def test_named_custom_image_and_vision_save_reject_unlisted_models_without_writing(
@@ -3060,11 +4587,11 @@ def test_named_custom_image_and_vision_save_reject_unlisted_models_without_writi
         yaml.safe_dump(original, allow_unicode=True),
         encoding="utf-8",
     )
-    env_write_calls = []
+    commit_calls = []
     monkeypatch.setattr(
         model_config,
-        "_write_env_file",
-        lambda *args, **kwargs: env_write_calls.append((args, kwargs)),
+        "_commit_expected_config_env",
+        lambda *args, **kwargs: commit_calls.append((args, kwargs)),
     )
 
     with pytest.raises(ValueError, match="unknown custom image"):
@@ -3085,7 +4612,7 @@ def test_named_custom_image_and_vision_save_reject_unlisted_models_without_writi
         )
 
     assert _read_config(tmp_path) == original
-    assert env_write_calls == []
+    assert commit_calls == []
 
 
 def test_named_custom_image_save_revalidates_after_concurrent_delete(

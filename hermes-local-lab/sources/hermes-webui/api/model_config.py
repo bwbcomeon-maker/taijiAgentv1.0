@@ -29,6 +29,8 @@ from agent.provider_credentials import (
     credential_secret_env,
     default_credential_ref,
     load_credential,
+    load_credential_config,
+    mutate_config_env_strict,
     normalize_credential_id,
     provider_family,
 )
@@ -44,9 +46,8 @@ from agent.image_gen_verification import (
 
 from api.config import (
     _cfg_lock,
+    _fsync_parent_directory,
     _get_config_path,
-    _load_yaml_config_file,
-    _save_yaml_config_file,
     get_auxiliary_models,
     invalidate_models_cache,
     reload_config,
@@ -59,9 +60,7 @@ from api.providers import (
     _load_env_file,
     _provider_has_key,
     _provider_is_oauth,
-    _write_env_file,
     get_providers,
-    set_provider_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -247,44 +246,28 @@ def _replace_provider_credential_row(
     config_data["provider_credentials"] = updated
 
 
-def _credential_env_snapshot(env_path: Path, secret_env: str) -> tuple[bool, str, bool, str]:
-    file_values = _load_env_file(env_path)
-    return (
-        secret_env in file_values,
-        str(file_values.get(secret_env) or ""),
-        secret_env in os.environ,
-        str(os.environ.get(secret_env) or ""),
-    )
-
-
-def _restore_credential_env(
-    env_path: Path,
-    secret_env: str,
-    snapshot: tuple[bool, str, bool, str],
-) -> None:
-    file_present, file_value, process_present, process_value = snapshot
-    _write_env_file(env_path, {secret_env: file_value if file_present else None})
-    if process_present:
-        os.environ[secret_env] = process_value
-    else:
-        os.environ.pop(secret_env, None)
-
-
-def _restore_provider_credential_metadata(
+def _commit_expected_config_env(
     config_path: Path,
-    credential_id: str,
-    previous_row: dict[str, Any] | None,
-    previous_index: int,
+    *,
+    expected_config: dict[str, Any],
+    desired_config: dict[str, Any],
+    env_updates: dict[str, str | None],
 ) -> None:
-    with _cfg_lock:
-        current = _load_yaml_config_file(config_path)
-        _replace_provider_credential_row(
-            current,
-            credential_id,
-            previous_row,
-            preferred_index=previous_index,
-        )
-        _save_yaml_config_file(config_path, current)
+    """Commit one config/.env pair without overwriting a newer config state."""
+
+    def replace_expected(current: dict[str, Any]) -> None:
+        if current != expected_config:
+            raise RuntimeError(
+                "credential config changed before the paired update"
+            )
+        current.clear()
+        current.update(copy.deepcopy(desired_config))
+
+    mutate_config_env_strict(
+        replace_expected,
+        env_updates,
+        config_path=config_path,
+    )
 
 
 def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str) -> list[str]:
@@ -302,7 +285,142 @@ def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str
             continue
         if ref == credential_id:
             used_by.append(path)
+    for config_key in ("custom_image_providers", "custom_vision_providers"):
+        entries = config_data.get(config_key)
+        if not isinstance(entries, list):
+            continue
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                ref = normalize_credential_id(entry.get("credential_ref"))
+            except ValueError:
+                continue
+            if ref != credential_id:
+                continue
+            provider_id = str(entry.get("id") or index).strip() or str(index)
+            used_by.append(f"{config_key}.{provider_id}")
     return used_by
+
+
+_CUSTOM_PROVIDER_CREDENTIAL_MANAGER = "hermes-webui"
+
+
+def _write_custom_provider_transaction(
+    *,
+    config_path: Path,
+    env_path: Path,
+    config_data: dict[str, Any],
+    env_updates: dict[str, str | None],
+) -> None:
+    """Commit custom-provider metadata and secret through one durable intent."""
+    desired = copy.deepcopy(config_data)
+
+    def replace(current: dict[str, Any]) -> None:
+        current.clear()
+        current.update(copy.deepcopy(desired))
+
+    with credential_transaction(config_path) as credential_spec:
+        if Path(env_path) != credential_spec.env_target:
+            raise ValueError(
+                "custom provider Secret path is not the pinned env target"
+            )
+        mutate_config_env_strict(
+            replace,
+            env_updates,
+            config_path=credential_spec.config_target,
+        )
+
+
+def _custom_provider_credential_binding(
+    config_data: dict[str, Any],
+    *,
+    requested_ref: str,
+    capability: str,
+    provider_id: str,
+    provider_label: str,
+) -> tuple[str, str]:
+    credential_ref = str(requested_ref or "").strip()
+    managed = not credential_ref
+    if managed:
+        credential_ref = normalize_credential_id(
+            f"webui-{capability}-{provider_id}-{uuid.uuid4().hex[:8]}"
+        )
+    else:
+        credential_ref = normalize_credential_id(credential_ref)
+
+    previous_index, previous_row = _provider_credential_row(config_data, credential_ref)
+    if previous_row is not None:
+        if provider_family(previous_row.get("provider_family")) != "custom":
+            raise ValueError("所选凭据不属于自定义 Provider。")
+        if str(previous_row.get("auth_type") or "api_key").strip().lower() != "api_key":
+            raise ValueError("自定义 Provider 凭据必须使用 API Key。")
+        _validate_provider_credential_secret_env(previous_row)
+        if previous_row.get("managed_by"):
+            if (
+                previous_row.get("managed_by") != _CUSTOM_PROVIDER_CREDENTIAL_MANAGER
+                or previous_row.get("source_capability") != capability
+                or previous_row.get("source_provider_id") != provider_id
+            ):
+                raise ValueError("所选托管凭据属于其他自定义 Provider。")
+        stored = dict(previous_row)
+    else:
+        stored = {
+            "id": credential_ref,
+            "provider_family": "custom",
+            "label": provider_label or provider_id,
+            "auth_type": "api_key",
+            "secret_env": credential_secret_env(credential_ref),
+        }
+        if managed:
+            stored.update(
+                {
+                    "managed_by": _CUSTOM_PROVIDER_CREDENTIAL_MANAGER,
+                    "source_capability": capability,
+                    "source_provider_id": provider_id,
+                }
+            )
+    stored.update(
+        {
+            "id": credential_ref,
+            "provider_family": "custom",
+            "auth_type": "api_key",
+            "secret_env": credential_secret_env(credential_ref),
+        }
+    )
+    _replace_provider_credential_row(
+        config_data,
+        credential_ref,
+        stored,
+        preferred_index=previous_index,
+    )
+    return credential_ref, credential_secret_env(credential_ref)
+
+
+def _remove_orphaned_managed_custom_credential(
+    config_data: dict[str, Any],
+    *,
+    credential_ref: str,
+    capability: str,
+    provider_id: str,
+) -> str:
+    try:
+        normalized_ref = normalize_credential_id(credential_ref)
+    except ValueError:
+        return ""
+    _index, row = _provider_credential_row(config_data, normalized_ref)
+    if row is None:
+        return ""
+    if (
+        row.get("managed_by") != _CUSTOM_PROVIDER_CREDENTIAL_MANAGER
+        or row.get("source_capability") != capability
+        or row.get("source_provider_id") != provider_id
+        or _provider_credential_used_by(config_data, normalized_ref)
+    ):
+        return ""
+    secret_env = _validate_provider_credential_secret_env(row)
+    _replace_provider_credential_row(config_data, normalized_ref, None)
+    return secret_env
 
 
 def _public_provider_credential(
@@ -326,8 +444,8 @@ def _public_provider_credential(
 
 
 def get_provider_credentials_config() -> dict[str, Any]:
-    with credential_transaction():
-        config_data = _load_yaml_config_file(_get_config_path())
+    with credential_transaction(_get_config_path()):
+        config_data = load_credential_config(_get_config_path())
         rows = config_data.get("provider_credentials")
         credentials: list[dict[str, Any]] = []
         if isinstance(rows, list):
@@ -362,11 +480,10 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
     requested_default = body.get("default") if "default" in body else None
     if requested_default is not None and not isinstance(requested_default, bool):
         raise ValueError("default must be a boolean")
-    config_path = _get_config_path()
-    env_path = _get_hermes_home() / ".env"
-    with credential_transaction():
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path):
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
         previous_index, previous_row = _provider_credential_row(config_data, credential_id)
         if previous_row is not None:
             _validate_provider_credential_secret_env(previous_row)
@@ -396,100 +513,73 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
             "auth_type": auth_type,
             "secret_env": secret_env,
         }
+        if previous_row is not None:
+            for lifecycle_key in (
+                "managed_by",
+                "source_capability",
+                "source_provider_id",
+            ):
+                if lifecycle_key in previous_row:
+                    stored[lifecycle_key] = previous_row[lifecycle_key]
         if default_value:
             stored["default"] = True
-        env_snapshot = _credential_env_snapshot(env_path, secret_env)
-        env_touched = False
-        metadata_touched = False
-        try:
-            if secret_value:
-                env_touched = True
-                _write_env_file(env_path, {secret_env: secret_value})
-            with _cfg_lock:
-                latest = _load_yaml_config_file(config_path)
-                _replace_provider_credential_row(
-                    latest,
-                    credential_id,
-                    stored,
-                    preferred_index=previous_index,
-                )
-                metadata_touched = True
-                _save_yaml_config_file(config_path, latest)
-            reload_config()
-            public_config = get_provider_credentials_config()
-            credential = next(
-                row for row in public_config["credentials"] if row["id"] == credential_id
+        def update_metadata(latest: dict[str, Any]) -> None:
+            _replace_provider_credential_row(
+                latest,
+                credential_id,
+                copy.deepcopy(stored),
+                preferred_index=previous_index,
             )
-            if secret_value:
-                used_by = credential.get("used_by") or []
-                if "auxiliary.vision" in used_by:
-                    _invalidate_vision_verification()
-                if "image_gen" in used_by:
-                    _invalidate_image_gen_verification()
-            return {"ok": True, "credential": credential}
-        except Exception:
-            if metadata_touched:
-                try:
-                    _restore_provider_credential_metadata(
-                        config_path,
-                        credential_id,
-                        previous_row,
-                        previous_index,
-                    )
-                except Exception:
-                    logger.exception("Failed to restore provider credential metadata")
-            if env_touched:
-                try:
-                    _restore_credential_env(env_path, secret_env, env_snapshot)
-                except Exception:
-                    logger.exception("Failed to restore provider credential secret")
-            raise
+
+        mutate_config_env_strict(
+            update_metadata,
+            {secret_env: secret_value} if secret_value else {},
+            config_path=config_path,
+        )
+        reload_config()
+        public_config = get_provider_credentials_config()
+        credential = next(
+            row for row in public_config["credentials"] if row["id"] == credential_id
+        )
+        if secret_value:
+            used_by = credential.get("used_by") or []
+            if "auxiliary.vision" in used_by or any(
+                str(path).startswith("custom_vision_providers.")
+                for path in used_by
+            ):
+                _invalidate_vision_verification()
+            if "image_gen" in used_by or any(
+                str(path).startswith("custom_image_providers.")
+                for path in used_by
+            ):
+                _invalidate_image_gen_verification()
+        return {"ok": True, "credential": credential}
 
 
 def delete_provider_credential(credential_id: str) -> dict[str, Any]:
     normalized = normalize_credential_id(credential_id)
-    config_path = _get_config_path()
-    env_path = _get_hermes_home() / ".env"
-    with credential_transaction():
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path):
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
         used_by = _provider_credential_used_by(config_data, normalized)
         if used_by:
             raise ValueError("凭据正在使用，不能删除。")
-        previous_index, previous_row = _provider_credential_row(config_data, normalized)
+        _previous_index, previous_row = _provider_credential_row(config_data, normalized)
         if previous_row is None:
             raise ValueError("凭据不存在。")
         secret_env = _validate_provider_credential_secret_env(previous_row)
-        env_snapshot = _credential_env_snapshot(env_path, secret_env)
-        metadata_touched = False
-        env_touched = False
-        try:
-            with _cfg_lock:
-                latest = _load_yaml_config_file(config_path)
-                _replace_provider_credential_row(latest, normalized, None)
-                metadata_touched = True
-                _save_yaml_config_file(config_path, latest)
-            env_touched = True
-            _write_env_file(env_path, {secret_env: None})
-            reload_config()
-            return get_provider_credentials_config()
-        except Exception:
-            if metadata_touched:
-                try:
-                    _restore_provider_credential_metadata(
-                        config_path,
-                        normalized,
-                        previous_row,
-                        previous_index,
-                    )
-                except Exception:
-                    logger.exception("Failed to restore deleted provider credential metadata")
-            if env_touched:
-                try:
-                    _restore_credential_env(env_path, secret_env, env_snapshot)
-                except Exception:
-                    logger.exception("Failed to restore deleted provider credential secret")
-            raise
+
+        def remove_metadata(latest: dict[str, Any]) -> None:
+            _replace_provider_credential_row(latest, normalized, None)
+
+        mutate_config_env_strict(
+            remove_metadata,
+            {secret_env: None},
+            config_path=config_path,
+        )
+        reload_config()
+        return get_provider_credentials_config()
 _VISION_PROBE_MARKER = "TAIJI-VISION-CHECK-7319"
 _VISION_PROBE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAkAAAAA0CAAAAABH3dgUAAABPElEQVR42u3aYRKCIBAGUO9/6TpAyO4COYrv+1cpwvKasc3jIzKRQwkEIAFIABKARAASgAQgAUgEIAFIHgLoaKT1Web41jnR8T+Ta4xXmWf1+Oi60Vxb1101/8p8zsaPan/2Xm+vAAIIIIAAAmgHQNkCVhaUnei/51E5PwKVXU9v/NFxsrUbGXekvgABBBBAAAEE0F6AMht+NaCVeFbVFyCAAAIIIIB2BxQ1DGcA9Rpf5QUVGmWZDc40JHsbX2noReNkx19Vn1TzESCAAAIIIIA2BzT6+sqb6FXrmL3OHW6is38Az64TIIAAAggggABaDygq3tsAzXz5AAIIIIAAAgigdYAyD4dXGl+VhVYbdG96qH6kKZidC0AAAQQQQADtDEgk/SNHCQQgAUgAEoBEABKABCABSAQgAUjumy803ZPAu+g+xgAAAABJRU5ErkJggg=="
@@ -605,11 +695,15 @@ def _safe_model_cfg(config_data: dict[str, Any]) -> dict[str, Any]:
     return model_cfg if isinstance(model_cfg, dict) else {}
 
 
-def _key_status_for_env(env_var: str | None) -> dict[str, Any]:
+def _key_status_for_env(
+    env_var: str | None,
+    *,
+    env_path: Path | None = None,
+) -> dict[str, Any]:
     if not env_var:
         return {"configured": False, "source": "none", "env_var": ""}
-    env_path = _get_hermes_home() / ".env"
-    env_values = _load_env_file(env_path)
+    target_env_path = Path(env_path) if env_path is not None else _get_hermes_home() / ".env"
+    env_values = _load_env_file(target_env_path)
     if str(env_values.get(env_var) or "").strip():
         return {"configured": True, "source": "env_file", "env_var": env_var}
     if str(os.getenv(env_var) or "").strip():
@@ -729,7 +823,7 @@ def _image_gen_provider_model_contract(
         data = (
             config_data
             if isinstance(config_data, dict)
-            else _load_yaml_config_file(_get_config_path())
+            else load_credential_config(_get_config_path())
         )
         entry = next(
             (
@@ -804,7 +898,7 @@ def _image_gen_credential_fields(
 
 def _image_gen_options_for_active(active_provider: str) -> dict[str, Any]:
     try:
-        config_data = _load_yaml_config_file(_get_config_path())
+        config_data = load_credential_config(_get_config_path())
     except Exception:
         return {}
     image_cfg = config_data.get("image_gen") if isinstance(config_data, dict) else None
@@ -882,7 +976,7 @@ def _image_gen_named_key_status(
 ) -> dict[str, Any] | None:
     if not active:
         return None
-    config_data = _load_yaml_config_file(_get_config_path())
+    config_data = load_credential_config(_get_config_path())
     image_cfg = config_data.get("image_gen")
     if not isinstance(image_cfg, dict):
         return None
@@ -1190,9 +1284,14 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
 
 
 def get_image_gen_config() -> dict[str, Any]:
+    with credential_transaction(_get_config_path()):
+        return _get_image_gen_config_unlocked()
+
+
+def _get_image_gen_config_unlocked() -> dict[str, Any]:
     reload_config()
     config_path = _get_config_path()
-    config_data = _load_yaml_config_file(config_path)
+    config_data = load_credential_config(config_path)
     image_cfg = config_data.get("image_gen")
     if not isinstance(image_cfg, dict):
         image_cfg = {}
@@ -1241,29 +1340,75 @@ def get_image_gen_config() -> dict[str, Any]:
     }
 
 
+def _custom_vision_entry_and_secret_env(
+    provider_id: str,
+    *,
+    config_data: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    provider = str(provider_id or "").strip().lower()
+    if not provider.startswith("custom:"):
+        return {}, ""
+    try:
+        from agent.custom_vision_providers import (
+            custom_vision_provider_secret_env,
+            find_custom_vision_provider_entry,
+        )
+    except ImportError:
+        return {}, ""
+    data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(_get_config_path())
+    )
+    entry = find_custom_vision_provider_entry(provider, data) or {}
+    if not entry:
+        return {}, ""
+    credential_ref = str(entry.get("credential_ref") or "").strip()
+    if credential_ref:
+        try:
+            row = load_credential(credential_ref, config_data=data)
+            if provider_family(row.get("provider_family")) != "custom":
+                return entry, ""
+            expected = credential_secret_env(row.get("id"))
+            if str(row.get("secret_env") or "").strip() != expected:
+                return entry, ""
+            return entry, expected
+        except ValueError:
+            return entry, ""
+    try:
+        return entry, custom_vision_provider_secret_env(entry)
+    except ValueError:
+        return entry, ""
+
+
 def _vision_key_status(
     provider_id: str,
     vision_cfg: dict[str, Any] | None = None,
+    *,
+    config_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     provider = str(provider_id or "").strip().lower()
     if provider.startswith("custom:"):
-        try:
-            from agent.custom_vision_providers import find_custom_vision_provider_entry
-
-            entry = find_custom_vision_provider_entry(
-                provider,
-                _load_yaml_config_file(_get_config_path()),
-            )
-        except ImportError:
-            entry = None
-        if entry is not None:
-            return _key_status_for_env(entry["api_key_env"])
+        _entry, env_var = _custom_vision_entry_and_secret_env(
+            provider,
+            config_data=config_data,
+        )
+        return (
+            _key_status_for_env(env_var)
+            if env_var
+            else {"configured": False, "source": "none", "env_var": ""}
+        )
     credential_ref = str((vision_cfg or {}).get("credential_ref") or "").strip()
     if credential_ref:
         try:
+            data = (
+                config_data
+                if isinstance(config_data, dict)
+                else load_credential_config(_get_config_path())
+            )
             row = load_credential(
                 credential_ref,
-                config_data=_load_yaml_config_file(_get_config_path()),
+                config_data=data,
             )
             if provider_family(row.get("provider_family")) != provider_family(provider):
                 return {"configured": False, "source": "none", "env_var": ""}
@@ -1337,8 +1482,11 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(tmp_name, 0o600)
         os.replace(tmp_name, path)
+        _fsync_parent_directory(path)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -1363,13 +1511,28 @@ def _read_vision_verification_state(profile: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _vision_secret_digest(provider: str, credential_ref: str = "") -> str:
+def _vision_secret_digest(
+    provider: str,
+    credential_ref: str = "",
+    *,
+    config_data: dict[str, Any] | None = None,
+) -> str:
     env_var = ""
-    if credential_ref:
+    if str(provider or "").startswith("custom:"):
+        _entry, env_var = _custom_vision_entry_and_secret_env(
+            provider,
+            config_data=config_data,
+        )
+    elif credential_ref:
         try:
+            data = (
+                config_data
+                if isinstance(config_data, dict)
+                else load_credential_config(_get_config_path())
+            )
             row = load_credential(
                 credential_ref,
-                config_data=_load_yaml_config_file(_get_config_path()),
+                config_data=data,
             )
             if provider_family(row.get("provider_family")) == provider_family(provider):
                 expected = credential_secret_env(row.get("id"))
@@ -1377,17 +1540,6 @@ def _vision_secret_digest(provider: str, credential_ref: str = "") -> str:
                     env_var = expected
         except ValueError:
             pass
-    elif str(provider or "").startswith("custom:"):
-        try:
-            from agent.custom_vision_providers import find_custom_vision_provider_entry
-
-            entry = find_custom_vision_provider_entry(
-                provider,
-                _load_yaml_config_file(_get_config_path()),
-            )
-        except ImportError:
-            entry = None
-        env_var = str((entry or {}).get("api_key_env") or "")
     else:
         env_var = _VISION_KEY_ENV.get(provider) or _PROVIDER_ENV_VAR.get(provider) or ""
     if not env_var:
@@ -1402,19 +1554,15 @@ def _vision_config_fingerprint(
     key_status: dict[str, Any],
     *,
     profile: str,
+    config_data: dict[str, Any] | None = None,
 ) -> str:
     provider = str(vision_cfg.get("provider") or "").strip().lower()
     custom_entry: dict[str, Any] = {}
     if provider.startswith("custom:"):
-        try:
-            from agent.custom_vision_providers import find_custom_vision_provider_entry
-
-            custom_entry = find_custom_vision_provider_entry(
-                provider,
-                _load_yaml_config_file(_get_config_path()),
-            ) or {}
-        except ImportError:
-            pass
+        custom_entry, _secret_env = _custom_vision_entry_and_secret_env(
+            provider,
+            config_data=config_data,
+        )
     material = {
         "profile": profile,
         "provider": provider,
@@ -1429,9 +1577,17 @@ def _vision_config_fingerprint(
         "key_digest": _vision_secret_digest(
             provider,
             str(vision_cfg.get("credential_ref") or "").strip(),
+            config_data=config_data,
         ),
         "custom_base_url": str(custom_entry.get("base_url") or "").rstrip("/"),
         "custom_transport": str(custom_entry.get("transport") or ""),
+        "custom_credential_ref": str(custom_entry.get("credential_ref") or ""),
+        "custom_default_model": str(custom_entry.get("default_model") or ""),
+        "custom_models": list(custom_entry.get("models") or []),
+        "custom_network_scope": str(custom_entry.get("network_scope") or ""),
+        "custom_trusted_proxy_profile": str(
+            custom_entry.get("trusted_proxy_profile") or ""
+        ),
     }
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1439,8 +1595,13 @@ def _vision_config_fingerprint(
 
 
 def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
+    with credential_transaction(_get_config_path()):
+        return _capture_vision_config_snapshot_unlocked()
+
+
+def _capture_vision_config_snapshot_unlocked() -> _VisionConfigSnapshot:
     profile = _active_profile_name()
-    config_data = _load_yaml_config_file(_get_config_path())
+    config_data = load_credential_config(_get_config_path())
     auxiliary = config_data.get("auxiliary")
     vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
     if not isinstance(vision_cfg, dict):
@@ -1460,7 +1621,11 @@ def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
             if entry.get("transport") == "anthropic_messages"
             else "chat_completions"
         )
-    key_status = _vision_key_status(provider, vision_cfg)
+    key_status = _vision_key_status(
+        provider,
+        vision_cfg,
+        config_data=config_data,
+    )
     return _VisionConfigSnapshot(
         profile=profile,
         provider=provider,
@@ -1471,16 +1636,26 @@ def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
         endpoint_mode=str(vision_cfg.get("endpoint_mode") or "").strip(),
         region=str(vision_cfg.get("region") or "").strip(),
         workspace_id=str(vision_cfg.get("workspace_id") or "").strip(),
-        configured=_vision_is_configured(vision_cfg, key_status),
+        configured=_vision_is_configured(
+            vision_cfg,
+            key_status,
+            config_data=config_data,
+        ),
         fingerprint=_vision_config_fingerprint(
             vision_cfg,
             key_status,
             profile=profile,
+            config_data=config_data,
         ),
     )
 
 
-def _vision_is_configured(vision_cfg: dict[str, Any], key_status: dict[str, Any]) -> bool:
+def _vision_is_configured(
+    vision_cfg: dict[str, Any],
+    key_status: dict[str, Any],
+    *,
+    config_data: dict[str, Any] | None = None,
+) -> bool:
     provider = str(vision_cfg.get("provider") or "").strip().lower()
     model = str(vision_cfg.get("model") or "").strip()
     meta = _VISION_PROVIDER_META.get(provider) or {}
@@ -1488,7 +1663,12 @@ def _vision_is_configured(vision_cfg: dict[str, Any], key_status: dict[str, Any]
         try:
             from agent.custom_vision_providers import find_custom_vision_provider_entry
 
-            entry = find_custom_vision_provider_entry(provider)
+            entry = find_custom_vision_provider_entry(
+                provider,
+                config_data
+                if isinstance(config_data, dict)
+                else load_credential_config(_get_config_path()),
+            )
         except ImportError:
             entry = None
         return bool(entry and model in entry["models"] and key_status.get("configured"))
@@ -1506,8 +1686,13 @@ def _public_vision_verification(
     key_status: dict[str, Any],
     *,
     profile: str,
+    config_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not _vision_is_configured(vision_cfg, key_status):
+    if not _vision_is_configured(
+        vision_cfg,
+        key_status,
+        config_data=config_data,
+    ):
         return {
             "status": "unconfigured",
             "checked_at": "",
@@ -1516,7 +1701,12 @@ def _public_vision_verification(
             "diagnostic_id": "",
         }
     state = _read_vision_verification_state(profile)
-    fingerprint = _vision_config_fingerprint(vision_cfg, key_status, profile=profile)
+    fingerprint = _vision_config_fingerprint(
+        vision_cfg,
+        key_status,
+        profile=profile,
+        config_data=config_data,
+    )
     if state.get("fingerprint") == fingerprint and state.get("status") in {"verified", "failed"}:
         return {
             "status": str(state.get("status")),
@@ -1758,7 +1948,7 @@ def _image_gen_config_fingerprint(
     profile: str,
     config_data: dict[str, Any] | None = None,
 ) -> str:
-    data = config_data or _load_yaml_config_file(_get_config_path())
+    data = config_data or load_credential_config(_get_config_path())
     provider = str(image_cfg.get("provider") or "").strip().lower()
     credential_ref = str(image_cfg.get("credential_ref") or "").strip()
     return shared_image_gen_fingerprint(
@@ -1770,8 +1960,13 @@ def _image_gen_config_fingerprint(
 
 
 def _capture_image_gen_config_snapshot() -> _ImageGenConfigSnapshot:
+    with credential_transaction(_get_config_path()):
+        return _capture_image_gen_config_snapshot_unlocked()
+
+
+def _capture_image_gen_config_snapshot_unlocked() -> _ImageGenConfigSnapshot:
     profile = _active_profile_name()
-    config_data = _load_yaml_config_file(_get_config_path())
+    config_data = load_credential_config(_get_config_path())
     image_cfg = config_data.get("image_gen")
     if not isinstance(image_cfg, dict):
         image_cfg = {}
@@ -2168,11 +2363,20 @@ def test_image_gen_config() -> dict[str, Any]:
     )
 
 
-def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _vision_provider_rows(
+    active_provider: str,
+    vision_cfg: dict[str, Any] | None = None,
+    *,
+    config_data: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     active = str(active_provider or "").strip().lower()
     for pid, meta in _VISION_PROVIDER_META.items():
-        key_status = _vision_key_status(pid, vision_cfg if pid == active else None)
+        key_status = _vision_key_status(
+            pid,
+            vision_cfg if pid == active else None,
+            config_data=config_data,
+        )
         requires_base_url = bool(meta.get("requires_base_url"))
         active_base_url = str((vision_cfg or {}).get("base_url") or "").strip() if pid == active else ""
         fields = []
@@ -2225,7 +2429,9 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
         custom_rows = [
             custom_vision_provider_public_row(entry, active_provider=active)
             for entry in load_custom_vision_provider_entries(
-                _load_yaml_config_file(_get_config_path())
+                config_data
+                if isinstance(config_data, dict)
+                else load_credential_config(_get_config_path())
             )
         ]
     except ImportError:
@@ -2254,7 +2460,11 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
         rows.append(row)
     custom_ids = {str(row.get("id") or "") for row in custom_rows}
     if active and active not in _VISION_PROVIDER_META and active not in custom_ids and active != "auto":
-        key_status = _vision_key_status(active, vision_cfg)
+        key_status = _vision_key_status(
+            active,
+            vision_cfg,
+            config_data=config_data,
+        )
         legacy_contract = normalized_setup_contract(
             {"credential_fields": []},
             provider_family=provider_family(active),
@@ -2280,9 +2490,14 @@ def _vision_provider_rows(active_provider: str, vision_cfg: dict[str, Any] | Non
 
 
 def get_vision_config() -> dict[str, Any]:
+    with credential_transaction(_get_config_path()):
+        return _get_vision_config_unlocked()
+
+
+def _get_vision_config_unlocked() -> dict[str, Any]:
     reload_config()
     config_path = _get_config_path()
-    config_data = _load_yaml_config_file(config_path)
+    config_data = load_credential_config(config_path)
     auxiliary = config_data.get("auxiliary")
     vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
     if not isinstance(vision_cfg, dict):
@@ -2304,7 +2519,11 @@ def get_vision_config() -> dict[str, Any]:
             if entry.get("transport") == "anthropic_messages"
             else ("chat_completions" if entry else "")
         )
-    key_status = _vision_key_status(provider, vision_cfg)
+    key_status = _vision_key_status(
+        provider,
+        vision_cfg,
+        config_data=config_data,
+    )
     meta = _VISION_PROVIDER_META.get(provider) or {}
     endpoint_values: dict[str, str] = {}
     for field in meta.get("endpoint_fields") or []:
@@ -2332,9 +2551,14 @@ def get_vision_config() -> dict[str, Any]:
                 vision_cfg,
                 key_status,
                 profile=_active_profile_name(),
+                config_data=config_data,
             ),
         },
-        "providers": _vision_provider_rows(provider, vision_cfg),
+        "providers": _vision_provider_rows(
+            provider,
+            vision_cfg,
+            config_data=config_data,
+        ),
     }
 
 
@@ -2423,9 +2647,9 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("base_url is required for custom vision provider")
 
     config_path = _get_config_path()
-    with credential_transaction():
+    with credential_transaction(config_path):
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
             if provider_id.startswith("custom:"):
                 locked_custom_entry = find_custom_vision_provider_entry(
                     provider_id,
@@ -2465,7 +2689,11 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 named_custom_entry = locked_custom_entry
             original_config = copy.deepcopy(config_data)
             if provider_id == "alibaba" and not credential_ref and not str(api_key or "").strip():
-                credential_ref = default_credential_ref(provider_id, config_data=config_data)
+                credential_ref = default_credential_ref(
+                    provider_id,
+                    config_data=config_data,
+                    config_path=config_path,
+                )
             if credential_ref:
                 credential_ref = normalize_credential_id(credential_ref)
             if credential_ref:
@@ -2476,9 +2704,6 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
             secret_value = str(api_key or "").strip()
             if secret_value and not env_var:
                 raise ValueError(f"{provider_id} does not accept an API key from WebUI")
-            env_path = _get_hermes_home() / ".env"
-            env_snapshot = _credential_env_snapshot(env_path, env_var) if secret_value else None
-            env_touched = False
             auxiliary = config_data.get("auxiliary")
             if not isinstance(auxiliary, dict):
                 auxiliary = {}
@@ -2533,19 +2758,16 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 vision_cfg.pop("endpoint_field_names", None)
             auxiliary["vision"] = vision_cfg
             config_data["auxiliary"] = auxiliary
-            try:
-                if secret_value and env_var:
-                    env_touched = True
-                    _write_env_file(env_path, {env_var: secret_value})
-                _save_yaml_config_file(config_path, config_data)
-            except Exception:
-                if env_touched and env_var and env_snapshot is not None:
-                    _restore_credential_env(env_path, env_var, env_snapshot)
-                try:
-                    _save_yaml_config_file(config_path, original_config)
-                except Exception:
-                    logger.exception("Failed to restore vision configuration after save failure")
-                raise
+            _commit_expected_config_env(
+                config_path,
+                expected_config=original_config,
+                desired_config=config_data,
+                env_updates=(
+                    {env_var: secret_value}
+                    if secret_value and env_var
+                    else {}
+                ),
+            )
     reload_config()
     invalidate_models_cache()
     _invalidate_vision_verification()
@@ -2572,11 +2794,11 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"unknown Alibaba image model: {image_model}")
 
     requested_secret = str(body.get("api_key") or "").strip()
-    env_path = _get_hermes_home() / ".env"
     config_path = _get_config_path()
-    with credential_transaction():
+    env_path = config_path.parent / ".env"
+    with credential_transaction(config_path):
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
             original_config = copy.deepcopy(config_data)
             previous_index, previous_row = _provider_credential_row(
                 config_data, _ALIBABA_QUICK_CREDENTIAL_ID
@@ -2612,100 +2834,78 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
             if not secret_value:
                 raise ValueError("api_key is required")
 
-            env_snapshot = _credential_env_snapshot(
-                env_path, _ALIBABA_QUICK_CREDENTIAL_ENV
+            _replace_provider_credential_row(
+                config_data,
+                _ALIBABA_QUICK_CREDENTIAL_ID,
+                dict(_ALIBABA_QUICK_CREDENTIAL_ROW),
+                preferred_index=previous_index,
             )
-            env_touched = False
-            try:
-                env_touched = True
-                _write_env_file(
-                    env_path,
-                    {_ALIBABA_QUICK_CREDENTIAL_ENV: secret_value},
-                )
-                _replace_provider_credential_row(
-                    config_data,
-                    _ALIBABA_QUICK_CREDENTIAL_ID,
-                    dict(_ALIBABA_QUICK_CREDENTIAL_ROW),
-                    preferred_index=previous_index,
-                )
 
-                auxiliary = config_data.get("auxiliary")
-                if not isinstance(auxiliary, dict):
-                    auxiliary = {}
-                vision_cfg = auxiliary.get("vision")
-                if not isinstance(vision_cfg, dict):
-                    vision_cfg = {}
-                for name in (
-                    "credential_ref",
-                    "workspace_id",
-                    "api_key",
-                    "api_mode",
-                ):
-                    vision_cfg.pop(name, None)
-                vision_cfg.update(
-                    {
-                        "provider": "alibaba",
-                        "model": vision_model,
-                        "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
-                        "base_url": build_vision_base_url(
-                            endpoint_mode="public", region="cn-beijing"
-                        ),
-                        "endpoint_mode": "public",
-                        "region": "cn-beijing",
-                        "endpoint_field_names": [
-                            "base_url",
-                            "endpoint_mode",
-                            "region",
-                        ],
-                    }
-                )
-                auxiliary["vision"] = vision_cfg
-                config_data["auxiliary"] = auxiliary
+            auxiliary = config_data.get("auxiliary")
+            if not isinstance(auxiliary, dict):
+                auxiliary = {}
+            vision_cfg = auxiliary.get("vision")
+            if not isinstance(vision_cfg, dict):
+                vision_cfg = {}
+            for name in (
+                "credential_ref",
+                "workspace_id",
+                "api_key",
+                "api_mode",
+            ):
+                vision_cfg.pop(name, None)
+            vision_cfg.update(
+                {
+                    "provider": "alibaba",
+                    "model": vision_model,
+                    "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
+                    "base_url": build_vision_base_url(
+                        endpoint_mode="public", region="cn-beijing"
+                    ),
+                    "endpoint_mode": "public",
+                    "region": "cn-beijing",
+                    "endpoint_field_names": [
+                        "base_url",
+                        "endpoint_mode",
+                        "region",
+                    ],
+                }
+            )
+            auxiliary["vision"] = vision_cfg
+            config_data["auxiliary"] = auxiliary
 
-                image_cfg = config_data.get("image_gen")
-                if not isinstance(image_cfg, dict):
-                    image_cfg = {}
-                image_cfg.pop("credential_ref", None)
-                image_cfg.pop("api_key", None)
-                options = image_cfg.get("options")
-                if not isinstance(options, dict):
-                    options = {}
-                options.pop("workspace_id", None)
-                options.pop("base_url", None)
-                options.update(
-                    {"endpoint_mode": "public", "region": "cn-beijing"}
-                )
-                image_cfg.update(
-                    {
-                        "provider": "dashscope",
-                        "model": image_model,
-                        "use_gateway": False,
-                        "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
-                        "options": options,
-                        "endpoint_field_names": ["endpoint_mode", "region"],
-                    }
-                )
-                config_data["image_gen"] = image_cfg
-                _save_yaml_config_file(config_path, config_data)
-            except Exception:
-                if env_touched:
-                    try:
-                        _restore_credential_env(
-                            env_path,
-                            _ALIBABA_QUICK_CREDENTIAL_ENV,
-                            env_snapshot,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to restore Alibaba single-key credential"
-                        )
-                try:
-                    _save_yaml_config_file(config_path, original_config)
-                except Exception:
-                    logger.exception(
-                        "Failed to restore Alibaba image capabilities configuration"
-                    )
-                raise
+            image_cfg = config_data.get("image_gen")
+            if not isinstance(image_cfg, dict):
+                image_cfg = {}
+            image_cfg.pop("credential_ref", None)
+            image_cfg.pop("api_key", None)
+            options = image_cfg.get("options")
+            if not isinstance(options, dict):
+                options = {}
+            options.pop("workspace_id", None)
+            options.pop("base_url", None)
+            options.update(
+                {"endpoint_mode": "public", "region": "cn-beijing"}
+            )
+            image_cfg.update(
+                {
+                    "provider": "dashscope",
+                    "model": image_model,
+                    "use_gateway": False,
+                    "credential_ref": _ALIBABA_QUICK_CREDENTIAL_ID,
+                    "options": options,
+                    "endpoint_field_names": ["endpoint_mode", "region"],
+                }
+            )
+            config_data["image_gen"] = image_cfg
+            _commit_expected_config_env(
+                config_path,
+                expected_config=original_config,
+                desired_config=config_data,
+                env_updates={
+                    _ALIBABA_QUICK_CREDENTIAL_ENV: secret_value,
+                },
+            )
 
     warnings: list[str] = []
     post_save_steps = (
@@ -2854,31 +3054,96 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def get_custom_vision_provider_configs() -> dict[str, Any]:
-    config_data = _load_yaml_config_file(_get_config_path())
-    auxiliary = config_data.get("auxiliary")
-    vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
-    active_provider = str((vision_cfg or {}).get("provider") or "").strip().lower()
-    try:
-        from agent.custom_vision_providers import (
-            custom_vision_provider_public_row,
-            load_custom_vision_provider_entries,
+def _refresh_custom_provider_commit(
+    capability: str,
+    *,
+    fallback_providers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if capability == "vision":
+        verification_action = (
+            "vision_verification_refresh_pending",
+            _invalidate_vision_verification,
         )
-    except ImportError:
-        return {"ok": True, "providers": []}
-    rows = [
-        custom_vision_provider_public_row(entry, active_provider=active_provider)
-        for entry in load_custom_vision_provider_entries(config_data)
-    ]
-    for row in rows:
-        row["key_status"] = _key_status_for_env(row["key_status"]["env_var"])
-        row["available"] = bool(row["key_status"].get("configured"))
-    return {"ok": True, "providers": rows}
+        projection_action = get_custom_vision_provider_configs
+        projection_warning = "vision_provider_projection_refresh_pending"
+    elif capability == "image":
+        verification_action = (
+            "image_gen_verification_refresh_pending",
+            _invalidate_image_gen_verification,
+        )
+        projection_action = get_custom_image_provider_configs
+        projection_warning = "image_gen_provider_projection_refresh_pending"
+    else:
+        raise ValueError(f"unsupported custom provider capability: {capability}")
+
+    warnings: list[str] = []
+    for warning, action in (
+        ("runtime_config_refresh_pending", reload_config),
+        ("models_cache_refresh_pending", invalidate_models_cache),
+        verification_action,
+    ):
+        try:
+            action()
+        except Exception:
+            logger.warning(
+                "Custom %s provider post-commit refresh failed: %s",
+                capability,
+                warning,
+                exc_info=True,
+            )
+            warnings.append(warning)
+    try:
+        providers = list(projection_action().get("providers") or [])
+    except Exception:
+        logger.warning(
+            "Custom %s provider committed projection refresh failed",
+            capability,
+            exc_info=True,
+        )
+        warnings.append(projection_warning)
+        providers = list(fallback_providers)
+    return {
+        "providers": providers,
+        "refresh_pending": bool(warnings),
+        "warnings": warnings,
+    }
+
+
+def get_custom_vision_provider_configs() -> dict[str, Any]:
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path) as credential_spec:
+        config_data = load_credential_config(credential_spec.config_target)
+        auxiliary = config_data.get("auxiliary")
+        vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+        active_provider = str((vision_cfg or {}).get("provider") or "").strip().lower()
+        try:
+            from agent.custom_vision_providers import (
+                custom_vision_provider_public_row,
+                load_custom_vision_provider_entries,
+            )
+        except ImportError:
+            return {"ok": True, "providers": []}
+        rows = [
+            custom_vision_provider_public_row(entry, active_provider=active_provider)
+            for entry in load_custom_vision_provider_entries(config_data)
+        ]
+        for row in rows:
+            row["key_status"] = _key_status_for_env(
+                row["key_status"]["env_var"],
+                env_path=credential_spec.env_target,
+            )
+            row["available"] = bool(row["key_status"].get("configured"))
+        return {"ok": True, "providers": rows}
 
 
 def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
+    if "api_key_env" in body:
+        raise ValueError(
+            "外部识图 Provider 不允许配置 api_key_env，请使用 credential_ref。"
+        )
     try:
         from agent.custom_vision_providers import (
+            custom_vision_provider_env_var,
             custom_vision_provider_public_row,
             is_custom_vision_base_url_safe,
             normalize_custom_vision_provider_entry,
@@ -2887,13 +3152,16 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
     except ImportError as exc:
         raise RuntimeError("custom vision provider support is unavailable") from exc
 
-    requested_id = normalize_custom_vision_provider_id(body.get("id") or body.get("provider_id"))
-    api_key = body.get("api_key")
-    config_path = _get_config_path()
-    env_path = _get_hermes_home() / ".env"
-    with credential_transaction():
+    requested_id = normalize_custom_vision_provider_id(
+        body.get("id") or body.get("provider_id")
+    )
+    secret_value = str(body.get("api_key") or "").strip()
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path) as credential_spec:
+        config_path = credential_spec.config_target
+        env_path = credential_spec.env_target
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
             existing_entries = config_data.get("custom_vision_providers")
             if not isinstance(existing_entries, list):
                 existing_entries = []
@@ -2908,52 +3176,92 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
                 if item_id == requested_id:
                     existing = item
                     break
+            previous_ref = str(existing.get("credential_ref") or "").strip()
+            legacy_env = ""
+            if existing and not previous_ref:
+                legacy_env = custom_vision_provider_env_var(requested_id)
+                configured_env = str(existing.get("api_key_env") or "").strip()
+                if configured_env and configured_env != legacy_env:
+                    raise ValueError("外部识图 Provider 的旧密钥环境变量配置已损坏。")
             merged = dict(existing)
-            merged.update({key: value for key, value in body.items() if key != "api_key"})
+            merged.update(
+                {
+                    key: value
+                    for key, value in body.items()
+                    if key not in {"api_key", "api_key_env"}
+                }
+            )
             merged["id"] = requested_id
+            credential_ref, secret_env = _custom_provider_credential_binding(
+                config_data,
+                requested_ref=str(merged.get("credential_ref") or ""),
+                capability="custom_vision_provider",
+                provider_id=requested_id,
+                provider_label=str(merged.get("name") or requested_id).strip(),
+            )
+            merged["credential_ref"] = credential_ref
+            merged.pop("api_key_env", None)
             normalized = normalize_custom_vision_provider_entry(merged)
-            if not is_custom_vision_base_url_safe(normalized["base_url"]):
+            if (
+                normalized["network_scope"] == "public_direct"
+                and not is_custom_vision_base_url_safe(normalized["base_url"])
+            ):
                 raise ValueError("外部识图 Base URL 无法通过公网安全校验。")
-            env_snapshot = _credential_env_snapshot(env_path, normalized["api_key_env"])
-            env_touched = False
-            try:
-                if api_key is not None and str(api_key).strip():
-                    env_touched = True
-                    _write_env_file(
-                        env_path,
-                        {normalized["api_key_env"]: str(api_key).strip()},
-                    )
-                updated = []
-                for item in existing_entries:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        item_id = normalize_custom_vision_provider_id(item.get("id"))
-                    except ValueError:
-                        continue
-                    if item_id != requested_id:
-                        updated.append(item)
-                updated.append(normalized)
-                config_data["custom_vision_providers"] = updated
-                _save_yaml_config_file(config_path, config_data)
-            except Exception:
-                if env_touched:
-                    _restore_credential_env(
-                        env_path,
-                        normalized["api_key_env"],
-                        env_snapshot,
-                    )
-                raise
-    reload_config()
-    invalidate_models_cache()
-    _invalidate_vision_verification()
+            updated = []
+            for item in existing_entries:
+                if not isinstance(item, dict):
+                    updated.append(item)
+                    continue
+                try:
+                    item_id = normalize_custom_vision_provider_id(item.get("id"))
+                except ValueError:
+                    updated.append(item)
+                    continue
+                if item_id != requested_id:
+                    updated.append(item)
+            updated.append(normalized)
+            config_data["custom_vision_providers"] = updated
+            env_updates: dict[str, str | None] = {}
+            migrated_secret = secret_value
+            if legacy_env and not migrated_secret:
+                migrated_secret = str(
+                    _load_env_file(env_path).get(legacy_env)
+                    or os.getenv(legacy_env)
+                    or ""
+                ).strip()
+            if migrated_secret:
+                env_updates[secret_env] = migrated_secret
+            if legacy_env:
+                env_updates[legacy_env] = None
+            if previous_ref and previous_ref != credential_ref:
+                orphaned_env = _remove_orphaned_managed_custom_credential(
+                    config_data,
+                    credential_ref=previous_ref,
+                    capability="custom_vision_provider",
+                    provider_id=requested_id,
+                )
+                if orphaned_env:
+                    env_updates[orphaned_env] = None
+            _write_custom_provider_transaction(
+                config_path=config_path,
+                env_path=env_path,
+                config_data=config_data,
+                env_updates=env_updates,
+            )
     row = custom_vision_provider_public_row(normalized)
-    row["key_status"] = _key_status_for_env(normalized["api_key_env"])
+    row["key_status"] = _key_status_for_env(
+        secret_env,
+        env_path=env_path,
+    )
     row["available"] = bool(row["key_status"].get("configured"))
+    refresh = _refresh_custom_provider_commit(
+        "vision",
+        fallback_providers=[row],
+    )
     return {
         "ok": True,
         "provider": row,
-        "providers": get_custom_vision_provider_configs()["providers"],
+        **refresh,
     }
 
 
@@ -2968,12 +3276,12 @@ def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
         raise RuntimeError("custom vision provider support is unavailable") from exc
     normalized_id = normalize_custom_vision_provider_id(provider_id)
     provider_name = custom_vision_provider_name(normalized_id)
-    config_path = _get_config_path()
-    env_path = _get_hermes_home() / ".env"
-    secret_env = custom_vision_provider_env_var(normalized_id)
-    with credential_transaction():
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path) as credential_spec:
+        config_path = credential_spec.config_target
+        env_path = credential_spec.env_target
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
             auxiliary = config_data.get("auxiliary")
             vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
             if str((vision_cfg or {}).get("provider") or "").strip().lower() == provider_name:
@@ -2983,80 +3291,105 @@ def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
                 entries = []
             updated = []
             removed = False
+            removed_entry: dict[str, Any] = {}
             for item in entries:
                 if not isinstance(item, dict):
+                    updated.append(item)
                     continue
                 try:
                     item_id = normalize_custom_vision_provider_id(item.get("id"))
                 except ValueError:
+                    updated.append(item)
                     continue
                 if item_id == normalized_id:
                     removed = True
+                    if not removed_entry:
+                        removed_entry = item
                 else:
                     updated.append(item)
             if not removed:
                 raise ValueError("外部识图 Provider 不存在。")
-            env_snapshot = _credential_env_snapshot(env_path, secret_env)
-            env_touched = False
-            try:
-                env_touched = True
-                _write_env_file(env_path, {secret_env: None})
-                config_data["custom_vision_providers"] = updated
-                _save_yaml_config_file(config_path, config_data)
-            except Exception:
-                if env_touched:
-                    _restore_credential_env(env_path, secret_env, env_snapshot)
-                raise
-    reload_config()
-    invalidate_models_cache()
-    return get_custom_vision_provider_configs()
+            config_data["custom_vision_providers"] = updated
+            legacy_env = ""
+            if not str(removed_entry.get("credential_ref") or "").strip():
+                legacy_env = custom_vision_provider_env_var(normalized_id)
+            orphaned_env = _remove_orphaned_managed_custom_credential(
+                config_data,
+                credential_ref=str(removed_entry.get("credential_ref") or ""),
+                capability="custom_vision_provider",
+                provider_id=normalized_id,
+            )
+            _write_custom_provider_transaction(
+                config_path=config_path,
+                env_path=env_path,
+                config_data=config_data,
+                env_updates={
+                    env_var: None
+                    for env_var in (orphaned_env, legacy_env)
+                    if env_var
+                },
+            )
+    return {
+        "ok": True,
+        **_refresh_custom_provider_commit(
+            "vision",
+            fallback_providers=[],
+        ),
+    }
 
 
 def get_custom_image_provider_configs() -> dict[str, Any]:
-    config_path = _get_config_path()
-    config_data = _load_yaml_config_file(config_path)
-    active_provider = ""
-    image_cfg = config_data.get("image_gen")
-    if isinstance(image_cfg, dict):
-        active_provider = str(image_cfg.get("provider") or "").strip()
-    try:
-        from agent.custom_image_providers import (
-            custom_image_provider_public_row,
-            load_custom_image_provider_entries,
-        )
-    except Exception:
-        return {"ok": True, "providers": []}
-    rows = [
-        custom_image_provider_public_row(entry, active_provider=active_provider)
-        for entry in load_custom_image_provider_entries(config_data)
-    ]
-    for row in rows:
-        key_status = _key_status_for_env((row.get("key_status") or {}).get("env_var"))
-        row["key_status"] = key_status
-        configured = bool(
-            key_status.get("configured")
-            and row.get("base_url_configured")
-            and row.get("default_model")
-        )
-        row["configured"] = configured
-        row["available"] = False
-        row["verification_status"] = (
-            "configured_unverified" if configured else "not_configured"
-        )
-        row["reason_code"] = (
-            "configured_unverified" if configured else "authorization_required"
-        )
-        row["status_message"] = (
-            "已配置，尚未验证。"
-            if configured
-            else "外部图片模型密钥未配置。"
-        )
-    return {"ok": True, "providers": rows}
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path) as credential_spec:
+        config_data = load_credential_config(credential_spec.config_target)
+        active_provider = ""
+        image_cfg = config_data.get("image_gen")
+        if isinstance(image_cfg, dict):
+            active_provider = str(image_cfg.get("provider") or "").strip()
+        try:
+            from agent.custom_image_providers import (
+                custom_image_provider_public_row,
+                load_custom_image_provider_entries,
+            )
+        except Exception:
+            return {"ok": True, "providers": []}
+        rows = [
+            custom_image_provider_public_row(entry, active_provider=active_provider)
+            for entry in load_custom_image_provider_entries(config_data)
+        ]
+        for row in rows:
+            key_status = _key_status_for_env(
+                (row.get("key_status") or {}).get("env_var"),
+                env_path=credential_spec.env_target,
+            )
+            row["key_status"] = key_status
+            configured = bool(
+                key_status.get("configured")
+                and row.get("base_url_configured")
+                and row.get("default_model")
+            )
+            row["configured"] = configured
+            row["available"] = False
+            row["verification_status"] = (
+                "configured_unverified" if configured else "not_configured"
+            )
+            row["reason_code"] = (
+                "configured_unverified" if configured else "authorization_required"
+            )
+            row["status_message"] = (
+                "已配置，尚未验证。"
+                if configured
+                else "外部图片模型密钥未配置。"
+            )
+        return {"ok": True, "providers": rows}
 
 
 def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
+    if "api_key_env" in body:
+        raise ValueError("外部图片模型不允许配置 api_key_env，请使用 credential_ref。")
     try:
         from agent.custom_image_providers import (
+            custom_image_provider_env_var,
             custom_image_provider_public_row,
             normalize_custom_image_provider_entry,
             normalize_custom_image_provider_id,
@@ -3064,91 +3397,188 @@ def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise RuntimeError("custom image provider support is unavailable") from exc
 
-    requested_id = normalize_custom_image_provider_id(body.get("id") or body.get("provider_id"))
-    config_path = _get_config_path()
-    api_key = body.get("api_key")
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        existing_entries = config_data.get("custom_image_providers")
-        if not isinstance(existing_entries, list):
-            existing_entries = []
-        existing = {}
-        for item in existing_entries:
-            if not isinstance(item, dict):
-                continue
-            try:
-                item_id = normalize_custom_image_provider_id(item.get("id"))
-            except ValueError:
-                continue
-            if item_id == requested_id:
-                existing = item
-                break
-        merged = dict(existing)
-        for key, value in body.items():
-            if key != "api_key":
-                merged[key] = value
-        merged["id"] = requested_id
-        normalized = normalize_custom_image_provider_entry(merged)
-        if api_key is not None and str(api_key).strip():
-            _write_env_file(_get_hermes_home() / ".env", {normalized["api_key_env"]: str(api_key).strip()})
+    requested_id = normalize_custom_image_provider_id(
+        body.get("id") or body.get("provider_id")
+    )
+    config_path = Path(_get_config_path())
+    secret_value = str(body.get("api_key") or "").strip()
+    with credential_transaction(config_path) as credential_spec:
+        config_path = credential_spec.config_target
+        env_path = credential_spec.env_target
+        with _cfg_lock:
+            config_data = load_credential_config(config_path)
+            existing_entries = config_data.get("custom_image_providers")
+            if not isinstance(existing_entries, list):
+                existing_entries = []
+            existing = {}
+            for item in existing_entries:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    item_id = normalize_custom_image_provider_id(item.get("id"))
+                except ValueError:
+                    continue
+                if item_id == requested_id:
+                    existing = item
+                    break
+            previous_ref = str(existing.get("credential_ref") or "").strip()
+            legacy_env = ""
+            if existing and not previous_ref:
+                legacy_env = custom_image_provider_env_var(requested_id)
+                configured_env = str(existing.get("api_key_env") or "").strip()
+                if configured_env and configured_env != legacy_env:
+                    raise ValueError("外部图片模型的旧密钥环境变量配置已损坏。")
+            merged = dict(existing)
+            for key, value in body.items():
+                if key not in {"api_key", "api_key_env"}:
+                    merged[key] = value
+            merged["id"] = requested_id
+            credential_ref, secret_env = _custom_provider_credential_binding(
+                config_data,
+                requested_ref=str(merged.get("credential_ref") or ""),
+                capability="custom_image_provider",
+                provider_id=requested_id,
+                provider_label=str(merged.get("name") or requested_id).strip(),
+            )
+            merged["credential_ref"] = credential_ref
+            merged.pop("api_key_env", None)
+            normalized = normalize_custom_image_provider_entry(merged)
 
-        updated = []
-        for item in existing_entries:
-            if not isinstance(item, dict):
-                continue
-            try:
-                item_id = normalize_custom_image_provider_id(item.get("id"))
-            except ValueError:
-                continue
-            if item_id != requested_id:
-                updated.append(item)
-        updated.append(normalized)
-        config_data["custom_image_providers"] = updated
-        _save_yaml_config_file(config_path, config_data)
-    reload_config()
-    invalidate_models_cache()
-    _invalidate_image_gen_verification()
+            updated = []
+            for item in existing_entries:
+                if not isinstance(item, dict):
+                    updated.append(item)
+                    continue
+                try:
+                    item_id = normalize_custom_image_provider_id(item.get("id"))
+                except ValueError:
+                    updated.append(item)
+                    continue
+                if item_id != requested_id:
+                    updated.append(item)
+            updated.append(normalized)
+            config_data["custom_image_providers"] = updated
+            env_updates: dict[str, str | None] = {}
+            migrated_secret = secret_value
+            if legacy_env and not migrated_secret:
+                migrated_secret = str(
+                    _load_env_file(env_path).get(legacy_env)
+                    or os.getenv(legacy_env)
+                    or ""
+                ).strip()
+            if migrated_secret:
+                env_updates[secret_env] = migrated_secret
+            if legacy_env:
+                env_updates[legacy_env] = None
+            if previous_ref and previous_ref != credential_ref:
+                orphaned_env = _remove_orphaned_managed_custom_credential(
+                    config_data,
+                    credential_ref=previous_ref,
+                    capability="custom_image_provider",
+                    provider_id=requested_id,
+                )
+                if orphaned_env:
+                    env_updates[orphaned_env] = None
+            _write_custom_provider_transaction(
+                config_path=config_path,
+                env_path=env_path,
+                config_data=config_data,
+                env_updates=env_updates,
+            )
     row = custom_image_provider_public_row(normalized)
-    return {"ok": True, "provider": row, "providers": get_custom_image_provider_configs().get("providers", [])}
+    row["key_status"] = _key_status_for_env(
+        secret_env,
+        env_path=env_path,
+    )
+    row["configured"] = bool(
+        row["key_status"].get("configured")
+        and row.get("base_url_configured")
+        and row.get("default_model")
+    )
+    return {
+        "ok": True,
+        "provider": row,
+        **_refresh_custom_provider_commit(
+            "image",
+            fallback_providers=[row],
+        ),
+    }
 
 
 def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
     try:
-        from agent.custom_image_providers import normalize_custom_image_provider_id, custom_image_provider_name
+        from agent.custom_image_providers import (
+            custom_image_provider_env_var,
+            custom_image_provider_name,
+            normalize_custom_image_provider_id,
+        )
     except Exception as exc:
         raise RuntimeError("custom image provider support is unavailable") from exc
 
     normalized_id = normalize_custom_image_provider_id(provider_id)
     provider_name = custom_image_provider_name(normalized_id)
-    config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        image_cfg = config_data.get("image_gen")
-        if isinstance(image_cfg, dict) and str(image_cfg.get("provider") or "").strip() == provider_name:
-            raise ValueError("该外部图片模型正在使用，请先切换到其他图片生成配置。")
-        existing_entries = config_data.get("custom_image_providers")
-        if not isinstance(existing_entries, list):
-            existing_entries = []
-        updated = []
-        removed = False
-        for item in existing_entries:
-            if not isinstance(item, dict):
-                continue
-            try:
-                item_id = normalize_custom_image_provider_id(item.get("id"))
-            except ValueError:
-                continue
-            if item_id == normalized_id:
-                removed = True
-                continue
-            updated.append(item)
-        if not removed:
-            raise ValueError("外部图片模型不存在。")
-        config_data["custom_image_providers"] = updated
-        _save_yaml_config_file(config_path, config_data)
-    reload_config()
-    invalidate_models_cache()
-    return {"ok": True, "providers": get_custom_image_provider_configs().get("providers", [])}
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path) as credential_spec:
+        config_path = credential_spec.config_target
+        env_path = credential_spec.env_target
+        with _cfg_lock:
+            config_data = load_credential_config(config_path)
+            image_cfg = config_data.get("image_gen")
+            if (
+                isinstance(image_cfg, dict)
+                and str(image_cfg.get("provider") or "").strip() == provider_name
+            ):
+                raise ValueError("该外部图片模型正在使用，请先切换到其他图片生成配置。")
+            existing_entries = config_data.get("custom_image_providers")
+            if not isinstance(existing_entries, list):
+                existing_entries = []
+            updated = []
+            removed = False
+            removed_entry: dict[str, Any] = {}
+            for item in existing_entries:
+                if not isinstance(item, dict):
+                    updated.append(item)
+                    continue
+                try:
+                    item_id = normalize_custom_image_provider_id(item.get("id"))
+                except ValueError:
+                    updated.append(item)
+                    continue
+                if item_id == normalized_id:
+                    removed = True
+                    if not removed_entry:
+                        removed_entry = item
+                    continue
+                updated.append(item)
+            if not removed:
+                raise ValueError("外部图片模型不存在。")
+            config_data["custom_image_providers"] = updated
+            legacy_env = ""
+            if not str(removed_entry.get("credential_ref") or "").strip():
+                legacy_env = custom_image_provider_env_var(normalized_id)
+            orphaned_env = _remove_orphaned_managed_custom_credential(
+                config_data,
+                credential_ref=str(removed_entry.get("credential_ref") or ""),
+                capability="custom_image_provider",
+                provider_id=normalized_id,
+            )
+            _write_custom_provider_transaction(
+                config_path=config_path,
+                env_path=env_path,
+                config_data=config_data,
+                env_updates={
+                    env_var: None
+                    for env_var in (orphaned_env, legacy_env)
+                    if env_var
+                },
+            )
+    return {
+        "ok": True,
+        **_refresh_custom_provider_commit(
+            "image",
+            fallback_providers=[],
+        ),
+    }
 
 
 def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
@@ -3256,9 +3686,9 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
         env_updates[env_var] = str(api_key).strip()
 
     config_path = _get_config_path()
-    with credential_transaction():
+    with credential_transaction(config_path):
         with _cfg_lock:
-            config_data = _load_yaml_config_file(config_path)
+            config_data = load_credential_config(config_path)
             locked_model_contract = _image_gen_provider_model_contract(
                 requested_provider_id,
                 config_data=config_data,
@@ -3287,96 +3717,80 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             )
             original_config = copy.deepcopy(config_data)
             if provider_id == "dashscope" and not credential_ref and not inline_secret_supplied:
-                credential_ref = default_credential_ref(provider_id, config_data=config_data)
+                credential_ref = default_credential_ref(
+                    provider_id,
+                    config_data=config_data,
+                    config_path=config_path,
+                )
             if credential_ref:
                 credential_ref = normalize_credential_id(credential_ref)
             if credential_ref:
                 row = load_credential(credential_ref, config_data=config_data)
                 if provider_family(row.get("provider_family")) != provider_family(provider_id):
                     raise ValueError("所选凭据不属于当前 Provider。")
-            env_path = _get_hermes_home() / ".env"
-            env_snapshots = {
-                env_var: _credential_env_snapshot(env_path, env_var)
-                for env_var in env_updates
+            image_cfg = config_data.get("image_gen")
+            if not isinstance(image_cfg, dict):
+                image_cfg = {}
+            previous_provider = str(image_cfg.get("provider") or "").strip().lower()
+            previous_public_provider = _public_image_gen_provider_id(previous_provider)
+            previous_row = next(
+                (row for row in rows if str(row.get("id") or "") == previous_public_provider),
+                {},
+            )
+            owned_names = {
+                str(name).strip()
+                for name in (image_cfg.get("endpoint_field_names") or [])
+                if str(name).strip()
             }
-            env_touched = False
-            try:
-                if env_updates:
-                    env_touched = True
-                    _write_env_file(env_path, env_updates)
-                image_cfg = config_data.get("image_gen")
-                if not isinstance(image_cfg, dict):
-                    image_cfg = {}
-                previous_provider = str(image_cfg.get("provider") or "").strip().lower()
-                previous_public_provider = _public_image_gen_provider_id(previous_provider)
-                previous_row = next(
-                    (row for row in rows if str(row.get("id") or "") == previous_public_provider),
-                    {},
-                )
-                owned_names = {
-                    str(name).strip()
-                    for name in (image_cfg.get("endpoint_field_names") or [])
-                    if str(name).strip()
-                }
-                owned_names.update(
-                    str(field.get("name") or "").strip()
-                    for field in (previous_row.get("endpoint_fields") or [])
-                    if isinstance(field, dict) and not bool(field.get("secret"))
-                )
-                if not previous_row and previous_provider == "dashscope":
-                    owned_names.update({"endpoint_mode", "workspace_id", "region", "base_url"})
-                owned_names.discard("")
-                image_cfg["provider"] = provider_id
-                if model_id:
-                    image_cfg["model"] = model_id
-                image_cfg["use_gateway"] = False
-                if provider_id == "dashscope":
-                    image_cfg["credential_ref"] = credential_ref
+            owned_names.update(
+                str(field.get("name") or "").strip()
+                for field in (previous_row.get("endpoint_fields") or [])
+                if isinstance(field, dict) and not bool(field.get("secret"))
+            )
+            if not previous_row and previous_provider == "dashscope":
+                owned_names.update({"endpoint_mode", "workspace_id", "region", "base_url"})
+            owned_names.discard("")
+            image_cfg["provider"] = provider_id
+            if model_id:
+                image_cfg["model"] = model_id
+            image_cfg["use_gateway"] = False
+            if provider_id == "dashscope":
+                image_cfg["credential_ref"] = credential_ref
+            else:
+                image_cfg.pop("credential_ref", None)
+            image_cfg.pop("api_key", None)
+            options = image_cfg.get("options")
+            if not isinstance(options, dict):
+                options = {}
+            for name in owned_names:
+                options.pop(name, None)
+            for name, value in option_updates.items():
+                if value:
+                    options[name] = value
                 else:
-                    image_cfg.pop("credential_ref", None)
-                image_cfg.pop("api_key", None)
-                options = image_cfg.get("options")
-                if not isinstance(options, dict):
-                    options = {}
-                for name in owned_names:
                     options.pop(name, None)
-                for name, value in option_updates.items():
-                    if value:
-                        options[name] = value
-                    else:
-                        options.pop(name, None)
-                if options:
-                    image_cfg["options"] = options
-                else:
-                    image_cfg.pop("options", None)
-                current_endpoint_names = sorted(
-                    str(field.get("name") or "").strip()
-                    for field in endpoint_fields
-                    if isinstance(field, dict)
-                    and not bool(field.get("secret"))
-                    and str(field.get("name") or "").strip()
-                )
-                if current_endpoint_names:
-                    image_cfg["endpoint_field_names"] = current_endpoint_names
-                else:
-                    image_cfg.pop("endpoint_field_names", None)
-                config_data["image_gen"] = image_cfg
-                _save_yaml_config_file(config_path, config_data)
-            except Exception:
-                if env_touched:
-                    for env_var, snapshot in env_snapshots.items():
-                        try:
-                            _restore_credential_env(env_path, env_var, snapshot)
-                        except Exception:
-                            logger.exception(
-                                "Failed to restore image generation credential %s",
-                                env_var,
-                            )
-                try:
-                    _save_yaml_config_file(config_path, original_config)
-                except Exception:
-                    logger.exception("Failed to restore image generation configuration after save failure")
-                raise
+            if options:
+                image_cfg["options"] = options
+            else:
+                image_cfg.pop("options", None)
+            current_endpoint_names = sorted(
+                str(field.get("name") or "").strip()
+                for field in endpoint_fields
+                if isinstance(field, dict)
+                and not bool(field.get("secret"))
+                and str(field.get("name") or "").strip()
+            )
+            if current_endpoint_names:
+                image_cfg["endpoint_field_names"] = current_endpoint_names
+            else:
+                image_cfg.pop("endpoint_field_names", None)
+            config_data["image_gen"] = image_cfg
+            _commit_expected_config_env(
+                config_path,
+                expected_config=original_config,
+                desired_config=config_data,
+                env_updates=env_updates,
+            )
     reload_config()
     invalidate_models_cache()
     _invalidate_image_gen_verification()
@@ -3384,9 +3798,14 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_model_config() -> dict[str, Any]:
+    with credential_transaction(_get_config_path()):
+        return _get_model_config_unlocked()
+
+
+def _get_model_config_unlocked() -> dict[str, Any]:
     reload_config()
     config_path = _get_config_path()
-    config_data = _load_yaml_config_file(config_path)
+    config_data = load_credential_config(config_path)
     model_cfg = _safe_model_cfg(config_data)
     provider = str(model_cfg.get("provider") or "").strip()
     model = str(model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "").strip()
@@ -3430,37 +3849,55 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
         label = _PROVIDER_DISPLAY.get(provider_id, provider_id)
         raise ValueError(f"{label} 使用网页登录授权，请在太极智能体中完成授权。")
 
+    env_updates: dict[str, str | None] = {}
+    secret_value = str(api_key or "").strip()
     if provider_id == "custom":
         if not base_url:
             raise ValueError("base_url is required for custom provider")
-        if api_key is not None and str(api_key).strip():
-            _write_env_file(_get_hermes_home() / ".env", {_CUSTOM_MODEL_KEY_ENV: str(api_key).strip()})
-    elif api_key is not None and str(api_key).strip():
-        result = set_provider_key(provider_id, str(api_key).strip())
-        if not result.get("ok"):
-            raise ValueError(str(result.get("error") or "failed to save provider key"))
+        if secret_value:
+            env_updates[_CUSTOM_MODEL_KEY_ENV] = secret_value
+    elif secret_value:
+        env_var = _PROVIDER_ENV_VAR.get(provider_id)
+        if not env_var:
+            raise ValueError(
+                f"Cannot configure API key for "
+                f"'{_PROVIDER_DISPLAY.get(provider_id, provider_id)}'. "
+                "This provider does not have a known env var mapping."
+            )
+        if "\n" in secret_value or "\r" in secret_value:
+            raise ValueError("API key must not contain newline characters.")
+        if len(secret_value) < 8:
+            raise ValueError("API key appears too short.")
+        env_updates[env_var] = secret_value
 
     config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        model_cfg = config_data.get("model")
-        if not isinstance(model_cfg, dict):
-            model_cfg = {}
-        model_cfg["provider"] = provider_id
-        model_cfg["default"] = model_id
-        if provider_id == "custom":
-            model_cfg["base_url"] = base_url
-            model_cfg["key_env"] = _CUSTOM_MODEL_KEY_ENV
-            model_cfg.pop("api_key", None)
-        else:
-            if base_url:
+    with credential_transaction(config_path):
+        with _cfg_lock:
+            config_data = load_credential_config(config_path)
+            original_config = copy.deepcopy(config_data)
+            model_cfg = config_data.get("model")
+            if not isinstance(model_cfg, dict):
+                model_cfg = {}
+            model_cfg["provider"] = provider_id
+            model_cfg["default"] = model_id
+            if provider_id == "custom":
                 model_cfg["base_url"] = base_url
-            elif provider_id != "openai":
-                model_cfg.pop("base_url", None)
-            model_cfg.pop("key_env", None)
-            model_cfg.pop("api_key_env", None)
-        config_data["model"] = model_cfg
-        _save_yaml_config_file(config_path, config_data)
+                model_cfg["key_env"] = _CUSTOM_MODEL_KEY_ENV
+                model_cfg.pop("api_key", None)
+            else:
+                if base_url:
+                    model_cfg["base_url"] = base_url
+                elif provider_id != "openai":
+                    model_cfg.pop("base_url", None)
+                model_cfg.pop("key_env", None)
+                model_cfg.pop("api_key_env", None)
+            config_data["model"] = model_cfg
+            _commit_expected_config_env(
+                config_path,
+                expected_config=original_config,
+                desired_config=config_data,
+                env_updates=env_updates,
+            )
     reload_config()
     invalidate_models_cache()
     return get_model_config()

@@ -25,6 +25,7 @@ The three fixes covered here:
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import sys
@@ -61,12 +62,28 @@ def _write_config(home: str, text: str) -> None:
 
 
 def _fresh_modules():
-    """Drop cached hermes modules so each test reloads against current env."""
-    for mod in list(sys.modules.keys()):
-        if mod.startswith(("agent.auxiliary_client", "agent.image_routing",
-                           "tools.vision_tools", "tools.browser_tool",
-                           "hermes_cli.config")):
-            del sys.modules[mod]
+    """Reload Hermes modules against current env without orphaning imports."""
+    for name in (
+        "hermes_cli.config",
+        "agent.image_routing",
+        "agent.auxiliary_client",
+        "tools.vision_tools",
+        "tools.browser_tool",
+    ):
+        module = sys.modules.get(name)
+        if module is not None:
+            importlib.reload(module)
+
+
+def test_fresh_modules_preserves_existing_module_identity():
+    """Reloading test state must not orphan collection-time function imports."""
+    import tools.vision_tools as before
+
+    _fresh_modules()
+
+    import tools.vision_tools as after
+
+    assert after is before
 
 
 # ---------------------------------------------------------------------------

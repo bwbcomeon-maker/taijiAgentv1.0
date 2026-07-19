@@ -5,22 +5,18 @@ Python environment (the agent venv). They are skipped when hermes-agent is
 not installed, since the server falls back to system Python which typically
 lacks pyyaml.
 """
+import importlib.util
 import json
 import pathlib
-import sys
 import urllib.error
 import urllib.request
 
 import pytest
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE, TEST_STATE_DIR
 
 # Check if pyyaml is available — onboarding setup tests need it on the server
-try:
-    import yaml as _yaml
-    _HAS_YAML = True
-except ImportError:
-    _HAS_YAML = False
+_HAS_YAML = importlib.util.find_spec("yaml") is not None
 _needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
 
 
@@ -43,20 +39,8 @@ def post(path, body=None):
 
 
 def _server_hermes_home() -> pathlib.Path:
-    """Get the hermes home path the test server is actually using.
-
-    Using the server's own /api/onboarding/status response is more robust than
-    reading TEST_STATE_DIR from conftest, which can get the wrong path when
-    conftest is imported multiple times under different HERMES_HOME environments
-    (api.config resets HERMES_HOME at module import time via init_profile_state).
-    """
-    data, _ = get("/api/onboarding/status")
-    env_path = data.get("system", {}).get("env_path", "")
-    if env_path:
-        return pathlib.Path(env_path).parent
-    # Fallback
-    hermes_home = pathlib.Path.home() / ".hermes"
-    return hermes_home / "webui-mvp-test"
+    """Return the same isolated state directory used by the test server."""
+    return TEST_STATE_DIR
 
 
 @pytest.fixture(autouse=True)
@@ -138,7 +122,7 @@ def test_onboarding_setup_custom_endpoint_writes_runtime_files():
         assert data["system"]["chat_ready"] is False
         assert data["system"]["setup_state"] == "agent_unavailable"
     assert data["system"]["current_provider"] == "custom"
-    assert data["system"]["current_base_url"] == "http://localhost:4000/v1"
+    assert data["setup"]["current"]["base_url"] == "http://localhost:4000/v1"
 
     cfg_text = (_server_hermes_home() / "config.yaml").read_text(encoding="utf-8")
     env_text = (_server_hermes_home() / ".env").read_text(encoding="utf-8")
@@ -249,3 +233,24 @@ def test_onboarding_setup_rejects_api_key_with_newline():
     )
     assert status == 400
     assert "newline" in data["error"].lower()
+
+
+@_needs_yaml
+def test_onboarding_setup_rejects_api_key_control_chars_before_config_exists_guard():
+    """Credential validation must win even when an existing config would early-return."""
+    config_path = _server_hermes_home() / "config.yaml"
+    original = "model:\n  provider: deepseek\n"
+    config_path.write_text(original, encoding="utf-8")
+
+    data, status = post(
+        "/api/onboarding/setup",
+        {
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4.6",
+            "api_key": "sk-bad\x00OTHER_KEY=injected",
+        },
+    )
+
+    assert status == 400
+    assert "nul" in data["error"].lower()
+    assert config_path.read_text(encoding="utf-8") == original

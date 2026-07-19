@@ -22,7 +22,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -485,17 +487,40 @@ def get_container_exec_info() -> Optional[dict]:
 # Config paths
 # =============================================================================
 
-# Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home  # noqa: F811,E402
+# Re-export from hermes_constants — canonical definitions live there.
+from hermes_constants import (  # noqa: E402
+    get_config_path as _canonical_config_path,
+    get_env_path as _canonical_env_path,
+    get_hermes_home,  # noqa: F811
+)
 from utils import atomic_replace
 
 def get_config_path() -> Path:
     """Get the main config file path."""
-    return get_hermes_home() / "config.yaml"
+    return _canonical_config_path()
 
 def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
-    return get_hermes_home() / ".env"
+    return _canonical_env_path()
+
+
+@contextmanager
+def _credential_files_transaction(config_path: Path | None = None):
+    """Join the shared config/.env transaction used by WebUI and the agent."""
+    from agent.provider_credentials import credential_transaction
+
+    with credential_transaction(config_path or get_config_path()):
+        yield
+
+
+def _credential_files_locked(func):
+    @wraps(func)
+    def locked(*args, **kwargs):
+        with _credential_files_transaction():
+            return func(*args, **kwargs)
+
+    return locked
+
 
 def get_project_root() -> Path:
     """Get the project installation directory."""
@@ -3835,132 +3860,137 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     
     # ── Version 3 → 4: migrate tool progress from .env to config.yaml ──
     if current_ver < 4:
-        config = load_config()
-        display = config.get("display", {})
-        if not isinstance(display, dict):
-            display = {}
-        if "tool_progress" not in display:
-            old_enabled = get_env_value("HERMES_TOOL_PROGRESS")
-            old_mode = get_env_value("HERMES_TOOL_PROGRESS_MODE")
-            if old_enabled and old_enabled.lower() in {"false", "0", "no"}:
-                display["tool_progress"] = "off"
-                results["config_added"].append("display.tool_progress=off (from HERMES_TOOL_PROGRESS=false)")
-            elif old_mode and old_mode.lower() in {"new", "all"}:
-                display["tool_progress"] = old_mode.lower()
-                results["config_added"].append(f"display.tool_progress={old_mode.lower()} (from HERMES_TOOL_PROGRESS_MODE)")
-            else:
-                display["tool_progress"] = "all"
-                results["config_added"].append("display.tool_progress=all (default)")
-            config["display"] = display
-            save_config(config)
-            if not quiet:
-                print(f"  ✓ Migrated tool progress to config.yaml: {display['tool_progress']}")
+        with _credential_files_transaction():
+            config = load_config()
+            display = config.get("display", {})
+            if not isinstance(display, dict):
+                display = {}
+            if "tool_progress" not in display:
+                old_enabled = get_env_value("HERMES_TOOL_PROGRESS")
+                old_mode = get_env_value("HERMES_TOOL_PROGRESS_MODE")
+                if old_enabled and old_enabled.lower() in {"false", "0", "no"}:
+                    display["tool_progress"] = "off"
+                    results["config_added"].append("display.tool_progress=off (from HERMES_TOOL_PROGRESS=false)")
+                elif old_mode and old_mode.lower() in {"new", "all"}:
+                    display["tool_progress"] = old_mode.lower()
+                    results["config_added"].append(f"display.tool_progress={old_mode.lower()} (from HERMES_TOOL_PROGRESS_MODE)")
+                else:
+                    display["tool_progress"] = "all"
+                    results["config_added"].append("display.tool_progress=all (default)")
+                config["display"] = display
+                save_config(config)
+                if not quiet:
+                    print(f"  ✓ Migrated tool progress to config.yaml: {display['tool_progress']}")
     
     # ── Version 4 → 5: add timezone field ──
     if current_ver < 5:
-        config = load_config()
-        if "timezone" not in config:
-            old_tz = os.getenv("HERMES_TIMEZONE", "")
-            if old_tz and old_tz.strip():
-                config["timezone"] = old_tz.strip()
-                results["config_added"].append(f"timezone={old_tz.strip()} (from HERMES_TIMEZONE)")
-            else:
-                config["timezone"] = ""
-                results["config_added"].append("timezone= (empty, uses server-local)")
-            save_config(config)
-            if not quiet:
-                tz_display = config["timezone"] or "(server-local)"
-                print(f"  ✓ Added timezone to config.yaml: {tz_display}")
+        with _credential_files_transaction():
+            config = load_config()
+            if "timezone" not in config:
+                old_tz = os.getenv("HERMES_TIMEZONE", "")
+                if old_tz and old_tz.strip():
+                    config["timezone"] = old_tz.strip()
+                    results["config_added"].append(f"timezone={old_tz.strip()} (from HERMES_TIMEZONE)")
+                else:
+                    config["timezone"] = ""
+                    results["config_added"].append("timezone= (empty, uses server-local)")
+                save_config(config)
+                if not quiet:
+                    tz_display = config["timezone"] or "(server-local)"
+                    print(f"  ✓ Added timezone to config.yaml: {tz_display}")
 
     # ── Version 8 → 9: clear ANTHROPIC_TOKEN from .env ──
     # The new Anthropic auth flow no longer uses this env var.
     if current_ver < 9:
         try:
-            old_token = get_env_value("ANTHROPIC_TOKEN")
-            if old_token:
-                save_env_value("ANTHROPIC_TOKEN", "")
-                if not quiet:
-                    print("  ✓ Cleared ANTHROPIC_TOKEN from .env (no longer used)")
+            with _credential_files_transaction():
+                old_token = get_env_value("ANTHROPIC_TOKEN")
+                if old_token:
+                    save_env_value("ANTHROPIC_TOKEN", "")
+                    if not quiet:
+                        print("  ✓ Cleared ANTHROPIC_TOKEN from .env (no longer used)")
         except Exception:
             pass
 
     # ── Version 11 → 12: migrate custom_providers list → providers dict ──
     if current_ver < 12:
-        config = load_config()
-        custom_list = config.get("custom_providers")
-        if isinstance(custom_list, list) and custom_list:
-            providers_dict = config.get("providers", {})
-            if not isinstance(providers_dict, dict):
-                providers_dict = {}
-            migrated_count = 0
-            for entry in custom_list:
-                if not isinstance(entry, dict):
-                    continue
-                old_name = entry.get("name", "")
-                old_url = entry.get("base_url", "") or entry.get("url", "") or ""
-                old_key = entry.get("api_key", "")
-                if not old_url:
-                    continue  # skip entries with no URL
+        with _credential_files_transaction():
+            config = load_config()
+            custom_list = config.get("custom_providers")
+            if isinstance(custom_list, list) and custom_list:
+                providers_dict = config.get("providers", {})
+                if not isinstance(providers_dict, dict):
+                    providers_dict = {}
+                migrated_count = 0
+                for entry in custom_list:
+                    if not isinstance(entry, dict):
+                        continue
+                    old_name = entry.get("name", "")
+                    old_url = entry.get("base_url", "") or entry.get("url", "") or ""
+                    old_key = entry.get("api_key", "")
+                    if not old_url:
+                        continue  # skip entries with no URL
 
-                # Generate a kebab-case key from the display name
-                key = old_name.strip().lower().replace(" ", "-").replace("(", "").replace(")", "")
-                # Remove consecutive hyphens and trailing hyphens
-                while "--" in key:
-                    key = key.replace("--", "-")
-                key = key.strip("-")
-                if not key:
-                    # Fallback: derive from URL hostname
-                    try:
-                        from urllib.parse import urlparse
-                        parsed = urlparse(old_url)
-                        key = (parsed.hostname or "endpoint").replace(".", "-")
-                    except Exception:
-                        key = f"endpoint-{migrated_count}"
+                    # Generate a kebab-case key from the display name
+                    key = old_name.strip().lower().replace(" ", "-").replace("(", "").replace(")", "")
+                    # Remove consecutive hyphens and trailing hyphens
+                    while "--" in key:
+                        key = key.replace("--", "-")
+                    key = key.strip("-")
+                    if not key:
+                        # Fallback: derive from URL hostname
+                        try:
+                            from urllib.parse import urlparse
+                            parsed = urlparse(old_url)
+                            key = (parsed.hostname or "endpoint").replace(".", "-")
+                        except Exception:
+                            key = f"endpoint-{migrated_count}"
 
-                # Don't overwrite existing entries
-                if key in providers_dict:
-                    key = f"{key}-{migrated_count}"
+                    # Don't overwrite existing entries
+                    if key in providers_dict:
+                        key = f"{key}-{migrated_count}"
 
-                new_entry = {"api": old_url}
-                if old_name:
-                    new_entry["name"] = old_name
-                if old_key and old_key not in {"no-key", "no-key-required", ""}:
-                    new_entry["api_key"] = old_key
+                    new_entry = {"api": old_url}
+                    if old_name:
+                        new_entry["name"] = old_name
+                    if old_key and old_key not in {"no-key", "no-key-required", ""}:
+                        new_entry["api_key"] = old_key
 
-                # Carry over model and api_mode if present
-                if entry.get("model"):
-                    new_entry["default_model"] = entry["model"]
-                if entry.get("api_mode"):
-                    new_entry["transport"] = entry["api_mode"]
+                    # Carry over model and api_mode if present
+                    if entry.get("model"):
+                        new_entry["default_model"] = entry["model"]
+                    if entry.get("api_mode"):
+                        new_entry["transport"] = entry["api_mode"]
 
-                providers_dict[key] = new_entry
-                migrated_count += 1
+                    providers_dict[key] = new_entry
+                    migrated_count += 1
 
-            if migrated_count > 0:
-                config["providers"] = providers_dict
-                # Remove the old list — runtime reads via get_compatible_custom_providers()
-                config.pop("custom_providers", None)
-                save_config(config)
-                if not quiet:
-                    print(f"  ✓ Migrated {migrated_count} custom provider(s) to providers: section")
-                    for key in list(providers_dict.keys())[-migrated_count:]:
-                        ep = providers_dict[key]
-                        print(f"    → {key}: {ep.get('api', '')}")
+                if migrated_count > 0:
+                    config["providers"] = providers_dict
+                    # Remove the old list — runtime reads via get_compatible_custom_providers()
+                    config.pop("custom_providers", None)
+                    save_config(config)
+                    if not quiet:
+                        print(f"  ✓ Migrated {migrated_count} custom provider(s) to providers: section")
+                        for key in list(providers_dict.keys())[-migrated_count:]:
+                            ep = providers_dict[key]
+                            print(f"    → {key}: {ep.get('api', '')}")
 
     # ── Version 12 → 13: clear dead LLM_MODEL / OPENAI_MODEL from .env ──
     # These env vars were written by the old setup wizard but nothing reads
     # them anymore (config.yaml is the sole source of truth since March 2026).
     # Stale entries cause user confusion — see issue report.
     if current_ver < 13:
-        for dead_var in ("LLM_MODEL", "OPENAI_MODEL"):
-            try:
-                old_val = get_env_value(dead_var)
-                if old_val:
-                    save_env_value(dead_var, "")
-                    if not quiet:
-                        print(f"  ✓ Cleared {dead_var} from .env (no longer used — config.yaml is source of truth)")
-            except Exception:
-                pass
+        with _credential_files_transaction():
+            for dead_var in ("LLM_MODEL", "OPENAI_MODEL"):
+                try:
+                    old_val = get_env_value(dead_var)
+                    if old_val:
+                        save_env_value(dead_var, "")
+                        if not quiet:
+                            print(f"  ✓ Cleared {dead_var} from .env (no longer used — config.yaml is source of truth)")
+                except Exception:
+                    pass
 
     # ── Version 13 → 14: migrate legacy flat stt.model to provider section ──
     # Old configs (and cli-config.yaml.example) had a flat `stt.model` key
@@ -3971,121 +4001,125 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     if current_ver < 14:
         # Read raw config (no defaults merged) to check what the user actually
         # wrote, then apply changes to the merged config for saving.
-        raw = read_raw_config()
-        raw_stt = raw.get("stt", {})
-        if isinstance(raw_stt, dict) and "model" in raw_stt:
-            legacy_model = raw_stt["model"]
-            provider = raw_stt.get("provider", "local")
-            config = load_config()
-            stt = config.get("stt", {})
-            # Remove the legacy flat key
-            stt.pop("model", None)
-            # Place it in the appropriate provider section only if the
-            # user didn't already set a model there
-            if provider in {"local", "local_command"}:
-                # Don't migrate an OpenAI model name into the local section
-                _local_models = {
-                    "tiny.en", "tiny", "base.en", "base", "small.en", "small",
-                    "medium.en", "medium", "large-v1", "large-v2", "large-v3",
-                    "large", "distil-large-v2", "distil-medium.en",
-                    "distil-small.en", "distil-large-v3", "distil-large-v3.5",
-                    "large-v3-turbo", "turbo",
-                }
-                if legacy_model in _local_models:
-                    # Check raw config — only set if user didn't already
-                    # have a nested local.model
-                    raw_local = raw_stt.get("local", {})
-                    if not isinstance(raw_local, dict) or "model" not in raw_local:
-                        local_cfg = stt.setdefault("local", {})
-                        local_cfg["model"] = legacy_model
-                # else: drop it — it was an OpenAI model name, local section
-                # already defaults to "base" via DEFAULT_CONFIG
-            else:
-                # Cloud provider — put it in that provider's section only
-                # if user didn't already set a nested model
-                raw_provider = raw_stt.get(provider, {})
-                if not isinstance(raw_provider, dict) or "model" not in raw_provider:
-                    provider_cfg = stt.setdefault(provider, {})
-                    provider_cfg["model"] = legacy_model
-            config["stt"] = stt
-            save_config(config)
-            if not quiet:
-                print(f"  ✓ Migrated legacy stt.model to provider-specific config")
+        with _credential_files_transaction():
+            raw = read_raw_config()
+            raw_stt = raw.get("stt", {})
+            if isinstance(raw_stt, dict) and "model" in raw_stt:
+                legacy_model = raw_stt["model"]
+                provider = raw_stt.get("provider", "local")
+                config = load_config()
+                stt = config.get("stt", {})
+                # Remove the legacy flat key
+                stt.pop("model", None)
+                # Place it in the appropriate provider section only if the
+                # user didn't already set a model there
+                if provider in {"local", "local_command"}:
+                    # Don't migrate an OpenAI model name into the local section
+                    _local_models = {
+                        "tiny.en", "tiny", "base.en", "base", "small.en", "small",
+                        "medium.en", "medium", "large-v1", "large-v2", "large-v3",
+                        "large", "distil-large-v2", "distil-medium.en",
+                        "distil-small.en", "distil-large-v3", "distil-large-v3.5",
+                        "large-v3-turbo", "turbo",
+                    }
+                    if legacy_model in _local_models:
+                        # Check raw config — only set if user didn't already
+                        # have a nested local.model
+                        raw_local = raw_stt.get("local", {})
+                        if not isinstance(raw_local, dict) or "model" not in raw_local:
+                            local_cfg = stt.setdefault("local", {})
+                            local_cfg["model"] = legacy_model
+                    # else: drop it — it was an OpenAI model name, local section
+                    # already defaults to "base" via DEFAULT_CONFIG
+                else:
+                    # Cloud provider — put it in that provider's section only
+                    # if user didn't already set a nested model
+                    raw_provider = raw_stt.get(provider, {})
+                    if not isinstance(raw_provider, dict) or "model" not in raw_provider:
+                        provider_cfg = stt.setdefault(provider, {})
+                        provider_cfg["model"] = legacy_model
+                config["stt"] = stt
+                save_config(config)
+                if not quiet:
+                    print(f"  ✓ Migrated legacy stt.model to provider-specific config")
 
     # ── Version 14 → 15: add explicit gateway interim-message gate ──
     if current_ver < 15:
-        config = read_raw_config()
-        display = config.get("display", {})
-        if not isinstance(display, dict):
-            display = {}
-        if "interim_assistant_messages" not in display:
-            display["interim_assistant_messages"] = True
-            config["display"] = display
-            results["config_added"].append("display.interim_assistant_messages=true (default)")
-            save_config(config)
-            if not quiet:
-                print("  ✓ Added display.interim_assistant_messages=true")
+        with _credential_files_transaction():
+            config = read_raw_config()
+            display = config.get("display", {})
+            if not isinstance(display, dict):
+                display = {}
+            if "interim_assistant_messages" not in display:
+                display["interim_assistant_messages"] = True
+                config["display"] = display
+                results["config_added"].append("display.interim_assistant_messages=true (default)")
+                save_config(config)
+                if not quiet:
+                    print("  ✓ Added display.interim_assistant_messages=true")
 
     # ── Version 15 → 16: migrate tool_progress_overrides into display.platforms ──
     if current_ver < 16:
-        config = read_raw_config()
-        display = config.get("display", {})
-        if not isinstance(display, dict):
-            display = {}
-        old_overrides = display.get("tool_progress_overrides")
-        if isinstance(old_overrides, dict) and old_overrides:
-            platforms = display.get("platforms", {})
-            if not isinstance(platforms, dict):
-                platforms = {}
-            for plat, mode in old_overrides.items():
-                if plat not in platforms:
-                    platforms[plat] = {}
-                if "tool_progress" not in platforms[plat]:
-                    platforms[plat]["tool_progress"] = mode
-            display["platforms"] = platforms
-            config["display"] = display
-            save_config(config)
-            if not quiet:
-                migrated = ", ".join(f"{p}={m}" for p, m in old_overrides.items())
-                print(f"  ✓ Migrated tool_progress_overrides → display.platforms: {migrated}")
-            results["config_added"].append("display.platforms (migrated from tool_progress_overrides)")
+        with _credential_files_transaction():
+            config = read_raw_config()
+            display = config.get("display", {})
+            if not isinstance(display, dict):
+                display = {}
+            old_overrides = display.get("tool_progress_overrides")
+            if isinstance(old_overrides, dict) and old_overrides:
+                platforms = display.get("platforms", {})
+                if not isinstance(platforms, dict):
+                    platforms = {}
+                for plat, mode in old_overrides.items():
+                    if plat not in platforms:
+                        platforms[plat] = {}
+                    if "tool_progress" not in platforms[plat]:
+                        platforms[plat]["tool_progress"] = mode
+                display["platforms"] = platforms
+                config["display"] = display
+                save_config(config)
+                if not quiet:
+                    migrated = ", ".join(f"{p}={m}" for p, m in old_overrides.items())
+                    print(f"  ✓ Migrated tool_progress_overrides → display.platforms: {migrated}")
+                results["config_added"].append("display.platforms (migrated from tool_progress_overrides)")
 
     # ── Version 16 → 17: remove legacy compression.summary_* keys ──
     if current_ver < 17:
-        config = read_raw_config()
-        comp = config.get("compression", {})
-        if isinstance(comp, dict):
-            s_model = comp.pop("summary_model", None)
-            s_provider = comp.pop("summary_provider", None)
-            s_base_url = comp.pop("summary_base_url", None)
-            migrated_keys = []
-            # Migrate non-empty, non-default values to auxiliary.compression
-            if s_model and str(s_model).strip():
-                aux = config.setdefault("auxiliary", {})
-                aux_comp = aux.setdefault("compression", {})
-                if not aux_comp.get("model"):
-                    aux_comp["model"] = str(s_model).strip()
-                    migrated_keys.append(f"model={s_model}")
-            if s_provider and str(s_provider).strip() not in {"", "auto"}:
-                aux = config.setdefault("auxiliary", {})
-                aux_comp = aux.setdefault("compression", {})
-                if not aux_comp.get("provider") or aux_comp.get("provider") == "auto":
-                    aux_comp["provider"] = str(s_provider).strip()
-                    migrated_keys.append(f"provider={s_provider}")
-            if s_base_url and str(s_base_url).strip():
-                aux = config.setdefault("auxiliary", {})
-                aux_comp = aux.setdefault("compression", {})
-                if not aux_comp.get("base_url"):
-                    aux_comp["base_url"] = str(s_base_url).strip()
-                    migrated_keys.append(f"base_url={s_base_url}")
-            if migrated_keys or s_model is not None or s_provider is not None or s_base_url is not None:
-                config["compression"] = comp
-                save_config(config)
-                if not quiet:
-                    if migrated_keys:
-                        print(f"  ✓ Migrated compression.summary_* → auxiliary.compression: {', '.join(migrated_keys)}")
-                    else:
-                        print("  ✓ Removed unused compression.summary_* keys")
+        with _credential_files_transaction():
+            config = read_raw_config()
+            comp = config.get("compression", {})
+            if isinstance(comp, dict):
+                s_model = comp.pop("summary_model", None)
+                s_provider = comp.pop("summary_provider", None)
+                s_base_url = comp.pop("summary_base_url", None)
+                migrated_keys = []
+                # Migrate non-empty, non-default values to auxiliary.compression
+                if s_model and str(s_model).strip():
+                    aux = config.setdefault("auxiliary", {})
+                    aux_comp = aux.setdefault("compression", {})
+                    if not aux_comp.get("model"):
+                        aux_comp["model"] = str(s_model).strip()
+                        migrated_keys.append(f"model={s_model}")
+                if s_provider and str(s_provider).strip() not in {"", "auto"}:
+                    aux = config.setdefault("auxiliary", {})
+                    aux_comp = aux.setdefault("compression", {})
+                    if not aux_comp.get("provider") or aux_comp.get("provider") == "auto":
+                        aux_comp["provider"] = str(s_provider).strip()
+                        migrated_keys.append(f"provider={s_provider}")
+                if s_base_url and str(s_base_url).strip():
+                    aux = config.setdefault("auxiliary", {})
+                    aux_comp = aux.setdefault("compression", {})
+                    if not aux_comp.get("base_url"):
+                        aux_comp["base_url"] = str(s_base_url).strip()
+                        migrated_keys.append(f"base_url={s_base_url}")
+                if migrated_keys or s_model is not None or s_provider is not None or s_base_url is not None:
+                    config["compression"] = comp
+                    save_config(config)
+                    if not quiet:
+                        if migrated_keys:
+                            print(f"  ✓ Migrated compression.summary_* → auxiliary.compression: {', '.join(migrated_keys)}")
+                        else:
+                            print("  ✓ Removed unused compression.summary_* keys")
 
     # ── Version 20 → 21: plugins are now opt-in; grandfather existing user plugins ──
     # The loader now requires plugins to appear in ``plugins.enabled`` before
@@ -4098,45 +4132,55 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # they ship off for everyone, including existing users, so any user who
     # wants one has to opt in explicitly.
     if current_ver < 21:
-        config = read_raw_config()
-        plugins_cfg = config.get("plugins")
-        if not isinstance(plugins_cfg, dict):
-            plugins_cfg = {}
-        # Only migrate if the enabled allow-list hasn't been set yet.
-        if "enabled" not in plugins_cfg:
-            disabled = plugins_cfg.get("disabled", []) or []
-            if not isinstance(disabled, list):
-                disabled = []
-            disabled_set = set(disabled)
+        # Scan plugin manifests without holding the credential transaction.
+        # The short commit window below reloads the latest disabled/enabled
+        # state before deciding what to persist.
+        installed_user_plugins: List[str] = []
+        try:
+            user_plugins_dir = get_hermes_home() / "plugins"
+            if user_plugins_dir.is_dir():
+                for child in sorted(user_plugins_dir.iterdir()):
+                    if not child.is_dir():
+                        continue
+                    manifest_file = child / "plugin.yaml"
+                    if not manifest_file.exists():
+                        manifest_file = child / "plugin.yml"
+                    if not manifest_file.exists():
+                        continue
+                    try:
+                        with open(manifest_file, encoding="utf-8") as _mf:
+                            manifest = yaml.safe_load(_mf) or {}
+                    except Exception:
+                        manifest = {}
+                    installed_user_plugins.append(
+                        manifest.get("name") or child.name
+                    )
+        except Exception:
+            installed_user_plugins = []
 
-            # Scan ``$HERMES_HOME/plugins/`` for currently installed user plugins.
-            grandfathered: List[str] = []
-            try:
-                user_plugins_dir = get_hermes_home() / "plugins"
-                if user_plugins_dir.is_dir():
-                    for child in sorted(user_plugins_dir.iterdir()):
-                        if not child.is_dir():
-                            continue
-                        manifest_file = child / "plugin.yaml"
-                        if not manifest_file.exists():
-                            manifest_file = child / "plugin.yml"
-                        if not manifest_file.exists():
-                            continue
-                        try:
-                            with open(manifest_file, encoding="utf-8") as _mf:
-                                manifest = yaml.safe_load(_mf) or {}
-                        except Exception:
-                            manifest = {}
-                        name = manifest.get("name") or child.name
-                        if name in disabled_set:
-                            continue
-                        grandfathered.append(name)
-            except Exception:
-                grandfathered = []
-
-            plugins_cfg["enabled"] = grandfathered
-            config["plugins"] = plugins_cfg
-            save_config(config)
+        migration_applied = False
+        grandfathered: List[str] = []
+        with _credential_files_transaction():
+            config = read_raw_config()
+            plugins_cfg = config.get("plugins")
+            if not isinstance(plugins_cfg, dict):
+                plugins_cfg = {}
+            # Only migrate if the enabled allow-list hasn't been set yet.
+            if "enabled" not in plugins_cfg:
+                disabled = plugins_cfg.get("disabled", []) or []
+                if not isinstance(disabled, list):
+                    disabled = []
+                disabled_set = set(disabled)
+                grandfathered = [
+                    name
+                    for name in installed_user_plugins
+                    if name not in disabled_set
+                ]
+                plugins_cfg["enabled"] = grandfathered
+                config["plugins"] = plugins_cfg
+                save_config(config)
+                migration_applied = True
+        if migration_applied:
             results["config_added"].append(
                 f"plugins.enabled (opt-in allow-list, {len(grandfathered)} grandfathered)"
             )
@@ -4178,45 +4222,47 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         except Exception as e:
             results["warnings"].append(f"Could not create {curator_dir}: {e}")
 
-        config = read_raw_config()
-        touched = False
+        with _credential_files_transaction():
+            config = read_raw_config()
+            touched = False
 
-        # (1) Top-level curator section — only add missing keys
-        _curator_defaults = DEFAULT_CONFIG.get("curator", {})
-        raw_curator = config.get("curator")
-        if not isinstance(raw_curator, dict):
-            raw_curator = {}
-        added_curator: List[str] = []
-        for k, v in _curator_defaults.items():
-            if k not in raw_curator:
-                raw_curator[k] = copy.deepcopy(v)
-                added_curator.append(k)
-        if added_curator:
-            config["curator"] = raw_curator
-            touched = True
+            # (1) Top-level curator section — only add missing keys
+            _curator_defaults = DEFAULT_CONFIG.get("curator", {})
+            raw_curator = config.get("curator")
+            if not isinstance(raw_curator, dict):
+                raw_curator = {}
+            added_curator: List[str] = []
+            for k, v in _curator_defaults.items():
+                if k not in raw_curator:
+                    raw_curator[k] = copy.deepcopy(v)
+                    added_curator.append(k)
+            if added_curator:
+                config["curator"] = raw_curator
+                touched = True
 
-        # (2) auxiliary.curator task slot
-        _aux_curator_defaults = (
-            DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {})
-        )
-        raw_aux = config.get("auxiliary")
-        if not isinstance(raw_aux, dict):
-            raw_aux = {}
-        raw_aux_curator = raw_aux.get("curator")
-        if not isinstance(raw_aux_curator, dict):
-            raw_aux_curator = {}
-        added_aux: List[str] = []
-        for k, v in _aux_curator_defaults.items():
-            if k not in raw_aux_curator:
-                raw_aux_curator[k] = copy.deepcopy(v)
-                added_aux.append(k)
-        if added_aux:
-            raw_aux["curator"] = raw_aux_curator
-            config["auxiliary"] = raw_aux
-            touched = True
+            # (2) auxiliary.curator task slot
+            _aux_curator_defaults = (
+                DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {})
+            )
+            raw_aux = config.get("auxiliary")
+            if not isinstance(raw_aux, dict):
+                raw_aux = {}
+            raw_aux_curator = raw_aux.get("curator")
+            if not isinstance(raw_aux_curator, dict):
+                raw_aux_curator = {}
+            added_aux: List[str] = []
+            for k, v in _aux_curator_defaults.items():
+                if k not in raw_aux_curator:
+                    raw_aux_curator[k] = copy.deepcopy(v)
+                    added_aux.append(k)
+            if added_aux:
+                raw_aux["curator"] = raw_aux_curator
+                config["auxiliary"] = raw_aux
+                touched = True
 
+            if touched:
+                save_config(config)
         if touched:
-            save_config(config)
             if added_curator:
                 results["config_added"].append(
                     f"curator ({len(added_curator)} default key(s))"
@@ -4322,25 +4368,27 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     missing_config = get_missing_config_fields()
     
     if missing_config:
-        config = load_config()
-        
-        for field in missing_config:
-            key = field["key"]
-            default = field["default"]
-            
-            _set_nested(config, key, default)
-            results["config_added"].append(key)
-            if not quiet:
-                print(f"  ✓ Added {key} = {default}")
-        
-        # Update version and save
-        config["_config_version"] = latest_ver
-        save_config(config)
+        with _credential_files_transaction():
+            config = load_config()
+
+            for field in missing_config:
+                key = field["key"]
+                default = field["default"]
+
+                _set_nested(config, key, default)
+                results["config_added"].append(key)
+                if not quiet:
+                    print(f"  ✓ Added {key} = {default}")
+
+            # Update version and save
+            config["_config_version"] = latest_ver
+            save_config(config)
     elif current_ver < latest_ver:
         # Just update version
-        config = load_config()
-        config["_config_version"] = latest_ver
-        save_config(config)
+        with _credential_files_transaction():
+            config = load_config()
+            config["_config_version"] = latest_ver
+            save_config(config)
 
     # ── Skill-declared config vars ──────────────────────────────────────
     # Skills can declare config.yaml settings they need via
@@ -4360,11 +4408,11 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
 
         if answer in {"y", "yes"}:
             print()
-            config = load_config()
             try:
                 from agent.skill_utils import SKILL_CONFIG_PREFIX
             except Exception:
                 SKILL_CONFIG_PREFIX = "skills.config"
+            pending_skill_values = []
             for var in missing_skill_config:
                 default = var.get("default", "")
                 default_hint = f" (default: {default})" if default else ""
@@ -4373,15 +4421,23 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     value = str(default)
                 if value:
                     storage_key = f"{SKILL_CONFIG_PREFIX}.{var['key']}"
-                    _set_nested(config, storage_key, value)
-                    results["config_added"].append(var["key"])
-                    print(f"  ✓ Saved {var['key']} = {value}")
+                    pending_skill_values.append(
+                        (storage_key, value, var["key"])
+                    )
                 else:
                     results["warnings"].append(
                         f"Skipped {var['key']} — skill '{var.get('skill', '?')}' may ask for it later"
                     )
                 print()
-            save_config(config)
+            if pending_skill_values:
+                with _credential_files_transaction():
+                    config = load_config()
+                    for storage_key, value, _public_key in pending_skill_values:
+                        _set_nested(config, storage_key, value)
+                    save_config(config)
+                for _storage_key, value, public_key in pending_skill_values:
+                    results["config_added"].append(public_key)
+                    print(f"  ✓ Saved {public_key} = {value}")
         else:
             print("  Set later with: hermes config set <key> <value>")
 
@@ -4600,6 +4656,7 @@ def cfg_get(cfg: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> A
 
 
 
+@_credential_files_locked
 def read_raw_config() -> Dict[str, Any]:
     """Read ~/.hermes/config.yaml as-is, without merging defaults or migrating.
 
@@ -4678,6 +4735,7 @@ def load_config_readonly() -> Dict[str, Any]:
     return _load_config_impl(want_deepcopy=False)
 
 
+@_credential_files_locked
 def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
     with _CONFIG_LOCK:
         ensure_hermes_home()
@@ -4812,19 +4870,25 @@ _COMMENTED_SECTIONS = """
 """
 
 
+@_credential_files_locked
 def save_config(config: Dict[str, Any]):
     """Save configuration to ~/.hermes/config.yaml."""
     with _CONFIG_LOCK:
         if is_managed():
             managed_error("save configuration")
             return
+        from agent.provider_credentials import load_credential_config
         from utils import atomic_yaml_write
 
         ensure_hermes_home()
         config_path = get_config_path()
         current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
         normalized = current_normalized
-        raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
+        raw_existing = _normalize_root_model_keys(
+            _normalize_max_turns_config(
+                load_credential_config(config_path),
+            )
+        )
         if raw_existing:
             normalized = _preserve_env_ref_templates(
                 normalized,
@@ -4856,6 +4920,7 @@ def save_config(config: Dict[str, Any]):
         _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
 
 
+@_credential_files_locked
 def load_env() -> Dict[str, str]:
     """Load environment variables from ~/.hermes/.env.
 
@@ -4993,6 +5058,7 @@ def _sanitize_env_lines(lines: list) -> list:
     return sanitized
 
 
+@_credential_files_locked
 def sanitize_env_file() -> int:
     """Read, sanitize, and rewrite ~/.hermes/.env in place.
 
@@ -5079,6 +5145,7 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
+@_credential_files_locked
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hermes/.env."""
     if is_managed():
@@ -5091,66 +5158,24 @@ def save_env_value(key: str, value: str):
     # API keys / tokens must be ASCII — strip non-ASCII with a warning.
     value = _check_non_ascii_credential(key, value)
     ensure_hermes_home()
+    config_path = get_config_path()
     env_path = get_env_path()
+    # Keep the explicit legacy repair step for the two known concatenation
+    # patterns, then hand the actual mutation to the canonical strict writer.
+    # The outer credential transaction makes this sanitize → mutate sequence
+    # one serialized operation across CLI/WebUI processes.
+    sanitize_env_file()
+    from agent.provider_credentials import mutate_env_unique
 
-    # On Windows, open() defaults to the system locale (cp1252) which can
-    # cause OSError errno 22 on UTF-8 .env files.
-    read_kw = {"encoding": "utf-8-sig", "errors": "replace"}
-    write_kw = {"encoding": "utf-8"}
-
-    lines = []
-    if env_path.exists():
-        with open(env_path, **read_kw) as f:
-            lines = f.readlines()
-        # Sanitize on every read: split concatenated keys, drop stale placeholders
-        lines = _sanitize_env_lines(lines)
-
-    # Find and update or append
-    found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-
-    if not found:
-        # Ensure there's a newline at the end of the file before appending
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        lines.append(f"{key}={value}\n")
-    
-    fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
-    # Preserve original permissions so Docker volume mounts aren't clobbered.
-    original_mode = None
-    if env_path.exists():
-        try:
-            original_mode = stat.S_IMODE(env_path.stat().st_mode)
-        except OSError:
-            pass
-    try:
-        with os.fdopen(fd, 'w', **write_kw) as f:
-            f.writelines(lines)
-            f.flush()
-            os.fsync(f.fileno())
-        atomic_replace(tmp_path, env_path)
-        # Restore original permissions before _secure_file may tighten them.
-        if original_mode is not None:
-            try:
-                os.chmod(env_path, original_mode)
-            except OSError:
-                pass
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    mutate_env_unique(
+        {key: value},
+        config_path=config_path,
+    )
     _secure_file(env_path)
-
-    os.environ[key] = value
     invalidate_env_cache()
 
 
+@_credential_files_locked
 def remove_env_value(key: str) -> bool:
     """Remove a key from ~/.hermes/.env and os.environ.
 
@@ -5161,72 +5186,97 @@ def remove_env_value(key: str) -> bool:
         return False
     if not _ENV_VAR_NAME_RE.match(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
+    config_path = get_config_path()
     env_path = get_env_path()
-    if not env_path.exists():
-        os.environ.pop(key, None)
-        return False
-
-    read_kw = {"encoding": "utf-8-sig", "errors": "replace"}
-    write_kw = {"encoding": "utf-8"}
-
-    with open(env_path, **read_kw) as f:
-        lines = f.readlines()
-    lines = _sanitize_env_lines(lines)
-
-    new_lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
-    found = len(new_lines) < len(lines)
-
-    if found:
-        fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
-        # Preserve original permissions so Docker volume mounts aren't clobbered.
-        original_mode = None
+    sanitize_env_file()
+    if env_path.exists():
         try:
-            original_mode = stat.S_IMODE(env_path.stat().st_mode)
-        except OSError:
-            pass
-        try:
-            with os.fdopen(fd, 'w', **write_kw) as f:
-                f.writelines(new_lines)
-                f.flush()
-                os.fsync(f.fileno())
-            atomic_replace(tmp_path, env_path)
-            if original_mode is not None:
-                try:
-                    os.chmod(env_path, original_mode)
-                except OSError:
-                    pass
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+            raw_lines = env_path.read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("credential env cannot be read safely") from exc
+        found = any(
+            line.strip().startswith(f"{key}=")
+            for line in raw_lines
+            if line.strip() and not line.strip().startswith("#")
+        )
+    else:
+        found = False
+    from agent.provider_credentials import mutate_env_unique
+
+    mutate_env_unique(
+        {key: None},
+        config_path=config_path,
+    )
+    if env_path.exists():
         _secure_file(env_path)
-
-    os.environ.pop(key, None)
     invalidate_env_cache()
     return found
 
 
+def _save_anthropic_env_pair(
+    updates: Dict[str, str],
+    *,
+    save_fn=None,
+) -> None:
+    if save_fn is not None:
+        for key, value in updates.items():
+            save_fn(key, value)
+        return
+    if is_managed():
+        managed_error("update Anthropic credentials")
+        return
+    ensure_hermes_home()
+    normalized = {
+        key: _check_non_ascii_credential(
+            key,
+            value.replace("\n", "").replace("\r", ""),
+        )
+        for key, value in updates.items()
+    }
+    from agent.provider_credentials import mutate_env_unique
+
+    mutate_env_unique(
+        normalized,
+        config_path=get_config_path(),
+    )
+    _secure_file(get_env_path())
+    invalidate_env_cache()
+
+
+@_credential_files_locked
 def save_anthropic_oauth_token(value: str, save_fn=None):
     """Persist an Anthropic OAuth/setup token and clear the API-key slot."""
-    writer = save_fn or save_env_value
-    writer("ANTHROPIC_TOKEN", value)
-    writer("ANTHROPIC_API_KEY", "")
+    _save_anthropic_env_pair(
+        {
+            "ANTHROPIC_TOKEN": value,
+            "ANTHROPIC_API_KEY": "",
+        },
+        save_fn=save_fn,
+    )
 
 
+@_credential_files_locked
 def use_anthropic_claude_code_credentials(save_fn=None):
     """Use Claude Code's own credential files instead of persisting env tokens."""
-    writer = save_fn or save_env_value
-    writer("ANTHROPIC_TOKEN", "")
-    writer("ANTHROPIC_API_KEY", "")
+    _save_anthropic_env_pair(
+        {
+            "ANTHROPIC_TOKEN": "",
+            "ANTHROPIC_API_KEY": "",
+        },
+        save_fn=save_fn,
+    )
 
 
+@_credential_files_locked
 def save_anthropic_api_key(value: str, save_fn=None):
     """Persist an Anthropic API key and clear the OAuth/setup-token slot."""
-    writer = save_fn or save_env_value
-    writer("ANTHROPIC_API_KEY", value)
-    writer("ANTHROPIC_TOKEN", "")
+    _save_anthropic_env_pair(
+        {
+            "ANTHROPIC_API_KEY": value,
+            "ANTHROPIC_TOKEN": "",
+        },
+        save_fn=save_fn,
+    )
 
 
 def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
@@ -5494,6 +5544,7 @@ def edit_config():
     subprocess.run([editor, str(config_path)])
 
 
+@_credential_files_locked
 def set_config_value(key: str, value: str):
     """Set a configuration value."""
     if is_managed():
@@ -5520,15 +5571,6 @@ def set_config_value(key: str, value: str):
     # Otherwise it goes to config.yaml
     # Read the raw user config (not merged with defaults) to avoid
     # dumping all default values back to the file
-    config_path = get_config_path()
-    user_config = {}
-    if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                user_config = yaml.safe_load(f) or {}
-        except Exception:
-            user_config = {}
-    
     # Handle nested keys (e.g., "tts.provider") including numeric list
     # indices (e.g., "custom_providers.0.api_key").  Delegates to
     # _set_nested which preserves list-typed nodes; before #17876 the
@@ -5544,13 +5586,9 @@ def set_config_value(key: str, value: str):
     elif value.replace('.', '', 1).isdigit():
         value = float(value)
 
-    _set_nested(user_config, key, value)
-    
-    # Write only user config back (not the full merged defaults)
     ensure_hermes_home()
-    from utils import atomic_yaml_write
-    atomic_yaml_write(config_path, user_config, sort_keys=False)
-    
+    config_path = get_config_path()
+
     # Keep .env in sync for keys that terminal_tool reads directly from env vars.
     # config.yaml is authoritative, but terminal_tool only reads TERMINAL_ENV etc.
     _config_to_env_sync = {
@@ -5574,8 +5612,26 @@ def set_config_value(key: str, value: str):
         "terminal.container_disk": "TERMINAL_CONTAINER_DISK",
         "terminal.container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
     }
+    from agent.provider_credentials import (
+        mutate_config_env_strict,
+        mutate_config_strict,
+    )
+
+    def _mutate_user_config(user_config):
+        _set_nested(user_config, key, value)
+
     if key in _config_to_env_sync:
-        save_env_value(_config_to_env_sync[key], str(value))
+        mutate_config_env_strict(
+            _mutate_user_config,
+            {_config_to_env_sync[key]: str(value)},
+            config_path=config_path,
+        )
+        invalidate_env_cache()
+    else:
+        mutate_config_strict(
+            _mutate_user_config,
+            config_path=config_path,
+        )
 
     print(f"✓ Set {key} = {value} in {config_path}")
 

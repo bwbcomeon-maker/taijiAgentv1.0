@@ -5,8 +5,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, Iterable
-
-import requests
+from urllib.parse import urlsplit, urlunsplit
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -15,7 +14,17 @@ from agent.image_gen_provider import (
     save_url_image,
     success_response,
 )
-from agent.provider_credentials import auth_schema
+from agent.provider_credentials import (
+    auth_schema,
+    load_credential_config,
+    provider_family,
+    resolve_api_key,
+)
+from agent.safe_outbound_http import (
+    SafeOutboundError,
+    read_bounded_json,
+    request_pinned_https,
+)
 
 SIZE_MAP_X = {
     "landscape": "1536x1024",
@@ -32,6 +41,29 @@ ASPECT_RATIO_MAP = {
     "square": "1:1",
     "portrait": "9:16",
 }
+MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024
+_ERROR_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+_BEARER_RE = re.compile(
+    r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}",
+    re.IGNORECASE,
+)
+_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"(?![A-Za-z0-9_-])"
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9])("
+    r"authorization|credentials?|jwt|token|sig(?:nature)?|password|passphrase|"
+    r"api[_.-]?key|access[_.-]?(?:key(?:[_.-]?(?:id|secret))?|token)|"
+    r"refresh[_.-]?token|id[_.-]?token|client[_.-]?secret|"
+    r"secret[_.-]?access[_.-]?key|secret(?:[_.-]?key)?|"
+    r"session[_.-]?(?:id|token)|security[_.-]?token|private[_.-]?key|cookie"
+    r")(\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 def credential_field(
@@ -92,6 +124,43 @@ def env_value(name: str) -> str:
     return str(os.getenv(name) or "").strip()
 
 
+def provider_api_key(
+    provider: str,
+    *,
+    config_data: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the active provider's named key without weakening legacy fallback."""
+    data = load_credential_config() if config_data is None else config_data
+    if not isinstance(data, dict):
+        raise ValueError("image provider configuration must be a mapping")
+    image_cfg = data.get("image_gen")
+    if image_cfg is None:
+        image_cfg = {}
+    if not isinstance(image_cfg, dict):
+        raise ValueError("image_gen configuration must be a mapping")
+
+    raw_active_provider = image_cfg.get("provider", "")
+    if raw_active_provider is None:
+        raw_active_provider = ""
+    if not isinstance(raw_active_provider, str):
+        raise ValueError("image_gen provider must be a string")
+
+    credential_ref = ""
+    if provider_family(raw_active_provider) == provider_family(provider):
+        raw_credential_ref = image_cfg.get("credential_ref", "")
+        if raw_credential_ref is None:
+            raw_credential_ref = ""
+        if not isinstance(raw_credential_ref, str):
+            raise ValueError("image_gen credential_ref must be a string")
+        credential_ref = raw_credential_ref.strip()
+
+    return resolve_api_key(
+        provider,
+        credential_ref,
+        config_data=data,
+    )
+
+
 def missing_required(required_envs: Iterable[str]) -> list[str]:
     return [name for name in required_envs if not env_value(name)]
 
@@ -134,22 +203,62 @@ def validate_prompt(
     )
 
 
+def _safe_error_url(match: re.Match[str]) -> str:
+    candidate = match.group(0)
+    suffix = ""
+    opener = match.string[match.start() - 1] if match.start() else ""
+    closer = {"(": ")", "[": "]", "{": "}", "'": "'"}.get(opener)
+    if closer:
+        probe = candidate
+        trailing = ""
+        while probe and probe[-1] in ".,;:!?":
+            trailing = probe[-1] + trailing
+            probe = probe[:-1]
+        if probe.endswith(closer):
+            candidate = probe[:-1]
+            suffix = closer + trailing
+    try:
+        parsed = urlsplit(candidate)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return "[redacted-url]" + suffix
+        hostname = parsed.hostname
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        port = parsed.port
+        default_port = 443 if parsed.scheme.lower() == "https" else 80
+        netloc = hostname if port in {None, default_port} else f"{hostname}:{port}"
+        return urlunsplit(
+            (
+                parsed.scheme.lower(),
+                netloc,
+                "/[redacted-path]",
+                "",
+                "",
+            )
+        ) + suffix
+    except (TypeError, ValueError):
+        return "[redacted-url]" + suffix
+
+
 def redact_secrets(message: Any, secrets: Iterable[str]) -> str:
-    text = str(message or "").strip()
+    text = _CONTROL_CHAR_RE.sub(" ", str(message or "")).strip()
     for secret in secrets:
         secret = str(secret or "").strip()
         if secret:
             text = text.replace(secret, "[redacted]")
-    text = re.sub(r"(sk-[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]*secret[A-Za-z0-9_-]*)", "[redacted]", text)
+    text = _ERROR_URL_RE.sub(_safe_error_url, text)
+    text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _JWT_RE.sub("[redacted]", text)
+    text = _SENSITIVE_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[redacted]",
+        text,
+    )
+    text = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "[redacted]", text)
     return text[:500]
 
 
-def error_message_from_response(response: Any, secrets: Iterable[str]) -> str:
+def error_message_from_body(body: Any, secrets: Iterable[str]) -> str:
     parts: list[str] = []
-    try:
-        body = response.json()
-    except Exception:
-        body = None
     if isinstance(body, dict):
         for key in ("error", "message", "msg"):
             value = body.get(key)
@@ -157,9 +266,6 @@ def error_message_from_response(response: Any, secrets: Iterable[str]) -> str:
                 value = value.get("message") or value.get("msg") or value.get("code")
             if value:
                 parts.append(str(value))
-    text = str(getattr(response, "text", "") or "").strip()
-    if text:
-        parts.append(text[:300])
     return redact_secrets(" ".join(parts), secrets)
 
 
@@ -174,12 +280,47 @@ def post_json(
     prompt: str,
     aspect_ratio: str,
     secrets: Iterable[str],
-    request_post: Any | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     try:
-        post = request_post or requests.post
-        response = post(url, headers=headers, json=payload, timeout=timeout)
-    except requests.RequestException as exc:
+        with request_pinned_https(
+            method="POST",
+            url=url,
+            network_scope="public_direct",
+            headers=headers,
+            json_body=payload,
+            timeout=timeout,
+            follow_redirects=False,
+        ) as response:
+            status_code = int(response.status_code)
+            if 200 <= status_code < 300:
+                body = read_bounded_json(
+                    response,
+                    max_bytes=MAX_API_RESPONSE_BYTES,
+                )
+            else:
+                try:
+                    body = read_bounded_json(
+                        response,
+                        max_bytes=MAX_API_RESPONSE_BYTES,
+                    )
+                except SafeOutboundError:
+                    body = None
+    except SafeOutboundError as exc:
+        invalid_response = exc.reason_code.startswith("provider_response_")
+        prefix = (
+            f"{provider} returned an invalid response"
+            if invalid_response
+            else f"{provider} image generation request failed"
+        )
+        return None, error_response(
+            error=f"{prefix}: {redact_secrets(exc, secrets)}",
+            error_type="invalid_response" if invalid_response else "api_error",
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+        )
+    except Exception as exc:
         return None, error_response(
             error=f"{provider} image generation request failed: {redact_secrets(exc, secrets)}",
             error_type="api_error",
@@ -188,23 +329,11 @@ def post_json(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
         )
-    if getattr(response, "status_code", 200) >= 400:
-        detail = error_message_from_response(response, secrets)
+    if not 200 <= status_code < 300:
+        detail = error_message_from_body(body, secrets)
         return None, error_response(
-            error=f"{provider} image generation failed: HTTP {response.status_code}{(': ' + detail) if detail else ''}",
+            error=f"{provider} image generation failed: HTTP {status_code}{(': ' + detail) if detail else ''}",
             error_type="api_error",
-            provider=provider,
-            model=model,
-            prompt=prompt,
-            aspect_ratio=aspect_ratio,
-        )
-    try:
-        response.raise_for_status()
-        body = response.json()
-    except Exception as exc:
-        return None, error_response(
-            error=f"{provider} returned an invalid response: {redact_secrets(exc, secrets)}",
-            error_type="invalid_response",
             provider=provider,
             model=model,
             prompt=prompt,
@@ -222,22 +351,50 @@ def post_json(
     return body, None
 
 
-def first_url(value: Any) -> str:
+def _https_image_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        return bool(
+            parsed.scheme.lower() == "https"
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def first_url(
+    value: Any,
+    *,
+    _depth: int = 0,
+    max_depth: int = 8,
+) -> str:
+    if _depth >= max_depth:
+        return ""
     if isinstance(value, dict):
         for key in ("url", "image", "image_url", "imageUrl"):
             url = value.get(key)
-            if isinstance(url, str) and url.strip().startswith(("http://", "https://")):
+            if isinstance(url, str) and _https_image_url(url):
                 return url.strip()
         for nested in value.values():
-            found = first_url(nested)
+            found = first_url(
+                nested,
+                _depth=_depth + 1,
+                max_depth=max_depth,
+            )
             if found:
                 return found
     elif isinstance(value, list):
         for item in value:
-            found = first_url(item)
+            found = first_url(
+                item,
+                _depth=_depth + 1,
+                max_depth=max_depth,
+            )
             if found:
                 return found
-    elif isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+    elif isinstance(value, str) and _https_image_url(value):
         return value.strip()
     return ""
 
@@ -253,12 +410,28 @@ def cached_success(
     extra: dict[str, Any] | None = None,
     save_image: Any | None = None,
 ) -> dict[str, Any]:
+    if not _https_image_url(image_url):
+        return error_response(
+            error=f"{provider} returned an unsafe image URL.",
+            error_type="invalid_response",
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+        )
     try:
         saver = save_image or save_url_image
-        image_ref = str(saver(image_url, prefix=cache_prefix))
-    except Exception as exc:
+        image_ref = str(
+            saver(
+                image_url,
+                prefix=cache_prefix,
+                network_scope="public_direct",
+                url_validator=_https_image_url,
+            )
+        )
+    except Exception:
         return error_response(
-            error=f"{provider} image result download failed: {exc}",
+            error=f"{provider} image result download failed.",
             error_type="io_error",
             provider=provider,
             model=model,

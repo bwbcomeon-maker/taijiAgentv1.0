@@ -22,6 +22,7 @@ import threading
 import time
 import traceback
 import uuid
+from functools import wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -294,12 +295,60 @@ def _get_config_path() -> Path:
         return _DEFAULT_HERMES_HOME / "config.yaml"
 
 
+def _active_config_transaction_locked(func):
+    @wraps(func)
+    def locked(*args, **kwargs):
+        from agent.provider_credentials import credential_transaction
+
+        with credential_transaction(_get_config_path()):
+            return func(*args, **kwargs)
+
+    return locked
+
+
+def _config_path_transaction_locked(func):
+    @wraps(func)
+    def locked(config_path: Path, *args, **kwargs):
+        from agent.provider_credentials import credential_transaction
+
+        with credential_transaction(Path(config_path)):
+            return func(Path(config_path), *args, **kwargs)
+
+    return locked
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Best-effort durability barrier for a completed atomic replace/unlink."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_fd: int | None = None
+    try:
+        directory_fd = os.open(path.parent, flags)
+        os.fsync(directory_fd)
+    except OSError:
+        # The file operation has already committed. Some platforms do not
+        # support opening/fsyncing directories, so this must not turn a
+        # successful replace into an unsafe rollback attempt.
+        logger.debug("Unable to fsync parent directory for %s", path)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
 _DEFAULT_WEBUI_SESSION_SAVE_MODE = "deferred"
 
 
-def get_config() -> dict:
-    """Return the cached config dict, loading from disk if needed."""
+def get_config(*, config_path: Path | None = None) -> dict:
+    """Return config, optionally as an isolated snapshot from an exact path.
+
+    The no-argument form preserves the process-wide cache used by request
+    handlers.  Concurrent profile streams must pass ``config_path`` so they do
+    not share or replace that mutable cache while another profile is running.
+    """
+    if config_path is not None:
+        return _load_yaml_config_file(Path(config_path))
+
     config_path = _get_config_path()
     try:
         current_mtime = config_path.stat().st_mtime
@@ -343,6 +392,7 @@ def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     return _DEFAULT_WEBUI_SESSION_SAVE_MODE
 
 
+@_active_config_transaction_locked
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
     global _cfg_mtime, _cfg_path, _cfg_fingerprint
@@ -377,6 +427,7 @@ def reload_config() -> None:
             _delete_models_cache_on_disk()
 
 
+@_config_path_transaction_locked
 def _load_yaml_config_file(config_path: Path) -> dict:
     try:
         import yaml as _yaml
@@ -393,17 +444,30 @@ def _load_yaml_config_file(config_path: Path) -> dict:
         return {}
 
 
-def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
-    try:
-        import yaml as _yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+def _load_yaml_config_file_strict(config_path: Path) -> dict:
+    """Load a config that is about to be mutated, failing closed on damage."""
+    from agent.provider_credentials import load_credential_config
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        _yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
+    return load_credential_config(Path(config_path))
+
+
+@_config_path_transaction_locked
+def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    """Replace config contents through the canonical strict credential store.
+
+    The primitive validates the existing YAML before mutation and atomically
+    writes the real target of a symlink, so damage is never silently erased and
+    a configured indirection is preserved.
+    """
+    from agent.provider_credentials import mutate_config_strict
+
+    replacement = copy.deepcopy(config_data)
+
+    def replace(current: dict) -> None:
+        current.clear()
+        current.update(copy.deepcopy(replacement))
+
+    mutate_config_strict(replace, config_path=Path(config_path))
 
 
 # Initial load
@@ -2331,6 +2395,7 @@ def get_reasoning_status(
     }
 
 
+@_active_config_transaction_locked
 def set_reasoning_display(show: bool) -> dict:
     """Persist ``display.show_reasoning`` to the active profile's config.yaml.
 
@@ -2340,7 +2405,7 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_strict(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -2351,6 +2416,7 @@ def set_reasoning_display(show: bool) -> dict:
     return get_reasoning_status()
 
 
+@_active_config_transaction_locked
 def set_reasoning_effort(effort: str) -> dict:
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
@@ -2368,7 +2434,7 @@ def set_reasoning_effort(effort: str) -> dict:
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_strict(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -2379,6 +2445,7 @@ def set_reasoning_effort(effort: str) -> dict:
     return get_reasoning_status()
 
 
+@_active_config_transaction_locked
 def set_hermes_default_model(model_id: str) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -2390,7 +2457,7 @@ def set_hermes_default_model(model_id: str) -> dict:
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_strict(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
@@ -2500,6 +2567,7 @@ def get_auxiliary_models() -> dict:
     }
 
 
+@_active_config_transaction_locked
 def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
     """Persist an auxiliary model assignment in config.yaml.
 
@@ -2511,7 +2579,7 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_strict(config_path)
 
         if task == "__reset__":
             # Per-slot reset: set each slot to auto, preserving extra fields

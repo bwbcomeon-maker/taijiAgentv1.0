@@ -874,6 +874,95 @@ class TestVisionClientFallback:
 
         assert "anthropic" in backends
 
+    def test_available_backends_skips_known_text_only_main_like_runtime(self):
+        """Setup discovery must not advertise a backend runtime auto will skip."""
+        with (
+            patch("agent.auxiliary_client._read_main_provider", return_value="deepseek"),
+            patch("agent.auxiliary_client._read_main_model", return_value="deepseek-v4-pro"),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(MagicMock(), "deepseek-v4-pro"),
+            ),
+            patch(
+                "agent.auxiliary_client._strict_vision_backend_available",
+                return_value=False,
+            ),
+        ):
+            backends = get_available_vision_backends()
+
+        assert backends == []
+
+    def test_text_only_openrouter_main_uses_strict_openrouter_vision_fallback(self):
+        """A text-only main model must not suppress the same aggregator's vision default."""
+        vision_client = MagicMock()
+
+        def strict_backend(provider, model=None):
+            if provider == "openrouter":
+                return vision_client, "openrouter/vision-default"
+            return None, None
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=("auto", None, None, None, None),
+            ),
+            patch("agent.auxiliary_client._read_main_provider", return_value="openrouter"),
+            patch("agent.auxiliary_client._read_main_model", return_value="text-only-main"),
+            patch(
+                "agent.auxiliary_client._main_model_supports_vision",
+                return_value=False,
+            ),
+            patch(
+                "agent.auxiliary_client._resolve_strict_vision_backend",
+                side_effect=strict_backend,
+            ),
+        ):
+            provider, client, model = resolve_vision_provider_client(provider="auto")
+
+        assert (provider, client, model) == (
+            "openrouter",
+            vision_client,
+            "openrouter/vision-default",
+        )
+
+    @pytest.mark.parametrize(
+        "alias",
+        ("kimi", "moonshot", "kimi-cn", "moonshot-cn", "deep-seek"),
+    )
+    def test_auto_canonicalizes_text_only_main_alias_before_vision_gate(self, alias):
+        """Provider aliases must not bypass the canonical auto-routing deny-set."""
+        generic_resolver = MagicMock(return_value=(MagicMock(), "text-only-main"))
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=("auto", None, None, None, None),
+            ),
+            patch("agent.auxiliary_client._read_main_provider", return_value=alias),
+            patch("agent.auxiliary_client._read_main_model", return_value="text-only-main"),
+            patch(
+                "agent.auxiliary_client._main_model_supports_vision",
+                return_value=True,
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                generic_resolver,
+            ),
+            patch(
+                "agent.auxiliary_client._strict_vision_backend_available",
+                return_value=False,
+            ),
+            patch(
+                "agent.auxiliary_client._resolve_strict_vision_backend",
+                return_value=(None, None),
+            ),
+        ):
+            available = get_available_vision_backends()
+            resolved = resolve_vision_provider_client(provider="auto")
+
+        assert available == []
+        assert resolved == (None, None, None)
+        generic_resolver.assert_not_called()
+
     def test_resolve_provider_client_returns_native_anthropic_wrapper(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "***")
         with (
@@ -2578,6 +2667,7 @@ class TestVisionAutoSkipsKimiCoding:
         """Guard against accidental widening of the skip list."""
         from agent.auxiliary_client import _PROVIDERS_WITHOUT_VISION
         assert _PROVIDERS_WITHOUT_VISION == frozenset({
+            "deepseek",
             "kimi-coding",
             "kimi-coding-cn",
         })

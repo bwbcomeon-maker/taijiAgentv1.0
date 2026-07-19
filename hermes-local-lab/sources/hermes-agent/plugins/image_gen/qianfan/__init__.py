@@ -4,19 +4,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-import requests
-
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, ImageGenProvider, error_response
 from plugins.image_gen.domestic_common import (
     SIZE_MAP_X,
     auth_error,
     cached_success,
     credential_field,
-    env_value,
     first_url,
-    missing_required,
     normalized_aspect,
     post_json,
+    provider_api_key,
     save_url_image,
     validate_prompt,
 )
@@ -36,7 +33,10 @@ class QianfanImageGenProvider(ImageGenProvider):
         return "百度千帆"
 
     def is_available(self) -> bool:
-        return bool(env_value("QIANFAN_API_KEY"))
+        try:
+            return bool(provider_api_key(self.name))
+        except ValueError:
+            return False
 
     def list_models(self) -> List[Dict[str, Any]]:
         return [
@@ -98,11 +98,25 @@ class QianfanImageGenProvider(ImageGenProvider):
         prompt, prompt_error = validate_prompt(prompt, provider=self.name, model=model, aspect_ratio=aspect)
         if prompt_error:
             return prompt_error
-        missing = missing_required(("QIANFAN_API_KEY",))
-        if missing:
-            return auth_error(missing=missing, provider=self.name, model=model, prompt=prompt, aspect_ratio=aspect)
-
-        api_key = env_value("QIANFAN_API_KEY")
+        try:
+            api_key = provider_api_key(self.name)
+        except ValueError:
+            return error_response(
+                error="Qianfan credential configuration is invalid.",
+                error_type="configuration_error",
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+        if not api_key:
+            return auth_error(
+                missing=("QIANFAN_API_KEY",),
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         payload = {
             "model": model,
             "prompt": prompt,
@@ -119,7 +133,6 @@ class QianfanImageGenProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             secrets=(api_key,),
-            request_post=requests.post,
         )
         if error:
             return error

@@ -28,13 +28,18 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.env_path = Path(self.tmpdir) / ".env"
+        self.config_path = Path(self.tmpdir) / "config.yaml"
         # Must import AFTER setting up, as the module has top-level code
         from api.providers import _write_env_file
-        self._write_env_file = _write_env_file
+        self._write_env_file = lambda env_path, updates: _write_env_file(
+            env_path,
+            updates,
+            config_path=self.config_path,
+        )
 
     def tearDown(self):
         # Clean os.environ entries set during tests
-        for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "NEW_KEY"):
+        for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "NEW_KEY", "DUPLICATE_KEY"):
             os.environ.pop(key, None)
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -121,6 +126,39 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
         # Comment B stays (it's just a comment, not tied to KEY_B structurally)
         self.assertIn("# Comment B", content)
 
+    def test_update_collapses_duplicate_keys_to_one_current_value(self):
+        self.env_path.write_text(
+            "DUPLICATE_KEY=older\n"
+            "KEEP_KEY=value\n"
+            "DUPLICATE_KEY=newer\n",
+            encoding="utf-8",
+        )
+
+        self._write_env_file(self.env_path, {"DUPLICATE_KEY": "current"})
+
+        lines = self._read().splitlines()
+        self.assertEqual(
+            [line for line in lines if line.startswith("DUPLICATE_KEY=")],
+            ["DUPLICATE_KEY=current"],
+        )
+        self.assertIn("KEEP_KEY=value", lines)
+
+    def test_delete_removes_every_duplicate_key_occurrence(self):
+        self.env_path.write_text(
+            "DUPLICATE_KEY=older\n"
+            "KEEP_KEY=value\n"
+            "DUPLICATE_KEY=newer\n",
+            encoding="utf-8",
+        )
+
+        self._write_env_file(self.env_path, {"DUPLICATE_KEY": None})
+
+        lines = self._read().splitlines()
+        self.assertFalse(
+            any(line.startswith("DUPLICATE_KEY=") for line in lines)
+        )
+        self.assertIn("KEEP_KEY=value", lines)
+
     def test_empty_file_handled_gracefully(self):
         """Writing to a non-existent .env file works."""
         self.assertFalse(self.env_path.exists())
@@ -129,42 +167,52 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
         self.assertEqual(self._read().strip(), "NEW_KEY=value")
 
 
-class TestOnboardingUsesProviderWriteEnv(unittest.TestCase):
-    """Verify that onboarding.py delegates to providers._write_env_file
-    (which holds _ENV_LOCK), eliminating the duplicate unprotected path."""
+class TestCanonicalCredentialEnvWriter(unittest.TestCase):
+    """Verify WebUI writes route through the durable credential primitives."""
 
-    def test_onboarding_imports_write_env_from_providers(self):
-        """api.onboarding._write_env_file must be the same object as
-        api.providers._write_env_file (shared implementation with lock)."""
-        from api import onboarding, providers
-        self.assertIs(
-            onboarding._write_env_file,
-            providers._write_env_file,
-            "onboarding must use providers._write_env_file for thread safety (#1164)"
+    def test_onboarding_uses_durable_config_env_pair(self):
+        import inspect
+        from api.onboarding import apply_onboarding_setup
+
+        self.assertIn(
+            "mutate_config_env_strict",
+            inspect.getsource(apply_onboarding_setup),
         )
 
-    def test_providers_write_env_holds_env_lock(self):
-        """providers._write_env_file must acquire _ENV_LOCK from api.streaming."""
+    def test_providers_write_env_delegates_to_canonical_primitive(self):
         import inspect
         from api.providers import _write_env_file
-        source = inspect.getsource(_write_env_file)
-        self.assertIn("_ENV_LOCK", source,
-                      "_write_env_file must use _ENV_LOCK for concurrency safety")
-        self.assertIn("from api.streaming import _ENV_LOCK", source,
-                      "_ENV_LOCK must be imported from api.streaming")
 
-    def test_providers_write_env_uses_atomic_rename(self):
-        """providers._write_env_file must write atomically via tempfile +
-        os.replace so cross-process readers (Telegram, CLI) never observe
-        a truncated half-written file (#1164 cross-process leg)."""
+        source = inspect.getsource(_write_env_file)
+        self.assertIn("mutate_env_unique", source)
+
+    def test_providers_write_env_has_no_second_manual_writer(self):
         import inspect
         from api.providers import _write_env_file
         source = inspect.getsource(_write_env_file)
-        self.assertIn("tempfile", source,
-                      "_write_env_file must stage writes through a tempfile")
-        self.assertIn("os.replace(", source,
-                      "_write_env_file must atomically rename via os.replace")
-        # The original O_TRUNC pattern must NOT remain — it is the source of
-        # the cross-process race the PR is closing.
-        self.assertNotIn("O_TRUNC", source,
-                         "_write_env_file must not truncate-in-place (#1164)")
+        self.assertNotIn("tempfile", source)
+        self.assertNotIn("os.replace(", source)
+
+
+def test_config_override_pairs_env_with_the_same_transaction_directory(
+    monkeypatch, tmp_path
+):
+    from api import config, onboarding, providers
+
+    override_path = tmp_path / "isolated-profile" / "config.yaml"
+    monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(override_path))
+
+    assert config._get_config_path() == override_path
+    assert onboarding._get_active_hermes_home() == override_path.parent
+    try:
+        providers._write_env_file(
+            override_path.parent / ".env",
+            {"TEST_CONFIG_OVERRIDE_KEY": "paired-value"},
+            config_path=override_path,
+        )
+        assert (override_path.parent / ".env").read_text(encoding="utf-8") == (
+            "TEST_CONFIG_OVERRIDE_KEY=paired-value\n"
+        )
+    finally:
+        os.environ.pop("TEST_CONFIG_OVERRIDE_KEY", None)

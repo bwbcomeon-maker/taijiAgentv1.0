@@ -58,6 +58,24 @@ def _restore_file_mode(path: Path, mode: "int | None") -> None:
         pass
 
 
+def _fsync_parent_directory(path: Union[str, Path]) -> None:
+    """Best-effort durability barrier after a committed replace."""
+    target = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_fd: int | None = None
+    try:
+        directory_fd = os.open(target.parent, flags)
+        os.fsync(directory_fd)
+    except OSError:
+        # The replace has already committed and some platforms cannot open or
+        # fsync directory handles. Never report a failed write after commit.
+        logger.debug("Unable to fsync parent directory for %s", target)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
 def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     """Atomically move *tmp_path* onto *target*, preserving symlinks.
 
@@ -79,6 +97,7 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     target_str = str(target)
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
     os.replace(str(tmp_path), real_path)
+    _fsync_parent_directory(real_path)
     return real_path
 
 

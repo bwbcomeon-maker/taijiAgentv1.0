@@ -1,6 +1,8 @@
 """Tests for skill toggle (enable/disable) API and frontend."""
 from pathlib import Path
 
+import pytest
+
 
 PANELS_JS = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text("utf-8")
 I18N_JS = (Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text("utf-8")
@@ -197,3 +199,35 @@ def test_platform_disabled_no_write_through_when_key_absent(tmp_path, monkeypatc
     assert "skill-b" in cfg_after["skills"]["disabled"]
     # platform_disabled was never created
     assert "platform_disabled" not in cfg_after.get("skills", {})
+
+
+def test_skill_toggle_fails_closed_without_overwriting_malformed_yaml(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import MagicMock
+
+    from api import routes
+
+    config_path = tmp_path / "config.yaml"
+    malformed_payload = b"skills:\n  disabled: [unterminated\n"
+    config_path.write_bytes(malformed_payload)
+    monkeypatch.setattr(routes, "_get_config_path", lambda: config_path)
+
+    fake_dir = tmp_path / "skills" / "skill-a"
+    fake_dir.mkdir(parents=True)
+    fake_md = fake_dir / "SKILL.md"
+    fake_md.write_text("---\nname: skill-a\n---\nA skill", encoding="utf-8")
+    monkeypatch.setattr(
+        routes,
+        "_find_skill_in_dirs",
+        lambda name, dirs: (fake_dir, fake_md),
+    )
+
+    with pytest.raises(ValueError, match="config"):
+        routes._handle_skill_toggle(
+            MagicMock(),
+            {"name": "skill-a", "enabled": False},
+        )
+
+    assert config_path.read_bytes() == malformed_payload

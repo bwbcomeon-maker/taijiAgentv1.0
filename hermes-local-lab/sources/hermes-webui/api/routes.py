@@ -23,6 +23,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
@@ -5212,6 +5213,22 @@ def _active_profile_config_path() -> Path:
         return _get_config_path()
 
 
+def _route_config_transaction_locked(path_resolver):
+    """Lock the exact config path that the decorated route will mutate."""
+    def decorator(func):
+        @wraps(func)
+        def locked(*args, **kwargs):
+            from agent.provider_credentials import credential_transaction
+
+            config_path = Path(path_resolver())
+            with credential_transaction(config_path):
+                return func(*args, **kwargs)
+
+        return locked
+
+    return decorator
+
+
 def _get_disabled_skill_names_for_profile() -> set:
     """Read disabled skill names from the active profile's config.yaml.
 
@@ -6036,6 +6053,7 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_strict,
     _save_yaml_config_file,
     reload_config,
     _cfg_lock,
@@ -21602,6 +21620,7 @@ def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
     return names
 
 
+@_route_config_transaction_locked(lambda: _active_profile_config_path())
 def _handle_skill_toggle(handler, body):
     """Toggle a skill's enabled/disabled state in the active profile's config.yaml.
 
@@ -21627,7 +21646,7 @@ def _handle_skill_toggle(handler, body):
 
     config_path = _active_profile_config_path()
     with _cfg_lock:
-        cfg = _load_yaml_config_file(config_path)
+        cfg = _load_yaml_config_file_strict(config_path)
 
         # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):
@@ -21651,7 +21670,13 @@ def _handle_skill_toggle(handler, body):
         cfg["skills"] = skills_cfg
         _save_yaml_config_file(config_path, cfg)
 
-    reload_config()  # outside with block — reload_config() acquires the lock itself
+    # Only refresh the process-global cache when it represents the exact file
+    # just written. Profile-scoped requests can intentionally target a
+    # different config than a process-level HERMES_CONFIG_PATH override.
+    from api import config as webui_config
+
+    if Path(webui_config._get_config_path()) == config_path:
+        reload_config()
 
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -22827,25 +22852,29 @@ def _handle_mcp_servers_list(handler):
     })
 
 
+@_route_config_transaction_locked(lambda: _get_config_path())
 def _handle_mcp_server_delete(handler, name):
     """Delete an MCP server by name."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    del servers[name]
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    config_path = Path(_get_config_path())
+    with _cfg_lock:
+        cfg = _load_yaml_config_file_strict(config_path)
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        del servers[name]
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(config_path, cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
 
+@_route_config_transaction_locked(lambda: _get_config_path())
 def _handle_mcp_server_toggle(handler, name, body):
     """Toggle enabled state for an MCP server (PATCH /api/mcp/servers/{name})."""
     from urllib.parse import unquote
@@ -22855,17 +22884,19 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    if not isinstance(servers[name], dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
-    servers[name]["enabled"] = enabled
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    config_path = Path(_get_config_path())
+    with _cfg_lock:
+        cfg = _load_yaml_config_file_strict(config_path)
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        if not isinstance(servers[name], dict):
+            return bad(handler, f"MCP server '{name}' has invalid config", 400)
+        servers[name]["enabled"] = enabled
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(config_path, cfg)
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -23118,22 +23149,25 @@ def _mcp_server_config_from_body(body, existing_cfg=None) -> tuple[dict | None, 
     return server_cfg, None
 
 
+@_route_config_transaction_locked(lambda: _get_config_path())
 def _handle_mcp_server_update(handler, name, body):
     """Add or update an MCP server."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
-    server_cfg, config_error = _mcp_server_config_from_body(body, existing_cfg)
-    if config_error:
-        return bad(handler, config_error)
-    servers[name] = server_cfg
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    config_path = Path(_get_config_path())
+    with _cfg_lock:
+        cfg = _load_yaml_config_file_strict(config_path)
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        existing_cfg = servers.get(name, {})
+        server_cfg, config_error = _mcp_server_config_from_body(body, existing_cfg)
+        if config_error:
+            return bad(handler, config_error)
+        servers[name] = server_cfg
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(config_path, cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

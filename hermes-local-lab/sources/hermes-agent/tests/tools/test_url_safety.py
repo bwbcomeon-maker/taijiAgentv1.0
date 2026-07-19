@@ -172,11 +172,11 @@ class TestIsSafeUrl:
         ]):
             assert is_safe_url("https://example.com/file.jpg") is False
 
-    def test_qq_multimedia_hostname_allowed_with_benchmark_ip(self):
+    def test_qq_multimedia_hostname_cannot_bypass_benchmark_floor(self):
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("198.18.0.23", 0)),
         ]):
-            assert is_safe_url("https://multimedia.nt.qq.com.cn/download?id=123") is True
+            assert is_safe_url("https://multimedia.nt.qq.com.cn/download?id=123") is False
 
     def test_qq_multimedia_hostname_exception_is_exact_match(self):
         with patch("socket.getaddrinfo", return_value=[
@@ -322,13 +322,13 @@ class TestAllowPrivateUrlsIntegration:
         ]):
             assert is_safe_url("http://router.local") is True
 
-    def test_benchmark_ip_allowed_when_toggle_on(self, monkeypatch):
-        """198.18.x.x (benchmark/OpenWrt proxy range) passes when toggle is on."""
+    def test_benchmark_ip_remains_blocked_when_toggle_on(self, monkeypatch):
+        """198.18.0.0/15 is a permanent floor, not a private-toggle escape."""
         monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "true")
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("198.18.23.183", 0)),
         ]):
-            assert is_safe_url("https://nousresearch.com") is True
+            assert is_safe_url("https://nousresearch.com") is False
 
     def test_cgnat_allowed_when_toggle_on(self, monkeypatch):
         """CGNAT range (100.64.0.0/10) passes when toggle is on."""
@@ -429,15 +429,23 @@ class TestIsAlwaysBlockedUrl:
         "http://169.254.170.2/v2/credentials",                   # AWS ECS task metadata
         "http://100.100.100.200/latest/meta-data/",              # Alibaba Cloud
         "http://169.254.42.1/",                                  # Any /16 link-local
+        "http://[fd20:ce::254]/computeMetadata/v1/",              # GCP IPv6 metadata
+        "https://198.18.0.1/provider",                            # Benchmark/Fake-IP floor
+        "https://[::ffff:198.18.0.1]/provider",                  # Mapped Fake-IP floor
     ])
-    def test_literal_imds_ips_always_blocked(self, url):
-        """Literal IMDS IPs and the /16 link-local range always block."""
+    def test_literal_permanent_floor_ips_always_blocked(self, url):
+        """Metadata, link-local and Fake-IP literals always block."""
         assert is_always_blocked_url(url) is True
 
     def test_gcp_metadata_hostname_always_blocked_even_without_dns(self):
         """metadata.google.internal blocks by hostname, no DNS needed."""
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")):
             assert is_always_blocked_url("http://metadata.google.internal/") is True
+
+    def test_aws_metadata_hostname_always_blocked_even_without_dns(self):
+        """The EC2 metadata hostname is part of the permanent floor."""
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")):
+            assert is_always_blocked_url("http://instance-data.ec2.internal/") is True
 
     def test_hostname_resolving_to_imds_always_blocked(self):
         """Attacker-controlled hostname resolving to IMDS still blocks."""
@@ -446,10 +454,20 @@ class TestIsAlwaysBlockedUrl:
         ]):
             assert is_always_blocked_url("http://attacker-controlled.example.com/") is True
 
+    def test_hostname_resolving_to_fake_ip_always_blocked(self):
+        """Fake-IP DNS answers remain blocked even when the hostname looks public."""
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("198.18.23.183", 0)),
+        ]):
+            assert is_always_blocked_url("https://public-looking.example.com/") is True
+
     # -- Things the floor must NOT block ----------------------------------------
 
     def test_public_url_not_blocked(self):
-        assert is_always_blocked_url("https://example.com/path") is False
+        with patch("socket.getaddrinfo", return_value=[
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+        ]):
+            assert is_always_blocked_url("https://example.com/path") is False
 
     @pytest.mark.parametrize("url", [
         "http://127.0.0.1:8080/",

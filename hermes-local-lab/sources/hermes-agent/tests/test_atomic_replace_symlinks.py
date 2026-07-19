@@ -25,6 +25,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import utils
 from utils import atomic_json_write, atomic_replace, atomic_yaml_write
 
 
@@ -89,6 +90,26 @@ def test_atomic_replace_accepts_pathlike_and_str(tmp_path: Path) -> None:
     tmp2 = _write_tmp(tmp_path, "2")
     atomic_replace(tmp2, target)
     assert target.read_text(encoding="utf-8") == "2"
+
+
+def test_atomic_replace_fsyncs_the_committed_target_parent(
+    monkeypatch, tmp_path: Path
+) -> None:
+    real = tmp_path / "profile" / "real.yaml"
+    link = tmp_path / "link.yaml"
+    real.parent.mkdir()
+    real.write_text("old\n", encoding="utf-8")
+    link.symlink_to(real)
+    synced: list[Path] = []
+    monkeypatch.setattr(
+        utils,
+        "_fsync_parent_directory",
+        lambda path: synced.append(Path(path)),
+    )
+
+    atomic_replace(_write_tmp(tmp_path, "new\n"), link)
+
+    assert synced == [real]
 
 
 # ─── atomic_json_write / atomic_yaml_write wiring ──────────────────────────

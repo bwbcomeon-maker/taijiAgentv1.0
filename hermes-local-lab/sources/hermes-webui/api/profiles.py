@@ -1246,38 +1246,27 @@ def _resolve_env_var_for_provider(provider: Optional[str]) -> Optional[str]:
     return _PROVIDER_ENV_MAP.get(str(provider).strip().lower())
 
 
-def _upsert_dotenv_line(env_path: Path, key: str, value: str) -> None:
+def _upsert_dotenv_line(
+    env_path: Path,
+    key: str,
+    value: str,
+    *,
+    config_path: Path,
+) -> None:
     """Write or replace a KEY=value line in a dotenv file.
 
     Reads existing lines; if *key* already exists its value is replaced.
     Otherwise a new line is appended.  The file (and parent dirs) are created
     when they do not exist yet.
     """
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-    except Exception:
-        lines = []
+        from api.providers import _write_env_file
 
-    new_line = f"{key}={value}"
-    found = False
-    new_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k, _ = stripped.split("=", 1)
-            if k.strip() == key:
-                new_lines.append(new_line)
-                found = True
-                continue
-        new_lines.append(line)
-
-    if not found:
-        new_lines.append(new_line)
-
-    try:
-        env_path.write_text("\n".join(new_lines).rstrip("\n") + "\n", encoding="utf-8")
+        _write_env_file(
+            env_path,
+            {key: value},
+            config_path=config_path,
+        )
     except Exception as exc:
         logger.error("Failed to write %s to %s: %s", key, env_path, exc)
         raise
@@ -1303,8 +1292,14 @@ def _write_api_key_to_dotenv(
             env_var,
         )
 
-    env_path = profile_dir / ".env"
-    _upsert_dotenv_line(env_path, env_var, api_key)
+    config_path = profile_dir / "config.yaml"
+    env_path = config_path.parent / ".env"
+    _upsert_dotenv_line(
+        env_path,
+        env_var,
+        api_key,
+        config_path=config_path,
+    )
 
     # Tighten permissions so the key isn't world-readable.
     try:
@@ -1324,26 +1319,10 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     """
     if not base_url:
         return
-    config_path = profile_dir / 'config.yaml'
-    try:
-        import yaml as _yaml
-    except ImportError:
-        return
-    cfg = {}
-    if config_path.exists():
-        try:
-            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cfg = loaded
-        except Exception:
-            logger.debug("Failed to load config from %s", config_path)
-    model_section = cfg.get('model', {})
-    if not isinstance(model_section, dict):
-        model_section = {}
-    if base_url:
-        model_section['base_url'] = base_url
-    cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+    _write_profile_runtime_config(
+        profile_dir,
+        base_url=base_url,
+    )
 
 
 def _clean_profile_config_value(value: Optional[str], field: str) -> Optional[str]:
@@ -1460,28 +1439,76 @@ def _write_model_defaults_to_config(
     default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
     if not default_model and not model_provider:
         return
-    config_path = profile_dir / 'config.yaml'
-    try:
-        import yaml as _yaml
-    except ImportError:
+    _write_profile_runtime_config(
+        profile_dir,
+        default_model=default_model,
+        model_provider=model_provider,
+    )
+
+
+def _write_profile_runtime_config(
+    profile_dir: Path,
+    *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    default_model: Optional[str] = None,
+    model_provider: Optional[str] = None,
+) -> None:
+    """Persist profile model fields and its key through one credential commit."""
+    from agent.provider_credentials import (
+        mutate_config_env_strict,
+        mutate_env_unique,
+    )
+
+    config_path = Path(profile_dir) / "config.yaml"
+    base_url = _clean_profile_config_value(base_url, "base_url")
+    default_model, model_provider = _split_webui_provider_model_value(
+        default_model,
+        model_provider,
+    )
+    secret_value = (
+        _clean_profile_config_value(api_key, "api_key")
+        if api_key is not None
+        else None
+    )
+    config_changed = bool(base_url or default_model or model_provider)
+    env_updates: dict[str, str | None] = {}
+    if secret_value:
+        env_var = _resolve_env_var_for_provider(model_provider)
+        if not env_var:
+            env_var = "HERMES_API_KEY"
+            logger.info(
+                "No provider→env mapping for %r; writing API key as %s",
+                model_provider,
+                env_var,
+            )
+        env_updates[env_var] = secret_value
+
+    if not config_changed:
+        if env_updates:
+            mutate_env_unique(
+                env_updates,
+                config_path=config_path,
+            )
         return
-    cfg = {}
-    if config_path.exists():
-        try:
-            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cfg = loaded
-        except Exception:
-            logger.debug("Failed to load config from %s", config_path)
-    model_section = cfg.get('model', {})
-    if not isinstance(model_section, dict):
-        model_section = {}
-    if default_model:
-        model_section['default'] = default_model
-    if model_provider:
-        model_section['provider'] = model_provider
-    cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+
+    def update_config(config_data: dict) -> None:
+        model_section = config_data.get("model")
+        if not isinstance(model_section, dict):
+            model_section = {}
+        if base_url:
+            model_section["base_url"] = base_url
+        if default_model:
+            model_section["default"] = default_model
+        if model_provider:
+            model_section["provider"] = model_provider
+        config_data["model"] = model_section
+
+    mutate_config_env_strict(
+        update_config,
+        env_updates,
+        config_path=config_path,
+    )
 
 
 def create_profile_api(name: str, clone_from: str = None,
@@ -1495,10 +1522,19 @@ def create_profile_api(name: str, clone_from: str = None,
         raise ValueError("Profile creation is disabled in Taiji single runtime mode.")
 
     _validate_profile_name(name)
+    # Bind an implicit config clone to this request's profile before crossing
+    # into hermes_cli.  Leaving clone_from=None lets the CLI fall back to the
+    # process-wide HERMES_HOME, which can belong to another WebUI client.
+    if clone_config and clone_from is None:
+        clone_from = get_active_profile_name()
     # Defense-in-depth: validate clone_from here too, even though routes.py
     # also validates it. Any caller that bypasses the HTTP layer gets protection.
-    if clone_from is not None and not _is_root_profile(clone_from):
-        _validate_profile_name(clone_from)
+    if clone_from is not None:
+        if _is_root_profile(clone_from):
+            # hermes_cli only recognizes "default" as the root-profile alias.
+            clone_from = 'default'
+        else:
+            _validate_profile_name(clone_from)
     default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
     _validate_profile_model_selection(default_model, model_provider)
 
@@ -1550,15 +1586,10 @@ def create_profile_api(name: str, clone_from: str = None,
                 exc_info=True,
             )
 
-    _write_endpoint_to_config(profile_path, base_url=base_url)
-    if api_key:
-        _write_api_key_to_dotenv(
-            profile_path,
-            api_key=api_key,
-            model_provider=model_provider,
-        )
-    _write_model_defaults_to_config(
+    _write_profile_runtime_config(
         profile_path,
+        base_url=base_url,
+        api_key=api_key,
         default_model=default_model,
         model_provider=model_provider,
     )
@@ -1607,7 +1638,7 @@ def delete_profile_api(name: str) -> dict:
             raise RuntimeError(
                 f"Cannot delete active profile '{name}' while an agent is running. "
                 "Cancel or wait for it to finish."
-            )
+            ) from None
 
     try:
         from hermes_cli.profiles import delete_profile
@@ -1619,7 +1650,7 @@ def delete_profile_api(name: str) -> dict:
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:
-            raise ValueError(f"Profile '{name}' does not exist.")
+            raise ValueError(f"Profile '{name}' does not exist.") from None
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()

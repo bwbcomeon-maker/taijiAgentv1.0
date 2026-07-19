@@ -1,8 +1,8 @@
 """Named custom vision providers with isolated credentials.
 
 Only the two wire protocols already supported by the auxiliary vision client
-are accepted. Secrets are referenced by a deterministic environment variable
-and never stored in the provider metadata.
+are accepted. New entries bind secrets through ``credential_ref``; deterministic
+legacy env names are accepted only while loading persisted pre-migration rows.
 """
 
 from __future__ import annotations
@@ -11,7 +11,20 @@ import ipaddress
 import os
 import re
 from typing import Any, Iterable, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
+
+from agent.custom_image_providers import _normalize_https_endpoint_url
+from agent.provider_credentials import (
+    credential_secret_env,
+    normalize_credential_id,
+    resolve_api_key,
+)
+from agent.safe_outbound_http import (
+    NetworkScope,
+    SafeOutboundError,
+    _validate_address,
+    normalize_network_scope,
+)
 
 CUSTOM_VISION_PROVIDER_PREFIX = "custom:"
 ALLOWED_CUSTOM_VISION_TRANSPORTS = {
@@ -20,6 +33,9 @@ ALLOWED_CUSTOM_VISION_TRANSPORTS = {
 }
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _MODEL_RE = re.compile(r"^[^\s]+$")
+_LEGACY_API_KEY_ENV_MARKER_KEY = "_legacy_api_key_env_read_compat"
+_LEGACY_API_KEY_ENV_MARKER = object()
+_MISSING = object()
 
 
 def normalize_custom_vision_provider_id(value: Any) -> str:
@@ -42,30 +58,32 @@ def custom_vision_provider_env_var(provider_id: Any) -> str:
     return f"TAIJI_VISION_CUSTOM_{token}_API_KEY"
 
 
-def _normalize_base_url(value: Any) -> str:
-    url = str(value or "").strip().rstrip("/")
-    parsed = urlparse(url)
+def _normalize_base_url(
+    value: Any,
+    *,
+    network_scope: NetworkScope = NetworkScope.PUBLIC_DIRECT,
+) -> str:
+    url = _normalize_https_endpoint_url(value, label="外部识图")
+    parsed = urlsplit(url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise ValueError("外部识图 Base URL 的主机名格式无效。")
     try:
-        port = parsed.port
-    except ValueError as exc:
-        raise ValueError("外部识图 Base URL 的端口必须在 1 到 65535 之间。") from exc
-    if port is not None and not 1 <= port <= 65535:
-        raise ValueError("外部识图 Base URL 的端口必须在 1 到 65535 之间。")
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("外部识图 Base URL 必须是不含账号、查询参数和片段的完整 HTTPS 地址。")
-    try:
-        address = ipaddress.ip_address(parsed.hostname)
+        address = ipaddress.ip_address(hostname)
     except ValueError:
         address = None
-    if address is not None and not address.is_global:
-        raise ValueError("外部识图 Base URL 不得指向本机、内网或链路本地地址。")
+    if address is not None:
+        literal_scope = (
+            NetworkScope.PRIVATE_DIRECT
+            if network_scope is NetworkScope.PRIVATE_DIRECT
+            else NetworkScope.PUBLIC_DIRECT
+        )
+        try:
+            _validate_address(address, literal_scope)
+        except SafeOutboundError as exc:
+            raise ValueError(
+                "外部识图 Base URL 不得指向当前网络范围禁止的地址。"
+            ) from exc
     return url
 
 
@@ -111,27 +129,127 @@ def _normalize_models(value: Any, default_model: Any = "") -> list[str]:
 def normalize_custom_vision_provider_entry(entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise ValueError("外部识图 Provider 配置必须是对象。")
+    if "api_key_env" in entry:
+        raise ValueError("外部识图 Provider 不允许配置 api_key_env，请使用 credential_ref。")
     provider_id = normalize_custom_vision_provider_id(entry.get("id") or entry.get("provider_id"))
-    expected_env = custom_vision_provider_env_var(provider_id)
-    configured_env = str(entry.get("api_key_env") or expected_env).strip()
-    if configured_env != expected_env:
-        raise ValueError("外部识图 Provider 的密钥环境变量配置已损坏。")
+    credential_ref = str(entry.get("credential_ref") or "").strip()
+    if credential_ref:
+        credential_ref = normalize_credential_id(credential_ref)
     transport = str(entry.get("transport") or "openai_chat_completions").strip().lower()
     if transport not in ALLOWED_CUSTOM_VISION_TRANSPORTS:
         raise ValueError("transport 只能是 openai_chat_completions 或 anthropic_messages。")
+    try:
+        network_scope = normalize_network_scope(
+            entry.get("network_scope"),
+            default=NetworkScope.PUBLIC_DIRECT,
+        )
+    except SafeOutboundError as exc:
+        raise ValueError("network_scope 配置无效。") from exc
+    trusted_proxy_profile = str(entry.get("trusted_proxy_profile") or "").strip()
+    if network_scope is NetworkScope.TRUSTED_PROXY:
+        if not trusted_proxy_profile:
+            raise ValueError("trusted_proxy 必须引用已批准的代理配置。")
+    elif trusted_proxy_profile:
+        raise ValueError("只有 trusted_proxy 可配置 trusted_proxy_profile。")
     models = _normalize_models(entry.get("models"), entry.get("default_model") or entry.get("model"))
     default_model = str(entry.get("default_model") or entry.get("model") or models[0]).strip()
     if default_model not in models:
         models.insert(0, default_model)
-    return {
+    normalized = {
         "id": provider_id,
         "name": str(entry.get("name") or provider_id).strip()[:80] or provider_id,
-        "base_url": _normalize_base_url(entry.get("base_url")),
-        "api_key_env": expected_env,
+        "base_url": _normalize_base_url(
+            entry.get("base_url"),
+            network_scope=network_scope,
+        ),
         "models": models,
         "default_model": default_model,
         "transport": transport,
+        "network_scope": network_scope.value,
+        "trusted_proxy_profile": trusted_proxy_profile,
     }
+    if credential_ref:
+        normalized["credential_ref"] = credential_ref
+    return normalized
+
+
+def _normalize_loaded_custom_vision_provider_entry(
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve the loader-only legacy credential marker by object identity."""
+    if not isinstance(entry, dict):
+        raise ValueError("外部识图 Provider 配置必须是对象。")
+    marker = entry.get(_LEGACY_API_KEY_ENV_MARKER_KEY, _MISSING)
+    cleaned = dict(entry)
+    cleaned.pop(_LEGACY_API_KEY_ENV_MARKER_KEY, None)
+    normalized = normalize_custom_vision_provider_entry(cleaned)
+    if marker is _MISSING:
+        return normalized
+    if marker is not _LEGACY_API_KEY_ENV_MARKER or normalized.get("credential_ref"):
+        raise ValueError("旧版外部识图 Provider 密钥引用无效。")
+    normalized[_LEGACY_API_KEY_ENV_MARKER_KEY] = _LEGACY_API_KEY_ENV_MARKER
+    return normalized
+
+
+def _normalize_persisted_custom_vision_provider_entry(
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Accept only the deterministic legacy env stored in persisted config."""
+    if not isinstance(entry, dict):
+        raise ValueError("外部识图 Provider 配置必须是对象。")
+    if "api_key_env" not in entry:
+        return normalize_custom_vision_provider_entry(entry)
+    if "credential_ref" in entry:
+        raise ValueError("旧版 api_key_env 不能与 credential_ref 同时存在。")
+
+    provider_id = normalize_custom_vision_provider_id(
+        entry.get("id") or entry.get("provider_id")
+    )
+    expected_env = custom_vision_provider_env_var(provider_id)
+    if (
+        not isinstance(entry.get("api_key_env"), str)
+        or entry["api_key_env"] != expected_env
+    ):
+        raise ValueError("旧版 api_key_env 必须与 Provider ID 的固定环境变量一致。")
+
+    cleaned = dict(entry)
+    cleaned.pop("api_key_env", None)
+    normalized = normalize_custom_vision_provider_entry(cleaned)
+    if normalized.get("credential_ref"):
+        raise ValueError("旧版 api_key_env 不能与 credential_ref 同时存在。")
+    normalized[_LEGACY_API_KEY_ENV_MARKER_KEY] = _LEGACY_API_KEY_ENV_MARKER
+    return normalized
+
+
+def custom_vision_provider_secret_env(entry: dict[str, Any]) -> str:
+    """Return the env bound by a credential_ref or loader-authenticated legacy row."""
+    normalized = _normalize_loaded_custom_vision_provider_entry(entry)
+    credential_ref = str(normalized.get("credential_ref") or "")
+    if credential_ref:
+        return credential_secret_env(credential_ref)
+    if (
+        normalized.get(_LEGACY_API_KEY_ENV_MARKER_KEY)
+        is _LEGACY_API_KEY_ENV_MARKER
+    ):
+        return custom_vision_provider_env_var(normalized.get("id"))
+    return ""
+
+
+def custom_vision_provider_api_key(entry: dict[str, Any]) -> str:
+    """Resolve only the credential explicitly bound to this provider entry."""
+    normalized = _normalize_loaded_custom_vision_provider_entry(entry)
+    credential_ref = str(normalized.get("credential_ref") or "").strip()
+    if credential_ref:
+        return resolve_api_key("custom", credential_ref)
+    if (
+        normalized.get(_LEGACY_API_KEY_ENV_MARKER_KEY)
+        is _LEGACY_API_KEY_ENV_MARKER
+    ):
+        return os.getenv(
+            custom_vision_provider_env_var(normalized.get("id")),
+            "",
+        ).strip()
+    return ""
 
 
 def load_custom_vision_provider_entries(
@@ -148,11 +266,17 @@ def load_custom_vision_provider_entries(
     if not isinstance(raw_entries, list):
         return []
     entries: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for item in raw_entries:
         try:
-            entries.append(normalize_custom_vision_provider_entry(item))
+            normalized = _normalize_persisted_custom_vision_provider_entry(item)
         except ValueError:
             continue
+        provider_id = normalized["id"]
+        if provider_id in seen_ids:
+            raise ValueError(f"外部识图 Provider 配置包含重复 ID：{provider_id}")
+        seen_ids.add(provider_id)
+        entries.append(normalized)
     return entries
 
 
@@ -175,9 +299,18 @@ def custom_vision_provider_public_row(
     *,
     active_provider: str = "",
 ) -> dict[str, Any]:
-    normalized = normalize_custom_vision_provider_entry(entry)
+    normalized = _normalize_loaded_custom_vision_provider_entry(entry)
     provider_name = custom_vision_provider_name(normalized["id"])
-    configured = bool(os.getenv(normalized["api_key_env"], "").strip())
+    credential_ref = str(normalized.get("credential_ref") or "").strip()
+    env_var = custom_vision_provider_secret_env(normalized)
+    legacy_env = bool(
+        normalized.get(_LEGACY_API_KEY_ENV_MARKER_KEY)
+        is _LEGACY_API_KEY_ENV_MARKER
+    )
+    try:
+        configured = bool(custom_vision_provider_api_key(normalized))
+    except ValueError:
+        configured = False
     transport_label = (
         "OpenAI Chat Completions"
         if normalized["transport"] == "openai_chat_completions"
@@ -191,10 +324,16 @@ def custom_vision_provider_public_row(
         "available": configured,
         "key_status": {
             "configured": configured,
-            "source": "env_var" if configured else "none",
-            "env_var": normalized["api_key_env"],
+            "source": (
+                "legacy_env_var"
+                if configured and legacy_env
+                else "credential_ref"
+                if configured
+                else "none"
+            ),
+            "env_var": env_var,
         },
-        "requires_env": [normalized["api_key_env"]],
+        "requires_env": [env_var] if env_var else [],
         "requires_base_url": False,
         "models": [{"id": model, "label": model} for model in normalized["models"]],
         "default_model": normalized["default_model"],
@@ -202,4 +341,7 @@ def custom_vision_provider_public_row(
         "base_url": normalized["base_url"],
         "transport": normalized["transport"],
         "transport_label": transport_label,
+        "credential_ref": credential_ref,
+        "network_scope": normalized["network_scope"],
+        "trusted_proxy_profile": normalized["trusted_proxy_profile"],
     }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import queue
 import sys
 import types
@@ -22,11 +21,11 @@ def _signature_block() -> str:
 def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path, monkeypatch):
     """Switching profiles in one WebUI session must not reuse old SOUL.md.
 
-    The fake AIAgent mirrors the real failure mode: it reads SOUL.md from
-    HERMES_HOME at construction time and keeps that value in a cached system
-    prompt. Two consecutive turns on the same profile should reuse the agent;
-    changing only ``session.profile`` should create a fresh agent whose cached
-    prompt comes from the new synthetic profile home.
+    The fake AIAgent mirrors the real failure mode: it reads SOUL.md from the
+    canonical HERMES_HOME resolver at construction time and keeps that value
+    in a cached system prompt. Two consecutive turns on the same profile should
+    reuse the agent; changing only ``session.profile`` should create a fresh
+    agent whose cached prompt comes from the new synthetic profile home.
     """
     sys.path.insert(0, str(REPO))
     from api import config as cfg
@@ -99,6 +98,8 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
 
     class SoulCachingAgent:
         def __init__(self, **kwargs):
+            from hermes_constants import get_hermes_home
+
             self.session_id = kwargs.get("session_id")
             self.model = kwargs.get("model")
             self.provider = kwargs.get("provider")
@@ -113,14 +114,16 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
             self.tool_progress_callback = kwargs.get("tool_progress_callback")
             self.reasoning_callback = kwargs.get("reasoning_callback")
             self.clarify_callback = kwargs.get("clarify_callback")
-            home = Path(os.environ["HERMES_HOME"])
+            home = get_hermes_home()
             self.constructed_home = str(home)
             self._cached_system_prompt = (home / "SOUL.md").read_text(encoding="utf-8")
             constructed_agents.append(self)
 
         def run_conversation(self, **kwargs):
+            from hermes_constants import get_hermes_home
+
             prompts_used_for_runs.append(self._cached_system_prompt)
-            homes_seen_during_runs.append(os.environ.get("HERMES_HOME"))
+            homes_seen_during_runs.append(str(get_hermes_home()))
             history = list(kwargs.get("conversation_history") or [])
             return {
                 "messages": history

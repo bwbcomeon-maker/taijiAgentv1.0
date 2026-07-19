@@ -1,15 +1,20 @@
 """Tests for hermes_cli configuration management."""
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
+import threading
 from unittest.mock import patch, MagicMock
 
 import pytest
 import yaml
 
+from agent.provider_credentials import credential_transaction
 from hermes_cli.config import (
     DEFAULT_CONFIG,
     get_hermes_home,
+    get_config_path,
+    get_env_path,
     ensure_hermes_home,
     get_compatible_custom_providers,
     load_config,
@@ -17,9 +22,12 @@ from hermes_cli.config import (
     migrate_config,
     remove_env_value,
     save_config,
+    save_anthropic_api_key,
+    save_anthropic_oauth_token,
     save_env_value,
     save_env_value_secure,
     sanitize_env_file,
+    use_anthropic_claude_code_credentials,
     _sanitize_env_lines,
 )
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, LEGACY_DEFAULT_SOUL_MD
@@ -36,6 +44,50 @@ class TestGetHermesHome:
         with patch.dict(os.environ, {"HERMES_HOME": "/custom/path"}):
             home = get_hermes_home()
             assert home == Path("/custom/path")
+
+
+class TestCredentialPaths:
+    def test_explicit_config_override_pairs_config_env_and_lock_directory(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        home = tmp_path / "home"
+        override = tmp_path / "override" / "custom-config.yaml"
+        override.parent.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(override))
+        monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
+
+        assert get_config_path() == override
+        assert get_env_path() == override.parent / ".env"
+
+        save_env_value("OVERRIDE_API_KEY", "override-secret")
+
+        assert "OVERRIDE_API_KEY=override-secret" in (
+            override.parent / ".env"
+        ).read_text(encoding="utf-8")
+        assert (
+            override.parent / ".taiji-credential-transaction.lock"
+        ).is_file()
+        assert not (home / ".env").exists()
+        assert not (home / ".taiji-credential-transaction.lock").exists()
+
+    def test_taiji_runtime_home_wins_over_legacy_config_override(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        runtime_home = tmp_path / "runtime-home"
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+        monkeypatch.setenv(
+            "HERMES_CONFIG_PATH",
+            str(tmp_path / "legacy" / "config.yaml"),
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "legacy-home"))
+
+        assert get_config_path() == runtime_home / "config.yaml"
+        assert get_env_path() == runtime_home / ".env"
 
 
 class TestEnsureHermesHome:
@@ -214,6 +266,28 @@ class TestSaveAndLoadRoundtrip:
             reloaded = load_config()
             assert reloaded["terminal"]["timeout"] == 999
 
+    def test_save_rejects_malformed_existing_config_without_overwriting(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            malformed = b"model:\n  provider: openrouter\nprovider_credentials: [\n"
+            config_path.write_bytes(malformed)
+
+            with pytest.raises(ValueError, match="cannot be read safely"):
+                save_config({"model": "gpt-4o"})
+
+            assert config_path.read_bytes() == malformed
+
+    def test_save_rejects_duplicate_mapping_without_overwriting(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            ambiguous = b"model: gpt-4o\nmodel: attacker-shadow\n"
+            config_path.write_bytes(ambiguous)
+
+            with pytest.raises(ValueError, match="duplicate"):
+                save_config({"model": "safe-replacement"})
+
+            assert config_path.read_bytes() == ambiguous
+
 
 class TestSaveEnvValueSecure:
     def test_save_env_value_writes_without_stdout(self, tmp_path, capsys):
@@ -225,6 +299,24 @@ class TestSaveEnvValueSecure:
 
             env_values = load_env()
             assert env_values["TENOR_API_KEY"] == "sk-test-secret"
+
+    def test_save_env_value_collapses_duplicate_keys_to_one_value(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            env_path = tmp_path / ".env"
+            env_path.write_text(
+                "ROTATE_KEY=older\n"
+                "UNCHANGED_KEY=keep\n"
+                "ROTATE_KEY=newer\n",
+                encoding="utf-8",
+            )
+
+            save_env_value("ROTATE_KEY", "current")
+
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            assert [line for line in lines if line.startswith("ROTATE_KEY=")] == [
+                "ROTATE_KEY=current"
+            ]
+            assert "UNCHANGED_KEY=keep" in lines
 
     def test_secure_save_returns_metadata_only(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
@@ -252,6 +344,35 @@ class TestSaveEnvValueSecure:
             assert env_mode == 0o600
 
 
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda writer: save_anthropic_oauth_token("oauth-token", writer),
+        lambda writer: use_anthropic_claude_code_credentials(writer),
+        lambda writer: save_anthropic_api_key("anthropic-key", writer),
+    ],
+)
+def test_anthropic_pair_writers_hold_one_outer_transaction(invoke):
+    from agent import provider_credentials
+
+    observed_depths = []
+
+    def writer(_key, _value):
+        observed_depths.append(
+            int(
+                getattr(
+                    provider_credentials._CREDENTIAL_TRANSACTION_STATE,
+                    "depth",
+                    0,
+                )
+            )
+        )
+
+    invoke(writer)
+
+    assert observed_depths == [1, 1]
+
+
 class TestRemoveEnvValue:
     def test_removes_key_from_env_file(self, tmp_path):
         env_path = tmp_path / ".env"
@@ -263,6 +384,23 @@ class TestRemoveEnvValue:
             assert "KEY_B" not in content
             assert "KEY_A=value_a" in content
             assert "KEY_C=value_c" in content
+
+    def test_removes_every_duplicate_occurrence(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "DUPLICATE_KEY=older\n"
+            "KEEP_KEY=value\n"
+            "DUPLICATE_KEY=newer\n",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(tmp_path), "DUPLICATE_KEY": "newer"},
+        ):
+            assert remove_env_value("DUPLICATE_KEY") is True
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            assert not any(line.startswith("DUPLICATE_KEY=") for line in lines)
+            assert "KEEP_KEY=value" in lines
 
     def test_clears_os_environ(self, tmp_path):
         env_path = tmp_path / ".env"
@@ -293,6 +431,46 @@ class TestRemoveEnvValue:
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path), "ORPHAN_KEY": "orphan"}):
             remove_env_value("ORPHAN_KEY")
             assert "ORPHAN_KEY" not in os.environ
+
+    @pytest.mark.parametrize(
+        ("writer", "initial"),
+        [
+            (lambda: remove_env_value("KEY_B"), "KEY_A=a\nKEY_B=b\n"),
+            (sanitize_env_file, "KEY_A=aKEY_B=b\n"),
+        ],
+    )
+    def test_env_rewriters_wait_for_the_shared_transaction(
+        self,
+        tmp_path,
+        writer,
+        initial,
+    ):
+        env_path = tmp_path / ".env"
+        env_path.write_text(initial, encoding="utf-8")
+        started = threading.Event()
+        finished = threading.Event()
+        errors = []
+
+        def run_writer():
+            started.set()
+            try:
+                writer()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            with credential_transaction(tmp_path / "config.yaml"):
+                thread = threading.Thread(target=run_writer, daemon=True)
+                thread.start()
+                assert started.wait(1)
+                assert not finished.wait(0.1)
+
+            thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert errors == []
 
 
 class TestSaveConfigAtomicity:
@@ -512,6 +690,136 @@ class TestOptionalEnvVarsRegistry:
 
 
 class TestConfigMigrationSecretPrompts:
+    def test_noninteractive_config_rmw_holds_a_scoped_transaction(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from hermes_cli import config as cfg_mod
+
+        depth = 0
+        observations = []
+
+        @contextmanager
+        def tracked_transaction(_config_path=None):
+            nonlocal depth
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+        def tracked_raw_load():
+            observations.append(("raw-load", depth))
+            return {"_config_version": 22}
+
+        def tracked_merged_load():
+            observations.append(("merged-load", depth))
+            return {"_config_version": 22}
+
+        def tracked_save(_config):
+            observations.append(("save", depth))
+
+        monkeypatch.setattr(
+            cfg_mod,
+            "_credential_files_transaction",
+            tracked_transaction,
+        )
+        monkeypatch.setattr(cfg_mod, "sanitize_env_file", lambda: 0)
+        monkeypatch.setattr(cfg_mod, "check_config_version", lambda: (22, 23))
+        monkeypatch.setattr(cfg_mod, "read_raw_config", tracked_raw_load)
+        monkeypatch.setattr(cfg_mod, "load_config", tracked_merged_load)
+        monkeypatch.setattr(cfg_mod, "save_config", tracked_save)
+        monkeypatch.setattr(cfg_mod, "get_missing_env_vars", lambda **_kwargs: [])
+        monkeypatch.setattr(cfg_mod, "get_missing_config_fields", lambda: [])
+        monkeypatch.setattr(cfg_mod, "get_missing_skill_config_vars", lambda: [])
+        monkeypatch.setattr(cfg_mod, "get_hermes_home", lambda: tmp_path)
+
+        cfg_mod.migrate_config(interactive=False, quiet=True)
+
+        assert observations
+        assert all(
+            observed_depth > 0
+            for _operation, observed_depth in observations
+        ), observations
+
+    def test_every_noninteractive_migration_config_write_is_scoped(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from copy import deepcopy
+        from hermes_cli import config as cfg_mod
+
+        depth = 0
+        observations = []
+        raw_template = {
+            "_config_version": 0,
+            "custom_providers": [
+                {
+                    "name": "Legacy Provider",
+                    "base_url": "https://provider.example.com/v1",
+                }
+            ],
+            "stt": {
+                "provider": "local",
+                "model": "base",
+            },
+            "display": {
+                "tool_progress_overrides": {
+                    "telegram": "off",
+                }
+            },
+            "compression": {
+                "summary_model": "summary-model",
+            },
+            "plugins": {},
+        }
+
+        @contextmanager
+        def tracked_transaction(_config_path=None):
+            nonlocal depth
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+        def tracked_raw_load():
+            observations.append(("raw-load", depth))
+            return deepcopy(raw_template)
+
+        def tracked_merged_load():
+            observations.append(("merged-load", depth))
+            return deepcopy(raw_template)
+
+        def tracked_save(_config):
+            observations.append(("save", depth))
+
+        monkeypatch.setattr(
+            cfg_mod,
+            "_credential_files_transaction",
+            tracked_transaction,
+        )
+        monkeypatch.setattr(cfg_mod, "sanitize_env_file", lambda: 0)
+        monkeypatch.setattr(cfg_mod, "check_config_version", lambda: (0, 23))
+        monkeypatch.setattr(cfg_mod, "read_raw_config", tracked_raw_load)
+        monkeypatch.setattr(cfg_mod, "load_config", tracked_merged_load)
+        monkeypatch.setattr(cfg_mod, "save_config", tracked_save)
+        monkeypatch.setattr(cfg_mod, "get_env_value", lambda _key: None)
+        monkeypatch.setattr(cfg_mod, "get_missing_env_vars", lambda **_kwargs: [])
+        monkeypatch.setattr(cfg_mod, "get_missing_config_fields", lambda: [])
+        monkeypatch.setattr(cfg_mod, "get_missing_skill_config_vars", lambda: [])
+        monkeypatch.setattr(cfg_mod, "get_hermes_home", lambda: tmp_path)
+
+        cfg_mod.migrate_config(interactive=False, quiet=True)
+
+        assert any(operation == "save" for operation, _depth in observations)
+        assert all(
+            observed_depth > 0
+            for _operation, observed_depth in observations
+        ), observations
+
     def test_required_secret_env_prompt_uses_masked_prompt(self, tmp_path, monkeypatch):
         from hermes_cli import config as cfg_mod
 

@@ -92,9 +92,12 @@ def test_verified_provider_is_publicly_ready(monkeypatch):
 
 def test_readiness_supports_configured_custom_image_provider(monkeypatch):
     from tools import image_generation_tool as image_tool
-    from agent.custom_image_providers import ConfigurableOpenAIImageProvider
+    from agent.custom_image_providers import (
+        ConfigurableOpenAIImageProvider,
+        load_custom_image_provider_entries,
+    )
 
-    entry = {
+    persisted_entry = {
         "id": "router",
         "name": "Router Images",
         "base_url": "https://images.example.com/v1",
@@ -102,6 +105,10 @@ def test_readiness_supports_configured_custom_image_provider(monkeypatch):
         "models": ["gpt-image-custom"],
         "default_model": "gpt-image-custom",
     }
+    entries = load_custom_image_provider_entries(
+        {"custom_image_providers": [persisted_entry]}
+    )
+    assert len(entries) == 1
     monkeypatch.setattr(
         image_tool,
         "_load_image_gen_config",
@@ -111,7 +118,7 @@ def test_readiness_supports_configured_custom_image_provider(monkeypatch):
     monkeypatch.setattr(
         image_tool,
         "_iter_image_generation_providers",
-        lambda: [ConfigurableOpenAIImageProvider(entry)],
+        lambda: [ConfigurableOpenAIImageProvider(entries[0])],
         raising=False,
     )
     monkeypatch.setattr(

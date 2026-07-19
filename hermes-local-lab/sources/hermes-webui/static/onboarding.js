@@ -222,13 +222,13 @@ function _renderOnboardingModelField(){
 
 function _renderOnboardingProviderOAuthField(provider){
   if(!provider||provider.oauth_provider!=='anthropic')return '';
-  return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
+  return `<div class="onboarding-oauth-card onboarding-oauth-pending" role="group" aria-labelledby="anthropicOAuthTitle" style="margin-top:12px">
     <div class="onboarding-oauth-icon">🔑</div>
     <div style="flex:1">
-      <strong>改用 Claude Code OAuth</strong>
-      <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code 订阅凭据不同于 Anthropic API 密钥。</strong>仅当你希望 taiji Agent 使用服务器上已有的 Claude Code 凭据，或在主机上完成 <code>claude setup-token</code> 时启动短轮询流程，才使用此路径。</p>
-      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="anthropicOAuthBtn" onclick="startAnthropicOAuth()" type="button">使用 Claude Code 登录</button></div>
-      <div id="anthropicOAuthFlow" style="display:none;margin-top:12px"></div>
+      <strong id="anthropicOAuthTitle">改用 Claude Code OAuth</strong>
+      <p id="anthropicOAuthDescription" style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code 订阅凭据不同于 Anthropic API 密钥。</strong>仅当你希望 taiji Agent 使用服务器上已有的 Claude Code 凭据，或在主机上完成 <code>claude setup-token</code> 时启动短轮询流程，才使用此路径。</p>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="anthropicOAuthBtn" onclick="startAnthropicOAuth()" type="button" aria-controls="anthropicOAuthFlow" aria-describedby="anthropicOAuthDescription">使用 Claude Code 登录</button></div>
+      <div id="anthropicOAuthFlow" role="status" aria-live="polite" aria-atomic="true" style="display:none;margin-top:12px"></div>
     </div>
   </div>`;
 }
@@ -273,18 +273,19 @@ function _renderOnboardingBody(){
   if(key==='setup'){
     const selectedId=ONBOARDING.form.provider;
     const groupedOptions=_renderProviderSelectOptions(selectedId);
-    const provider=_getOnboardingSetupProvider(selectedId)||_getOnboardingSetupProviders()[0]||null;
+    const selectedProvider=_getOnboardingSetupProvider(selectedId);
+    const provider=selectedProvider||_getOnboardingSetupProviders()[0]||null;
     const showBaseUrl=provider&&provider.requires_base_url;
     const keyHelp=provider
       ? (provider.id==='anthropic'
-        ? 'Anthropic API key path: paste an Anthropic Console API key here. This is separate from a Claude Code subscription; use the Claude Code OAuth card if you want subscription credentials instead.'
+        ? 'Anthropic API 密钥路径：请在此粘贴 Anthropic Console API 密钥。Claude Code 订阅凭据不同于 Anthropic API 密钥；如需使用订阅凭据，请改用 Claude Code OAuth 卡片。'
         : `${t('onboarding_api_key_help_prefix')}.`)
       : '';
 
     // OAuth provider path: configured via CLI, no API key input needed.
     const currentIsOauth=!!(ONBOARDING.status.setup||{}).current_is_oauth;
     const currentProviderName=((ONBOARDING.status.setup||{}).current||{}).provider||'';
-    if(currentIsOauth){
+    if(currentIsOauth&&!selectedProvider){
       const isReady=!!(ONBOARDING.status.system||{}).chat_ready;
       const providerLabel=esc(currentProviderName);
       const codexOauthPendingBody=currentProviderName==='openai-codex'
@@ -417,6 +418,8 @@ function syncOnboardingProvider(value){
     }
   }
   _renderOnboardingBody();
+  const providerSelect=$('onboardingProviderSelect');
+  if(providerSelect) providerSelect.focus();
 }
 
 async function loadOnboardingWizard(){
@@ -697,20 +700,76 @@ function _clearAnthropicOAuthPoll(){
 
 function _setAnthropicOAuthButton(enabled){
   const btn=$('anthropicOAuthBtn');
-  if(btn){btn.disabled=!enabled;btn.textContent=enabled?'Login with Claude Code':'...';}
+  if(btn){btn.disabled=!enabled;btn.textContent=enabled?'使用 Claude Code 登录':'处理中…';}
+}
+
+function _isAnthropicOAuthActive(status){
+  return status==='pending'||status==='linking'||status==='committing';
+}
+
+function _scheduleAnthropicOAuthPoll(delayMs){
+  _clearAnthropicOAuthPoll();
+  if(_anthropicOAuthFlowId){
+    _anthropicOAuthPollTimer=setTimeout(_pollAnthropicOAuth,Math.max(1000,Number(delayMs||3000)));
+  }
+}
+
+function _renderAnthropicOAuthProgress(status,message){
+  const flowDiv=$('anthropicOAuthFlow');
+  if(!flowDiv)return;
+  const finishing=status==='linking'||status==='committing';
+  const title=finishing?'正在完成 Claude Code OAuth 关联…':'正在等待 Claude Code 凭据…';
+  const detail=message||(finishing
+    ?'taiji Agent 正在安全完成凭据关联，此步骤已无法取消。'
+    :"请在服务器上运行“claude setup-token”，然后返回此处。taiji Agent 会自动检测凭据。");
+  flowDiv.style.display='block';
+  flowDiv.innerHTML=`
+    <div class="onboarding-oauth-card onboarding-oauth-pending">
+      <div class="onboarding-oauth-icon">${finishing?'🔐':'🖥️'}</div>
+      <div style="flex:1">
+        <strong>${title}</strong>
+        <p style="margin-top:6px">${esc(detail)}</p>
+        ${finishing?'':`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+          <code style="display:inline-block;background:rgba(255,255,255,.08);padding:6px 10px;border-radius:8px;user-select:all">claude setup-token</code>
+          <button class="sm-btn" type="button" onclick="cancelAnthropicOAuth()">取消</button>
+        </div>`}
+      </div>
+    </div>`;
 }
 
 async function cancelAnthropicOAuth(){
-  const flowDiv=$('anthropicOAuthFlow');
   const flowId=_anthropicOAuthFlowId;
+  if(!flowId)return;
   _clearAnthropicOAuthPoll();
-  _anthropicOAuthFlowId=null;
-  if(flowId){
-    try{await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({flow_id:flowId,provider:'anthropic'})});}catch(e){}
-  }
-  _setAnthropicOAuthButton(true);
-  if(flowDiv){
-    flowDiv.innerHTML=`<div class="onboarding-oauth-card"><div class="onboarding-oauth-icon">⏹</div><div><strong>Claude Code OAuth cancelled</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">Start again whenever you're ready.</p></div></div>`;
+  _setAnthropicOAuthButton(false);
+  try{
+    const resp=await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({flow_id:flowId,provider:'anthropic'})});
+    const status=(resp&&resp.status)||'error';
+    if(_isAnthropicOAuthActive(status)){
+      _renderAnthropicOAuthProgress(status,status==='pending'
+        ?'正在处理取消请求。taiji Agent 将继续检查服务器的权威状态。'
+        :'服务器已开始安全提交，taiji Agent 正在完成关联。');
+      _scheduleAnthropicOAuthPoll(3000);
+      return;
+    }
+    _anthropicOAuthFlowId=null;
+    _setAnthropicOAuthButton(true);
+    if(status==='success'){
+      _renderAnthropicOAuthTerminal('success','taiji Agent 现已关联 Claude Code 凭据。');
+      try{await loadOnboardingWizard();}catch(e){}
+    }else if(status==='cancelled'){
+      _renderAnthropicOAuthTerminal('cancelled','登录流程已在凭据关联开始前取消。');
+    }else if(status==='expired'){
+      _renderAnthropicOAuthTerminal('expired','凭据关联流程在取消完成前已过期。');
+    }else{
+      _renderAnthropicOAuthTerminal('error',(resp&&resp.error)||'无法确认取消结果。');
+    }
+  }catch(e){
+    _renderAnthropicOAuthProgress(
+      'pending',
+      `取消请求失败（${(e&&e.message)||String(e)}）。正在继续检查服务器状态；尚未声明取消成功。`
+    );
+    _scheduleAnthropicOAuthPoll(3000);
   }
 }
 
@@ -719,7 +778,7 @@ function _renderAnthropicOAuthTerminal(status,message){
   if(!flowDiv)return;
   const ok=status==='success';
   const icon=ok?'✅':status==='expired'?'⌛':status==='cancelled'?'⏹':'❌';
-  const title=ok?'Claude Code OAuth linked':(status==='expired'?'Claude Code polling expired':(status==='cancelled'?'Claude Code OAuth cancelled':'Claude Code OAuth failed'));
+  const title=ok?'Claude Code OAuth 已关联':(status==='expired'?'Claude Code 轮询已过期':(status==='cancelled'?'Claude Code OAuth 已取消':'Claude Code OAuth 失败'));
   flowDiv.style.display='block';
   flowDiv.innerHTML=`
     <div class="onboarding-oauth-card ${ok?'onboarding-oauth-ready':''}" ${ok?'':'style="border-color:var(--error,#e55)"'}>
@@ -734,29 +793,31 @@ async function _pollAnthropicOAuth(){
   try{
     const resp=await api('/api/onboarding/oauth/poll?flow_id='+encodeURIComponent(flowId));
     const status=(resp&&resp.status)||'error';
-    if(status==='pending'){
-      _anthropicOAuthPollTimer=setTimeout(_pollAnthropicOAuth,3000);
+    if(_isAnthropicOAuthActive(status)){
+      if(status!=='pending')_renderAnthropicOAuthProgress(status);
+      _scheduleAnthropicOAuthPoll(3000);
       return;
     }
     _clearAnthropicOAuthPoll();
     _anthropicOAuthFlowId=null;
     _setAnthropicOAuthButton(true);
     if(status==='success'){
-      _renderAnthropicOAuthTerminal('success','taiji Agent is now linked to Claude Code credentials. Refreshing provider status…');
+      _renderAnthropicOAuthTerminal('success','taiji Agent 已关联 Claude Code 凭据，正在刷新提供商状态…');
       showToast('Claude Code OAuth 已连接');
       try{await loadOnboardingWizard();}catch(e){}
     }else if(status==='expired'){
-      _renderAnthropicOAuthTerminal('expired','Claude Code credentials were not detected before this flow expired. Start a new flow to try again.');
+      _renderAnthropicOAuthTerminal('expired','在此流程过期前未检测到 Claude Code 凭据。请启动新流程后重试。');
     }else if(status==='cancelled'){
-      _renderAnthropicOAuthTerminal('cancelled','The login flow was cancelled.');
+      _renderAnthropicOAuthTerminal('cancelled','登录流程已取消。');
     }else{
-      _renderAnthropicOAuthTerminal('error',(resp&&resp.error)||'Claude Code OAuth linking failed. Please try again.');
+      _renderAnthropicOAuthTerminal('error',(resp&&resp.error)||'Claude Code OAuth 关联失败，请重试。');
     }
   }catch(e){
-    _clearAnthropicOAuthPoll();
-    _anthropicOAuthFlowId=null;
-    _setAnthropicOAuthButton(true);
-    _renderAnthropicOAuthTerminal('error',(e&&e.message)||String(e));
+    _renderAnthropicOAuthProgress(
+      'pending',
+      `状态检查失败（${(e&&e.message)||String(e)}）。将在不更改服务器端流程的情况下重试。`
+    );
+    _scheduleAnthropicOAuthPoll(3000);
   }
 }
 
@@ -767,36 +828,27 @@ async function startAnthropicOAuth(){
   _anthropicOAuthFlowId=null;
   _setAnthropicOAuthButton(false);
   flowDiv.style.display='block';
-  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>Checking Claude Code credentials…</strong><p>taiji Agent is checking for existing Claude Code OAuth credentials on this server.</p></div></div>`;
+  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>正在检查 Claude Code 凭据…</strong><p>taiji Agent 正在检查此服务器上已有的 Claude Code OAuth 凭据。</p></div></div>`;
   try{
     const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'anthropic'})});
     if(resp.error) throw new Error(resp.error);
     const{flow_id,status,action_required}=resp;
-    if(!flow_id) throw new Error('Invalid OAuth response');
+    if(!flow_id) throw new Error('OAuth 响应无效');
     _anthropicOAuthFlowId=flow_id;
     if(status==='success'){
       _clearAnthropicOAuthPoll();
       _anthropicOAuthFlowId=null;
       _setAnthropicOAuthButton(true);
-      _renderAnthropicOAuthTerminal('success','taiji Agent is now linked to Claude Code credentials. Refreshing provider status…');
+      _renderAnthropicOAuthTerminal('success','taiji Agent 已关联 Claude Code 凭据，正在刷新提供商状态…');
       showToast('Claude Code OAuth 已连接');
       try{await loadOnboardingWizard();}catch(e){}
       return;
     }
-    flowDiv.innerHTML=`
-      <div class="onboarding-oauth-card onboarding-oauth-pending">
-        <div class="onboarding-oauth-icon">🖥️</div>
-        <div style="flex:1">
-          <strong>Complete Claude Code login on this host</strong>
-          <p style="margin-top:6px">${esc(action_required||"Run 'claude setup-token' on the server, then return here. taiji Agent will detect the credential automatically.")}</p>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
-            <code style="display:inline-block;background:rgba(255,255,255,.08);padding:6px 10px;border-radius:8px;user-select:all">claude setup-token</code>
-            <button class="sm-btn" type="button" onclick="cancelAnthropicOAuth()">Cancel</button>
-          </div>
-          <p style="margin-top:8px;color:var(--muted);font-size:13px">Waiting for Claude Code credentials...</p>
-        </div>
-      </div>`;
-    _anthropicOAuthPollTimer=setTimeout(_pollAnthropicOAuth,Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
+    if(!_isAnthropicOAuthActive(status)){
+      throw new Error((resp&&resp.error)||'Claude Code OAuth 状态异常');
+    }
+    _renderAnthropicOAuthProgress(status,action_required);
+    _scheduleAnthropicOAuthPoll(Number(resp.poll_interval_seconds||3)*1000);
   }catch(e){
     _clearAnthropicOAuthPoll();
     _anthropicOAuthFlowId=null;

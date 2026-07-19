@@ -7,6 +7,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 def test_stale_verifying_state_degrades_to_configured_unverified(tmp_path):
     from agent.image_gen_verification import (
@@ -109,6 +111,93 @@ def test_image_gen_secret_env_named_ref_never_falls_back_to_legacy():
         {"provider_credentials": [valid]},
     ) == "TAIJI_CREDENTIAL_ALIBABA_IMAGE_API_KEY"
     assert image_gen_secret_env("dashscope", "", {}) == "DASHSCOPE_API_KEY"
+
+
+def test_custom_image_identity_reads_only_deterministic_legacy_secret_env():
+    from agent.image_gen_verification import (
+        active_custom_provider_identity,
+        image_gen_secret_env,
+    )
+
+    config = {
+        "custom_image_providers": [
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+                "models": ["image-model"],
+                "default_model": "image-model",
+            }
+        ]
+    }
+
+    identity = active_custom_provider_identity("custom:router", config)
+
+    assert identity["id"] == "router"
+    assert identity["credential_ref"] == ""
+    assert identity["secret_env"] == "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY"
+    assert image_gen_secret_env("custom:router", "", config) == identity["secret_env"]
+    assert "api_key" not in identity
+
+
+def test_custom_image_identity_includes_canonical_credential_and_network_contract():
+    from agent.image_gen_verification import (
+        active_custom_provider_identity,
+        image_gen_secret_env,
+    )
+
+    config = {
+        "provider_credentials": [
+            {
+                "id": "router-image",
+                "provider_family": "custom",
+                "secret_env": "TAIJI_CREDENTIAL_ROUTER_IMAGE_API_KEY",
+            }
+        ],
+        "custom_image_providers": [
+            {
+                "id": "router",
+                "base_url": "https://images.example.com/v1",
+                "credential_ref": "router-image",
+                "models": ["image-model"],
+                "default_model": "image-model",
+                "network_scope": "trusted_proxy",
+                "trusted_proxy_profile": "corp-egress",
+            }
+        ],
+    }
+
+    identity = active_custom_provider_identity("custom:router", config)
+
+    assert identity["credential_ref"] == "router-image"
+    assert identity["secret_env"] == "TAIJI_CREDENTIAL_ROUTER_IMAGE_API_KEY"
+    assert identity["network_scope"] == "trusted_proxy"
+    assert identity["trusted_proxy_profile"] == "corp-egress"
+    assert image_gen_secret_env("custom:router", "", config) == identity["secret_env"]
+
+
+def test_custom_image_identity_rejects_normalized_provider_id_collision():
+    from agent.image_gen_verification import active_custom_provider_identity
+
+    config = {
+        "custom_image_providers": [
+            {
+                "id": "router@prod",
+                "base_url": "https://first.example.com/v1",
+                "credential_ref": "first-credential",
+                "models": ["first-model"],
+            },
+            {
+                "id": "router-prod",
+                "base_url": "https://last.example.com/v1",
+                "credential_ref": "last-credential",
+                "models": ["last-model"],
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="重复"):
+        active_custom_provider_identity("custom:router-prod", config)
 
 
 def test_taiji_runtime_forces_default_verification_profile(monkeypatch, tmp_path):

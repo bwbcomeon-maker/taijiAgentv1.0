@@ -1386,6 +1386,150 @@ def test_transaction_works_when_os_fchmod_is_unavailable(
     assert snapshot.env["API_KEY"] == "after-secret"
 
 
+def test_lock_open_recovers_from_darwin_concurrent_creator_enoent(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    real_open = credentials._os.open
+    injected = False
+
+    def simulate_losing_nonexclusive_create(
+        path,
+        flags,
+        mode=0o777,
+        *,
+        dir_fd=None,
+    ):
+        nonlocal injected
+        if (
+            path == credentials._CREDENTIAL_LOCK_NAME
+            and flags & credentials._os.O_CREAT
+            and not flags & credentials._os.O_EXCL
+            and not injected
+        ):
+            winner_fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            credentials._os.close(winner_fd)
+            injected = True
+            raise FileNotFoundError("simulated Darwin concurrent-create loser")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(
+        credentials._os,
+        "open",
+        simulate_losing_nonexclusive_create,
+    )
+
+    with credentials.credential_transaction(config_path):
+        pass
+
+    lock_path = profile_root / credentials._CREDENTIAL_LOCK_NAME
+    lock_stat = lock_path.stat()
+    assert injected is True
+    assert stat.S_ISREG(lock_stat.st_mode)
+    assert lock_stat.st_nlink == 1
+
+
+def test_lock_open_darwin_race_does_not_follow_symlink_winner(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    victim_path = tmp_path / "victim"
+    victim_path.write_text("do-not-open\n", encoding="utf-8")
+    real_open = credentials._os.open
+    injected = False
+
+    def inject_symlink_winner(
+        path,
+        flags,
+        mode=0o777,
+        *,
+        dir_fd=None,
+    ):
+        nonlocal injected
+        if (
+            path == credentials._CREDENTIAL_LOCK_NAME
+            and flags & credentials._os.O_CREAT
+            and not flags & credentials._os.O_EXCL
+            and not injected
+        ):
+            credentials._os.symlink(
+                victim_path,
+                path,
+                dir_fd=dir_fd,
+            )
+            injected = True
+            raise FileNotFoundError("simulated Darwin concurrent-create loser")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(credentials._os, "open", inject_symlink_winner)
+
+    with pytest.raises(OSError):
+        with credentials.credential_transaction(config_path):
+            pass
+
+    assert injected is True
+    assert (profile_root / credentials._CREDENTIAL_LOCK_NAME).is_symlink()
+    assert victim_path.read_text(encoding="utf-8") == "do-not-open\n"
+
+
+def test_lock_open_darwin_race_rejects_replaced_resource_directory(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    displaced_root = tmp_path / "profile-displaced"
+    profile_root.mkdir()
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    real_open = credentials._os.open
+    injected = False
+
+    def replace_directory_before_fallback(
+        path,
+        flags,
+        mode=0o777,
+        *,
+        dir_fd=None,
+    ):
+        nonlocal injected
+        if (
+            path == credentials._CREDENTIAL_LOCK_NAME
+            and flags & credentials._os.O_CREAT
+            and not flags & credentials._os.O_EXCL
+            and not injected
+        ):
+            profile_root.rename(displaced_root)
+            profile_root.mkdir()
+            config_path.write_text("provider: victim\n", encoding="utf-8")
+            injected = True
+            raise FileNotFoundError("simulated Darwin concurrent-create loser")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(
+        credentials._os,
+        "open",
+        replace_directory_before_fallback,
+    )
+
+    with pytest.raises(CredentialRecoveryError, match="directory changed"):
+        with credentials.credential_transaction(config_path):
+            pass
+
+    assert injected is True
+    assert config_path.read_text(encoding="utf-8") == "provider: victim\n"
+    assert (displaced_root / "config.yaml").read_text(
+        encoding="utf-8"
+    ) == "provider: before\n"
+
+
 def test_symlink_alias_and_direct_config_share_one_lock_identity(tmp_path):
     managed_root = tmp_path / "managed"
     alias_root = tmp_path / "alias"

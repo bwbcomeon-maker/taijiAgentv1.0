@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import socket
 import ssl
 from contextlib import asynccontextmanager, contextmanager
@@ -37,11 +36,7 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
-from hermes_constants import (
-    get_hermes_home,
-    get_hermes_home_override,
-    get_taiji_runtime_home,
-)
+from hermes_constants import get_config_path
 
 
 class NetworkScope(str, Enum):
@@ -341,6 +336,12 @@ def _is_permanently_blocked(
     effective = _effective_ip(address)
     if isinstance(effective, ipaddress.IPv4Address) and effective in _FAKE_IP_NETWORK:
         return "fake_ip_requires_trusted_proxy"
+    # Reject IPv4-mapped IPv6 spellings instead of letting them inherit
+    # ``private_direct`` allowances from their embedded IPv4 address.  Keeping
+    # one canonical address family at the policy boundary prevents mapped
+    # loopback/RFC1918 forms from becoming an alternate representation bypass.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return "outbound_address_blocked"
     if address in {_IPV6_METADATA, _GCP_IPV6_METADATA}:
         return "outbound_address_blocked"
     if (
@@ -404,29 +405,25 @@ def normalize_network_scope(
 
 
 def _canonical_config_path() -> Path:
-    if get_hermes_home_override() or get_taiji_runtime_home() is not None:
-        path = get_hermes_home() / "config.yaml"
-    else:
-        configured_path = str(os.getenv("HERMES_CONFIG_PATH") or "").strip()
-        if configured_path:
-            path = Path(configured_path).expanduser()
-        else:
-            path = get_hermes_home() / "config.yaml"
+    path = get_config_path()
     if not path.is_absolute():
         raise ValueError
     return path
 
 
 def _load_trusted_proxy_profiles() -> dict[str, TrustedProxyProfile]:
+    from agent.provider_credentials import credential_transaction
+
     config_path = _canonical_config_path()
-    with config_path.open("rb") as config_stream:
-        raw_config = config_stream.read(_PROXY_CONFIG_MAX_BYTES + 1)
-    if len(raw_config) > _PROXY_CONFIG_MAX_BYTES:
-        raise ValueError
-    loaded = yaml.load(
-        raw_config.decode("utf-8"),
-        Loader=_StrictSafeLoader,
-    )
+    with credential_transaction(config_path):
+        with config_path.open("rb") as config_stream:
+            raw_config = config_stream.read(_PROXY_CONFIG_MAX_BYTES + 1)
+        if len(raw_config) > _PROXY_CONFIG_MAX_BYTES:
+            raise ValueError
+        loaded = yaml.load(
+            raw_config.decode("utf-8"),
+            Loader=_StrictSafeLoader,
+        )
     if loaded is None:
         return {}
     if type(loaded) is not dict:
@@ -1597,9 +1594,9 @@ def _validated_json_headers(
             declared_length = declared_length * 10 + digit
 
 
-def _decode_bounded_json(parts: list[bytes]) -> Any:
+def _decode_bounded_json(body: bytes | bytearray) -> Any:
     try:
-        return json.loads(b"".join(parts))
+        return json.loads(body)
     except Exception:
         raise SafeOutboundError("provider_response_invalid_json") from None
 
@@ -1610,19 +1607,19 @@ def read_bounded_json(
     max_bytes: int = 2 * 1024 * 1024,
 ) -> Any:
     _validated_json_headers(response, max_bytes)
-    parts: list[bytes] = []
+    body = bytearray()
     size = 0
     try:
         for chunk in response.iter_bytes():
             size += len(chunk)
             if size > max_bytes:
                 raise SafeOutboundError("provider_response_too_large")
-            parts.append(bytes(chunk))
+            body.extend(chunk)
     except SafeOutboundError:
         raise
     except Exception:
         raise SafeOutboundError("safe_transport_unavailable") from None
-    return _decode_bounded_json(parts)
+    return _decode_bounded_json(body)
 
 
 async def read_bounded_json_async(
@@ -1631,16 +1628,16 @@ async def read_bounded_json_async(
     max_bytes: int = 2 * 1024 * 1024,
 ) -> Any:
     _validated_json_headers(response, max_bytes)
-    parts: list[bytes] = []
+    body = bytearray()
     size = 0
     try:
         async for chunk in response.aiter_bytes():
             size += len(chunk)
             if size > max_bytes:
                 raise SafeOutboundError("provider_response_too_large")
-            parts.append(bytes(chunk))
+            body.extend(chunk)
     except SafeOutboundError:
         raise
     except Exception:
         raise SafeOutboundError("safe_transport_unavailable") from None
-    return _decode_bounded_json(parts)
+    return _decode_bounded_json(body)

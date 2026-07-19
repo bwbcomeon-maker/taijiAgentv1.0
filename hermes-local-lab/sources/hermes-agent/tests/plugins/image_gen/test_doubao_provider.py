@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -84,22 +85,32 @@ class TestDoubaoGenerate:
         monkeypatch.setenv("ARK_API_KEY", "ark-test-key")
         from plugins.image_gen.doubao import DoubaoImageGenProvider
 
-        with patch("plugins.image_gen.doubao.requests.post", return_value=_ark_response()) as mock_post:
+        response_body = _ark_response().json()
+        with (
+            patch(
+                "plugins.image_gen.doubao.post_json",
+                return_value=(response_body, None),
+            ) as mock_post,
+            patch(
+                "plugins.image_gen.doubao.save_url_image",
+                return_value=Path("/tmp/doubao-result.png"),
+            ),
+        ):
             result = DoubaoImageGenProvider().generate(
                 prompt="A precise enterprise dashboard illustration",
                 aspect_ratio="landscape",
             )
 
         assert result["success"] is True
-        assert result["image"] == "https://ark-content/result.png"
+        assert result["image"] == "/tmp/doubao-result.png"
         assert result["provider"] == "doubao"
         assert result["model"] == "doubao-seedream-5-0-260128"
         assert result["aspect_ratio"] == "landscape"
         assert result["size"] == "2560x1440"
 
-        url = mock_post.call_args[0][0]
+        url = mock_post.call_args.kwargs["url"]
         headers = mock_post.call_args.kwargs["headers"]
-        payload = mock_post.call_args.kwargs["json"]
+        payload = mock_post.call_args.kwargs["payload"]
         assert url == "https://ark.cn-beijing.volces.com/api/v3/images/generations"
         assert headers["Authorization"] == "Bearer ark-test-key"
         assert payload == {
@@ -115,10 +126,43 @@ class TestDoubaoGenerate:
         monkeypatch.setenv("ARK_API_KEY", "ark-test-key")
         from plugins.image_gen.doubao import DoubaoImageGenProvider
 
-        with patch("plugins.image_gen.doubao.requests.post", return_value=_ark_response()) as mock_post:
+        with (
+            patch(
+                "plugins.image_gen.doubao.post_json",
+                return_value=(_ark_response().json(), None),
+            ) as mock_post,
+            patch(
+                "plugins.image_gen.doubao.save_url_image",
+                return_value=Path("/tmp/doubao-result.png"),
+            ),
+        ):
             DoubaoImageGenProvider().generate(prompt="portrait", aspect_ratio="portrait")
 
-        assert mock_post.call_args.kwargs["json"]["size"] == "1440x2560"
+        assert mock_post.call_args.kwargs["payload"]["size"] == "1440x2560"
+
+    def test_http_result_url_is_rejected_before_download(self, monkeypatch):
+        monkeypatch.setenv("ARK_API_KEY", "ark-test-key")
+        from plugins.image_gen import doubao
+
+        saver = MagicMock()
+        with (
+            patch.object(
+                doubao,
+                "post_json",
+                return_value=(
+                    {"data": [{"url": "http://ark-content/result.png"}]},
+                    None,
+                ),
+            ),
+            patch.object(doubao, "save_url_image", saver),
+        ):
+            result = doubao.DoubaoImageGenProvider().generate(
+                "A clean product photo"
+            )
+
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_response"
+        saver.assert_not_called()
 
     def test_register_wires_provider(self):
         from plugins.image_gen.doubao import DoubaoImageGenProvider, register

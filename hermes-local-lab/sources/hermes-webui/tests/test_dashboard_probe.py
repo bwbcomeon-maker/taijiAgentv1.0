@@ -1,6 +1,8 @@
 import json
 from urllib.parse import urlparse
 
+import pytest
+
 
 class _FakeHandler:
     def __init__(self):
@@ -225,3 +227,20 @@ def test_dashboard_config_roundtrip_writes_profile_config_yaml(tmp_path, monkeyp
             pass
         else:
             raise AssertionError(f"unsafe dashboard URL must be rejected: {unsafe_url}")
+
+
+def test_dashboard_config_write_fails_closed_without_overwriting_malformed_yaml(
+    tmp_path,
+    monkeypatch,
+):
+    config_path = tmp_path / "config.yaml"
+    malformed_payload = b"webui:\n  dashboard: [unterminated\n"
+    config_path.write_bytes(malformed_payload)
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+
+    from api.dashboard_probe import save_dashboard_config
+
+    with pytest.raises(ValueError, match="cannot be read safely"):
+        save_dashboard_config({"enabled": "never", "url": ""})
+
+    assert config_path.read_bytes() == malformed_payload

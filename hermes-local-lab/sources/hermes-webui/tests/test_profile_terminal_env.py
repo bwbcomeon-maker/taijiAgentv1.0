@@ -1,4 +1,3 @@
-import os
 import re
 from pathlib import Path
 
@@ -47,13 +46,16 @@ def test_profile_runtime_env_includes_terminal_config_and_dotenv(tmp_path):
     assert env["HERMES_MAX_ITERATIONS"] == "90"
 
 
-def test_streaming_applies_profile_runtime_env_to_agent_run():
+def test_streaming_keeps_profile_runtime_env_thread_and_context_local():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
     assert "get_profile_runtime_env" in src
     assert "_profile_runtime_env" in src
-    assert "old_profile_env" in src
-    assert "os.environ.update(_profile_runtime_env)" in src
+    assert "_set_thread_env(**_thread_env)" in src
+    assert "set_hermes_home_override(_profile_home_path)" in src
+    assert "old_profile_env" not in src
+    assert "os.environ.update(_profile_runtime_env)" not in src
+    assert "os.environ['HERMES_HOME'] = _profile_home" not in src
 
 
 def test_streaming_thread_env_allows_profile_terminal_cwd_override():

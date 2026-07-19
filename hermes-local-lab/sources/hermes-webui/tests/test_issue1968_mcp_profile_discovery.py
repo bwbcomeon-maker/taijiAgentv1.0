@@ -1,13 +1,13 @@
 """Regression test for issue #1968 — non-default profile MCP servers never load.
 
 The bug: `discover_mcp_tools()` was called at the top of `_run_agent_streaming`
-before the `HERMES_HOME` env mutation that stamps the per-session profile.
+before the per-stream HERMES_HOME scope was established.
 Result: `_load_mcp_config()` always read the default profile's
 `~/.hermes/config.yaml`, never the non-default profile's MCP servers.
 
-The fix moves the call past the `_ENV_LOCK` env-mutation block so
-`discover_mcp_tools()` runs with the correct `HERMES_HOME` for the session's
-profile.
+The current fix establishes a ContextVar-backed HERMES_HOME override before
+discovery, so concurrent streams can resolve their own profile without
+mutating process-global ``os.environ``.
 
 This is a static check (source ordering) rather than a runtime test, because
 mocking the entire agent stack to reach the call site would be brittle and
@@ -28,16 +28,18 @@ def _line_of(pattern: str) -> int:
     raise AssertionError(f"pattern not found in api/streaming.py: {pattern!r}")
 
 
-def test_discover_mcp_tools_called_after_hermes_home_mutation():
+def test_discover_mcp_tools_called_after_hermes_home_context_override():
     """The fix for #1968: `discover_mcp_tools()` must execute AFTER the
-    `HERMES_HOME = _profile_home` assignment, otherwise non-default profile
-    MCP servers are never discovered.
+    stream-local home override, otherwise non-default profile MCP servers are
+    never discovered.
     """
-    home_set_line = _line_of(r"os\.environ\['HERMES_HOME'\]\s*=\s*_profile_home")
+    home_set_line = _line_of(
+        r"set_hermes_home_override\(_profile_home_path\)"
+    )
     discover_call_line = _line_of(r"discover_mcp_tools\(\)\s*$")
     assert discover_call_line > home_set_line, (
         f"discover_mcp_tools() at line {discover_call_line} must be AFTER the "
-        f"HERMES_HOME mutation at line {home_set_line} (issue #1968). "
+        f"HERMES_HOME context override at line {home_set_line} (issue #1968). "
         "Otherwise non-default profile MCP servers never load."
     )
 

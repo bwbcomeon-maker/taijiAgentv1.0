@@ -21,8 +21,10 @@
 #   2. create_profile_api(name, clone_from=<str>) → seed never called.
 #   3. seed raising → profile dict returned, warning logged.
 
-import logging
+import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
@@ -53,6 +55,7 @@ def fake_hermes_home(tmp_path, monkeypatch):
     # profile-path resolution does not touch the real ~/.hermes.
     fake_home = tmp_path / '.hermes'
     fake_home.mkdir(parents=True)
+    monkeypatch.delenv('TAIJI_RUNTIME_HOME', raising=False)
     monkeypatch.setenv('HERMES_BASE_HOME', str(fake_home))
     monkeypatch.setattr(profiles_mod, '_DEFAULT_HERMES_HOME', fake_home)
     return fake_home
@@ -155,6 +158,120 @@ class TestCloneSkipsSeeding:
         assert result['name'] == 'clonedprofile'
 
 
+class TestImplicitCloneSourceIsolation:
+    def test_clone_config_binds_each_request_tls_profile_before_cli(
+        self,
+        fake_hermes_home,
+        monkeypatch,
+    ):
+        calls = []
+        calls_lock = threading.Lock()
+        ready = threading.Barrier(2)
+
+        def fake_create(name, clone_from=None, **kw):
+            with calls_lock:
+                calls.append((name, clone_from))
+            _make_profile_dir(_isolated_profiles_root(fake_hermes_home), name)
+
+        def fake_seed(profile_path, quiet=None):
+            return None
+
+        def create_from_request_profile(request_profile, target_profile):
+            profiles_mod.set_request_profile(request_profile)
+            try:
+                ready.wait(timeout=5)
+                return profiles_mod.create_profile_api(
+                    target_profile,
+                    clone_config=True,
+                )
+            finally:
+                profiles_mod.clear_request_profile()
+
+        process_profile_home = (
+            _isolated_profiles_root(fake_hermes_home) / 'process-global-profile'
+        )
+        monkeypatch.setenv('HERMES_HOME', str(process_profile_home))
+        monkeypatch.setattr(profiles_mod, '_active_profile', 'process-global-profile')
+
+        _remove_hermes_cli()
+        _install_hermes_cli_profiles_mock(fake_create, fake_seed)
+
+        try:
+            with patch.object(profiles_mod, 'list_profiles_api', return_value=[]):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [
+                        executor.submit(create_from_request_profile, 'alice', 'alice-copy'),
+                        executor.submit(create_from_request_profile, 'bob', 'bob-copy'),
+                    ]
+                    results = [future.result(timeout=10) for future in futures]
+        finally:
+            _remove_hermes_cli()
+            _restore_real_hermes_cli()
+
+        assert {result['name'] for result in results} == {'alice-copy', 'bob-copy'}
+        assert dict(calls) == {
+            'alice-copy': 'alice',
+            'bob-copy': 'bob',
+        }
+
+    def test_renamed_root_request_profile_is_passed_to_cli_as_default(
+        self,
+        fake_hermes_home,
+        monkeypatch,
+    ):
+        create_profile = MagicMock(
+            side_effect=lambda name, **kw: _make_profile_dir(
+                _isolated_profiles_root(fake_hermes_home),
+                name,
+            )
+        )
+        seed_profile_skills = MagicMock()
+        monkeypatch.setattr(
+            profiles_mod,
+            '_is_root_profile',
+            lambda name: name in {'default', 'kinni'},
+        )
+
+        _remove_hermes_cli()
+        _install_hermes_cli_profiles_mock(create_profile, seed_profile_skills)
+
+        profiles_mod.set_request_profile('kinni')
+        try:
+            with patch.object(profiles_mod, 'list_profiles_api', return_value=[]):
+                profiles_mod.create_profile_api(
+                    'root-copy',
+                    clone_config=True,
+                )
+        finally:
+            profiles_mod.clear_request_profile()
+            _remove_hermes_cli()
+            _restore_real_hermes_cli()
+
+        assert create_profile.call_args.kwargs['clone_from'] == 'default'
+
+    def test_explicit_invalid_clone_source_is_rejected_before_cli(
+        self,
+        fake_hermes_home,
+    ):
+        create_profile = MagicMock()
+        seed_profile_skills = MagicMock()
+
+        _remove_hermes_cli()
+        _install_hermes_cli_profiles_mock(create_profile, seed_profile_skills)
+        try:
+            with pytest.raises(ValueError, match='Invalid profile name'):
+                profiles_mod.create_profile_api(
+                    'safe-target',
+                    clone_from='../other-profile',
+                    clone_config=True,
+                )
+        finally:
+            _remove_hermes_cli()
+            _restore_real_hermes_cli()
+
+        create_profile.assert_not_called()
+
+
 class TestSeedFailureIsBestEffort:
     def test_seed_raising_logs_warning_and_still_returns_profile(self, fake_hermes_home, caplog):
         import logging as std_logging
@@ -184,6 +301,54 @@ class TestSeedFailureIsBestEffort:
         # Profile dict is returned (best-effort).
         assert result['name'] == 'failprofile'
         assert 'path' in result
+
+
+def test_profile_create_preserves_config_env_pair_when_intent_fails(
+    fake_hermes_home,
+    monkeypatch,
+):
+    import agent.provider_credentials as credential_store
+
+    def fake_create(name, **_kwargs):
+        _make_profile_dir(_isolated_profiles_root(fake_hermes_home), name)
+
+    def fail_journal(*_args, **_kwargs):
+        raise OSError('journal unavailable')
+
+    _remove_hermes_cli()
+    _install_hermes_cli_profiles_mock(fake_create, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        profiles_mod,
+        '_validate_profile_model_selection',
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        credential_store,
+        '_write_credential_journal',
+        fail_journal,
+    )
+
+    try:
+        with patch.object(profiles_mod, 'list_profiles_api', return_value=[]):
+            with pytest.raises(OSError, match='journal unavailable'):
+                profiles_mod.create_profile_api(
+                    'atomic-profile',
+                    base_url='https://models.example.com/v1',
+                    api_key='profile-secret-after',
+                    default_model='deepseek-chat',
+                    model_provider='deepseek',
+                )
+    finally:
+        _remove_hermes_cli()
+        _restore_real_hermes_cli()
+
+    profile_path = (
+        _isolated_profiles_root(fake_hermes_home) / 'atomic-profile'
+    )
+    assert profile_path.is_dir()
+    assert not (profile_path / 'config.yaml').exists()
+    assert not (profile_path / '.env').exists()
+    assert os.environ.get('DEEPSEEK_API_KEY') != 'profile-secret-after'
 
 
 class TestHermesCliUnavailableFallbackDoesNotCrash:

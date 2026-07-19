@@ -121,7 +121,7 @@ class TestGetProviders:
         try:
             result = get_providers()
             for p in result["providers"]:
-                assert "id" in p, f"Missing 'id' in provider entry"
+                assert "id" in p, "Missing 'id' in provider entry"
                 assert "display_name" in p, f"Missing 'display_name' for {p['id']}"
                 assert "has_key" in p, f"Missing 'has_key' for {p['id']}"
                 assert "configurable" in p, f"Missing 'configurable' for {p['id']}"
@@ -222,6 +222,10 @@ class TestSetProviderKey:
         # Also pin HERMES_HOME so code that reads it directly gets tmp_path,
         # not the conftest session TEST_STATE_DIR that bleeds into the main process.
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv(
+            "HERMES_CONFIG_PATH",
+            str(tmp_path / "config.yaml"),
+        )
 
         old_cfg = dict(config.cfg)
         old_mtime = config._cfg_mtime

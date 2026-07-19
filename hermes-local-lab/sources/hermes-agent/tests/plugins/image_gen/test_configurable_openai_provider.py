@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
+from httpx import Headers
 
 
 _PNG_HEX = (
@@ -19,14 +23,81 @@ def _b64_png() -> str:
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, payload=None):
+    def __init__(self, status_code: int = 200, payload: Any = None) -> None:
         self.status_code = status_code
         self._payload = payload or {}
-        self.headers = {"content-type": "application/json"}
+        self.headers = Headers({"Content-Type": "application/json"})
         self.text = "fake-response-text"
 
-    def json(self):
+    def json(self) -> Any:
         return self._payload
+
+    def iter_bytes(self):
+        yield json.dumps(self._payload).encode()
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        del exc_type, exc_value, traceback
+        return False
+
+
+def _bind_custom_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    credentials: dict[str, str],
+) -> dict[str, str]:
+    from agent.provider_credentials import credential_secret_env
+
+    rows = []
+    secret_envs: dict[str, str] = {}
+    for credential_ref, secret in credentials.items():
+        secret_env = credential_secret_env(credential_ref)
+        secret_envs[credential_ref] = secret_env
+        rows.append({
+            "id": credential_ref,
+            "provider_family": "custom",
+            "auth_type": "api_key",
+            "secret_env": secret_env,
+        })
+        if secret:
+            monkeypatch.setenv(secret_env, secret)
+        else:
+            monkeypatch.delenv(secret_env, raising=False)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"provider_credentials": rows}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+    return secret_envs
+
+
+def _install_safe_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    *,
+    payload: dict[str, Any],
+    status_code: int = 200,
+) -> tuple[list[dict[str, Any]], list[_FakeResponse]]:
+    request_calls: list[dict[str, Any]] = []
+    read_calls: list[_FakeResponse] = []
+    real_reader = module.read_bounded_json
+
+    def fake_request_pinned_https(**kwargs: Any) -> _FakeResponse:
+        request_calls.append(kwargs)
+        return _FakeResponse(status_code=status_code, payload=payload)
+
+    def bounded_reader(response: _FakeResponse) -> Any:
+        read_calls.append(response)
+        return real_reader(response)
+
+    monkeypatch.setattr(module, "request_pinned_https", fake_request_pinned_https)
+    monkeypatch.setattr(module, "read_bounded_json", bounded_reader)
+    return request_calls, read_calls
 
 
 def _entry(**overrides):
@@ -34,7 +105,7 @@ def _entry(**overrides):
         "id": "router",
         "name": "Router Images",
         "base_url": "https://images.example.com/v1",
-        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+        "credential_ref": "router-images",
         "models": ["gpt-image-custom"],
         "default_model": "gpt-image-custom",
         "size_map": {
@@ -49,10 +120,14 @@ def _entry(**overrides):
     return data
 
 
-def test_configurable_provider_requires_key_and_base_url(monkeypatch):
+def test_configurable_provider_requires_key_and_base_url(monkeypatch, tmp_path):
     from agent.custom_image_providers import ConfigurableOpenAIImageProvider
 
-    monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)
+    secret_envs = _bind_custom_credentials(
+        monkeypatch,
+        tmp_path,
+        {"router-images": ""},
+    )
     provider = ConfigurableOpenAIImageProvider(_entry())
 
     assert provider.name == "custom:router"
@@ -60,7 +135,7 @@ def test_configurable_provider_requires_key_and_base_url(monkeypatch):
     assert provider.default_model() == "gpt-image-custom"
     assert provider.is_available() is False
 
-    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret-key")
+    monkeypatch.setenv(secret_envs["router-images"], "secret-key")
     assert provider.is_available() is True
 
 
@@ -73,27 +148,22 @@ def test_configurable_provider_rejects_insecure_http_base_url():
         )
 
 
-def test_configurable_provider_posts_to_openai_compatible_endpoint(monkeypatch, tmp_path):
+def test_configurable_provider_posts_to_openai_compatible_endpoint(
+    monkeypatch, tmp_path
+):
     from agent import custom_image_providers
     from agent.custom_image_providers import ConfigurableOpenAIImageProvider
 
-    calls = []
-
-    def fake_post(url, *, headers, json, timeout, allow_redirects):
-        calls.append(
-            {
-                "url": url,
-                "headers": headers,
-                "json": json,
-                "timeout": timeout,
-                "allow_redirects": allow_redirects,
-            }
-        )
-        return _FakeResponse(payload={"data": [{"b64_json": _b64_png()}]})
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret-key")
-    monkeypatch.setattr(custom_image_providers.requests, "post", fake_post)
+    _bind_custom_credentials(
+        monkeypatch,
+        tmp_path,
+        {"router-images": "secret-key"},
+    )
+    calls, read_calls = _install_safe_bridge(
+        monkeypatch,
+        custom_image_providers,
+        payload={"data": [{"b64_json": _b64_png()}]},
+    )
 
     result = ConfigurableOpenAIImageProvider(_entry()).generate(
         "draw a quiet operations dashboard",
@@ -106,12 +176,14 @@ def test_configurable_provider_posts_to_openai_compatible_endpoint(monkeypatch, 
     assert Path(result["image"]).exists()
     assert calls == [
         {
+            "method": "POST",
             "url": "https://images.example.com/v1/images/generations",
+            "network_scope": "public_direct",
             "headers": {
                 "Authorization": "Bearer secret-key",
                 "Content-Type": "application/json",
             },
-            "json": {
+            "json_body": {
                 "model": "gpt-image-custom",
                 "prompt": "draw a quiet operations dashboard",
                 "size": "1536x1024",
@@ -119,9 +191,10 @@ def test_configurable_provider_posts_to_openai_compatible_endpoint(monkeypatch, 
                 "response_format": "b64_json",
             },
             "timeout": 30,
-            "allow_redirects": False,
+            "follow_redirects": False,
         }
     ]
+    assert len(read_calls) == 1
 
 
 def test_configurable_provider_accepts_url_responses(monkeypatch, tmp_path):
@@ -130,14 +203,34 @@ def test_configurable_provider_accepts_url_responses(monkeypatch, tmp_path):
 
     saved = tmp_path / "cached.png"
     saved.write_bytes(b"png")
-
-    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret-key")
-    monkeypatch.setattr(
-        custom_image_providers.requests,
-        "post",
-        lambda *args, **kwargs: _FakeResponse(payload={"data": [{"url": "https://cdn.example.com/image.png"}]}),
+    _bind_custom_credentials(
+        monkeypatch,
+        tmp_path,
+        {"router-images": "secret-key"},
     )
-    monkeypatch.setattr(custom_image_providers, "save_url_image", lambda url, prefix: saved)
+    _install_safe_bridge(
+        monkeypatch,
+        custom_image_providers,
+        payload={"data": [{"url": "https://cdn.example.com/image.png"}]},
+    )
+    download_calls = []
+
+    def fake_save_url_image(
+        url,
+        *,
+        prefix,
+        network_scope,
+        trusted_proxy_profile,
+    ):
+        download_calls.append({
+            "url": url,
+            "prefix": prefix,
+            "network_scope": network_scope,
+            "trusted_proxy_profile": trusted_proxy_profile,
+        })
+        return saved
+
+    monkeypatch.setattr(custom_image_providers, "save_url_image", fake_save_url_image)
 
     result = ConfigurableOpenAIImageProvider(_entry(response_format="url")).generate(
         "draw a field report",
@@ -147,9 +240,19 @@ def test_configurable_provider_accepts_url_responses(monkeypatch, tmp_path):
     assert result["success"] is True
     assert result["image"] == str(saved)
     assert result["provider"] == "custom:router"
+    assert download_calls == [
+        {
+            "url": "https://cdn.example.com/image.png",
+            "prefix": "custom_router_gpt-image-custom",
+            "network_scope": "public_direct",
+            "trusted_proxy_profile": None,
+        }
+    ]
 
 
-def test_configurable_provider_sanitizes_model_id_for_cache_prefix(monkeypatch, tmp_path):
+def test_configurable_provider_sanitizes_model_id_for_cache_prefix(
+    monkeypatch, tmp_path
+):
     from agent import custom_image_providers
     from agent.custom_image_providers import ConfigurableOpenAIImageProvider
 
@@ -157,39 +260,58 @@ def test_configurable_provider_sanitizes_model_id_for_cache_prefix(monkeypatch, 
     saved.write_bytes(b"png")
     prefixes = []
 
-    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret-key")
-    monkeypatch.setattr(
-        custom_image_providers.requests,
-        "post",
-        lambda *args, **kwargs: _FakeResponse(payload={"data": [{"url": "https://cdn.example.com/image.png"}]}),
+    _bind_custom_credentials(
+        monkeypatch,
+        tmp_path,
+        {"router-images": "secret-key"},
+    )
+    _install_safe_bridge(
+        monkeypatch,
+        custom_image_providers,
+        payload={"data": [{"url": "https://cdn.example.com/image.png"}]},
     )
 
-    def fake_save_url_image(url, prefix):
+    def fake_save_url_image(
+        url,
+        *,
+        prefix,
+        network_scope,
+        trusted_proxy_profile,
+    ):
+        del url
+        assert network_scope == "public_direct"
+        assert trusted_proxy_profile is None
         prefixes.append(prefix)
         return saved
 
     monkeypatch.setattr(custom_image_providers, "save_url_image", fake_save_url_image)
 
     result = ConfigurableOpenAIImageProvider(
-        _entry(models=["vendor/gpt-image-custom"], default_model="vendor/gpt-image-custom")
+        _entry(
+            models=["vendor/gpt-image-custom"], default_model="vendor/gpt-image-custom"
+        )
     ).generate("draw a field report")
 
     assert result["success"] is True
     assert prefixes == ["custom_router_vendor_gpt-image-custom"]
 
 
-def test_configurable_provider_maps_remote_errors_without_leaking_key(monkeypatch):
+def test_configurable_provider_maps_remote_errors_without_leaking_key(
+    monkeypatch, tmp_path
+):
     from agent import custom_image_providers
     from agent.custom_image_providers import ConfigurableOpenAIImageProvider
 
-    monkeypatch.setenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", "secret-key")
-    monkeypatch.setattr(
-        custom_image_providers.requests,
-        "post",
-        lambda *args, **kwargs: _FakeResponse(
-            status_code=401,
-            payload={"error": {"message": "bad api key secret-key"}},
-        ),
+    _bind_custom_credentials(
+        monkeypatch,
+        tmp_path,
+        {"router-images": "secret-key"},
+    )
+    _install_safe_bridge(
+        monkeypatch,
+        custom_image_providers,
+        status_code=401,
+        payload={"error": {"message": "bad api key secret-key"}},
     )
 
     result = ConfigurableOpenAIImageProvider(_entry()).generate("draw a chart")
@@ -200,16 +322,34 @@ def test_configurable_provider_maps_remote_errors_without_leaking_key(monkeypatc
     assert "HTTP 401" in result["error"]
 
 
-def test_register_configured_custom_image_providers_refreshes_stale_entries(monkeypatch):
+def test_register_configured_custom_image_providers_refreshes_stale_entries(
+    monkeypatch, tmp_path
+):
     from agent import image_gen_registry
     from agent.custom_image_providers import register_configured_custom_image_providers
 
+    _bind_custom_credentials(
+        monkeypatch,
+        tmp_path,
+        {
+            "one-images": "one-secret",
+            "two-images": "two-secret",
+        },
+    )
     image_gen_registry._reset_for_tests()
-    register_configured_custom_image_providers({"custom_image_providers": [_entry(id="one")]})
-    assert image_gen_registry.get_provider("custom:one") is not None
+    register_configured_custom_image_providers({
+        "custom_image_providers": [_entry(id="one", credential_ref="one-images")]
+    })
+    first = image_gen_registry.get_provider("custom:one")
+    assert first is not None
+    assert first.is_available() is True
 
-    register_configured_custom_image_providers({"custom_image_providers": [_entry(id="two")]})
+    register_configured_custom_image_providers({
+        "custom_image_providers": [_entry(id="two", credential_ref="two-images")]
+    })
 
     assert image_gen_registry.get_provider("custom:one") is None
-    assert image_gen_registry.get_provider("custom:two") is not None
+    second = image_gen_registry.get_provider("custom:two")
+    assert second is not None
+    assert second.is_available() is True
     image_gen_registry._reset_for_tests()

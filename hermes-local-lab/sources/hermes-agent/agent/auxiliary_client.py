@@ -56,6 +56,9 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 _transient_named_vision_clients: ContextVar[Optional[list[Any]]] = ContextVar(
     "transient_named_vision_clients", default=None
 )
+_named_vision_http_binding: ContextVar[Optional[dict[str, Any]]] = ContextVar(
+    "named_vision_http_binding", default=None
+)
 
 
 def _register_transient_named_vision_client(client: Any) -> None:
@@ -167,6 +170,12 @@ OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 from agent.alibaba_endpoints import build_vision_base_url
 from agent.credential_pool import load_pool
 from agent.provider_credentials import resolve_api_key
+from agent.safe_outbound_http import (
+    NetworkScope,
+    build_openai_async_transport,
+    build_openai_sync_transport,
+    normalize_network_scope,
+)
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
@@ -210,6 +219,7 @@ _PROVIDER_ALIASES = {
     "moonshot": "kimi-coding",
     "kimi-cn": "kimi-coding-cn",
     "moonshot-cn": "kimi-coding-cn",
+    "deep-seek": "deepseek",
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
     "minimax-china": "minimax-cn",
@@ -366,7 +376,12 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
 # api.kimi.com/coding (Anthropic Messages wire) which Kimi's own docs
 # describe as having no image_in capability. Vision lives on the separate
 # Kimi Platform (api.moonshot.ai, OpenAI-wire, pay-as-you-go).  See #17076.
+#
+# deepseek: the direct DeepSeek API is text/reasoning-only.  Keep this
+# provider-level fallback so a fresh/offline install cannot mistake missing
+# models.dev capability data for permission to send image payloads.
 _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
+    "deepseek",
     "kimi-coding",
     "kimi-coding-cn",
 })
@@ -1195,6 +1210,7 @@ def _maybe_wrap_anthropic(
     base_url: str,
     api_mode: Optional[str] = None,
     follow_redirects: Optional[bool] = None,
+    http_client: Any = None,
 ) -> Any:
     """Rewrap a plain OpenAI client in ``AnthropicAuxiliaryClient`` when
     the endpoint actually speaks Anthropic Messages.
@@ -1257,6 +1273,7 @@ def _maybe_wrap_anthropic(
             api_key,
             base_url,
             follow_redirects=follow_redirects,
+            http_client=http_client,
         )
     except Exception as exc:
         logger.warning(
@@ -3472,7 +3489,37 @@ def resolve_provider_client(
                         extra["default_headers"] = dict(_ph_custom.default_headers)
                 except Exception:
                     pass
-            if follow_redirects is not None:
+            named_http_binding = _named_vision_http_binding.get()
+            if named_http_binding is not None:
+                if wants_anthropic:
+                    wrapped_client = _maybe_wrap_anthropic(
+                        None,
+                        final_model,
+                        custom_key,
+                        str(explicit_base_url).strip().rstrip("/"),
+                        api_mode,
+                        follow_redirects=follow_redirects,
+                        http_client=named_http_binding["http_client"],
+                    )
+                    if wrapped_client is None:
+                        logger.warning(
+                            "Strict custom vision endpoint requires Anthropic "
+                            "Messages support; refusing OpenAI-wire fallback"
+                        )
+                        return None, None
+                    resolved_client = (
+                        _to_async_client(
+                            wrapped_client,
+                            final_model,
+                            is_vision=is_vision,
+                        )
+                        if async_mode
+                        else (wrapped_client, final_model)
+                    )
+                    named_http_binding["claimed"] = True
+                    return resolved_client
+                extra["http_client"] = named_http_binding["http_client"]
+            elif follow_redirects is not None:
                 import httpx
 
                 extra["http_client"] = (
@@ -3483,10 +3530,15 @@ def resolve_provider_client(
             if async_mode and not wants_anthropic:
                 from openai import AsyncOpenAI
 
-                return AsyncOpenAI(
+                client = AsyncOpenAI(
                     api_key=custom_key, base_url=_clean_base, **extra
-                ), final_model
+                )
+                if named_http_binding is not None:
+                    named_http_binding["claimed"] = True
+                return client, final_model
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
+            if named_http_binding is not None:
+                named_http_binding["claimed"] = True
             if follow_redirects is not None:
                 client._taiji_follow_redirects = bool(follow_redirects)
             wrapped_client = _maybe_wrap_anthropic(
@@ -4033,13 +4085,25 @@ def get_available_vision_backends() -> List[str]:
     """
     available: List[str] = []
     # 1. Active provider — if the user configured a provider, try it first.
-    main_provider = _read_main_provider()
+    main_provider = _normalize_vision_provider(_read_main_provider())
     if main_provider and main_provider not in {"auto", ""}:
         if main_provider in _VISION_AUTO_PROVIDER_ORDER:
             if _strict_vision_backend_available(main_provider):
                 available.append(main_provider)
-        else:
-            client, _ = resolve_provider_client(main_provider, _read_main_model())
+        elif main_provider not in _PROVIDERS_WITHOUT_VISION:
+            main_model = _PROVIDER_VISION_MODELS.get(
+                main_provider,
+                _read_main_model(),
+            )
+            client, _ = (
+                resolve_provider_client(
+                    main_provider,
+                    main_model,
+                    is_vision=True,
+                )
+                if _main_model_supports_vision(main_provider, main_model)
+                else (None, None)
+            )
             if client is not None:
                 available.append(main_provider)
     # 2. OpenRouter, 3. Nous — skip if already covered by main provider.
@@ -4047,6 +4111,73 @@ def get_available_vision_backends() -> List[str]:
         if p not in available and _strict_vision_backend_available(p):
             available.append(p)
     return available
+
+
+def _build_named_openai_vision_http_client(
+    provider_name: str,
+    *,
+    async_mode: bool,
+) -> Any:
+    """Build the hardened HTTP client owned by a named vision SDK client."""
+    from agent.custom_vision_providers import (
+        _normalize_loaded_custom_vision_provider_entry,
+        find_custom_vision_provider_entry,
+    )
+    import httpx
+
+    entry = find_custom_vision_provider_entry(provider_name)
+    if entry is None:
+        raise ValueError("named custom vision provider unavailable")
+    normalized = _normalize_loaded_custom_vision_provider_entry(entry)
+    transport = normalized["transport"]
+    if transport not in {"openai_chat_completions", "anthropic_messages"}:
+        raise ValueError("named custom vision transport unavailable")
+
+    scope = normalize_network_scope(
+        normalized.get("network_scope"),
+        default=NetworkScope.PUBLIC_DIRECT,
+    )
+    trusted_proxy_profile = (
+        str(normalized.get("trusted_proxy_profile") or "").strip() or None
+    )
+    if async_mode and transport == "openai_chat_completions":
+        async_transport = build_openai_async_transport(
+            network_scope=scope,
+            trusted_proxy_profile=trusted_proxy_profile,
+        )
+        return httpx.AsyncClient(
+            transport=async_transport,
+            trust_env=False,
+            follow_redirects=False,
+        )
+    sync_transport = build_openai_sync_transport(
+        network_scope=scope,
+        trusted_proxy_profile=trusted_proxy_profile,
+    )
+    return httpx.Client(
+        transport=sync_transport,
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+def _close_unclaimed_named_vision_http_client(
+    http_client: Any,
+    *,
+    async_mode: bool,
+) -> None:
+    if not async_mode:
+        http_client.close()
+        return
+    import asyncio
+
+    close_result = http_client.aclose()
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(close_result)
+    else:
+        running_loop.create_task(close_result)
 
 
 def resolve_vision_provider_client(
@@ -4096,21 +4227,48 @@ def resolve_vision_provider_client(
             )
         )
         named_custom_vision = provider_for_base_override.startswith("custom:")
+        named_http_binding = None
+        named_http_token = None
+        if named_custom_vision:
+            http_client = _build_named_openai_vision_http_client(
+                provider_for_base_override,
+                async_mode=async_mode,
+            )
+            named_http_binding = {
+                "http_client": http_client,
+                "claimed": False,
+                "is_async": (
+                    async_mode and resolved_api_mode != "anthropic_messages"
+                ),
+            }
+            named_http_token = _named_vision_http_binding.set(named_http_binding)
         route_provider = "custom" if named_custom_vision else provider_for_base_override
         redirect_kwargs = (
             {"follow_redirects": False}
             if custom_alibaba_endpoint or named_custom_vision
             else {}
         )
-        client, final_model = resolve_provider_client(
-            route_provider,
-            model=resolved_model,
-            async_mode=async_mode,
-            explicit_base_url=resolved_base_url,
-            explicit_api_key=resolved_api_key,
-            api_mode=resolved_api_mode,
-            **redirect_kwargs,
-        )
+        try:
+            client, final_model = resolve_provider_client(
+                route_provider,
+                model=resolved_model,
+                async_mode=async_mode,
+                explicit_base_url=resolved_base_url,
+                explicit_api_key=resolved_api_key,
+                api_mode=resolved_api_mode,
+                **redirect_kwargs,
+            )
+        finally:
+            if named_http_token is not None:
+                _named_vision_http_binding.reset(named_http_token)
+            if (
+                named_http_binding is not None
+                and not named_http_binding["claimed"]
+            ):
+                _close_unclaimed_named_vision_http_client(
+                    named_http_binding["http_client"],
+                    async_mode=named_http_binding["is_async"],
+                )
         if client is None:
             return provider_for_base_override, None, None
         if named_custom_vision:
@@ -4129,7 +4287,7 @@ def resolve_vision_provider_client(
         #   2. OpenRouter  (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
         #   4. Stop
-        main_provider = _read_main_provider()
+        main_provider = _normalize_vision_provider(_read_main_provider())
         main_model = _read_main_model()
         if main_provider and main_provider not in {"auto", ""}:
             vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
@@ -4189,8 +4347,6 @@ def resolve_vision_provider_client(
         # Fall back through aggregators (uses their dedicated vision model,
         # not the user's main model) when main provider has no client.
         for candidate in _VISION_AUTO_PROVIDER_ORDER:
-            if candidate == main_provider:
-                continue  # already tried above
             sync_client, default_model = _resolve_strict_vision_backend(candidate)
             if sync_client is not None:
                 return _finalize(candidate, sync_client, default_model)
@@ -4675,6 +4831,9 @@ def _resolve_task_provider_model(
     selected_provider = provider or cfg_provider
     if task == "vision" and str(selected_provider or "").strip().lower().startswith("custom:"):
         from agent.custom_vision_providers import (
+            _normalize_base_url as normalize_custom_vision_base_url,
+            _normalize_loaded_custom_vision_provider_entry,
+            custom_vision_provider_api_key,
             find_custom_vision_provider_entry,
             is_custom_vision_base_url_safe,
         )
@@ -4682,19 +4841,40 @@ def _resolve_task_provider_model(
         entry = find_custom_vision_provider_entry(selected_provider)
         if entry is None:
             raise ValueError("named custom vision provider unavailable")
+        entry = _normalize_loaded_custom_vision_provider_entry(entry)
         named_model = resolved_model or entry["default_model"]
         if named_model not in entry["models"]:
             raise ValueError("named custom vision model unavailable")
-        named_base_url = base_url or entry["base_url"]
-        if not is_custom_vision_base_url_safe(named_base_url):
-            raise ValueError("unsafe custom vision endpoint")
-        named_key = (
-            str(api_key).strip()
-            if api_key is not None and str(api_key).strip()
-            else os.getenv(entry["api_key_env"], "").strip()
+        network_scope = normalize_network_scope(
+            entry.get("network_scope"),
+            default=NetworkScope.PUBLIC_DIRECT,
         )
+        canonical_named_base_url = normalize_custom_vision_base_url(
+            entry["base_url"],
+            network_scope=network_scope,
+        )
+        explicit_named_base_url = str(base_url or "").strip()
+        if explicit_named_base_url:
+            normalized_override = normalize_custom_vision_base_url(
+                explicit_named_base_url,
+                network_scope=network_scope,
+            )
+            if normalized_override != canonical_named_base_url:
+                raise ValueError(
+                    "named custom vision endpoint override unavailable"
+                )
+        named_base_url = canonical_named_base_url
+        if (
+            network_scope is NetworkScope.PUBLIC_DIRECT
+            and not is_custom_vision_base_url_safe(named_base_url)
+        ):
+            raise ValueError("unsafe custom vision endpoint")
+        named_key = custom_vision_provider_api_key(entry)
         if not named_key:
             raise ValueError("named custom vision credential unavailable")
+        explicit_key = str(api_key or "").strip()
+        if explicit_key and explicit_key != named_key:
+            raise ValueError("named custom vision API key override unavailable")
         named_mode = (
             "anthropic_messages"
             if entry["transport"] == "anthropic_messages"

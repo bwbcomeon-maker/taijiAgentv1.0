@@ -2,15 +2,8 @@
 
 from __future__ import annotations
 
-import ipaddress
-import os
-import re
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
-
-import requests
-import yaml
 
 from agent.alibaba_endpoints import (
     DEFAULT_REGION,
@@ -20,11 +13,10 @@ from agent.alibaba_endpoints import (
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
-    _is_public_ip,
     error_response,
     save_url_image,
 )
-from agent.provider_credentials import resolve_api_key
+from agent.provider_credentials import load_credential_config
 from plugins.image_gen.domestic_common import (
     SIZE_MAP_STAR,
     auth_error,
@@ -34,6 +26,8 @@ from plugins.image_gen.domestic_common import (
     first_url,
     normalized_aspect,
     post_json,
+    provider_api_key,
+    redact_secrets,
     validate_prompt,
 )
 from tools.url_safety import is_safe_url
@@ -49,18 +43,8 @@ _IMAGE_EXTENSIONS = {
     "image/jpeg": "jpg",
     "image/jpg": "jpg",
 }
-_DASHSCOPE_OSS_ACCELERATE_HOST_RE = re.compile(
-    r"^dashscope-[a-z0-9]+\.oss-accelerate\.aliyuncs\.com$"
-)
-_PROXY_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
-
-
 class DashScopeConfigurationError(RuntimeError):
     """Raised when the saved runtime configuration cannot be loaded safely."""
-
-
-def _post_without_redirects(url: str, **kwargs: Any):
-    return requests.post(url, allow_redirects=False, **kwargs)
 
 
 def _dashscope_url_shape_allowed(url: str) -> bool:
@@ -84,30 +68,27 @@ def _dashscope_url_shape_allowed(url: str) -> bool:
     return True
 
 
-def _dashscope_address_allowed(hostname: str, value: str) -> bool:
-    """Permit public peers plus DashScope's narrowly scoped Fake-IP range."""
-    hostname = str(hostname or "").strip().lower().rstrip(".")
-    value = str(value or "").split("%", 1)[0]
-    if _is_public_ip(value):
-        return True
-    if not _DASHSCOPE_OSS_ACCELERATE_HOST_RE.fullmatch(hostname):
-        return False
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return (
-        isinstance(address, ipaddress.IPv4Address)
-        and address in _PROXY_BENCHMARK_NETWORK
-    )
-
-
 def _save_safe_image_url(
     url: str,
     *,
     prefix: str = "dashscope_qwen_image",
+    network_scope: str = "public_direct",
+    url_validator: Callable[[str], bool] | None = None,
 ) -> Any:
     """Delegate to the Agent's proxy-free, DNS-pinned image transport."""
+    if network_scope != "public_direct":
+        raise ValueError("DashScope image URL failed safety validation")
+
+    def combined_url_validator(candidate: str) -> bool:
+        return _dashscope_url_shape_allowed(candidate) and (
+            url_validator(candidate) if url_validator is not None else True
+        )
+
+    effective_url_validator = (
+        _dashscope_url_shape_allowed
+        if url_validator is None
+        else combined_url_validator
+    )
     try:
         return save_url_image(
             str(url or "").strip(),
@@ -116,8 +97,8 @@ def _save_safe_image_url(
             max_bytes=MAX_IMAGE_BYTES,
             max_pixels=MAX_IMAGE_PIXELS,
             max_redirects=MAX_IMAGE_REDIRECTS,
-            url_validator=_dashscope_url_shape_allowed,
-            address_validator=_dashscope_address_allowed,
+            network_scope=network_scope,
+            url_validator=effective_url_validator,
         )
     except ValueError as exc:
         if "unsafe image URL" in str(exc):
@@ -129,23 +110,7 @@ def _save_safe_image_url(
 
 def _load_config_data() -> dict[str, Any]:
     try:
-        configured_path = str(os.getenv("HERMES_CONFIG_PATH") or "").strip()
-        if configured_path:
-            config_path = Path(configured_path).expanduser()
-        else:
-            from hermes_cli.config import get_config_path
-
-            config_path = Path(get_config_path())
-        try:
-            config_path.stat()
-        except FileNotFoundError:
-            return {}
-        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        if loaded is None:
-            return {}
-        if not isinstance(loaded, dict):
-            raise ValueError("DashScope configuration root must be a mapping")
-        return loaded
+        return load_credential_config()
     except Exception as exc:
         raise DashScopeConfigurationError("DashScope configuration could not be loaded") from exc
 
@@ -154,25 +119,6 @@ def _load_image_config(config_data: dict[str, Any] | None = None) -> dict[str, A
     cfg = config_data if isinstance(config_data, dict) else _load_config_data()
     image_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
     return image_cfg if isinstance(image_cfg, dict) else {}
-
-
-def _resolve_api_key(
-    config_data: dict[str, Any] | None = None,
-    image_cfg: dict[str, Any] | None = None,
-) -> str:
-    config_data = config_data if isinstance(config_data, dict) else _load_config_data()
-    image_cfg = image_cfg if isinstance(image_cfg, dict) else _load_image_config(config_data)
-    credential_ref = ""
-    if str(image_cfg.get("provider") or "").strip().lower() == "dashscope":
-        credential_ref = str(image_cfg.get("credential_ref") or "").strip()
-    try:
-        return resolve_api_key(
-            "dashscope",
-            credential_ref,
-            config_data=config_data,
-        )
-    except ValueError:
-        return ""
 
 
 def _option_value(
@@ -220,7 +166,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         try:
             config_data = _load_config_data()
             image_cfg = _load_image_config(config_data)
-            if not _resolve_api_key(config_data, image_cfg):
+            if not provider_api_key(self.name, config_data=config_data):
                 return False
             endpoint = self._endpoint(image_cfg=image_cfg)
         except (DashScopeConfigurationError, ValueError):
@@ -360,8 +306,8 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         try:
             config_data = _load_config_data()
             image_cfg = _load_image_config(config_data)
-            api_key = _resolve_api_key(config_data, image_cfg)
-        except DashScopeConfigurationError:
+            api_key = provider_api_key(self.name, config_data=config_data)
+        except (DashScopeConfigurationError, ValueError):
             return error_response(
                 error="DashScope configuration could not be loaded.",
                 error_type="configuration_error",
@@ -422,24 +368,28 @@ class DashScopeQwenImageProvider(ImageGenProvider):
                 "size": SIZE_MAP_STAR.get(aspect, SIZE_MAP_STAR["landscape"]),
             },
         }
+        secrets = (
+            api_key,
+            _option_value(
+                "workspace_id",
+                "DASHSCOPE_WORKSPACE_ID",
+                image_cfg=image_cfg,
+            ),
+        )
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
         body, error = post_json(
             url=endpoint,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers=headers,
             payload=payload,
             timeout=TIMEOUT_SECONDS,
             provider=self.name,
             model=model,
             prompt=prompt,
             aspect_ratio=aspect,
-            secrets=(
-                api_key,
-                _option_value(
-                    "workspace_id",
-                    "DASHSCOPE_WORKSPACE_ID",
-                    image_cfg=image_cfg,
-                ),
-            ),
-            request_post=_post_without_redirects,
+            secrets=secrets,
         )
         if error:
             return error

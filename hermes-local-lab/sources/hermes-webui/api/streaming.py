@@ -86,14 +86,11 @@ def _finalize_public_reasoning(raw_text: str) -> str:
         )
     return str(public_egress_scrub(value, surface="reasoning_full_buffer"))
 
-# Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
-# concurrent runs of the SAME session, but two DIFFERENT sessions can still
-# interleave their os.environ writes. This global lock serializes the env
-# save/restore — held only briefly across the env-mutation critical section,
-# NOT for the entire agent run. The agent runs outside the lock; the finally
-# block re-acquires to atomically restore env vars. See narrow-lock pattern
-# in _run_agent_streaming (line ~2719) and profile_env_for_background_worker
-# (api/profiles.py:715).
+# Global lock for the remaining compatibility os.environ writes. Per-profile
+# home/config/Secret routing must not use this lock: save/set/restore only makes
+# each mutation atomic, but cannot give a process-global mapping ownership for
+# the lifetime of two concurrent streams. Streaming profile routing therefore
+# uses hermes_constants' ContextVar override instead.
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
@@ -4264,13 +4261,11 @@ def _run_agent_streaming(
     old_session_key = None
     old_session_id = None
     old_session_platform = None
-    old_hermes_home = None
-    old_profile_env = {}
+    _hermes_home_override_token = None
+    _reset_hermes_home_override = None
 
-    # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
-    # (was here at v0.51.30) — the previous placement always read the default
-    # profile's mcp_servers because os.environ['HERMES_HOME'] hadn't been
-    # rewritten yet.  See https://github.com/nesquena/hermes-webui/issues/1968.
+    # MCP discovery runs after the per-stream HERMES_HOME ContextVar is set
+    # below, so it sees this session's profile without rewriting os.environ.
 
     # Sprint 10: create a cancel event for this stream
     cancel_event = threading.Event()
@@ -4589,6 +4584,12 @@ def _run_agent_streaming(
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+            _reset_hermes_home_override = reset_hermes_home_override
+            _hermes_home_override_token = set_hermes_home_override(_profile_home_path)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
@@ -4623,26 +4624,21 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
-        # Still set process-level env as fallback for tools that bypass thread-local
-        # Acquire lock only for the env mutation, then release before the agent runs.
-        # The finally block re-acquires to restore — keeping critical sections short
-        # and preventing a deadlock where the restore would re-enter the same lock.
+        # Keep legacy per-session process variables for compatibility, but never
+        # project profile config/.env/HERMES_HOME into os.environ. Those values
+        # are process-global and two concurrent streams cannot safely own them.
         with _ENV_LOCK:
-            old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_session_id = os.environ.get('HERMES_SESSION_ID')
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
-            old_hermes_home = os.environ.get('HERMES_HOME')
-            os.environ.update(_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
             os.environ['HERMES_SESSION_ID'] = session_id
             os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
             if _profile_home:
-                os.environ['HERMES_HOME'] = _profile_home
                 # Patch module-level caches to match the active profile.
                 # _set_hermes_home() does this for process-wide switches
                 # but per-request switches skip it (#1700).
@@ -4654,11 +4650,9 @@ def _run_agent_streaming(
                     patch_skill_home_modules(Path(_profile_home))
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
-        # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
-        # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
-        # `os.environ['HERMES_HOME']`.  Calling it before the mutation always
-        # loaded the default profile's `mcp_servers`, even when the session
-        # was stamped with a non-default profile.  See issue #1968.
+        # MUST run after the ContextVar override above — discover_mcp_tools()
+        # resolves config through get_hermes_home() and therefore stays scoped
+        # to this stream without mutating the process environment.
         #
         # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global registry
         # keyed by server name.  This means once profile A registers a server
@@ -5163,9 +5157,22 @@ def _run_agent_streaming(
                 resolved_provider, resolved_api_key, resolved_base_url
             )
 
-            # Read per-profile config at call time (not module-level snapshot)
+            # Read an immutable per-stream snapshot from the ContextVar-routed
+            # config path. The normal no-argument get_config() form owns one
+            # process-global mutable cache, so concurrent profile streams must
+            # use its explicit-path form. Signature detection preserves
+            # compatibility with older/mocked no-argument implementations.
+            import inspect as _inspect_config
             from api.config import get_config as _get_config
-            _cfg = _get_config()
+            from hermes_constants import get_config_path as _get_config_path
+            try:
+                _get_config_params = _inspect_config.signature(_get_config).parameters
+            except (TypeError, ValueError):
+                _get_config_params = {}
+            if 'config_path' in _get_config_params:
+                _cfg = _get_config(config_path=_get_config_path())
+            else:
+                _cfg = _get_config()
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             put('context_status', {
@@ -6986,9 +6993,6 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
             with _ENV_LOCK:
-                for _key, _old_value in old_profile_env.items():
-                    if _old_value is None: os.environ.pop(_key, None)
-                    else: os.environ[_key] = _old_value
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd
                 if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
@@ -6999,8 +7003,6 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_ID'] = old_session_id
                 if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
@@ -7233,6 +7235,12 @@ def _run_agent_streaming(
                 and getattr(s, 'pending_user_message', None)):
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        if (
+            _hermes_home_override_token is not None
+            and _reset_hermes_home_override is not None
+        ):
+            _reset_hermes_home_override(_hermes_home_override_token)
+            _hermes_home_override_token = None
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

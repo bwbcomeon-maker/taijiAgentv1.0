@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,11 +34,10 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _custom_provider_slug_from_name,
-    _get_label_for_model,
+    _get_config_path,
     _models_from_live_provider_ids,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
-    _save_yaml_config_file,
     get_config,
     invalidate_models_cache,
     reload_config,
@@ -706,9 +705,10 @@ _OAUTH_PROVIDERS = frozenset({
 
 
 def _get_hermes_home() -> Path:
-    """Return the active Hermes home directory."""
+    """Return the active Hermes home directory for read-only status lookups."""
     try:
         from api.profiles import get_active_hermes_home
+
         return get_active_hermes_home()
     except ImportError:
         return Path.home() / ".hermes"
@@ -816,102 +816,25 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
     return any(_looks_like_codex_oauth_token(str(value or "")) for value in values)
 
 
-def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
-    """Write key=value pairs to the .env file.
+def _write_env_file(
+    env_path: Path,
+    updates: dict[str, str | None],
+    *,
+    config_path: Path,
+    expected_values: dict[str, str | None] | None = None,
+) -> dict[str, bool]:
+    """Strictly mutate the canonical .env and then synchronize the process."""
+    from agent.provider_credentials import mutate_env_unique
 
-    Values of ``None`` cause the key to be removed.
-
-    Preserves comments, blank lines, and original key order (#1164).
-    New keys are appended at the end of the file with a blank-line separator.
-
-    Holds ``_ENV_LOCK`` from ``api.streaming`` for the entire load → modify →
-    write cycle to prevent TOCTOU races between concurrent POST /api/providers
-    calls (each reading the same file baseline and overwriting the other's key).
-    Also serialises os.environ mutations with streaming sessions.
-    """
-    from api.streaming import _ENV_LOCK
-    import stat as _stat
-
-    with _ENV_LOCK:
-        # ── Read existing lines (preserving comments and blank lines) ──
-        existing_lines: list[str] = []
-        if env_path.exists():
-            try:
-                existing_lines = env_path.read_text(encoding="utf-8").splitlines()
-            except Exception:
-                existing_lines = []
-
-        # Map each existing key to its line index so we can update in-place.
-        existing_key_indices: dict[str, int] = {}
-        for _i, _raw in enumerate(existing_lines):
-            _stripped = _raw.strip()
-            if _stripped and not _stripped.startswith("#") and "=" in _stripped:
-                _existing_key_indices_key = _stripped.split("=", 1)[0].strip()
-                existing_key_indices[_existing_key_indices_key] = _i
-
-        output_lines = list(existing_lines)
-        new_keys: list[str] = []
-
-        for key, value in updates.items():
-            if value is None:
-                # Mark the line for removal (None sentinel) and clear env.
-                os.environ.pop(key, None)
-                if key in existing_key_indices:
-                    output_lines[existing_key_indices[key]] = None  # type: ignore[assignment]
-                continue
-            clean = str(value).strip()
-            if not clean:
-                continue
-            # Reject embedded newlines/carriage returns to prevent .env injection
-            if "\n" in clean or "\r" in clean:
-                raise ValueError("API key must not contain newline characters.")
-            os.environ[key] = clean
-
-            if key in existing_key_indices:
-                output_lines[existing_key_indices[key]] = f"{key}={clean}"
-            else:
-                new_keys.append(f"{key}={clean}")
-
-        # Remove deleted lines (None sentinels)
-        output_lines = [l for l in output_lines if l is not None]
-
-        # Append new keys after a blank-line separator
-        if new_keys:
-            if output_lines and output_lines[-1].strip() != "":
-                output_lines.append("")
-            output_lines.extend(new_keys)
-
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        content = "\n".join(output_lines)
-        if content:
-            content += "\n"
-        # Atomic write via tempfile + os.replace so cross-process readers
-        # (Telegram bot, CLI) never see a half-truncated file.  The shared
-        # ``~/.hermes/.env`` is also written by ``hermes_cli.config.save_env_value``
-        # using the same atomic pattern; matching it here closes the
-        # cross-process leg of #1164 (within-process is covered by _ENV_LOCK).
-        _mode = _stat.S_IRUSR | _stat.S_IWUSR  # 0o600
-        import tempfile as _tempfile
-        _tmp_fd, _tmp_path = _tempfile.mkstemp(
-            dir=str(env_path.parent), prefix=".env_", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(_tmp_fd, "w", encoding="utf-8") as _f:
-                _f.write(content)
-                _f.flush()
-                os.fsync(_f.fileno())
-            os.chmod(_tmp_path, _mode)  # tighten before rename so readers see 0600
-            os.replace(_tmp_path, env_path)
-        except BaseException:
-            try:
-                os.unlink(_tmp_path)
-            except OSError:
-                pass
-            raise
-        try:
-            env_path.chmod(_mode)
-        except OSError:
-            pass
+    env_path = Path(env_path).expanduser()
+    config_path = Path(config_path).expanduser()
+    if env_path != config_path.parent / ".env":
+        raise ValueError("config and env must share one logical credential home")
+    return mutate_env_unique(
+        updates,
+        config_path=config_path,
+        expected_values=expected_values,
+    )
 
 
 def _provider_has_key(provider_id: str) -> bool:
@@ -2021,6 +1944,27 @@ def get_providers() -> dict[str, Any]:
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
+    """Set one provider key under the exact active config transaction."""
+    from agent.provider_credentials import credential_transaction
+
+    if api_key is None or not str(api_key).strip():
+        return remove_provider_key(provider_id)
+
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path):
+        return _set_provider_key_locked(
+            provider_id,
+            api_key,
+            config_path=config_path,
+        )
+
+
+def _set_provider_key_locked(
+    provider_id: str,
+    api_key: str | None,
+    *,
+    config_path: Path,
+) -> dict[str, Any]:
     """Set or update the API key for a provider.
 
     Writes the key to ``~/.hermes/.env`` using the standard env var name.
@@ -2056,9 +2000,13 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
         if len(api_key) < 8:
             return {"ok": False, "error": "API key appears too short."}
 
-    env_path = _get_hermes_home() / ".env"
+    env_path = config_path.parent / ".env"
     try:
-        _write_env_file(env_path, {env_var: api_key})
+        _write_env_file(
+            env_path,
+            {env_var: api_key},
+            config_path=config_path,
+        )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -2079,24 +2027,144 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
 
 
 def remove_provider_key(provider_id: str) -> dict[str, Any]:
-    """Remove the API key for a provider.
+    """Remove env and inline config keys as one durable credential update."""
+    from agent.provider_credentials import (
+        credential_transaction,
+        load_credential_snapshot,
+        mutate_config_env_strict,
+        mutate_env_unique,
+    )
+    import api.config as _config
 
-    Removes the key from ``~/.hermes/.env`` (via ``set_provider_key``)
-    and also cleans up ``config.yaml`` if the key is stored there
-    (``providers.<id>.api_key`` or top-level ``model.api_key`` when this
-    provider is the active one).
+    provider_id = str(provider_id or "").strip().lower()
+    if not provider_id:
+        return {"ok": False, "error": "Provider ID is required."}
+    if _provider_is_oauth(provider_id):
+        return {
+            "ok": False,
+            "error": f"'{_PROVIDER_DISPLAY.get(provider_id, provider_id)}' "
+            "uses OAuth authentication. Use `hermes model` in the terminal "
+            "to configure it.",
+        }
+    env_var = _PROVIDER_ENV_VAR.get(provider_id)
+    if not env_var:
+        return {
+            "ok": False,
+            "error": f"Cannot configure API key for "
+            f"'{_PROVIDER_DISPLAY.get(provider_id, provider_id)}'. "
+            "This provider does not have a known env var mapping.",
+        }
 
-    Returns a status dict with the operation result.
-    """
-    result = set_provider_key(provider_id, None)
+    config_path = Path(_config._get_config_path())
+    changed = False
+    env_updates: dict[str, str | None] = {env_var: None}
+    for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
+        env_updates[alias] = None
 
-    # Even if the .env removal succeeded, the key might also live in
-    # config.yaml (e.g. providers.<id>.api_key or model.api_key).
-    # Clean those up so _provider_has_key() returns False after removal.
-    if result.get("ok"):
-        _clean_provider_key_from_config(provider_id)
+    def clean_config(config_data: dict[str, Any]) -> None:
+        nonlocal changed
+        changed = _remove_provider_key_fields(config_data, provider_id)
 
-    return result
+    try:
+        with credential_transaction(config_path):
+            if provider_id in {"opencode-zen", "opencode-go"}:
+                snapshot = load_credential_snapshot(config_path)
+                shared_value = snapshot.env.get("OPENCODE_API_KEY")
+                if not _provider_value_counts_as_api_key(
+                    provider_id,
+                    shared_value,
+                ):
+                    shared_value = os.getenv("OPENCODE_API_KEY")
+                remaining_provider = (
+                    "opencode-go"
+                    if provider_id == "opencode-zen"
+                    else "opencode-zen"
+                )
+                remaining_env_var = _PROVIDER_ENV_VAR[remaining_provider]
+                remaining_present = _provider_value_counts_as_api_key(
+                    remaining_provider,
+                    snapshot.env.get(remaining_env_var),
+                ) or _provider_value_counts_as_api_key(
+                    remaining_provider,
+                    os.getenv(remaining_env_var),
+                )
+                if (
+                    not remaining_present
+                    and _provider_value_counts_as_api_key(
+                        remaining_provider,
+                        shared_value,
+                    )
+                ):
+                    # The legacy shared bridge enabled both providers. Migrate
+                    # it to the provider the user did not remove before
+                    # deleting the shared alias in the same disk/process
+                    # transaction.
+                    env_updates[remaining_env_var] = str(shared_value).strip()
+            if config_path.exists():
+                mutate_config_env_strict(
+                    clean_config,
+                    env_updates,
+                    config_path=config_path,
+                )
+            else:
+                mutate_env_unique(
+                    env_updates,
+                    config_path=config_path,
+                )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        logger.exception("Failed to remove provider key for %s", provider_id)
+        return {"ok": False, "error": f"Failed to remove API key: {exc}"}
+
+    if changed:
+        reload_config()
+    invalidate_models_cache()
+    return {
+        "ok": True,
+        "provider": provider_id,
+        "display_name": _PROVIDER_DISPLAY.get(provider_id, provider_id),
+        "action": "removed",
+    }
+
+
+def _remove_provider_key_fields(
+    config_data: dict[str, Any],
+    provider_id: str,
+) -> bool:
+    """Remove all inline key locations for one provider from a config mapping."""
+    changed = False
+
+    providers_cfg = config_data.get("providers", {})
+    if isinstance(providers_cfg, dict):
+        provider_cfg = providers_cfg.get(provider_id, {})
+        if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
+            del provider_cfg["api_key"]
+            changed = True
+
+    model_cfg = config_data.get("model", {})
+    if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
+        active_provider = model_cfg.get("provider")
+        if (
+            active_provider
+            and str(active_provider).strip().lower() == provider_id
+        ):
+            del model_cfg["api_key"]
+            changed = True
+
+    custom_providers = config_data.get("custom_providers", [])
+    if isinstance(custom_providers, list):
+        for custom_provider in custom_providers:
+            if not isinstance(custom_provider, dict):
+                continue
+            if _custom_provider_name_matches(
+                provider_id,
+                custom_provider.get("name"),
+            ) and custom_provider.get("api_key"):
+                del custom_provider["api_key"]
+                changed = True
+
+    return changed
 
 
 def _clean_provider_key_from_config(provider_id: str) -> None:
@@ -2110,8 +2178,6 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
     Writes back to config.yaml only if something was actually removed.
     Uses ``_cfg_lock`` to prevent TOCTOU races.
     """
-    from api.config import _cfg_lock
-
     try:
         # Resolve through api.config at call time instead of the function imported
         # at module load. Several tests (and some profile flows) monkeypatch the
@@ -2119,7 +2185,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         # imported; using the stale imported reference can clean the wrong
         # config.yaml.
         import api.config as _config
-        config_path = _config._get_config_path()
+        config_path = Path(_config._get_config_path())
     except Exception:
         return
 
@@ -2127,44 +2193,22 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         return
 
     try:
-        import yaml as _yaml
-
+        from agent.provider_credentials import mutate_config_strict
+        from api.config import _cfg_lock
         changed = False
 
+        def clean_config(config_data: dict[str, Any]) -> None:
+            nonlocal changed
+            changed = _remove_provider_key_fields(
+                config_data,
+                str(provider_id or "").strip().lower(),
+            )
+
         with _cfg_lock:
-            raw = config_path.read_text(encoding="utf-8")
-            cfg = _yaml.safe_load(raw)
-            if not isinstance(cfg, dict):
-                return
-
-            # 1. Clean providers.<id>.api_key
-            providers_cfg = cfg.get("providers", {})
-            if isinstance(providers_cfg, dict):
-                provider_cfg = providers_cfg.get(provider_id, {})
-                if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
-                    del provider_cfg["api_key"]
-                    changed = True
-
-            # 2. Clean model.api_key — only if this provider is the active one
-            model_cfg = cfg.get("model", {})
-            if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
-                active_provider = model_cfg.get("provider")
-                if active_provider and str(active_provider).strip().lower() == provider_id.lower():
-                    del model_cfg["api_key"]
-                    changed = True
-
-            # 3. Clean custom_providers[].api_key
-            custom_providers = cfg.get("custom_providers", [])
-            if isinstance(custom_providers, list):
-                for cp in custom_providers:
-                    if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
-                            if cp.get("api_key"):
-                                del cp["api_key"]
-                                changed = True
-
-            if changed:
-                _save_yaml_config_file(config_path, cfg)
+            mutate_config_strict(
+                clean_config,
+                config_path=config_path,
+            )
         # Sync in-memory cache and bust model TTL cache
         # MUST be called outside _cfg_lock to avoid deadlock:
         # _cfg_lock is a threading.Lock (non-reentrant) and

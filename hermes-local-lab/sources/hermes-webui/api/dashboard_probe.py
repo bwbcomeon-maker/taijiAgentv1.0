@@ -183,23 +183,26 @@ def save_dashboard_config(payload: dict) -> dict:
     normalized_url = normalize_dashboard_browser_url(raw_url) if raw_url else ""
 
     from api import config as webui_config
+    from agent.provider_credentials import credential_transaction
 
     config_path = webui_config._get_config_path()
-    config_data = webui_config._load_yaml_config_file(config_path)
-    webui_section = config_data.get("webui")
-    if not isinstance(webui_section, dict):
-        webui_section = {}
-        config_data["webui"] = webui_section
-    dashboard_section = webui_section.get("dashboard")
-    if not isinstance(dashboard_section, dict):
-        dashboard_section = {}
-        webui_section["dashboard"] = dashboard_section
-    dashboard_section["enabled"] = enabled
-    if normalized_url:
-        dashboard_section["url"] = normalized_url
-    else:
-        dashboard_section.pop("url", None)
-    webui_config._save_yaml_config_file(config_path, config_data)
+    with credential_transaction(config_path):
+        with webui_config._cfg_lock:
+            config_data = webui_config._load_yaml_config_file_strict(config_path)
+            webui_section = config_data.get("webui")
+            if not isinstance(webui_section, dict):
+                webui_section = {}
+                config_data["webui"] = webui_section
+            dashboard_section = webui_section.get("dashboard")
+            if not isinstance(dashboard_section, dict):
+                dashboard_section = {}
+                webui_section["dashboard"] = dashboard_section
+            dashboard_section["enabled"] = enabled
+            if normalized_url:
+                dashboard_section["url"] = normalized_url
+            else:
+                dashboard_section.pop("url", None)
+            webui_config._save_yaml_config_file(config_path, config_data)
     webui_config.reload_config()
     return {"enabled": enabled, "url": normalized_url}
 
