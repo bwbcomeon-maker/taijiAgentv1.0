@@ -6,6 +6,7 @@ across the workspace-path safety, size ceiling, multi-image, MIME, and
 fallback cases the maintainer asked about.
 """
 import base64
+import copy
 import os
 import struct
 from pathlib import Path
@@ -325,7 +326,41 @@ class TestBuildNativeMultimodalMessage:
         assert data_url.startswith('data:image/png;base64,')
         assert len(result) == 2
 
-    def test_text_image_mode_strips_historical_image_url_parts(self):
+    def test_pure_text_history_does_not_read_image_capability_state(
+        self,
+        monkeypatch,
+    ):
+        """Pure text replay must not consult mutable image capability state."""
+        calls = []
+        monkeypatch.setattr(
+            "api.streaming._resolve_image_input_mode",
+            lambda *_args, **_kwargs: calls.append("resolved") or "text",
+        )
+        history = [
+            {
+                "role": "user",
+                "content": "hello",
+                "attachments": [{"name": "notes.txt"}],
+                "timestamp": 123,
+            },
+            {"role": "assistant", "content": "hi"},
+        ]
+
+        sanitized = _sanitize_messages_for_api(
+            history,
+            cfg={"agent": {"image_input_mode": "text"}},
+        )
+
+        assert calls == []
+        assert sanitized == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+    def test_text_image_mode_strips_historical_image_url_parts(
+        self,
+        monkeypatch,
+    ):
         """#2297: text-only providers must not replay old native image parts."""
         history = [
             {
@@ -338,15 +373,31 @@ class TestBuildNativeMultimodalMessage:
                 'timestamp': 123,
             },
             {'role': 'assistant', 'content': 'It is a chart.'},
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'and this image?'},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,BBB='}},
+                ],
+            },
         ]
         cfg = {'agent': {'image_input_mode': 'text'}}
+        original = copy.deepcopy(history)
+        calls = []
+        monkeypatch.setattr(
+            "api.streaming._resolve_image_input_mode",
+            lambda *_args, **_kwargs: calls.append("resolved") or "text",
+        )
 
         sanitized = _sanitize_messages_for_api(history, cfg=cfg)
 
+        assert calls == ["resolved"]
+        assert history == original
         assert sanitized[0] == {'role': 'user', 'content': 'what is in this image?'}
         assert 'image_url' not in str(sanitized)
         assert 'attachments' not in sanitized[0]
         assert sanitized[1] == {'role': 'assistant', 'content': 'It is a chart.'}
+        assert sanitized[2] == {'role': 'user', 'content': 'and this image?'}
 
     def test_native_image_mode_keeps_historical_image_url_parts(self):
         """Vision-capable/native mode keeps existing multimodal history intact."""

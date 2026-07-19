@@ -2745,7 +2745,7 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
     remaining replay gap where an older native image in the saved transcript kept
     causing 400s on every later text-only turn (#2297).
     """
-    strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
+    strip_native_images = False if cfg is None else None
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     valid_tool_call_ids: set = set()
@@ -2786,8 +2786,27 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
-        if strip_native_images and 'content' in sanitized:
-            sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
+        content = sanitized.get('content')
+        has_native_images = (
+            isinstance(content, list)
+            and any(
+                isinstance(part, dict)
+                and (
+                    part.get('type') == 'image_url'
+                    or 'image_url' in part
+                )
+                for part in content
+            )
+        )
+        if has_native_images:
+            if strip_native_images is None:
+                strip_native_images = (
+                    _resolve_image_input_mode(cfg) == "text"
+                )
+            if strip_native_images:
+                sanitized['content'] = (
+                    _strip_native_image_parts_from_content(content)
+                )
         if role == 'user' and 'content' in sanitized:
             visible_text = _message_text(sanitized.get('content'))
             if classify_brand_safety_prompt(visible_text).action == 'safe_reply':
