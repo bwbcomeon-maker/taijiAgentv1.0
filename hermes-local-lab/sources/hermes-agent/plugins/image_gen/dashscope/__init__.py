@@ -8,7 +8,10 @@ from urllib.parse import urlparse
 from agent.alibaba_endpoints import (
     DEFAULT_REGION,
     PUBLIC_ROOTS,
-    build_image_generation_url,
+)
+from agent.image_gen_verification import (
+    image_gen_runtime_identity,
+    require_image_gen_request_binding,
 )
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -22,7 +25,6 @@ from plugins.image_gen.domestic_common import (
     auth_error,
     cached_success,
     credential_field,
-    env_value,
     first_url,
     normalized_aspect,
     post_json,
@@ -121,39 +123,9 @@ def _load_image_config(config_data: dict[str, Any] | None = None) -> dict[str, A
     return image_cfg if isinstance(image_cfg, dict) else {}
 
 
-def _option_value(
-    name: str,
-    env_var: str,
-    *,
-    image_cfg: dict[str, Any] | None = None,
-) -> str:
-    image_cfg = image_cfg if isinstance(image_cfg, dict) else _load_image_config()
-    credential_ref = str(image_cfg.get("credential_ref") or "").strip()
-    options = image_cfg.get("options")
-    if not isinstance(options, dict):
-        options = {}
-    if credential_ref:
-        return str(options.get(name) or "").strip()
-    value = env_value(env_var)
-    if value:
-        return value
-    return str(options.get(name) or "").strip()
-
-
-def _effective_endpoint_mode(*, image_cfg: dict[str, Any] | None = None) -> str:
-    explicit = _option_value(
-        "endpoint_mode", "DASHSCOPE_ENDPOINT_MODE", image_cfg=image_cfg
-    ).lower()
-    if explicit:
-        return explicit
-    if _option_value(
-        "workspace_id", "DASHSCOPE_WORKSPACE_ID", image_cfg=image_cfg
-    ):
-        return "workspace"
-    return "public"
-
-
 class DashScopeQwenImageProvider(ImageGenProvider):
+    _supports_pinned_image_request_binding = True
+
     @property
     def name(self) -> str:
         return "dashscope"
@@ -168,10 +140,13 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             image_cfg = _load_image_config(config_data)
             if not provider_api_key(self.name, config_data=config_data):
                 return False
-            endpoint = self._endpoint(image_cfg=image_cfg)
+            identity = image_gen_runtime_identity(self.name, image_cfg)
         except (DashScopeConfigurationError, ValueError):
             return False
-        endpoint_mode = _effective_endpoint_mode(image_cfg=image_cfg)
+        if not identity.get("endpoint_resolved"):
+            return False
+        endpoint = str(identity.get("endpoint") or "")
+        endpoint_mode = str(identity.get("endpoint_mode") or "")
         if endpoint_mode.strip().lower() == "custom":
             return is_safe_url(endpoint)
         return True
@@ -267,19 +242,11 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         return model
 
     def _endpoint(self, *, image_cfg: dict[str, Any] | None = None) -> str:
-        return build_image_generation_url(
-            endpoint_mode=_effective_endpoint_mode(image_cfg=image_cfg),
-            workspace_prefix=_option_value(
-                "workspace_id", "DASHSCOPE_WORKSPACE_ID", image_cfg=image_cfg
-            ),
-            region=_option_value(
-                "region", "DASHSCOPE_REGION", image_cfg=image_cfg
-            )
-            or DEFAULT_REGION,
-            custom_url=_option_value(
-                "base_url", "DASHSCOPE_BASE_URL", image_cfg=image_cfg
-            ),
-        )
+        image_cfg = image_cfg if isinstance(image_cfg, dict) else _load_image_config()
+        identity = image_gen_runtime_identity(self.name, image_cfg)
+        if not identity.get("endpoint_resolved"):
+            raise ValueError("DashScope endpoint configuration is invalid")
+        return str(identity.get("endpoint") or "")
 
     def generate(
         self,
@@ -303,37 +270,61 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         prompt, prompt_error = validate_prompt(prompt, provider=self.name, model=model, aspect_ratio=aspect)
         if prompt_error:
             return prompt_error
-        try:
-            config_data = _load_config_data()
-            image_cfg = _load_image_config(config_data)
-            api_key = provider_api_key(self.name, config_data=config_data)
-        except (DashScopeConfigurationError, ValueError):
-            return error_response(
-                error="DashScope configuration could not be loaded.",
-                error_type="configuration_error",
-                provider=self.name,
-                model=model,
-                prompt=prompt,
-                aspect_ratio=aspect,
+        raw_binding = kwargs.get("_runtime_binding")
+        if raw_binding is not None:
+            try:
+                binding = require_image_gen_request_binding(
+                    raw_binding,
+                    provider=self.name,
+                    model=model,
+                )
+            except ValueError:
+                return error_response(
+                    error="DashScope pinned probe configuration is invalid.",
+                    error_type="configuration_error",
+                    provider=self.name,
+                    model=model,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
+            api_key = binding.api_key
+            runtime_identity = dict(binding.runtime_identity)
+        else:
+            try:
+                config_data = _load_config_data()
+                image_cfg = _load_image_config(config_data)
+                api_key = provider_api_key(
+                    self.name,
+                    config_data=config_data,
+                )
+            except (DashScopeConfigurationError, ValueError):
+                return error_response(
+                    error="DashScope configuration could not be loaded.",
+                    error_type="configuration_error",
+                    provider=self.name,
+                    model=model,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
+            runtime_identity = image_gen_runtime_identity(
+                self.name,
+                image_cfg,
             )
         missing = []
         if not api_key:
             missing.append("DASHSCOPE_API_KEY")
-        endpoint_mode = _effective_endpoint_mode(image_cfg=image_cfg)
-        if endpoint_mode == "workspace" and not _option_value(
-            "workspace_id", "DASHSCOPE_WORKSPACE_ID", image_cfg=image_cfg
-        ):
+        endpoint_mode = str(runtime_identity.get("endpoint_mode") or "")
+        workspace_id = str(runtime_identity.get("workspace_id") or "")
+        base_url = str(runtime_identity.get("base_url") or "")
+        if endpoint_mode == "workspace" and not workspace_id:
             missing.append("DASHSCOPE_WORKSPACE_ID")
-        if endpoint_mode == "custom" and not _option_value(
-            "base_url", "DASHSCOPE_BASE_URL", image_cfg=image_cfg
-        ):
+        if endpoint_mode == "custom" and not base_url:
             missing.append("DASHSCOPE_BASE_URL")
         if missing:
             return auth_error(missing=missing, provider=self.name, model=model, prompt=prompt, aspect_ratio=aspect)
 
-        try:
-            endpoint = self._endpoint(image_cfg=image_cfg)
-        except ValueError:
+        endpoint = str(runtime_identity.get("endpoint") or "")
+        if not runtime_identity.get("endpoint_resolved"):
             return error_response(
                 error="DashScope endpoint configuration is invalid.",
                 error_type="endpoint_invalid",
@@ -370,11 +361,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         }
         secrets = (
             api_key,
-            _option_value(
-                "workspace_id",
-                "DASHSCOPE_WORKSPACE_ID",
-                image_cfg=image_cfg,
-            ),
+            workspace_id,
         )
         headers = {
             "Authorization": f"Bearer {api_key}",

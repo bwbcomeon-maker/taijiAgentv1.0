@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from agent.image_gen_verification import require_image_gen_request_binding
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, ImageGenProvider, error_response
+from agent.image_gen_runtime_contracts import builtin_image_runtime_contract
 from plugins.image_gen.domestic_common import (
     SIZE_MAP_X,
     auth_error,
@@ -18,12 +20,16 @@ from plugins.image_gen.domestic_common import (
     validate_prompt,
 )
 
-ENDPOINT = "https://qianfan.baidubce.com/v2/images/generations"
+_RUNTIME_CONTRACT = builtin_image_runtime_contract("qianfan")
+RUNTIME_TRANSPORT = _RUNTIME_CONTRACT["transport"]
+ENDPOINT = _RUNTIME_CONTRACT["endpoint"]
 DEFAULT_MODEL = "qwen-image"
 TIMEOUT_SECONDS = 180
 
 
 class QianfanImageGenProvider(ImageGenProvider):
+    _supports_pinned_image_request_binding = True
+
     @property
     def name(self) -> str:
         return "qianfan"
@@ -98,8 +104,17 @@ class QianfanImageGenProvider(ImageGenProvider):
         prompt, prompt_error = validate_prompt(prompt, provider=self.name, model=model, aspect_ratio=aspect)
         if prompt_error:
             return prompt_error
+        raw_binding = kwargs.get("_runtime_binding")
         try:
-            api_key = provider_api_key(self.name)
+            api_key = (
+                require_image_gen_request_binding(
+                    raw_binding,
+                    provider=self.name,
+                    model=model,
+                ).api_key
+                if raw_binding is not None
+                else provider_api_key(self.name)
+            )
         except ValueError:
             return error_response(
                 error="Qianfan credential configuration is invalid.",

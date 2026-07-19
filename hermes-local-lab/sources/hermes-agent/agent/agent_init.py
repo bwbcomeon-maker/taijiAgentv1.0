@@ -968,6 +968,25 @@ def init_agent(
     elif not agent.quiet_mode:
         print("🛠️  No tools loaded (all tools filtered out or unavailable)")
 
+    # Keep the registry-owned subset separate from tools injected later by
+    # memory providers, context engines, and MCP. Long-lived capability
+    # refreshes replace only this subset.
+    agent._registry_tool_names = set(agent.valid_tool_names)
+    agent._image_runtime_lock = threading.RLock()
+    try:
+        from agent.image_runtime import verification_runtime_snapshot
+
+        _image_snapshot = verification_runtime_snapshot("image_generation")
+        agent._image_capability_fingerprint = str(
+            _image_snapshot.get("fingerprint") or ""
+        )
+        # Sentinel until the final, post-injection refresh below publishes
+        # definitions and identity from one stable snapshot.
+        agent._image_runtime_identity = None
+    except Exception:
+        agent._image_capability_fingerprint = ""
+        agent._image_runtime_identity = None
+
     # Kanban worker/orchestrator lifecycle guidance is session-static:
     # the dispatcher decides at spawn time whether this process is a kanban
     # worker (kanban_show tool is present iff HERMES_KANBAN_TASK is set).
@@ -1059,6 +1078,7 @@ def init_agent(
     
     # Cached system prompt -- built once per session, only rebuilt on compression
     agent._cached_system_prompt: Optional[str] = None
+    agent._force_system_prompt_rebuild = False
     
     # Filesystem checkpoint manager (transparent — not a tool)
     from tools.checkpoint_manager import CheckpointManager
@@ -1683,6 +1703,21 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+
+    # Rebuild once after memory/context/MCP schemas have been injected. The
+    # refresh helper preserves those non-registry tools and only publishes
+    # when its before/after capability identity is stable. If this best-effort
+    # pass fails, the None sentinel forces the next turn to retry before the
+    # model sees a tool surface.
+    try:
+        from agent.image_runtime import refresh_agent_image_runtime
+
+        refresh_agent_image_runtime(
+            agent,
+            definitions_loader=_ra().get_tool_definitions,
+        )
+    except Exception:
+        pass
 
 
 

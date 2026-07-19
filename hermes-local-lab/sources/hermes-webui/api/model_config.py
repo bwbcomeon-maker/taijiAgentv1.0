@@ -19,7 +19,7 @@ import stat
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,15 +33,29 @@ from agent.provider_credentials import (
     mutate_config_env_strict,
     normalize_credential_id,
     provider_family,
+    resolve_api_key,
+    resolve_secret_env_value,
 )
+from agent.auxiliary_client import VisionRequestBinding
 from plugins.image_gen.domestic_common import credential_field, normalized_setup_contract
 from agent.alibaba_endpoints import build_vision_base_url
 from agent.image_gen_verification import (
-    active_custom_provider_identity,
+    CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    ImageGenRequestBinding,
+    expand_effective_config,
     image_gen_fingerprint as shared_image_gen_fingerprint,
-    image_gen_secret_env,
+    image_gen_fingerprint_from_material as shared_image_gen_fingerprint_from_material,
+    image_gen_provider_target,
+    image_gen_secret_value as shared_image_gen_secret_value,
+    resolve_image_gen_material,
     verification_state_path,
     verification_status_from_state,
+)
+from agent.image_runtime import (
+    VisionResolvedMaterial,
+    resolve_vision_material,
+    vision_fingerprint,
+    vision_fingerprint_from_material,
 )
 
 from api.config import (
@@ -739,7 +753,10 @@ class _ImageGenRegisterContext:
         register_provider(provider)
 
 
-def _ensure_image_gen_plugins_registered() -> None:
+def _ensure_image_gen_plugins_registered(
+    *,
+    include_custom: bool = True,
+) -> None:
     """Load bundled image_gen plugins so the registry can expose catalogs."""
     from agent import image_gen_registry
 
@@ -766,6 +783,8 @@ def _ensure_image_gen_plugins_registered() -> None:
                     register(ctx)
             except Exception:
                 logger.debug("Failed to register image_gen plugin %s", module_name, exc_info=True)
+    if not include_custom:
+        return
     try:
         from agent.custom_image_providers import register_configured_custom_image_providers
 
@@ -1386,8 +1405,83 @@ def _vision_key_status(
     vision_cfg: dict[str, Any] | None = None,
     *,
     config_data: dict[str, Any] | None = None,
+    config_path: Path | None = None,
+    allow_process_fallback: bool | None = None,
 ) -> dict[str, Any]:
     provider = str(provider_id or "").strip().lower()
+    if allow_process_fallback is False:
+        data = (
+            config_data
+            if isinstance(config_data, dict)
+            else load_credential_config(config_path or _get_config_path())
+        )
+        exact_config_path = Path(config_path or _get_config_path())
+        env_var = ""
+        secret_value = ""
+        try:
+            if provider.startswith("custom:"):
+                from agent.custom_vision_providers import (
+                    custom_vision_provider_api_key,
+                )
+
+                entry, env_var = _custom_vision_entry_and_secret_env(
+                    provider,
+                    config_data=data,
+                )
+                if entry:
+                    secret_value = custom_vision_provider_api_key(
+                        entry,
+                        config_path=exact_config_path,
+                        allow_process_fallback=False,
+                    )
+            elif provider == "custom":
+                env_var = _VISION_KEY_ENV["custom"]
+                secret_value = resolve_secret_env_value(
+                    env_var,
+                    config_path=exact_config_path,
+                    allow_process_fallback=False,
+                )
+            elif provider in {"alibaba", "zai"}:
+                credential_ref = str(
+                    (vision_cfg or {}).get("credential_ref") or ""
+                ).strip()
+                env_var = _VISION_KEY_ENV.get(provider, "")
+                if credential_ref:
+                    row = load_credential(
+                        credential_ref,
+                        config_data=data,
+                    )
+                    if (
+                        provider_family(row.get("provider_family"))
+                        == provider_family(provider)
+                    ):
+                        env_var = credential_secret_env(row.get("id"))
+                secret_value = resolve_api_key(
+                    provider,
+                    credential_ref,
+                    config_data=data,
+                    config_path=exact_config_path,
+                    allow_process_fallback=False,
+                )
+            else:
+                env_var = (
+                    _VISION_KEY_ENV.get(provider)
+                    or _PROVIDER_ENV_VAR.get(provider)
+                    or ""
+                )
+                if env_var:
+                    secret_value = resolve_secret_env_value(
+                        env_var,
+                        config_path=exact_config_path,
+                        allow_process_fallback=False,
+                    )
+        except (ImportError, ValueError):
+            secret_value = ""
+        return {
+            "configured": bool(secret_value),
+            "source": "env_file" if secret_value else "none",
+            "env_var": env_var,
+        }
     if provider.startswith("custom:"):
         _entry, env_var = _custom_vision_entry_and_secret_env(
             provider,
@@ -1431,6 +1525,8 @@ _VISION_PROBE_GENERATIONS: dict[str, int] = {}
 
 @dataclass(frozen=True)
 class _VisionConfigSnapshot:
+    config_path: Path
+    runtime_home: Path
     profile: str
     provider: str
     model: str
@@ -1441,7 +1537,13 @@ class _VisionConfigSnapshot:
     region: str
     workspace_id: str
     configured: bool
+    effective_config_resolved: bool
     fingerprint: str
+    binding: VisionRequestBinding | None = dataclass_field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 def _vision_verification_state_root() -> Path:
@@ -1469,10 +1571,16 @@ def _vision_profile_lock(profile: str) -> threading.Lock:
         return lock
 
 
-def _begin_vision_probe(profile: str) -> int:
+def _begin_vision_probe(profile: str, state: dict[str, Any]) -> int:
     with _vision_profile_lock(profile):
         generation = _VISION_PROBE_GENERATIONS.get(profile, 0) + 1
         _VISION_PROBE_GENERATIONS[profile] = generation
+        generation_state = dict(state)
+        generation_state["generation"] = generation
+        _atomic_write_json(
+            _vision_verification_state_path(profile),
+            generation_state,
+        )
         return generation
 
 
@@ -1500,6 +1608,45 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     _atomic_write_bytes(path, encoded)
 
 
+def _discard_owned_verifying_state(
+    path: Path,
+    *,
+    generation: int,
+    current_generation: int,
+    fingerprint: str,
+    diagnostic_id: str,
+) -> bool:
+    """Delete only the still-current in-flight state owned by one probe."""
+    if current_generation != generation:
+        return False
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return False
+    state_generation = state.get("generation") if isinstance(state, dict) else None
+    if (
+        not isinstance(state, dict)
+        or type(state_generation) is not int
+        or state_generation != generation
+        or str(state.get("status") or "") != "verifying"
+        or str(state.get("fingerprint") or "") != fingerprint
+        or str(state.get("diagnostic_id") or "") != diagnostic_id
+    ):
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        try:
+            _atomic_write_json(path, {})
+        except OSError:
+            logger.warning(
+                "Failed to clear superseded verification state at %s",
+                path,
+            )
+            return False
+    return True
+
+
 def _read_vision_verification_state(profile: str) -> dict[str, Any]:
     with _vision_profile_lock(profile):
         try:
@@ -1511,11 +1658,13 @@ def _read_vision_verification_state(profile: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _vision_secret_digest(
+def _vision_secret_value(
     provider: str,
     credential_ref: str = "",
     *,
     config_data: dict[str, Any] | None = None,
+    config_path: Path | None = None,
+    allow_process_fallback: bool | None = None,
 ) -> str:
     env_var = ""
     if str(provider or "").startswith("custom:"):
@@ -1544,9 +1693,11 @@ def _vision_secret_digest(
         env_var = _VISION_KEY_ENV.get(provider) or _PROVIDER_ENV_VAR.get(provider) or ""
     if not env_var:
         return ""
-    env_values = _load_env_file(_get_hermes_home() / ".env")
-    secret = str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else ""
+    return resolve_secret_env_value(
+        env_var,
+        config_path=config_path or _get_config_path(),
+        allow_process_fallback=allow_process_fallback,
+    )
 
 
 def _vision_config_fingerprint(
@@ -1555,98 +1706,201 @@ def _vision_config_fingerprint(
     *,
     profile: str,
     config_data: dict[str, Any] | None = None,
+    secret_value: str | None = None,
+    resolved_material: VisionResolvedMaterial | None = None,
 ) -> str:
+    data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(_get_config_path())
+    )
     provider = str(vision_cfg.get("provider") or "").strip().lower()
-    custom_entry: dict[str, Any] = {}
-    if provider.startswith("custom:"):
-        custom_entry, _secret_env = _custom_vision_entry_and_secret_env(
-            provider,
-            config_data=config_data,
-        )
-    material = {
-        "profile": profile,
-        "provider": provider,
-        "model": str(vision_cfg.get("model") or "").strip(),
-        "base_url": str(vision_cfg.get("base_url") or "").strip().rstrip("/"),
-        "api_mode": str(vision_cfg.get("api_mode") or "").strip(),
-        "credential_ref": str(vision_cfg.get("credential_ref") or "").strip(),
-        "endpoint_mode": str(vision_cfg.get("endpoint_mode") or "").strip(),
-        "region": str(vision_cfg.get("region") or "").strip(),
-        "workspace_id": str(vision_cfg.get("workspace_id") or "").strip(),
-        "key_configured": bool(key_status.get("configured")),
-        "key_digest": _vision_secret_digest(
+    if secret_value is None:
+        secret_value = _vision_secret_value(
             provider,
             str(vision_cfg.get("credential_ref") or "").strip(),
-            config_data=config_data,
-        ),
-        "custom_base_url": str(custom_entry.get("base_url") or "").rstrip("/"),
-        "custom_transport": str(custom_entry.get("transport") or ""),
-        "custom_credential_ref": str(custom_entry.get("credential_ref") or ""),
-        "custom_default_model": str(custom_entry.get("default_model") or ""),
-        "custom_models": list(custom_entry.get("models") or []),
-        "custom_network_scope": str(custom_entry.get("network_scope") or ""),
-        "custom_trusted_proxy_profile": str(
-            custom_entry.get("trusted_proxy_profile") or ""
-        ),
-    }
-    return hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+            config_data=data,
+        )
+    if resolved_material is not None:
+        fingerprint, _resolved = vision_fingerprint_from_material(
+            resolved_material,
+            profile=profile,
+            secret_value=secret_value,
+            key_configured=bool(key_status.get("configured")),
+        )
+    else:
+        fingerprint, _resolved = vision_fingerprint(
+            vision_cfg,
+            profile=profile,
+            config_data=data,
+            secret_value=secret_value,
+            key_configured=bool(key_status.get("configured")),
+        )
+    return fingerprint
 
 
 def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
-    with credential_transaction(_get_config_path()):
-        return _capture_vision_config_snapshot_unlocked()
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path):
+        return _capture_vision_config_snapshot_unlocked(
+            config_path=config_path
+        )
 
 
-def _capture_vision_config_snapshot_unlocked() -> _VisionConfigSnapshot:
+def _capture_vision_config_snapshot_unlocked(
+    *,
+    config_path: Path | None = None,
+) -> _VisionConfigSnapshot:
+    exact_config_path = Path(config_path or _get_config_path())
     profile = _active_profile_name()
-    config_data = load_credential_config(_get_config_path())
-    auxiliary = config_data.get("auxiliary")
-    vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
-    if not isinstance(vision_cfg, dict):
-        vision_cfg = {}
+    raw_config_data = load_credential_config(exact_config_path)
+    raw_auxiliary = raw_config_data.get("auxiliary")
+    raw_vision_cfg = (
+        raw_auxiliary.get("vision")
+        if isinstance(raw_auxiliary, dict)
+        else {}
+    )
+    if not isinstance(raw_vision_cfg, dict):
+        raw_vision_cfg = {}
+    resolved_material = resolve_vision_material(
+        raw_vision_cfg,
+        raw_config_data,
+    )
+    vision_cfg = resolved_material.vision_cfg
+    config_data = resolved_material.config_data
+    config_resolved = bool(
+        resolved_material.data_resolved
+        and resolved_material.cfg_resolved
+    )
+    endpoint_resolved = resolved_material.endpoint_resolved
     provider = str(vision_cfg.get("provider") or "").strip().lower()
+    model = str(vision_cfg.get("model") or "").strip()
+    credential_ref = str(vision_cfg.get("credential_ref") or "").strip()
+    secret_value = ""
+    binding: VisionRequestBinding | None = None
+    base_url = str(vision_cfg.get("base_url") or "").strip().rstrip("/")
+    api_mode = str(vision_cfg.get("api_mode") or "").strip()
+    endpoint_mode = str(vision_cfg.get("endpoint_mode") or "").strip().lower()
+    region = str(vision_cfg.get("region") or "").strip()
+    workspace_id = str(vision_cfg.get("workspace_id") or "").strip()
+    network_scope = (
+        str(vision_cfg.get("network_scope") or "public_direct").strip()
+        or "public_direct"
+    )
+    trusted_proxy_profile = str(
+        vision_cfg.get("trusted_proxy_profile") or ""
+    ).strip()
+    config_complete = False
     if provider.startswith("custom:"):
         try:
-            from agent.custom_vision_providers import find_custom_vision_provider_entry
+            from agent.custom_vision_providers import (
+                custom_vision_provider_api_key,
+                find_custom_vision_provider_entry,
+            )
 
             entry = find_custom_vision_provider_entry(provider, config_data) or {}
-        except ImportError:
+            if entry:
+                secret_value = custom_vision_provider_api_key(
+                    entry,
+                    config_path=exact_config_path,
+                    allow_process_fallback=False,
+                )
+                config_complete = bool(
+                    model
+                    and model in (entry.get("models") or [])
+                    and base_url
+                    and secret_value
+                )
+        except (ImportError, ValueError):
             entry = {}
-        vision_cfg = dict(vision_cfg)
-        vision_cfg["base_url"] = str(entry.get("base_url") or "")
-        vision_cfg["api_mode"] = (
-            "anthropic_messages"
-            if entry.get("transport") == "anthropic_messages"
-            else "chat_completions"
+    elif provider == "alibaba":
+        try:
+            endpoint_mode = endpoint_mode or "public"
+            region = region or "cn-beijing"
+            secret_value = resolve_api_key(
+                "alibaba",
+                credential_ref,
+                config_data=config_data,
+                config_path=exact_config_path,
+                allow_process_fallback=False,
+            )
+            config_complete = bool(
+                endpoint_resolved and model and base_url and secret_value
+            )
+        except ValueError:
+            config_complete = False
+    elif provider == "zai":
+        try:
+            secret_value = resolve_api_key(
+                "zai",
+                credential_ref,
+                config_data=config_data,
+                config_path=exact_config_path,
+                allow_process_fallback=False,
+            )
+            config_complete = bool(
+                endpoint_resolved and model and base_url and secret_value
+            )
+        except ValueError:
+            config_complete = False
+    elif provider == "custom":
+        try:
+            secret_value = resolve_secret_env_value(
+                _VISION_KEY_ENV["custom"],
+                config_path=exact_config_path,
+                allow_process_fallback=False,
+            )
+            config_complete = bool(
+                endpoint_resolved and model and base_url and secret_value
+            )
+        except ValueError:
+            config_complete = False
+    if config_resolved and endpoint_resolved and config_complete:
+        binding = VisionRequestBinding(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=secret_value,
+            api_mode=api_mode,
+            network_scope=network_scope,
+            trusted_proxy_profile=trusted_proxy_profile,
+            endpoint_mode=endpoint_mode,
         )
-    key_status = _vision_key_status(
-        provider,
-        vision_cfg,
-        config_data=config_data,
-    )
+    key_status = {
+        "configured": bool(secret_value),
+        "source": "profile",
+        "env_var": "",
+    }
     return _VisionConfigSnapshot(
+        config_path=exact_config_path,
+        runtime_home=Path(_get_hermes_home()),
         profile=profile,
         provider=provider,
-        model=str(vision_cfg.get("model") or "").strip(),
-        base_url=str(vision_cfg.get("base_url") or "").strip().rstrip("/"),
-        api_mode=str(vision_cfg.get("api_mode") or "").strip(),
-        credential_ref=str(vision_cfg.get("credential_ref") or "").strip(),
-        endpoint_mode=str(vision_cfg.get("endpoint_mode") or "").strip(),
-        region=str(vision_cfg.get("region") or "").strip(),
-        workspace_id=str(vision_cfg.get("workspace_id") or "").strip(),
-        configured=_vision_is_configured(
-            vision_cfg,
-            key_status,
-            config_data=config_data,
+        model=model,
+        base_url=base_url,
+        api_mode=api_mode,
+        credential_ref=credential_ref,
+        endpoint_mode=endpoint_mode,
+        region=region,
+        workspace_id=workspace_id,
+        configured=bool(
+            config_resolved
+            and endpoint_resolved
+            and config_complete
+            and binding is not None
+        ),
+        effective_config_resolved=bool(
+            config_resolved and endpoint_resolved
         ),
         fingerprint=_vision_config_fingerprint(
             vision_cfg,
             key_status,
             profile=profile,
             config_data=config_data,
+            secret_value=secret_value,
+            resolved_material=resolved_material,
         ),
+        binding=binding,
     )
 
 
@@ -1687,12 +1941,73 @@ def _public_vision_verification(
     *,
     profile: str,
     config_data: dict[str, Any] | None = None,
+    snapshot: _VisionConfigSnapshot | None = None,
 ) -> dict[str, Any]:
-    if not _vision_is_configured(
-        vision_cfg,
+    if snapshot is not None:
+        if not snapshot.effective_config_resolved:
+            return {
+                "status": "configured_unverified",
+                "checked_at": "",
+                "error_code": "unresolved_effective_config",
+                "message": "识图配置包含未解析的环境变量，请修正后重新验证。",
+                "diagnostic_id": "",
+            }
+        if not snapshot.configured:
+            return {
+                "status": "unconfigured",
+                "checked_at": "",
+                "error_code": "vision_not_configured",
+                "message": "请先保存完整的识图 Provider、模型和密钥配置。",
+                "diagnostic_id": "",
+            }
+        state = _read_vision_verification_state(snapshot.profile)
+        persisted_status = verification_status_from_state(
+            state,
+            expected_fingerprint=snapshot.fingerprint,
+        )
+        if persisted_status in {"verifying", "verified", "failed"}:
+            return {
+                "status": persisted_status,
+                "checked_at": str(state.get("checked_at") or ""),
+                "error_code": str(state.get("error_code") or ""),
+                "message": str(state.get("message") or ""),
+                "diagnostic_id": str(state.get("diagnostic_id") or ""),
+            }
+        return {
+            "status": "configured_unverified",
+            "checked_at": "",
+            "error_code": "",
+            "message": "识图配置已保存，但尚未通过真实图片验证。",
+            "diagnostic_id": "",
+        }
+    data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(_get_config_path())
+    )
+    effective_data, data_resolved = expand_effective_config(data)
+    effective_cfg, cfg_resolved = expand_effective_config(vision_cfg)
+    if not isinstance(effective_data, dict):
+        effective_data = {}
+    if not isinstance(effective_cfg, dict):
+        effective_cfg = {}
+    if not (
+        data_resolved
+        and cfg_resolved
+        and _vision_is_configured(
+        effective_cfg,
         key_status,
-        config_data=config_data,
+        config_data=effective_data,
+        )
     ):
+        if not (data_resolved and cfg_resolved):
+            return {
+                "status": "configured_unverified",
+                "checked_at": "",
+                "error_code": "unresolved_effective_config",
+                "message": "识图配置包含未解析的环境变量，请修正后重新验证。",
+                "diagnostic_id": "",
+            }
         return {
             "status": "unconfigured",
             "checked_at": "",
@@ -1702,14 +2017,18 @@ def _public_vision_verification(
         }
     state = _read_vision_verification_state(profile)
     fingerprint = _vision_config_fingerprint(
-        vision_cfg,
+        effective_cfg,
         key_status,
         profile=profile,
-        config_data=config_data,
+        config_data=effective_data,
     )
-    if state.get("fingerprint") == fingerprint and state.get("status") in {"verified", "failed"}:
+    persisted_status = verification_status_from_state(
+        state,
+        expected_fingerprint=fingerprint,
+    )
+    if persisted_status in {"verifying", "verified", "failed"}:
         return {
-            "status": str(state.get("status")),
+            "status": persisted_status,
             "checked_at": str(state.get("checked_at") or ""),
             "error_code": str(state.get("error_code") or ""),
             "message": str(state.get("message") or ""),
@@ -1776,6 +2095,17 @@ def test_vision_config() -> dict[str, Any]:
     snapshot = _capture_vision_config_snapshot()
     checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     diagnostic_id = uuid.uuid4().hex
+    if not snapshot.effective_config_resolved and snapshot.provider:
+        return _vision_test_response(
+            ok=False,
+            status="configured_unverified",
+            checked_at=checked_at,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            error_code="unresolved_effective_config",
+            message="识图配置包含未解析或不受支持的运行时端点，请修正后重新验证。",
+            diagnostic_id=diagnostic_id,
+        )
     if not snapshot.configured:
         return _vision_test_response(
             ok=False,
@@ -1788,49 +2118,77 @@ def test_vision_config() -> dict[str, Any]:
             diagnostic_id=diagnostic_id,
         )
 
-    generation = _begin_vision_probe(snapshot.profile)
+    verifying_state = {
+        "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        "fingerprint": snapshot.fingerprint,
+        "status": "verifying",
+        "checked_at": checked_at,
+        "error_code": "",
+        "message": "正在执行真实识图测试。",
+        "diagnostic_id": diagnostic_id,
+    }
+    generation = _begin_vision_probe(snapshot.profile, verifying_state)
     error_code = ""
     message = "识图验证通过，当前配置已完成真实图片探测。"
     ok = False
+    current_snapshot: _VisionConfigSnapshot | None = None
+    from hermes_constants import (
+        reset_hermes_config_path_override,
+        reset_hermes_home_override,
+        set_hermes_config_path_override,
+        set_hermes_home_override,
+    )
+
+    home_token = set_hermes_home_override(snapshot.runtime_home)
+    config_path_token = set_hermes_config_path_override(
+        snapshot.config_path
+    )
     try:
-        from tools.vision_tools import vision_analyze_tool
+        try:
+            from tools.vision_tools import vision_analyze_tool
 
-        probe_path = _vision_probe_image_path(snapshot.profile)
-        if not probe_path.exists() or probe_path.read_bytes() != _VISION_PROBE_PNG:
-            _atomic_write_bytes(probe_path, _VISION_PROBE_PNG)
-        prompt = (
-            "请只识别图片中的大写英文、数字和连字符标记。"
-            "不要猜测或补全，请在回复中完整包含你真实看到的标记。"
-        )
-
-        async def _run_probe() -> str:
-            return await vision_analyze_tool(
-                image_url=str(probe_path),
-                user_prompt=prompt,
-                model=snapshot.model,
-                provider=snapshot.provider,
-                strict_target=True,
+            probe_path = _vision_probe_image_path(snapshot.profile)
+            if not probe_path.exists() or probe_path.read_bytes() != _VISION_PROBE_PNG:
+                _atomic_write_bytes(probe_path, _VISION_PROBE_PNG)
+            prompt = (
+                "请只识别图片中的大写英文、数字和连字符标记。"
+                "不要猜测或补全，请在回复中完整包含你真实看到的标记。"
             )
 
-        result = json.loads(asyncio.run(_run_probe()))
-        analysis = str(result.get("analysis") or "") if isinstance(result, dict) else ""
-        ok = bool(
-            isinstance(result, dict)
-            and result.get("success")
-            and result.get("resolved_provider") == snapshot.provider
-            and result.get("resolved_model") == snapshot.model
-            and _VISION_PROBE_MARKER in analysis
-        )
-        if not ok:
+            async def _run_probe() -> str:
+                return await vision_analyze_tool(
+                    image_url=str(probe_path),
+                    user_prompt=prompt,
+                    model=snapshot.model,
+                    provider=snapshot.provider,
+                    strict_target=True,
+                    _runtime_binding=snapshot.binding,
+                )
+
+            result = json.loads(asyncio.run(_run_probe()))
+            analysis = str(result.get("analysis") or "") if isinstance(result, dict) else ""
+            ok = bool(
+                isinstance(result, dict)
+                and result.get("success")
+                and result.get("resolved_provider") == snapshot.provider
+                and result.get("resolved_model") == snapshot.model
+                and _VISION_PROBE_MARKER in analysis
+            )
+            if not ok:
+                error_code = "vision_probe_failed"
+                message = "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
+        except Exception:
+            logger.warning("Vision configuration probe failed (%s)", diagnostic_id)
             error_code = "vision_probe_failed"
             message = "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
-    except Exception:
-        logger.warning("Vision configuration probe failed (%s)", diagnostic_id)
-        error_code = "vision_probe_failed"
-        message = "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
+        current_snapshot = _capture_vision_config_snapshot()
+    finally:
+        reset_hermes_config_path_override(config_path_token)
+        reset_hermes_home_override(home_token)
 
     status = "verified" if ok else "failed"
     state = {
+        "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
         "fingerprint": snapshot.fingerprint,
         "status": status,
         "checked_at": checked_at,
@@ -1838,16 +2196,26 @@ def test_vision_config() -> dict[str, Any]:
         "message": message,
         "diagnostic_id": diagnostic_id,
     }
-    current_snapshot = _capture_vision_config_snapshot()
     with _vision_profile_lock(snapshot.profile):
+        current_generation = _VISION_PROBE_GENERATIONS.get(
+            snapshot.profile
+        )
         still_current = (
-            _VISION_PROBE_GENERATIONS.get(snapshot.profile) == generation
+            current_generation == generation
             and current_snapshot == snapshot
         )
         if still_current:
             _atomic_write_json(
                 _vision_verification_state_path(snapshot.profile),
                 state,
+            )
+        else:
+            _discard_owned_verifying_state(
+                _vision_verification_state_path(snapshot.profile),
+                generation=generation,
+                current_generation=current_generation or 0,
+                fingerprint=snapshot.fingerprint,
+                diagnostic_id=diagnostic_id,
             )
     if not still_current:
         return _vision_test_response(
@@ -1879,6 +2247,8 @@ _IMAGE_GEN_PROBE_GENERATIONS: dict[str, int] = {}
 
 @dataclass(frozen=True)
 class _ImageGenConfigSnapshot:
+    config_path: Path
+    runtime_home: Path
     profile: str
     provider: str
     model: str
@@ -1888,7 +2258,18 @@ class _ImageGenConfigSnapshot:
     workspace_id: str
     base_url: str
     configured: bool
+    effective_config_resolved: bool
     fingerprint: str
+    request_local_provider: Any | None = dataclass_field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    probe_binding: ImageGenRequestBinding | None = dataclass_field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 def _image_gen_verification_state_root() -> Path:
@@ -1915,7 +2296,12 @@ def _begin_image_gen_probe(profile: str, state: dict[str, Any]) -> int:
     with _image_gen_profile_lock(profile):
         generation = _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0) + 1
         _IMAGE_GEN_PROBE_GENERATIONS[profile] = generation
-        _atomic_write_json(_image_gen_verification_state_path(profile), state)
+        generation_state = dict(state)
+        generation_state["generation"] = generation
+        _atomic_write_json(
+            _image_gen_verification_state_path(profile),
+            generation_state,
+        )
         return generation
 
 
@@ -1934,12 +2320,16 @@ def _image_gen_secret_value(
     provider: str,
     credential_ref: str,
     config_data: dict[str, Any],
+    *,
+    config_path: Path | None = None,
 ) -> str:
-    env_var = image_gen_secret_env(provider, credential_ref, config_data)
-    if not env_var:
-        return ""
-    env_values = _load_env_file(_get_hermes_home() / ".env")
-    return str(env_values.get(env_var) or os.getenv(env_var) or "").strip()
+    return shared_image_gen_secret_value(
+        provider,
+        credential_ref,
+        config_data,
+        config_path=config_path or _get_config_path(),
+        allow_process_fallback=False,
+    )
 
 
 def _image_gen_config_fingerprint(
@@ -1947,40 +2337,91 @@ def _image_gen_config_fingerprint(
     *,
     profile: str,
     config_data: dict[str, Any] | None = None,
+    resolved_material: Any | None = None,
+    config_path: Path | None = None,
 ) -> str:
-    data = config_data or load_credential_config(_get_config_path())
+    exact_config_path = Path(config_path or _get_config_path())
+    data = config_data or load_credential_config(exact_config_path)
     provider = str(image_cfg.get("provider") or "").strip().lower()
     credential_ref = str(image_cfg.get("credential_ref") or "").strip()
+    secret_value = _image_gen_secret_value(
+        provider,
+        credential_ref,
+        data,
+        config_path=exact_config_path,
+    )
+    if resolved_material is not None:
+        return shared_image_gen_fingerprint_from_material(
+            resolved_material,
+            profile=profile,
+            secret_value=secret_value,
+        )
     return shared_image_gen_fingerprint(
         image_cfg,
         profile=profile,
         config_data=data,
-        secret_value=_image_gen_secret_value(provider, credential_ref, data),
+        secret_value=secret_value,
     )
 
 
 def _capture_image_gen_config_snapshot() -> _ImageGenConfigSnapshot:
-    with credential_transaction(_get_config_path()):
-        return _capture_image_gen_config_snapshot_unlocked()
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path):
+        return _capture_image_gen_config_snapshot_unlocked(
+            config_path=config_path
+        )
 
 
-def _capture_image_gen_config_snapshot_unlocked() -> _ImageGenConfigSnapshot:
+def _capture_image_gen_config_snapshot_unlocked(
+    *,
+    config_path: Path | None = None,
+) -> _ImageGenConfigSnapshot:
+    exact_config_path = Path(config_path or _get_config_path())
     profile = _active_profile_name()
-    config_data = load_credential_config(_get_config_path())
-    image_cfg = config_data.get("image_gen")
-    if not isinstance(image_cfg, dict):
-        image_cfg = {}
+    raw_config_data = load_credential_config(exact_config_path)
+    raw_image_cfg = raw_config_data.get("image_gen")
+    if not isinstance(raw_image_cfg, dict):
+        raw_image_cfg = {}
+    resolved_material = resolve_image_gen_material(
+        raw_image_cfg,
+        config_data=raw_config_data,
+    )
+    config_data = resolved_material.config_data
+    image_cfg = resolved_material.image_cfg
+    data_resolved = resolved_material.data_resolved
+    cfg_resolved = resolved_material.cfg_resolved
     provider = str(image_cfg.get("provider") or "").strip().lower()
     model = str(image_cfg.get("model") or "").strip()
+    request_local_provider = None
+    if provider.startswith("custom:"):
+        try:
+            from agent.custom_image_providers import (
+                build_configured_custom_image_provider,
+            )
+
+            request_local_provider = (
+                build_configured_custom_image_provider(
+                    provider,
+                    config_data,
+                )
+            )
+        except (ImportError, ValueError):
+            request_local_provider = None
+    effective_config_resolved = resolved_material.effective_config_resolved
     options = image_cfg.get("options")
     if not isinstance(options, dict):
         options = {}
     credential_ref = str(image_cfg.get("credential_ref") or "").strip()
-    secret_value = _image_gen_secret_value(provider, credential_ref, config_data)
+    secret_value = _image_gen_secret_value(
+        provider,
+        credential_ref,
+        config_data,
+        config_path=exact_config_path,
+    )
     credential_required = provider in _IMAGE_GEN_KEY_ENV or provider.startswith("custom:")
     custom_complete = bool(
         not provider.startswith("custom:")
-        or active_custom_provider_identity(provider, config_data)
+        or request_local_provider is not None
     )
     endpoint_mode = str(options.get("endpoint_mode") or "").strip()
     endpoint_complete = bool(
@@ -1995,13 +2436,27 @@ def _capture_image_gen_config_snapshot_unlocked() -> _ImageGenConfigSnapshot:
         )
     )
     configured = bool(
-        provider
+        data_resolved
+        and cfg_resolved
+        and provider
         and model
         and custom_complete
         and endpoint_complete
         and (not credential_required or secret_value)
     )
+    probe_binding = (
+        ImageGenRequestBinding(
+            provider=provider,
+            model=model,
+            api_key=secret_value,
+            runtime_identity=resolved_material.runtime_identity,
+        )
+        if configured and effective_config_resolved
+        else None
+    )
     return _ImageGenConfigSnapshot(
+        config_path=exact_config_path,
+        runtime_home=Path(_get_hermes_home()),
         profile=profile,
         provider=provider,
         model=model,
@@ -2011,12 +2466,38 @@ def _capture_image_gen_config_snapshot_unlocked() -> _ImageGenConfigSnapshot:
         workspace_id=str(options.get("workspace_id") or "").strip(),
         base_url=str(options.get("base_url") or "").strip().rstrip("/"),
         configured=configured,
+        effective_config_resolved=effective_config_resolved,
         fingerprint=_image_gen_config_fingerprint(
             image_cfg,
             profile=profile,
             config_data=config_data,
+            resolved_material=resolved_material,
+            config_path=exact_config_path,
         ),
+        request_local_provider=request_local_provider,
+        probe_binding=probe_binding,
     )
+
+
+def _image_gen_preflight_failure(
+    snapshot: _ImageGenConfigSnapshot,
+) -> tuple[str, str, str] | None:
+    if (
+        image_gen_provider_target(snapshot.provider)
+        and not snapshot.effective_config_resolved
+    ):
+        return (
+            "configured_unverified",
+            "unresolved_effective_config",
+            "生图配置包含未解析或不受支持的运行时端点，请修正后重新验证。",
+        )
+    if not snapshot.configured:
+        return (
+            "unconfigured",
+            "image_gen_not_configured",
+            "请先保存完整的生图 Provider、模型和凭据配置。",
+        )
+    return None
 
 
 def _public_image_gen_verification(
@@ -2025,16 +2506,18 @@ def _public_image_gen_verification(
     profile: str,
 ) -> dict[str, Any]:
     snapshot = _capture_image_gen_config_snapshot()
-    if not snapshot.configured:
+    preflight_failure = _image_gen_preflight_failure(snapshot)
+    if preflight_failure is not None:
+        status, error_code, message = preflight_failure
         return {
-            "status": "unconfigured",
+            "status": status,
             "checked_at": "",
-            "error_code": "image_gen_not_configured",
-            "message": "请先保存完整的生图 Provider、模型和凭据配置。",
+            "error_code": error_code,
+            "message": message,
             "diagnostic_id": "",
         }
     state = _read_image_gen_verification_state(profile)
-    fingerprint = _image_gen_config_fingerprint(image_cfg, profile=profile)
+    fingerprint = snapshot.fingerprint
     persisted_status = verification_status_from_state(
         state, expected_fingerprint=fingerprint
     )
@@ -2233,33 +2716,11 @@ def _remove_probe_cleanup_candidate(candidate: _ProbeCleanupCandidate) -> bool:
         return False
 
 
-def test_image_gen_config() -> dict[str, Any]:
-    reload_config()
-    snapshot = _capture_image_gen_config_snapshot()
-    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    diagnostic_id = uuid.uuid4().hex
-    if not snapshot.configured:
-        return _image_gen_test_response(
-            ok=False,
-            status="unconfigured",
-            checked_at=checked_at,
-            provider=snapshot.provider,
-            model=snapshot.model,
-            error_code="image_gen_not_configured",
-            message="请先保存完整的生图 Provider、模型和凭据配置。",
-            diagnostic_id=diagnostic_id,
-        )
-
-    verifying_state = {
-        "fingerprint": snapshot.fingerprint,
-        "status": "verifying",
-        "checked_at": checked_at,
-        "error_code": "",
-        "message": "正在执行真实生图测试，可能产生少量费用。",
-        "diagnostic_id": diagnostic_id,
-    }
-    generation = _begin_image_gen_probe(snapshot.profile, verifying_state)
-
+def _execute_image_gen_probe(
+    snapshot: _ImageGenConfigSnapshot,
+    *,
+    diagnostic_id: str,
+) -> tuple[bool, str, str]:
     ok = False
     error_code = "image_gen_probe_failed"
     message = "生图验证失败，请检查网络、凭据、模型和账号状态后重试。"
@@ -2267,24 +2728,67 @@ def test_image_gen_config() -> dict[str, Any]:
     cleanup_candidate: _ProbeCleanupCandidate | None = None
     try:
         cache_before = _snapshot_image_cache()
-        from agent.image_gen_registry import get_provider
+        if snapshot.provider.startswith("custom:"):
+            _ensure_image_gen_plugins_registered(include_custom=False)
+            selected = snapshot.request_local_provider
+        else:
+            _ensure_image_gen_plugins_registered()
+            from agent.image_gen_registry import get_provider
 
-        selected = get_provider(snapshot.provider)
-        can_attempt = bool(selected and selected.is_available())
+            selected = get_provider(snapshot.provider)
+        binding_aware = bool(
+            selected
+            and getattr(
+                selected,
+                "_supports_pinned_image_request_binding",
+                False,
+            )
+        )
+        legacy_test_seam = bool(
+            selected
+            and getattr(
+                selected,
+                "_allow_legacy_image_probe_test_seam",
+                False,
+            )
+        )
+        can_attempt = bool(
+            selected
+            and (
+                snapshot.probe_binding is not None
+                if binding_aware
+                else (
+                    selected.is_available()
+                    if legacy_test_seam
+                    else False
+                )
+            )
+        )
         if not can_attempt:
             error_code = "image_gen_provider_unavailable"
             message = "生图配置已保存，但当前 Provider 或凭据暂不可用。"
             result = None
         else:
+            probe_kwargs = {
+                "prompt": _IMAGE_GEN_PROBE_PROMPT,
+                "aspect_ratio": "square",
+                "num_images": 1,
+                "model": snapshot.model,
+            }
+            if binding_aware:
+                probe_kwargs["_runtime_binding"] = snapshot.probe_binding
             result = selected.generate(
-                prompt=_IMAGE_GEN_PROBE_PROMPT,
-                aspect_ratio="square",
-                num_images=1,
-                model=snapshot.model,
+                **probe_kwargs,
             )
         if isinstance(result, dict):
-            cleanup_candidate = _probe_cleanup_candidate(result.get("image"), cache_before)
-            generated_image = _owned_probe_image(cleanup_candidate, cache_before)
+            cleanup_candidate = _probe_cleanup_candidate(
+                result.get("image"),
+                cache_before,
+            )
+            generated_image = _owned_probe_image(
+                cleanup_candidate,
+                cache_before,
+            )
             provider_error = str(result.get("error") or "").lower()
             if (
                 result.get("success") is False
@@ -2313,18 +2817,78 @@ def test_image_gen_config() -> dict[str, Any]:
                 error_code = ""
                 message = "生图验证通过，当前配置已完成真实生成探测。"
     except Exception:
-        logger.warning("Image generation configuration probe failed (%s)", diagnostic_id)
+        logger.warning(
+            "Image generation configuration probe failed (%s)",
+            diagnostic_id,
+        )
     finally:
         if cleanup_candidate is not None:
             removed = _remove_probe_cleanup_candidate(cleanup_candidate)
             if not removed:
-                logger.warning("Failed to remove image generation probe output (%s)", diagnostic_id)
+                logger.warning(
+                    "Failed to remove image generation probe output (%s)",
+                    diagnostic_id,
+                )
                 ok = False
                 error_code = "image_gen_cleanup_failed"
                 message = "生图验证未能安全清理测试图片，请检查本地文件权限后重试。"
+    return ok, error_code, message
+
+
+def test_image_gen_config() -> dict[str, Any]:
+    reload_config()
+    snapshot = _capture_image_gen_config_snapshot()
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    diagnostic_id = uuid.uuid4().hex
+    preflight_failure = _image_gen_preflight_failure(snapshot)
+    if preflight_failure is not None:
+        status, error_code, message = preflight_failure
+        return _image_gen_test_response(
+            ok=False,
+            status=status,
+            checked_at=checked_at,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            error_code=error_code,
+            message=message,
+            diagnostic_id=diagnostic_id,
+        )
+
+    verifying_state = {
+        "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        "fingerprint": snapshot.fingerprint,
+        "status": "verifying",
+        "checked_at": checked_at,
+        "error_code": "",
+        "message": "正在执行真实生图测试，可能产生少量费用。",
+        "diagnostic_id": diagnostic_id,
+    }
+    generation = _begin_image_gen_probe(snapshot.profile, verifying_state)
+
+    from hermes_constants import (
+        reset_hermes_config_path_override,
+        reset_hermes_home_override,
+        set_hermes_config_path_override,
+        set_hermes_home_override,
+    )
+
+    home_token = set_hermes_home_override(snapshot.runtime_home)
+    config_path_token = set_hermes_config_path_override(
+        snapshot.config_path
+    )
+    try:
+        ok, error_code, message = _execute_image_gen_probe(
+            snapshot,
+            diagnostic_id=diagnostic_id,
+        )
+        current_snapshot = _capture_image_gen_config_snapshot()
+    finally:
+        reset_hermes_config_path_override(config_path_token)
+        reset_hermes_home_override(home_token)
 
     status = "verified" if ok else "failed"
     state = {
+        "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
         "fingerprint": snapshot.fingerprint,
         "status": status,
         "checked_at": checked_at,
@@ -2332,14 +2896,24 @@ def test_image_gen_config() -> dict[str, Any]:
         "message": message,
         "diagnostic_id": diagnostic_id,
     }
-    current_snapshot = _capture_image_gen_config_snapshot()
     with _image_gen_profile_lock(snapshot.profile):
+        current_generation = _IMAGE_GEN_PROBE_GENERATIONS.get(
+            snapshot.profile
+        )
         still_current = (
-            _IMAGE_GEN_PROBE_GENERATIONS.get(snapshot.profile) == generation
+            current_generation == generation
             and current_snapshot == snapshot
         )
         if still_current:
             _atomic_write_json(_image_gen_verification_state_path(snapshot.profile), state)
+        else:
+            _discard_owned_verifying_state(
+                _image_gen_verification_state_path(snapshot.profile),
+                generation=generation,
+                current_generation=current_generation or 0,
+                fingerprint=snapshot.fingerprint,
+                diagnostic_id=diagnostic_id,
+            )
     if not still_current:
         return _image_gen_test_response(
             ok=False,
@@ -2368,6 +2942,8 @@ def _vision_provider_rows(
     vision_cfg: dict[str, Any] | None = None,
     *,
     config_data: dict[str, Any] | None = None,
+    config_path: Path | None = None,
+    allow_process_fallback: bool | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     active = str(active_provider or "").strip().lower()
@@ -2376,6 +2952,8 @@ def _vision_provider_rows(
             pid,
             vision_cfg if pid == active else None,
             config_data=config_data,
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
         )
         requires_base_url = bool(meta.get("requires_base_url"))
         active_base_url = str((vision_cfg or {}).get("base_url") or "").strip() if pid == active else ""
@@ -2427,7 +3005,12 @@ def _vision_provider_rows(
         )
 
         custom_rows = [
-            custom_vision_provider_public_row(entry, active_provider=active)
+            custom_vision_provider_public_row(
+                entry,
+                active_provider=active,
+                config_path=config_path,
+                allow_process_fallback=allow_process_fallback,
+            )
             for entry in load_custom_vision_provider_entries(
                 config_data
                 if isinstance(config_data, dict)
@@ -2437,7 +3020,13 @@ def _vision_provider_rows(
     except ImportError:
         custom_rows = []
     for row in custom_rows:
-        row["key_status"] = _key_status_for_env(row["key_status"]["env_var"])
+        row["key_status"] = _vision_key_status(
+            str(row.get("id") or ""),
+            vision_cfg if str(row.get("id") or "") == active else None,
+            config_data=config_data,
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
+        )
         row["available"] = bool(row["key_status"].get("configured"))
         custom_contract = normalized_setup_contract(
             {
@@ -2464,6 +3053,8 @@ def _vision_provider_rows(
             active,
             vision_cfg,
             config_data=config_data,
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
         )
         legacy_contract = normalized_setup_contract(
             {"credential_fields": []},
@@ -2496,33 +3087,25 @@ def get_vision_config() -> dict[str, Any]:
 
 def _get_vision_config_unlocked() -> dict[str, Any]:
     reload_config()
-    config_path = _get_config_path()
+    config_path = Path(_get_config_path())
     config_data = load_credential_config(config_path)
     auxiliary = config_data.get("auxiliary")
     vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
     if not isinstance(vision_cfg, dict):
         vision_cfg = {}
-    provider = str(vision_cfg.get("provider") or "").strip().lower()
-    model = str(vision_cfg.get("model") or "").strip()
-    base_url = str(vision_cfg.get("base_url") or "").strip()
-    api_mode = str(vision_cfg.get("api_mode") or "").strip()
-    if provider.startswith("custom:"):
-        try:
-            from agent.custom_vision_providers import find_custom_vision_provider_entry
-
-            entry = find_custom_vision_provider_entry(provider, config_data) or {}
-        except ImportError:
-            entry = {}
-        base_url = str(entry.get("base_url") or "")
-        api_mode = (
-            "anthropic_messages"
-            if entry.get("transport") == "anthropic_messages"
-            else ("chat_completions" if entry else "")
-        )
+    snapshot = _capture_vision_config_snapshot_unlocked(
+        config_path=config_path
+    )
+    provider = snapshot.provider
+    model = snapshot.model
+    base_url = snapshot.base_url
+    api_mode = snapshot.api_mode
     key_status = _vision_key_status(
         provider,
         vision_cfg,
         config_data=config_data,
+        config_path=config_path,
+        allow_process_fallback=False,
     )
     meta = _VISION_PROVIDER_META.get(provider) or {}
     endpoint_values: dict[str, str] = {}
@@ -2534,7 +3117,7 @@ def _get_vision_config_unlocked() -> dict[str, Any]:
             endpoint_values[name] = str(vision_cfg.get(name) or "").strip()
     return {
         "ok": True,
-        "profile": _active_profile_name(),
+        "profile": snapshot.profile,
         "config": _public_config_summary(config_path),
         "vision": {
             "provider": provider,
@@ -2550,14 +3133,17 @@ def _get_vision_config_unlocked() -> dict[str, Any]:
             "verification": _public_vision_verification(
                 vision_cfg,
                 key_status,
-                profile=_active_profile_name(),
+                profile=snapshot.profile,
                 config_data=config_data,
+                snapshot=snapshot,
             ),
         },
         "providers": _vision_provider_rows(
             provider,
             vision_cfg,
             config_data=config_data,
+            config_path=config_path,
+            allow_process_fallback=False,
         ),
     }
 
@@ -2693,6 +3279,7 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                     provider_id,
                     config_data=config_data,
                     config_path=config_path,
+                    allow_process_fallback=False,
                 )
             if credential_ref:
                 credential_ref = normalize_credential_id(credential_ref)
@@ -3124,7 +3711,12 @@ def get_custom_vision_provider_configs() -> dict[str, Any]:
         except ImportError:
             return {"ok": True, "providers": []}
         rows = [
-            custom_vision_provider_public_row(entry, active_provider=active_provider)
+            custom_vision_provider_public_row(
+                entry,
+                active_provider=active_provider,
+                config_path=_get_config_path(),
+                allow_process_fallback=False,
+            )
             for entry in load_custom_vision_provider_entries(config_data)
         ]
         for row in rows:
@@ -3248,7 +3840,11 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
                 config_data=config_data,
                 env_updates=env_updates,
             )
-    row = custom_vision_provider_public_row(normalized)
+    row = custom_vision_provider_public_row(
+        normalized,
+        config_path=_get_config_path(),
+        allow_process_fallback=False,
+    )
     row["key_status"] = _key_status_for_env(
         secret_env,
         env_path=env_path,
@@ -3721,6 +4317,7 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
                     provider_id,
                     config_data=config_data,
                     config_path=config_path,
+                    allow_process_fallback=False,
                 )
             if credential_ref:
                 credential_ref = normalize_credential_id(credential_ref)

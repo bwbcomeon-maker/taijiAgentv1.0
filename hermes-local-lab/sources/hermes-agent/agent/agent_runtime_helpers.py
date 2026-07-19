@@ -1612,7 +1612,8 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
 
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
-                 pre_tool_block_checked: bool = False) -> str:
+                 pre_tool_block_checked: bool = False,
+                 caller_capability_fingerprint: Optional[str] = None) -> str:
     """Invoke a single tool and return the result string. No display logic.
 
     Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
@@ -1695,13 +1696,25 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     else:
         from agent.brand_safety import public_chat_guard
 
+        dispatch_kwargs = {
+            "tool_call_id": tool_call_id,
+            "session_id": agent.session_id or "",
+            "enabled_tools": (
+                list(agent.valid_tool_names) if agent.valid_tool_names else None
+            ),
+            "skip_pre_tool_call_hook": True,
+        }
+        if (
+            function_name == "image_generate"
+            and caller_capability_fingerprint is not None
+        ):
+            dispatch_kwargs["caller_capability_fingerprint"] = (
+                caller_capability_fingerprint
+            )
         with public_chat_guard(getattr(agent, "platform", None) == "webui"):
             return _ra().handle_function_call(
                 function_name, function_args, effective_task_id,
-                tool_call_id=tool_call_id,
-                session_id=agent.session_id or "",
-                enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                skip_pre_tool_call_hook=True,
+                **dispatch_kwargs,
             )
 
 

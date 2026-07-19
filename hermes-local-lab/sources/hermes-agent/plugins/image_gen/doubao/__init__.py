@@ -12,6 +12,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.image_gen_verification import require_image_gen_request_binding
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
@@ -19,6 +20,7 @@ from agent.image_gen_provider import (
     resolve_aspect_ratio,
     save_url_image,
 )
+from agent.image_gen_runtime_contracts import builtin_image_runtime_contract
 from plugins.image_gen.domestic_common import (
     cached_success,
     post_json,
@@ -27,8 +29,10 @@ from plugins.image_gen.domestic_common import (
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-GENERATIONS_ENDPOINT = f"{BASE_URL}/images/generations"
+_RUNTIME_CONTRACT = builtin_image_runtime_contract("doubao")
+RUNTIME_TRANSPORT = _RUNTIME_CONTRACT["transport"]
+GENERATIONS_ENDPOINT = _RUNTIME_CONTRACT["endpoint"]
+BASE_URL = GENERATIONS_ENDPOINT.rsplit("/images/generations", 1)[0]
 
 DEFAULT_MODEL = "doubao-seedream-5-0-260128"
 ALIAS_MODEL = "doubao-seedream-5-0-lite-260128"
@@ -113,6 +117,8 @@ def _extract_image_url(payload: Any) -> Optional[str]:
 class DoubaoImageGenProvider(ImageGenProvider):
     """Doubao Seedream 5.0 Lite backend via Volcengine Ark."""
 
+    _supports_pinned_image_request_binding = True
+
     @property
     def name(self) -> str:
         return "doubao"
@@ -186,8 +192,17 @@ class DoubaoImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        raw_binding = kwargs.get("_runtime_binding")
         try:
-            api_key = provider_api_key(self.name)
+            api_key = (
+                require_image_gen_request_binding(
+                    raw_binding,
+                    provider=self.name,
+                    model=model_id,
+                ).api_key
+                if raw_binding is not None
+                else provider_api_key(self.name)
+            )
         except ValueError:
             return error_response(
                 error="Doubao credential configuration is invalid.",

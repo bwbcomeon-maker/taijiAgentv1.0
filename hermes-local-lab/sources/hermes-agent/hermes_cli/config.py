@@ -13,6 +13,7 @@ This module provides:
 """
 
 import copy
+import hashlib
 import logging
 import os
 import platform
@@ -155,14 +156,18 @@ def _reject_denylisted_env_var(key: str) -> None:
         )
 
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
-# (path, mtime_ns, size) -> cached expanded config dict.
+# path -> (mtime_ns, size, normalized raw config, referenced-env digest,
+#          expanded config).
 # load_config() returns a deepcopy of the cached value when the file
-# hasn't changed since the last load, skipping yaml.safe_load +
-# _deep_merge + _normalize_* + _expand_env_vars (~13 ms/call).
+# and every referenced environment value are unchanged, skipping
+# yaml.safe_load + _deep_merge + _normalize_* + _expand_env_vars (~13 ms/call).
 # save_config() + migrate_config() write via atomic_yaml_write which
 # produces a fresh inode, so stat() sees a new mtime_ns and the next
 # load repopulates automatically — no explicit invalidation hook.
-_LOAD_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+_LOAD_CONFIG_CACHE: Dict[
+    str,
+    Tuple[int, int, Dict[str, Any], str, Dict[str, Any]],
+] = {}
 # (path, mtime_ns, size) -> cached raw yaml dict. Same pattern as
 # _LOAD_CONFIG_CACHE but for read_raw_config() — used when callers want
 # the user's on-disk values without defaults merged in.
@@ -4464,7 +4469,11 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def _expand_env_vars(obj):
+def _expand_env_vars(
+    obj,
+    *,
+    env_snapshot: Dict[str, Tuple[bool, str]] | None = None,
+):
     """Recursively expand ``${VAR}`` references in config values.
 
     Only string values are processed; dict keys, numbers, booleans, and
@@ -4472,16 +4481,81 @@ def _expand_env_vars(obj):
     ``os.environ``) are kept verbatim so callers can detect them.
     """
     if isinstance(obj, str):
+        def replacement(match):
+            name = match.group(1)
+            if env_snapshot is None:
+                return os.environ.get(name, match.group(0))
+            present, value = env_snapshot.get(name, (False, ""))
+            return value if present else match.group(0)
+
         return re.sub(
             r"\${([^}]+)}",
-            lambda m: os.environ.get(m.group(1), m.group(0)),
+            replacement,
             obj,
         )
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
+        return {
+            k: _expand_env_vars(v, env_snapshot=env_snapshot)
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
+        return [
+            _expand_env_vars(item, env_snapshot=env_snapshot)
+            for item in obj
+        ]
     return obj
+
+
+def _referenced_env_snapshot(
+    obj: Any,
+) -> Dict[str, Tuple[bool, str]]:
+    """Capture every referenced environment value once for one config load."""
+    names: set[str] = set()
+
+    def collect(item: Any) -> None:
+        if isinstance(item, str):
+            names.update(re.findall(r"\${([^}]+)}", item))
+        elif isinstance(item, dict):
+            for value in item.values():
+                collect(value)
+        elif isinstance(item, list):
+            for value in item:
+                collect(value)
+
+    collect(obj)
+    current_env = dict(os.environ)
+    return {
+        name: (
+            name in current_env,
+            str(current_env.get(name) or ""),
+        )
+        for name in names
+    }
+
+
+def _referenced_env_digest(
+    obj: Any,
+    *,
+    env_snapshot: Dict[str, Tuple[bool, str]] | None = None,
+) -> str:
+    """Hash one captured value for every env reference in a config tree."""
+    snapshot = (
+        env_snapshot
+        if env_snapshot is not None
+        else _referenced_env_snapshot(obj)
+    )
+    digest = hashlib.sha256()
+    for name in sorted(snapshot):
+        present, value = snapshot[name]
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        if present:
+            digest.update(b"1")
+            digest.update(value.encode("utf-8"))
+        else:
+            digest.update(b"0")
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _items_by_unique_name(items):
@@ -4750,7 +4824,30 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
 
         cached = _LOAD_CONFIG_CACHE.get(path_key)
         if cached is not None and cache_key is not None and cached[:2] == cache_key:
-            return copy.deepcopy(cached[2]) if want_deepcopy else cached[2]
+            normalized = cached[2]
+            env_snapshot = _referenced_env_snapshot(normalized)
+            env_digest = _referenced_env_digest(
+                normalized,
+                env_snapshot=env_snapshot,
+            )
+            if env_digest == cached[3]:
+                expanded = cached[4]
+            else:
+                expanded = _expand_env_vars(
+                    normalized,
+                    env_snapshot=env_snapshot,
+                )
+                _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
+                cached_copy = copy.deepcopy(expanded)
+                _LOAD_CONFIG_CACHE[path_key] = (
+                    cache_key[0],
+                    cache_key[1],
+                    normalized,
+                    env_digest,
+                    cached_copy,
+                )
+                expanded = cached_copy
+            return copy.deepcopy(expanded) if want_deepcopy else expanded
 
         config = copy.deepcopy(DEFAULT_CONFIG)
 
@@ -4771,7 +4868,15 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 _warn_config_parse_failure(config_path, e)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-        expanded = _expand_env_vars(normalized)
+        env_snapshot = _referenced_env_snapshot(normalized)
+        expanded = _expand_env_vars(
+            normalized,
+            env_snapshot=env_snapshot,
+        )
+        env_digest = _referenced_env_digest(
+            normalized,
+            env_snapshot=env_snapshot,
+        )
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_key is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
@@ -4779,7 +4884,13 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             # cached value, and ``load_config_readonly()`` (deepcopy=False)
             # callers all see the same stable cached object.
             cached_copy = copy.deepcopy(expanded)
-            _LOAD_CONFIG_CACHE[path_key] = (cache_key[0], cache_key[1], cached_copy)
+            _LOAD_CONFIG_CACHE[path_key] = (
+                cache_key[0],
+                cache_key[1],
+                copy.deepcopy(normalized),
+                env_digest,
+                cached_copy,
+            )
             # On the readonly path return the same cached object subsequent
             # calls will see — keeps "two readonly calls return the same
             # object" invariant that callers may rely on for identity checks.

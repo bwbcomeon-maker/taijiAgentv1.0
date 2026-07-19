@@ -8,7 +8,6 @@ legacy env names are accepted only while loading persisted pre-migration rows.
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
 from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
@@ -18,6 +17,7 @@ from agent.provider_credentials import (
     credential_secret_env,
     normalize_credential_id,
     resolve_api_key,
+    resolve_secret_env_value,
 )
 from agent.safe_outbound_http import (
     NetworkScope,
@@ -235,20 +235,31 @@ def custom_vision_provider_secret_env(entry: dict[str, Any]) -> str:
     return ""
 
 
-def custom_vision_provider_api_key(entry: dict[str, Any]) -> str:
+def custom_vision_provider_api_key(
+    entry: dict[str, Any],
+    *,
+    config_path: Any = None,
+    allow_process_fallback: bool | None = None,
+) -> str:
     """Resolve only the credential explicitly bound to this provider entry."""
     normalized = _normalize_loaded_custom_vision_provider_entry(entry)
     credential_ref = str(normalized.get("credential_ref") or "").strip()
     if credential_ref:
-        return resolve_api_key("custom", credential_ref)
+        return resolve_api_key(
+            "custom",
+            credential_ref,
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
+        )
     if (
         normalized.get(_LEGACY_API_KEY_ENV_MARKER_KEY)
         is _LEGACY_API_KEY_ENV_MARKER
     ):
-        return os.getenv(
+        return resolve_secret_env_value(
             custom_vision_provider_env_var(normalized.get("id")),
-            "",
-        ).strip()
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
+        )
     return ""
 
 
@@ -298,6 +309,8 @@ def custom_vision_provider_public_row(
     entry: dict[str, Any],
     *,
     active_provider: str = "",
+    config_path: Any = None,
+    allow_process_fallback: bool | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_loaded_custom_vision_provider_entry(entry)
     provider_name = custom_vision_provider_name(normalized["id"])
@@ -308,7 +321,13 @@ def custom_vision_provider_public_row(
         is _LEGACY_API_KEY_ENV_MARKER
     )
     try:
-        configured = bool(custom_vision_provider_api_key(normalized))
+        configured = bool(
+            custom_vision_provider_api_key(
+                normalized,
+                config_path=config_path,
+                allow_process_fallback=allow_process_fallback,
+            )
+        )
     except ValueError:
         configured = False
     transport_label = (

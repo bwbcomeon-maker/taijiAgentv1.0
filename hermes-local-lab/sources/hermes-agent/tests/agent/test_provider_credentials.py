@@ -49,6 +49,197 @@ def test_missing_credential_ref_falls_back_to_legacy_provider_env(monkeypatch):
     assert resolve_api_key("zhipu-image", config_data={}) == "legacy-zai"
 
 
+def test_exact_config_context_disables_process_fallback_per_thread_and_resets(
+    monkeypatch,
+    tmp_path,
+):
+    """A request-bound profile fails closed without breaking CLI env fallback."""
+    import threading
+
+    from hermes_constants import (
+        reset_hermes_config_path_override,
+        set_hermes_config_path_override,
+    )
+
+    config_path = tmp_path / "profile-b.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "process-profile-a-secret")
+    barrier = threading.Barrier(2)
+    observed = {}
+
+    def exact_worker():
+        token = set_hermes_config_path_override(config_path)
+        try:
+            barrier.wait(timeout=5)
+            observed["exact"] = resolve_api_key("dashscope", config_data={})
+        finally:
+            reset_hermes_config_path_override(token)
+        observed["after_reset"] = resolve_api_key("dashscope", config_data={})
+
+    def cli_worker():
+        barrier.wait(timeout=5)
+        observed["cli"] = resolve_api_key("dashscope", config_data={})
+
+    exact = threading.Thread(target=exact_worker)
+    cli = threading.Thread(target=cli_worker)
+    exact.start()
+    cli.start()
+    exact.join(timeout=5)
+    cli.join(timeout=5)
+
+    assert not exact.is_alive()
+    assert not cli.is_alive()
+    assert observed == {
+        "exact": "",
+        "after_reset": "process-profile-a-secret",
+        "cli": "process-profile-a-secret",
+    }
+
+
+def test_cli_process_fallback_survives_unrelated_env_file(
+    monkeypatch,
+    tmp_path,
+):
+    """Legacy CLI env-only setups remain compatible outside exact requests."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "UNRELATED_TEST_VALUE=present\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "shell-cli-secret")
+
+    assert (
+        resolve_api_key(
+            "dashscope",
+            config_data={},
+            config_path=config_path,
+        )
+        == "shell-cli-secret"
+    )
+
+
+@pytest.mark.parametrize("env_state", ["absent", "missing_key"])
+def test_home_only_profile_context_fails_closed_for_all_image_key_paths(
+    monkeypatch,
+    tmp_path,
+    env_state,
+):
+    """Streaming's home-only request scope must never inherit process A keys."""
+    import threading
+
+    from agent.custom_image_providers import (
+        _entry_api_key,
+        custom_image_provider_env_var,
+        load_custom_image_provider_entries,
+    )
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    home = tmp_path / "profile-b"
+    home.mkdir()
+    config_path = home / "config.yaml"
+    credential_ref = "shared-dashscope"
+    named_env = credential_secret_env(credential_ref)
+    custom_env = custom_image_provider_env_var("router")
+    config = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": "alibaba_dashscope",
+                "label": "Shared DashScope",
+                "auth_type": "api_key",
+                "secret_env": named_env,
+                "default": True,
+            }
+        ],
+        "custom_image_providers": [
+            {
+                "id": "router",
+                "name": "Router",
+                "base_url": "https://profile-b.example.test/v1",
+                "api_key_env": custom_env,
+                "models": ["image-model"],
+                "default_model": "image-model",
+            }
+        ],
+    }
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    if env_state == "missing_key":
+        (home / ".env").write_text(
+            "UNRELATED_TEST_VALUE=present\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv(named_env, "process-profile-a-named-secret")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "process-profile-a-legacy-secret")
+    monkeypatch.setenv(custom_env, "process-profile-a-custom-secret")
+    custom_entry = load_custom_image_provider_entries(config)[0]
+    barrier = threading.Barrier(2)
+    observed = {}
+
+    def collect():
+        return {
+            "named": resolve_api_key(
+                "dashscope",
+                credential_ref,
+                config_data=config,
+            ),
+            "default": resolve_api_key(
+                "dashscope",
+                config_data=config,
+            ),
+            "legacy": resolve_api_key(
+                "dashscope",
+                config_data={},
+            ),
+            "custom": _entry_api_key(custom_entry),
+        }
+
+    def profile_worker():
+        token = set_hermes_home_override(home)
+        try:
+            barrier.wait(timeout=5)
+            observed["profile"] = collect()
+        finally:
+            reset_hermes_home_override(token)
+        observed["after_reset"] = collect()
+
+    def cli_worker():
+        barrier.wait(timeout=5)
+        observed["cli"] = collect()
+
+    profile_thread = threading.Thread(target=profile_worker)
+    cli_thread = threading.Thread(target=cli_worker)
+    profile_thread.start()
+    cli_thread.start()
+    profile_thread.join(timeout=5)
+    cli_thread.join(timeout=5)
+
+    assert not profile_thread.is_alive()
+    assert not cli_thread.is_alive()
+    assert observed["profile"] == {
+        "named": "",
+        "default": "",
+        "legacy": "",
+        "custom": "",
+    }
+    expected_cli = {
+        "named": "process-profile-a-named-secret",
+        "default": "process-profile-a-named-secret",
+        "legacy": "process-profile-a-legacy-secret",
+        "custom": "process-profile-a-custom-secret",
+    }
+    assert observed["cli"] == expected_cli
+    assert observed["after_reset"] == expected_cli
+
+
 def test_zhipu_legacy_env_precedence(monkeypatch):
     monkeypatch.setenv("GLM_API_KEY", "glm-primary")
     monkeypatch.setenv("ZAI_API_KEY", "zai-compatible")

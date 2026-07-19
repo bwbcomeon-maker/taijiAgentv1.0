@@ -70,6 +70,16 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
+    image_runtime_lock = getattr(agent, "_image_runtime_lock", None)
+    if image_runtime_lock is not None:
+        with image_runtime_lock:
+            caller_capability_fingerprint = str(
+                getattr(agent, "_image_capability_fingerprint", "") or ""
+            )
+    else:
+        caller_capability_fingerprint = str(
+            getattr(agent, "_image_capability_fingerprint", "") or ""
+        )
 
     # ── Pre-flight: interrupt check ──────────────────────────────────
     if agent._interrupt_requested:
@@ -241,6 +251,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 tool_call.id,
                 messages=messages,
                 pre_tool_block_checked=True,
+                caller_capability_fingerprint=caller_capability_fingerprint,
             )
         except Exception as tool_error:
             result = f"Error executing tool '{function_name}': {tool_error}"
@@ -468,6 +479,16 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
+    image_runtime_lock = getattr(agent, "_image_runtime_lock", None)
+    if image_runtime_lock is not None:
+        with image_runtime_lock:
+            caller_capability_fingerprint = str(
+                getattr(agent, "_image_capability_fingerprint", "") or ""
+            )
+    else:
+        caller_capability_fingerprint = str(
+            getattr(agent, "_image_capability_fingerprint", "") or ""
+        )
     for i, tool_call in enumerate(assistant_message.tool_calls, 1):
         # SAFETY: check interrupt BEFORE starting each tool.
         # If the user sent "stop" during a previous tool's execution,
@@ -755,6 +776,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         session_id=agent.session_id or "",
                         enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                         skip_pre_tool_call_hook=True,
+                        **(
+                            {
+                                "caller_capability_fingerprint":
+                                    caller_capability_fingerprint
+                            }
+                            if function_name == "image_generate"
+                            else {}
+                        ),
                     )
                 _spinner_result = function_result
             except Exception as tool_error:
@@ -778,6 +807,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         session_id=agent.session_id or "",
                         enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                         skip_pre_tool_call_hook=True,
+                        **(
+                            {
+                                "caller_capability_fingerprint":
+                                    caller_capability_fingerprint
+                            }
+                            if function_name == "image_generate"
+                            else {}
+                        ),
                     )
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"

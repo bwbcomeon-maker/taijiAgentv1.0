@@ -226,7 +226,13 @@ def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
         return False
 
 
-def _restore_or_build_system_prompt(agent, system_message, conversation_history):
+def _restore_or_build_system_prompt(
+    agent,
+    system_message,
+    conversation_history,
+    *,
+    force_rebuild: bool = False,
+):
     """Restore the cached system prompt from the session DB or build it fresh.
 
     Mutates ``agent._cached_system_prompt`` and persists a freshly-built
@@ -255,7 +261,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     """
     stored_prompt = None
     stored_state = "missing"
-    if conversation_history and agent._session_db:
+    if not force_rebuild and conversation_history and agent._session_db:
         try:
             session_row = agent._session_db.get_session(agent.session_id)
             if session_row is not None:
@@ -301,16 +307,17 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # Plugin hook: on_session_start — fired once when a brand-new
     # session is created (not on continuation).  Plugins can use this
     # to initialise session-scoped state (e.g. warm a memory cache).
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "on_session_start",
-            session_id=agent.session_id,
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-        )
-    except Exception as exc:
-        logger.warning("on_session_start hook failed: %s", exc)
+    if not conversation_history:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_start",
+                session_id=agent.session_id,
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_start hook failed: %s", exc)
 
     # Persist the system prompt snapshot in SQLite.  Failure here used
     # to log at DEBUG, which silently broke prefix-cache reuse on the
@@ -593,8 +600,18 @@ def run_conversation(
     # from disk that the model already knows about (it wrote them!),
     # producing a different system prompt and breaking the Anthropic
     # prefix cache.
-    if agent._cached_system_prompt is None:
-        _restore_or_build_system_prompt(agent, system_message, conversation_history)
+    force_prompt_rebuild = bool(
+        getattr(agent, "_force_system_prompt_rebuild", False)
+    )
+    if agent._cached_system_prompt is None or force_prompt_rebuild:
+        _restore_or_build_system_prompt(
+            agent,
+            system_message,
+            conversation_history,
+            force_rebuild=force_prompt_rebuild,
+        )
+        if agent._cached_system_prompt is not None:
+            agent._force_system_prompt_rebuild = False
 
     active_system_prompt = agent._cached_system_prompt
 

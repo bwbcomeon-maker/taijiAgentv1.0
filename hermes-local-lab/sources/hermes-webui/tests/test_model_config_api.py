@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import multiprocessing
 import os
 import threading
@@ -1921,6 +1922,87 @@ def test_vision_config_writes_auxiliary_vision_and_key_without_echo(monkeypatch,
     os.environ.pop("DASHSCOPE_API_KEY", None)
 
 
+def test_vision_save_does_not_adopt_process_only_default_credential(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    credential_ref = "profile-b-default"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": credential_ref,
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Profile B default",
+                        "auth_type": "api_key",
+                        "secret_env": secret_env,
+                        "default": True,
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(secret_env, "stale-profile-a-secret")
+
+    result = model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+    )
+
+    saved = _read_config(tmp_path)["auxiliary"]["vision"]
+    assert saved["credential_ref"] == ""
+    assert result["vision"]["credential_ref"] == ""
+    assert result["vision"]["key_status"]["configured"] is False
+    assert result["vision"]["verification"]["status"] == "unconfigured"
+
+
+def test_image_save_does_not_adopt_process_only_default_credential(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    credential_ref = "profile-b-default"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": credential_ref,
+                        "provider_family": "alibaba_dashscope",
+                        "label": "Profile B default",
+                        "auth_type": "api_key",
+                        "secret_env": secret_env,
+                        "default": True,
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(secret_env, "stale-profile-a-secret")
+
+    result = model_config.set_image_gen_config(
+        {
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+    )
+
+    saved = _read_config(tmp_path)["image_gen"]
+    assert saved["credential_ref"] == ""
+    assert result["image_gen"]["credential_ref"] == ""
+    assert result["image_gen"]["verification"]["status"] == "unconfigured"
+
+
 def test_alibaba_vision_config_persists_named_credential_and_beijing_endpoint(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     model_config.upsert_provider_credential(
@@ -2584,6 +2666,68 @@ def test_vision_test_rejects_unconfigured_without_calling_provider(monkeypatch, 
     }
 
 
+def test_vision_test_rejects_unresolved_runtime_without_calling_provider(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_: state_path,
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "auxiliary": {
+                    "vision": {
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                        "endpoint_mode": "custom",
+                        "base_url": "${MISSING_VISION_ENDPOINT}",
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=profile-b-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MISSING_VISION_ENDPOINT", raising=False)
+    calls = []
+
+    async def should_not_run(**kwargs):
+        calls.append(kwargs)
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        should_not_run,
+    )
+
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "configured_unverified"
+    assert result["error_code"] == "unresolved_effective_config"
+    assert calls == []
+    assert not state_path.exists()
+
+
 def test_vision_test_persists_verified_result_without_model_text_or_secret(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
@@ -2682,10 +2826,430 @@ def test_vision_probe_full_chain_uses_named_key_and_keeps_alibaba_identity(
             {
                 "explicit_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "explicit_api_key": "named-probe-secret",
-                "api_mode": None,
+                "api_mode": "chat_completions",
             },
         )
     ]
+
+
+@pytest.mark.parametrize("credential_mode", ["named", "legacy"])
+@pytest.mark.parametrize("env_state", ["absent", "missing_key"])
+def test_vision_probe_exact_profile_never_falls_back_to_process_secret(
+    monkeypatch,
+    tmp_path,
+    credential_mode,
+    env_state,
+):
+    """Exact B vision config without a B key must perform zero provider I/O."""
+    import tools.vision_tools as vision_tools
+
+    profile_b = tmp_path / "profile-b"
+    profile_b.mkdir()
+    config_path = profile_b / "profile-specific.yaml"
+    credential_ref = "shared-alibaba-vision"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    vision_cfg = {
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "endpoint_mode": "public",
+        "region": "cn-beijing",
+    }
+    config = {"auxiliary": {"vision": vision_cfg}}
+    if credential_mode == "named":
+        config["provider_credentials"] = [
+            {
+                "id": credential_ref,
+                "provider_family": "alibaba_dashscope",
+                "label": "Shared Alibaba vision",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ]
+        vision_cfg["credential_ref"] = credential_ref
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    if env_state == "missing_key":
+        (profile_b / ".env").write_text(
+            "UNRELATED_TEST_VALUE=present\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv(secret_env, "process-profile-a-named-secret")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "process-profile-a-legacy-secret")
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(api_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: profile_b)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "B")
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_: profile_b / "vision-verification.json",
+    )
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "B")
+    outbound_calls = []
+
+    async def fake_probe(**kwargs):
+        outbound_calls.append(kwargs)
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_probe)
+
+    snapshot = model_config._capture_vision_config_snapshot()
+    from agent.image_runtime import current_vision_runtime_snapshot
+    from hermes_constants import (
+        reset_hermes_config_path_override,
+        reset_hermes_home_override,
+        set_hermes_config_path_override,
+        set_hermes_home_override,
+    )
+
+    home_token = set_hermes_home_override(profile_b)
+    config_token = set_hermes_config_path_override(config_path)
+    try:
+        runtime_snapshot = current_vision_runtime_snapshot()
+    finally:
+        reset_hermes_config_path_override(config_token)
+        reset_hermes_home_override(home_token)
+    public_config = model_config.get_vision_config()
+    result = model_config.test_vision_config()
+
+    assert snapshot.configured is False
+    assert runtime_snapshot["configured"] is False
+    assert runtime_snapshot["available"] is False
+    assert runtime_snapshot["fingerprint"] == snapshot.fingerprint
+    assert public_config["vision"]["key_status"]["configured"] is False
+    assert public_config["vision"]["verification"]["status"] == "unconfigured"
+    active_row = next(
+        row
+        for row in public_config["providers"]
+        if row["id"] == "alibaba"
+    )
+    assert active_row["available"] is False
+    assert result["status"] == "unconfigured"
+    assert outbound_calls == []
+
+
+@pytest.mark.parametrize("credential_mode", ["named", "legacy"])
+@pytest.mark.parametrize("env_state", ["absent", "missing_key"])
+def test_custom_vision_public_projection_never_borrows_process_secret(
+    monkeypatch,
+    tmp_path,
+    credential_mode,
+    env_state,
+):
+    import tools.vision_tools as vision_tools
+    from agent.custom_vision_providers import custom_vision_provider_env_var
+
+    profile_b = tmp_path / "custom-profile-b"
+    profile_b.mkdir()
+    config_path = profile_b / "profile-specific.yaml"
+    credential_ref = "shared-custom-vision"
+    named_secret_env = model_config.credential_secret_env(credential_ref)
+    legacy_secret_env = custom_vision_provider_env_var("router")
+    entry = {
+        "id": "router",
+        "name": "Router Vision",
+        "base_url": "https://vision-b.example.test/v1",
+        "models": ["router-vl"],
+        "default_model": "router-vl",
+        "transport": "openai_chat_completions",
+    }
+    config = {
+        "auxiliary": {
+            "vision": {
+                "provider": "custom:router",
+                "model": "router-vl",
+            }
+        },
+        "custom_vision_providers": [entry],
+    }
+    if credential_mode == "named":
+        config["provider_credentials"] = [
+            {
+                "id": credential_ref,
+                "provider_family": "custom",
+                "label": "Shared custom vision",
+                "auth_type": "api_key",
+                "secret_env": named_secret_env,
+            }
+        ]
+        entry["credential_ref"] = credential_ref
+    else:
+        entry["api_key_env"] = legacy_secret_env
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    if env_state == "missing_key":
+        (profile_b / ".env").write_text(
+            "UNRELATED_TEST_VALUE=present\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv(
+        named_secret_env,
+        "process-profile-a-custom-named-secret",
+    )
+    monkeypatch.setenv(
+        legacy_secret_env,
+        "process-profile-a-custom-legacy-secret",
+    )
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(api_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: profile_b)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "B")
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_: profile_b / "vision-verification.json",
+    )
+    outbound_calls = []
+
+    async def fake_probe(**kwargs):
+        outbound_calls.append(kwargs)
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "custom:router",
+                "resolved_model": "router-vl",
+            }
+        )
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_probe)
+
+    snapshot = model_config._capture_vision_config_snapshot()
+    public_config = model_config.get_vision_config()
+    result = model_config.test_vision_config()
+
+    assert snapshot.configured is False
+    assert public_config["vision"]["key_status"]["configured"] is False
+    assert public_config["vision"]["verification"]["status"] == "unconfigured"
+    active_row = next(
+        row
+        for row in public_config["providers"]
+        if row["id"] == "custom:router"
+    )
+    assert active_row["available"] is False
+    assert result["status"] == "unconfigured"
+    assert outbound_calls == []
+
+
+def test_vision_snapshot_fingerprint_tracks_the_final_bound_endpoint(
+    monkeypatch,
+    tmp_path,
+):
+    from agent.image_runtime import current_vision_runtime_snapshot
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "DASHSCOPE_API_KEY=alibaba-profile-secret",
+                "GLM_API_KEY=zai-profile-secret",
+                "AUXILIARY_VISION_API_KEY=custom-profile-secret",
+                (
+                    "TAIJI_VISION_CUSTOM_ROUTER_API_KEY="
+                    "custom-router-profile-secret"
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def snapshot_for(vision_cfg):
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"auxiliary": {"vision": vision_cfg}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return model_config._capture_vision_config_snapshot()
+
+    alibaba_a = snapshot_for(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+            "base_url": "https://stale-a.example.test/v1",
+            "api_mode": "stale-wire-a",
+        }
+    )
+    alibaba_b = snapshot_for(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+            "base_url": "https://stale-b.example.test/v1",
+            "api_mode": "stale-wire-b",
+        }
+    )
+    assert alibaba_a.binding is not None
+    assert alibaba_b.binding is not None
+    assert alibaba_a.binding.base_url == (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    assert alibaba_b.binding.base_url == alibaba_a.binding.base_url
+    assert alibaba_b.fingerprint == alibaba_a.fingerprint
+    alibaba_runtime = current_vision_runtime_snapshot()
+    assert alibaba_runtime["base_url"] == alibaba_b.binding.base_url
+    assert alibaba_runtime["fingerprint"] == alibaba_b.fingerprint
+
+    alibaba_custom_a = snapshot_for(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "endpoint_mode": "custom",
+            "region": "cn-beijing",
+            "base_url": "https://alibaba-custom-a.example.test/v1",
+        }
+    )
+    alibaba_custom_b = snapshot_for(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "endpoint_mode": "custom",
+            "region": "cn-beijing",
+            "base_url": "https://alibaba-custom-b.example.test/v1",
+        }
+    )
+    assert alibaba_custom_a.binding is not None
+    assert alibaba_custom_b.binding is not None
+    assert (
+        alibaba_custom_a.binding.base_url
+        != alibaba_custom_b.binding.base_url
+    )
+    assert (
+        alibaba_custom_a.fingerprint
+        != alibaba_custom_b.fingerprint
+    )
+    alibaba_custom_runtime = current_vision_runtime_snapshot()
+    assert (
+        alibaba_custom_runtime["base_url"]
+        == alibaba_custom_b.binding.base_url
+    )
+    assert (
+        alibaba_custom_runtime["fingerprint"]
+        == alibaba_custom_b.fingerprint
+    )
+
+    zai_a = snapshot_for(
+        {
+            "provider": "zai",
+            "model": "glm-5v-turbo",
+            "base_url": "https://stale-a.example.test/v1",
+            "api_mode": "stale-wire-a",
+        }
+    )
+    zai_b = snapshot_for(
+        {
+            "provider": "zai",
+            "model": "glm-5v-turbo",
+            "base_url": "https://stale-b.example.test/v1",
+            "api_mode": "stale-wire-b",
+        }
+    )
+    assert zai_a.binding is not None
+    assert zai_b.binding is not None
+    assert zai_a.binding.base_url == (
+        "https://open.bigmodel.cn/api/paas/v4"
+    )
+    assert zai_b.binding.base_url == zai_a.binding.base_url
+    assert zai_b.fingerprint == zai_a.fingerprint
+    zai_runtime = current_vision_runtime_snapshot()
+    assert zai_runtime["base_url"] == zai_b.binding.base_url
+    assert zai_runtime["fingerprint"] == zai_b.fingerprint
+
+    custom_a = snapshot_for(
+        {
+            "provider": "custom",
+            "model": "private-vl",
+            "base_url": "https://custom-a.example.test/v1",
+        }
+    )
+    custom_b = snapshot_for(
+        {
+            "provider": "custom",
+            "model": "private-vl",
+            "base_url": "https://custom-b.example.test/v1",
+        }
+    )
+    assert custom_a.binding is not None
+    assert custom_b.binding is not None
+    assert custom_a.binding.base_url != custom_b.binding.base_url
+    assert custom_a.fingerprint != custom_b.fingerprint
+    custom_runtime = current_vision_runtime_snapshot()
+    assert custom_runtime["base_url"] == custom_b.binding.base_url
+    assert custom_runtime["fingerprint"] == custom_b.fingerprint
+
+    custom_anthropic = snapshot_for(
+        {
+            "provider": "custom",
+            "model": "private-vl",
+            "base_url": "https://custom-b.example.test/v1",
+            "api_mode": "anthropic_messages",
+        }
+    )
+    assert custom_anthropic.binding is not None
+    assert custom_anthropic.binding.api_mode == "anthropic_messages"
+    assert custom_anthropic.fingerprint != custom_b.fingerprint
+    custom_anthropic_runtime = current_vision_runtime_snapshot()
+    assert (
+        custom_anthropic_runtime["transport"]
+        == custom_anthropic.binding.api_mode
+    )
+    assert (
+        custom_anthropic_runtime["fingerprint"]
+        == custom_anthropic.fingerprint
+    )
+
+    config_with_named_custom = {
+        "auxiliary": {
+            "vision": {
+                "provider": "custom:router",
+                "model": "router-vl",
+            }
+        },
+        "custom_vision_providers": [
+            {
+                "id": "router",
+                "name": "Router Vision",
+                "base_url": "https://router.example.test/v1",
+                "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                "models": ["router-vl"],
+                "default_model": "router-vl",
+                "transport": "anthropic_messages",
+            }
+        ],
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(config_with_named_custom, sort_keys=False),
+        encoding="utf-8",
+    )
+    named_custom = model_config._capture_vision_config_snapshot()
+    assert named_custom.binding is not None
+    assert named_custom.binding.api_mode == "anthropic_messages"
+    named_custom_runtime = current_vision_runtime_snapshot()
+    assert (
+        named_custom_runtime["base_url"]
+        == named_custom.binding.base_url
+    )
+    assert named_custom_runtime["transport"] == "anthropic_messages"
+    assert (
+        named_custom_runtime["fingerprint"]
+        == named_custom.fingerprint
+    )
 
 
 def test_vision_test_failure_returns_only_safe_fields(monkeypatch, tmp_path):
@@ -2822,6 +3386,63 @@ def test_vision_probe_does_not_persist_success_after_key_rotation(monkeypatch, t
     assert result["status"] == "configured_unverified"
     assert result["error_code"] == "vision_probe_superseded"
     assert not state_path.exists()
+    assert (
+        model_config.get_vision_config()["vision"]["verification"]["status"]
+        != "verified"
+    )
+
+
+def test_superseded_vision_probe_tombstones_owned_state_when_unlink_fails(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_: state_path,
+    )
+    _write_saved_vision_config(tmp_path)
+    original_unlink = Path.unlink
+
+    def fail_state_unlink(path, *args, **kwargs):
+        if path == state_path:
+            raise PermissionError("simulated state unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_state_unlink)
+
+    async def rotate_key_during_probe(**_kwargs):
+        (tmp_path / ".env").write_text(
+            "DASHSCOPE_API_KEY=rotated-during-probe\n",
+            encoding="utf-8",
+        )
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        rotate_key_during_probe,
+    )
+
+    result = model_config.test_vision_config()
+
+    assert result["error_code"] == "vision_probe_superseded"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {}
+    assert (
+        model_config.get_vision_config()["vision"]["verification"]["status"]
+        != "verifying"
+    )
 
 
 def test_vision_verification_is_isolated_per_profile(monkeypatch, tmp_path):
@@ -2884,6 +3505,10 @@ def test_vision_probe_does_not_persist_after_profile_switch(monkeypatch, tmp_pat
     assert result["status"] == "configured_unverified"
     assert result["error_code"] == "vision_probe_superseded"
     assert list((tmp_path / "vision-verification").glob("*.json")) == []
+    assert (
+        model_config.get_vision_config()["vision"]["verification"]["status"]
+        != "verified"
+    )
 
 
 def test_vision_probe_rejects_success_from_wrong_resolved_backend(monkeypatch, tmp_path):
@@ -2959,6 +3584,691 @@ def test_newer_vision_probe_prevents_older_request_overwrite(monkeypatch, tmp_pa
     assert results["first"]["status"] == "configured_unverified"
     assert results["first"]["error_code"] == "vision_probe_superseded"
     assert model_config.get_vision_config()["vision"]["verification"]["status"] == "verified"
+
+
+def test_vision_probe_persists_generation_matched_verifying_before_provider(
+    monkeypatch,
+    tmp_path,
+):
+    """The visible in-flight state and final state must belong to one generation."""
+    _use_home(monkeypatch, tmp_path)
+    state_path = tmp_path / "vision-verification.json"
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_: state_path,
+    )
+    _write_saved_vision_config(tmp_path)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_lock = threading.Lock()
+    call_count = {"value": 0}
+
+    async def ordered_probe(**_kwargs):
+        with call_lock:
+            call_count["value"] += 1
+            call_number = call_count["value"]
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+            return json.dumps({
+                "success": False,
+                "error": "old failure",
+                "analysis": "old failure",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            })
+        return json.dumps({
+            "success": True,
+            "analysis": "TAIJI-VISION-CHECK-7319",
+            "resolved_provider": "alibaba",
+            "resolved_model": "qwen3-vl-plus",
+        })
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", ordered_probe)
+    results = {}
+    first = threading.Thread(
+        target=lambda: results.setdefault("first", model_config.test_vision_config())
+    )
+    first.start()
+    assert first_started.wait(timeout=5)
+    try:
+        verifying_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        verifying_state = {}
+
+    results["second"] = model_config.test_vision_config()
+    state_after_second = json.loads(state_path.read_text(encoding="utf-8"))
+    release_first.set()
+    first.join(timeout=5)
+    final_state = json.loads(state_path.read_text(encoding="utf-8"))
+
+    violations = []
+    if verifying_state.get("status") != "verifying":
+        violations.append("vision probe did not persist verifying before Provider call")
+    if verifying_state.get("schema_version") != model_config.CAPABILITY_VERIFICATION_SCHEMA_VERSION:
+        violations.append("vision verifying state used the wrong schema")
+    if not verifying_state.get("fingerprint"):
+        violations.append("vision verifying state omitted its runtime fingerprint")
+    if verifying_state.get("diagnostic_id") != results["first"]["diagnostic_id"]:
+        violations.append("vision verifying state did not match the first generation")
+    if state_after_second.get("status") != "verified":
+        violations.append("newer vision probe did not persist its verified result")
+    if state_after_second.get("diagnostic_id") != results["second"]["diagnostic_id"]:
+        violations.append("newer vision final state did not match its generation")
+    if final_state != state_after_second:
+        violations.append("superseded vision result overwrote the newer final state")
+    if results["first"]["error_code"] != "vision_probe_superseded":
+        violations.append("older vision probe was not reported as superseded")
+    if first.is_alive():
+        violations.append("older vision probe thread did not finish")
+
+    assert violations == [], "; ".join(violations)
+
+
+def test_vision_snapshot_uses_one_environment_generation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    env_name = "B3_VISION_GENERATION"
+    monkeypatch.setenv(env_name, "a")
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "auxiliary": {
+                    "vision": {
+                        "provider": "custom:router",
+                        "model": f"model-${{{env_name}}}",
+                    }
+                },
+                "custom_vision_providers": [
+                    {
+                        "id": "router",
+                        "name": "Router",
+                        "base_url": (
+                            f"https://${{{env_name}}}.example.test/v1"
+                        ),
+                        "api_key_env": "TAIJI_VISION_CUSTOM_ROUTER_API_KEY",
+                        "models": [f"model-${{{env_name}}}"],
+                        "default_model": f"model-${{{env_name}}}",
+                        "transport": "openai_chat_completions",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=profile-key\n",
+        encoding="utf-8",
+    )
+    from hermes_cli import config as hermes_config
+
+    original_expand = hermes_config._expand_env_vars
+    calls = {"value": 0}
+    depth = {"value": 0}
+
+    def mutate_after_first_expand(value, **kwargs):
+        depth["value"] += 1
+        try:
+            return original_expand(value, **kwargs)
+        finally:
+            depth["value"] -= 1
+            if depth["value"] == 0:
+                calls["value"] += 1
+                if calls["value"] == 1:
+                    monkeypatch.setenv(env_name, "b")
+
+    monkeypatch.setattr(
+        hermes_config,
+        "_expand_env_vars",
+        mutate_after_first_expand,
+    )
+
+    snapshot = model_config._capture_vision_config_snapshot()
+
+    assert calls["value"] == 1
+    assert snapshot.model == "model-a"
+    assert snapshot.base_url == "https://a.example.test/v1"
+    assert snapshot.binding is not None
+    assert snapshot.binding.model == "model-a"
+    assert snapshot.binding.base_url == "https://a.example.test/v1"
+    assert snapshot.configured is True
+
+
+def test_unsupported_image_identity_is_fail_closed_in_webui_and_agent(
+    monkeypatch,
+    tmp_path,
+):
+    """Both runtimes must apply the same effective-runtime resolution gate."""
+    from agent.image_gen_verification import (
+        CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        image_gen_fingerprint,
+        read_image_gen_verification_snapshot,
+        verification_state_path,
+    )
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-secret")
+    config_data = {
+        "image_gen": {
+            "provider": "xai",
+            "model": "legacy-top-level-model",
+            "xai": {
+                "model": "grok-imagine-image",
+                "resolution": "1k",
+            },
+        },
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(config_data),
+        encoding="utf-8",
+    )
+    fingerprint = image_gen_fingerprint(
+        config_data["image_gen"],
+        profile="default",
+        config_data=config_data,
+        secret_value="xai-secret",
+    )
+    state_path = verification_state_path(tmp_path, "default")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+                "fingerprint": fingerprint,
+                "status": "verified",
+                "checked_at": "2030-01-01T00:00:00Z",
+                "diagnostic_id": "unsupported-xai-state",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+
+    webui_snapshot = model_config._capture_image_gen_config_snapshot()
+    webui_public = model_config._public_image_gen_verification(
+        config_data["image_gen"],
+        profile="default",
+    )
+    agent_snapshot = read_image_gen_verification_snapshot(
+        config_data["image_gen"],
+        profile="default",
+        config_data=config_data,
+        secret_value="xai-secret",
+        state_root=tmp_path,
+    )
+
+    assert webui_snapshot.effective_config_resolved is False
+    assert agent_snapshot["effective_config_resolved"] is False
+    assert webui_public["status"] == agent_snapshot["status"]
+    assert webui_public["status"] == "configured_unverified"
+
+
+def test_webui_image_snapshot_uses_one_env_generation(monkeypatch, tmp_path):
+    """WebUI capture must not combine values from two process-env generations."""
+    from agent.image_gen_verification import image_gen_fingerprint
+    from hermes_cli import config as config_module
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    base_env = "B3_GAP5_WEBUI_BASE_URL"
+    model_env = "B3_GAP5_WEBUI_MODEL"
+    base_before = "https://before.example.test/v1"
+    base_after = "https://after.example.test/v1"
+    model_before = "image-before"
+    model_after = "image-after"
+    credential_ref = "gap5-custom-router"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    raw_config = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": "custom",
+                "label": "Gap5 custom router",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ],
+        "custom_image_providers": [
+            {
+                "base_url": f"${{{base_env}}}",
+                "credential_ref": credential_ref,
+                "id": "router",
+                "name": "Router Images",
+                "models": [f"${{{model_env}}}"],
+                "default_model": f"${{{model_env}}}",
+            }
+        ],
+        "image_gen": {
+            "provider": "custom:router",
+            "model": f"${{{model_env}}}",
+        },
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(raw_config, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=custom-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(secret_env, "custom-secret")
+    monkeypatch.setenv(base_env, base_before)
+    monkeypatch.setenv(model_env, model_before)
+    expected_before = image_gen_fingerprint(
+        raw_config["image_gen"],
+        profile="default",
+        config_data=raw_config,
+        secret_value="custom-secret",
+    )
+    monkeypatch.setenv(base_env, base_after)
+    monkeypatch.setenv(model_env, model_after)
+    expected_after = image_gen_fingerprint(
+        raw_config["image_gen"],
+        profile="default",
+        config_data=raw_config,
+        secret_value="custom-secret",
+    )
+    assert expected_before != expected_after
+    monkeypatch.setenv(base_env, base_before)
+    monkeypatch.setenv(model_env, model_before)
+
+    original_expand = config_module._expand_env_vars
+    switched = {"value": False}
+
+    def racing_expand(value, *args, **kwargs):
+        expanded = original_expand(value, *args, **kwargs)
+        if value == f"${{{base_env}}}" and not switched["value"]:
+            switched["value"] = True
+            monkeypatch.setenv(base_env, base_after)
+            monkeypatch.setenv(model_env, model_after)
+        return expanded
+
+    monkeypatch.setattr(config_module, "_expand_env_vars", racing_expand)
+
+    snapshot = model_config._capture_image_gen_config_snapshot()
+
+    assert switched["value"] is True
+    assert snapshot.effective_config_resolved is True
+    assert snapshot.model == model_before
+    assert snapshot.fingerprint == expected_before
+    assert snapshot.fingerprint != expected_after
+
+
+def test_image_probe_uses_exact_profile_config_path_for_real_dispatch(
+    monkeypatch,
+    tmp_path,
+):
+    """A B-profile probe cannot execute with A-profile endpoint or secret."""
+    import sys
+
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    profile_a.mkdir()
+    profile_b.mkdir()
+    credential_ref = "shared-dashscope"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    endpoint_a = (
+        "https://profile-a.example.test/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+    endpoint_b = (
+        "https://profile-b.example.test/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+
+    def write_profile(root: Path, endpoint: str, secret: str) -> Path:
+        config_path = root / "profile-specific.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "provider_credentials": [
+                        {
+                            "id": credential_ref,
+                            "provider_family": "alibaba_dashscope",
+                            "label": "Shared DashScope",
+                            "auth_type": "api_key",
+                            "secret_env": secret_env,
+                        }
+                    ],
+                    "image_gen": {
+                        "provider": "dashscope",
+                        "model": "qwen-image-2.0-pro",
+                        "credential_ref": credential_ref,
+                        "options": {
+                            "endpoint_mode": "custom",
+                            "base_url": endpoint,
+                        },
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (root / ".env").write_text(
+            f"{secret_env}={secret}\n",
+            encoding="utf-8",
+        )
+        return config_path
+
+    path_a = write_profile(profile_a, endpoint_a, "profile-a-secret")
+    path_b = write_profile(profile_b, endpoint_b, "profile-b-secret")
+    monkeypatch.setenv("HERMES_HOME", str(profile_a))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(path_a))
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: path_b)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: profile_b)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "B")
+    state_path = profile_b / "image-verification.json"
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+    model_config._ensure_image_gen_plugins_registered()
+    from agent.image_gen_registry import get_provider
+
+    selected = get_provider("dashscope")
+    assert selected is not None
+    dashscope = sys.modules[type(selected).__module__]
+    captured = {}
+
+    def fake_post_json(**kwargs):
+        captured["url"] = kwargs["url"]
+        captured["authorization"] = kwargs["headers"]["Authorization"]
+        return {"data": [{"url": "https://cdn.example.test/probe.png"}]}, None
+
+    def fake_cached_success(**kwargs):
+        from hermes_constants import get_hermes_home
+
+        provider_home = get_hermes_home()
+        captured["provider_home"] = provider_home
+        image_path = (
+            provider_home / "cache" / "images" / "gap7-probe.png"
+        )
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(model_config._VISION_PROBE_PNG)
+        return {
+            "success": True,
+            "image": str(image_path),
+            "provider": kwargs["provider"],
+            "model": kwargs["model"],
+        }
+
+    monkeypatch.setattr(dashscope, "post_json", fake_post_json)
+    monkeypatch.setattr(dashscope, "cached_success", fake_cached_success)
+    monkeypatch.setattr(dashscope, "is_safe_url", lambda *_: True)
+
+    result = model_config.test_image_gen_config()
+
+    assert result["status"] == "verified"
+    assert captured["url"] == endpoint_b
+    assert captured["authorization"] == "Bearer profile-b-secret"
+    assert captured["provider_home"] == profile_b
+
+
+@pytest.mark.parametrize("credential_mode", ["named", "legacy"])
+@pytest.mark.parametrize("env_state", ["absent", "missing_key"])
+def test_image_probe_exact_profile_never_falls_back_to_process_secret(
+    monkeypatch,
+    tmp_path,
+    credential_mode,
+    env_state,
+):
+    """An exact B profile with no B key must not probe using process A."""
+    import sys
+
+    profile_b = tmp_path / "profile-b"
+    profile_b.mkdir()
+    config_path = profile_b / "profile-specific.yaml"
+    endpoint = (
+        "https://profile-b.example.test/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+    credential_ref = "shared-dashscope"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    config = {
+        "image_gen": {
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "options": {
+                "endpoint_mode": "custom",
+                "base_url": endpoint,
+            },
+        }
+    }
+    if credential_mode == "named":
+        config["provider_credentials"] = [
+            {
+                "id": credential_ref,
+                "provider_family": "alibaba_dashscope",
+                "label": "Shared DashScope",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ]
+        config["image_gen"]["credential_ref"] = credential_ref
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    if env_state == "missing_key":
+        (profile_b / ".env").write_text(
+            "UNRELATED_TEST_VALUE=present\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv(secret_env, "process-profile-a-named-secret")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "process-profile-a-legacy-secret")
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: profile_b)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "B")
+    model_config._ensure_image_gen_plugins_registered()
+    from agent.image_gen_registry import get_provider
+
+    selected = get_provider("dashscope")
+    assert selected is not None
+    dashscope = sys.modules[type(selected).__module__]
+    outbound_calls = []
+
+    def fake_post_json(**kwargs):
+        outbound_calls.append(kwargs)
+        return {"data": [{"url": "https://cdn.example.test/probe.png"}]}, None
+
+    def fake_cached_success(**kwargs):
+        image_path = profile_b / "cache" / "images" / "gap7d-probe.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(model_config._VISION_PROBE_PNG)
+        return {
+            "success": True,
+            "image": str(image_path),
+            "provider": kwargs["provider"],
+            "model": kwargs["model"],
+        }
+
+    monkeypatch.setattr(dashscope, "post_json", fake_post_json)
+    monkeypatch.setattr(dashscope, "cached_success", fake_cached_success)
+    monkeypatch.setattr(dashscope, "is_safe_url", lambda *_: True)
+
+    snapshot = model_config._capture_image_gen_config_snapshot()
+    result = model_config.test_image_gen_config()
+
+    assert snapshot.configured is False
+    assert result["status"] == "unconfigured"
+    assert outbound_calls == []
+
+
+def test_concurrent_custom_image_probes_use_request_local_provider_identity(
+    monkeypatch,
+    tmp_path,
+):
+    """Same custom ID in concurrent profiles must keep each profile's URL/key/model."""
+    import agent.custom_image_providers as custom_image_providers
+
+    profiles = {}
+    credential_ref = "shared-custom-image"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    for name in ("A", "B"):
+        home = tmp_path / f"profile-{name.lower()}"
+        home.mkdir()
+        model = f"image-model-{name.lower()}"
+        base_url = f"https://profile-{name.lower()}.example.test/v1"
+        config_path = home / f"profile-{name.lower()}.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "provider_credentials": [
+                        {
+                            "id": credential_ref,
+                            "provider_family": "custom",
+                            "label": "Shared custom image",
+                            "auth_type": "api_key",
+                            "secret_env": secret_env,
+                        }
+                    ],
+                    "image_gen": {
+                        "provider": "custom:router",
+                        "model": model,
+                    },
+                    "custom_image_providers": [
+                        {
+                            "id": "router",
+                            "name": f"Router {name}",
+                            "base_url": base_url,
+                            "credential_ref": credential_ref,
+                            "models": [
+                                "image-model-a",
+                                "image-model-b",
+                            ],
+                            "default_model": model,
+                            "network_scope": "public_direct",
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (home / ".env").write_text(
+            f"{secret_env}=profile-{name.lower()}-secret\n",
+            encoding="utf-8",
+        )
+        profiles[name] = {
+            "home": home,
+            "config_path": config_path,
+            "model": model,
+            "endpoint": f"{base_url}/images/generations",
+            "authorization": f"Bearer profile-{name.lower()}-secret",
+        }
+
+    runtime = threading.local()
+    monkeypatch.setattr(
+        model_config,
+        "_get_config_path",
+        lambda: runtime.config_path,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_get_hermes_home",
+        lambda: runtime.home,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_active_profile_name",
+        lambda: runtime.profile,
+    )
+    monkeypatch.setattr(model_config, "reload_config", lambda: None)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda profile=None: (
+            tmp_path / "states" / f"{profile or runtime.profile}.json"
+        ),
+    )
+    register_barrier = threading.Barrier(2)
+    original_register = (
+        custom_image_providers.register_configured_custom_image_providers
+    )
+
+    def racing_register(*args, **kwargs):
+        original_register(*args, **kwargs)
+        register_barrier.wait(timeout=5)
+
+    monkeypatch.setattr(
+        custom_image_providers,
+        "register_configured_custom_image_providers",
+        racing_register,
+    )
+    requests = {}
+
+    @contextmanager
+    def fake_request_pinned_https(**kwargs):
+        requests[threading.current_thread().name] = {
+            "url": kwargs["url"],
+            "authorization": kwargs["headers"]["Authorization"],
+            "model": kwargs["json_body"]["model"],
+        }
+        yield SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(
+        custom_image_providers,
+        "request_pinned_https",
+        fake_request_pinned_https,
+    )
+    encoded_probe = base64.b64encode(model_config._VISION_PROBE_PNG).decode(
+        "ascii"
+    )
+    monkeypatch.setattr(
+        custom_image_providers,
+        "read_bounded_json",
+        lambda _response: {"data": [{"b64_json": encoded_probe}]},
+    )
+    results = {}
+
+    def worker(profile: str):
+        from hermes_constants import (
+            reset_hermes_config_path_override,
+            reset_hermes_home_override,
+            set_hermes_config_path_override,
+            set_hermes_home_override,
+        )
+
+        runtime.profile = profile
+        runtime.home = profiles[profile]["home"]
+        runtime.config_path = profiles[profile]["config_path"]
+        home_token = set_hermes_home_override(runtime.home)
+        config_token = set_hermes_config_path_override(runtime.config_path)
+        try:
+            results[profile] = model_config.test_image_gen_config()
+        finally:
+            reset_hermes_config_path_override(config_token)
+            reset_hermes_home_override(home_token)
+
+    first = threading.Thread(target=worker, args=("A",), name="A")
+    second = threading.Thread(target=worker, args=("B",), name="B")
+    first.start()
+    second.start()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results["A"]["status"] == "verified"
+    assert results["B"]["status"] == "verified"
+    assert requests == {
+        profile: {
+            "url": profiles[profile]["endpoint"],
+            "authorization": profiles[profile]["authorization"],
+            "model": profiles[profile]["model"],
+        }
+        for profile in ("A", "B")
+    }
 
 
 def test_custom_image_provider_config_writes_secret_to_env_and_redacts(monkeypatch, tmp_path):
@@ -4293,7 +5603,10 @@ def test_canonical_custom_vision_fingerprint_tracks_secret_and_network_identity(
 
 def test_named_custom_vision_provider_appears_in_vision_config(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
-    monkeypatch.setenv("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", "router-secret")
+    (tmp_path / ".env").write_text(
+        "TAIJI_VISION_CUSTOM_ROUTER_API_KEY=router-secret\n",
+        encoding="utf-8",
+    )
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump({
             "auxiliary": {"vision": {"provider": "custom:router", "model": "router-vl"}},
@@ -4317,7 +5630,6 @@ def test_named_custom_vision_provider_appears_in_vision_config(monkeypatch, tmp_
     assert row["transport"] == "openai_chat_completions"
     assert result["vision"]["key_status"]["env_var"] == "TAIJI_VISION_CUSTOM_ROUTER_API_KEY"
     assert "router-secret" not in json.dumps(result, ensure_ascii=False)
-    os.environ.pop("TAIJI_VISION_CUSTOM_ROUTER_API_KEY", None)
 
 
 def test_selecting_named_custom_vision_provider_stores_only_reference_and_model(
@@ -5173,6 +6485,7 @@ def _write_saved_image_gen_config(
 
 class _ProbeImageProvider:
     name = "dashscope"
+    _supports_pinned_image_request_binding = True
 
     def __init__(self, result):
         self.result = result
@@ -5252,6 +6565,436 @@ def test_image_gen_test_rejects_unconfigured_without_calling_provider(monkeypatc
     }
 
 
+def test_image_gen_test_classifies_unresolved_env_before_incomplete_config(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "image-gen-verification.json"
+    unresolved_model_env = "B3_GAP9_UNRESOLVED_IMAGE_MODEL"
+    monkeypatch.delenv(unresolved_model_env, raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": f"${{{unresolved_model_env}}}",
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=profile-b-key\n",
+        encoding="utf-8",
+    )
+    provider = _ProbeImageProvider({})
+    _install_probe_provider(monkeypatch, provider)
+
+    snapshot = model_config._capture_image_gen_config_snapshot()
+    result = model_config.test_image_gen_config()
+
+    assert snapshot.configured is False
+    assert snapshot.effective_config_resolved is False
+    assert result["ok"] is False
+    assert result["status"] == "configured_unverified"
+    assert result["error_code"] == "unresolved_effective_config"
+    assert provider.calls == []
+    assert not state_path.exists()
+
+
+@pytest.mark.parametrize(
+    (
+        "image_cfg",
+        "api_key",
+        "expected_configured",
+        "expected_effective_config_resolved",
+        "expected_status",
+        "expected_error_code",
+    ),
+    [
+        (
+            {},
+            "",
+            False,
+            False,
+            "unconfigured",
+            "image_gen_not_configured",
+        ),
+        (
+            {"provider": "disabled", "model": ""},
+            "",
+            False,
+            False,
+            "unconfigured",
+            "image_gen_not_configured",
+        ),
+        (
+            {
+                "provider": "dashscope",
+                "model": "${B3_GAP9_UNRESOLVED_IMAGE_MODEL}",
+            },
+            "profile-b-key",
+            False,
+            False,
+            "configured_unverified",
+            "unresolved_effective_config",
+        ),
+        (
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+            },
+            "",
+            False,
+            True,
+            "unconfigured",
+            "image_gen_not_configured",
+        ),
+    ],
+)
+def test_image_gen_preflight_classification_matches_all_entry_points(
+    monkeypatch,
+    tmp_path,
+    image_cfg,
+    api_key,
+    expected_configured,
+    expected_effective_config_resolved,
+    expected_status,
+    expected_error_code,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "image-gen-verification.json"
+    monkeypatch.delenv("B3_GAP9_UNRESOLVED_IMAGE_MODEL", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_: [],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "get_custom_image_provider_configs",
+        lambda: {"providers": []},
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"image_gen": image_cfg}, sort_keys=False),
+        encoding="utf-8",
+    )
+    env_value = (
+        f"DASHSCOPE_API_KEY={api_key}\n"
+        if api_key
+        else "UNRELATED_TEST_VALUE=present\n"
+    )
+    (tmp_path / ".env").write_text(env_value, encoding="utf-8")
+    provider = _ProbeImageProvider({})
+    _install_probe_provider(monkeypatch, provider)
+
+    snapshot = model_config._capture_image_gen_config_snapshot()
+    direct_public = model_config._public_image_gen_verification(
+        image_cfg,
+        profile="default",
+    )
+    get_public = model_config.get_image_gen_config()["image_gen"][
+        "verification"
+    ]
+    probe = model_config.test_image_gen_config()
+
+    assert snapshot.configured is expected_configured
+    assert (
+        snapshot.effective_config_resolved
+        is expected_effective_config_resolved
+    )
+    for result in (direct_public, get_public, probe):
+        assert result["status"] == expected_status
+        assert result["error_code"] == expected_error_code
+    assert provider.calls == []
+    assert not state_path.exists()
+
+
+def test_image_gen_test_rejects_unresolved_runtime_without_calling_provider(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "image-gen-verification.json"
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                    "options": {
+                        "endpoint_mode": "custom",
+                        "base_url": "https://invalid-image.example.test/v1",
+                    },
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=profile-b-key\n",
+        encoding="utf-8",
+    )
+    provider = _ProbeImageProvider({})
+    _install_probe_provider(monkeypatch, provider)
+
+    result = model_config.test_image_gen_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "configured_unverified"
+    assert result["error_code"] == "unresolved_effective_config"
+    assert provider.calls == []
+    assert not state_path.exists()
+
+
+def test_image_gen_probe_discards_its_verifying_state_after_key_rotation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "image-gen-verification.json"
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+    _write_saved_image_gen_config(tmp_path)
+    generated = tmp_path / "cache" / "images" / "rotated.png"
+
+    def rotate_key_during_probe():
+        (tmp_path / ".env").write_text(
+            "DASHSCOPE_API_KEY=rotated-during-probe\n",
+            encoding="utf-8",
+        )
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nrotated")
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    _install_probe_provider(
+        monkeypatch,
+        _ProbeImageProvider(rotate_key_during_probe),
+    )
+
+    result = model_config.test_image_gen_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "configured_unverified"
+    assert result["error_code"] == "image_gen_probe_superseded"
+    assert not state_path.exists()
+    assert (
+        model_config.get_image_gen_config()["image_gen"]["verification"][
+            "status"
+        ]
+        != "verified"
+    )
+
+
+def test_image_probe_uses_captured_dashscope_binding_after_config_rotation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    before_root = "https://before-image.example.test"
+    after_root = "https://after-image.example.test"
+
+    def write_profile(root, secret):
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "image_gen": {
+                        "provider": "dashscope",
+                        "model": "qwen-image-2.0-pro",
+                        "options": {
+                            "endpoint_mode": "custom",
+                            "base_url": root,
+                        },
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / ".env").write_text(
+            f"DASHSCOPE_API_KEY={secret}\n",
+            encoding="utf-8",
+        )
+
+    write_profile(before_root, "before-secret")
+    model_config._ensure_image_gen_plugins_registered()
+    from agent.image_gen_registry import get_provider
+
+    selected = get_provider("dashscope")
+    assert selected is not None
+    dashscope = __import__(
+        type(selected).__module__,
+        fromlist=["cached_success"],
+    )
+    captured = {}
+
+    def fake_post_json(**kwargs):
+        captured["url"] = kwargs["url"]
+        captured["authorization"] = kwargs["headers"]["Authorization"]
+        return {
+            "data": [{"url": "https://cdn.example.test/probe.png"}]
+        }, None
+
+    def fake_cached_success(**kwargs):
+        image_path = tmp_path / "cache" / "images" / "pinned-probe.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\npinned")
+        return {
+            "success": True,
+            "image": str(image_path),
+            "provider": "dashscope",
+            "model": kwargs["model"],
+        }
+
+    monkeypatch.setattr(dashscope, "post_json", fake_post_json)
+    monkeypatch.setattr(dashscope, "cached_success", fake_cached_success)
+    monkeypatch.setattr(dashscope, "is_safe_url", lambda *_: True)
+    capture_snapshot = model_config._capture_image_gen_config_snapshot
+
+    def capture_then_rotate_profile():
+        snapshot = capture_snapshot()
+        write_profile(after_root, "after-secret")
+        return snapshot
+
+    monkeypatch.setattr(
+        model_config,
+        "_capture_image_gen_config_snapshot",
+        capture_then_rotate_profile,
+    )
+
+    result = model_config.test_image_gen_config()
+
+    from agent.alibaba_endpoints import IMAGE_GENERATION_PATH
+
+    assert result["error_code"] == "image_gen_probe_superseded"
+    assert captured == {
+        "url": before_root + IMAGE_GENERATION_PATH,
+        "authorization": "Bearer before-secret",
+    }
+    assert "after-secret" not in json.dumps(captured)
+    assert after_root not in json.dumps(captured)
+
+
+def test_image_probe_uses_captured_custom_binding_after_config_rotation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    before_root = "https://before-custom.example.test/v1"
+    after_root = "https://after-custom.example.test/v1"
+    secret_env = "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY"
+
+    def write_profile(root, secret):
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "custom_image_providers": [
+                        {
+                            "id": "router",
+                            "name": "Router",
+                            "base_url": root,
+                            "api_key_env": secret_env,
+                            "models": ["image-model"],
+                            "default_model": "image-model",
+                        }
+                    ],
+                    "image_gen": {
+                        "provider": "custom:router",
+                        "model": "image-model",
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / ".env").write_text(
+            f"{secret_env}={secret}\n",
+            encoding="utf-8",
+        )
+
+    write_profile(before_root, "before-custom-secret")
+    import agent.custom_image_providers as custom_image_providers
+
+    captured = {}
+
+    @contextmanager
+    def fake_request(**kwargs):
+        captured["url"] = kwargs["url"]
+        captured["authorization"] = kwargs["headers"]["Authorization"]
+        yield SimpleNamespace(status_code=200)
+
+    def fake_save_b64(_payload, *, prefix):
+        image_path = tmp_path / "cache" / "images" / f"{prefix}.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\ncustom")
+        return image_path
+
+    monkeypatch.setattr(
+        custom_image_providers,
+        "request_pinned_https",
+        fake_request,
+    )
+    monkeypatch.setattr(
+        custom_image_providers,
+        "read_bounded_json",
+        lambda _response: {"data": [{"b64_json": "aW1hZ2U="}]},
+    )
+    monkeypatch.setattr(
+        custom_image_providers,
+        "save_b64_image",
+        fake_save_b64,
+    )
+    capture_snapshot = model_config._capture_image_gen_config_snapshot
+
+    def capture_then_rotate_profile():
+        snapshot = capture_snapshot()
+        write_profile(after_root, "after-custom-secret")
+        return snapshot
+
+    monkeypatch.setattr(
+        model_config,
+        "_capture_image_gen_config_snapshot",
+        capture_then_rotate_profile,
+    )
+
+    result = model_config.test_image_gen_config()
+
+    assert result["error_code"] == "image_gen_probe_superseded"
+    assert captured == {
+        "url": before_root + "/images/generations",
+        "authorization": "Bearer before-custom-secret",
+    }
+    assert "after-custom-secret" not in json.dumps(captured)
+    assert after_root not in json.dumps(captured)
+
+
 def test_image_gen_saved_config_is_not_unconfigured_when_provider_cannot_attempt(
     monkeypatch, tmp_path
 ):
@@ -5260,6 +7003,8 @@ def test_image_gen_saved_config_is_not_unconfigured_when_provider_cannot_attempt
     _write_saved_image_gen_config(tmp_path)
     provider = _ProbeImageProvider({})
     provider.is_available = lambda: False
+    provider._supports_pinned_image_request_binding = False
+    provider._allow_legacy_image_probe_test_seam = True
     _install_probe_provider(monkeypatch, provider)
 
     public = model_config.get_image_gen_config()["image_gen"]["verification"]
@@ -5358,12 +7103,21 @@ def test_image_gen_probe_verifies_identity_magic_and_removes_probe_file(monkeypa
     result = model_config.test_image_gen_config()
 
     assert result["status"] == "verified"
-    assert provider.calls == [{
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    from agent.image_gen_verification import ImageGenRequestBinding
+
+    assert isinstance(call["_runtime_binding"], ImageGenRequestBinding)
+    assert {
+        key: value
+        for key, value in call.items()
+        if key != "_runtime_binding"
+    } == {
         "prompt": "生成一张简洁的蓝色几何图形测试图，不包含人物、文字或品牌。",
         "aspect_ratio": "square",
         "num_images": 1,
         "model": "qwen-image-2.0-pro",
-    }]
+    }
     assert not generated.exists()
     public_dump = json.dumps(result, ensure_ascii=False)
     persisted_dump = state_path.read_text(encoding="utf-8")
@@ -5554,17 +7308,17 @@ def test_image_gen_probe_isolated_by_profile_and_newer_probe_wins(monkeypatch, t
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "changes_identity"),
     [
-        ("base_url", "https://other.example.com/v1"),
-        ("default_model", "image-model-v2"),
-        ("transport", "vendor_native_images"),
-        ("response_format", "url"),
-        ("timeout_seconds", 90),
+        ("base_url", "https://other.example.com/v1", True),
+        ("default_model", "image-model-v2", True),
+        ("transport", "vendor_native_images", False),
+        ("response_format", "url", True),
+        ("timeout_seconds", 90, True),
     ],
 )
 def test_custom_image_identity_changes_verification_fingerprint(
-    monkeypatch, tmp_path, field, value
+    monkeypatch, tmp_path, field, value, changes_identity
 ):
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     base_entry = {
@@ -5586,19 +7340,26 @@ def test_custom_image_identity_changes_verification_fingerprint(
     (tmp_path / ".env").write_text(
         "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY=custom-secret\n", encoding="utf-8"
     )
-    before = model_config._image_gen_config_fingerprint(
-        config["image_gen"], profile="default", config_data=config
-    )
+    before = model_config._capture_image_gen_config_snapshot().fingerprint
     config["custom_image_providers"][0] = {**base_entry, field: value}
-
-    after = model_config._image_gen_config_fingerprint(
-        config["image_gen"], profile="default", config_data=config
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(config),
+        encoding="utf-8",
     )
+    after = model_config._capture_image_gen_config_snapshot().fingerprint
     state_path = tmp_path / "state.json"
     state_path.write_text(
-        json.dumps({"fingerprint": before, "status": "verified"}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_version": (
+                    model_config.CAPABILITY_VERIFICATION_SCHEMA_VERSION
+                ),
+                "fingerprint": before,
+                "status": "verified",
+            }
+        ),
+        encoding="utf-8",
     )
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path)
     provider = _ProbeImageProvider({})
     provider.name = "custom:router"
@@ -5608,11 +7369,13 @@ def test_custom_image_identity_changes_verification_fingerprint(
         lambda name: provider if name == "custom:router" else None,
     )
 
-    assert before != after
+    assert (before != after) is changes_identity
     assert "custom-secret" not in before + after
     assert model_config._public_image_gen_verification(
         config["image_gen"], profile="default"
-    )["status"] == "configured_unverified"
+    )["status"] == (
+        "configured_unverified" if changes_identity else "verified"
+    )
     assert "custom-secret" not in state_path.read_text(encoding="utf-8")
 
 
@@ -5856,3 +7619,338 @@ def test_probe_cache_accepts_runtime_home_parent_symlink(monkeypatch, tmp_path):
     assert owned is not None
     assert model_config._remove_probe_cleanup_candidate(candidate) is True
     assert not result_path.exists()
+
+
+_B3_VERIFICATION_SCHEMA_VERSION = 1
+
+
+def _b3_verification_fixture(
+    monkeypatch,
+    tmp_path,
+    capability,
+    *,
+    endpoint_env="",
+):
+    """Build a real WebUI probe/public-projection seam for B3 RED tests."""
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / f"{capability}-verification.json"
+    config_path = tmp_path / "config.yaml"
+    endpoint = f"${{{endpoint_env}}}" if endpoint_env else ""
+
+    if capability == "vision":
+        vision = {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        if endpoint:
+            vision.update(
+                {
+                    "endpoint_mode": "custom",
+                    "base_url": endpoint,
+                }
+            )
+        config_path.write_text(
+            yaml.safe_dump({"auxiliary": {"vision": vision}}),
+            encoding="utf-8",
+        )
+        (tmp_path / ".env").write_text(
+            "DASHSCOPE_API_KEY=b3-vision-key\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_vision_verification_state_path",
+            lambda *_: state_path,
+        )
+
+        async def vision_probe(**_kwargs):
+            return json.dumps(
+                {
+                    "success": True,
+                    "analysis": "TAIJI-VISION-CHECK-7319",
+                    "resolved_provider": "alibaba",
+                    "resolved_model": "qwen3-vl-plus",
+                }
+            )
+
+        import tools.vision_tools as vision_tools
+
+        monkeypatch.setattr(vision_tools, "vision_analyze_tool", vision_probe)
+        return {
+            "state_path": state_path,
+            "config_path": config_path,
+            "verify": model_config.test_vision_config,
+            "public_status": lambda: model_config.get_vision_config()["vision"][
+                "verification"
+            ]["status"],
+            "runtime_endpoint": lambda cfg: cfg["auxiliary"]["vision"]["base_url"],
+        }
+
+    image_cfg = {
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+    }
+    if endpoint:
+        image_cfg["options"] = {
+            "endpoint_mode": "custom",
+            "base_url": endpoint,
+        }
+    config_path.write_text(
+        yaml.safe_dump({"image_gen": image_cfg}),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=b3-image-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_: state_path,
+    )
+    generated = tmp_path / "cache" / "images" / "b3-probe.png"
+
+    def image_probe():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nb3")
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    _install_probe_provider(
+        monkeypatch,
+        _ProbeImageProvider(image_probe),
+    )
+    return {
+        "state_path": state_path,
+        "config_path": config_path,
+        "verify": model_config.test_image_gen_config,
+        "public_status": lambda: model_config.get_image_gen_config()["image_gen"][
+            "verification"
+        ]["status"],
+        "runtime_endpoint": lambda cfg: cfg["image_gen"]["options"]["base_url"],
+    }
+
+
+@pytest.mark.parametrize("capability", ("vision", "image"))
+def test_superseded_probe_compare_delete_preserves_new_generation(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    seam = _b3_verification_fixture(monkeypatch, tmp_path, capability)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_lock = threading.Lock()
+    call_count = {"value": 0}
+
+    def next_call_number():
+        with call_lock:
+            call_count["value"] += 1
+            return call_count["value"]
+
+    if capability == "vision":
+        async def ordered_vision_probe(**_kwargs):
+            call_number = next_call_number()
+            if call_number == 1:
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            return json.dumps(
+                {
+                    "success": True,
+                    "analysis": "TAIJI-VISION-CHECK-7319",
+                    "resolved_provider": "alibaba",
+                    "resolved_model": "qwen3-vl-plus",
+                }
+            )
+
+        import tools.vision_tools as vision_tools
+
+        monkeypatch.setattr(
+            vision_tools,
+            "vision_analyze_tool",
+            ordered_vision_probe,
+        )
+        superseded_error = "vision_probe_superseded"
+    else:
+        def ordered_image_probe():
+            call_number = next_call_number()
+            if call_number == 1:
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            generated = (
+                tmp_path
+                / "cache"
+                / "images"
+                / f"generation-{call_number}.png"
+            )
+            generated.parent.mkdir(parents=True, exist_ok=True)
+            generated.write_bytes(b"\x89PNG\r\n\x1a\ngeneration")
+            return {
+                "success": True,
+                "image": str(generated),
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+            }
+
+        _install_probe_provider(
+            monkeypatch,
+            _ProbeImageProvider(ordered_image_probe),
+        )
+        superseded_error = "image_gen_probe_superseded"
+
+    results = {}
+    first = threading.Thread(
+        target=lambda: results.setdefault("first", seam["verify"]())
+    )
+    first.start()
+    assert first_started.wait(timeout=5)
+    results["second"] = seam["verify"]()
+    state_after_second = json.loads(
+        seam["state_path"].read_text(encoding="utf-8")
+    )
+    release_first.set()
+    first.join(timeout=5)
+    final_state = json.loads(
+        seam["state_path"].read_text(encoding="utf-8")
+    )
+
+    assert not first.is_alive()
+    assert results["second"]["status"] == "verified"
+    assert results["first"]["error_code"] == superseded_error
+    assert state_after_second["status"] == "verified"
+    assert (
+        state_after_second["diagnostic_id"]
+        == results["second"]["diagnostic_id"]
+    )
+    assert final_state == state_after_second
+    assert call_count["value"] == 2
+
+
+def _b3_rewrite_effective_endpoint(config_path, capability, endpoint, nonce):
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if capability == "vision":
+        config["auxiliary"]["vision"]["base_url"] = endpoint
+    else:
+        config["image_gen"]["options"]["base_url"] = endpoint
+    config["b3_reload_nonce"] = nonce
+    config_path.write_text(
+        yaml.safe_dump(config),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("capability", ("vision", "image"))
+def test_webui_verification_state_requires_current_schema_version(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    seam = _b3_verification_fixture(monkeypatch, tmp_path, capability)
+
+    verified = seam["verify"]()
+    assert verified["status"] == "verified"
+    persisted = json.loads(seam["state_path"].read_text(encoding="utf-8"))
+
+    violations = []
+    if persisted.get("schema_version") != _B3_VERIFICATION_SCHEMA_VERSION:
+        violations.append(
+            "probe writer omitted current schema_version=1"
+        )
+    for label, schema_version in (
+        ("missing", None),
+        ("old", _B3_VERIFICATION_SCHEMA_VERSION - 1),
+        ("unknown_new", _B3_VERIFICATION_SCHEMA_VERSION + 1),
+    ):
+        candidate = dict(persisted)
+        if schema_version is None:
+            candidate.pop("schema_version", None)
+        else:
+            candidate["schema_version"] = schema_version
+        seam["state_path"].write_text(
+            json.dumps(candidate),
+            encoding="utf-8",
+        )
+        if seam["public_status"]() == "verified":
+            violations.append(f"{label} schema inherited verified")
+
+    current = dict(persisted)
+    current["schema_version"] = _B3_VERIFICATION_SCHEMA_VERSION
+    seam["state_path"].write_text(
+        json.dumps(current),
+        encoding="utf-8",
+    )
+    assert seam["public_status"]() == "verified"
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.parametrize("capability", ("vision", "image"))
+def test_webui_effective_fingerprint_expands_env_or_fails_unresolved(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    endpoint_env = f"B3_{capability.upper()}_ENDPOINT"
+    placeholder = f"${{{endpoint_env}}}"
+    endpoint_suffix = "/v1" if capability == "vision" else ""
+    endpoint_a = f"https://{capability}-a.example.test{endpoint_suffix}"
+    endpoint_b = f"https://{capability}-b.example.test{endpoint_suffix}"
+    monkeypatch.setenv(endpoint_env, endpoint_a)
+    seam = _b3_verification_fixture(
+        monkeypatch,
+        tmp_path,
+        capability,
+        endpoint_env=endpoint_env,
+    )
+
+    verified = seam["verify"]()
+    assert verified["status"] == "verified"
+
+    from hermes_cli.config import load_config
+
+    violations = []
+    _b3_rewrite_effective_endpoint(
+        seam["config_path"],
+        capability,
+        endpoint_a,
+        "same-effective-endpoint",
+    )
+    runtime_config = load_config()
+    assert seam["runtime_endpoint"](runtime_config) == endpoint_a
+    if seam["public_status"]() != "verified":
+        violations.append(
+            "placeholder and its runtime-expanded endpoint produced different fingerprints"
+        )
+
+    monkeypatch.setenv(endpoint_env, endpoint_b)
+    _b3_rewrite_effective_endpoint(
+        seam["config_path"],
+        capability,
+        placeholder,
+        "changed-effective-endpoint-value",
+    )
+    runtime_config = load_config()
+    assert seam["runtime_endpoint"](runtime_config) == endpoint_b
+    if seam["public_status"]() == "verified":
+        violations.append(
+            "changed runtime-expanded endpoint inherited verified"
+        )
+
+    monkeypatch.delenv(endpoint_env)
+    _b3_rewrite_effective_endpoint(
+        seam["config_path"],
+        capability,
+        placeholder,
+        "unresolved-effective-endpoint-token",
+    )
+    runtime_config = load_config()
+    assert seam["runtime_endpoint"](runtime_config) == placeholder
+    if seam["public_status"]() == "verified":
+        violations.append(
+            "unresolved endpoint token inherited verified"
+        )
+
+    assert violations == [], "; ".join(violations)

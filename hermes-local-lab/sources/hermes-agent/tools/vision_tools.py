@@ -29,6 +29,7 @@ Usage:
 """
 
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -37,7 +38,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
-from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from agent.auxiliary_client import (
+    VisionRequestBinding,
+    async_call_llm,
+    extract_content_or_reasoning,
+)
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
@@ -46,6 +51,64 @@ import sys
 logger = logging.getLogger(__name__)
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
+_VISION_AUTHORIZATION_SNAPSHOT: contextvars.ContextVar[
+    Dict[str, Any] | None
+] = contextvars.ContextVar(
+    "vision_authorization_snapshot",
+    default=None,
+)
+
+
+def _vision_authorization_is_current(expected: Dict[str, Any]) -> bool:
+    """Revalidate the exact immutable snapshot immediately before Provider I/O."""
+    from agent.image_gen_verification import (
+        CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    )
+    from agent.image_runtime import verification_runtime_snapshot
+
+    current = verification_runtime_snapshot("vision")
+    return bool(
+        current.get("schema_version")
+        == CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        and current.get("schema_version") == expected.get("schema_version")
+        and str(current.get("fingerprint") or "")
+        == str(expected.get("fingerprint") or "")
+        and str(current.get("status") or "") == "verified"
+        and str(current.get("provider") or "")
+        == str(expected.get("provider") or "")
+        and str(current.get("model") or "")
+        == str(expected.get("model") or "")
+        and bool(current.get("available"))
+    )
+
+
+def _require_current_vision_authorization() -> None:
+    expected = _VISION_AUTHORIZATION_SNAPSHOT.get()
+    if expected is not None and not _vision_authorization_is_current(expected):
+        raise RuntimeError("vision_capability_stale")
+
+
+async def _await_with_vision_authorization(
+    awaitable: Awaitable[str],
+    snapshot: Dict[str, Any],
+) -> str:
+    token = _VISION_AUTHORIZATION_SNAPSHOT.set(dict(snapshot))
+    try:
+        return await awaitable
+    finally:
+        _VISION_AUTHORIZATION_SNAPSHOT.reset(token)
+
+
+async def _blocked_vision_result(error_code: str, message: str) -> str:
+    return json.dumps(
+        {
+            "success": False,
+            "status": "blocked",
+            "error": message,
+            "error_code": error_code,
+        },
+        ensure_ascii=False,
+    )
 
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
@@ -637,6 +700,7 @@ async def vision_analyze_tool(
     *,
     provider: str = None,
     strict_target: bool = False,
+    _runtime_binding: VisionRequestBinding | None = None,
 ) -> str:
     """
     Analyze an image from a URL or local file path using vision AI.
@@ -817,8 +881,11 @@ async def vision_analyze_tool(
         if strict_target:
             call_kwargs["no_fallback"] = True
             call_kwargs["resolution_out"] = resolution
+        if _runtime_binding is not None:
+            call_kwargs["vision_binding"] = _runtime_binding
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
+            _require_current_vision_authorization()
             response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
             if (_is_image_size_error(_api_err)
@@ -832,6 +899,7 @@ async def vision_analyze_tool(
                 image_data_url = _resize_image_for_vision(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
+                _require_current_vision_authorization()
                 response = await async_call_llm(**call_kwargs)
             else:
                 raise
@@ -850,6 +918,7 @@ async def vision_analyze_tool(
         # Retry once on empty content (reasoning-only response)
         if not analysis:
             logger.warning("Vision LLM returned empty content, retrying once")
+            _require_current_vision_authorization()
             response = await async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
 
@@ -1074,15 +1143,54 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
             )
             return _vision_analyze_native(image_url, question)
     except Exception as exc:
-        logger.debug("Native vision fast-path check failed; using aux LLM: %s", exc)
+        logger.warning(
+            "vision_analyze route decision failed closed: %s",
+            exc,
+        )
+        return _blocked_vision_result(
+            "vision_route_unknown",
+            "当前主模型的识图路由无法确认，未调用辅助识图服务。",
+        )
+
+    if _mode not in {"native", "text"}:
+        return _blocked_vision_result(
+            "vision_route_unknown",
+            "当前主模型的识图路由无法确认，未调用辅助识图服务。",
+        )
+
+    from agent.image_gen_verification import (
+        CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    )
+    from agent.image_runtime import verification_runtime_snapshot
+
+    runtime_snapshot = verification_runtime_snapshot("vision")
+    if not (
+        runtime_snapshot.get("schema_version")
+        == CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        and runtime_snapshot.get("status") == "verified"
+        and runtime_snapshot.get("available")
+        and str(runtime_snapshot.get("fingerprint") or "")
+        and str(runtime_snapshot.get("provider") or "")
+        and str(runtime_snapshot.get("model") or "")
+    ):
+        return _blocked_vision_result(
+            str(runtime_snapshot.get("reason_code") or "vision_not_verified"),
+            "辅助识图配置未通过当前版本的真实验证，未调用 Provider。",
+        )
 
     # Legacy path: aux LLM describes the image and we return its text.
     full_prompt = (
         "Fully describe and explain everything about this image, then answer the "
         f"following question:\n\n{question}"
     )
-    model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
-    return vision_analyze_tool(image_url, full_prompt, model)
+    call = vision_analyze_tool(
+        image_url,
+        full_prompt,
+        str(runtime_snapshot.get("model") or ""),
+        provider=str(runtime_snapshot.get("provider") or ""),
+        strict_target=True,
+    )
+    return _await_with_vision_authorization(call, runtime_snapshot)
 
 
 registry.register(

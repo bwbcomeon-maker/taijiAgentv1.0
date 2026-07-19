@@ -67,6 +67,27 @@ class TestStoredPromptReuse:
         _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
         assert agent._cached_system_prompt == stored
 
+    def test_force_rebuild_skips_stored_prompt_and_persists_new_prompt(self):
+        """A tool-surface refresh must not restore a stale DB prompt."""
+        db = MagicMock()
+        db.get_session.return_value = {"system_prompt": "OLD_TOOL_SURFACE"}
+        agent = _make_agent(session_db=db, prebuilt_prompt="NEW_TOOL_SURFACE")
+
+        _restore_or_build_system_prompt(
+            agent,
+            None,
+            [{"role": "user", "content": "continuation"}],
+            force_rebuild=True,
+        )
+
+        db.get_session.assert_not_called()
+        agent._build_system_prompt.assert_called_once_with(None)
+        db.update_system_prompt.assert_called_once_with(
+            agent.session_id,
+            "NEW_TOOL_SURFACE",
+        )
+        assert agent._cached_system_prompt == "NEW_TOOL_SURFACE"
+
 
 # ---------------------------------------------------------------------------
 # Legitimate fresh-build paths (no history, no DB)

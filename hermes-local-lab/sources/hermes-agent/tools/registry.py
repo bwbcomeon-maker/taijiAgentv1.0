@@ -121,12 +121,14 @@ class ToolEntry:
 _CHECK_FN_TTL_SECONDS = 30.0
 _check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
 _check_fn_cache_lock = threading.Lock()
+_check_fn_cache_epoch = 0
 
 
 def _check_fn_cached(fn: Callable) -> bool:
     """Return bool(fn()), TTL-cached across calls. Swallows exceptions as False."""
     now = time.monotonic()
     with _check_fn_cache_lock:
+        epoch = _check_fn_cache_epoch
         cached = _check_fn_cache.get(fn)
         if cached is not None:
             ts, value = cached
@@ -137,14 +139,19 @@ def _check_fn_cached(fn: Callable) -> bool:
     except Exception:
         value = False
     with _check_fn_cache_lock:
-        _check_fn_cache[fn] = (now, value)
+        # An invalidation may have happened while fn() ran outside the lock.
+        # Never let that old result repopulate the new cache generation.
+        if epoch == _check_fn_cache_epoch:
+            _check_fn_cache[fn] = (now, value)
     return value
 
 
 def invalidate_check_fn_cache() -> None:
     """Drop all cached ``check_fn`` results. Call after config changes that
     affect tool availability (e.g. ``hermes tools enable``)."""
+    global _check_fn_cache_epoch
     with _check_fn_cache_lock:
+        _check_fn_cache_epoch += 1
         _check_fn_cache.clear()
 
 

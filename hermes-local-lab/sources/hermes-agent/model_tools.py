@@ -29,7 +29,11 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import discover_builtin_tools, registry
+from tools.registry import (
+    discover_builtin_tools,
+    invalidate_check_fn_cache,
+    registry,
+)
 from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
@@ -252,13 +256,53 @@ _LEGACY_TOOLSET_MAP = {
 # inner check_fn TTL cache in registry.py handles environment drift (Docker
 # daemon start/stop, env var changes, etc.) on a 30 s horizon.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
+_tool_defs_cache_lock = threading.RLock()
+_last_image_capability_identity: tuple | None = None
+
+
+def _image_capability_cache_identity() -> tuple:
+    """Return every immutable field that can change image tool exposure."""
+    from agent.image_runtime import verification_runtime_snapshot
+
+    snapshot = verification_runtime_snapshot("image_generation")
+    return (
+        snapshot.get("schema_version"),
+        str(snapshot.get("fingerprint") or ""),
+        str(snapshot.get("status") or ""),
+        bool(snapshot.get("available")),
+    )
 
 
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
     schema dependencies change (e.g. discord capability cache reset,
     execute_code sandbox reconfigured)."""
-    _tool_defs_cache.clear()
+    global _last_image_capability_identity
+    with _tool_defs_cache_lock:
+        _tool_defs_cache.clear()
+        _last_image_capability_identity = None
+
+
+def _transition_image_capability_identity_locked(identity: tuple) -> tuple:
+    """Publish one identity generation and invalidate both schema caches."""
+    global _last_image_capability_identity
+    if identity != _last_image_capability_identity:
+        _tool_defs_cache.clear()
+        invalidate_check_fn_cache()
+        _last_image_capability_identity = identity
+    return identity
+
+
+def _synchronize_image_capability_identity(observed_identity: tuple) -> tuple:
+    """Re-read under the outer-cache lock so paused readers cannot roll back."""
+    with _tool_defs_cache_lock:
+        current_identity = _image_capability_cache_identity()
+        identity = (
+            observed_identity
+            if observed_identity == current_identity
+            else current_identity
+        )
+        return _transition_image_capability_identity_locked(identity)
 
 
 def get_tool_definitions(
@@ -279,6 +323,19 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    global _last_resolved_tool_names, _last_image_capability_identity
+
+    initial_capability_identity = _synchronize_image_capability_identity(
+        _image_capability_cache_identity()
+    )
+
+    if not quiet_mode:
+        return _compute_tool_definitions(
+            enabled_toolsets,
+            disabled_toolsets,
+            quiet_mode,
+        )
+
     # Fast path: memoized result when the caller doesn't need stdout prints.
     # The cache key captures every argument-level input; the registry
     # generation captures registry mutations (MCP refresh, plugin load).
@@ -287,7 +344,13 @@ def get_tool_definitions(
     # user-visible config edits that affect dynamic schemas (execute_code
     # mode, discord action allowlist, etc.) without needing an explicit
     # invalidate hook on every config-writer.
-    if quiet_mode:
+    result: List[Dict[str, Any]] = []
+    for _attempt in range(2):
+        capability_identity = (
+            initial_capability_identity
+            if _attempt == 0
+            else _image_capability_cache_identity()
+        )
         try:
             from hermes_cli.config import get_config_path
             cfg_path = get_config_path()
@@ -301,19 +364,33 @@ def get_tool_definitions(
             registry._generation,
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
+            capability_identity,
         )
-        cached = _tool_defs_cache.get(cache_key)
-        if cached is not None:
-            # Update _last_resolved_tool_names so downstream callers see
-            # consistent state even on a cache hit.
-            global _last_resolved_tool_names
-            _last_resolved_tool_names = [t["function"]["name"] for t in cached]
-            # Return a shallow copy of the list but share the dict references —
-            # schemas are treated as read-only by all known callers.
-            return list(cached)
+        with _tool_defs_cache_lock:
+            # Identity can drift after the initial synchronization but before
+            # this lookup. Re-read while holding the outer-cache lock so a
+            # pending hit cannot return a schema from the revoked generation.
+            lookup_identity = _image_capability_cache_identity()
+            _transition_image_capability_identity_locked(lookup_identity)
+            if lookup_identity != capability_identity:
+                continue
+            cached = _tool_defs_cache.get(cache_key)
+            if cached is not None:
+                _last_resolved_tool_names = [
+                    t["function"]["name"] for t in cached
+                ]
+                return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
-    if quiet_mode:
+        result = _compute_tool_definitions(
+            enabled_toolsets,
+            disabled_toolsets,
+            quiet_mode,
+        )
+        final_identity = _image_capability_cache_identity()
+        if final_identity != capability_identity:
+            _synchronize_image_capability_identity(final_identity)
+            continue
+
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
         # schemas to self.tools) don't poison the cache. Without this, a
@@ -321,9 +398,32 @@ def get_tool_definitions(
         # agent inits and providers that enforce unique tool names
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
-        _tool_defs_cache[cache_key] = result
-        return list(result)
-    return result
+        with _tool_defs_cache_lock:
+            # Re-read while publishing so a stale compute can never refill the
+            # key after another thread observed and invalidated a new identity.
+            publish_identity = _image_capability_cache_identity()
+            _transition_image_capability_identity_locked(publish_identity)
+            if publish_identity == capability_identity:
+                _tool_defs_cache[cache_key] = result
+                return list(result)
+
+    # An identity that keeps changing cannot authorize image generation.
+    # Preserve all unrelated schemas and fail closed for this capability.
+    if not result:
+        result = _compute_tool_definitions(
+            enabled_toolsets,
+            disabled_toolsets,
+            quiet_mode,
+        )
+    filtered = [
+        tool
+        for tool in result
+        if str(tool.get("function", {}).get("name") or "") != "image_generate"
+    ]
+    _last_resolved_tool_names = [
+        tool["function"]["name"] for tool in filtered
+    ]
+    return filtered
 
 
 def _compute_tool_definitions(
@@ -747,6 +847,7 @@ def handle_function_call(
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
+    caller_capability_fingerprint: Optional[str] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -854,10 +955,18 @@ def handle_function_call(
                 enabled_tools=sandbox_enabled,
             )
         else:
+            dispatch_kwargs = {
+                "task_id": task_id,
+                "user_task": user_task,
+            }
+            if function_name == "image_generate":
+                dispatch_kwargs["caller_capability_fingerprint"] = (
+                    caller_capability_fingerprint
+                )
             result = registry.dispatch(
-                function_name, function_args,
-                task_id=task_id,
-                user_task=user_task,
+                function_name,
+                function_args,
+                **dispatch_kwargs,
             )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 

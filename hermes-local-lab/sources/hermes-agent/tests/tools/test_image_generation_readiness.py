@@ -2,11 +2,123 @@
 
 from __future__ import annotations
 
+import pytest
+
 from model_tools import get_tool_definitions
 
 
 def _tool_names(tool_defs):
     return {item["function"]["name"] for item in tool_defs}
+
+
+def _verification_snapshot(status: str = "configured_unverified"):
+    return {
+        "schema_version": 1,
+        "fingerprint": "test-image-config-fingerprint",
+        "status": status,
+        "effective_config_resolved": True,
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "image_cfg",
+        "expected_effective_config_resolved",
+        "expected_verification_status",
+        "expected_configured",
+        "expected_reason_code",
+    ),
+    [
+        ({}, False, "unconfigured", False, "not_configured"),
+        (
+            {"provider": "disabled", "model": ""},
+            False,
+            "unconfigured",
+            False,
+            "disabled",
+        ),
+        (
+            {
+                "provider": "dashscope",
+                "model": "${B3_GAP9_UNRESOLVED_IMAGE_MODEL}",
+            },
+            False,
+            "configured_unverified",
+            True,
+            "unresolved_effective_config",
+        ),
+        (
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+            },
+            True,
+            "configured_unverified",
+            True,
+            "authorization_required",
+        ),
+    ],
+)
+def test_readiness_classifies_empty_unresolved_and_unauthorized_targets(
+    monkeypatch,
+    tmp_path,
+    image_cfg,
+    expected_effective_config_resolved,
+    expected_verification_status,
+    expected_configured,
+    expected_reason_code,
+):
+    from agent.image_gen_verification import (
+        read_image_gen_verification_snapshot,
+    )
+    from tools import image_generation_tool as image_tool
+
+    monkeypatch.delenv("B3_GAP9_UNRESOLVED_IMAGE_MODEL", raising=False)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.delenv("FAL_API_KEY", raising=False)
+    config_data = {"image_gen": image_cfg}
+    snapshot = read_image_gen_verification_snapshot(
+        image_cfg,
+        profile="default",
+        config_data=config_data,
+        secret_value="",
+        state_root=tmp_path,
+    )
+
+    class _Provider:
+        name = "dashscope"
+
+        def is_available(self):
+            return False
+
+    monkeypatch.setattr(
+        image_tool,
+        "_load_image_gen_config",
+        lambda: image_cfg,
+    )
+    monkeypatch.setattr(
+        image_tool,
+        "_read_image_gen_verification_snapshot",
+        lambda *_: snapshot,
+    )
+    monkeypatch.setattr(image_tool, "check_fal_api_key", lambda: False)
+    monkeypatch.setattr(
+        image_tool,
+        "_iter_image_generation_providers",
+        lambda: [_Provider()] if image_cfg.get("provider") else [],
+    )
+
+    readiness = image_tool.get_image_generation_readiness()
+
+    assert (
+        snapshot["effective_config_resolved"]
+        is expected_effective_config_resolved
+    )
+    assert snapshot["status"] == expected_verification_status
+    assert readiness["verification_status"] == expected_verification_status
+    assert readiness["configured"] is expected_configured
+    assert readiness["available"] is False
+    assert readiness["reason_code"] == expected_reason_code
 
 
 def test_readiness_reports_configured_but_unavailable_without_provider_auth(monkeypatch):
@@ -31,6 +143,11 @@ def test_readiness_reports_configured_but_unavailable_without_provider_auth(monk
         "_iter_image_generation_providers",
         lambda: [_Provider()],
         raising=False,
+    )
+    monkeypatch.setattr(
+        image_tool,
+        "_read_image_gen_verification_snapshot",
+        lambda *_: _verification_snapshot(),
     )
 
     status = image_tool.get_image_generation_readiness()
@@ -73,7 +190,11 @@ def test_verified_provider_is_publicly_ready(monkeypatch):
     from tools import image_generation_tool as image_tool
 
     monkeypatch.setattr(image_tool, "_load_image_gen_config", lambda: {"provider": "dashscope", "model": "qwen-image"})
-    monkeypatch.setattr(image_tool, "_read_image_gen_verification_status", lambda *_: "verified", raising=False)
+    monkeypatch.setattr(
+        image_tool,
+        "_read_image_gen_verification_snapshot",
+        lambda *_: _verification_snapshot("verified"),
+    )
 
     class _Provider:
         name = "dashscope"
@@ -123,8 +244,8 @@ def test_readiness_supports_configured_custom_image_provider(monkeypatch):
     )
     monkeypatch.setattr(
         image_tool,
-        "_read_image_gen_verification_status",
-        lambda *_: "verified",
+        "_read_image_gen_verification_snapshot",
+        lambda *_: _verification_snapshot("verified"),
     )
     monkeypatch.delenv("TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY", raising=False)
 

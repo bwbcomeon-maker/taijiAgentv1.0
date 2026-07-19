@@ -28,6 +28,11 @@ import threading
 import uuid
 from typing import Any, Dict, Optional
 
+from agent.image_gen_verification import (
+    CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    image_gen_provider_target,
+)
+
 # fal_client is imported lazily — see _load_fal_client(). Pulling it
 # eagerly added ~64 ms to every CLI cold start because
 # discover_builtin_tools() imports this module unconditionally during
@@ -798,15 +803,30 @@ def _load_image_gen_full_config() -> Dict[str, Any]:
 
 
 def _iter_image_generation_providers():
-    """Return registered image generation providers, best-effort."""
+    """Return built-ins plus request-local custom providers, best-effort."""
     try:
         from agent.image_gen_registry import list_providers
-        from agent.custom_image_providers import register_configured_custom_image_providers
+        from agent.custom_image_providers import (
+            ConfigurableOpenAIImageProvider,
+            load_custom_image_provider_entries,
+        )
         from hermes_cli.plugins import _ensure_plugins_discovered
 
         _ensure_plugins_discovered()
-        register_configured_custom_image_providers()
-        return list(list_providers())
+        providers = [
+            provider
+            for provider in list_providers()
+            if not str(getattr(provider, "name", "") or "").startswith(
+                "custom:"
+            )
+        ]
+        providers.extend(
+            ConfigurableOpenAIImageProvider(entry)
+            for entry in load_custom_image_provider_entries(
+                _load_image_gen_full_config()
+            )
+        )
+        return providers
     except Exception as exc:
         logger.debug("Could not list image generation providers: %s", exc)
         return []
@@ -826,34 +846,47 @@ def _image_gen_public_message(reason_code: str) -> str:
     return "图像生成服务暂不可用，请检查太极智能体图像生成配置。"
 
 
-def _read_image_gen_verification_status(image_cfg: Dict[str, Any]) -> str:
-    """Read probe state through the Agent-owned cross-runtime contract."""
+def _read_image_gen_verification_snapshot(
+    image_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Read one versioned probe identity through the shared runtime contract."""
     try:
         from agent.image_gen_verification import (
-            active_profile_name,
-            image_gen_secret_env,
-            read_image_gen_verification_status,
+            image_gen_runtime_context,
+            image_gen_secret_value,
+            read_image_gen_verification_snapshot,
         )
-        from hermes_cli.config import load_env
 
+        runtime_context = image_gen_runtime_context()
         config_data = _load_image_gen_full_config()
         provider = str(image_cfg.get("provider") or "").strip().lower()
         credential_ref = str(image_cfg.get("credential_ref") or "").strip()
-        env_var = image_gen_secret_env(provider, credential_ref, config_data)
-        env_values = load_env()
-        secret = str(
-            (env_values.get(env_var) if isinstance(env_values, dict) and env_var else "")
-            or (os.getenv(env_var) if env_var else "")
-            or ""
-        ).strip()
-        return read_image_gen_verification_status(
+        secret = image_gen_secret_value(
+            provider,
+            credential_ref,
+            config_data,
+            config_path=runtime_context.config_path,
+        )
+        return read_image_gen_verification_snapshot(
             image_cfg,
-            profile=active_profile_name(),
+            profile=runtime_context.profile,
             config_data=config_data,
             secret_value=secret,
         )
     except Exception:
-        return "configured_unverified"
+        return {
+            "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+            "fingerprint": "",
+            "status": "configured_unverified",
+        }
+
+
+def _read_image_gen_verification_status(image_cfg: Dict[str, Any]) -> str:
+    """Compatibility wrapper for callers that only need the public status."""
+    return str(
+        _read_image_gen_verification_snapshot(image_cfg).get("status")
+        or "configured_unverified"
+    )
 
 
 def get_image_generation_readiness() -> Dict[str, Any]:
@@ -867,18 +900,48 @@ def get_image_generation_readiness() -> Dict[str, Any]:
     image_cfg = _load_image_gen_config()
     provider = str(image_cfg.get("provider") or "").strip().lower()
     model = str(image_cfg.get("model") or "").strip()
-    disabled_values = {"none", "disabled", "off", "false", "0"}
+    provider_target = image_gen_provider_target(provider)
+    verification = _read_image_gen_verification_snapshot(image_cfg)
+    verification_status = str(
+        verification.get("status") or "configured_unverified"
+    )
+    effective_config_resolved = bool(
+        verification.get("effective_config_resolved", True)
+    )
 
-    if provider in disabled_values:
+    def finalize(payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(payload)
+        fingerprint = str(verification.get("fingerprint") or "")
+        result.update(
+            {
+                "verification_status": verification_status,
+                "verification_schema_version": verification.get(
+                    "schema_version"
+                ),
+                "verification_fingerprint": fingerprint,
+                "capability_fingerprint": fingerprint,
+                "runtime_fingerprint": fingerprint,
+            }
+        )
+        if provider_target and not effective_config_resolved:
+            result.update(
+                {
+                    "available": False,
+                    "reason_code": "unresolved_effective_config",
+                }
+            )
+        return result
+
+    if provider and not provider_target:
         reason = "disabled"
-        return {
+        return finalize({
             "configured": False,
             "available": False,
             "reason_code": reason,
             "public_message": _image_gen_public_message(reason),
             "provider": provider,
             "model": model,
-        }
+        })
 
     has_inline_config = bool(
         provider
@@ -887,15 +950,13 @@ def get_image_generation_readiness() -> Dict[str, Any]:
         or str(image_cfg.get("key_env") or image_cfg.get("api_key_env") or "").strip()
     )
     configured = bool(has_inline_config or os.getenv("FAL_KEY") or os.getenv("FAL_API_KEY"))
-    verification_status = _read_image_gen_verification_status(image_cfg)
-
     if provider in {"", "fal"}:
         try:
             if check_fal_api_key():
                 _load_fal_client()
                 verified = verification_status == "verified"
                 reason = "ready" if verified else "verification_required"
-                return {
+                return finalize({
                     "configured": True,
                     "available": verified,
                     "reason_code": reason,
@@ -903,17 +964,17 @@ def get_image_generation_readiness() -> Dict[str, Any]:
                     "provider": provider or "fal",
                     "model": model,
                     "verification_status": verification_status,
-                }
+                })
         except ImportError:
             reason = "provider_unavailable"
-            return {
+            return finalize({
                 "configured": True,
                 "available": False,
                 "reason_code": reason,
                 "public_message": _image_gen_public_message(reason),
                 "provider": provider or "fal",
                 "model": model,
-            }
+            })
 
     providers = _iter_image_generation_providers()
     if provider:
@@ -923,14 +984,14 @@ def get_image_generation_readiness() -> Dict[str, Any]:
         )
         if selected is None:
             reason = "provider_unavailable"
-            return {
+            return finalize({
                 "configured": True,
                 "available": False,
                 "reason_code": reason,
                 "public_message": _image_gen_public_message(reason),
                 "provider": provider,
                 "model": model,
-            }
+            })
         try:
             can_attempt = bool(selected.is_available())
         except Exception:
@@ -942,7 +1003,7 @@ def get_image_generation_readiness() -> Dict[str, Any]:
             if available
             else ("verification_required" if can_attempt else "authorization_required")
         )
-        return {
+        return finalize({
             "configured": True,
             "available": available,
             "reason_code": reason,
@@ -950,14 +1011,14 @@ def get_image_generation_readiness() -> Dict[str, Any]:
             "provider": provider,
             "model": model,
             "verification_status": verification_status,
-        }
+        })
 
     for item in providers:
         try:
             if item.is_available():
                 verified = verification_status == "verified"
                 reason = "ready" if verified else "verification_required"
-                return {
+                return finalize({
                     "configured": True,
                     "available": verified,
                     "reason_code": reason,
@@ -965,19 +1026,19 @@ def get_image_generation_readiness() -> Dict[str, Any]:
                     "provider": str(getattr(item, "name", "") or ""),
                     "model": model,
                     "verification_status": verification_status,
-                }
+                })
         except Exception:
             continue
 
     reason = "authorization_required" if configured else "not_configured"
-    return {
+    return finalize({
         "configured": configured,
         "available": False,
         "reason_code": reason,
         "public_message": _image_gen_public_message(reason),
         "provider": provider,
         "model": model,
-    }
+    })
 
 
 def check_image_generation_requirements() -> bool:
@@ -1092,7 +1153,35 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _same_authorization_snapshot(
+    expected: Dict[str, Any],
+) -> bool:
+    from agent.image_gen_verification import (
+        CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    )
+    from agent.image_runtime import verification_runtime_snapshot
+
+    current = verification_runtime_snapshot("image_generation")
+    return bool(
+        current.get("schema_version")
+        == CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        and current.get("schema_version") == expected.get("schema_version")
+        and str(current.get("fingerprint") or "")
+        == str(expected.get("fingerprint") or "")
+        and str(current.get("status") or "") == "verified"
+        and str(current.get("status") or "")
+        == str(expected.get("status") or "")
+        and bool(current.get("available"))
+        and bool(current.get("available")) == bool(expected.get("available"))
+    )
+
+
+def _dispatch_to_plugin_provider(
+    prompt: str,
+    aspect_ratio: str,
+    *,
+    runtime_snapshot: Dict[str, Any] | None = None,
+):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -1104,28 +1193,44 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     pipeline via ``_it`` indirection so behavior is identical to the
     direct call, just routed through the registry).
     """
-    configured = _read_configured_image_provider()
+    configured = (
+        str(runtime_snapshot.get("provider") or "").strip()
+        if isinstance(runtime_snapshot, dict)
+        else _read_configured_image_provider()
+    )
     if not configured:
         return None
 
     # Also read configured model so we can pass it to the plugin
-    configured_model = _read_configured_image_model()
+    configured_model = (
+        str(runtime_snapshot.get("model") or "").strip() or None
+        if isinstance(runtime_snapshot, dict)
+        else _read_configured_image_model()
+    )
 
     try:
         # Import locally so plugin discovery isn't triggered just by
         # importing this module (tests rely on that).
-        from agent.image_gen_registry import get_provider
-        from agent.custom_image_providers import register_configured_custom_image_providers
-        from hermes_cli.plugins import _ensure_plugins_discovered
+        if configured.startswith("custom:"):
+            from agent.custom_image_providers import (
+                build_configured_custom_image_provider,
+            )
 
-        _ensure_plugins_discovered()
-        register_configured_custom_image_providers()
-        provider = get_provider(configured)
+            provider = build_configured_custom_image_provider(
+                configured,
+                _load_image_gen_full_config(),
+            )
+        else:
+            from agent.image_gen_registry import get_provider
+            from hermes_cli.plugins import _ensure_plugins_discovered
+
+            _ensure_plugins_discovered()
+            provider = get_provider(configured)
     except Exception as exc:
         logger.debug("image_gen plugin dispatch skipped: %s", exc)
         return None
 
-    if provider is None:
+    if provider is None and not configured.startswith("custom:"):
         try:
             # Long-lived sessions may have discovered plugins before a bundled
             # backend was patched in or before config changed. Retry once with
@@ -1144,6 +1249,20 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
             ),
             "error_type": "provider_not_registered",
         })
+
+    if isinstance(runtime_snapshot, dict) and not _same_authorization_snapshot(
+        runtime_snapshot
+    ):
+        return json.dumps(
+            {
+                "success": False,
+                "image": None,
+                "error": "图像生成授权状态已变化，请重新发起请求。",
+                "error_code": "capability_caller_stale",
+                "error_type": "capability_caller_stale",
+            },
+            ensure_ascii=False,
+        )
 
     try:
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
@@ -1176,12 +1295,57 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    from agent.image_gen_verification import (
+        CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    )
+    from agent.image_runtime import verification_runtime_snapshot
+
+    runtime_snapshot = verification_runtime_snapshot("image_generation")
+    caller_fingerprint = str(
+        kw.get("caller_capability_fingerprint") or ""
+    )
+    current_fingerprint = str(runtime_snapshot.get("fingerprint") or "")
+    authorized = bool(
+        runtime_snapshot.get("schema_version")
+        == CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        and runtime_snapshot.get("status") == "verified"
+        and runtime_snapshot.get("available")
+        and current_fingerprint
+    )
+    if not authorized or caller_fingerprint != current_fingerprint:
+        error_code = "capability_caller_stale"
+        return json.dumps(
+            {
+                "success": False,
+                "image": None,
+                "error": "图像生成授权状态已变化，请重新发起请求。",
+                "error_code": error_code,
+                "error_type": error_code,
+            },
+            ensure_ascii=False,
+        )
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(
+        prompt,
+        aspect_ratio,
+        runtime_snapshot=runtime_snapshot,
+    )
     if dispatched is not None:
         return dispatched
+
+    if not _same_authorization_snapshot(runtime_snapshot):
+        return json.dumps(
+            {
+                "success": False,
+                "image": None,
+                "error": "图像生成授权状态已变化，请重新发起请求。",
+                "error_code": "capability_caller_stale",
+                "error_type": "capability_caller_stale",
+            },
+            ensure_ascii=False,
+        )
 
     return image_generate_tool(
         prompt=prompt,

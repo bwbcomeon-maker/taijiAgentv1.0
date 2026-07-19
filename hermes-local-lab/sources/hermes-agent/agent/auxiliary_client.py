@@ -41,11 +41,13 @@ Payment / credit exhaustion fallback:
 """
 
 import json
+import hashlib
 import logging
 import os
 import threading
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
@@ -59,6 +61,20 @@ _transient_named_vision_clients: ContextVar[Optional[list[Any]]] = ContextVar(
 _named_vision_http_binding: ContextVar[Optional[dict[str, Any]]] = ContextVar(
     "named_vision_http_binding", default=None
 )
+
+
+@dataclass(frozen=True)
+class VisionRequestBinding:
+    """Private immutable endpoint and credential material for one vision call."""
+
+    provider: str
+    model: str
+    base_url: str = field(repr=False)
+    api_key: str = field(repr=False)
+    api_mode: str = "chat_completions"
+    network_scope: str = "public_direct"
+    trusted_proxy_profile: str = field(default="", repr=False)
+    endpoint_mode: str = ""
 
 
 def _register_transient_named_vision_client(client: Any) -> None:
@@ -2747,6 +2763,7 @@ async def _retry_same_provider_async(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    vision_binding: Optional[VisionRequestBinding] = None,
 ) -> Any:
     if task == "vision":
         _, retry_client, retry_model = resolve_vision_provider_client(
@@ -2755,6 +2772,7 @@ async def _retry_same_provider_async(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             async_mode=True,
+            binding=vision_binding,
         )
     else:
         retry_client, retry_model = _get_cached_client(
@@ -3751,13 +3769,20 @@ def resolve_provider_client(
             final_model = _normalize_resolved_model(model or default_model, provider)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode else (client, final_model))
 
-        creds = resolve_api_key_provider_credentials(provider)
-        api_key = str(creds.get("api_key", "")).strip()
-        # Honour an explicit api_key override (e.g. from a fallback_model entry
-        # or a custom_providers entry) so callers that pass an explicit
-        # credential can authenticate against endpoints where no built-in
-        # credential is registered for this provider alias.
-        if explicit_api_key:
+        fully_explicit_runtime = bool(explicit_api_key and explicit_base_url)
+        creds = (
+            {}
+            if fully_explicit_runtime
+            else resolve_api_key_provider_credentials(provider)
+        )
+        api_key = (
+            explicit_api_key.strip()
+            if fully_explicit_runtime
+            else str(creds.get("api_key", "")).strip()
+        )
+        # Honour a partial explicit api_key override (e.g. from a
+        # fallback_model entry) while retaining the resolved endpoint.
+        if explicit_api_key and not fully_explicit_runtime:
             api_key = explicit_api_key.strip() or api_key
         if not api_key:
             tried_sources = list(pconfig.api_key_env_vars)
@@ -3768,7 +3793,14 @@ def resolve_provider_client(
                          provider, ", ".join(tried_sources))
             return None, None
 
-        raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        raw_base_url = (
+            explicit_base_url.strip().rstrip("/")
+            if fully_explicit_runtime
+            else (
+                str(creds.get("base_url", "")).strip().rstrip("/")
+                or pconfig.inference_base_url
+            )
+        )
         base_url = _to_openai_base_url(raw_base_url)
         # Honour an explicit base_url override from the caller — used when a
         # fallback_model entry (or custom_providers lookup) routes through a
@@ -3776,7 +3808,7 @@ def resolve_provider_client(
         if explicit_base_url:
             base_url = _to_openai_base_url(explicit_base_url.strip().rstrip("/"))
 
-        default_model = _get_aux_model_for_provider(provider)
+        default_model = None if model else _get_aux_model_for_provider(provider)
         final_model = _normalize_resolved_model(model or default_model, provider)
 
         if provider == "gemini":
@@ -4117,29 +4149,43 @@ def _build_named_openai_vision_http_client(
     provider_name: str,
     *,
     async_mode: bool,
+    binding: Optional[VisionRequestBinding] = None,
 ) -> Any:
     """Build the hardened HTTP client owned by a named vision SDK client."""
-    from agent.custom_vision_providers import (
-        _normalize_loaded_custom_vision_provider_entry,
-        find_custom_vision_provider_entry,
-    )
     import httpx
 
-    entry = find_custom_vision_provider_entry(provider_name)
-    if entry is None:
-        raise ValueError("named custom vision provider unavailable")
-    normalized = _normalize_loaded_custom_vision_provider_entry(entry)
-    transport = normalized["transport"]
+    if binding is not None:
+        transport = (
+            "anthropic_messages"
+            if binding.api_mode == "anthropic_messages"
+            else "openai_chat_completions"
+        )
+        scope = normalize_network_scope(
+            binding.network_scope,
+            default=NetworkScope.PUBLIC_DIRECT,
+        )
+        trusted_proxy_profile = binding.trusted_proxy_profile or None
+    else:
+        from agent.custom_vision_providers import (
+            _normalize_loaded_custom_vision_provider_entry,
+            find_custom_vision_provider_entry,
+        )
+
+        entry = find_custom_vision_provider_entry(provider_name)
+        if entry is None:
+            raise ValueError("named custom vision provider unavailable")
+        normalized = _normalize_loaded_custom_vision_provider_entry(entry)
+        transport = normalized["transport"]
+        scope = normalize_network_scope(
+            normalized.get("network_scope"),
+            default=NetworkScope.PUBLIC_DIRECT,
+        )
+        trusted_proxy_profile = (
+            str(normalized.get("trusted_proxy_profile") or "").strip() or None
+        )
     if transport not in {"openai_chat_completions", "anthropic_messages"}:
         raise ValueError("named custom vision transport unavailable")
 
-    scope = normalize_network_scope(
-        normalized.get("network_scope"),
-        default=NetworkScope.PUBLIC_DIRECT,
-    )
-    trusted_proxy_profile = (
-        str(normalized.get("trusted_proxy_profile") or "").strip() or None
-    )
     if async_mode and transport == "openai_chat_completions":
         async_transport = build_openai_async_transport(
             network_scope=scope,
@@ -4187,6 +4233,7 @@ def resolve_vision_provider_client(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     async_mode: bool = False,
+    binding: Optional[VisionRequestBinding] = None,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Resolve the client actually used for vision tasks.
 
@@ -4195,10 +4242,19 @@ def resolve_vision_provider_client(
     backends, so users can intentionally force experimental providers. Auto mode
     stays conservative and only tries vision backends known to work today.
     """
-    requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        "vision", provider, model, base_url, api_key
-    )
-    requested = _normalize_vision_provider(requested)
+    if binding is not None:
+        requested = str(binding.provider or "").strip().lower()
+        resolved_model = str(binding.model or "").strip() or None
+        resolved_base_url = str(binding.base_url or "").strip() or None
+        resolved_api_key = str(binding.api_key or "").strip() or None
+        resolved_api_mode = str(binding.api_mode or "").strip() or None
+        if not requested or not resolved_model or not resolved_base_url or not resolved_api_key:
+            raise ValueError("incomplete vision request binding")
+    else:
+        requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+            "vision", provider, model, base_url, api_key
+        )
+        requested = _normalize_vision_provider(requested)
 
     def _finalize(resolved_provider: str, sync_client: Any, default_model: Optional[str]):
         if sync_client is None:
@@ -4213,19 +4269,25 @@ def resolve_vision_provider_client(
         provider_for_base_override = (
             requested if requested and requested not in {"", "auto"} else "custom"
         )
-        vision_cfg = _get_auxiliary_task_config("vision")
-        configured_base_url = str(vision_cfg.get("base_url") or "").strip().rstrip("/")
-        custom_alibaba_endpoint = bool(
-            provider_for_base_override == "alibaba"
-            and (
-                str(vision_cfg.get("endpoint_mode") or "").strip().lower()
-                == "custom"
-                or (
-                    base_url
-                    and base_url.rstrip("/") != configured_base_url
+        if binding is not None:
+            custom_alibaba_endpoint = bool(
+                provider_for_base_override == "alibaba"
+                and binding.endpoint_mode == "custom"
+            )
+        else:
+            vision_cfg = _get_auxiliary_task_config("vision")
+            configured_base_url = str(vision_cfg.get("base_url") or "").strip().rstrip("/")
+            custom_alibaba_endpoint = bool(
+                provider_for_base_override == "alibaba"
+                and (
+                    str(vision_cfg.get("endpoint_mode") or "").strip().lower()
+                    == "custom"
+                    or (
+                        base_url
+                        and base_url.rstrip("/") != configured_base_url
+                    )
                 )
             )
-        )
         named_custom_vision = provider_for_base_override.startswith("custom:")
         named_http_binding = None
         named_http_token = None
@@ -4233,6 +4295,7 @@ def resolve_vision_provider_client(
             http_client = _build_named_openai_vision_http_client(
                 provider_for_base_override,
                 async_mode=async_mode,
+                binding=binding,
             )
             named_http_binding = {
                 "http_client": http_client,
@@ -4435,7 +4498,8 @@ def auxiliary_max_tokens_param(value: int) -> dict:
 # Every auxiliary LLM consumer should use these instead of manually
 # constructing clients and calling .chat.completions.create().
 
-# Client cache: (provider, async_mode, base_url, api_key, api_mode, runtime_key) -> (client, default_model, loop)
+# Client cache: (provider, async_mode, base_url_digest, api_key_digest,
+# api_mode, runtime_key) -> (client, default_model, loop)
 # NOTE: loop identity is NOT part of the key.  On async cache hits we check
 # whether the cached loop is the *current* loop; if not, the stale entry is
 # replaced in-place.  This bounds cache growth to one entry per unique
@@ -4459,7 +4523,17 @@ def _client_cache_key(
     runtime = _normalize_main_runtime(main_runtime)
     runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
-    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, pool_hint)
+    base_url_digest = (
+        hashlib.sha256(str(base_url).encode("utf-8")).hexdigest()
+        if base_url
+        else ""
+    )
+    api_key_digest = (
+        hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()
+        if api_key
+        else ""
+    )
+    return (provider, async_mode, base_url_digest, api_key_digest, api_mode or "", runtime_key, is_vision, pool_hint)
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
@@ -5700,14 +5774,32 @@ async def async_call_llm(
     extra_body: dict = None,
     no_fallback: bool = False,
     resolution_out: Optional[Dict[str, str]] = None,
+    vision_binding: Optional[VisionRequestBinding] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
-    effective_extra_body = _get_task_extra_body(task)
+    if vision_binding is not None:
+        if task != "vision":
+            raise ValueError("vision request binding requires task=vision")
+        resolved_provider = str(vision_binding.provider or "").strip().lower()
+        resolved_model = str(vision_binding.model or "").strip() or None
+        resolved_base_url = str(vision_binding.base_url or "").strip() or None
+        resolved_api_key = str(vision_binding.api_key or "").strip() or None
+        resolved_api_mode = str(vision_binding.api_mode or "").strip() or None
+        if (
+            not resolved_provider
+            or not resolved_model
+            or not resolved_base_url
+            or not resolved_api_key
+        ):
+            raise ValueError("incomplete vision request binding")
+        effective_extra_body = {}
+    else:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+            task, provider, model, base_url, api_key)
+        effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
     if task == "vision":
@@ -5717,9 +5809,11 @@ async def async_call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=True,
+            binding=vision_binding,
         )
         if (
             client is None
+            and vision_binding is None
             and not no_fallback
             and resolved_provider != "auto"
             and not resolved_base_url
@@ -5772,7 +5866,15 @@ async def async_call_llm(
             "model": str(final_model or ""),
         })
 
-    effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
+    effective_timeout = (
+        timeout
+        if timeout is not None
+        else (
+            _DEFAULT_AUX_TIMEOUT
+            if vision_binding is not None
+            else _get_task_timeout(task)
+        )
+    )
 
     # Pass the client's actual base_url (not just resolved_base_url) so
     # endpoint-specific temperature overrides can distinguish
@@ -5851,6 +5953,7 @@ async def async_call_llm(
         if (
             _is_payment_error(first_err)
             and client_is_nous
+            and vision_binding is None
             and _nous_portal_account_has_fresh_paid_access()
         ):
             refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
@@ -5882,7 +5985,11 @@ async def async_call_llm(
                         raise
                     first_err = retry_err
 
-        if _is_auth_error(first_err) and client_is_nous:
+        if (
+            _is_auth_error(first_err)
+            and client_is_nous
+            and vision_binding is None
+        ):
             refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
@@ -5903,7 +6010,8 @@ async def async_call_llm(
         # ── Auth refresh retry (mirrors sync call_llm) ───────────────
         if (_is_auth_error(first_err)
                 and resolved_provider not in {"auto", "", None}
-                and not client_is_nous):
+                and not client_is_nous
+                and vision_binding is None):
             if _refresh_provider_credentials(resolved_provider):
                 logger.info(
                     "Auxiliary %s (async): refreshed %s credentials after auth error, retrying",
@@ -5923,10 +6031,19 @@ async def async_call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    vision_binding=vision_binding,
                 )
 
         # ── Same-provider credential-pool recovery (mirrors sync) ─────
-        pool_provider = _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime)
+        pool_provider = (
+            None
+            if vision_binding is not None
+            else _recoverable_pool_provider(
+                resolved_provider,
+                client,
+                main_runtime=main_runtime,
+            )
+        )
         _client_api_key = str(getattr(client, "api_key", "") or "")
         if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
             recovery_err = first_err
@@ -5960,6 +6077,7 @@ async def async_call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        vision_binding=vision_binding,
                     )
                 except Exception as retry2_err:
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
@@ -5980,7 +6098,12 @@ async def async_call_llm(
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if not no_fallback and should_fallback and (is_auto or is_capacity_error):
+        if (
+            vision_binding is None
+            and not no_fallback
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 _mark_provider_unhealthy(

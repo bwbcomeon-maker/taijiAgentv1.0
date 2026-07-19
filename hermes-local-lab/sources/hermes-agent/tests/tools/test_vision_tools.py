@@ -1,6 +1,7 @@
 """Tests for tools/vision_tools.py — URL validation, type hints, error logging."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ from typing import Awaitable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from tools.vision_tools import (
     _validate_image_url,
@@ -190,11 +192,39 @@ class TestHandleVisionAnalyze:
             # Clean up the coroutine to avoid RuntimeWarning
             result.close()
 
-    def test_prompt_contains_question(self):
+    @pytest.mark.asyncio
+    async def test_prompt_contains_question(self):
         """The full prompt should incorporate the user's question."""
-        with patch(
-            "tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock
-        ) as mock_tool:
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": "verified-vision",
+            "status": "verified",
+            "available": True,
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        with (
+            patch(
+                "tools.vision_tools.vision_analyze_tool",
+                new_callable=AsyncMock,
+            ) as mock_tool,
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value=snapshot,
+            ),
+        ):
             mock_tool.return_value = json.dumps({"result": "ok"})
             coro = _handle_vision_analyze(
                 {
@@ -202,37 +232,88 @@ class TestHandleVisionAnalyze:
                     "question": "Describe the cat",
                 }
             )
-            # Clean up coroutine
-            coro.close()
+            await coro
             call_args = mock_tool.call_args
             full_prompt = call_args[0][1]  # second positional arg
             assert "Describe the cat" in full_prompt
             assert "Fully describe and explain" in full_prompt
 
-    def test_uses_auxiliary_vision_model_env(self):
-        """AUXILIARY_VISION_MODEL env var should override DEFAULT_VISION_MODEL."""
+    @pytest.mark.asyncio
+    async def test_pins_verified_auxiliary_model_over_env_override(self):
+        """Call-time routing uses the exact model identity that was verified."""
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": "verified-vision",
+            "status": "verified",
+            "available": True,
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
         with (
             patch(
                 "tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock
             ) as mock_tool,
             patch.dict(os.environ, {"AUXILIARY_VISION_MODEL": "custom/model-v1"}),
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value=snapshot,
+            ),
         ):
             mock_tool.return_value = json.dumps({"result": "ok"})
             coro = _handle_vision_analyze(
                 {"image_url": "https://example.com/img.png", "question": "test"}
             )
-            coro.close()
+            await coro
             call_args = mock_tool.call_args
             model = call_args[0][2]  # third positional arg
-            assert model == "custom/model-v1"
+            assert model == "qwen3-vl-plus"
+            assert call_args.kwargs["provider"] == "alibaba"
+            assert call_args.kwargs["strict_target"] is True
 
-    def test_falls_back_to_default_model(self):
-        """Without AUXILIARY_VISION_MODEL, model should be None (let call_llm resolve default)."""
+    @pytest.mark.asyncio
+    async def test_verified_auxiliary_model_never_uses_implicit_default(self):
+        """A verified auxiliary route never delegates target choice to fallback."""
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": "verified-vision",
+            "status": "verified",
+            "available": True,
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
         with (
             patch(
                 "tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock
             ) as mock_tool,
             patch.dict(os.environ, {}, clear=False),
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value=snapshot,
+            ),
         ):
             # Ensure AUXILIARY_VISION_MODEL is not set
             os.environ.pop("AUXILIARY_VISION_MODEL", None)
@@ -240,12 +321,12 @@ class TestHandleVisionAnalyze:
             coro = _handle_vision_analyze(
                 {"image_url": "https://example.com/img.png", "question": "test"}
             )
-            coro.close()
+            await coro
             call_args = mock_tool.call_args
             model = call_args[0][2]
-            # With no AUXILIARY_VISION_MODEL set, model should be None
-            # (the centralized call_llm router picks the default)
-            assert model is None
+            assert model == "qwen3-vl-plus"
+            assert call_args.kwargs["provider"] == "alibaba"
+            assert call_args.kwargs["strict_target"] is True
 
     def test_empty_args_graceful(self):
         """Missing keys should default to empty strings, not raise."""
@@ -256,6 +337,327 @@ class TestHandleVisionAnalyze:
             result = _handle_vision_analyze({})
             assert isinstance(result, Awaitable)
             result.close()
+
+
+@pytest.mark.asyncio
+async def test_vision_handle_call_time_gate_blocks_unknown_unverified_and_stale_before_provider(
+    monkeypatch,
+    tmp_path,
+):
+    """The final handler, not an earlier router, owns Provider authorization."""
+    config_path = tmp_path / "config.yaml"
+    state_root = tmp_path / "webui-state"
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("TAIJI_WEBUI_STATE_DIR", str(state_root))
+    monkeypatch.delenv("AUXILIARY_VISION_MODEL", raising=False)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "openai",
+                    "default": "gpt-4.1",
+                },
+                "auxiliary": {
+                    "vision": {
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=b3-vision-gate-key\n",
+        encoding="utf-8",
+    )
+
+    webui_root = Path(__file__).resolve().parents[3] / "hermes-webui"
+    monkeypatch.syspath_prepend(str(webui_root))
+    import api.config as api_config
+    import api.model_config as model_config
+
+    monkeypatch.setattr(api_config, "STATE_DIR", state_root)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "default")
+
+    async def successful_probe(**_kwargs):
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    monkeypatch.setattr(
+        "tools.vision_tools.vision_analyze_tool",
+        successful_probe,
+    )
+    probe_result = await asyncio.to_thread(model_config.test_vision_config)
+    assert probe_result["status"] == "verified"
+    state_path = model_config._vision_verification_state_path("default")
+    current_state = json.loads(state_path.read_text(encoding="utf-8"))
+    current_state["schema_version"] = 1
+    state_path.write_text(json.dumps(current_state), encoding="utf-8")
+
+    from agent import auxiliary_client, image_routing
+    from tools import vision_tools
+
+    main = {
+        "provider": "unknown-provider",
+        "model": "unknown-main-model",
+        "mode": "unknown",
+    }
+    monkeypatch.setattr(
+        auxiliary_client,
+        "_read_main_provider",
+        lambda: main["provider"],
+    )
+    monkeypatch.setattr(
+        auxiliary_client,
+        "_read_main_model",
+        lambda: main["model"],
+    )
+
+    def decide_mode(_provider, _model, _config):
+        if main["mode"] == "unknown":
+            raise ValueError("unknown main-model vision capability")
+        return main["mode"]
+
+    monkeypatch.setattr(image_routing, "decide_image_input_mode", decide_mode)
+    monkeypatch.setattr(
+        vision_tools,
+        "_supports_media_in_tool_results",
+        lambda *_args: True,
+    )
+    native_calls = []
+
+    async def native_call(image_url, question):
+        native_calls.append((image_url, question))
+        return {"_multimodal": True, "content": []}
+
+    monkeypatch.setattr(vision_tools, "_vision_analyze_native", native_call)
+    provider_calls = []
+
+    async def provider_call(
+        image_url,
+        prompt,
+        model=None,
+        *,
+        provider=None,
+        strict_target=False,
+    ):
+        provider_calls.append(
+            {
+                "image_url": image_url,
+                "prompt": prompt,
+                "model": model,
+                "provider": provider,
+                "strict_target": strict_target,
+            }
+        )
+        return json.dumps(
+            {
+                "success": True,
+                "resolved_provider": provider or "fallback-provider",
+                "resolved_model": model or "fallback-model",
+            }
+        )
+
+    monkeypatch.setattr(vision_tools, "vision_analyze_tool", provider_call)
+
+    def failed(result):
+        if isinstance(result, dict):
+            payload = result
+        else:
+            try:
+                payload = json.loads(result)
+            except (TypeError, ValueError):
+                return False
+        return bool(
+            payload.get("success") is False
+            or payload.get("status") in {"blocked", "failed"}
+            or payload.get("error")
+            or payload.get("error_code")
+        )
+
+    violations = []
+    unknown_before = len(provider_calls)
+    unknown = await vision_tools._handle_vision_analyze(
+        {"image_url": "/tmp/unknown.png", "question": "unknown main"}
+    )
+    if len(provider_calls) != unknown_before or not failed(unknown):
+        violations.append("unknown main model reached auxiliary Provider")
+
+    main.update(
+        provider="openai",
+        model="gpt-4.1-mini",
+        mode="text",
+    )
+    state_path.unlink()
+    unverified_before = len(provider_calls)
+    unverified = await vision_tools._handle_vision_analyze(
+        {"image_url": "/tmp/unverified.png", "question": "unverified aux"}
+    )
+    if len(provider_calls) != unverified_before or not failed(unverified):
+        violations.append("unverified auxiliary config reached Provider")
+
+    old_schema = dict(current_state)
+    old_schema["schema_version"] = 0
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(old_schema), encoding="utf-8")
+    old_schema_before = len(provider_calls)
+    old_schema_result = await vision_tools._handle_vision_analyze(
+        {"image_url": "/tmp/old-schema.png", "question": "old schema"}
+    )
+    if len(provider_calls) != old_schema_before or not failed(old_schema_result):
+        violations.append("old verification schema reached Provider")
+
+    stale_fingerprint = dict(current_state)
+    stale_fingerprint["schema_version"] = 1
+    stale_fingerprint["fingerprint"] = hashlib.sha256(
+        b"stale-vision-config"
+    ).hexdigest()
+    state_path.write_text(json.dumps(stale_fingerprint), encoding="utf-8")
+    stale_before = len(provider_calls)
+    stale_result = await vision_tools._handle_vision_analyze(
+        {"image_url": "/tmp/stale.png", "question": "stale fingerprint"}
+    )
+    if len(provider_calls) != stale_before or not failed(stale_result):
+        violations.append("stale verification fingerprint reached Provider")
+
+    main.update(
+        provider="openai",
+        model="gpt-4.1",
+        mode="native",
+    )
+    native = await vision_tools._handle_vision_analyze(
+        {"image_url": "/tmp/native.png", "question": "known native"}
+    )
+    if not isinstance(native, dict) or not native.get("_multimodal"):
+        violations.append("known native route was blocked")
+    if native_calls != [("/tmp/native.png", "known native")]:
+        violations.append("known native route did not use native handler exactly once")
+
+    main.update(
+        provider="openai",
+        model="gpt-4.1-mini",
+        mode="text",
+    )
+    state_path.write_text(json.dumps(current_state), encoding="utf-8")
+    exact_before = len(provider_calls)
+    exact = await vision_tools._handle_vision_analyze(
+        {"image_url": "/tmp/exact.png", "question": "verified exact aux"}
+    )
+    if failed(exact) or len(provider_calls) != exact_before + 1:
+        violations.append("current verified exact auxiliary route was blocked")
+    else:
+        routed = provider_calls[-1]
+        if (
+            routed["provider"] != "alibaba"
+            or routed["model"] != "qwen3-vl-plus"
+            or routed["strict_target"] is not True
+        ):
+            violations.append(
+                "current verified auxiliary route was not pinned to exact provider/model"
+            )
+
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.asyncio
+async def test_vision_deep_gate_revalidates_before_provider_and_retry(
+    monkeypatch,
+    tmp_path,
+):
+    """The actual vision Provider seam consumes the handler's snapshot."""
+    from agent import image_runtime
+    from tools import vision_tools
+
+    image = tmp_path / "verified.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    verified = {
+        "schema_version": 1,
+        "fingerprint": "verified-vision-runtime",
+        "status": "verified",
+        "available": True,
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+    }
+    runtime = {"snapshot": dict(verified)}
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: dict(runtime["snapshot"]),
+    )
+
+    def response(content):
+        value = MagicMock()
+        choice = MagicMock()
+        choice.message.content = content
+        value.choices = [choice]
+        return value
+
+    stable_calls = []
+
+    async def stable_provider(**kwargs):
+        stable_calls.append(kwargs)
+        kwargs["resolution_out"].update(
+            {"provider": "alibaba", "model": "qwen3-vl-plus"}
+        )
+        return response("verified analysis")
+
+    monkeypatch.setattr(vision_tools, "async_call_llm", stable_provider)
+    stable = await vision_tools._await_with_vision_authorization(
+        vision_tools.vision_analyze_tool(
+            str(image),
+            "describe",
+            "qwen3-vl-plus",
+            provider="alibaba",
+            strict_target=True,
+        ),
+        verified,
+    )
+    assert json.loads(stable)["success"] is True
+    assert len(stable_calls) == 1
+
+    retry_calls = []
+    runtime["snapshot"] = dict(verified)
+
+    async def revoke_after_first_call(**kwargs):
+        retry_calls.append(kwargs)
+        kwargs["resolution_out"].update(
+            {"provider": "alibaba", "model": "qwen3-vl-plus"}
+        )
+        runtime["snapshot"] = {
+            **verified,
+            "status": "configured_unverified",
+            "available": False,
+        }
+        return response("")
+
+    monkeypatch.setattr(
+        vision_tools,
+        "async_call_llm",
+        revoke_after_first_call,
+    )
+    revoked = await vision_tools._await_with_vision_authorization(
+        vision_tools.vision_analyze_tool(
+            str(image),
+            "describe",
+            "qwen3-vl-plus",
+            provider="alibaba",
+            strict_target=True,
+        ),
+        verified,
+    )
+
+    assert json.loads(revoked)["success"] is False
+    assert len(retry_calls) == 1, "revocation allowed a second Provider call"
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +1180,72 @@ class TestStrictVisionTarget:
 
         assert result["success"] is False
         assert "strict vision target mismatch" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_runtime_binding_is_reused_for_resize_and_empty_retries(
+        self,
+        tmp_path,
+    ):
+        from agent.auxiliary_client import VisionRequestBinding
+
+        img = tmp_path / "strict.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        binding = VisionRequestBinding(
+            provider="custom:router",
+            model="router-vl",
+            base_url="https://vision.example.test/v1",
+            api_key="binding-secret",
+        )
+        empty_response = MagicMock()
+        empty_choice = MagicMock()
+        empty_choice.message.content = ""
+        empty_response.choices = [empty_choice]
+        success_response = MagicMock()
+        success_choice = MagicMock()
+        success_choice.message.content = "binding-retry-ok"
+        success_response.choices = [success_choice]
+        calls = []
+
+        async def strict_call(**kwargs):
+            calls.append(kwargs)
+            assert kwargs["vision_binding"] is binding
+            if len(calls) == 1:
+                raise Exception("HTTP 413 Payload Too Large")
+            kwargs["resolution_out"].update(
+                {"provider": "custom:router", "model": "router-vl"}
+            )
+            return empty_response if len(calls) == 2 else success_response
+
+        with (
+            patch(
+                "tools.vision_tools._image_to_base64_data_url",
+                return_value="data:image/png;base64," + ("x" * 40),
+            ),
+            patch(
+                "tools.vision_tools._resize_image_for_vision",
+                return_value="data:image/png;base64,small",
+            ) as resize,
+            patch("tools.vision_tools._RESIZE_TARGET_BYTES", 10),
+            patch(
+                "tools.vision_tools.async_call_llm",
+                side_effect=strict_call,
+            ),
+        ):
+            result = json.loads(
+                await vision_analyze_tool(
+                    str(img),
+                    "识别图片",
+                    "router-vl",
+                    provider="custom:router",
+                    strict_target=True,
+                    _runtime_binding=binding,
+                )
+            )
+
+        assert result["success"] is True
+        assert result["analysis"] == "binding-retry-ok"
+        assert len(calls) == 3
+        assert resize.call_count == 1
 
 
 class TestVisionRegistration:

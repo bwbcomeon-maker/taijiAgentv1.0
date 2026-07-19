@@ -5,11 +5,11 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-import os
 import re
 from typing import Any, Dict, Iterable, List, Optional, cast
 from urllib.parse import unquote, urlsplit
 
+from agent.image_gen_verification import require_image_gen_request_binding
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
@@ -22,7 +22,9 @@ from agent.image_gen_provider import (
 from agent.provider_credentials import (
     credential_secret_env,
     normalize_credential_id,
+    process_env_fallback_allowed,
     resolve_api_key,
+    resolve_secret_env_value,
 )
 from agent.safe_outbound_http import (
     NetworkScope,
@@ -40,6 +42,7 @@ from agent.safe_outbound_http import (
 logger = logging.getLogger(__name__)
 
 CUSTOM_PROVIDER_PREFIX = "custom:"
+OPENAI_IMAGES_TRANSPORT = "openai_images"
 DEFAULT_SIZE_MAP = {
     "landscape": "1536x1024",
     "square": "1024x1024",
@@ -139,6 +142,14 @@ def custom_image_provider_env_var(provider_id: Any) -> str:
 
 def _normalize_base_url(value: Any) -> str:
     return _normalize_https_endpoint_url(value, label="外部图片模型")
+
+
+def openai_images_generation_endpoint(base_url: Any) -> str:
+    """Normalize the exact request endpoint used by custom image Providers."""
+    base = _normalize_base_url(base_url).rstrip("/")
+    if base.endswith("/images/generations"):
+        return base
+    return f"{base}/images/generations"
 
 
 def _normalize_models(value: Any, default_model: Any = "") -> List[str]:
@@ -319,21 +330,46 @@ def _normalize_persisted_custom_image_provider_entry(
     return normalized
 
 
-def _entry_secret_env(entry: dict[str, Any]) -> str:
-    credential_ref = str(entry.get("credential_ref") or "")
+def custom_image_provider_secret_env(entry: dict[str, Any]) -> str:
+    """Return the exact secret env bound by one normalized custom entry."""
+    normalized = _normalize_loaded_custom_image_provider_entry(entry)
+    credential_ref = str(normalized.get("credential_ref") or "")
     if credential_ref:
         return credential_secret_env(credential_ref)
-    if entry.get(_LEGACY_API_KEY_ENV_MARKER_KEY) is _LEGACY_API_KEY_ENV_MARKER:
-        return custom_image_provider_env_var(entry.get("id"))
+    if (
+        normalized.get(_LEGACY_API_KEY_ENV_MARKER_KEY)
+        is _LEGACY_API_KEY_ENV_MARKER
+    ):
+        return custom_image_provider_env_var(normalized.get("id"))
     return ""
 
 
-def _entry_api_key(entry: dict[str, Any]) -> str:
+def _entry_api_key(
+    entry: dict[str, Any],
+    *,
+    allow_process_fallback: bool | None = None,
+) -> str:
+    from hermes_constants import get_config_path
+
+    config_path = get_config_path()
+    allow_process_fallback = process_env_fallback_allowed(
+        allow_process_fallback
+    )
     credential_ref = str(entry.get("credential_ref") or "")
     if credential_ref:
-        return resolve_api_key("custom", credential_ref).strip()
+        return resolve_api_key(
+            "custom",
+            credential_ref,
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
+        ).strip()
     if entry.get(_LEGACY_API_KEY_ENV_MARKER_KEY) is _LEGACY_API_KEY_ENV_MARKER:
-        return os.getenv(custom_image_provider_env_var(entry.get("id")), "").strip()
+        secret_env = custom_image_provider_env_var(entry.get("id"))
+        return resolve_secret_env_value(
+            secret_env,
+            config_path=config_path,
+            allow_process_fallback=allow_process_fallback,
+        )
     return ""
 
 
@@ -348,7 +384,7 @@ def custom_image_provider_public_row(
         normalized = _normalize_persisted_custom_image_provider_entry(entry)
     provider_name = custom_image_provider_name(normalized["id"])
     credential_ref = str(normalized.get("credential_ref") or "")
-    secret_env = _entry_secret_env(normalized)
+    secret_env = custom_image_provider_secret_env(normalized)
     legacy_env = bool(
         normalized.get(_LEGACY_API_KEY_ENV_MARKER_KEY) is _LEGACY_API_KEY_ENV_MARKER
     )
@@ -441,6 +477,8 @@ def load_custom_image_provider_entries(
 class ConfigurableOpenAIImageProvider(ImageGenProvider):
     """OpenAI Images compatible backend described by config.yaml."""
 
+    _supports_pinned_image_request_binding = True
+
     def __init__(self, entry: dict[str, Any]) -> None:
         self._entry = _normalize_loaded_custom_image_provider_entry(entry)
 
@@ -477,7 +515,7 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
         return str(self._entry.get("default_model") or "").strip() or None
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        secret_env = _entry_secret_env(self._entry)
+        secret_env = custom_image_provider_secret_env(self._entry)
         return {
             "name": self.display_name,
             "badge": "外部",
@@ -497,10 +535,7 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
         }
 
     def _endpoint(self) -> str:
-        base = self._entry["base_url"].rstrip("/")
-        if base.endswith("/images/generations"):
-            return base
-        return f"{base}/images/generations"
+        return openai_images_generation_endpoint(self._entry["base_url"])
 
     def _model(self, requested: Any = "") -> str:
         model = str(requested or "").strip()
@@ -599,8 +634,17 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
                 prompt=prompt,
                 aspect_ratio=aspect,
             )
+        raw_binding = kwargs.get("_runtime_binding")
         try:
-            api_key = _entry_api_key(self._entry)
+            api_key = (
+                require_image_gen_request_binding(
+                    raw_binding,
+                    provider=provider,
+                    model=model,
+                ).api_key
+                if raw_binding is not None
+                else _entry_api_key(self._entry)
+            )
         except ValueError:
             api_key = ""
         if not api_key:
@@ -763,6 +807,22 @@ def _response_error_message(body: Any, *, secret: str = "") -> str:
         message,
     )
     return f"：{redacted[:240]}"
+
+
+def build_configured_custom_image_provider(
+    provider_name: str,
+    config_data: dict[str, Any],
+) -> ConfigurableOpenAIImageProvider | None:
+    """Build one request-local provider from one already-loaded config."""
+    try:
+        requested = custom_image_provider_name(provider_name)
+    except ValueError:
+        return None
+    for entry in load_custom_image_provider_entries(config_data):
+        provider = ConfigurableOpenAIImageProvider(entry)
+        if provider.name == requested:
+            return provider
+    return None
 
 
 def register_configured_custom_image_providers(

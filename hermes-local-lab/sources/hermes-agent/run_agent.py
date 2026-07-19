@@ -4323,10 +4323,20 @@ class AIAgent:
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
-                     pre_tool_block_checked: bool = False) -> str:
+                     pre_tool_block_checked: bool = False,
+                     caller_capability_fingerprint: Optional[str] = None) -> str:
         """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool``."""
         from agent.agent_runtime_helpers import invoke_tool
-        return invoke_tool(self, function_name, function_args, effective_task_id, tool_call_id, messages, pre_tool_block_checked)
+        return invoke_tool(
+            self,
+            function_name,
+            function_args,
+            effective_task_id,
+            tool_call_id,
+            messages,
+            pre_tool_block_checked,
+            caller_capability_fingerprint,
+        )
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:
@@ -4392,6 +4402,14 @@ class AIAgent:
             raise taiji_license.LicenseExecutionBlocked(status) from None
         if blocked is not None:
             raise taiji_license.LicenseExecutionBlocked(blocked)
+        try:
+            from agent.image_runtime import refresh_agent_image_runtime
+
+            refresh_agent_image_runtime(self)
+        except Exception:
+            # Capability refresh is fail-closed inside its builder. A transient
+            # refresh error must not abort an unrelated user turn.
+            pass
         from agent.conversation_loop import run_conversation
         return run_conversation(
             self,

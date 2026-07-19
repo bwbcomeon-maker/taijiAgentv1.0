@@ -26,6 +26,8 @@ from yaml.resolver import BaseResolver
 
 from hermes_constants import (
     get_config_path,
+    get_hermes_config_path_override,
+    get_hermes_home_override,
 )
 
 # Preserve the historical public module seam without using it for profile
@@ -260,6 +262,29 @@ def _process_env_fallback(key: str) -> str:
             _MISSING_ENV_VALUE,
         )
         return "" if baseline is _MISSING_ENV_VALUE else str(baseline)
+
+
+def process_env_fallback_allowed(
+    allow_process_fallback: bool | None = None,
+) -> bool:
+    """Allow ambient env only outside request-local profile scopes."""
+    if allow_process_fallback is not None:
+        return bool(allow_process_fallback)
+    return bool(
+        get_hermes_config_path_override() is None
+        and get_hermes_home_override() is None
+    )
+
+
+def process_env_fallback_value(
+    key: str,
+    *,
+    allow_process_fallback: bool | None = None,
+) -> str:
+    """Read an ambient baseline only when the current scope permits it."""
+    if not process_env_fallback_allowed(allow_process_fallback):
+        return ""
+    return _process_env_fallback(key)
 
 
 def _supports_exact_posix_modes() -> bool:
@@ -851,6 +876,9 @@ def credential_secret_env(credential_id: object) -> str:
 def _credential_secret_value(
     secret_env: str,
     config_path: Path | None = None,
+    *,
+    allow_process_fallback: bool = True,
+    fallback_when_env_key_missing: bool = True,
 ) -> str:
     env_path = (
         _physical_credential_path(_credential_config_path(config_path)).parent
@@ -864,7 +892,11 @@ def _credential_secret_value(
         label="env",
     )
     if not env_exists:
-        return _process_env_fallback(secret_env)
+        return (
+            _process_env_fallback(secret_env)
+            if allow_process_fallback
+            else ""
+        )
     try:
         from dotenv import dotenv_values
 
@@ -882,17 +914,39 @@ def _credential_secret_value(
                 matching_keys += 1
         if matching_keys > 1:
             raise ValueError("credential env contains duplicate keys")
-        return str(
+        value = str(
             dotenv_values(
                 stream=StringIO(env_text),
                 interpolate=False,
             ).get(secret_env)
             or ""
         )
+        if (
+            value
+            or not allow_process_fallback
+            or not fallback_when_env_key_missing
+        ):
+            return value
+        return _process_env_fallback(secret_env)
     except ValueError:
         raise
     except Exception as exc:
         raise ValueError("credential env cannot be read safely") from exc
+
+
+def resolve_secret_env_value(
+    secret_env: str,
+    *,
+    config_path: Path | None = None,
+    allow_process_fallback: bool | None = None,
+) -> str:
+    """Resolve one exact secret env through the shared profile policy."""
+    allowed = process_env_fallback_allowed(allow_process_fallback)
+    return _credential_secret_value(
+        str(secret_env or "").strip(),
+        config_path,
+        allow_process_fallback=allowed,
+    ).strip()
 
 
 def _parse_config_bytes(payload: bytes) -> dict[str, Any]:
@@ -3041,16 +3095,25 @@ def default_credential_ref(
     *,
     config_data: dict[str, Any] | None = None,
     config_path: Path | None = None,
+    allow_process_fallback: bool | None = None,
     _pinned_spec: _CredentialTransactionSpec | None = None,
+    _fallback_when_env_key_missing: bool | None = None,
 ) -> str:
     """Return the unique explicitly marked family default without mutating config."""
+    if _fallback_when_env_key_missing is None:
+        _fallback_when_env_key_missing = config_path is None
+    allow_process_fallback = process_env_fallback_allowed(
+        allow_process_fallback
+    )
     family = provider_family(provider)
     if _pinned_spec is None:
         with credential_transaction(config_path) as spec:
             return default_credential_ref(
                 family,
                 config_data=config_data,
+                allow_process_fallback=allow_process_fallback,
                 _pinned_spec=spec,
+                _fallback_when_env_key_missing=_fallback_when_env_key_missing,
             )
     spec = _pinned_spec
     data = (
@@ -3106,6 +3169,8 @@ def default_credential_ref(
     if not _credential_secret_value(
         credential_secret_env(credential_id),
         spec.config_target,
+        allow_process_fallback=allow_process_fallback,
+        fallback_when_env_key_missing=_fallback_when_env_key_missing,
     ):
         return ""
     return credential_id
@@ -3117,8 +3182,14 @@ def resolve_api_key(
     *,
     config_data: dict[str, Any] | None = None,
     config_path: Path | None = None,
+    allow_process_fallback: bool | None = None,
 ) -> str:
     """Resolve a named API key, or lazily fall back to the legacy provider env."""
+    explicit_config_path = config_path is not None
+    fallback_when_env_key_missing = not explicit_config_path
+    allow_process_fallback = process_env_fallback_allowed(
+        allow_process_fallback
+    )
     with credential_transaction(config_path) as spec:
         resolved_path = spec.config_target
         family = provider_family(provider)
@@ -3133,7 +3204,9 @@ def resolve_api_key(
             ref = default_credential_ref(
                 family,
                 config_data=data,
+                allow_process_fallback=allow_process_fallback,
                 _pinned_spec=spec,
+                _fallback_when_env_key_missing=fallback_when_env_key_missing,
             )
 
         if ref:
@@ -3143,11 +3216,20 @@ def resolve_api_key(
             secret_env = str(row.get("secret_env") or "").strip()
             if secret_env != credential_secret_env(row.get("id")):
                 raise ValueError("所选凭据的 Secret 环境变量配置无效。")
-            value = _credential_secret_value(secret_env, resolved_path)
+            value = _credential_secret_value(
+                secret_env,
+                resolved_path,
+                allow_process_fallback=allow_process_fallback,
+                fallback_when_env_key_missing=fallback_when_env_key_missing,
+            )
             if value or explicit_ref:
                 return value
         for legacy_env in LEGACY_API_KEY_ENV.get(family, ()):
-            value = _process_env_fallback(legacy_env).strip()
+            value = _credential_secret_value(
+                legacy_env,
+                resolved_path,
+                allow_process_fallback=allow_process_fallback,
+            ).strip()
             if value:
                 return value
         return ""

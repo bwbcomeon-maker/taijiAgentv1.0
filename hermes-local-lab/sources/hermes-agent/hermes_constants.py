@@ -15,6 +15,9 @@ _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
+_HERMES_CONFIG_PATH_OVERRIDE: ContextVar[str | object] = ContextVar(
+    "_HERMES_CONFIG_PATH_OVERRIDE", default=_UNSET
+)
 
 
 def get_taiji_runtime_home() -> Path | None:
@@ -43,6 +46,25 @@ def reset_hermes_home_override(token: Token) -> None:
 def get_hermes_home_override() -> str | None:
     """Return the active context-local Hermes home override, if any."""
     override = _HERMES_HOME_OVERRIDE.get()
+    if override is _UNSET or not override:
+        return None
+    return str(override)
+
+
+def set_hermes_config_path_override(path: str | Path | None) -> Token:
+    """Pin one exact config filename for the current request context."""
+    value: str | object = _UNSET if path is None else str(path)
+    return _HERMES_CONFIG_PATH_OVERRIDE.set(value)
+
+
+def reset_hermes_config_path_override(token: Token) -> None:
+    """Restore the previous exact config-path override."""
+    _HERMES_CONFIG_PATH_OVERRIDE.reset(token)
+
+
+def get_hermes_config_path_override() -> str | None:
+    """Return the current request's exact config path, if pinned."""
+    override = _HERMES_CONFIG_PATH_OVERRIDE.get()
     if override is _UNSET or not override:
         return None
     return str(override)
@@ -409,6 +431,9 @@ def get_config_path() -> Path:
     authoritative. Outside those scopes, ``HERMES_CONFIG_PATH`` is an exact
     legacy override and must win over the broader ``HERMES_HOME`` directory.
     """
+    context_config = get_hermes_config_path_override()
+    if context_config:
+        return Path(context_config).expanduser()
     context_home = get_hermes_home_override()
     if context_home:
         return Path(context_home) / "config.yaml"
